@@ -752,6 +752,24 @@ actor DaemonClient {
             resultType: TerminalContinueInCodexResult.self)
     }
 
+    /// Replace one idle Codex process with a fresh Claude session in the same
+    /// terminal row and tmux window. A nil profile selects the ambient login.
+    func continueInClaude(
+        sourceTerminalID: UUID,
+        profileID: UUID?,
+        cols: Int?,
+        rows: Int?
+    ) async throws -> Terminal {
+        try await callAsync(
+            method: RPCMethod.terminalContinueInClaude,
+            params: TerminalContinueInClaudeParams(
+                sourceTerminalID: sourceTerminalID,
+                profileID: profileID,
+                cols: cols,
+                rows: rows),
+            resultType: Terminal.self)
+    }
+
     /// List terminals, optionally filtered by worktree.
     func listTerminals(worktreeID: UUID? = nil) async throws -> [Terminal] {
         return try await callAsync(
@@ -915,6 +933,33 @@ actor DaemonClient {
             method: RPCMethod.prBindingsAll,
             resultType: PRBindingsAllResult.self
         )
+    }
+
+    // MARK: - Dev servers
+
+    func listDevServers(worktreeID: UUID, runStatusCommands: Bool) async throws -> DevServerListResult {
+        try await callAsync(
+            method: RPCMethod.serverList,
+            params: DevServerListParams(worktreeID: worktreeID, runStatusCommands: runStatusCommands),
+            resultType: DevServerListResult.self)
+    }
+
+    func startDevServers(worktreeID: UUID, names: [String]) async throws -> DevServerActionResult {
+        try await callAsync(
+            method: RPCMethod.serverStart,
+            params: DevServerActionParams(worktreeID: worktreeID, names: names),
+            resultType: DevServerActionResult.self)
+    }
+
+    func stopDevServers(worktreeID: UUID, names: [String]) async throws -> DevServerActionResult {
+        try await callAsync(
+            method: RPCMethod.serverStop,
+            params: DevServerActionParams(worktreeID: worktreeID, names: names),
+            resultType: DevServerActionResult.self)
+    }
+
+    func devServerSummary() async throws -> DevServerSummaryResult {
+        try await callNoParamsAsync(method: RPCMethod.serverSummary, resultType: DevServerSummaryResult.self)
     }
 
     /// Untrack one PR from one worktree — the same tombstoning `tbd pr detach`
@@ -1179,6 +1224,24 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the transcript prompt-answer gate (default OFF, soaking). New
+    /// sessions pick up the hooks.
+    func setTranscriptPromptAnswer(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
+            params: ConfigSetPromptAnswerParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the live remote transcript sync gate (default OFF, soaking).
+    /// The daemon reads it at every decision, so it applies from the next sync.
+    func setRemoteTranscriptLiveSync(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetRemoteTranscriptLiveSyncEnabled,
+            params: ConfigSetRemoteLiveSyncEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the pending-input veto for auto-hibernate (machine-interface
     /// guard that prevents hibernation of sessions with typed-but-unsent input).
     /// Applies on the next hibernation sweep.
@@ -1209,7 +1272,7 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the pty-holder transport gate (default OFF). Read fresh at spawn
+    /// Persist the pty-holder transport gate (default ON). Read fresh at spawn
     /// time, so no daemon restart is needed — but it applies only to sessions
     /// created after the call: a session records its transport at creation and
     /// keeps it for life. Sending either value is an explicit gesture that
@@ -1365,6 +1428,20 @@ actor DaemonClient {
         )
     }
 
+    /// Prepend one page of earlier history to a remote session's transcript
+    /// cache (`remote.transcriptLoadEarlier`). Refused by the daemon with
+    /// `remote_transcript_live_sync_enabled` off, without `transcript.tail`,
+    /// for a dismissed session, or when nothing is recorded above the cache.
+    func remoteTranscriptLoadEarlier(
+        provider: String, sessionID: String
+    ) async throws -> RemoteTranscriptLoadEarlierResult {
+        try await callAsync(
+            method: RPCMethod.remoteTranscriptLoadEarlier,
+            params: RemoteTranscriptLoadEarlierParams(provider: provider, sessionID: sessionID),
+            resultType: RemoteTranscriptLoadEarlierResult.self
+        )
+    }
+
     /// Submit `text` as one message to a remote session
     /// (`remote.sendMessage` → `send <id> --submit`). Unlike `remoteSend`, the
     /// text is a message, not keystrokes: the provider pastes it and presses
@@ -1381,6 +1458,37 @@ actor DaemonClient {
             params: RemoteSendMessageParams(provider: provider, sessionID: sessionID, text: text),
             resultType: RemoteSendMessageResult.self
         ).outcome
+    }
+
+    /// Answer a remote session's pending prompt (`remote.answer`). Returns the
+    /// outcome; `.unknown` means the answer may have arrived — never resubmit
+    /// it automatically. Refusals (flag off, no `answer` capability, an answer
+    /// that does not fit the prompt) throw.
+    func remoteAnswer(
+        provider: String, sessionID: String, promptID: String, answer: PromptAnswer
+    ) async throws -> PromptAnswerResult {
+        try await callAsync(
+            method: RPCMethod.remoteAnswer,
+            params: RemoteAnswerParams(
+                provider: provider, sessionID: sessionID, promptID: promptID, answer: answer),
+            resultType: PromptAnswerResult.self
+        )
+    }
+
+    /// Answer a local terminal's pending prompt (`prompt.answer`). Returns once
+    /// the hook acknowledged delivery, `already_resolved`, or `unknown` when no
+    /// acknowledgement came back in time — never resubmit that automatically.
+    /// A hook that is
+    /// reconnecting, the flag being off, and an answer that does not fit the
+    /// prompt all throw.
+    func promptAnswer(
+        terminalID: UUID, promptID: String, answer: PromptAnswer
+    ) async throws -> PromptAnswerResult {
+        try await callAsync(
+            method: RPCMethod.promptAnswer,
+            params: PromptAnswerParams(terminalID: terminalID, promptID: promptID, answer: answer),
+            resultType: PromptAnswerResult.self
+        )
     }
 
     /// Fetch recent log lines for a remote session. `lines` nil == provider default.
@@ -2176,6 +2284,16 @@ actor DaemonClient {
         )
     }
 
+    /// Move one session (or, with `nil`, every session) from the tmux
+    /// transport to the pty holder in place.
+    func migrateTerminalTransport(terminalID: UUID?) async throws -> TerminalMigrateTransportResult {
+        return try await callAsync(
+            method: RPCMethod.terminalMigrateTransport,
+            params: TerminalMigrateTransportParams(terminalID: terminalID),
+            resultType: TerminalMigrateTransportResult.self
+        )
+    }
+
     /// List Claude session summaries for a worktree.
     func listSessions(worktreeID: UUID) async throws -> [SessionSummary] {
         return try await callAsync(
@@ -2284,7 +2402,7 @@ actor DaemonClient {
 
     /// Tell the daemon that these pending `AskUserQuestion` captures now have a
     /// matching `tool_use` line in the JSONL, so it can drop them from
-    /// `PendingQuestionStore` and retract them from every subscriber.
+    /// `PendingPromptStore` and retract them from every subscriber.
     ///
     /// The app's own transcript reader calls this, because it is the party that
     /// parses the file and so the only one that sees the match. For a pane with

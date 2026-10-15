@@ -8,9 +8,25 @@ import TBDShared
 // path (setTabLabel / setTabOrder) is covered by daemon-side tests in
 // `Tests/TBDDaemonTests/TabRPCHandlersTests.swift`.
 
+/// Per-test UserDefaults suite: `AppState()` would default to `.standard`,
+/// which on this unbundled executable is the developer's real TBDApp.plist
+/// (selection changes save navigation history there).
+@MainActor
+private func makeIsolatedAppState() -> (AppState, String) {
+    let suiteName = "TBDAppTests.TabReorder.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suiteName)!
+    return (AppState(userDefaults: defaults), suiteName)
+}
+
+@MainActor
+private func tearDown(_ suiteName: String) {
+    UserDefaults().removePersistentDomain(forName: suiteName)
+}
+
 @MainActor
 @Test func reorderMovesTabAndPreservesActiveSelection() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let ids = [UUID(), UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
@@ -33,7 +49,8 @@ import TBDShared
 
 @MainActor
 @Test func reorderDropOnSelfIsNoOp() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let ids = [UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
@@ -43,7 +60,8 @@ import TBDShared
 
 @MainActor
 @Test func reorderLeadingEdgeInsertsBeforeTarget() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let ids = [UUID(), UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
@@ -60,7 +78,8 @@ import TBDShared
 
 @MainActor
 @Test func renameTabWithEmptyStringClearsLabel() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let tabID = UUID()
     state.tabs[worktreeID] = [Tab(id: tabID, content: .terminal(terminalID: tabID), label: "old")]
@@ -72,7 +91,8 @@ import TBDShared
 
 @MainActor
 @Test func renameTabTrimsAndUpdatesInMemory() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let tabID = UUID()
     state.tabs[worktreeID] = [Tab(id: tabID, content: .terminal(terminalID: tabID), label: nil)]
@@ -82,7 +102,8 @@ import TBDShared
 
 @MainActor
 @Test func applyStoredOrderReordersTabsToMatchStoredOrder() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let ids = [UUID(), UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
@@ -94,7 +115,8 @@ import TBDShared
 
 @MainActor
 @Test func applyStoredOrderPlacesUnknownIDsAtEnd() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let known = [UUID(), UUID()]
     let newTab = UUID()
@@ -112,7 +134,8 @@ import TBDShared
 @MainActor
 @Test func applyStoredOrderRepairsDuplicateCachedOrder() {
     // Tier 1: deterministic in-process state only.
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let known = [UUID(), UUID()]
     let unknown = [UUID(), UUID()]
@@ -131,7 +154,8 @@ import TBDShared
 
 @MainActor
 @Test func applyStoredOrderIsNoOpWhenStoredOrderEmpty() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let ids = [UUID(), UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
@@ -142,7 +166,8 @@ import TBDShared
 
 @MainActor
 @Test func setActiveTabUpdatesInMemoryIndex() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let ids = [UUID(), UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
@@ -154,7 +179,8 @@ import TBDShared
 
 @MainActor
 @Test func setActiveTabIgnoresOutOfBoundsIndexForPersistButStillStoresIndex() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let ids = [UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
@@ -166,7 +192,8 @@ import TBDShared
 
 @MainActor
 @Test func closeFocusedTabRemovesFocusedTabAndLayout() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let ids = [UUID(), UUID(), UUID()]
     state.tabs[worktreeID] = ids.map { Tab(id: $0, content: .terminal(terminalID: $0), label: nil) }
@@ -189,7 +216,8 @@ import TBDShared
 
 @MainActor
 @Test func closeFocusedTabUsesFocusedContextInsteadOfSelectedWorktree() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let selectedWorktreeID = UUID()
     let focusedWorktreeID = UUID()
     let selectedTabID = UUID()
@@ -207,7 +235,8 @@ import TBDShared
 
 @MainActor
 @Test func canCloseFocusedTabRequiresLiveFocusedContext() {
-    let state = AppState()
+    let (state, suite) = makeIsolatedAppState()
+    defer { tearDown(suite) }
     let worktreeID = UUID()
     let tabID = UUID()
     state.tabs[worktreeID] = [Tab(id: tabID, content: .terminal(terminalID: tabID), label: nil)]

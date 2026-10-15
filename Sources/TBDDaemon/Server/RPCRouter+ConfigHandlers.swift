@@ -351,37 +351,11 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the remote peer-messaging gate — the default-off soak switch for
-    /// shadow peers and the provider `messages` stream. This is how the soak is
-    /// turned on: the flag is the feature's only opt-in, and leaving it
+    /// Persist the pty-holder transport gate — the switch that decides whether
+    /// a session is spawned onto a holder process or into a tmux window. The
+    /// flag is the feature's only switch in either direction, and leaving it
     /// reachable only by hand-editing `~/tbd/state.db` would put the sole way
-    /// to enable it behind a database the project's own rules say not to go
-    /// into.
-    ///
-    /// **It does not take effect until the daemon restarts.** The gate is read
-    /// where a provider's streams are armed (`RemoteProviderManager`), so
-    /// flipping it on builds no bridge for a provider whose loops are already
-    /// running, and flipping it off leaves a running bridge up. `tbd peer list`
-    /// and `peer.status` are what say whether a restart is still owed.
-    ///
-    /// The column is written on every call, because writing either value is the
-    /// explicit gesture that lifts it out of NULL forever after.
-    func handleConfigSetRemotePeerMessagingEnabled(
-        _ paramsData: Data
-    ) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetPeerMessagingEnabledParams.self, from: paramsData)
-        try await db.config.setRemotePeerMessagingEnabled(params.enabled)
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
-    /// Persist the pty-holder transport gate — the default-off soak switch for
-    /// spawning sessions onto a holder process rather than into a tmux window.
-    /// This is how the soak is turned on: the flag is the feature's only opt-in,
-    /// and leaving it reachable only by hand-editing `~/tbd/state.db` would put
-    /// the sole way to enable it behind a database the project's own rules say
+    /// to move off the default behind a database the project's own rules say
     /// not to go into.
     ///
     /// **It applies to sessions created after the call, and to no others.** A
@@ -544,6 +518,39 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist balancing's usage ceiling (design 2026-09-05 §5). A value outside
+    /// `ProfilePoolPolicy.usageCeilingRange` is refused rather than clamped: a
+    /// typo should say so, not quietly become some other threshold. Nil
+    /// returns the column to NULL, the shipped default.
+    func handleConfigSetProfileBalancingUsageCeiling(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetBalancingUsageCeilingParams.self, from: paramsData)
+        let range = ProfilePoolPolicy.usageCeilingRange
+        if let percent = params.percent, !range.contains(percent) {
+            return RPCResponse(
+                error: "Usage ceiling must be between \(range.lowerBound) and \(range.upperBound) percent, got \(percent)")
+        }
+        try await db.config.setProfileBalancingUsageCeilingPercent(params.percent)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist balancing's maximum reading age. Refused outside
+    /// `ProfilePoolPolicy.maxReadingAgeRange`, for the same reason as the
+    /// ceiling. Nil returns the column to NULL, each kind's own window.
+    func handleConfigSetProfileBalancingMaxReadingAge(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetBalancingMaxReadingAgeParams.self, from: paramsData)
+        let range = ProfilePoolPolicy.maxReadingAgeRange
+        if let seconds = params.seconds, !range.contains(seconds) {
+            return RPCResponse(
+                error: "Maximum reading age must be between \(range.lowerBound) and \(range.upperBound) seconds, got \(seconds)")
+        }
+        try await db.config.setProfileBalancingMaxReadingAgeSeconds(params.seconds)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the schedule-based PR polling gate (default OFF, soaking) and
     /// apply it at once: the daemon stops the running PR driver and starts the
     /// other (`PRPollDriverSwitch`). The write happens inside the switch's
@@ -576,6 +583,34 @@ extension RPCRouter {
         try await db.config.setProgramStatusEnabled(params.enabled)
         // Turning it off also drops every terminal's entries and retracts them.
         await programStatus.setEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the transcript prompt-answer gate (default OFF while it soaks).
+    /// Hook changes reach a session on its next start; the answer RPCs read the
+    /// column on every call, so they follow the toggle at once.
+    func handleConfigSetTranscriptPromptAnswerEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetPromptAnswerParams.self, from: paramsData)
+        try await db.config.setTranscriptPromptAnswerEnabled(params.enabled)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the live remote transcript sync gate (default OFF, soaking).
+    /// Nothing caches it: every decision reads it fresh, so it applies on the
+    /// next sync without a restart. Turning it off also drops background
+    /// sync's queue at once, rather than leaving it to the next dequeue's
+    /// read of the flag. Design:
+    /// docs/specs/2026-09-25-remote-session-transcript-design.md § Gating.
+    func handleConfigSetRemoteTranscriptLiveSyncEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetRemoteLiveSyncEnabledParams.self, from: paramsData)
+        try await db.config.setRemoteTranscriptLiveSyncEnabled(params.enabled)
+        if !params.enabled {
+            await remoteTranscriptBackgroundSync?.dropAll()
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

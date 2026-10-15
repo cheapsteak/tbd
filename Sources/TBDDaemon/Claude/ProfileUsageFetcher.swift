@@ -123,6 +123,11 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
     /// identifier, not a credential — safe to log at `.public`, but it must
     /// never be composed into a string that also carries token bytes.
     case ok([ClaudeUsageLimitBucket], organizationID: String?)
+    /// The account is at its usage limit: the request was refused (HTTP 429),
+    /// but the response still carried the window readings, at least one of
+    /// them full. A successful reading, not a failure — `retryAfter` is the
+    /// server's `Retry-After` (seconds), for when to read it again.
+    case limitReached([ClaudeUsageLimitBucket], organizationID: String?, retryAfter: TimeInterval?)
     /// No stored credential for this profile (not logged in), or the
     /// credential could not be read. The reason is human-readable and MUST
     /// NOT contain token bytes.
@@ -148,7 +153,7 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
     /// status strings. nil for `.ok`.
     public var failureReason: String? {
         switch self {
-        case .ok: return nil
+        case .ok, .limitReached: return nil
         case .noCredentials(let reason): return "no credentials (\(reason))"
         case .needsLogin(let reason): return "needs re-login (\(reason))"
         case .rateLimited(let ra):
@@ -198,7 +203,7 @@ public enum ProfileUsageFetchStatus: Equatable, Sendable {
     /// Machine-readable classification for the snapshot / UI.
     public var kind: ProfileUsageStatusKind {
         switch self {
-        case .ok: return .ok
+        case .ok, .limitReached: return .ok
         case .noCredentials: return .noCredentials
         case .needsLogin: return .needsLogin
         case .rateLimited: return .rateLimited

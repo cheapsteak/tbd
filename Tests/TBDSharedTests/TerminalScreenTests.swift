@@ -189,6 +189,29 @@ import Testing
         #expect(decoded.screen == screen, "the screen did not survive the round trip")
     }
 
+    /// The nested path a script actually greps, now that all three sources are
+    /// reachable.
+    ///
+    /// `TBDSkillContent` tells agents to read `screen.source`, and the CLI's
+    /// staleness note spells the same value, so the two can be correlated. That
+    /// instruction is only sound if the field really sits at that path under
+    /// that spelling — a nesting change or a renamed key would leave every
+    /// documented reader looking in the wrong place, and the reader that
+    /// suffers most is the one acting on a `viewer` screen it cannot identify
+    /// as somebody's live keyboard.
+    @Test("the result's JSON carries the source and age at screen.source")
+    func resultCarriesScreenSourceAtTheDocumentedPath() throws {
+        for source in TerminalScreen.Source.allCases {
+            let screen = try Self.make(lines: ["alpha"], source: source, ageMilliseconds: 42)
+            let data = try JSONEncoder().encode(TerminalOutputResult(screen: screen))
+            let object = try #require(
+                try JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let nested = try #require(object["screen"] as? [String: Any])
+            #expect(nested["source"] as? String == source.rawValue)
+            #expect(nested["ageMilliseconds"] as? Int == 42)
+        }
+    }
+
     /// The tmux arm's half of the same wire, and a contract a reader is told to
     /// rely on: `TBDSkillContent` tells agents that a **missing** `screen` key
     /// means a tmux-backed session. That reading is only sound while a nil

@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 import TestSupport
@@ -7,13 +6,13 @@ import TestSupport
 /// **Tier 3** — both tests spawn a real child. `Tests/CLAUDE.md`'s test-tier
 /// taxonomy names this case verbatim: a suite belongs here if it "spawns a
 /// child racing a deadline," and that holds even when the *deadline itself*
-/// is virtual — `GitManagerTimeoutTests` is the precedent for a `TestClock`
+/// is virtual — `GitManagerTimeoutTests` is the precedent for a virtual clock
 /// still living in this tier.
 ///
 /// `BoundedProcessClaudeSpawner` now threads an injected `clock:` through to
 /// `runBoundedProcess`, matching `GitManager`/`TmuxManager.runExternalCommand`.
 /// `spawnTimesOutOnInjectedClockDeadline` below is the discriminating proof of
-/// that wiring: it advances only a `TestClock` the spawner was constructed
+/// that wiring: it advances only an `EventDrivenTestClock` the spawner was constructed
 /// with, never sleeps for real, and the deadline still fires — which is only
 /// possible if `spawn(_:)` actually forwards `clock` to `runBoundedProcess`
 /// rather than dropping it on the floor. Delete the `clock:` argument from
@@ -37,7 +36,7 @@ struct ClaudeCloudSpawnerTimeoutTests {
     private static var tmp: String { FileManager.default.temporaryDirectory.path }
 
     /// Far enough out that the real watchdog cannot reach it inside the
-    /// suite's one-minute hang limit, so only the injected `TestClock` can
+    /// suite's one-minute hang limit, so only the injected `EventDrivenTestClock` can
     /// fire this deadline.
     private static let unreachableTimeout: TimeInterval = 600
 
@@ -58,12 +57,12 @@ struct ClaudeCloudSpawnerTimeoutTests {
 
     /// Proves `spawn(_:)` actually forwards its injected `clock` to
     /// `runBoundedProcess` rather than always taking the `ContinuousClock()`
-    /// default. The clock never sees a real 600s wait — `advanceWhenSuspended`
+    /// default. The clock never sees a real 600s wait — `requireAdvanceWhenArmed`
     /// only returns once the spawner has armed a sleeper on `clock`, and the
     /// deadline fires the instant virtual time crosses it, so a passing run
     /// proves the wiring rather than a generous real timeout.
     @Test func spawnTimesOutOnInjectedClockDeadline() async throws {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let spawner = BoundedProcessClaudeSpawner(executable: "/bin/sh", clock: clock)
         let call = Task {
             try await spawner.spawn(
@@ -73,7 +72,7 @@ struct ClaudeCloudSpawnerTimeoutTests {
                     usesPseudoTerminal: false,
                     timeout: Self.unreachableTimeout))
         }
-        await clock.advanceWhenSuspended(by: .seconds(Self.unreachableTimeout))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(Self.unreachableTimeout))
         let outcome = try await call.value
         #expect(outcome == .timedOut)
     }

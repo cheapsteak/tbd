@@ -4,9 +4,20 @@ included:
   # The two test targets guarded by the no_setenv_tbdhome_wrong_target custom rule.
   # A custom rule only runs on files already inside the global lint scope, so these
   # dirs must be listed here for that rule to fire in CI (`swiftlint --strict`).
-  # TBDDaemonTests is intentionally left out — setenv("TBD_HOME") is legitimate there.
+  # TBDDaemonTests is outside that rule's own `included:` regex — setenv("TBD_HOME")
+  # is legitimate there.
   - Tests/TBDSharedTests
   - Tests/TBDAppTests
+  # In scope for the no_polling_test_clock custom rule only. Each of these dirs
+  # carries a nested .swiftlint.yml with `only_rules: [no_polling_test_clock]`,
+  # so no default rule reaches test code there.
+  - Tests/TBDDaemonTests
+  - Tests/TBDDaemonLiveTests
+  - Tests/TBDModelProxyTests
+  - Tests/TBDCLITests
+  - Tests/TBDHolderTests
+  - Tests/TBDPeerHelperTests
+  - Tests/TestSupport
 
 excluded:
   - .build
@@ -69,6 +80,33 @@ custom_rules:
     message: "New delays/timers take an injected clock (`clock: any Clock<Duration> = ContinuousClock()`) — see Tests/CLAUDE.md \"Clock and date seams\" and docs/specs/2026-07-24-test-hardening-design.md §5."
     severity: error
 
+  no_polling_test_clock:
+    name: "No polling TestClock in Tests/"
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    # Only test dirs inside the global lint scope above are reachable, so a new
+    # test target must be added there too (with its nested only_rules config)
+    # before this rule can see it.
+    included:
+      - "Tests/.*\\.swift"
+    excluded:
+      # The two files that test swift-clocks' TestClock itself.
+      - "Tests/TBDDaemonTests/ClockTestSupportTests\\.swift"
+      - "Tests/TestSupport/ClockTestSupport\\.swift"
+    # Two shapes. Construction: `TestClock()`, `TestClock<Duration>()`,
+    # `TestClock<Swift.Duration>.init()` — a type annotation alone constructs
+    # nothing and is left to fall with its construction. The `\b` keeps
+    # `EventDrivenTestClock()` out. Calls: the three swift-clocks suspension
+    # probes, which poll with megaYield and starve under a saturated pass.
+    # `match_kinds` drops doc comments, comments and string literals that only
+    # name them.
+    regex: '\bTestClock\s*(?:<[^>()]*>)?\s*(?:\.init)?\s*\(|\b(?:advanceWhenSuspended|waitForSuspension|checkSuspension)\s*\('
+    match_kinds:
+      - identifier
+      - typeidentifier
+      - keyword
+    message: "Clock-driven tests use EventDrivenTestClock with its strict waits (requireAdvanceWhenArmed(by:), requireSleeperArmed()), not swift-clocks' TestClock and its polling advanceWhenSuspended/waitForSuspension/checkSuspension. See Tests/CLAUDE.md \"Clock and date seams\" and docs/specs/2026-10-14-retire-polling-test-clock-design.md."
+    severity: error
+
   no_passwd_home_lookup:
     name: "No account-database home lookup in Sources/"
     # included/excluded HERE take REGEX (not glob), matched against file path.
@@ -87,9 +125,10 @@ custom_rules:
   no_hardcoded_users_path:
     name: "No hardcoded /Users/ path literal"
     # included/excluded HERE take REGEX (not glob), matched against file path.
-    # The two test dirs are the ones already inside the global lint scope; a
-    # custom rule cannot reach files outside it, and pulling all of Tests/ in
-    # would drag every default rule onto test code — a separate change.
+    # The two test dirs are the ones the full rule set lints. The other test
+    # dirs are in the global scope too, but their nested configs run only
+    # no_polling_test_clock, so this rule cannot reach them without being
+    # named there as well — and widening it is a separate change.
     included:
       - "Sources/(TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder|TBDModelProxy)/.*\\.swift"
       - "Tests/(TBDSharedTests|TBDAppTests)/.*\\.swift"
@@ -284,6 +323,9 @@ custom_rules:
       # AttachmentStrip is the composer's thumbnail strip above the text field —
       # also outside the transcript list's row-measurement path.
       - "Sources/TBDApp/Panes/Transcript/Composer/AttachmentStrip\\.swift"
+      # PromptInputPopoverView is the permission card's "Show all" popover — it
+      # renders outside the row and is never part of the row's measurement.
+      - "Sources/TBDApp/Panes/Transcript/PromptInputPopoverView\\.swift"
     regex: '\bScrollView\b'
     match_kinds:
       - identifier
@@ -395,8 +437,10 @@ custom_rules:
       # actuated before.
       - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                          # defines the primitives; the implementation, not a caller
       - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"       # the terminal.* handlers; each writes its own row before acting
+      - "Sources/TBDDaemon/Server/RPCRouter\\+DevServerHandlers\\.swift"      # server.start / server.stop; one worktree-named row per call, written before any spawn, respawn or tab close
       - "Sources/TBDDaemon/Server/RPCRouter\\+ScratchHandlers\\.swift"        # scratch.create/delete/archive; one scratch-named row per call
       - "Sources/TBDDaemon/Server/RPCRouter\\+ContinueInCodexHandlers\\.swift" # terminal.continueInCodex; spawn row + rollback kill
+      - "Sources/TBDDaemon/Server/RPCRouter\\+ContinueInClaudeHandlers\\.swift" # terminal.continueInClaude; one row covers destination + rollback/recovery
       - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"          # park/wake engine: RPC rows plus the auto-hibernate rail's entry point
       # The shared lifecycle internals and phases. They stay deliberately
       # silent — `worktree.archive` and the reconcile sweep both reach them, and

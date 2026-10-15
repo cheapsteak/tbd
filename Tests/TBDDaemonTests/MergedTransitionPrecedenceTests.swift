@@ -51,7 +51,7 @@ struct MergedTransitionPrecedenceTests {
             actuationLog: ActuationLog(path: logPath))
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            subscriptions: subs, configDirManager: mergeIsolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         let hibernate = AutoHibernateOnMergeCoordinator(db: db, hibernation: hibernation, subscriptions: subs)
         let dispatcher = MergedTransitionDispatcher(archive: archive, hibernate: hibernate)
         return Deps(dispatcher: dispatcher, archive: archive, db: db,

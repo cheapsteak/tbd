@@ -1,5 +1,5 @@
-import Clocks
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 
@@ -29,13 +29,13 @@ import Testing
 /// releases every parked work item in a path that runs regardless of the
 /// call's outcome. Never leave the pool parked past the end of a test.
 ///
-/// WHY THESE TESTS PASS A `TestClock` THEY NEVER ADVANCE — and it is the
+/// WHY THESE TESTS PASS AN `EventDrivenTestClock` THEY NEVER ADVANCE — and it is the
 /// opposite of virtualizing the deadline. `runBoundedProcess` arms its deadline
 /// twice: on the `SubprocessWatchdog` thread and on the injected clock. The
 /// clock armer sleeps on the *cooperative* executor, a different pool from the
 /// libdispatch global queue this suite floods, so with a real clock it could
 /// fire first and satisfy these assertions without the watchdog participating.
-/// A never-advanced `TestClock` disables that armer, leaving the deadline REAL
+/// A never-advanced `EventDrivenTestClock` disables that armer, leaving the deadline REAL
 /// and the satisfier set exactly as it was before the clock seam existed.
 ///
 /// HOW THIS SUITE DISCRIMINATES THE WATCHDOG — `sleep 90` + a 60 s time limit,
@@ -81,7 +81,7 @@ import Testing
 ///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
 ///    machine, so real arming latency here is milliseconds and the saturation
 ///    that motivated the raise never occurs. This suite never advances its
-///    `TestClock` at all, so it does not even pay the handshake.
+///    clock at all, so it does not even pay the handshake.
 @Suite("Subprocess timeout under dispatch-pool starvation", .serialized, .timeLimit(.minutes(1)))
 struct SubprocessTimeoutStarvationTests {
 
@@ -156,7 +156,7 @@ struct SubprocessTimeoutStarvationTests {
                     arguments: ["90"],
                     label: "starvation-test",
                     timeout: .milliseconds(100),
-                    clock: TestClock()  // never advanced — isolates the watchdog; see suite doc
+                    clock: EventDrivenTestClock()  // never advanced — isolates the watchdog; see suite doc
                 )
                 Issue.record("expected runExternalCommand to time out under pool saturation, but it returned")
             } catch let error as TmuxError {
@@ -171,8 +171,8 @@ struct SubprocessTimeoutStarvationTests {
     }
 
     @Test func gitRunTimesOutEvenWhenPoolSaturated() async {
-        // TestClock never advanced — disables the clock armer; see suite doc.
-        let git = GitManager(subprocessTimeout: .milliseconds(100), clock: TestClock())
+        // Clock never advanced — disables the clock armer; see suite doc.
+        let git = GitManager(subprocessTimeout: .milliseconds(100), clock: EventDrivenTestClock())
         await withSaturatedGlobalPool {
             do {
                 _ = try await git.runForTimeoutTesting(

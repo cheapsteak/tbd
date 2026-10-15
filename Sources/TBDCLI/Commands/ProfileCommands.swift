@@ -15,8 +15,10 @@ struct ProfileCommand: AsyncParsableCommand {
             ProfileList.self,
             ProfileSetDefault.self,
             ProfileLogin.self,
+            ProfileExec.self,
             ProfileBalancing.self,
             ProfilePool.self,
+            ProfileRename.self,
         ]
     )
 }
@@ -140,6 +142,12 @@ struct ProfileListJSONPayload: JSONObjectPayload {
 
     private struct Balancing: Encodable {
         let enabled: Bool
+        /// The usage ceiling in effect, in percent: the stored value, or the
+        /// shipped default when none is set.
+        let usageCeilingPercent: Int
+        /// The maximum reading age in seconds, present only when set; absent
+        /// means each credential kind keeps its own window.
+        let maxReadingAgeSeconds: Int?
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -151,8 +159,12 @@ struct ProfileListJSONPayload: JSONObjectPayload {
         var container = encoder.container(keyedBy: CodingKeys.self)
         // A daemon that sends no flag predates balancing, so nothing on it
         // balances: `false`, not the shipped default a newer daemon resolves.
+        let policy = result.profileBalancingPolicy
         try container.encode(
-            Balancing(enabled: result.profileBalancingEnabled ?? false),
+            Balancing(
+                enabled: result.profileBalancingEnabled ?? false,
+                usageCeilingPercent: policy.usageCeilingPercent,
+                maxReadingAgeSeconds: policy.maxReadingAgeSeconds),
             forKey: .balancing)
     }
 }
@@ -274,9 +286,21 @@ func findExecutable(named name: String, searchPath: String? = nil) -> String? {
     return nil
 }
 
+/// `execve` refused to run `executablePath`; `code` is its `errno`.
+struct ExecFailure: LocalizedError, CustomStringConvertible {
+    let executablePath: String
+    let code: Int32
+
+    var description: String {
+        "Failed to exec \(executablePath): \(String(cString: strerror(code)))"
+    }
+
+    var errorDescription: String? { description }
+}
+
 /// Replace the current process image with `executablePath` via `execve`,
 /// handing the controlling TTY over cleanly (no wrapper process lingers).
-/// Only returns by throwing, when exec itself fails.
+/// Only returns by throwing `ExecFailure`, when exec itself fails.
 func execReplacingCurrentProcess(
     executablePath: String,
     arguments: [String],
@@ -290,10 +314,10 @@ func execReplacingCurrentProcess(
     envp.append(nil)
     execve(executablePath, argv, envp)
     // execve only returns on failure — clean up and surface errno.
-    let reason = String(cString: strerror(errno))
+    let code = errno
     for pointer in argv { free(pointer) }
     for pointer in envp { free(pointer) }
-    throw CLIError.invalidArgument("Failed to exec \(executablePath): \(reason)")
+    throw ExecFailure(executablePath: executablePath, code: code)
 }
 
 // MARK: - profile list
@@ -525,30 +549,262 @@ struct ProfileLogin: AsyncParsableCommand {
     }
 }
 
+// MARK: - profile exec
+
+/// Exit statuses `tbd profile exec` returns when the command never ran. Once it
+/// runs, the command replaces this process and its own status is the one the
+/// caller sees. These are the values `env(1)`, `nice(1)` and `timeout(1)` use,
+/// so a caller can tell TBD's failure from the command's.
+enum ProfileExecStatus {
+    /// TBD could not run the command: the daemon is unreachable, the profile
+    /// is unknown, or it has no credential.
+    static let failed: Int32 = 125
+    /// The command was found but could not be executed.
+    static let notExecutable: Int32 = 126
+    /// The command was not found.
+    static let notFound: Int32 = 127
+
+    /// The status for an `execve` that failed with `code`.
+    static func forExecFailure(_ code: Int32) -> Int32 {
+        code == ENOENT || code == ENOTDIR ? notFound : notExecutable
+    }
+}
+
+/// The search path `execvp(3)` falls back to when the environment has no
+/// `PATH`.
+let profileExecDefaultSearchPath = "/usr/bin:/bin"
+
+/// The path to exec for `command`, the way `execvp(3)` and a shell find it.
+///
+/// - A command containing a slash is taken as given.
+/// - Otherwise each directory of `searchPath` is tried in order, or of
+///   `profileExecDefaultSearchPath` when the child has no `PATH`. An empty
+///   entry means `currentDirectory`, as POSIX specifies, and directories named
+///   like the command are skipped.
+/// - The first executable regular file wins. With none, the first match that is
+///   not executable is returned, so `execve` reports it unrunnable (126)
+///   rather than missing (127).
+///
+/// nil when nothing matches. `currentDirectory` is a parameter so tests can
+/// name it without changing the process-wide working directory.
+func profileExecExecutablePath(
+    _ command: String,
+    searchPath: String?,
+    currentDirectory: String = "."
+) -> String? {
+    if command.contains("/") { return command }
+    let fileManager = FileManager.default
+    var unrunnable: String?
+    let entries = (searchPath ?? profileExecDefaultSearchPath)
+        .split(separator: ":", omittingEmptySubsequences: false)
+    for entry in entries {
+        let candidate = "\(entry.isEmpty ? currentDirectory : String(entry))/\(command)"
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: candidate, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { continue }
+        if fileManager.isExecutableFile(atPath: candidate) { return candidate }
+        if unrunnable == nil { unrunnable = candidate }
+    }
+    return unrunnable
+}
+
+/// The one-line reason `tbd profile exec` prints when it fails before running
+/// the command. Daemon refusals arrive as `CLIError.rpcError`, whose own
+/// description adds an `Error:` prefix that would read twice after the
+/// command's name.
+func profileExecFailureMessage(_ error: Error) -> String {
+    switch error {
+    case CLIError.rpcError(let message), CLIError.invalidArgument(let message):
+        return "tbd profile exec: \(message)\n"
+    default:
+        return "tbd profile exec: \(error)\n"
+    }
+}
+
+struct ProfileExec: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "exec",
+        abstract: "Run a command under a profile's account, with the credentials a session on it gets",
+        discussion: """
+            Runs the command after `--` with what a Claude session spawned on \
+            the profile gets from it: the profile's CLAUDE_CONFIG_DIR, its \
+            stored setup token or API key, its endpoint and model, and the \
+            global and profile env overrides. Everything else is inherited \
+            from this process, except the variables that choose Claude's \
+            credential, provider, endpoint or model (CLAUDE_CODE_OAUTH_TOKEN, \
+            ANTHROPIC_API_KEY, CLAUDE_CONFIG_DIR and others; see \
+            docs/profile-exec.md), which are cleared first so this process's \
+            own account does not carry over.
+
+            The command replaces this process, so its output, signals and exit \
+            status are its own. When the command never runs, the exit status \
+            is 125 if TBD could not prepare it (daemon unreachable, unknown \
+            profile, no stored credential), 126 if it could not be executed, \
+            and 127 if it was not found. Nothing this prints contains a \
+            credential.
+
+            Example: tbd profile exec work -- claude -p "summarize the diff"
+            """
+    )
+
+    @Argument(help: "Profile name or UUID")
+    var name: String
+
+    @Argument(parsing: .postTerminator, help: "The command to run and its arguments, after --")
+    var command: [String] = []
+
+    func validate() throws {
+        guard !command.isEmpty else {
+            throw ValidationError(
+                "Give the command to run after --, e.g. tbd profile exec \(name) -- claude -p \"…\"")
+        }
+    }
+
+    mutating func run() async throws {
+        let profileEnvironment: ModelProfileExecEnvironmentResult
+        do {
+            let client = SocketClient()
+            let list = try client.call(
+                method: RPCMethod.modelProfileList,
+                resultType: ModelProfileListResult.self
+            )
+            let entry = try resolveProfile(named: name, in: list.profiles)
+            profileEnvironment = try client.call(
+                method: RPCMethod.modelProfileExecEnvironment,
+                params: ModelProfileExecEnvironmentParams(id: entry.profile.id),
+                resultType: ModelProfileExecEnvironmentResult.self
+            )
+        } catch {
+            FileHandle.standardError.write(Data(profileExecFailureMessage(error).utf8))
+            throw ExitCode(ProfileExecStatus.failed)
+        }
+
+        let environment = ProfileExecEnvironment.compose(
+            inherited: ProcessInfo.processInfo.environment,
+            profile: profileEnvironment.environment
+        )
+        guard let executable = profileExecExecutablePath(command[0], searchPath: environment["PATH"]) else {
+            FileHandle.standardError.write(Data("tbd profile exec: \(command[0]): command not found\n".utf8))
+            throw ExitCode(ProfileExecStatus.notFound)
+        }
+        do {
+            try execReplacingCurrentProcess(
+                executablePath: executable,
+                arguments: Array(command.dropFirst()),
+                environment: environment
+            )
+        } catch let failure as ExecFailure {
+            FileHandle.standardError.write(Data("tbd profile exec: \(failure)\n".utf8))
+            throw ExitCode(ProfileExecStatus.forExecFailure(failure.code))
+        }
+    }
+}
+
 // MARK: - profile balancing
+
+/// Parse `--usage-ceiling`: a whole percent in
+/// `ProfilePoolPolicy.usageCeilingRange`, or `default` (returned as nil) to
+/// restore the shipped value.
+func parseUsageCeilingArgument(_ raw: String) throws -> Int? {
+    if raw.lowercased() == "default" { return nil }
+    let range = ProfilePoolPolicy.usageCeilingRange
+    guard let percent = Int(raw.trimmingCharacters(in: CharacterSet(charactersIn: "%"))),
+          range.contains(percent) else {
+        throw ValidationError(
+            "--usage-ceiling takes a whole percent from \(range.lowerBound) to \(range.upperBound), or 'default'; got: \(raw)")
+    }
+    return percent
+}
+
+/// Parse `--max-reading-age`: whole minutes, converted to the seconds the
+/// daemon stores and bounded by `ProfilePoolPolicy.maxReadingAgeRange`, or
+/// `default` (returned as nil) to restore each credential kind's own window.
+func parseMaxReadingAgeArgument(_ raw: String) throws -> Int? {
+    if raw.lowercased() == "default" { return nil }
+    let range = ProfilePoolPolicy.maxReadingAgeRange
+    guard let minutes = Int(raw), range.contains(minutes * 60) else {
+        throw ValidationError(
+            "--max-reading-age takes whole minutes from \(range.lowerBound / 60) to \(range.upperBound / 60), or 'default'; got: \(raw)")
+    }
+    return minutes * 60
+}
+
+/// What `tbd profile balancing` prints with no arguments: the gate and the
+/// two thresholds in effect, each marked when it is the shipped default.
+func profileBalancingStatus(_ result: ModelProfileListResult) -> String {
+    let policy = result.profileBalancingPolicy
+    let enabled = result.profileBalancingEnabled ?? false
+    let ceilingNote = result.profileBalancingUsageCeilingPercent == nil ? " (default)" : ""
+    let age: String
+    if let seconds = policy.maxReadingAgeSeconds {
+        age = "\(seconds / 60) min, every profile"
+    } else {
+        let signedIn = Int(ProfilePoolPicker.stalenessWindow(for: .oauth)) / 60
+        let token = Int(ProfilePoolPicker.stalenessWindow(for: .oauthToken)) / 60
+        age = "\(signedIn) min signed-in, \(token) min token (default)"
+    }
+    return """
+        Profile balancing: \(enabled ? "on" : "off")
+          Usage ceiling:   \(policy.usageCeilingPercent)%\(ceilingNote) — skip an account at or above this in its 5-hour or weekly window
+          Reading age:     \(age) — skip an account whose usage reading is older
+        """
+}
 
 struct ProfileBalancing: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "balancing",
-        abstract: "Enable or disable spreading new sessions across profiles (default off)",
+        abstract: "Show or set how new sessions spread across profiles (default off)",
         discussion: """
             When on, new sessions land on the eligible profile with the most \
             room in its usage window, adjusted for how many sessions that \
-            account already carries.
+            account already carries. An account is skipped when its 5-hour or \
+            weekly usage is at or above the usage ceiling, or when its usage \
+            reading is older than the maximum reading age. When every account \
+            is skipped, the session goes to the least-used one and TBD posts a \
+            notification saying so.
+
+            With no arguments, prints the current settings.
             """
     )
-    @Argument(help: "on | off") var state: String
+    @Argument(help: "on | off") var state: String?
+    @Option(name: .long, help: "Skip accounts at or above this percent of any usage window (1-100, or 'default' for 85)")
+    var usageCeiling: String?
+    @Option(name: .long, help: "Skip accounts whose usage reading is older than this many minutes (1-1440, or 'default' for 5 signed-in / 15 token)")
+    var maxReadingAge: String?
+
     mutating func run() async throws {
-        let enabled: Bool
-        switch state.lowercased() {
+        let enabled: Bool?
+        switch state?.lowercased() {
+        case nil: enabled = nil
         case "on", "true", "enable": enabled = true
         case "off", "false", "disable": enabled = false
-        default: throw ValidationError("Expected 'on' or 'off', got: \(state)")
+        default: throw ValidationError("Expected 'on' or 'off', got: \(state ?? "")")
         }
-        try SocketClient().callVoid(
-            method: RPCMethod.configSetProfileBalancingEnabled,
-            params: ConfigSetProfileBalancingEnabledParams(enabled: enabled))
-        print("Profile balancing \(enabled ? "enabled" : "disabled").")
+        // Parse everything before writing anything, so a bad second option
+        // cannot leave the first one applied.
+        let ceiling = try usageCeiling.map { try parseUsageCeilingArgument($0) }
+        let maxAge = try maxReadingAge.map { try parseMaxReadingAgeArgument($0) }
+
+        let client = SocketClient()
+        if let enabled {
+            try client.callVoid(
+                method: RPCMethod.configSetProfileBalancingEnabled,
+                params: ConfigSetProfileBalancingEnabledParams(enabled: enabled))
+        }
+        if let ceiling {
+            try client.callVoid(
+                method: RPCMethod.configSetProfileBalancingUsageCeiling,
+                params: ConfigSetBalancingUsageCeilingParams(percent: ceiling))
+        }
+        if let maxAge {
+            try client.callVoid(
+                method: RPCMethod.configSetProfileBalancingMaxReadingAge,
+                params: ConfigSetBalancingMaxReadingAgeParams(seconds: maxAge))
+        }
+        let list = try client.call(
+            method: RPCMethod.modelProfileList,
+            resultType: ModelProfileListResult.self)
+        print(profileBalancingStatus(list))
     }
 }
 
@@ -583,5 +839,35 @@ struct ProfilePool: AsyncParsableCommand {
             method: RPCMethod.modelProfileSetPoolOptOut,
             params: ModelProfileSetPoolOptOutParams(id: entry.profile.id, optOut: optOut))
         print("Profile '\(entry.profile.name)' is now \(optOut ? "excluded" : "included") in the balancing pool.")
+    }
+}
+
+// MARK: - profile rename
+
+struct ProfileRename: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "rename",
+        abstract: "Rename a profile",
+        discussion: """
+            Only the display name changes. The profile keeps its id, so the \
+            global default, repo overrides, pool membership and the sessions \
+            already running on it all still point at it.
+            """
+    )
+    @Argument(help: "Profile name or UUID") var name: String
+    @Argument(help: "New name") var newName: String
+    mutating func run() async throws {
+        let client = SocketClient()
+        let list = try client.call(
+            method: RPCMethod.modelProfileList,
+            resultType: ModelProfileListResult.self
+        )
+        let entry = try resolveProfile(named: name, in: list.profiles)
+        // The daemon trims the name and refuses an empty or taken one.
+        try client.callVoid(
+            method: RPCMethod.modelProfileRename,
+            params: ModelProfileRenameParams(id: entry.profile.id, name: newName))
+        let renamed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        print("Renamed profile '\(entry.profile.name)' to '\(renamed)'.")
     }
 }

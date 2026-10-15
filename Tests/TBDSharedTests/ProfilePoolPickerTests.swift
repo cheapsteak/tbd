@@ -206,10 +206,10 @@ struct ProfilePoolPickerTests {
         }
     }
 
-    @Test("exhausted: profile at headroomFloor is exhausted")
-    func exhaustedAtFloor() {
+    @Test("exhausted: a profile exactly at the 85% default ceiling is exhausted")
+    func exhaustedAtCeiling() {
         let candidate = makeCandidate(
-            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 95)])
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 85)])
         )
         let decision = ProfilePoolPicker.pick(candidates: [candidate], now: Date())
 
@@ -217,8 +217,31 @@ struct ProfilePoolPickerTests {
         #expect(decision.verdicts[candidate.profileID] == .exhausted)
     }
 
-    @Test("exhausted: profile below headroomFloor is exhausted")
-    func exhaustedBelowFloor() {
+    @Test("exhausted: a profile just under the ceiling is still eligible")
+    func justUnderCeilingIsEligible() {
+        let candidate = makeCandidate(
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "weekly_all", percent: 84.9)])
+        )
+        let decision = ProfilePoolPicker.pick(candidates: [candidate], now: Date())
+
+        #expect(decision.chosen == candidate.profileID)
+    }
+
+    @Test("exhausted: the weekly window binds as much as the 5-hour one")
+    func weeklyWindowAtCeilingIsExhausted() {
+        let candidate = makeCandidate(
+            snapshot: makeSnapshot(buckets: [
+                makeBucket(kind: "session", percent: 0),
+                makeBucket(kind: "weekly_all", percent: 96),
+            ])
+        )
+        let decision = ProfilePoolPicker.pick(candidates: [candidate], now: Date())
+
+        #expect(decision.verdicts[candidate.profileID] == .exhausted)
+    }
+
+    @Test("exhausted: profile well above the ceiling is exhausted")
+    func exhaustedAboveCeiling() {
         let candidate = makeCandidate(
             snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 99)])
         )
@@ -243,6 +266,234 @@ struct ProfilePoolPickerTests {
         #expect(headroom == 0.5)
         #expect(accountLoad == 0)
         #expect(score == 1.0 / 0.5)  // (0 + 1) / 0.5
+    }
+
+    // MARK: Policy
+
+    @Test("policy: the default ceiling is 85% and the floor lands exactly on it")
+    func policyDefaults() {
+        #expect(ProfilePoolPolicy.standard.usageCeilingPercent == 85)
+        #expect(ProfilePoolPolicy.standard.maxReadingAgeSeconds == nil)
+        #expect(ProfilePoolPolicy.standard.headroomFloor == 0.15)
+        #expect(ProfilePoolPolicy(usageCeilingPercent: 95).headroomFloor == 0.05)
+        #expect(ProfilePoolPolicy(usageCeilingPercent: 100).headroomFloor == 0)
+    }
+
+    @Test("policy: a raised ceiling admits what the default turns away")
+    func policyRaisedCeilingAdmits() {
+        let candidate = makeCandidate(
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 90)])
+        )
+        let byDefault = ProfilePoolPicker.pick(candidates: [candidate], now: Date())
+        #expect(byDefault.verdicts[candidate.profileID] == .exhausted)
+
+        let raised = ProfilePoolPicker.pick(
+            candidates: [candidate], now: Date(),
+            policy: ProfilePoolPolicy(usageCeilingPercent: 95))
+        #expect(raised.chosen == candidate.profileID)
+    }
+
+    @Test("policy: a lowered ceiling turns away what the default admits")
+    func policyLoweredCeilingExcludes() {
+        let candidate = makeCandidate(
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 60)])
+        )
+        let lowered = ProfilePoolPicker.pick(
+            candidates: [candidate], now: Date(),
+            policy: ProfilePoolPolicy(usageCeilingPercent: 50))
+        #expect(lowered.verdicts[candidate.profileID] == .exhausted)
+    }
+
+    @Test("policy: a reading-age override applies to every kind alike")
+    func policyMaxReadingAgeOverridesBothKinds() {
+        let now = Date()
+        let bucket = [makeBucket(kind: "session", percent: 10)]
+        // Ten minutes old: stale for a signed-in profile by default, fresh
+        // under a 30-minute override.
+        let signedIn = makeCandidate(
+            kind: .oauth,
+            snapshot: makeSnapshot(buckets: bucket, fetchedAt: now.addingTimeInterval(-600)))
+        #expect(ProfilePoolPicker.pick(candidates: [signedIn], now: now)
+            .verdicts[signedIn.profileID] == .noFreshReading)
+        #expect(ProfilePoolPicker.pick(
+            candidates: [signedIn], now: now,
+            policy: ProfilePoolPolicy(maxReadingAgeSeconds: 1800)).chosen == signedIn.profileID)
+
+        // Twelve minutes old: fresh for a token profile by default, stale
+        // under a 10-minute override.
+        let token = makeCandidate(
+            kind: .oauthToken,
+            snapshot: makeSnapshot(buckets: bucket, fetchedAt: now.addingTimeInterval(-720)))
+        #expect(ProfilePoolPicker.pick(candidates: [token], now: now).chosen == token.profileID)
+        #expect(ProfilePoolPicker.pick(
+            candidates: [token], now: now,
+            policy: ProfilePoolPolicy(maxReadingAgeSeconds: 600))
+            .verdicts[token.profileID] == .noFreshReading)
+    }
+
+    @Test("policy: unset and out-of-range stored values resolve to the shipped defaults")
+    func policyResolution() {
+        #expect(ProfilePoolPolicy.resolved(usageCeilingPercent: nil, maxReadingAgeSeconds: nil)
+            == .standard)
+        #expect(ProfilePoolPolicy.resolved(usageCeilingPercent: 90, maxReadingAgeSeconds: 1200)
+            == ProfilePoolPolicy(usageCeilingPercent: 90, maxReadingAgeSeconds: 1200))
+        #expect(ProfilePoolPolicy.resolved(usageCeilingPercent: 0, maxReadingAgeSeconds: 59)
+            == .standard)
+        #expect(ProfilePoolPolicy.resolved(usageCeilingPercent: 101, maxReadingAgeSeconds: 86_401)
+            == .standard)
+    }
+
+    // MARK: Fallback
+
+    private func id(_ n: Int) -> UUID {
+        UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!
+    }
+
+    @Test("fallback: none when something is eligible")
+    func fallbackAbsentWhenEligible() {
+        let eligible = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 20)]))
+        let full = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 99)]))
+        let decision = ProfilePoolPicker.pick(candidates: [full, eligible], now: Date())
+
+        #expect(decision.chosen == eligible.profileID)
+        #expect(decision.fallback == nil)
+    }
+
+    @Test("fallback: every account over the ceiling picks the least used of them")
+    func fallbackLeastUsedAboveCeiling() {
+        let at90 = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 90)]))
+        let at88 = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "weekly_all", percent: 88)]))
+        let decision = ProfilePoolPicker.pick(candidates: [at90, at88], now: Date())
+
+        #expect(decision.chosen == nil)
+        #expect(decision.fallback == ProfilePoolFallback(profileID: at88.profileID, reason: .aboveCeiling))
+    }
+
+    @Test("fallback: load still spreads a burst across accounts over the ceiling")
+    func fallbackWeighsLoad() {
+        let loaded = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 88)]),
+            liveSessions: 3)
+        let idle = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 90)]),
+            liveSessions: 0)
+        let decision = ProfilePoolPicker.pick(candidates: [loaded, idle], now: Date())
+
+        #expect(decision.fallback?.profileID == idle.profileID)
+    }
+
+    @Test("fallback: a fresh reading over the ceiling beats a stale one")
+    func fallbackPrefersFreshOverStale() {
+        let now = Date()
+        let fresh = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 92)]))
+        let stale = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(
+                buckets: [makeBucket(kind: "session", percent: 10)],
+                fetchedAt: now.addingTimeInterval(-3600)))
+        let decision = ProfilePoolPicker.pick(candidates: [stale, fresh], now: now)
+
+        #expect(decision.fallback == ProfilePoolFallback(profileID: fresh.profileID, reason: .aboveCeiling))
+    }
+
+    @Test("fallback: a stale reading beats a fresh one at 100%")
+    func fallbackPrefersStaleOverFull() {
+        let now = Date()
+        let full = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 100)]))
+        let stale = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(
+                buckets: [makeBucket(kind: "session", percent: 50)],
+                fetchedAt: now.addingTimeInterval(-3600)))
+        let decision = ProfilePoolPicker.pick(candidates: [full, stale], now: now)
+
+        #expect(decision.fallback == ProfilePoolFallback(profileID: stale.profileID, reason: .staleReading))
+    }
+
+    @Test("fallback: among stale readings, the least used wins, and no reading comes last")
+    func fallbackOrdersStaleReadings() {
+        let now = Date()
+        let hourAgo = now.addingTimeInterval(-3600)
+        let never = makeCandidate(profileID: id(1), accountKey: "a", snapshot: nil)
+        let stale60 = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 60)], fetchedAt: hourAgo))
+        let stale30 = makeCandidate(
+            profileID: id(3), accountKey: "c",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 30)], fetchedAt: hourAgo))
+
+        let decision = ProfilePoolPicker.pick(candidates: [never, stale60, stale30], now: now)
+        #expect(decision.fallback == ProfilePoolFallback(profileID: stale30.profileID, reason: .staleReading))
+
+        let onlyUnread = ProfilePoolPicker.pick(candidates: [never], now: now)
+        #expect(onlyUnread.fallback == ProfilePoolFallback(profileID: never.profileID, reason: .staleReading))
+    }
+
+    @Test("fallback: every account full picks the least loaded, and says so")
+    func fallbackAllFull() {
+        let busy = makeCandidate(
+            profileID: id(1), accountKey: "a",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 100)]),
+            liveSessions: 2)
+        let quiet = makeCandidate(
+            profileID: id(2), accountKey: "b",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "weekly_all", percent: 100)]),
+            liveSessions: 0)
+        let decision = ProfilePoolPicker.pick(candidates: [busy, quiet], now: Date())
+
+        #expect(decision.fallback == ProfilePoolFallback(profileID: quiet.profileID, reason: .full))
+    }
+
+    @Test("fallback: never a profile outside the pool")
+    func fallbackNeverLeavesThePool() {
+        let fullOptedOut = makeCandidate(
+            profileID: id(1), poolOptOut: true,
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 10)]))
+        let noCredential = makeCandidate(profileID: id(2), hasCredential: false)
+        let apiKey = makeCandidate(profileID: id(3), kind: .apiKey)
+        let decision = ProfilePoolPicker.pick(
+            candidates: [fullOptedOut, noCredential, apiKey], now: Date())
+
+        #expect(decision.chosen == nil)
+        #expect(decision.fallback == nil)
+    }
+
+    @Test("fallback: never an excluded account")
+    func fallbackNeverAnExcludedAccount() {
+        let limited = makeCandidate(
+            profileID: id(1), accountKey: "limited",
+            snapshot: makeSnapshot(buckets: [makeBucket(kind: "session", percent: 100)]))
+        let decision = ProfilePoolPicker.pick(
+            candidates: [limited], excludingAccountKeys: ["limited"], now: Date())
+
+        #expect(decision.fallback == nil)
+    }
+
+    @Test("fallback: deterministic, with the configured default breaking a tie")
+    func fallbackTieBreak() {
+        let snapshot = makeSnapshot(buckets: [makeBucket(kind: "session", percent: 90)])
+        let other = makeCandidate(profileID: id(1), accountKey: "a", snapshot: snapshot)
+        let preferred = makeCandidate(
+            profileID: id(2), accountKey: "b", snapshot: snapshot, isConfiguredDefault: true)
+
+        let forward = ProfilePoolPicker.pick(candidates: [other, preferred], now: Date())
+        let reversed = ProfilePoolPicker.pick(candidates: [preferred, other], now: Date())
+        #expect(forward.fallback?.profileID == preferred.profileID)
+        #expect(reversed.fallback == forward.fallback)
     }
 
     // MARK: Headroom Calculation

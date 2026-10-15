@@ -47,6 +47,23 @@ struct TranscriptStreamPlanTests {
         #expect(TranscriptStreamPlan.step(previous: prev, next: next) == .rebuild)
     }
 
+    /// The prepend anchor in `TableTranscriptView` restores after the reload a
+    /// `.rebuild` performs; it relies on a prepend never classifying as an
+    /// `.append` (whose `insertRows` path assumes the new rows are at the end).
+    @Test("earlier history added at the front classifies as .rebuild")
+    func aPrependClassifiesAsRebuild() {
+        let prev = [
+            TranscriptRenderNode.makeAssistantText(id: "a1", text: "x"),
+            TranscriptRenderNode.makeAssistantText(id: "a2", text: "y"),
+        ]
+        let next = [
+            TranscriptRenderNode.makeAssistantText(id: "e1", text: "earlier"),
+            TranscriptRenderNode.makeAssistantText(id: "a1", text: "x"),
+            TranscriptRenderNode.makeAssistantText(id: "a2", text: "y"),
+        ]
+        #expect(TranscriptStreamPlan.step(previous: prev, next: next) == .rebuild)
+    }
+
     @Test("near-bottom threshold compares document tail to visible tail")
     func nearBottom() {
         #expect(TranscriptStreamPlan.isNearBottom(documentMaxY: 1000, visibleMaxY: 900, threshold: 120))

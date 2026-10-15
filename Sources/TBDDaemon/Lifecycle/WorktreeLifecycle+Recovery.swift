@@ -91,6 +91,7 @@ extension WorktreeLifecycle {
                 logger.warning("recovery: deleting .creating worktree \(row.id, privacy: .public) — checkout missing at \(row.localPath, privacy: .public)")
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: row.id)
+                    await sessionTitles.forget(worktreeID: row.id)
                     try await db.tabs.deleteForWorktree(worktreeID: row.id)
                     // Hard delete: closed-terminal history (rows + files) goes too.
                     try await db.terminalHistory.deleteForWorktree(worktreeID: row.id)
@@ -118,6 +119,7 @@ extension WorktreeLifecycle {
                 logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — checkout exists but no terminals; reconcile will re-adopt it")
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+                    await sessionTitles.forget(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
                     // Hard delete: closed-terminal history (rows + files) goes too.
                     try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
@@ -132,6 +134,7 @@ extension WorktreeLifecycle {
                 logger.warning("recovery: deleting .creating worktree \(worktree.id, privacy: .public) — repo \(String(describing: worktree.repoID), privacy: .public) row is missing, so the pre-session wait can never be resumed")
                 do {
                     try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+                    await sessionTitles.forget(worktreeID: worktree.id)
                     try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
                     // Hard delete: closed-terminal history (rows + files) goes too.
                     try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)

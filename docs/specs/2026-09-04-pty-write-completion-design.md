@@ -610,15 +610,16 @@ above, not an orphan.
 ## Flag
 
 **No flag of its own.** The change is confined to holder-backed panels, which
-exist only under `pty_holder_enabled` (default off, `Config.ptyHolderDefault`,
-`Sources/TBDShared/Models.swift:1698`) and have never shipped on. It replaces
-the panel's write step, which the repo's rule names as flag-worthy — and the
-flag it lands behind is the one wrapped around the entire transport, for the
-reason single-typist gives: a second column would keep selectable a quadrant
-(holder on, completion off) that is known-defective in the three ways this
-document records. Both branches remain testable, because a tmux panel's write
-path is untouched. If this were to land after `pty_holder_enabled` had
-graduated, it would need its own default-off column with the tri-state
+exist only under `pty_holder_enabled` (`Config.ptyHolderDefault` in
+`Sources/TBDShared/Models.swift`). It replaces the panel's write step, which
+the repo's rule names as flag-worthy — and the flag it sits behind is the one
+wrapped around the entire transport, for the reason single-typist gives: a
+second column would keep selectable a quadrant (holder on, completion off)
+that is known-defective in the three ways this document records. Both branches
+remain testable, because a tmux panel's write path is untouched. That
+judgement rests on the quadrant being worthless rather than on how the
+transport's own flag is defaulted: a later change to holder panels that did
+have a usable off state would need a column of its own, with the tri-state
 discipline.
 
 ## Testing

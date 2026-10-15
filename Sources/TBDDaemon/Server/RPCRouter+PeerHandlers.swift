@@ -12,18 +12,28 @@ import TBDShared
 /// and whether the provider declared the `messages` capability at all.
 ///
 /// **Degrading, never refusing.** Each of the four sources can be missing on
-/// its own — no daemon-side bridge, no reconciler yet, an unreadable config, an
-/// unreadable ledger — and each absence narrows the answer rather than failing
-/// the call. A diagnostic that fails hard is useless exactly when it is needed,
+/// its own — no daemon-side bridge, no reconciler yet, an unreadable repo
+/// table, an unreadable ledger — and each absence narrows the answer rather
+/// than failing the call. A diagnostic that fails hard is useless exactly when it is needed,
 /// and the caller's job here is to say what it could not establish.
 ///
 /// Design: `docs/specs/2026-08-29-remote-peer-messaging-design.md`
 /// §§ "Reclamation and detection", "Conformance".
 extension RPCRouter {
     func handlePeerStatus() async throws -> RPCResponse {
-        let config = try? await db.config.get()
-        let messagingEnabled =
-            config?.remotePeerMessagingEnabled ?? Config.remotePeerMessagingDefault
+        // Every registered repository's switch, read fresh from the `tbd.toml`
+        // in its main checkout — the same read the bridge makes on its tick,
+        // so the listing reports what the bridge will act on. Nil, not empty,
+        // when the repo table could not be read.
+        let repoStatuses = (try? await db.repos.list())?
+            .sorted { $0.displayName < $1.displayName }
+            .map { repo -> PeerMessagingRepoStatus in
+                let setting = PeerMessagingSetting.read(checkoutPath: repo.path)
+                return PeerMessagingRepoStatus(
+                    repoID: repo.id, repoName: repo.displayName,
+                    tomlPath: setting.path, enabled: setting.enabled,
+                    problems: setting.problems)
+            }
 
         // Empty when `remote_backends_enabled` was off at boot, so no provider
         // was ever described. `remoteBackendsLive` below is what tells that
@@ -72,7 +82,7 @@ extension RPCRouter {
         }
 
         return try RPCResponse(result: PeerBridgeStatus(
-            messagingEnabled: messagingEnabled,
+            repos: repoStatuses,
             remoteBackendsLive: remoteManager != nil,
             providers: report.providers,
             shadows: shadows,

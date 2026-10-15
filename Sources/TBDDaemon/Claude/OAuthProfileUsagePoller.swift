@@ -18,15 +18,22 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "oauthUsagePo
 ///
 /// Rules:
 /// - Cadence-swept profiles: `kind == .oauth` with a non-nil login identity
-///   (someone has completed `/login` in the profile's isolated config dir).
-/// - `kind == .oauthToken` profiles are deliberately NOT cadence-swept. Their
-///   usage comes from the headers of a real billed request (a setup token 403s
-///   on the read-only usage endpoint), so they refresh on a `working -> idle`
-///   session transition instead — `noteSessionBecameIdle(profileID:)` — at most
-///   once per `tokenProfileFloor`, plus once per credential change
-///   (`noteCredentialChanged(profileID:)`, on creation and on rotation). They
-///   are still swept by a *targeted* sweep, and still keep their snapshots
-///   across full sweeps.
+///   (someone has completed `/login` in the profile's isolated config dir),
+///   and — while account balancing is on — every `kind == .oauthToken`
+///   profile in the balancing pool (`tokenCadenceEnabled`, `poolOptOut`).
+/// - A token profile's usage comes from the headers of a real billed request
+///   (a setup token 403s on the read-only usage endpoint), so the cadence
+///   sweep reaches it at most once per `tokenProfileFloor` rather than every
+///   tick, and only when balancing will route on the reading. It also
+///   refreshes when a session using it finishes a turn
+///   (`noteSessionBecameIdle(profileID:)`, under the same floor) and once per
+///   credential change (`noteCredentialChanged(profileID:)`, on creation and
+///   on rotation). The cadence leg is what keeps an idle pool member's
+///   reading current: its account's windows also move with work TBD never
+///   sees — other machines, CI, claude.ai — and balancing will not route on a
+///   reading older than `ProfilePoolPicker.stalenessWindow(for:)`. With
+///   balancing off nothing routes on it, so a token profile issues no probe
+///   without a gesture or a turn end, exactly as before balancing existed.
 /// - Per-profile calls within one sweep are staggered slightly.
 /// - At most one fetch per profile is ever in flight. Sweeps overlap freely
 ///   (the actor is reentrant across every `await` one takes), and a second
@@ -64,22 +71,42 @@ public actor OAuthProfileUsagePoller {
     /// must not turn into a fetch per open.
     public static let refreshFreshness: TimeInterval = 30
 
-    /// Floor between two usage probes of the same token profile.
+    /// Floor between two usage probes of the same token profile, and so the
+    /// token profiles' effective cadence.
     ///
     /// A `.oauthToken` profile's usage cannot be read from the read-only usage
     /// endpoint (a setup token 403s there); it comes from the headers of a real,
-    /// billed `max_tokens: 0` request. So token profiles are kept off the
-    /// cadence sweep entirely and refresh on session activity instead — and even
-    /// then no more often than this, so a burst of turns collapses into one
-    /// probe. Enforced for EVERY caller by `freshnessWindow(requested:kind:)`,
+    /// billed `max_tokens: 0` request. So no caller may probe a token profile
+    /// more often than this: the 90-second cadence sweep reaches it every
+    /// fourth tick, and a burst of turn ends collapses into one probe. That is
+    /// fewer than 300 probes a day per profile, each about eight input tokens.
+    /// Enforced for EVERY caller by `freshnessWindow(requested:kind:)`,
     /// including the picker-open refresh, which asks for a 30-second window.
+    /// It sits well inside the picker's 15-minute staleness window for token
+    /// profiles, so one failed probe does not take a profile out of balancing.
     public static let tokenProfileFloor: TimeInterval = 300
+
+    /// The longest a token profile at its usage limit waits before it is read
+    /// again, whatever its `Retry-After` says.
+    ///
+    /// A 429 from an account at its limit is recorded as a reading — the
+    /// account full, now — and its `Retry-After` is usually the time until the
+    /// window resets, often hours. Waiting that long would let the reading go
+    /// stale while the account is still full; probing at the floor would send
+    /// a refused request every five minutes for nothing. Ten minutes plus the
+    /// jitter and a tick stays inside the picker's 15-minute window, so a full
+    /// account stays visibly full. A shorter `Retry-After` is honored, so the
+    /// first read after a reset is not late.
+    public static let limitReachedRecheck: TimeInterval = 600
 
     /// Backoff schedule for a profile whose fetch failed transiently. Doubles
     /// per consecutive failure, jittered, capped. A 429 with a `Retry-After`
-    /// overrides this with the server's own value. Kept below the picker's
-    /// stale threshold at the low end so a single hiccup doesn't visibly stall
-    /// a profile. A rejected token is not on this schedule at all — see
+    /// replaces the exponential step with the server's own value, jittered on
+    /// top and capped the same way, so one rate-limited profile is retried
+    /// within 15 minutes however long the server asked for, and profiles
+    /// limited together do not retry together. Kept below the picker's stale
+    /// threshold at the low end so a single hiccup doesn't visibly stall a
+    /// profile. A rejected token is not on this schedule at all — see
     /// `BackoffState.awaitingUserAction`.
     public static let baseBackoff: TimeInterval = 30
     public static let maxBackoff: TimeInterval = 15 * 60
@@ -103,6 +130,10 @@ public actor OAuthProfileUsagePoller {
     /// no secret is stored. Never logged, never included in an error string.
     private let profileSecret: @Sendable (UUID) -> String?
     private let broadcast: @Sendable () -> Void
+    /// Whether full sweeps probe token profiles: true while account balancing
+    /// is on, read once per sweep. Off, a token profile's billed probe runs
+    /// only on a turn end, a credential change, or the row's manual refresh.
+    private let tokenCadenceEnabled: @Sendable () async -> Bool
     private let sleeper: @Sendable (TimeInterval) async throws -> Void
     private let now: @Sendable () -> Date
     private let jitter: @Sendable (TimeInterval) -> TimeInterval
@@ -214,6 +245,7 @@ public actor OAuthProfileUsagePoller {
         tokenFetcher: ProfileUsageFetching = TokenProfileUsageFetcher(),
         profileSecret: @escaping @Sendable (UUID) -> String? = { _ in nil },
         broadcast: @escaping @Sendable () -> Void,
+        tokenCadenceEnabled: @escaping @Sendable () async -> Bool = { false },
         sleeper: (@Sendable (TimeInterval) async throws -> Void)? = nil,
         now: (@Sendable () -> Date)? = nil,
         jitter: (@Sendable (TimeInterval) -> TimeInterval)? = nil,
@@ -231,6 +263,7 @@ public actor OAuthProfileUsagePoller {
         self.tokenFetcher = tokenFetcher
         self.profileSecret = profileSecret
         self.broadcast = broadcast
+        self.tokenCadenceEnabled = tokenCadenceEnabled
         // swiftlint:disable:next no_raw_task_sleep - already seamed: this closure IS the default of the type's own `sleeper:` seam (which sits alongside the `now:` and `jitter:` seams), injected as `sleeper: { _ in }` at 6 sites in Tests/TBDDaemonTests/OAuthProfileUsagePollerTests.swift — but only the `sweep()` inter-profile stagger below is actually REACHED by those tests: no test calls `start()`, so `runLoop()`'s cadence use of this same closure is unexercised; see docs/specs/2026-07-24-test-hardening-design.md
         self.sleeper = sleeper ?? { try await Task.sleep(for: .seconds($0)) }
         self.now = now ?? { Date() }
@@ -306,8 +339,8 @@ public actor OAuthProfileUsagePoller {
 
     // MARK: - Refresh-if-stale sweep (RPC `modelProfile.usageRefresh`)
 
-    /// Refresh usage for stale, eligible profiles — all logged-in OAuth
-    /// profiles when `profileID` is nil, or just the one profile. Returns the
+    /// Refresh usage for stale, eligible profiles — every cadence-swept
+    /// profile when `profileID` is nil, or just the one profile. Returns the
     /// post-sweep snapshots (filtered to the requested profile when one was
     /// given).
     ///
@@ -321,8 +354,9 @@ public actor OAuthProfileUsagePoller {
     /// A NAMED profile does release the user-action hold, and only that. A
     /// non-nil id reaches the daemon from exactly one place: the profile row's
     /// explicit `⋯ ▸ Refresh usage`. Picker-open and `tbd profile list
-    /// --refresh` pass nil, which sweeps the cadence set — no held token
-    /// profile is in it — so the gesture stays a gesture. The hold exists
+    /// --refresh` pass nil, which sweeps the cadence set without releasing
+    /// anything — a held token profile in that set stays held — so the
+    /// gesture stays a gesture. The hold exists
     /// because only the user can clear a rejected token; asking for a refresh
     /// on that very row IS the user acting, and if the token is still dead the
     /// probe re-arms the hold. The timed window is untouched by the release:
@@ -350,10 +384,12 @@ public actor OAuthProfileUsagePoller {
         await loadPersistedSnapshots()
     }
 
-    // MARK: - Activity-gated probes (token profiles)
+    // MARK: - Activity-triggered probes (token profiles)
 
     /// Called when a terminal using this profile transitions `working -> idle`:
-    /// the moment a turn completed and utilization actually moved.
+    /// the moment a turn completed and utilization actually moved. For a token
+    /// profile this lands the new numbers right after the turn rather than at
+    /// the next cadence probe up to five minutes later.
     ///
     /// Only `.oauthToken` profiles act on this. A signed-in profile is served
     /// by the 90-second cadence sweep and its usage endpoint is free to call,
@@ -451,7 +487,9 @@ public actor OAuthProfileUsagePoller {
     /// whatever the caller asked for: the picker-open refresh asks for 30
     /// seconds, which is the right answer for a free GET and the wrong one for
     /// a billed probe. Enforcing it here rather than at each call site means
-    /// there is one place a future caller can't forget.
+    /// there is one place a future caller can't forget. The scheduled sweep
+    /// asks for no window at all, which a token profile turns into the floor:
+    /// that is what makes the 90-second tick a five-minute token cadence.
     ///
     /// One caller does not consult this at all: `noteCredentialChanged` passes
     /// `ignoringFreshness`, because a snapshot's age cannot gate a probe of a
@@ -462,12 +500,8 @@ public actor OAuthProfileUsagePoller {
         return max(requested ?? 0, tokenProfileFloor)
     }
 
-    /// Whether this poller can fetch usage for the profile at all.
-    ///
-    /// Wider than the cadence-sweep filter: a token profile is supported (it is
-    /// simply refreshed on a different trigger), so a full sweep's pruning must
-    /// not mistake "not swept on cadence" for "no longer a profile" and delete
-    /// its snapshot.
+    /// Whether this poller can fetch usage for the profile at all: the set a
+    /// full sweep visits, and the set its pruning keeps snapshots for.
     private func isSupported(_ profile: ModelProfile) -> Bool {
         switch profile.kind {
         case .oauth: return loginIdentity(profile.id) != nil
@@ -512,21 +546,22 @@ public actor OAuthProfileUsagePoller {
         }
         rememberTokenProfiles(in: allProfiles)
 
-        // Deliberately `.oauth` only. Token profiles are NOT swept on cadence:
-        // their probe is a real billed API request, so they refresh on session
-        // activity instead (see `noteSessionBecameIdle`). Widening this filter
-        // would defeat that gate and put every token profile back on a
-        // ~960-request-per-day timer.
-        let cadenceEligible = allProfiles.filter { $0.kind == .oauth && loginIdentity($0.id) != nil }
         let supported = allProfiles.filter { isSupported($0) }
         let supportedIDs = Set(supported.map(\.id))
+        // A full sweep reaches a token profile only while balancing is on and
+        // the profile is in its pool: the probe is a real billed request, and
+        // it is worth paying for only where something routes on the reading.
+        // `freshnessWindow(requested:kind:)` below then holds each one to a
+        // probe per `tokenProfileFloor` instead of one per tick.
+        let sweepsTokens = only == nil ? await tokenCadenceEnabled() : false
+        let cadenceSet = supported.filter { profile in
+            profile.kind != .oauthToken || (sweepsTokens && !profile.poolOptOut)
+        }
 
         let before = snapshots
 
         // Full sweeps prune snapshots for profiles that were deleted, logged
-        // out, or changed kind, so the RPC surface never leaks ghosts. The
-        // retention set is the SUPPORTED one, not the cadence one — a token
-        // profile keeps its snapshot between activity probes.
+        // out, or changed kind, so the RPC surface never leaks ghosts.
         if only == nil {
             snapshots = snapshots.filter { supportedIDs.contains($0.key) }
             backoff = backoff.filter { supportedIDs.contains($0.key) }
@@ -543,9 +578,10 @@ public actor OAuthProfileUsagePoller {
         // is recent enough (startup sweep, picker-open refresh).
         //
         // A full sweep covers the cadence set; a targeted sweep may name any
-        // SUPPORTED profile, which is how an activity-gated token probe and the
-        // creation-time probe reach a profile the cadence deliberately skips.
-        let candidates = only.map { id in supported.filter { $0.id == id } } ?? cadenceEligible
+        // supported profile, which is how a turn-end token probe and the
+        // creation-time probe reach a token profile the cadence skips or has
+        // not reached yet.
+        let candidates = only.map { id in supported.filter { $0.id == id } } ?? cadenceSet
         let currentTime = now()
         let targets = candidates.filter { profile in
             guard isEligibleNow(profile.id,
@@ -650,19 +686,16 @@ public actor OAuthProfileUsagePoller {
         switch status {
         case .ok(let buckets, let organizationID):
             backoff[profileID] = BackoffState()  // reset schedule on success
-            let snapshot = ProfileUsageSnapshot(
-                buckets: buckets,
-                fetchedAt: timestamp,
-                lastAttemptAt: timestamp,
-                status: "ok",
-                statusKind: .ok,
-                organizationID: organizationID
-            )
-            snapshots[profileID] = snapshot
-            if let persist {
-                await persist(profileID, snapshot)
-            }
-            logger.debug("usage sweep ok for profile \(profileID, privacy: .public): \(buckets.count, privacy: .public) buckets")
+            await commitReading(buckets, organizationID: organizationID, for: profileID, at: timestamp)
+        case .limitReached(let buckets, let organizationID, let retryAfter):
+            // A reading, so it commits like one; but the account refuses
+            // requests until its window resets, so the next read waits for
+            // that — no longer than `limitReachedRecheck`, so the reading
+            // stays current — instead of following the floor.
+            let wait = min(retryAfter ?? Self.limitReachedRecheck, Self.limitReachedRecheck)
+            backoff[profileID] = BackoffState(
+                nextEligibleAt: timestamp.addingTimeInterval(wait + jitter(Self.baseBackoff)))
+            await commitReading(buckets, organizationID: organizationID, for: profileID, at: timestamp)
         default:
             let reason = status.failureReason ?? "unknown"
             let previous = snapshots[profileID]
@@ -698,6 +731,27 @@ public actor OAuthProfileUsagePoller {
             )
             logger.warning("usage sweep failed for profile \(profileID, privacy: .public): \(reason, privacy: .public)")
         }
+    }
+
+    /// Record a successful reading — in memory, in the persisted cache — as
+    /// the profile's current snapshot.
+    private func commitReading(_ buckets: [ClaudeUsageLimitBucket],
+                               organizationID: String?,
+                               for profileID: UUID,
+                               at timestamp: Date) async {
+        let snapshot = ProfileUsageSnapshot(
+            buckets: buckets,
+            fetchedAt: timestamp,
+            lastAttemptAt: timestamp,
+            status: "ok",
+            statusKind: .ok,
+            organizationID: organizationID
+        )
+        snapshots[profileID] = snapshot
+        if let persist {
+            await persist(profileID, snapshot)
+        }
+        logger.debug("usage sweep ok for profile \(profileID, privacy: .public): \(buckets.count, privacy: .public) buckets")
     }
 
     /// Stop retrying this profile until the user acts.
@@ -748,9 +802,15 @@ public actor OAuthProfileUsagePoller {
         backoff[profileID] = BackoffState(awaitingUserAction: true)
     }
 
-    /// Advance a profile's timed backoff after a failure. Honors a 429
-    /// `Retry-After` verbatim; otherwise uses exponential backoff
-    /// (base·2^failures) plus additive jitter, capped at `maxBackoff`.
+    /// Advance a profile's timed backoff after a failure. A 429's
+    /// `Retry-After` sets the wait; otherwise it is exponential
+    /// (base·2^failures). Either way additive jitter of up to `baseBackoff`
+    /// goes on top, so profiles that failed together — a network blip, an
+    /// endpoint-wide 429 — do not retry in lockstep, and the total is capped
+    /// at `maxBackoff`. A `Retry-After` near or past the cap is deliberately
+    /// cut short: on a token profile's probe it is usually the time until the
+    /// account's usage window resets, often hours, and honoring it would leave
+    /// the profile's reading stale for all of that time.
     ///
     /// This is the regime for every failure that a later, identical request
     /// might still resolve — including `.needsLogin` on a signed-in `.oauth`
@@ -766,7 +826,10 @@ public actor OAuthProfileUsagePoller {
         state.consecutiveFailures += 1
         let delay: TimeInterval
         if let retryAfter = status.retryAfter, retryAfter > 0 {
-            delay = min(retryAfter, Self.maxBackoff)
+            // Capped short of `maxBackoff` before the jitter, so the jitter
+            // still spreads profiles whose `Retry-After` all ran past the cap
+            // and the total still never exceeds it.
+            delay = min(retryAfter, Self.maxBackoff - Self.baseBackoff) + jitter(Self.baseBackoff)
         } else {
             let exponent = Double(min(state.consecutiveFailures - 1, 10))
             let raw = Self.baseBackoff * pow(2, exponent)

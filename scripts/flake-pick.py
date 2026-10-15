@@ -112,6 +112,13 @@ def pr_outcome(state: fl.State, number: int | None) -> str | None:
     return None
 
 
+def told_nothing(attempt) -> bool:
+    """An abort that says nothing about the test (spec §5): a fixer session
+    that failed before committing anything, or a verified candidate that
+    `publish` lost to `main` moving during the run."""
+    return attempt.outcome == "aborted" and bool(attempt.session_failed or attempt.publish_raced)
+
+
 def last_attempt_allows(view, state: fl.State) -> tuple[bool, str]:
     """Spec §5: the last attempt in the current episode, by its recorded
     outcome, allows another, or there is none."""
@@ -127,18 +134,21 @@ def last_attempt_allows(view, state: fl.State) -> tuple[bool, str]:
         return False, f"PR #{last.pr} merged in this episode"
     if outcome == "pr-opened":
         return False, f"PR #{last.pr} has no recorded close"
-    if outcome == "aborted" and last.session_failed:
+    if told_nothing(last):
         # A session that failed without a commit (an outage, an expired
-        # token, a crash) told us nothing about the test, so the next night
-        # may try again on the same evidence – once: a second such failure in
-        # a row, with no failure of the test between them, waits for a new
+        # token, a crash), or a publish that lost its candidate to `main`
+        # moving during the run, told us nothing about the test, so the next
+        # night may try again on the same evidence – once: a second such abort
+        # in a row, with no failure of the test between them, waits for a new
         # one like any other abort. That also bounds a session that keeps
         # running out of turns or time on this test: it cannot hold every
         # night's slot.
         prev = ordered[-2] if len(ordered) > 1 else None
-        repeated = (prev is not None and prev.outcome == "aborted" and prev.session_failed
+        repeated = (prev is not None and told_nothing(prev)
                     and latest_failure_at(state) <= prev.started_at)
         if not repeated:
+            if last.publish_raced:
+                return True, "the last attempt's candidate was lost to main moving during the run"
             return True, "the last attempt's session failed before trying anything"
     if outcome in RETRY_AFTER_NEW_FAILURE:
         if latest_failure_at(state) > last.started_at:
@@ -165,6 +175,11 @@ def eligible(view, prs: list[dict]) -> tuple[bool, str]:
         return False, "a bot comment does not parse"
     if state is None:
         return False, "no ledger state"
+    if not fl.has_ci_place(state):
+        # Spec §4.3: nightly stress failures alone never qualify. The
+        # threshold check below says the same; this names the reason, and
+        # holds for an open issue the ledger has not demoted yet (§4.4).
+        return False, "nightly-only failures: the watchlist's, not a fix target"
     if not fl.qualifies(state):
         return False, "below the threshold"
     if view.state != "OPEN":
@@ -236,7 +251,21 @@ def locate(state: fl.State, root: Path) -> tuple[str | None, int | None]:
     return path, int(line)
 
 
-def brief(view, repo: str, root: Path) -> tuple[dict, str]:
+def flaky_list(views: dict, target: int) -> list[tuple[str, int]]:
+    """(test ID, issue) for every other open `flaky` issue with a ledger the
+    bot wrote: the tests a coverage claim may not lean on (spec §5, §6.1).
+    Structured state only, like the rest of the brief."""
+    out = []
+    for view in views.values():
+        if view.number == target or view.state != "OPEN" or view.ledger is None or view.unreadable:
+            continue
+        if fl.FLAKY_LABEL not in view.labels or fl.WATCHLIST_LABEL in view.labels:
+            continue
+        out.append((view.ledger.test_id, view.number))
+    return sorted(out)
+
+
+def brief(view, repo: str, root: Path, views: dict | None = None) -> tuple[dict, str]:
     state = view.ledger
     file, line = locate(state, root)
     current = sorted(fl.current_failures(state), key=lambda f: (f.at, f.key))
@@ -302,6 +331,10 @@ def brief(view, repo: str, root: Path) -> tuple[dict, str]:
             line += f", PR https://github.com/{repo}/pull/{a.pr}"
             if a.verdict:
                 line += f", verifier verdict {a.verdict}"
+            if a.target_change == "renamed":
+                line += f", renamed the target to `{a.renamed_to}`"
+            elif a.target_change == "retired":
+                line += ", retired the target"
         if outcome == "merged" and a.episode < state.episode:
             line += ". A prior fix that did not hold."
         out.append(line)
@@ -310,6 +343,10 @@ def brief(view, repo: str, root: Path) -> tuple[dict, str]:
         prior = True
     if not prior:
         out.append("None.")
+    out += ["", "## Tests on the flaky list", "",
+            "Every other test with an open `flaky` issue. None of them counts as coverage another test can lean on.", ""]
+    listed = flaky_list(views or {}, view.number)
+    out += [f"- `{test}` (#{number})" for test, number in listed] or ["None."]
     return target, "\n".join(out).rstrip() + "\n"
 
 
@@ -345,7 +382,7 @@ def pick(issues_file: Path, prs_file: Path, repo: str, out: Path, issue: int | N
             return 3
         chosen = min(candidates, key=rank_key)
         why = "ranked first"
-    target, text = brief(chosen, repo, root)
+    target, text = brief(chosen, repo, root, views)
     target["why"] = why
     (out / "target.json").write_text(json.dumps(target, indent=1) + "\n")
     (out / "brief.md").write_text(text)
@@ -416,7 +453,7 @@ def main(argv: list[str]) -> int:
     except ledger.GhError as error:
         print(f"flake-pick: {error}", file=sys.stderr)
         return 2
-    except Refused as error:
+    except (Refused, fl.UnsupportedSchema) as error:
         print(f"flake-pick: refused: {error}", file=sys.stderr)
         summary = os.environ.get("GITHUB_STEP_SUMMARY")
         if summary:

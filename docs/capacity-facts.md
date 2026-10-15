@@ -87,9 +87,16 @@ Top level of `tbd profile list --json`:
   will be spawned under; it does not tell you what any *existing* session is
   running on, and it is never a substitute for a missing `profileID` (see
   "The terminal join").
-- **`balancing`** – object with one boolean field, `enabled`: whether new
-  sessions spread across the available pool (design 2026-09-05 §6). Defaults
-  to `false`.
+- **`balancing`** – object describing the launch policy (design 2026-09-05
+  §5–6):
+  - **`enabled`** – boolean: whether new sessions spread across the available
+    pool. Defaults to `false`.
+  - **`usageCeilingPercent`** – integer: the percent of any usage window at or
+    above which an account is treated as full. Always present; `85` unless
+    set.
+  - **`maxReadingAgeSeconds`** – integer, present only when set: the oldest
+    usage reading balancing routes on, for every kind alike. Absent means
+    five minutes for signed-in profiles and fifteen for token profiles.
 
 The envelope also carries app-oriented configuration mirrors —
 `primaryAgentPreference`, `globalEnvOverrides`, merge-automation defaults, and

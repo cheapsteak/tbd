@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import TestSupport
@@ -25,7 +24,7 @@ struct PaneRepairCoordinatorTests {
 
     /// The reader-catch-up pacing the coordinator actually ships with. Under
     /// virtual time there is nothing to gain from shrinking them, so these
-    /// tests run the PRODUCTION constants and advance the `TestClock` by them.
+    /// tests run the PRODUCTION constants and advance the virtual clock by them.
     private let checkInterval: Duration = .milliseconds(50)
     private let slowInterval: Duration = .milliseconds(500)
 
@@ -39,11 +38,11 @@ struct PaneRepairCoordinatorTests {
 
     private func makeHarness() -> (
         TmuxControlSupervisor, PaneRepairCoordinator, LineRecorder,
-        TmuxControlCommandClient, SignalCounter, TestClock<Duration>
+        TmuxControlCommandClient, SignalCounter, EventDrivenTestClock
     ) {
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let coordinator = PaneRepairCoordinator(
             supervisor: supervisor,
             commandProvider: { [server] in $0 == server ? client : nil },
@@ -154,17 +153,17 @@ struct PaneRepairCoordinatorTests {
         // The reader has NOT caught up (pipe still full): batch 2 must wait.
         // Parking on the reader-wait sleep PROVES the loop is waiting —
         // strictly stronger than inferring it from elapsed wall time.
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         #expect(recorder.writes.count == 1,
                 "captures+continue must not be sent while the reader is behind")
 
         // The app catches up — the pipe becomes writable. Virtual time is
-        // driven for as long as the reader-wait keeps re-arming (see
-        // `advanceUntil`): one advance would stake the test on a single
-        // writability probe, and a probe that reads "keep waiting" re-arms a
-        // sleep nothing would ever advance again.
+        // driven for as long as the reader-wait keeps re-arming, each step
+        // waiting for the re-arm (`advanceUntil`): one advance would stake the
+        // test on a single writability probe, and a probe that reads "keep
+        // waiting" re-arms a sleep nothing would ever advance again.
         drainPipe(readFD)
-        await clock.advanceUntil("captures+continue write", by: checkInterval) {
+        try await clock.advanceUntil("captures+continue write", by: checkInterval) {
             recorder.writes.count >= 2
         }
         try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
@@ -319,7 +318,7 @@ struct PaneRepairCoordinatorTests {
         // latter). Same short chain, strictly stronger claim.
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let fast: Duration = .seconds(2)
         let slow: Duration = .seconds(15)
         let coordinator = PaneRepairCoordinator(
@@ -356,13 +355,13 @@ struct PaneRepairCoordinatorTests {
         // carries the wait past the fixed 30 s `readerStallLogThreshold` — so
         // the stall-log branch runs exactly once and the loop keeps waiting
         // rather than giving up. Four advances, 34 s of virtual stall. Do NOT
-        // lengthen this chain to "prove" more: a long chain of advances is
-        // itself a load-sensitivity hazard (see
-        // `readerWaitEscalatesToTheSlowInterval`) — reach further thresholds
-        // by injecting larger pacing, never by advancing more times.
-        for _ in 0..<2 { await clock.advanceWhenSuspended(by: fast) }
-        for _ in 0..<2 { await clock.advanceWhenSuspended(by: slow) }
-        await clock.waitForSuspension()  // re-armed on the slow interval, pipe still full
+        // lengthen this chain to "prove" more: a long chain of advances has
+        // its own cost (see `readerWaitEscalatesToTheSlowInterval`) — reach
+        // further thresholds by injecting larger pacing, never by advancing
+        // more times.
+        for _ in 0..<2 { try await clock.requireAdvanceWhenArmed(by: fast) }
+        for _ in 0..<2 { try await clock.requireAdvanceWhenArmed(by: slow) }
+        try await clock.requireSleeperArmed()  // re-armed on the slow interval, pipe still full
         #expect(recorder.writes.count == 1, "no captures and NO continue while the reader is wedged")
         #expect(await coordinator.isInFlight(key) == true, "the repair must keep waiting, not give up")
         let stats = try #require(supervisor.fanout.flowStats(key: key))
@@ -385,7 +384,7 @@ struct PaneRepairCoordinatorTests {
         // proceeds — batch 2 (captures + continue), replay behind the fence,
         // endRepair, streaming resumed. No new attach needed.
         drainPipe(readFD)
-        await clock.advanceUntil("captures+continue write", by: slow) {
+        try await clock.advanceUntil("captures+continue write", by: slow) {
             recorder.writes.count >= 2
         }
         try #require(recorder.writes.count >= 2, "the captures+continue batch was never sent")
@@ -417,17 +416,15 @@ struct PaneRepairCoordinatorTests {
         // This is the ONE test that injects pacing values instead of running
         // the production 50 ms / 5 s pair (every other test here keeps the
         // production constants). Reason: that ratio needs 100 advances to
-        // accumulate the threshold, and a long chain of advances is itself a
-        // load-sensitivity hazard — `advanceWhenSuspended` gives the code
-        // under test 20 yields to re-park, and is non-throwing, so under load
-        // one missed re-park advances a sleeper-less clock and the test hangs
-        // forever (the failure mode ClockTestSupport's doc comment names).
-        // 100 draws makes that near-certain. A 1 s / 2 s / 10 s pacing proves
+        // accumulate the threshold, and a long chain of advances has its own
+        // cost — every step is a re-arm the test must wait out before it may
+        // advance, and each wait is a hang guard that a slow runner spends
+        // against the suite's time limit. A 1 s / 2 s / 10 s pacing proves
         // exactly the same branch in THREE advances. Do not reintroduce a
         // long advance chain here.
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let fast: Duration = .seconds(1)
         let slow: Duration = .seconds(10)
         let coordinator = PaneRepairCoordinator(
@@ -453,22 +450,27 @@ struct PaneRepairCoordinatorTests {
 
         // Two fast intervals accumulate exactly the escalation threshold, so
         // the interval the loop picks NEXT is the slow one.
-        await clock.advanceWhenSuspended(by: fast)
-        await clock.advanceWhenSuspended(by: fast)
-        await clock.waitForSuspension()  // re-armed — on the slow interval now
+        try await clock.requireAdvanceWhenArmed(by: fast)
+        try await clock.requireAdvanceWhenArmed(by: fast)
+        try await clock.requireSleeperArmed()  // re-armed — on the slow interval now
         #expect(await coordinator.isInFlight(key) == true, "the wait must still be running")
 
         // The reader catches up, but the loop is parked on the SLOW interval:
         // a fast-interval advance is not enough to wake it, so batch 2 stays
         // unsent. (Before escalation, this same advance would have sent it —
         // that is `fullRepairHappyPath`.)
+        // `advance` does not run a woken task, so `settle()` gives a loop that
+        // wrongly parked on the fast interval the chance to send batch 2
+        // before the count is read — without it the read could pass while the
+        // forbidden send is still on its way.
         drainPipe(readFD)
-        await clock.advanceWhenSuspended(by: fast)
+        try await clock.requireAdvanceWhenArmed(by: fast)
+        await settle()
         #expect(recorder.writes.count == 1,
                 "past the escalation threshold the wait must sleep the SLOW interval")
 
         // The rest of the slow interval does wake it, and the repair proceeds.
-        await clock.advanceWhenSuspended(by: slow - fast)
+        try await clock.requireAdvanceWhenArmed(by: slow - fast)
         try await waitFor("captures+continue write after escalation") { recorder.writes.count >= 2 }
         try #require(recorder.writes.count >= 2, "the escalated wait never sent batch 2")
         #expect(recorder.writes[1].hasSuffix("refresh-client -A '%13:continue'"))
@@ -493,7 +495,7 @@ struct PaneRepairCoordinatorTests {
         await succeed(client, [[]])  // pause reply — the reader wait begins
 
         // A merely-full pipe keeps the repair parked in the reader-wait…
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         #expect(recorder.writes.count == 1, "still waiting while the pipe is merely full")
 
         // …then the viewer dies: the READ end closes mid-wait. The pipe can
@@ -508,9 +510,9 @@ struct PaneRepairCoordinatorTests {
         // for as long as it keeps re-arming rather than exactly once: a single
         // advance stakes the test on one `poll(2)` reading the closed read end,
         // and a probe that reads "keep waiting" re-arms a sleep nothing would
-        // ever advance again — a 240 s hang instead of a failure. See
-        // `advanceUntil`. The contract asserted below is unchanged.
-        await clock.advanceUntil("trailing continue write", by: checkInterval) {
+        // ever advance again. `advanceUntil` waits for each re-arm before it
+        // advances and stops as soon as the condition holds.
+        try await clock.advanceUntil("trailing continue write", by: checkInterval) {
             recorder.writes.count >= 2
         }
         #expect(recorder.writes.last == "refresh-client -A '%5:continue'",
@@ -665,7 +667,7 @@ struct PaneRepairCoordinatorTests {
         // The pause reply lands while gen-1 still owns the pane: the repair
         // enters the reader-wait (the pipe is full — read1 is never drained).
         await succeed(client, [[]])
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         #expect(recorder.writes.count == 1, "still waiting while the pipe is merely full")
         #expect(await coordinator.isInFlight(key) == true, "the repair must be parked in the reader-wait")
 
@@ -679,7 +681,7 @@ struct PaneRepairCoordinatorTests {
         // the supersession (`nil`). The exit itself then bounds the negative
         // assertions below — the repair task is gone, so no later write can
         // appear.
-        await clock.advanceWhenSuspended(by: checkInterval)
+        try await clock.requireAdvanceWhenArmed(by: checkInterval)
         try await waitFor("repair exit") {
             await coordinator.isInFlight(key) == false
         }
@@ -704,7 +706,7 @@ struct PaneRepairCoordinatorTests {
         // `onOverflowRepair` closure installed in the bridge's init.
         let (client, recorder) = makeFakeClient()
         let supervisor = TmuxControlSupervisor()
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let bridge = TmuxControlModeBridge(
             supervisor: supervisor,
             environment: [:],
@@ -729,9 +731,9 @@ struct PaneRepairCoordinatorTests {
         await succeed(client, [[]])
         // The default coordinator parks on the BRIDGE's clock — proof the
         // bridge threaded its clock into the coordinator it constructed.
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         drainPipe(readFD)
-        await clock.advanceUntil("captures+continue write", by: checkInterval) {
+        try await clock.advanceUntil("captures+continue write", by: checkInterval) {
             recorder.writes.count >= 2
         }
         await succeed(client, captureAndContinueReplies(paneID: paneID))

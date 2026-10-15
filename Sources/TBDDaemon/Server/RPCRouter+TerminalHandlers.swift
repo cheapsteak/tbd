@@ -474,7 +474,8 @@ extension RPCRouter {
                 // Per-spawn fragment applies to FRESH spawns only; a
                 // resume must not reapply it. Hooks overlay still resolves
                 // for resumes — only extraSettingsJSON goes nil.
-                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
+                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil,
+                promptAnswerHooks: createConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
               )
             : nil
 
@@ -515,6 +516,19 @@ extension RPCRouter {
             attachment = nil
         }
 
+        // Only a Claude spawn carries a session name; a shell's command never
+        // reads it, so none is reserved for one. A login session passes the
+        // bare display name and reserves nothing. The reservation is
+        // confirmed once the spawn has succeeded and released if it throws.
+        let spawnTitle: ClaudeSpawnTitle?
+        if isClaudeType {
+            spawnTitle = await ClaudeSessionTitle.forSpawn(
+                db: db, store: lifecycle.sessionTitles,
+                worktreeID: params.worktreeID, displayName: worktree.displayName,
+                terminalID: plannedTerminalID, isLogin: isLoginSession)
+        } else {
+            spawnTitle = nil
+        }
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
             freshSessionID: freshSessionID,
@@ -538,7 +552,7 @@ extension RPCRouter {
             settingsOverlayPath: overlayPath,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: worktree.displayName
+            sessionName: spawnTitle?.name
         )
 
         // For Claude terminals, layer the builder's auth/routing env ON TOP of
@@ -552,37 +566,44 @@ extension RPCRouter {
         let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
         let spawnEnv = env
         let spawnProfileID = resolvedProfile?.profileID
-        let terminal = try await actuating(actuationID) {
-            try await tmux.withWorktreeServerLock(
-                db: db, worktreeID: params.worktreeID,
-                allowedStatuses: [worktree.status]
-            ) { currentWorktree in
-                try await prepareTmuxServer(
-                    for: transport, worktree: currentWorktree,
-                    cols: resolvedCols, rows: resolvedRows)
-                let terminal = try await lifecycle.spawnTerminal(
-                    id: plannedTerminalID,
-                    worktreeID: params.worktreeID,
-                    tmuxServer: currentWorktree.tmuxServer,
-                    workingDirectory: currentWorktree.path,
-                    command: spawn.command,
-                    env: spawnEnv,
-                    sensitiveEnv: primarySensitiveEnv,
-                    cols: resolvedCols,
-                    rows: resolvedRows,
-                    label: label,
-                    claudeSessionID: claudeSessionID,
-                    profileID: spawnProfileID,
-                    kind: terminalKind,
-                    transport: transport,
-                    attachment: attachment,
-                    modelProxySupervisor: modelProxySupervisor)
-                return terminal
+        let terminal: Terminal
+        do {
+            terminal = try await actuating(actuationID) {
+                try await tmux.withWorktreeServerLock(
+                    db: db, worktreeID: params.worktreeID,
+                    allowedStatuses: [worktree.status]
+                ) { currentWorktree in
+                    try await prepareTmuxServer(
+                        for: transport, worktree: currentWorktree,
+                        cols: resolvedCols, rows: resolvedRows)
+                    let spawned = try await lifecycle.spawnTerminal(
+                        id: plannedTerminalID,
+                        worktreeID: params.worktreeID,
+                        tmuxServer: currentWorktree.tmuxServer,
+                        workingDirectory: currentWorktree.path,
+                        command: spawn.command,
+                        env: spawnEnv,
+                        sensitiveEnv: primarySensitiveEnv,
+                        cols: resolvedCols,
+                        rows: resolvedRows,
+                        label: label,
+                        claudeSessionID: claudeSessionID,
+                        profileID: spawnProfileID,
+                        kind: terminalKind,
+                        transport: transport,
+                        attachment: attachment,
+                        modelProxySupervisor: modelProxySupervisor)
+                    return spawned
+                }
             }
+        } catch {
+            await lifecycle.sessionTitles.release(spawnTitle)
+            throw error
         }
         // The row is in, so its live count now carries a balanced pick's
         // load; hand the reservation back so it stops counting too.
         await modelProfileResolver.settleReservation(resolvedProfile?.reservationID)
+        await lifecycle.sessionTitles.confirm(spawnTitle)
 
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label
@@ -819,6 +840,41 @@ extension RPCRouter {
             }
         }
 
+        let (transportCleanupFailure, teardownRefusal) = try await closeTerminalTab(
+            terminal, actuationID: actuationID)
+
+        if let transportCleanupFailure {
+            await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
+        } else if let teardownRefusal {
+            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
+        } else {
+            await finishActuation(actuationID, .dispatched)
+        }
+        return try RPCResponse(result: TerminalDeleteResult(
+            closed: true,
+            alreadyGone: false,
+            claudeSessionID: terminal.claudeSessionID
+        ))
+    }
+
+    /// The teardown half of `terminal.delete`: cancel a pending auto-resume,
+    /// capture scrollback into Closed Terminals, kill the window (or dispose
+    /// the holder), delete the row and its tab, clear pending prompts, drop
+    /// the per-session overlay, and broadcast `.terminalRemoved`. Shared with
+    /// `server.stop`, which closes a server's tab under its own actuation row.
+    ///
+    /// Returns the two strings `handleTerminalDelete` turns into its outcome
+    /// row; the caller decides how to record them. With an `actuationID`, a
+    /// throw also writes that row's `transport-failed` outcome before it
+    /// propagates; `server.*` passes nil, because its one outcome row covers
+    /// every server in the call and a tab close is one step inside it.
+    func closeTerminalTab(
+        _ terminal: Terminal, actuationID: String?
+    ) async throws -> (transportCleanupFailure: String?, teardownRefusal: String?) {
+        func step<T>(_ body: () async throws -> T) async throws -> T {
+            guard let actuationID else { return try await body() }
+            return try await actuating(actuationID, body)
+        }
         // Terminal close cancels any pending auto-resume (spec §Cancellation).
         if (try? await db.scheduledResumes.cancelPending(terminalID: terminal.id)) == true {
             await limitResumeScheduler?.wake()
@@ -828,7 +884,7 @@ extension RPCRouter {
         // user can view it read-only later (Session History → Closed
         // Terminals). Strictly best-effort: any failure logs inside
         // captureOnClose and the close proceeds unchanged.
-        let worktree = try await actuating(actuationID) {
+        let worktree = try await step {
             try await db.worktrees.getLocal(id: terminal.worktreeID)
         }
         // Set when the transport-level teardown failed. The deletion proceeds
@@ -864,7 +920,8 @@ extension RPCRouter {
             // reclaims.
             if worktree != nil {
                 await WorktreeLifecycle.recordHolderClosedTerminal(
-                    terminal, registry: holderRegistry, history: db.terminalHistory)
+                    terminal, registry: holderRegistry, resolver: holderScreenResolver,
+                    history: db.terminalHistory)
             }
             transportCleanupFailure = await disposeHolder(for: terminal)
         } else if let worktree {
@@ -910,33 +967,24 @@ extension RPCRouter {
         }
 
         // Delete from DB
-        try await actuating(actuationID) {
-            try await db.terminals.delete(id: params.terminalID)
-            try await db.tabs.delete(tabID: params.terminalID)
+        try await step {
+            try await db.terminals.delete(id: terminal.id)
+            try await db.tabs.delete(tabID: terminal.id)
         }
-        await pendingQuestions.clear(terminalID: params.terminalID)
-        await broadcastPendingQuestions(terminalID: params.terminalID)
+        await pendingQuestions.clear(terminalID: terminal.id)
+        await broadcastPendingPrompts(terminalID: terminal.id)
+        await continueInClaudeReadiness.clear(terminalID: terminal.id)
+        await lifecycle.sessionTitles.forget(terminalID: terminal.id)
 
         // Reclaim the per-session fallbackModel overlay (keyed by terminal id),
         // if this terminal had one. No-op when the profile had no fallback.
-        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: params.terminalID.uuidString)
+        ClaudeHookOverlay.removePerSessionOverlay(sessionKey: terminal.id.uuidString)
 
         subscriptions.broadcast(delta: .terminalRemoved(TerminalIDDelta(
             terminalID: terminal.id
         )))
 
-        if let transportCleanupFailure {
-            await finishActuation(actuationID, .transportFailed, error: transportCleanupFailure)
-        } else if let teardownRefusal {
-            await finishActuation(actuationID, .refused(.targetMismatch), error: teardownRefusal)
-        } else {
-            await finishActuation(actuationID, .dispatched)
-        }
-        return try RPCResponse(result: TerminalDeleteResult(
-            closed: true,
-            alreadyGone: false,
-            claudeSessionID: terminal.claudeSessionID
-        ))
+        return (transportCleanupFailure, teardownRefusal)
     }
 
     /// What a row's own transport can say about whether its session is still
@@ -1202,6 +1250,10 @@ extension RPCRouter {
                 storedTranscriptPath: nil
             )
             let claudeEnvOverrides = reviveConfig?.envSettingOverrides ?? [:]
+            let reviveSpawnTitle = await ClaudeSessionTitle.forSpawn(
+                db: db, store: lifecycle.sessionTitles,
+                worktreeID: worktree.id, displayName: worktree.displayName,
+                terminalID: plannedTerminalID)
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: sessionID,
                 freshSessionID: nil,
@@ -1219,11 +1271,12 @@ extension RPCRouter {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                    promptAnswerHooks: reviveConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
+                sessionName: reviveSpawnTitle.name
             )
             let env: [String: String] = [
                 "TBD_WORKTREE_ID": worktree.id.uuidString,
@@ -1234,22 +1287,29 @@ extension RPCRouter {
                 repo: repo?.envOverrides,
                 profile: resolvedProfile?.envOverrides
             )
-            let terminal = try await actuating(actuationID) {
-                try await spawnRevivedTerminal(
-                    worktree: worktree.worktree,
-                    plannedTerminalID: plannedTerminalID,
-                    spawnCommand: spawn.command,
-                    env: env,
-                    sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
-                    label: TerminalLabel.claudeCode,
-                    kind: .claude,
-                    claudeSessionID: sessionID,
-                    profileID: resolvedProfile?.profileID,
-                    cols: resolvedCols,
-                    rows: resolvedRows,
-                    transport: transport
-                )
+            let terminal: Terminal
+            do {
+                terminal = try await actuating(actuationID) {
+                    try await spawnRevivedTerminal(
+                        worktree: worktree.worktree,
+                        plannedTerminalID: plannedTerminalID,
+                        spawnCommand: spawn.command,
+                        env: env,
+                        sensitiveEnv: mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder },
+                        label: TerminalLabel.claudeCode,
+                        kind: .claude,
+                        claudeSessionID: sessionID,
+                        profileID: resolvedProfile?.profileID,
+                        cols: resolvedCols,
+                        rows: resolvedRows,
+                        transport: transport
+                    )
+                }
+            } catch {
+                await lifecycle.sessionTitles.release(reviveSpawnTitle)
+                throw error
             }
+            await lifecycle.sessionTitles.confirm(reviveSpawnTitle)
             logger.info("revive: resumed claude session \(sessionID, privacy: .public) as terminal \(terminal.id, privacy: .public) in worktree \(worktree.id, privacy: .public)")
             await finishActuation(actuationID, .dispatched)
             return try RPCResponse(result: terminal)
@@ -1519,7 +1579,7 @@ extension RPCRouter {
                         throw StaleTerminalReplacementError()
                     }
                     await self.pendingQuestions.clear(terminalID: currentTerminal.id)
-                    await self.broadcastPendingQuestions(terminalID: currentTerminal.id)
+                    await self.broadcastPendingPrompts(terminalID: currentTerminal.id)
                     return .parked(try await self.db.terminals.get(id: currentTerminal.id))
                 }
             }
@@ -1790,6 +1850,10 @@ extension RPCRouter {
                             at: now()) else {
                             throw StaleTerminalReplacementError()
                         }
+                        // The row is a plain shell now; its title entry must
+                        // not keep blocking other Claude tabs' titles.
+                        await self.lifecycle.sessionTitles.forget(
+                            terminalID: params.terminalID)
                         replacementEnv = AgentProcessEnvironment.replacement(
                             base: replacementEnv, incarnationID: incarnationID)
                     } catch {
@@ -1862,16 +1926,21 @@ extension RPCRouter {
         return try RPCResponse(result: TerminalOutputResult(output: trimmed))
     }
 
-    /// The holder half of `terminal.output`: the typed screen, from the
-    /// daemon's own emulator.
+    /// The holder half of `terminal.output`: the typed screen, from whichever
+    /// of the transport's two stores is live.
     ///
-    /// **A session a person has open is answerable.** The daemon's reader is
-    /// retained across an attach — suspended, holding the screen as it stood
-    /// when the viewer arrived — so this reads it and labels the answer
-    /// `staleDaemon` with an age rather than failing. Before the reader was
-    /// retained, a machine read of any open session returned an error saying
-    /// the session was gone, which was both wrong and the most comfortable
-    /// possible wrong answer.
+    /// **A session a person has open answers from the screen they are looking
+    /// at.** `HolderScreenResolver` asks the registry's census who is reading
+    /// that pty: the daemon, and its live emulator answers; a viewer, and the
+    /// daemon pulls the screen over the fd sidecar and labels it `viewer`. A
+    /// viewer that does not answer within the pull's bound leaves the daemon's
+    /// retained emulator as the answer — suspended since the attach, labelled
+    /// `staleDaemon` with an age. All three are answers with their provenance
+    /// attached, and which one a consumer got is a field rather than a guess.
+    ///
+    /// With no resolver wired — mock mode, or a daemon with no sidecar — this
+    /// asks the reader directly, which is what it did before the pull existed
+    /// and is the honest answer for a daemon that has nothing to pull over.
     ///
     /// A missing reader is still reported rather than papered over. It means
     /// the registry has no reader to hand out: the holder is gone, startup
@@ -1893,24 +1962,35 @@ extension RPCRouter {
             return RPCResponse(
                 error: "Holder transport is not wired in this daemon: \(terminal.id)")
         }
-        guard let reader = await holderRegistry.reader(for: terminal.id) else {
-            return RPCResponse(
-                error: "No live holder reader for terminal \(terminal.id); "
-                    + "its session is gone, was never adopted, or is mid-transition "
-                    + "(being adopted or released); retry if it was just created "
-                    + "or is being closed")
-        }
         let lines = params.lines ?? 50
         // Rendered to the requested depth directly. The tmux path asks for a
         // whole pane and trims afterwards because `capture-pane` has no such
         // knob; the emulator does, and going through it means the scrollback
         // above the viewport is available rather than discarded.
-        let screen: TerminalScreen
+        //
+        // The two arms differ only in which store may answer, so the "no
+        // reader" and "refused projection" errors below are shared: a resolver
+        // answers nil for exactly the sessions `reader(for:)` answers nil for,
+        // and throws exactly what the screen type's construction refuses.
+        let screen: TerminalScreen?
         do {
-            screen = try await reader.screen(maxLines: lines)
+            if let holderScreenResolver {
+                screen = try await holderScreenResolver.screen(
+                    terminalID: terminal.id, maxLines: lines)
+            } else {
+                screen = try await holderRegistry.reader(for: terminal.id)?
+                    .screen(maxLines: lines)
+            }
         } catch {
             return RPCResponse(
                 error: "Could not project terminal \(terminal.id)'s screen: \(error)")
+        }
+        guard let screen else {
+            return RPCResponse(
+                error: "No live holder reader for terminal \(terminal.id); "
+                    + "its session is gone, was never adopted, or is mid-transition "
+                    + "(being adopted or released); retry if it was just created "
+                    + "or is being closed")
         }
         return try RPCResponse(result: TerminalOutputResult(screen: screen))
     }
@@ -2165,6 +2245,143 @@ extension RPCRouter {
             }
             return nil
         }.value
+    }
+
+    /// `terminal.migrateTransport` — move one session (or, with no id, every
+    /// session) from the tmux transport to the pty holder in place.
+    ///
+    /// Deliberately no pre-filter: the migrator decides eligibility, and a
+    /// shell is as migratable as a Claude session. A shell has no
+    /// `claudeSessionID`, so the guards `handleTerminalSwapProfile` applies
+    /// would wrongly refuse it.
+    ///
+    /// Park and wake broadcast their own hibernation deltas, and neither
+    /// carries the `transport` column, so every row that comes back
+    /// holder-backed is re-read and published whole as `.terminalReplaced`,
+    /// which the app adopts in place.
+    ///
+    /// **Per row, inside the loop — the record, the broadcast and the move.**
+    /// A fleet run is composed from the single-session move rather than being a
+    /// second mechanism (see the spec's `Surfaces`), and two things have to
+    /// happen at each session's own act moment rather than after the whole run.
+    /// The actuation row, because the record's unit is an actuation on a
+    /// session and a destructive fleet gesture must be able to say which
+    /// sessions it stopped — the shape `worktree.suspend` and `worktree.resume`
+    /// already have. And the broadcast, because until it lands every app client
+    /// still caches `tmux` and the window id this migration has already
+    /// retired, so a mounted pane rebuilds into an attach against a dead window
+    /// and spends a recovery attempt on a `terminal.recreateWindow` the daemon
+    /// refuses for a holder row. For one id that gap is milliseconds; for
+    /// `--all` over a real fleet it would be the whole run, for every mounted
+    /// pane.
+    ///
+    /// Each row's request record is fail-closed like every other actuation: an
+    /// unwritable record stops the run where it stands rather than acting
+    /// unrecorded, which is `worktree.resume`'s stance for its own fan-out.
+    func handleTerminalMigrateTransport(
+        _ paramsData: Data, actor: ActuationActor? = nil
+    ) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalMigrateTransportParams.self, from: paramsData)
+
+        // The third door into the Nightwatch/holder pair, and refused like the
+        // other two: `config.setPtyHolderEnabled` refuses `true` while a mode
+        // is on, `nightwatch.setMode` refuses a mode while the hazard is live.
+        // A watch mode and the holder are never both live — on the holder the
+        // desk's liveness check reads an empty tmux window id and leaks one
+        // Claude session per tick — and this migration CREATES holder-backed
+        // sessions, so it asks the flag door's own question with
+        // `enabling: true`: the migration is that enabling, for the rows it
+        // moves.
+        //
+        // Refused per CALL and before any row is read, because the hazard is
+        // the transport rather than any one session: nothing is written,
+        // nothing is broadcast, nothing is migrated, and no actuation row
+        // exists — the shape `nightwatch.setMode`'s refusal has. This is the
+        // authoritative gate; the app's hidden button is a courtesy on top of
+        // it and covers neither the CLI nor an older app build.
+        let config = try await db.config.get()
+        if NightwatchHolderGate.refusesHolder(
+            enabling: true, currentMode: config.nightwatchMode) {
+            logger.notice("transport migration: refusing the whole call — a watch mode is active")
+            return RPCResponse(error: NightwatchHolderGate.migrationRefusal)
+        }
+
+        let operations = transportMigratorOperationsOverride ?? .production(
+            hibernation: hibernationCoordinator, holderRegistry: holderRegistry)
+        let migrator = TerminalTransportMigrator(db: db, operations: operations)
+
+        let terminalIDs: [UUID]
+        if let id = params.terminalID {
+            terminalIDs = [id]
+        } else {
+            terminalIDs = await migrator.fleetTerminalIDs()
+        }
+
+        var migrated: [UUID] = []
+        var movedNotResumed: [TerminalMigrationSkip] = []
+        var skipped: [TerminalMigrationSkip] = []
+        var refused: [TerminalMigrationSkip] = []
+        var alreadyHolder: [UUID] = []
+        for terminalID in terminalIDs {
+            let actuationID = try await beginActuation(
+                .terminalMigrateTransport, actor: actor,
+                target: await resolvedTerminalTarget(terminalID))
+            let outcome = await migrator.migrate(terminalID: terminalID)
+            await publishIfMovedToHolder(terminalID: terminalID, outcome: outcome)
+            await finishActuation(
+                actuationID, ActuationOutcome.classify(outcome),
+                error: ActuationOutcome.detail(outcome))
+            switch outcome {
+            case .migrated:
+                migrated.append(terminalID)
+            case .movedNotResumed(let reason):
+                movedNotResumed.append(
+                    TerminalMigrationSkip(terminalID: terminalID, reason: reason))
+            case .alreadyHolder:
+                alreadyHolder.append(terminalID)
+            case .skipped(let reason):
+                skipped.append(TerminalMigrationSkip(terminalID: terminalID, reason: reason))
+            case .refused(let reason):
+                refused.append(TerminalMigrationSkip(terminalID: terminalID, reason: reason))
+            }
+        }
+        return try RPCResponse(result: TerminalMigrateTransportResult(
+            migrated: migrated, movedNotResumed: movedNotResumed,
+            skipped: skipped, refused: refused, alreadyHolder: alreadyHolder))
+    }
+
+    /// Publish one migrated row whole, for every outcome that may have left it
+    /// holder-backed.
+    ///
+    /// **Keyed on what the row now says, not on the outcome.** The rewrite
+    /// landing and the wake succeeding are two different facts: a migration
+    /// whose wake failed has a holder-backed row with blanked coordinates, and
+    /// a client that never heard about it keeps attaching to the window this
+    /// migration killed until some unrelated full refresh. `.alreadyHolder` is
+    /// the one outcome with nothing to publish, because nothing was touched.
+    ///
+    /// A re-read that fails or finds nothing is logged rather than swallowed:
+    /// the consequence is a client holding a stale transport, which is
+    /// invisible from the row and has to be findable in the log.
+    private func publishIfMovedToHolder(
+        terminalID: UUID, outcome: TransportMigrationOutcome
+    ) async {
+        guard outcome != .alreadyHolder else { return }
+        do {
+            guard let row = try await db.terminals.get(id: terminalID) else {
+                if outcome.claimsTheRowMoved {
+                    logger.warning("transport migration: terminal \(terminalID, privacy: .public) moved but was gone when its row was re-read, so no replacement was published")
+                } else {
+                    logger.debug("transport migration: terminal \(terminalID, privacy: .public) is gone, so there was nothing to publish")
+                }
+                return
+            }
+            guard row.transport == .holder else { return }
+            subscriptions.broadcast(delta: .terminalReplaced(row))
+        } catch {
+            let detail = "\(error)"
+            logger.error("transport migration: could not re-read terminal \(terminalID, privacy: .public) to publish it, so clients keep a stale transport: \(detail, privacy: .public)")
+        }
     }
 
     func handleTerminalSwapProfile(
@@ -2501,8 +2718,21 @@ extension RPCRouter {
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
             watchDeskRole: swapDeskRole,
             worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir
+            profileConfigDir: profileConfigDir,
+            promptAnswerHooks: swapConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
         )
+
+        // The session name is the swapped tab's: the new tab on a fork, the
+        // same row on an in-place swap. Reserved here, confirmed only once
+        // the swap's spawn has succeeded and released otherwise, below. The
+        // holder arm's wake settles it itself, since only the wake knows
+        // whether a session launched under it; a confirm or release after
+        // that is a no-op.
+        let swapSpawnTitle = await ClaudeSessionTitle.forSpawn(
+            db: db, store: lifecycle.sessionTitles,
+            worktreeID: worktree.id, displayName: worktree.displayName,
+            terminalID: plannedTerminalID)
+        let swapSessionName = swapSpawnTitle.name
 
         // The spawn each arm runs, as a closure rather than a value: the
         // holder arm cannot compose its own until after its park, because its
@@ -2514,7 +2744,8 @@ extension RPCRouter {
                 builderBaseURL: builderBaseURL,
                 overlayPath: overlayPath, profileConfigDir: profileConfigDir,
                 worktree: worktree, repo: repo, swapConfig: swapConfig,
-                claudeEnvOverrides: claudeEnvOverrides)
+                claudeEnvOverrides: claudeEnvOverrides,
+                sessionName: swapSessionName)
         }
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
@@ -2530,6 +2761,7 @@ extension RPCRouter {
         // has to be carried out separately, or the record would call a failed
         // respawn `dispatched`.
         var respawnFailure: String?
+        let isHolderInPlace = mode == .inPlace && oldTerminal.transport == .holder
         do {
             switch mode {
             case .fork:
@@ -2562,7 +2794,8 @@ extension RPCRouter {
                     cols: resolvedCols,
                     rows: resolvedRows,
                     resumeProjectsRoot: resumeProjectsRoot,
-                    composeSpawn: composeSpawn)
+                    composeSpawn: composeSpawn,
+                    spawnTitle: swapSpawnTitle)
                 response = outcome.response
                 respawnFailure = outcome.failure
 
@@ -2600,15 +2833,26 @@ extension RPCRouter {
                 respawnFailure = outcome.respawnError
             }
         } catch {
+            await lifecycle.sessionTitles.release(swapSpawnTitle)
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error
         }
         if let respawnFailure {
+            await lifecycle.sessionTitles.release(swapSpawnTitle)
             await finishActuation(actuationID, .transportFailed, error: respawnFailure)
         } else {
             // The only unsuccessful response either swap branch returns is
             // "Terminal vanished after swap" — the row it respawned is gone.
             await finishActuation(actuationID, response: response, refusedAs: .notFound)
+            // The holder arm answers success after a wake that adopted a live
+            // holder and launched nothing, so its success says nothing about
+            // the title: its wake has settled the reservation already, and
+            // this release only covers an exit before the wake was reached.
+            if response.success, !isHolderInPlace {
+                await lifecycle.sessionTitles.confirm(swapSpawnTitle)
+            } else {
+                await lifecycle.sessionTitles.release(swapSpawnTitle)
+            }
         }
         return response
     }
@@ -2712,7 +2956,8 @@ extension RPCRouter {
         worktree: LocalWorktree,
         repo: Repo?,
         swapConfig: Config?,
-        claudeEnvOverrides: [String: ClaudeEnvValue]
+        claudeEnvOverrides: [String: ClaudeEnvValue],
+        sessionName: String?
     ) -> ClaudeSpawnCommandBuilder.Result {
         switch plan {
         case .resume(let resumeID):
@@ -2735,7 +2980,7 @@ extension RPCRouter {
                 settingsOverlayPath: overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
+                sessionName: sessionName
             )
         case .fresh(let newSessionID):
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
@@ -2759,7 +3004,7 @@ extension RPCRouter {
                 settingsOverlayPath: overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: worktree.displayName
+                sessionName: sessionName
             )
         }
     }
@@ -2847,7 +3092,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         resumeProjectsRoot: URL?,
-        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
+        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result,
+        spawnTitle: ClaudeSpawnTitle?
     ) async throws -> (response: RPCResponse, failure: String?) {
         // THE CLAIM, ahead of the park and released after the wake.
         //
@@ -2864,7 +3110,7 @@ extension RPCRouter {
         // parked on its old account while it is in fact awake there.
         //
         // The swap's own halves are unaffected: `performHibernate` consults
-        // `hibernatesInFlight` and `wakeHolderForProfileSwap` consults that and
+        // `hibernatesInFlight` and `wakeHolderAfterInPlaceChange` consults that and
         // `wakesInFlight`, and neither reads the swap claim.
         guard await hibernationCoordinator.claimSwap(terminalID: oldTerminal.id) else {
             let reason = "Terminal \(oldTerminal.id) was not switched to the other account: another pause, wake or account switch of this session is in flight; nothing was changed. Retry once it has finished."
@@ -2886,7 +3132,8 @@ extension RPCRouter {
                 cols: cols,
                 rows: rows,
                 resumeProjectsRoot: resumeProjectsRoot,
-                composeSpawn: composeSpawn)
+                composeSpawn: composeSpawn,
+                spawnTitle: spawnTitle)
             await hibernationCoordinator.releaseSwap(terminalID: oldTerminal.id)
             return outcome
         } catch {
@@ -2910,7 +3157,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         resumeProjectsRoot: URL?,
-        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result
+        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result,
+        spawnTitle: ClaudeSpawnTitle?
     ) async throws -> (response: RPCResponse, failure: String?) {
         // 1. PARK, through the coordinator's own holder park under the
         //    `.profileSwap` policy: the ladder and its rollback unchanged, the
@@ -3013,7 +3261,7 @@ extension RPCRouter {
             supervisor: modelProxySupervisor)
         let spawn = composeSpawn(attachment.builderBaseURL(profile: resolved?.baseURL))
         let sensitiveEnv = attachment.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
-        let woken = await hibernationCoordinator.wakeHolderForProfileSwap(
+        let woken = await hibernationCoordinator.wakeHolderAfterInPlaceChange(
             terminal: target,
             worktree: worktree,
             sessionID: storedSessionID,
@@ -3022,7 +3270,8 @@ extension RPCRouter {
             env: env,
             attachment: attachment.withEnvironment(sensitiveEnv),
             cols: cols,
-            rows: rows)
+            rows: rows,
+            spawnTitle: spawnTitle)
 
         guard let updated = try await db.terminals.get(id: target.id) else {
             return (RPCResponse(error: "Terminal vanished after swap"), nil)
@@ -4117,14 +4366,23 @@ extension RPCRouter {
     ///
     /// The oracle is consulted at composition time, which is a moment, and the
     /// child can change a mode between that moment and the write. **How wide
-    /// that window is depends on which store answered.** A live store — the
-    /// daemon's own emulator, or a viewer that answered the pull — leaves only
-    /// the moment between the read and the write, which is the window tmux has
-    /// too: its server reads the pane's mode when it pastes, not when the bytes
-    /// land. A `staleDaemon` reading leaves the whole attach, because that
+    /// that window is depends on which store answered**, and for a session
+    /// somebody has open the answer is ordinarily the live one: the oracle asks
+    /// that viewer for a modes-only reading over the sidecar, and a `.viewer`
+    /// answer leaves only the moment between the read and the write — the
+    /// window tmux has too, since its server reads the pane's mode when it
+    /// pastes, not when the bytes land. A detached session's `.daemon` reading
+    /// is the same width, from the emulator the daemon is draining.
+    ///
+    /// `staleDaemon` is now the **pull-failure** arm rather than the ordinary
+    /// shape of an attached send: the viewer did not answer inside
+    /// `sendPathScreenPullBound`, so this is the emulator as it stood when that
+    /// viewer attached. The window is then the whole attach, because that
     /// emulator stopped consuming bytes when the viewer took the pty, so a mode
-    /// the child changed since then is invisible here for as long as the viewer
-    /// holds it — possibly hours.
+    /// the child changed since is invisible here for as long as the viewer
+    /// holds it — possibly hours. It stays reachable forever — a napping,
+    /// wedged or mid-paste app is exactly the moment supervision wants to send
+    /// — which is why the rule below is not going anywhere.
     ///
     /// **So a stale reading is trusted in one direction only.** A viewer
     /// ordinarily takes the pty within milliseconds of a spawn or a wake,
@@ -4501,13 +4759,23 @@ extension RPCRouter {
     /// What the child's modes are, as best this daemon can say.
     ///
     /// The seam first so a test can pin all three answers without a real
-    /// holder; otherwise the registry's reader for this session, which is
-    /// retained across an attach and so answers for an open session as well as
-    /// a detached one — `.daemon` while the daemon is draining, `.staleDaemon`
-    /// while a viewer holds the pty.
+    /// holder; otherwise `HolderScreenResolver`, which asks the store that
+    /// holds the pty. A session the daemon is draining answers `.daemon` from
+    /// its live emulator with no frame sent. A session somebody has open is
+    /// asked, over the sidecar, for a modes-only reading — `.viewer`, bounded
+    /// by `sendPathScreenPullBound` — and falls back to the daemon's retained
+    /// emulator, `.staleDaemon`, when no answer arrives inside it.
+    ///
+    /// With no resolver wired — mock mode, or a daemon with no sidecar — this
+    /// reads the registry's reader directly, which is what it did before the
+    /// pull existed: `.daemon` while draining, `.staleDaemon` while a viewer
+    /// holds the pty.
     private func holderModeReading(terminalID: UUID) async -> TerminalModeReading? {
         if let holderModeOracle {
             return await holderModeOracle(terminalID)
+        }
+        if let holderScreenResolver {
+            return await holderScreenResolver.modeReading(terminalID: terminalID)
         }
         guard let reader = await holderRegistry?.reader(for: terminalID) else { return nil }
         return await reader.modeReading()
@@ -5447,6 +5715,27 @@ extension RPCRouter {
             return p
         }()
         let effectiveTranscriptPath = cleanedPath ?? terminal.transcriptPath
+
+        // Provider continuation keeps the durable row on its Codex source
+        // identity until readiness and the final database commit agree.
+        // `applySessionStart` deliberately rejects pending rows, so intercept
+        // only the exact pending token and leave the source row untouched.
+        if terminal.kind == .codex,
+           !terminal.isParked,
+           let pendingIncarnationID = terminal.pendingSessionIncarnationID,
+           params.sessionIncarnationID == pendingIncarnationID {
+            _ = await continueInClaudeReadiness.noteReady(
+                ContinueInClaudeReadyEvent(
+                    sessionID: params.sessionID,
+                    transcriptPath: cleanedPath,
+                    source: params.source,
+                    cwd: params.cwd,
+                    observedAt: observedAt),
+                for: .init(
+                    terminalID: terminal.id,
+                    incarnationID: pendingIncarnationID))
+            return .ok()
+        }
         let observedTranscriptBoundary = terminal.isCodexTerminal
             ? observedTranscriptBoundary(atAbsolutePath: effectiveTranscriptPath)
             : nil
@@ -5915,7 +6204,14 @@ extension RPCRouter {
         if activityApplication.clearedAwaitingInput {
             broadcastAwaitingInputRetraction(terminal: terminal)
         }
-        return .ok()
+        // Only a caller that asked gets a title — the Claude overlay's
+        // `UserPromptSubmit` entry. Asked after the identity check above, so a
+        // delayed hook from a replaced process is never handed one and never
+        // moves the record of what the live session carries.
+        guard params.wantsSessionTitle == true else { return .ok() }
+        let sessionTitle = await ClaudeSessionTitle.forPrompt(
+            db: db, store: lifecycle.sessionTitles, terminal: terminal)
+        return try RPCResponse(result: TerminalActivityEventResult(sessionTitle: sessionTitle))
     }
 
     /// Announce that a terminal's recorded wait reason is gone.
@@ -5997,7 +6293,7 @@ extension RPCRouter {
 
         // `gcExpired` reaps across every terminal, not just the polled one, so
         // its reaped set is what has to be broadcast — a terminal whose entry
-        // this poll reaped gets no other retraction. `PendingQuestionExpirySweep`
+        // this poll reaped gets no other retraction. `PendingPromptExpirySweep`
         // cannot cover for it: the sweep finds nothing left to reap and stays
         // silent, leaving that terminal's pane rendering the entry forever.
         // Unioned with the polled terminal so a terminal that both lost an
@@ -6012,7 +6308,7 @@ extension RPCRouter {
             affected.insert(params.terminalID)
         }
         for terminalID in affected {
-            await broadcastPendingQuestions(terminalID: terminalID)
+            await broadcastPendingPrompts(terminalID: terminalID)
         }
         let messages = merged.items
 

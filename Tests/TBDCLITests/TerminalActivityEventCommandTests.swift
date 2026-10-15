@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDCLI
+import TBDShared
 
 @Suite struct TerminalActivityEventCommandTests {
     @Test("hook payload parser extracts session identity")
@@ -49,6 +50,46 @@ import Testing
         ])
 
         #expect(command.readHookPayload)
+    }
+
+    @Test("session-title flag is explicit and off by default")
+    func sessionTitleFlagIsExplicit() throws {
+        #expect(try TerminalActivityEventCommand.parse(["working"]).sessionTitle == false)
+        #expect(try TerminalActivityEventCommand.parse(["working", "--session-title"]).sessionTitle)
+    }
+
+    @Test("a title becomes valid UserPromptSubmit hook output")
+    func titleBecomesHookOutput() throws {
+        let title = #"Acme "checkout" \ flow · 2"#
+        let output = try #require(TerminalActivityEventCommand.hookOutput(sessionTitle: title))
+
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any])
+        #expect(Array(object.keys) == ["hookSpecificOutput"])
+        let specific = try #require(object["hookSpecificOutput"] as? [String: Any])
+        #expect(specific.count == 2)
+        #expect(specific["hookEventName"] as? String == "UserPromptSubmit")
+        #expect(specific["sessionTitle"] as? String == title)
+        #expect(!output.contains("\n"))
+    }
+
+    @Test("no title, or an empty one, prints nothing")
+    func noTitleNoOutput() {
+        #expect(TerminalActivityEventCommand.hookOutput(sessionTitle: nil) == nil)
+        #expect(TerminalActivityEventCommand.hookOutput(sessionTitle: "") == nil)
+    }
+
+    @Test("the title is read from a result, and absent from an empty success or a failure")
+    func titleFromResponse() throws {
+        let titled = try RPCResponse(result: TerminalActivityEventResult(sessionTitle: "acme"))
+        #expect(TerminalActivityEventCommand.title(from: titled) == "acme")
+
+        let untitled = try RPCResponse(result: TerminalActivityEventResult(sessionTitle: nil))
+        #expect(TerminalActivityEventCommand.title(from: untitled) == nil)
+
+        // An older daemon answers with an empty success.
+        #expect(TerminalActivityEventCommand.title(from: .ok()) == nil)
+        #expect(TerminalActivityEventCommand.title(from: RPCResponse(error: "boom")) == nil)
     }
 
     @Test("hook payload reader stops after detecting one byte over the limit")

@@ -4,6 +4,40 @@ import TBDShared
 @testable import TBDApp
 
 struct AccountPickerOrderingTests {
+    private func entry(id: UUID, name: String, percent: Double, now: Date) -> ModelProfileWithUsage {
+        ModelProfileWithUsage(
+            profile: ModelProfile(id: id, name: name, kind: .oauth),
+            loginIdentity: "\(name)@example.com",
+            usageSnapshot: ProfileUsageSnapshot(
+                buckets: [ClaudeUsageLimitBucket(kind: "session", percent: percent)],
+                fetchedAt: now,
+                lastAttemptAt: now,
+                status: "ok",
+                statusKind: .ok,
+                organizationID: nil))
+    }
+
+    /// The sheet marks the daemon's pick under the daemon's thresholds: a
+    /// profile at 90% is no balanced pick under the shipped 85% ceiling, and is
+    /// one under a 95% ceiling.
+    @Test
+    func balancedPickFollowsTheDaemonsUsageCeiling() {
+        let now = Date()
+        let busyID = UUID()
+        let entries = [entry(id: busyID, name: "Busy", percent: 90, now: now)]
+
+        let shipped = AccountPickerOrdering.order(
+            entries: entries, balancingOn: true, liveCount: { _ in 0 },
+            defaultProfileID: nil, now: now)
+        #expect(shipped.balancedPickID == nil)
+
+        let raised = AccountPickerOrdering.order(
+            entries: entries, balancingOn: true, liveCount: { _ in 0 },
+            defaultProfileID: nil, now: now,
+            policy: ProfilePoolPolicy(usageCeilingPercent: 95))
+        #expect(raised.balancedPickID == busyID)
+    }
+
     @Test
     func orderingOffEqualsSortedForPicker() {
         let profiles = [

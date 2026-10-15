@@ -12,7 +12,9 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 /// its own overlay file pinned at spawn time without touching the user's
 /// settings.json at all.
 ///
-/// The overlay registers eight event types:
+/// The overlay registers eight event types (plus, only when the transcript
+/// prompt-answer flag is on, matcher-less `PreToolUse`/`PostToolUse`/
+/// `PostToolUseFailure` note hooks and a `PermissionRequest` wait hook):
 /// - `SessionStart` (matcher `*`): calls `tbd session-event`, which
 ///   relays the new session ID + transcript path to the daemon. This is
 ///   what fixes the post-`/clear`/`/compact` transcript freeze. Also
@@ -27,7 +29,10 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///   `tbd notify --type error` — `Stop` fires only on normal completion.
 ///   Also sets activity to idle.
 /// - `UserPromptSubmit`: sets activity to working so the thinking
-///   indicator appears in the sidebar while Claude processes a prompt.
+///   indicator appears in the sidebar while Claude processes a prompt, and
+///   returns `hookSpecificOutput.sessionTitle` when the session's wanted title
+///   (worktree display name plus tab suffix) has changed since TBD last set it
+///   — see `ClaudeSessionTitle`.
 /// - `PreToolUse:AskUserQuestion` / `PostToolUse:AskUserQuestion`:
 ///   bridge tool input and `tool_use_id` so the transcript pane can
 ///   render the question before Claude flushes the assistant message
@@ -123,9 +128,19 @@ public enum ClaudeHookOverlay {
         #"tbd hooks notification 2>/dev/null || true"#
 
     /// Sets the terminal activity state to working (shows the thinking
-    /// indicator in the sidebar while Claude processes a prompt).
+    /// indicator in the sidebar while Claude processes a prompt), and asks for
+    /// the session's title on the same round trip. When the worktree's display
+    /// name (or the tab's suffix) changed since the session was last named,
+    /// the command prints `hookSpecificOutput.sessionTitle` and Claude Code
+    /// renames the session; otherwise it prints nothing. stderr is discarded
+    /// and stdout is not, because stdout is the title.
+    ///
+    /// A `tbd` older than the flag rejects it with a usage error, so the plain
+    /// command runs as a fallback: an out-of-date CLI loses the title but
+    /// keeps the working indicator. A rejected flag prints its usage to
+    /// stderr, never stdout, so the fallback cannot add a second output.
     static let workingCommand =
-        #"tbd terminal-activity working 2>/dev/null || true"#
+        #"tbd terminal-activity working --session-title 2>/dev/null || tbd terminal-activity working 2>/dev/null || true"#
 
     /// Sets the terminal activity state to waiting_for_user.
     static let waitingForUserCommand =
@@ -248,6 +263,18 @@ public enum ClaudeHookOverlay {
     /// delayed binding.
     static let prBindTimeoutSeconds = 3
 
+    /// `PreToolUse`, no matcher: records {session, tool_use_id, tool_name} so a
+    /// PermissionRequest can be paired with its tool call. Never prints a decision.
+    static let promptNotePreCommand = #"tbd prompt note --phase pre 2>/dev/null || true"#
+    /// `PostToolUse` and `PostToolUseFailure`, no matcher: the terminal answered
+    /// (or no dialog was needed) and the call ran — resolves any prompt for it.
+    static let promptNotePostCommand = #"tbd prompt note --phase post 2>/dev/null || true"#
+    /// `PermissionRequest`, no matcher: blocks on the daemon until the dialog is
+    /// answered from TBD (prints the decision) or ends otherwise (prints nothing).
+    static let promptWaitCommand = #"tbd prompt wait 2>/dev/null || true"#
+    static let promptNoteTimeoutSeconds = 3
+    static let promptWaitTimeoutSeconds = 86400
+
     /// Build the JSON-encoded overlay body.
     ///
     /// When `fallbackModels` is non-nil and non-empty, a top-level
@@ -272,7 +299,8 @@ public enum ClaudeHookOverlay {
     public static func generateBody(
         fallbackModels: [String]? = nil,
         extraSettings: [String: Any]? = nil,
-        statusLineCommand: String? = nil
+        statusLineCommand: String? = nil,
+        promptAnswerHooks: Bool = false
     ) throws -> Data {
         var body: [String: Any] = [
             "hooks": [
@@ -355,6 +383,18 @@ public enum ClaudeHookOverlay {
                 ]
             ]
         ]
+        if promptAnswerHooks, var hooks = body["hooks"] as? [String: Any] {
+            func entry(_ command: String, _ timeout: Int) -> [String: Any] {
+                ["hooks": [["type": "command", "command": command, "timeout": timeout] as [String: Any]]]
+            }
+            let notePre = entry(promptNotePreCommand, promptNoteTimeoutSeconds)
+            let notePost = entry(promptNotePostCommand, promptNoteTimeoutSeconds)
+            hooks["PreToolUse"] = ((hooks["PreToolUse"] as? [Any]) ?? []) + [notePre]
+            hooks["PostToolUse"] = ((hooks["PostToolUse"] as? [Any]) ?? []) + [notePost]
+            hooks["PostToolUseFailure"] = [notePost]
+            hooks["PermissionRequest"] = [entry(promptWaitCommand, promptWaitTimeoutSeconds)]
+            body["hooks"] = hooks
+        }
         if let fallbackModels, !fallbackModels.isEmpty {
             body["fallbackModel"] = fallbackModels
         }
@@ -471,7 +511,8 @@ public enum ClaudeHookOverlay {
         extraSettingsJSON: String? = nil,
         watchDeskRole: WatchDeskRole? = nil,
         worktreePath: String? = nil,
-        profileConfigDir: String? = nil
+        profileConfigDir: String? = nil,
+        promptAnswerHooks: Bool = false
     ) -> String {
         // A session that is not installing a tee must not be able to read one's
         // leftovers. The capture path is keyed by the session, and several
@@ -502,7 +543,7 @@ public enum ClaudeHookOverlay {
         // forces a per-session overlay for the same reason the fragments do:
         // the shared global file must never carry one session's statusline.
         let isDesk = watchDeskRole != nil
-        guard hasFallback || hasExtra || isDesk else {
+        guard hasFallback || hasExtra || isDesk || promptAnswerHooks else {
             return overlayPath
         }
         // Repo fragment first, per-spawn fragment deep-merged on top.
@@ -531,7 +572,8 @@ public enum ClaudeHookOverlay {
             let data = try generateBody(
                 fallbackModels: fallbackModels,
                 extraSettings: extraSettings,
-                statusLineCommand: statusLineCommand
+                statusLineCommand: statusLineCommand,
+                promptAnswerHooks: promptAnswerHooks
             )
             let parent = (path as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(

@@ -8,7 +8,7 @@ import TBDShared
 /// they now render inside a repo's own sidebar section beside local
 /// worktrees — a click into one that doesn't populate history reads as a
 /// broken back button, not a deliberate omission.
-enum NavigationEntry: Equatable {
+enum NavigationEntry: Equatable, Codable {
     case worktrees([UUID])
     case repo(UUID)
     case remoteSession(RemoteSessionSelection)
@@ -20,9 +20,24 @@ enum NavigationEntry: Equatable {
 /// UUID, the provider mints an opaque string id). Parallel to
 /// `selectedScratchSection`/`selectedRepoID` and, as of `NavigationEntry
 /// .remoteSession`, fully integrated into back/forward history.
-struct RemoteSessionSelection: Equatable, Hashable {
+struct RemoteSessionSelection: Equatable, Hashable, Codable {
     let provider: String
     let sessionID: String
+}
+
+/// The saved form of the sidebar back/forward history
+/// (`AppState.navigationHistoryKey`). Synthesized coding: an unknown entry
+/// kind fails the whole decode, which loads as an empty history.
+struct NavigationHistorySnapshot: Codable, Equatable {
+    var entries: [NavigationEntry]
+    var index: Int
+
+    /// Mirrors the in-memory invariants: at most `cap` entries, index -1 iff
+    /// empty, otherwise an in-range index.
+    func isWellFormed(cap: Int) -> Bool {
+        guard entries.count <= cap else { return false }
+        return entries.isEmpty ? index == -1 : entries.indices.contains(index)
+    }
 }
 
 // MARK: - Sidebar reveal
@@ -79,7 +94,36 @@ extension AppState {
 
 extension AppState {
     /// Maximum number of entries to retain in the navigation history.
-    private static let navigationHistoryCap = 100
+    static let navigationHistoryCap = 100
+
+    /// Refresh the toolbar flags and save the history. Every path that changes
+    /// `navigationEntries` or `navigationIndex` ends here, so none can skip
+    /// the save. Flag-only refreshes (data loaded, entries went stale) call
+    /// `updateNavigationFlags()` directly and do not write.
+    func navigationHistoryDidChange() {
+        updateNavigationFlags()
+        persistNavigationHistory()
+    }
+
+    private func persistNavigationHistory() {
+        let snapshot = NavigationHistorySnapshot(entries: navigationEntries, index: navigationIndex)
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+        userDefaults.set(data, forKey: Self.navigationHistoryKey)
+    }
+
+    /// Load the saved history. Called once from `init`, before the saved
+    /// selection is restored. A missing, undecodable or malformed value
+    /// leaves the history empty. Does not save and does not compute flags:
+    /// the worktree/repo/remote lists are still empty here, so flags are
+    /// computed after they load.
+    func restoreNavigationHistory() {
+        guard let data = userDefaults.data(forKey: Self.navigationHistoryKey),
+              let snapshot = try? JSONDecoder().decode(NavigationHistorySnapshot.self, from: data),
+              snapshot.isWellFormed(cap: Self.navigationHistoryCap)
+        else { return }
+        navigationEntries = snapshot.entries
+        navigationIndex = snapshot.index
+    }
 
     /// Record a new navigation entry. No-op while navigating (back/forward in
     /// progress) or when the entry equals the current head. Truncates any
@@ -102,7 +146,7 @@ extension AppState {
             navigationIndex -= 1
         }
 
-        updateNavigationFlags()
+        navigationHistoryDidChange()
     }
 
     /// Move back to the nearest usable prior entry and apply it. Skips stale
@@ -119,7 +163,7 @@ extension AppState {
         }
         navigationIndex = index
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
-        updateNavigationFlags()
+        navigationHistoryDidChange()
     }
 
     /// Move forward to the nearest usable next entry and apply it. Skips stale
@@ -134,7 +178,7 @@ extension AppState {
         }
         navigationIndex = index
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
-        updateNavigationFlags()
+        navigationHistoryDidChange()
     }
 
     /// Navigate back to the most recent usable history entry after `archivedID`
@@ -151,7 +195,7 @@ extension AppState {
         }
         navigationIndex = index
         withNavigating { applyNavigationEntry(navigationEntries[index]) }
-        updateNavigationFlags()
+        navigationHistoryDidChange()
         return true
     }
 

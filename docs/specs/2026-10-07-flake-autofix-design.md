@@ -77,7 +77,8 @@ Six components, each with one job:
 
 1. **Ledger** (`scripts/flake-ledger.py`) – reads structured test results from
    the nightly and from CI, and maintains one issue per flaky test, plus one
-   watchlist issue for tests below the threshold. Deterministic; no model
+   watchlist issue for tests below the threshold or failing only in the
+   nightly stress loop. Deterministic; no model
    involved.
 2. **Picker** (`scripts/flake-pick.py`) – chooses tonight's target from the
    ledger, or none.
@@ -239,14 +240,31 @@ Each failure becomes an **occurrence** with a key that names where it happened:
 
 A test's failures are grouped into **episodes**. The first episode starts at
 its first recorded failure; a new one starts at each recurrence after a merged
-fix (§4.4). A test **qualifies** for a fix attempt when either:
+fix (§4.4). A test **qualifies** for a fix attempt only when its current
+episode holds at least one failure at a **CI place** – a `branch:` or `main:`
+key, a PR, branch or `main` run of `test.yml` – and, besides, either:
 
 - its current episode's failures span two or more distinct occurrence keys, in
-  any mix. One night and one PR branch qualify; two failures on the same night
-  or the same branch do not. The rule is meant to separate a test that fails in
-  different places from one bad run; or
+  any other mix. One night and one PR branch qualify; two failures on the same
+  night or the same branch do not, and neither do any number of nights alone.
+  The rule is meant to separate a test that fails in different places from one
+  bad run; or
 - its current episode is a recurrence. One failure on a commit that contains a
-  recorded fix (§4.4) is enough, because it shows that fix did not hold.
+  recorded fix (§4.4) is enough, because it shows that fix did not hold; a
+  recurrence seen only at night waits for a CI failure in its episode, like
+  any other nightly-only history.
+
+Nightly failures still count as places once a CI failure is present, and they
+are always recorded, but they never qualify a test by themselves. The nightly
+stress loop loads the machine on purpose (#962's induced CPU load), so a
+failure there measures how a test copes with load, not whether it flakes in
+the CI runs people wait on. A test that a loaded machine breaks every night
+would otherwise qualify after its second night: a count of the open per-test
+issues on 2026-10-11 found 119, of which 113 held failures only at `night:`
+places and 6 held a CI place. A nightly-only test stays on the watchlist
+(§4.4) however many nights it fails, and its whole history is there the day a
+CI failure qualifies it. `NIGHT_PREFIX` and `has_ci_place` in
+`scripts/flake_lib.py` are the rule.
 
 ### 4.4 The issue
 
@@ -259,7 +277,9 @@ failed in one bad run. So a test gets an issue of its own only once it
 qualifies (§4.3), and until then its history lives on the **watchlist**
 (below), one issue shared by every such test. A test that already has an
 issue – one the ledger opened, or a human's it adopted – keeps recording there
-whether or not it qualifies.
+whether or not it qualifies, with one exception: an open issue the ledger
+opened whose test does not qualify is closed back into the watchlist
+(**demotion**, below).
 
 A test's own issue has three parts:
 
@@ -282,8 +302,8 @@ A test's own issue has three parts:
 **The watchlist** is one issue, titled `Flake watchlist` and labelled
 `flake-watchlist` – its own label, never `flaky`, so neither the per-test
 lookup below nor the picker (§5) ever reads it as a test's issue. It holds every
-test that has failed in the last 30 days, has no issue of its own, and does not
-qualify, and, until a run confirms its history on its new issue, a test that
+test that has failed in the last 30 days, has no open issue of its own – none,
+or one the ledger demoted – and does not qualify, and, until a run confirms its history on its new issue, a test that
 just qualified (below).
 The ledger finds it by label and authorship: the oldest issue under the label
 that the bot itself opened, open or closed. An issue under the label opened by
@@ -335,7 +355,10 @@ under the same 60,000 it keeps a ledger comment under:
   recorded meanwhile, while what the skip loses is at most one place's history
   per test, below the threshold by definition. If a human repairs the comment,
   the next read finds a test in two comments and merges them, as for a run
-  that died midway (above).
+  that died midway (above). The skip is for a corrupt comment only: a bot
+  comment declaring a schema version this code does not read stops the run
+  unwritten (below), because skipping it would skip every comment that
+  version wrote.
 
 **Aging out.** An entry whose newest failure is 30 days old leaves the
 watchlist (`WATCHLIST_AGE_OUT_DAYS` in `scripts/flake_lib.py`), and the
@@ -365,6 +388,57 @@ the entry still holds everything, and the next run finds the issue (by its
 `flaky` label, or by title) or creates it again, seeded from the entry. Aging
 out is the only other way off the watchlist.
 
+**Demotion: back onto the watchlist.** An open issue the bot opened whose
+test does not qualify – every failure in its current episode is nightly – is
+closed by the ledger itself, as the bot, in its next run. The test's state,
+everything the issue's ledger comment holds plus the run's new failures,
+becomes its watchlist entry, and the watchlist is written before any issue
+(§8), so the history is on the watchlist before the issue changes. Then the
+ledger closes the issue as not planned and posts one comment saying why, in
+plain words: nightly-only failures belong on the watchlist, because the
+nightly run loads the machine on purpose, and a CI failure reopens the issue
+with that history. The ledger comment is left as it was. Three issues are
+never demoted:
+
+- **An issue a human opened** – one adopted by title or by `.flaky(issue:)`.
+  It keeps recording there, as before; the picker never selects it while it
+  does not qualify (§5).
+- **An issue with an open bot PR.** The PR names the issue, and closing it
+  under the PR would strand the review. The ledger demotes it in the first run
+  after the PR closes, if the test still does not qualify.
+- **An issue a human reopened after a demotion** – open, with the bot's own
+  not-planned close as its latest close. The ledger reopens a demoted issue
+  only once its test qualifies, and a qualifying test stays qualified for the
+  rest of its episode, so such an issue that does not qualify was reopened by
+  hand, and stays open.
+
+The ledger recognizes a demoted issue by its latest `ClosedEvent`: reason not
+planned, and actor the bot's own account (`tbd-flake-fixer[bot]`, which
+GraphQL spells `tbd-flake-fixer` with type `Bot`, a type no person's account
+has). A not-planned close by anyone else is an ordinary one (below). A
+demoted issue's test lives on the watchlist like any test without an issue:
+
+- **A nightly failure** updates the watchlist entry. The issue stays closed
+  and its ledger comment is not written.
+- **A quiet month** ages the entry out after 30 days without a failure, as
+  for any entry; the demoted issue does not pin it. A run in which the test
+  has neither a new failure nor an entry plans nothing for it, so no empty
+  entry reappears.
+- **A failure that qualifies it** – a CI failure in the current episode, with
+  a second place or a recurrence – reopens the demoted issue, with a comment
+  linking that failure, writes the entry's history, merged into the issue's
+  ledger comment, and keeps the entry until a later run reads that history
+  on the issue, as for any test promoted off the watchlist. If the entry had
+  aged out, the test's state starts from the ledger comment's episode, fixes
+  and PR outcomes with no failures, as an aged-out test's fresh entry does.
+
+A demotion costs two writes, the close and its comment, paced like any
+other issue's. Demoting all 113 nightly-only issues in the count above takes
+one run of about six minutes and 226 writes, inside GitHub's limits of 80
+content-creating requests a minute and 500 an hour, so the ledger does not
+cap demotions per run. A rate limit stops the writes there, as for any issue
+write (§8), and the next run demotes the rest.
+
 The exact-title search (step 1 below) runs for a test's first failure and,
 once it is on the watchlist, only in a run where its recorded and new
 failures span two places and so may qualify: a test that stays on the
@@ -381,7 +455,9 @@ no two jobs ever edit the same comment:
   the session's notes, and one outcome:
   - `aborted` – the job ended before producing a candidate artifact (§8),
     or a fixer session failed and left no commit, which the entry marks
-    `session_failed` because nothing reached the verifier;
+    `session_failed` because nothing reached the verifier, or `main` moved
+    during the run and the verified candidate could not be replayed onto it
+    (§7), which the entry marks `publish_raced`;
   - `no-diff` – a session that finished made no commits;
   - `push-refused` – GitHub rejected the push (§8);
   - `pr-opened` – with the PR number, the scope, `N`, the false-pass
@@ -411,6 +487,47 @@ equals the login; the readers without a token – the picker, in the read-only
 comment with a sentinel and any other author is ignored, and the `ledger`
 job's summary lists it so a human can see the attempt. Any number of such
 forgeries changes nothing the bot reads.
+
+**Every comment declares its schema version, and a version the reader does
+not know stops it.** Every writer stamps the current version
+(`SCHEMA` in `scripts/flake_lib.py`) twice: in the sentinel (the `v1` of
+`<!-- flake-ledger v1 -->`, `<!-- flakefix-attempts v1 -->` and
+`<!-- flake-watchlist v1 -->`) and as the JSON block's `schema` key. One version
+covers all three kinds of comment. Readers find a comment by the sentinel's
+prefix (`<!-- flake-ledger v`, and so on), whatever version follows, so a
+comment another version wrote is never invisible to them. That holds for
+readers that match the prefix; code older than the prefix match fetches only
+the exact `v1` sentinels, so a bump to version 2 must never be rolled back
+past the prefix-matching readers. A comment from the
+bot that declares, in either place, a version outside the set this code reads
+(`READABLE_SCHEMAS`), or a version spelled as anything but a bare integer
+(`v2.0`, `"2"`), is not treated as corrupt, because reading it as corrupt
+would read it as empty. A schema bump, or a rollback to code older than the
+comments it finds, would make every bot comment unreadable at once: the
+watchlist would read as empty, so every sub-threshold test would restart its
+history, and an attempt record read as missing would let the picker choose a
+test it has already tried. So every reader stops instead: the ledger exits
+non-zero before any write, the picker refuses to pick, and `publish` refuses
+before it pushes or posts (§8), each naming the comment, the version it
+declares, and the versions the code reads. Only a comment the bot wrote can
+stop a run this way; a forgery is ignored before its version is read. An older
+version stays in the readable set for as long as the readers can read it,
+migrating it as they load it. Within one version a writer may add a key: an
+attempt reader drops an entry key it does not know, and the ledger and
+watchlist readers ignore an unknown top-level key. But every writer rebuilds
+its comment from what it parsed, so an older reader that drops a key also
+erases it the next time it writes. An additive field therefore needs no bump
+only when losing it is harmless, as for the optional attempt fields
+(`OPTIONAL_ATTEMPT_FIELDS`), which mean nothing when absent. A change an older
+reader would misread – a key renamed, retyped, or given a new meaning, a key
+whose loss matters, or a new key inside a failure or folded record, which the
+reader does not accept – takes a new version. A comment the bot wrote whose
+declared version is readable or absent, but whose JSON block does not parse
+or does not hold state of that version, is corrupt – most likely a hand edit –
+and is handled per comment: a watchlist comment is skipped (above), and an
+issue holding a corrupt ledger or attempt comment is left untouched by the
+ledger, never picked, and refused by `publish`, while every other test goes
+on.
 
 The issues – each test's own and the watchlist – are the ledger's only durable
 store, because the artifacts it reads expire. Their retention differs, and each sets a read window:
@@ -472,7 +589,12 @@ which GitHub sets to the commit or the merged pull request that closed it.
 - **Closed as not planned, or as completed with no closer** – no fix is on
   record. The issue **stays closed**: the ledger never reopens it, and the
   picker never selects a closed issue. The ledger still records new failures
-  in its comment, so the history is there if a human reopens it.
+  in its comment, so the history is there if a human reopens it. The one
+  exception is an issue the ledger itself closed as not planned, by demotion
+  (above): its test's failures go to the watchlist instead, and the ledger
+  reopens it once the test qualifies. A human who reopens a demoted issue and
+  closes it as not planned again makes it an ordinary not-planned issue,
+  which stays closed for good.
 
 **A failure after a fix commit** counts as a **recurrence** only if the
 failing run's commit contains the fix: the ledger asks GitHub's compare API
@@ -485,8 +607,14 @@ actually tested a merge with the base branch, so a branch that has not been
 rebased since the fix is treated as pre-fix even if the tested merge contained
 it. That errs toward missing a recurrence rather than inventing one.
 
-A recurrence reopens the issue, with a comment linking the failure and the fix,
-and starts a new episode (§4.3), which makes the test eligible again (§5). The
+A recurrence starts a new episode (§4.3) and, once that episode qualifies,
+reopens the issue, with a comment linking the failure and the fix, which makes
+the test eligible again (§5). A recurrence seen only at night is recorded in
+the ledger comment, and the issue stays closed; the first CI failure of that
+episode reopens it, in whatever run it arrives. The ledger reopens a closed
+issue whenever its current episode is newer than the episode of the fix it
+was closed with and qualifies, so a run that died between the recurrence and
+the reopen converges on the next. The
 brief lists the fix as a prior attempt that did not hold. Recurrence after a
 fix is exactly the evidence a human needs to see.
 
@@ -506,7 +634,8 @@ would stay open with no fix on record, and the bot could pick it; a human
 closing it by hand, as completed with no closer, ends that.
 
 The ledger posts nothing besides its one comment per issue, the reopen
-comment above, and the watchlist's comments. A new failure updates the ledger
+comment above, a demotion's closing comment and its reopen comment, and the
+watchlist's comments. A new failure updates the ledger
 comment; it never adds a second one.
 
 The ledger writes the watchlist first, then each test's issue, and paces its
@@ -541,7 +670,10 @@ list of open PRs, and chooses at most one test. It never selects the
 watchlist: it lists only `flaky` issues, and an issue that also carries the
 `flake-watchlist` label is refused by name, on the schedule and on dispatch,
 so a mislabelled watchlist is never a target. A test on the watchlist does not
-qualify and has no issue to pick. A test is **eligible** when:
+qualify and has no issue to pick; a demoted issue is closed. The picker also
+checks the CI-place rule (§4.3) by itself, ahead of the threshold, so an open
+issue whose current failures are all nightly is refused with that reason even
+before the ledger's next run demotes it. A test is **eligible** when:
 
 - it qualifies (§4.3);
 - its issue is open;
@@ -563,6 +695,10 @@ qualify and has no issue to pick. A test is **eligible** when:
     abort. A session that ran out of turns or time also counts as failed, and
     the same bound keeps one that does so on every try from holding every
     night's slot;
+  - `aborted` marked `publish_raced` – eligible at once, under the same
+    once-bound, counted together with `session_failed` aborts: `publish` lost
+    a verified candidate to `main` moving during the run (§7), which says
+    nothing about the test;
   - `pr-opened` with no close recorded yet – not eligible; the open-PR check
     above also covers it;
   - `merged` – not eligible within that episode. A recurrence (§4.4) starts a
@@ -572,9 +708,14 @@ Among eligible tests the picker takes the one with the most failures, then the
 most recent failure, then the lowest issue number. It writes a brief for the
 session: the test ID, file and line, the issue number, the current episode's
 occurrences with run links, the failure signatures, and every prior attempt
-with its outcome. A merged PR is listed as a prior fix that did not hold, with
+with its outcome, including a rename or retirement of the target it made
+(§6.4). A merged PR is listed as a prior fix that did not hold, with
 its link and the session notes its attempt entry recorded, so the session
-starts from what was already tried. The brief is built only from the ledger's
+starts from what was already tried. The brief ends with the **flaky list**:
+the test ID and issue number of every other open `flaky` issue whose ledger
+comment the bot wrote, the watchlist excluded. It is what a session checks a
+coverage claim against (§6.1): a test on it is no coverage another test can
+lean on. The brief is built only from the ledger's
 structured data, read only from the bot's own comments (§4.4). No human-written
 text reaches it: not issue comments, not the issue body or title, not PR
 bodies, and not a sentinel comment someone else posted, because anyone can
@@ -610,6 +751,55 @@ The job then starts `claude-code-action` in the session tree with the brief and
 the rules below. The session runs on the macOS runner itself, so it can build,
 run the test through `scripts/test.sh --filter`, and stress it while it
 diagnoses.
+
+**Both sessions run on Opus** (`--model claude-opus-5-5`), not the action's
+default model. A fix here is judged on whether it keeps the test testing what
+it was written to test, and the evidence is that the default model can miss
+that: PR #1018 (run 37928079031), on the default model in about three
+minutes and 16 and 13 turns, fixed #989 by swapping the clock a
+`ClockTestSupportTests` self-test drives from `TestClock` to
+`EventDrivenTestClock`, so the self-test of `TestClock` stopped testing
+`TestClock`, and it claimed a sibling still covered the behaviour without
+noticing that the sibling was itself flaky (#990). The model is named once,
+as an output of the step that lays the attempt out, and both sessions read it
+from there: a step output taken before session 1 is one no session can
+rewrite, where an `env` value could be changed by session 1 through
+`$GITHUB_ENV` before session 2's inputs are read.
+
+**Every session leaves a transcript.** Both session steps set
+`show_full_output: true`, so the session's messages and tool results go to
+the step log. The runner masks only registered secrets there –
+`CLAUDE_CODE_OAUTH_TOKEN`, the job token, and the runtime tokens it issues –
+and the action's own documentation warns that full output can expose any
+other secret a tool prints. The session's environment holds no other secret
+(§6.1's credential list), so this is accepted for the reasoning it makes
+visible. The action also
+writes the whole session to `claude-execution-output.json` in `$RUNNER_TEMP`
+when the session ends and names it in its `execution_file` output; an
+artifact is not masked the way a log is, so a step after each session, run
+whatever the attempt's outcome once that session's End step has ended its
+processes, and in the recorded environment (§6.4), copies
+that file and only that file – at the action's own path, a regular file, never
+a symlink – into `flakefix-transcripts/session-<i>.json`, with every
+credential-shaped string redacted: Anthropic keys and OAuth tokens
+(`sk-ant-…`), GitHub tokens of every prefix (`ghs_…`, `github_pat_…`), and
+JWTs such as the Actions runtime token. Before anything else, even with no
+file to keep, it removes from the transcript directory anything that is not a
+regular file and redacts every file in it again, so a symlink or an
+unredacted file session 2 left there is not uploaded; the upload leaves out
+hidden files. It runs main's verifier copy, checked
+against its fingerprint first, and removes the original, so session 2's
+transcript can never be session 1's left behind. A transcript that cannot be
+kept says why in the job summary and never fails the job; one whose session
+ended in an aborted End step is not kept at all. The upload runs only when
+the Keep step after the last session that ran succeeded, having cleaned the
+directory, so nothing a session left there unexamined is uploaded. The `fix` job
+uploads the directory as the `flakefix-transcripts` artifact. A transcript
+holds repository content and this repository's CI output, and the repository
+is public, so nothing in it is private beyond the credentials redacted. A
+session that times out leaves no file – the action writes it when the session
+ends – and its log is then the only record. The transcript is for a human
+reading why a fix took the shape it did; nothing in the bot reads it back.
 
 **The session holds no repository write credential**, by these mechanisms
 rather than by instruction:
@@ -686,6 +876,33 @@ restates them here because they are the review criteria for every bot PR:
 - **Run tests through `scripts/test.sh`**, never bare `swift test`.
 - **Assertion hygiene** – assert contracts, not incidents; no wall-clock
   freshness windows; timeouts report observed state.
+
+Three more rules keep a fix from making a test pass by no longer testing what
+it was written to test. They are review criteria too, and the prompt states
+them:
+
+- **A test of test infrastructure tests that infrastructure.** When the
+  target belongs to a suite that tests a test helper – a `*SelfTests` suite,
+  `ClockTestSupportTests`, a test of a clock, a poller, or a fixture – the
+  helper is the code under test, and the fix must keep exercising it. Swapping
+  the thing under test for a different helper turns the test green while the
+  helper it existed for goes untested.
+- **A coverage claim names its test.** Notes that say something remains
+  covered elsewhere must name that test, in the xunit form, and say it was
+  checked against the brief's flaky list (§5). A test on that list is not
+  coverage anything can lean on.
+- **A name says what the test checks.** A fix that makes the test check
+  something its name no longer describes renames it, which is preferred over
+  keeping a misleading name; moving or retiring the test follows the same
+  rule. The session declares it in its notes, on a line of its own –
+  `RENAMED: <old test ID> -> <new test ID>` or `RETIRED: <old test ID> —
+  <reason>` – and the verifier and the PR treat it as §6.4 and §7 say. PR
+  #1018 is the evidence that an honest rename needs a way through: its first
+  try renamed the test to describe what it now checked, every iteration then
+  failed on the target's absence from the xunit output, and the second try
+  restored the old name on a test that no longer checked what that name said.
+  A verifier that fails every absent target teaches a session to hide a
+  rename.
 
 ### 6.2 Stress scope
 
@@ -859,7 +1076,8 @@ of these hold, at that scope:
 - every iteration completed – a wedged or truncated iteration, or one below its
   floor, fails the run;
 - every iteration's xunit output shows the target test executed and passed – a
-  deleted, renamed, or disabled test cannot pass by running nothing;
+  deleted, renamed, or disabled test cannot pass by running nothing, and a
+  declared rename or retirement (below) is never a pass either;
 - every iteration's retry-metrics ledger is present and readable, and shows the
   target never needed a retry, by the rule below.
 
@@ -897,6 +1115,60 @@ it:
 Records for other tests are ignored, except that they prove the wiring
 reached the test process: at pass scope 1a, `FlakyQuarantineSelfTests`
 always writes one.
+
+**A renamed, moved, or retired target.** A fix may rightly rename the target
+so its name says what it now checks, move it to another suite, or retire it
+(§6.1). The target is then absent from the xunit output, and absence alone
+cannot tell an honest rename from a candidate that silently broke discovery
+or deleted the test. So the verifier honors a change to the target only when
+both of these hold, checked after the candidate is applied and before the
+stress run:
+
+- **The session declared it.** Its notes hold a line for the target,
+  `RENAMED: <old test ID> -> <new test ID>` or `RETIRED: <old test ID> —
+  <reason>`, the IDs in the xunit form; a bullet and backticks around an ID
+  are allowed. Lines for other tests are ignored. The last line for the
+  target counts: both tries write one notes file, so try 1's declaration is
+  still there when try 2 writes its own. The notes are read without
+  following a symlink and without blocking on anything but a regular file.
+- **The diff bears it out.** Read from `git diff -U0` of the candidate under
+  `Tests/`, with each revision's type declarations from `git grep`. The old
+  side: the diff takes the old test's function declaration out of a file
+  that declared its innermost suite on the base – a same-named function in
+  another suite's file, or a commented-out line, proves nothing – or, for a
+  rename that keeps the function's name, the old suite is declared nowhere in
+  its module afterwards (a renamed suite). Removing a suite extension while
+  the function stays is never enough. The new side, for a rename: the new
+  function's declaration goes into a file that declares the new suite
+  afterwards, or the renamed suite is declared in a file that held the old
+  one. A retirement needs the old side's function removal. Two suites in one
+  file with a same-named function are told apart by no part of this; a human
+  reading the draft is the backstop there, as for everything a rename or
+  retirement leaves.
+
+What follows:
+
+- **A rename** is stressed under the new ID, with the same scope and the
+  adaptive `N` the baseline planned for the old one, and with the retry check
+  keyed to whether the candidate quarantines the new ID. At pass scope the
+  old ID still chooses the pass, the one `N` was sized for; the iterations
+  are judged on the new ID, so a test moved out of that pass is absent and
+  fails. The verdict is
+  judged on the new ID exactly as on the old: absent, failing, or retried, it
+  fails, and a second try may follow. Clean, the candidate is **not eligible
+  for ready** rather than passing: a human must judge whether the renamed test
+  still covers what the old one did.
+- **A retirement** stress-runs nothing, and the verdict claims no stress
+  result: it is not eligible for ready, with no iterations, no `N`, and no
+  false-pass probability. The PR's own `test.yml` run is the only build check
+  it gets.
+- **An undeclared absence, or a declaration the diff does not bear out,**
+  changes nothing: the old ID is stressed, is absent, and fails the verdict.
+  The failing lines a second try reads say how to declare a change, or why the
+  declaration was not honored.
+
+The change, when honored, is part of `verdict.json`, which the packaging step
+sums (below), so `publish` reads it from the artifact it checks.
 
 At pass scope the verdict is about the target test. Another test failing in the
 same iteration does not fail the candidate: a pass of thousands of tests under
@@ -1107,19 +1379,73 @@ Transitions, each owned by the PR driver:
   it, the stress result (iterations, failures, core count, spinner count, and
   `load1m` as observed), any other tests that failed at pass scope, and the
   §6.5 limit in one sentence. For weak evidence the numbers lead the body and
-  the PR gets the `flakefix-weak-evidence` label (§6.5). The driver then
+  the PR gets the `flakefix-weak-evidence` label (§6.5). A candidate that
+  renamed or retired its target (§6.4) gets the `flakefix-needs-human` label,
+  created if missing and put on before the status is set, whatever its stress
+  result, and its body leads with "The target test was renamed; a human must
+  judge whether coverage is preserved." (or "retired"), naming the new ID, or
+  the session's reason for a retirement, sanitized like the notes; a
+  retirement's body carries no numbers line, since nothing was stressed. The
+  driver then
   records the attempt in the attempt comment (§4.4). The push happens once per
   attempt, after
   verification, so the PR's CI runs once on the final candidate rather than
   once per try.
+- **Replay at publish.** GitHub refuses the App's push of a branch whose
+  `.github/workflows/` files differ from `main`'s, whoever's commits made the
+  difference: the App has no `workflows` permission, and a candidate built
+  on a `main` that has since changed a workflow reads to GitHub as a
+  workflow edit. Run 37879620449 is the evidence: `fix` started from
+  `main` at `cda5eab3a`, #952 merged while it ran and changed
+  `.github/workflows/`, and GitHub refused a candidate that touched one
+  test file ("refusing to allow a GitHub App to create or update workflow
+  `.github/workflows/test.yml` without `workflows` permission"). So before
+  pushing, the driver fetches `main`. When the candidate leaves the run's
+  base's `.github/workflows/` files as they were – judged on its tree, not
+  on which files its commits list, because GitHub judges the tree pushed –
+  and `main`'s workflow files differ from the base, it replays the candidate's commits onto `main` as it is now –
+  cherry-picked in order, keeping each commit's author, committer, and
+  message, plus git's `(cherry picked from commit <sha>)` line naming the
+  original – and pushes the replay. When the workflow files did not move,
+  the candidate is pushed as it is, whatever else `main` gained. A replay
+  that does not apply pushes nothing and records `aborted`, marked
+  `publish_raced`, with git's reason (§5, §8); so does a failure to fetch
+  `main` or to set the replay up, which says nothing about the test either.
+  A candidate that changes `.github/workflows/` is never replayed: no replay
+  makes its push acceptable (§8).
+
+  The replayed commit is the one the PR carries, so it is the **pushed
+  SHA** for everything after the push: the `flakefix/stress` status goes on
+  it, and promotion requires it to be the PR's head with its own Test run
+  green on it, exactly as for a candidate pushed as it is. The stress
+  verdict was measured on the original base, so the status description and
+  the PR body both say "stress-checked on `<old base>`; replayed onto main
+  `<new base>` because main's workflow files changed during the run", and
+  the attempt entry's notes record it. The PR's own CI on the replayed
+  commits is the check that the replay still builds and passes; the
+  verifier's stress run is not repeated. A re-run of `publish` that finds
+  the PR open on a replay of its candidate reuses it, as it reuses a PR on
+  the candidate itself. The tip's `(cherry picked from commit …)` line only
+  locates the base the replay was made on: the driver replays the
+  candidate onto that base again and reuses the PR only if the result is
+  the PR's head exactly. A replay keeps every author, committer, and date,
+  so it is reproducible, and a head anyone amended – message intact or not
+  – is someone else's work, never stamped with the bot's status.
 - **Record the verdict.** On a verifier pass, the driver sets a commit status
   `flakefix/stress` = `success` on the pushed SHA, described as "no failure
   observed in N runs", followed by the weak-evidence clause when the evidence
-  is weak (§6.5). On a fail, it sets `failure`
+  is weak (§6.5), then the replay note when the candidate was replayed. The
+  description is composed whole and then cut once at GitHub's 140
+  characters, so the cut falls on the replay note, which the PR body carries whole, and never
+  on the weak-evidence clause `promote` reads back. On a fail, it sets `failure`
   and comments on the issue with the iteration log's failing lines and the
   session's notes. A candidate that touches a protected file (§6.4) also gets
   `failure`, whatever its stress result, with a status description naming the
-  files, and its PR body says a human must judge the change. Either way the
+  files, and its PR body says a human must judge the change. So does a
+  candidate that renamed or retired its target, with a description saying
+  which – "target test renamed; no failure observed in N runs under its new
+  ID", or "target test retired; nothing was stress-run" – and a failed stress
+  run under the new ID gets the ordinary failure description. Either way the
   draft stays open for a human to read, finish, or close.
 - **Promote.** Promotion needs two facts that arrive in either order: the
   PR's own `test.yml` run passing, and the bot's `flakefix/stress` status. The
@@ -1152,7 +1478,9 @@ Transitions, each owned by the PR driver:
   `test.yml` runs on that SHA, on its branch and from this repository, has
   completed with `success`; the SHA carries `flakefix/stress` = `success`
   (the newest such status the bot set on it); and the SHA is still the PR's
-  head. Under the Test trigger, the run that started `promote` enters that
+  head; and the PR does not carry `flakefix-needs-human`, which only a
+  renamed or retired target puts on it (§6.4), so such a PR is never readied
+  by the bot, whatever statuses it gathers. Under the Test trigger, the run that started `promote` enters that
   list as its own event describes it, because the runs listing may not yet
   show it completed; a newer run in the listing, such as a re-run still
   going, still decides. A human push to the branch moves the head to an unverified SHA, so
@@ -1179,12 +1507,28 @@ Transitions, each owned by the PR driver:
   because a `ready_for_review` event raised by `GITHUB_TOKEN` would not
   start `claude-review`.
 - **Review.** `claude-review` skips drafts and runs on `ready_for_review`, so
-  the gate judges the PR once it is ready, like any other.
+  the gate judges the PR once it is ready, like any other. The review action
+  refuses non-human actors by default, so the gate's workflow names this App,
+  and only this App, in the action's `allowed_bots` input.
 - **Merge or close.** A human does either. `Fixes #N` closes the issue on
   merge. The next `ledger` run records `merged` or `closed-unmerged` from the
   PR's state (§4.4). A recurrence on a commit containing the fix reopens the
   issue and makes the test eligible again; a PR closed unmerged makes it
   ineligible until it fails again (§5).
+
+  **A merged rename or retirement** closes the old ID's issue like any fix,
+  and the attempt entry records the change – `target_change` `renamed` with
+  `renamed_to`, or `retired` – so the issue's attempt comment and every later
+  brief name it. The ledger keys every issue by test ID, and nothing in it
+  is confused by the change: the old ID can no longer fail on a commit
+  holding the fix, so its issue is never reopened as a recurrence, and a
+  failure of the old ID on a commit without the fix is `pre-fix` as usual. A
+  renamed test that flakes again is a new test to the ledger: it starts on
+  the watchlist and earns its own issue at the threshold, rather than
+  reopening the old one, so a recurrence after a rename takes two places to
+  surface where it would otherwise take one. When the renamed test still
+  carries the old test's `.flaky(issue: N)` trait, N already holds the old
+  ID's ledger, so the new ID gets its own issue linking N (§4.4).
 
 ## 8. Failure handling
 
@@ -1236,6 +1580,22 @@ Transitions, each owned by the PR driver:
   write issues, and the `ledger` job's token can only read them.
 - **The picker cannot read the ledger.** No attempt that night. The `fix` job
   ends red without starting a session.
+- **A bot comment declares a schema version this code does not read** – a
+  later writer's, or an older one after a rollback (§4.4). The ledger exits
+  non-zero before any write, the picker refuses, and `publish` refuses before
+  it pushes, posts, or records, each naming the comment, its version, and the
+  versions the code reads. The job going red is the signal; a human deploys
+  code that reads that version, or adds the migration. Every reader stops
+  rather than skipping the one comment, because a version change reaches every
+  bot comment at once, and skipping them all would read the watchlist and the
+  attempt records as empty. `publish` reads every bot attempt comment on the
+  issue before it pushes, and one that does not parse stops it there too:
+  the record `publish` ends with cannot be written over such a comment, so a
+  push or a PR made first would be an attempt nobody recorded. A failed read
+  of those comments is not a refusal: `publish` fails as for any other read
+  failure, still trying to record `aborted`. The tracking-issue note (above)
+  does not say why the ledger went red; the job's summary and log name the
+  comment and the versions.
 - **The build fails before the session starts.** No attempt; the job ends red.
   `main` is expected to build, so this is a CI problem, not a flake.
 - **The session fails** – it errors, times out, or exhausts its turns, or
@@ -1261,9 +1621,27 @@ Transitions, each owned by the PR driver:
   chose a target), finds no candidate, pushes nothing, and records `aborted`
   in the attempt comment, so the picker waits for a new failure before trying
   that test again.
-- **The push is rejected** – most likely because the candidate touched
-  `.github/workflows/`. No PR is opened; the issue gets a comment saying the fix
-  appears to need a workflow change, which is a human's job.
+- **`main`'s workflow files change while `fix` runs.** `publish` replays the
+  candidate onto `main` before pushing (§7). A replay that does not apply
+  – `main` changed the lines the candidate changed – pushes nothing and
+  records `aborted`, marked `publish_raced`, and the picker may try the
+  test again the next night (§5). The run stays green: the attempt is
+  recorded, and the next one starts from the new `main`.
+- **The push is refused as a workflow change, though the candidate changes
+  no workflow file.** `main` moved again between the fetch and the push.
+  Such a refusal is never read as the fix needing a workflow change: the
+  driver fetches `main` again and judges it afresh: it replays onto it if
+  its workflow files moved from the base, and otherwise pushes the
+  candidate itself – never a replay onto a `main` that has since moved on,
+  and no PR claims a replay that never happened. A
+  second refusal pushes nothing, records `aborted`, marked `publish_raced`,
+  with GitHub's message, and ends the run red so a human sees it.
+- **The push is rejected** for any other reason. A candidate that changes
+  `.github/workflows/`, refused with GitHub's workflow-permission
+  text, opens no PR, records `push-refused`, and its issue gets a comment
+  saying the fix appears to need a workflow change, which is a human's job.
+  Any other rejection records `push-refused` too, says it was not a workflow
+  change, and ends the run red.
 - **CI fails on the PR.** The PR stays a draft; nothing promotes it.
 
 ## 9. Cost and slots
@@ -1312,11 +1690,18 @@ The account allows five concurrent macOS jobs, shared by every workflow.
     measured);
   - pre-fix baseline, 20 test-alone iterations – 10 minutes (20 × 25
     seconds is 8.3);
-  - two sessions, capped at 60 minutes each – 120 minutes;
+  - two sessions, capped at 60 minutes each – 120 minutes. The cap holds on
+    Opus (§6.1) without change: Opus takes longer per turn than the default
+    model, but the one measured session, PR #1018's on the default model,
+    used about 3 minutes and 16 turns, so even several times slower per turn
+    is far inside 60 minutes. A session that would run longer – the turn
+    limit is 300 – is ended by the step's timeout and fails as §8 says;
+    it does not move the budget;
   - checkouts, ending the session's processes, the verification tree's
-    digest before and after each session (§6.4), the bundle, the artifact
-    upload, and API calls – 20 minutes (not measured on CI; one digest of a
-    4.4 GB `.build` took 3.5 seconds on a development machine).
+    digest before and after each session (§6.4), the bundle, keeping the
+    transcripts, the artifact uploads, and API calls – 20 minutes (not
+    measured on CI; one digest of a 4.4 GB `.build` took 3.5 seconds on a
+    development machine).
 
   That is 187 minutes, which leaves 53 of the 240-minute timeout for the two
   verifier runs: an allotment `R` of 24 minutes each, with 5 to spare. The
@@ -1349,8 +1734,9 @@ The account allows five concurrent macOS jobs, shared by every workflow.
   once per attempt and so at most once a night.
 - **The `ledger`, `publish`, and `promote` jobs** run on ubuntu and cost no
   macOS slot.
-- **Model usage** is one attempt a night, at most two sessions, authenticated
-  with the existing `CLAUDE_CODE_OAUTH_TOKEN` that the review workflow uses.
+- **Model usage** is one attempt a night, at most two sessions, on Opus,
+  authenticated with the existing `CLAUDE_CODE_OAUTH_TOKEN` that the review
+  workflow uses.
 
 ## 10. Rollout
 
@@ -1423,7 +1809,10 @@ names who reclaims its orphans:
 - **Issues** are one per qualifying test, found by exact title before any
   create (§4.4), and the `ledger` job runs under a concurrency group so two runs
   cannot race to create the same one. Issues are records, not leaks; humans
-  close them.
+  close them, and the ledger closes, as not planned, one it opened whose test
+  does not qualify (demotion, §4.4) – a change of state on an existing record,
+  which creates nothing, and which the ledger reverses by reopening the same
+  issue rather than opening another.
 - **The watchlist issue** is one fixed resource: found by its label and the
   bot's authorship before any create, created once, and reused for every
   sub-threshold test. Its comments are edited in place; one left empty is
@@ -1433,20 +1822,28 @@ names who reclaims its orphans:
   ever failed (§4.4). A bot comment that does not parse is left in place for a
   human, never deleted; it stays one comment.
 
-Four more things the bot creates need no reclaimer, each for a stated reason:
+Five more things the bot creates need no reclaimer, each for a stated reason:
 
 - **The `flakefix-candidate` artifact** is uploaded with `retention-days: 7`.
   `publish` consumes it within minutes; the week is for a human reading a
   failed attempt. GitHub deletes it on expiry.
-- **Labels** – `flaky`, `flake-watchlist`, `flakefix-skip`, and
-  `flakefix-weak-evidence` – are a fixed set of four names, created once if missing and reused after. Their
+- **The `flakefix-transcripts` artifact** (§6.1) is uploaded with
+  `retention-days: 14`: nothing in the bot reads it, and the two weeks are
+  for a human reviewing a PR or a failed attempt after the fact, which can
+  take longer than the candidate's week. GitHub deletes it on expiry. The
+  `claude-execution-output.json` each session leaves in `$RUNNER_TEMP` is
+  removed when it is kept, and the runner itself is discarded with the job.
+- **Labels** – `flaky`, `flake-watchlist`, `flakefix-skip`,
+  `flakefix-weak-evidence`, and `flakefix-needs-human` – are a fixed set of
+  five names, created once if missing and reused after. Their
   number cannot grow with use, so nothing accumulates.
 - **Commit statuses** (`flakefix/stress`) are one per pushed SHA per attempt,
   immutable metadata on that commit with no separate lifetime. They are
   bounded by the number of attempts, at most one a night, and become
   unreachable with the commit when its branch is reclaimed.
 - **Comments** – one ledger comment and one attempt comment per issue, each
-  edited in place, plus a reopen comment per recurrence and the attempt
+  edited in place, plus a reopen comment per recurrence, a closing comment per
+  demotion and a reopen comment per requalification, and the attempt
   comments `publish` posts, and one note on the tracking issue per streak of
   red `ledger` runs (§8). They live on issues, which are records (above).
 
@@ -1471,7 +1868,7 @@ file. The placement battery from `docs/theory-placement.md` agrees:
 Each script follows the repository's harness pattern: the logic that decides
 is a pure function of input files, proven against fixtures with no network, and
 its `*.test.sh` harness runs in the ubuntu `plans-guard` job beside
-`nightly-flake-stress.test.sh`. GitHub access goes through a `gh` stand-in
+`nightly-flake-stress.test.sh`, except the bash 3.2 harness below. GitHub access goes through a `gh` stand-in
 supplied by environment variable, as `nightly-quarantine-audit.sh` does with
 `AUDIT_GH_CMD`.
 
@@ -1526,7 +1923,24 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   an issue not aged,
   and an aged-out test that fails again starting a fresh entry; folding
   keeping a count's latest failure time; an existing per-test issue below the threshold keeps
-  recording there; a forged watchlist comment and a watchlist issue opened by
+  recording there. The CI-place rule and demotion: fourteen nights alone, a
+  nightly-only recurrence, and a branch failure from an earlier episode each
+  not qualifying, while a night with a branch, `main` with a night, and a
+  folded `main` count do; a test failing on four nights kept on the
+  watchlist with no issue, then given one by a branch failure; an open
+  bot-opened issue with only nightly failures demoted – one action, no ledger
+  write, a closing comment naming the watchlist, its history and the run's
+  failure on the watchlist – and, in write mode, the watchlist written first,
+  then the close as not planned, then the comment; a human-opened issue, one
+  with an open bot PR, and one a human reopened after a demotion, each not
+  demoted; after a demotion, a nightly failure updating the entry with no
+  issue write, a human's not-planned close still recording on the issue, and
+  a CI failure reopening the issue with the entry's history and keeping the
+  entry; a demoted test with no entry planning nothing, and its entry aging
+  out; a nightly recurrence recorded on its closed issue and not reopening
+  it, a CI failure reopening it in the same run, and one in a later run
+  reopening it with the fix named; `fetch` reading a bot's not-planned close,
+  by GraphQL's bare login, as a demotion; a forged watchlist comment and a watchlist issue opened by
   someone else, each ignored and listed; a missing watchlist created once and
   not again; two watchlists, the oldest used and both listed; the report's
   counts of issues to open and tests watched; and a watchlist too big for one
@@ -1538,17 +1952,38 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   have held starting a fresh entry in a readable or new comment and a test
   with an issue still recorded there; a watchlist whose label was removed, found by title and
   relabelled; and a watched test title-searched only when it may qualify.
-- **`flake-pick.test.sh`** – each eligibility condition on its own, both sides;
+  Schema versions: a watchlist comment, a ledger comment, and an attempt
+  comment each declaring a newer version – in the sentinel, in the JSON
+  block, or both – each stopping the run before any write, naming the
+  comment, its version, and the versions read, and found by `fetch` though
+  its sentinel is not this code's; a version spelled other than as a bare
+  integer, in the sentinel or the block, stopping the reader too; a watchlist comment at the current version
+  whose block holds no state, and one whose block declares no version, each
+  still skipped and listed; a key added at the current version to each kind
+  of comment, still read; every writer stamping the current version in the
+  sentinel and the block; and an older version read while it is listed and
+  stopping the reader once it is not.
+- **`flake-pick.test.sh`** – each eligibility condition on its own, both sides,
+  including an open issue with three nights and no CI place, refused with
+  that reason;
   the tie-break order; the re-eligibility rule after each recorded outcome
   (`aborted`, `no-diff`, `push-refused`, `closed-unmerged`, open `pr-opened`,
   `merged`), with and without a later failure; a `session_failed` abort,
-  retried at once, and two in a row with no failure between, which wait; a recurrence after `merged`
+  retried at once, and two in a row with no failure between, which wait; a
+  `publish_raced` abort, retried at once, and one after a `session_failed`
+  abort with no failure between, which waits; a recurrence after `merged`
   that makes the test eligible at once with the merged PR in the brief; a dispatched
   issue refused for each missing condition (closed, no `flaky` label, the
   `flake-watchlist` label, no ledger comment, a ledger comment from a login other than the bot's, an unparsable
   JSON block, an open bot PR); a closed issue, never picked whatever its
   failures; a brief built from fixtures that also hold human comments and
-  forged sentinel comments, none of whose text appears in it; and the refusal
+  forged sentinel comments, none of whose text appears in it; the brief's
+  flaky list, which names another open `flaky` issue's test with its number
+  and leaves out the target, the watchlist, a closed issue, and a test only a
+  forged ledger names, and says "None." when empty; an earlier attempt's
+  rename, named in the brief; an attempt comment in a newer schema version,
+  which refuses the whole pick, though another test is eligible, and a
+  dispatch of its issue; and the refusal
   to start with the fixer flag on and the ledger flag off.
 - **`flake-verify.test.sh`** – scope selection from a baseline with one
   failure and with none; baseline classification of a target failure, a
@@ -1577,7 +2012,36 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   non-ASCII byte, a non-ASCII name outside every glob, and a protected name in
   another case, each flagged; a candidate that force-adds a file under
   `.build/`, refused before the warm build is touched and judged a failure
-  with that reason; and a non-ASCII name elsewhere, which is applied.
+  with that reason; and a non-ASCII name elsewhere, which is applied. A
+  renamed or retired target, over throwaway repositories: a declared rename
+  the diff bears out, stressed under the new ID; a renamed suite, which is a
+  rename; a declared rename that keeps the old test beside the new one, not
+  honored and saying why; a rename with no declaration, which changes
+  nothing; a declared retirement that removes the function, which stresses
+  nothing; one that removes only a suite extension and keeps the function,
+  not honored; a retirement whose only removal is a same-named function in
+  another suite's file, or a commented-out line, not honored; a move into
+  another suite's file, renamed or keeping its name, honored; a rename that
+  only drops a suite extension while the target stays, not honored; a
+  second try's declaration after the first's, which counts; a declaration
+  for another test, and a new ID not in the xunit form, neither honored; a
+  rename at pass scope stressed through the old ID's pass; and a notes file
+  that is a symlink, missing, or a FIFO, which declares nothing, the FIFO
+  without blocking. A `target-change`
+  that failed and left an empty change file still gets its harness-error
+  verdict. The judge with a
+  change: a clean rename under its new ID, not eligible for ready, and the
+  same iterations without the change failing on the absent old ID; a rename
+  whose new ID never ran, failed; a retirement, not eligible, claiming no
+  iterations, `N`, or result; an absent target with no honored change,
+  failed, its failing lines saying how to declare one or why a declaration
+  was not honored; and a change file naming another test, malformed. The
+  transcript keeper: a kept transcript with an OAuth token, a GitHub token,
+  and a JWT each redacted, the count reported, and the original removed; a
+  path other than the action's own, a symlink at the action's path, and no
+  file at all, each keeping nothing; and a planted symlink in the transcript
+  directory, removed, and an unredacted file there redacted again, even when
+  there is no execution file to keep.
 - **`flake-ledger.test.sh`** also covers the tracking-issue rule: a red run
   after a green `ledger` job posts to #519, a red run after a red one does
   not, and a red first-ever run does; a re-run attempt reads its own earlier
@@ -1609,6 +2073,48 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   of the body, and still promotes when clean; a strong one, which gets none of
   those; and the open step for a candidate that
   touched a protected file, which records `failure` and names the files.
+  A candidate that renamed its target: a draft whose status is `failure`
+  saying so, labelled `flakefix-needs-human` before the status is set, whose
+  body leads with the coverage note and names the new ID, recorded with the
+  rename beside its stress verdict; one that retired its target: the same
+  label and note, the session's reason defused, no numbers line, and no
+  stress verdict recorded; a weak-evidence rename, whose status keeps the
+  weak-evidence clause; an entry with no change, which writes neither
+  change field, and an attempt comment holding a key its reader does not
+  know, which still parses; an attempt comment in a newer schema version, one
+  after a readable bot attempt comment, and one that does not parse, each
+  refusing `publish` before any push, post, or record, the newer ones naming
+  their version; a failed read of the comments, which fails without refusing
+  and tries to record the abort; a rename whose stress failed, still labelled, and
+  a plain failure, not; and a PR carrying `flakefix-needs-human`, never
+  promoted under either trigger with every other condition met. The
+  workflow: both sessions on the model the layout step names, never through
+  `env`; both with `show_full_output: true`; a Keep step after each End
+  session step that checks the verifier copy's fingerprint and keeps only
+  the action's execution file; the `flakefix-transcripts` upload for 14 days;
+  each Stress step stressing the ID `target-change` names, and each Judge
+  step reading it. The session prompt states the three rules of §6.1 that
+  keep a test testing what it tests, in the declaration format the verifier
+  parses.
+  Replay at publish, against a pre-receive hook that refuses a branch
+  whose workflow files differ from `main`'s, as GitHub does: `main` moving
+  without a workflow change, which pushes the candidate as it is; `main`'s
+  workflows moving under a candidate that touches none, which pushes a
+  replay on the new `main` that keeps the author and names the original
+  commit, sets the status on the replay with the replay note in it and in
+  the body, and is accepted on the first push; a replay that conflicts,
+  recorded `aborted` and `publish_raced` with nothing pushed; a workflow
+  refusal of a candidate that touches no workflow file, retried once and
+  then recorded `aborted` and `publish_raced`, red, never `push-refused`,
+  and one the retry clears, which opens the PR on the replay; a candidate
+  that touches a workflow file, pushed once as it is and recorded
+  `push-refused`; a fetch of `main` that fails, recorded `aborted` and
+  `publish_raced`; a refusal with `main`'s workflows unmoved, re-pushed as
+  it is with no replay note, and one during which `main` reverted its
+  workflow change, which pushes the candidate itself rather than the
+  earlier replay; and a re-run that finds its PR open on the
+  replay, which reuses it, and on a replay a human amended, which it
+  leaves alone.
 - **`nightly-flake-stress.test.sh`** gains cases for `--test` (floor 1; the
   filter built from a top-level, a nested, and a suite-less ID, escaped and
   anchored, and not matching a test whose name extends the target's),
@@ -1621,11 +2127,40 @@ supplied by environment variable, as `nightly-quarantine-audit.sh` does with
   them, and check the pass table against the
   `watched-test-pass.sh` invocations parsed from `test.yml`, so a fixture
   `test.yml` with a changed filter or floor makes the check fail.
+- **`flake-bash32.test.sh`** – the one harness outside `plans-guard`: it runs
+  in the macOS `lint` job, because the `fix` job's steps run under macOS's
+  `/bin/bash`, GNU bash 3.2, which Linux does not have, and bash 5 parses and
+  runs constructs 3.2 refuses. Over every macOS `run:` script in the workflow
+  and every shell script those steps run, it checks `bash -n` under 3.2; a
+  `case` inside `$( … )` or a process substitution whose patterns lack the
+  leading `(`, which 3.2 ends at the first pattern's `)` and parses only when
+  it runs, so `-n` cannot see it; constructs 3.2 lacks (associative arrays,
+  `mapfile`, case conversion, `|&`, `;&`, and the like); and an array that can
+  be empty expanded without a guard under `set -u`, which 3.2 reads as
+  unbound – a site that cannot be reached empty carries a `# non-empty:`
+  comment saying why. It runs the environment record, the preamble that
+  restores it, and the packaging step under 3.2. A script that a macOS step,
+  or a script it checks, runs and that it does not check fails it, and under
+  `$CI` it fails rather than skips without a bash 3.2.
 
 Every harness must prove it can fail: each case that expects a finding runs
 against a fixture that contains one.
 
 ## 14. Rejected alternatives
+
+- **Counting each night as a place on its own.** A night of the stress loop is
+  an independent run, so it looks like a second place. But the loop loads the
+  machine on purpose, so every night repeats the same condition, and a test
+  that load breaks fails on each of them: two nights measure load sensitivity
+  twice, not flakiness in two places. Under that rule 113 of 119 open per-test
+  issues (§4.3) held nightly failures only, and the picker would have spent
+  its one nightly attempt on them instead of on the six tests that had failed
+  in CI. Load sensitivity is still worth a human's look, which the watchlist
+  gives it, with every night's failure kept.
+- **Opening a new issue for a test that requalifies after a demotion.** Two
+  issues with the same exact title would make the title lookup (§4.4)
+  ambiguous and split one test's history across two records. Reopening the
+  demoted issue keeps one issue per test.
 
 - **A session on Linux, with CI as its feedback loop.** A Linux runner cannot
   build this macOS Swift package, so every try would wait on a full CI round

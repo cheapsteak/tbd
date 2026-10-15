@@ -400,7 +400,7 @@ struct WorktreeRowView: View {
         } else if !providers.isEmpty {
             Menu("New Remote Session…") {
                 ForEach(providers, id: \.config.name) { provider in
-                    Button(provider.describe?.name ?? provider.config.name) {
+                    Button(RemoteProviderIdentityPresentation.headline(provider)) {
                         remoteCreateSheetProvider = provider
                     }
                     .disabled(provider.hasStaleSnapshot)
@@ -590,6 +590,13 @@ struct WorktreeRowView: View {
         }
     }
 
+    /// A green dot when any of this worktree's dev servers runs by a live
+    /// running file or a live TBD server tab. Never runs `status` commands;
+    /// stopped and exited servers show nothing.
+    nonisolated static func showsServerDot(worktreeID: UUID, running: Set<UUID>) -> Bool {
+        running.contains(worktreeID)
+    }
+
     @ViewBuilder
     private func suffixIcon() -> some View {
         let tooltip: String? = programStatusTooltip
@@ -695,6 +702,13 @@ struct WorktreeRowView: View {
                 }
             }
             suffixIcon()
+            if Self.showsServerDot(worktreeID: worktree.id, running: appState.devServerRunningWorktreeIDs) {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 6, height: 6)
+                    .help("A dev server is running")
+                    .accessibilityLabel("Dev server running")
+            }
             if let sectionRepoID, sectionRepoID != worktree.repoID,
                let rid = worktree.repoID,
                let homeRepo = appState.repoName(for: rid) {

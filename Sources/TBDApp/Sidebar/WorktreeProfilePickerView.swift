@@ -537,11 +537,12 @@ struct WorktreeProfilePickerView: View {
         }
     }
 
-    /// Display name for a provider — the negotiated `describe` name when the
-    /// provider supplied one, else its configured name (same precedence as
-    /// `RepoSectionView.newRemoteSessionMenuItem`).
+    /// Display name for a provider: its REGISTRY key, which is unique by
+    /// construction — never `describe.name`, which names the provider's kind
+    /// and is therefore identical across two entries running the same binary
+    /// against different backends. See `RemoteProviderIdentityPresentation`.
     nonisolated static func providerLabel(_ provider: RemoteProviderStatus) -> String {
-        provider.describe?.name ?? provider.config.name
+        RemoteProviderIdentityPresentation.headline(provider)
     }
 
     /// Why a provider's row is unselectable, or nil when it is selectable.
@@ -622,10 +623,11 @@ struct WorktreeProfilePickerView: View {
     ///
     /// Reserved for `.oauth`, as it was before token profiles reached this row
     /// at all: a signed-in profile with no snapshot is genuinely awaiting its
-    /// first cadence poll, which lands within ~90 seconds. A token profile is
-    /// deliberately off that cadence — it probes after a session goes idle —
-    /// so a skeleton there would promise numbers that may not arrive until
-    /// some session finishes a turn, or at all if nobody spawns on it.
+    /// first cadence poll, which lands within ~90 seconds. A token profile
+    /// joins that cadence only while account balancing is on — otherwise it
+    /// probes after a session goes idle — so a skeleton there could promise
+    /// numbers that may not arrive until some session finishes a turn, or at
+    /// all if nobody spawns on it.
     nonisolated static func claudeRowShowsSkeleton(kind: CredentialKind,
                                                    usageNote: String?,
                                                    snapshot: ProfileUsageSnapshot?) -> Bool {

@@ -15,6 +15,12 @@ public final class RPCRouter: Sendable {
     public let subscriptions: StateSubscriptionManager
     public let prManager: PRStatusManager
     public let hibernationCoordinator: HibernationCoordinator
+    /// Exact-token SessionStart rendezvous for Codex-to-Claude replacement
+    /// and its Codex rollback/recovery process.
+    let continueInClaudeReadiness = ContinueInClaudeReadinessCoordinator()
+    /// Behavior deadline for one replacement or rollback readiness wait.
+    /// Production keeps the design's 15-second bound; focused tests shorten it.
+    nonisolated(unsafe) var continueInClaudeReadinessTimeout: Duration = .seconds(15)
     /// Append-only record of every state-changing actuation this router
     /// performs. Shared with the daemon-internal rails (see `Daemon.swift`) so
     /// the whole daemon writes one file. Handlers append a request row before
@@ -131,7 +137,7 @@ public final class RPCRouter: Sendable {
     /// effects get rolled back. Never set in production; when nil (always,
     /// outside tests) the promote path is unchanged.
     nonisolated(unsafe) var scratchPromoteMigrationFailureHook: (@Sendable () async throws -> Void)?
-    public let pendingQuestions: PendingQuestionStore
+    public let pendingQuestions: PendingPromptStore
     /// Program Status Protocol (OSC 7501) reports, per terminal. Memory only.
     /// Design: docs/specs/2026-10-10-program-status-protocol-design.md.
     public let programStatus: ProgramStatusStore
@@ -252,6 +258,15 @@ public final class RPCRouter: Sendable {
     /// `remoteManager`, so it is `nil` exactly when that is — and the handler
     /// is refused by `remoteGate()` before it would need one.
     let remoteTranscriptSync: RemoteTranscriptSync?
+    /// The latest transcript hint each remote session reported, read by
+    /// `remoteTranscriptSync`'s tail-or-forward decision. Always built, and
+    /// empty after every daemon start until the first sightings.
+    let remoteTranscriptHints: RemoteTranscriptHints
+    /// Keeps unopened remote sessions' transcript caches current, fed the
+    /// sightings `remoteManager` processes through the observer `Daemon`
+    /// installs. Built over `remoteTranscriptSync`, so it is `nil` exactly
+    /// when that is.
+    let remoteTranscriptBackgroundSync: RemoteTranscriptBackgroundSync?
     /// Daemon-lifetime incremental transcript baselines used only to enrich
     /// terminal-list responses for Codex presentation state.
     let codexActivityTracker = CodexTranscriptActivityTracker()
@@ -279,6 +294,36 @@ public final class RPCRouter: Sendable {
     /// exercise the transport, where a holder row reports that it has no live
     /// reader rather than crashing.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
+
+    /// Replaces the production operations of `terminal.migrateTransport`'s
+    /// migrator. Tests only: the production wiring needs a live pty to wake.
+    nonisolated(unsafe) var transportMigratorOperationsOverride:
+        TerminalTransportMigrator.Operations?
+
+    // MARK: Dev servers (docs/specs/2026-10-11-dev-servers-design.md)
+    //
+    // Wired post-construction by `Daemon.swift`, like `holderRegistry`. The
+    // defaults are the production collaborators, so a router a test builds
+    // without touching them still works; tests replace them with fakes.
+
+    nonisolated(unsafe) var devServerStopper = DevServerStopper()
+    /// nil → `ProductionDevServerTabInspector` over `lifecycle.tmux` and
+    /// `holderRegistry`, built per call so a later `holderRegistry`
+    /// assignment is honored.
+    nonisolated(unsafe) var devServerTabInspector: (any DevServerTabInspecting)?
+    nonisolated(unsafe) var devServerCommandRunner: any DevServerCommandRunning = ProductionDevServerCommandRunner()
+    nonisolated(unsafe) var devServerRunningFiles = DevServerRunningFileStore()
+    nonisolated(unsafe) var devServerProcessProbe: DevServerProcessProbe = .live
+    /// Resolves `servers.toml` (via `TBD_HOME`).
+    nonisolated(unsafe) var devServerEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    /// Called after every start or stop; the daemon points it at the
+    /// running-file monitor's `refresh()`.
+    nonisolated(unsafe) var onDevServersChanged: (@Sendable () async -> Void)?
+    /// `server.summary`'s answer; the daemon points it at the monitor.
+    nonisolated(unsafe) var devServerSummaryProvider: (@Sendable () async -> [UUID])?
+    /// The servers a `server.start` or `server.stop` is acting on, so two
+    /// requests for one server never both act.
+    let devServerClaims = DevServerActionClaims()
 
     /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
     /// from the same value the lifecycle and the hibernation coordinator hold.
@@ -335,6 +380,17 @@ public final class RPCRouter: Sendable {
     /// never exercise the transport, where a holder row is told there is no
     /// input path in this daemon rather than being silently dropped.
     nonisolated(unsafe) var holderInjectionCourier: HolderInjectionCourier?
+
+    /// Answers a machine read of a holder-backed session from whichever store
+    /// is live — the daemon's emulator while detached, a viewer's SwiftTerm
+    /// while attached. Set by `Daemon` after construction, beside the registry
+    /// and the courier it is built from.
+    ///
+    /// `nil` in mock mode and in tests that never exercise the transport, where
+    /// `terminal.output` falls back to asking the registry's reader directly:
+    /// exactly the behaviour it had before the pull existed, which is the right
+    /// answer for a daemon that has no sidecar to pull over.
+    nonisolated(unsafe) var holderScreenResolver: HolderScreenResolver?
 
     /// Answers what modes a holder-backed session's child is in, for the send
     /// path to compose against. A **test seam only** — production leaves it
@@ -413,7 +469,7 @@ public final class RPCRouter: Sendable {
         usageFetcher: ClaudeUsageFetcher = LiveClaudeUsageFetcher(),
         modelProfileResolver: ModelProfileResolver? = nil,
         profilePoolCandidateSource: ProfilePoolCandidateSource? = nil,
-        pendingQuestions: PendingQuestionStore = PendingQuestionStore(),
+        pendingQuestions: PendingPromptStore = PendingPromptStore(),
         programStatus: ProgramStatusStore? = nil,
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
@@ -502,6 +558,8 @@ public final class RPCRouter: Sendable {
             candidateSource: resolvedCandidateSource,
             reservations: ProfilePickReservations(),
             staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: db, subscriptions: subscriptions)),
+            fallbackAlerts: BalancingFallbackAlerts(
                 notify: StaleAccountAlerts.notifier(db: db, subscriptions: subscriptions))
         )
         self.modelProfileResolver = resolvedModelProfileResolver
@@ -516,6 +574,7 @@ public final class RPCRouter: Sendable {
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
+            sessionTitles: lifecycle.sessionTitles,
             actuationLog: actuationLog, programStatus: resolvedProgramStatus
         )
         self.usageFetcher = usageFetcher
@@ -565,12 +624,53 @@ public final class RPCRouter: Sendable {
         // `remoteTranscriptEnvironment` resolves the cache root through
         // `TBDConstants`, so `TBD_HOME` decides where caches live and a test
         // can point it at a temp home without touching the process env.
-        self.remoteTranscriptSync = remoteManager.map { manager in
-            RemoteTranscriptSync(environment: remoteTranscriptEnvironment) { provider, verb in
-                try await manager.invoke(
-                    providerName: provider, verb: verb, stdin: nil,
-                    timeout: RPCRouter.transcriptReadTimeout)
-            }
+        let hints = RemoteTranscriptHints()
+        self.remoteTranscriptHints = hints
+        let transcriptSync = remoteManager.map { manager in
+            RemoteTranscriptSync(
+                environment: remoteTranscriptEnvironment,
+                policy: { [db] provider, sessionID in
+                    // Read at every decision, never cached (§ Gating), so a
+                    // toggle takes effect on the next sync.
+                    let enabled = (try? await db.config.get().remoteTranscriptLiveSyncEnabled)
+                        ?? Config.remoteTranscriptLiveSyncEnabledDefault
+                    let capabilities = await manager.declaredCapabilities(provider: provider)
+                    return RemoteTranscriptSyncPolicy(
+                        liveSyncEnabled: enabled,
+                        tailDeclared: capabilities.contains(RemoteCapability.transcriptTail),
+                        hint: await hints.latest(provider: provider, sessionID: sessionID))
+                },
+                invoke: { provider, verb in
+                    try await manager.invoke(
+                        providerName: provider, verb: verb, stdin: nil,
+                        timeout: RPCRouter.transcriptReadTimeout)
+                })
+        }
+        self.remoteTranscriptSync = transcriptSync
+        if let manager = remoteManager, let transcriptSync {
+            self.remoteTranscriptBackgroundSync = RemoteTranscriptBackgroundSync(
+                environment: remoteTranscriptEnvironment,
+                hints: hints,
+                isEnabled: { [db] in
+                    // Read at every admission and dequeue, never cached.
+                    (try? await db.config.get().remoteTranscriptLiveSyncEnabled)
+                        ?? Config.remoteTranscriptLiveSyncEnabledDefault
+                },
+                capabilities: { provider in
+                    await manager.declaredCapabilities(provider: provider)
+                },
+                isDismissed: { [db] provider, sessionID in
+                    let row = try? await db.remoteSessions.row(provider: provider, sessionID: sessionID)
+                    return row?.dismissed == true
+                },
+                discard: { provider, sessionID in
+                    await transcriptSync.discard(provider: provider, sessionID: sessionID)
+                },
+                sync: { provider, sessionID in
+                    try await transcriptSync.sync(provider: provider, sessionID: sessionID)
+                })
+        } else {
+            self.remoteTranscriptBackgroundSync = nil
         }
         self.claudeCloudLive = claudeCloudLive
         self.codexExecutableResolver = codexExecutableResolver ?? {
@@ -680,13 +780,24 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeForget(request.paramsData, actor: request.actor)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData, actor: request.actor)
+            case RPCMethod.serverList:
+                return try await handleServerList(request.paramsData)
+            case RPCMethod.serverStart:
+                return try await handleServerStart(request.paramsData, actor: request.actor)
+            case RPCMethod.serverStop:
+                return try await handleServerStop(request.paramsData, actor: request.actor)
+            case RPCMethod.serverSummary:
+                return try await handleServerSummary()
             case RPCMethod.terminalContinueInCodex:
                 return try await handleTerminalContinueInCodex(request.paramsData, actor: request.actor)
+            case RPCMethod.terminalContinueInClaude:
+                return try await handleTerminalContinueInClaude(
+                    request.paramsData, actor: request.actor)
             case RPCMethod.terminalList:
                 return try await handleTerminalList(request.paramsData)
             case RPCMethod.terminalSend:
-                // The ONE case that is handed the connection, because it is the
-                // one that makes an authorization decision on it.
+                // Handed the connection because it makes an authorization
+                // decision on it, as `prompt.answer` and `remote.answer` do.
                 return try await handleTerminalSend(
                     request.paramsData, actor: request.actor, connection: connection)
             case RPCMethod.terminalCompletions:
@@ -695,6 +806,9 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalDelete(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSetPin:
                 return try await handleTerminalSetPin(request.paramsData)
+            case RPCMethod.terminalMigrateTransport:
+                return try await handleTerminalMigrateTransport(
+                    request.paramsData, actor: request.actor)
             case RPCMethod.terminalSwapProfile:
                 return try await handleTerminalSwapProfile(request.paramsData, actor: request.actor)
             case RPCMethod.terminalSessionEvent:
@@ -795,6 +909,20 @@ public final class RPCRouter: Sendable {
                 return try await handleTerminalProgramStatusReport(request.paramsData)
             case RPCMethod.terminalProgramStatusList:
                 return try await handleTerminalProgramStatusList()
+            case RPCMethod.promptNote:
+                return try await handlePromptNote(request.paramsData)
+            case RPCMethod.promptRegister:
+                return try await handlePromptRegister(request.paramsData)
+            case RPCMethod.promptAnswer:
+                return try await handlePromptAnswer(
+                    request.paramsData, actor: request.actor, connection: connection)
+            case RPCMethod.promptAck:
+                return try await handlePromptAck(request.paramsData)
+            case RPCMethod.promptAwait:
+                // A long-poll parks a waiter, and only the socket can see the
+                // connection close that releases it. `SocketServer` serves it
+                // around the limiter; every other caller (HTTP) is refused.
+                return RPCResponse(error: Self.promptAwaitSocketOnlyRefusal)
             case RPCMethod.modelProfileList:
                 return try await handleModelProfileList()
             case RPCMethod.modelProfileAdd:
@@ -837,6 +965,8 @@ public final class RPCRouter: Sendable {
                 return try await handleModelProfileHealthCheck(request.paramsData)
             case RPCMethod.modelProfilePrepareConfigDir:
                 return try await handleModelProfilePrepareConfigDir(request.paramsData)
+            case RPCMethod.modelProfileExecEnvironment:
+                return try await handleModelProfileExecEnvironment(request.paramsData)
             case RPCMethod.modelProfileSetPoolOptOut:
                 return try await handleModelProfileSetPoolOptOut(request.paramsData)
             case RPCMethod.appSetForegroundState:
@@ -944,10 +1074,18 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteDeleteEnabled(request.paramsData)
             case RPCMethod.configSetProfileBalancingEnabled:
                 return try await handleConfigSetProfileBalancingEnabled(request.paramsData)
+            case RPCMethod.configSetProfileBalancingUsageCeiling:
+                return try await handleConfigSetProfileBalancingUsageCeiling(request.paramsData)
+            case RPCMethod.configSetProfileBalancingMaxReadingAge:
+                return try await handleConfigSetProfileBalancingMaxReadingAge(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
             case RPCMethod.configSetProgramStatusEnabled:
                 return try await handleConfigSetProgramStatusEnabled(request.paramsData)
+            case RPCMethod.configSetTranscriptPromptAnswerEnabled:
+                return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
+            case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
+                return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
             case RPCMethod.configSetSupervisionEnabled:
                 return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
@@ -990,12 +1128,15 @@ public final class RPCRouter: Sendable {
                 return try await handleRemoteReconnect(request.paramsData)
             case RPCMethod.remoteTranscriptSync:
                 return try await handleRemoteTranscriptSync(request.paramsData)
+            case RPCMethod.remoteTranscriptLoadEarlier:
+                return try await handleRemoteTranscriptLoadEarlier(request.paramsData)
             case RPCMethod.remoteSendMessage:
                 return try await handleRemoteSendMessage(request.paramsData, actor: request.actor)
+            case RPCMethod.remoteAnswer:
+                return try await handleRemoteAnswer(
+                    request.paramsData, actor: request.actor, connection: connection)
             case RPCMethod.configSetRemoteBackends:
                 return try await handleConfigSetRemoteBackends(request.paramsData)
-            case RPCMethod.configSetRemotePeerMessagingEnabled:
-                return try await handleConfigSetRemotePeerMessagingEnabled(request.paramsData)
             case RPCMethod.configSetUpdateMode:
                 return try await handleConfigSetUpdateMode(request.paramsData)
             case RPCMethod.configSetPtyHolderEnabled:
@@ -1090,8 +1231,9 @@ public final class RPCRouter: Sendable {
             // The same second half the spawn gate asks
             // (`WorktreeLifecycle+Create`): a registry can exist and still be
             // unable to start a holder, and with the flag on that combination
-            // falls back to tmux silently. Reported so Settings can say so
-            // instead of offering a switch that would change nothing.
+            // falls back to tmux silently. Reported so Settings can say so,
+            // and so it can grey the switch out in the one state where neither
+            // direction would change anything.
             ptyHolderSupported: holderRegistry?.canSpawn == true)
         // Assigned rather than passed: this initializer's argument list is at
         // the Swift type-checker's expression budget — adding to it produces
@@ -1112,11 +1254,20 @@ public final class RPCRouter: Sendable {
         result.modelProxySupported = proxy.supported
         result.modelProxyPort = proxy.port
         result.modelProxyVersion = proxy.version
+        // Assigned rather than passed, for the same budget reason. The
+        // watch-mode controls need all three holder terms to reach the verdict
+        // the daemon's own refusal will, and this is the one neither the flag
+        // nor `ptyHolderSupported` implies.
+        result.ptyHolderSessionsLive = try await db.terminals.hasLiveHolderSession()
         // Assigned rather than passed, for the same budget reason as the
         // model-proxy fields above: the load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
         result.programStatusEnabled = config.programStatusEnabled
+        result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
+        result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
+        result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
+        result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
         return try RPCResponse(result: result)
     }
 

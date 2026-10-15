@@ -756,6 +756,10 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// the app renders exactly what it renders today.
     public var transcriptStreamPath: String?
 
+    /// The declared dev server this tab runs, or nil for every other tab.
+    /// Stamped at spawn and never changed.
+    public var serverName: String?
+
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
     /// Nil whenever either provenance column is missing, deliberately: a bare
@@ -875,7 +879,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
         case transport, holderPID, childPID, holderChildStartedAt
-        case transcriptStreamPath
+        case transcriptStreamPath, serverName
     }
 
     public init(from decoder: Decoder) throws {
@@ -931,6 +935,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
         holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
         transcriptStreamPath = try c.decodeIfPresent(String.self, forKey: .transcriptStreamPath)
+        serverName = try c.decodeIfPresent(String.self, forKey: .serverName)
     }
 }
 
@@ -1326,9 +1331,11 @@ public struct ModelProfileWithUsage: Codable, Sendable, Equatable {
     /// time and never persisted. Non-nil only for `.oauthToken` profiles with a
     /// stored secret. nil = other kind, no secret, or an older daemon.
     ///
-    /// The whole token never leaves the daemon: the app renders
+    /// The list never carries the whole token: the app renders
     /// `Token •••• <tail>` so two token profiles can be told apart, and that is
-    /// all it is ever given.
+    /// all it is ever given. The one RPC result that carries a whole token is
+    /// `ModelProfileExecEnvironmentResult`, which `tbd profile exec` puts into
+    /// its child's environment and never prints.
     public let tokenTail: String?
     /// Count of live Claude sessions on this profile (unparked, not hibernated).
     /// Computed by the daemon at list time (never persisted). Non-nil only on
@@ -1604,34 +1611,17 @@ public struct Config: Codable, Sendable, Equatable {
     /// NULL means "never chose" and follows the shipped default wherever it
     /// goes; `0`/`1` is an explicit gesture and is honored forever.
     public var gcRetainedTranscriptsEnabled: Bool
-    /// The single opt-in for remote peer messaging
-    /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, "Flag and
-    /// rollout"): publishing a shadow peer for each remote session and carrying
-    /// frames over the provider's `messages` stream. It ships OFF because the
-    /// bridge acts without a user gesture — helper processes, sockets and
-    /// records appear in `~/.claude/sessions` and `/tmp/cc-socks`, directories
-    /// shared with every Claude Code session on the machine.
-    ///
-    /// There is deliberately no per-worktree companion: a second gate under a
-    /// global one is the kind nobody tunes and everybody has to debug around.
-    ///
-    /// **Resolved, not stored**, like `gcOrphanProcessesEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `remote_peer_messaging_enabled ?? Config.remotePeerMessagingDefault`.
-    /// NULL means "never chose" and follows the shipped default wherever it
-    /// goes; `0`/`1` is an explicit gesture and is honored forever.
-    public var remotePeerMessagingEnabled: Bool
     /// Whether new sessions spawn onto the per-session pty-holder transport
-    /// instead of tmux. It ships OFF: the holder owns a pty and a child process
-    /// that outlive the daemon, and until the holder reconcilers land nothing
-    /// reclaims one orphaned by a daemon crash.
+    /// instead of tmux. It is ON: the holder owns a pty and a child process
+    /// that outlive the daemon, and the named reconcilers that reclaim one
+    /// orphaned by a daemon crash — the orphan-GC rendezvous leg, the reaper's
+    /// holder leg, and the reconcile pass — are what make that safe.
     ///
     /// The gate covers *spawning* only. A session records its transport at
     /// creation and keeps it for life, so flipping this never migrates a running
     /// session and both transports coexist while any pre-flip session is alive.
     ///
-    /// **Resolved, not stored**, like `remotePeerMessagingEnabled`: the backing
+    /// **Resolved, not stored**, like `gcHangStacksEnabled`: the backing
     /// column carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `pty_holder_enabled ?? Config.ptyHolderDefault`. NULL means "never chose"
@@ -1726,6 +1716,26 @@ public struct Config: Codable, Sendable, Equatable {
     /// answers Claude Code's probe and accepts its status reports. Resolved as
     /// `program_status_enabled ?? Config.programStatusEnabledDefault`.
     public var programStatusEnabled: Bool
+    /// Answering question and permission prompts from the transcript. Resolved
+    /// as `transcript_prompt_answer_enabled ?? Config.transcriptPromptAnswerDefault`.
+    /// Assigned after construction by the daemon, so it is a stored property
+    /// with a default rather than a required initializer argument.
+    public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
+    /// Balancing's usage ceiling, in percent, as stored: nil when never set.
+    /// Act on `profileBalancingPolicy`, which resolves it.
+    public var profileBalancingUsageCeilingPercent: Int?
+    /// Balancing's maximum reading age, in seconds, as stored: nil when never
+    /// set. Act on `profileBalancingPolicy`, which resolves it.
+    public var profileBalancingMaxReadingAgeSeconds: Int?
+    /// Live remote transcript sync: tail-first loading, earlier-history
+    /// loading and hint-driven background sync. Read fresh at every decision.
+    ///
+    /// **Resolved, not stored**: the backing column carries no SQL default and
+    /// stays NULL until somebody touches the toggle, so this property is
+    /// `remote_transcript_live_sync_enabled ?? Config.remoteTranscriptLiveSyncEnabledDefault`.
+    /// Declared with a default value rather than threaded through the
+    /// memberwise initializer, which sits at the type-checker's budget.
+    public var remoteTranscriptLiveSyncEnabled: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
     /// Machine-wide remote create-param defaults, keyed by the **provider's
     /// own** `create_params` field names — the fall-through level beneath
     /// `Repo.remoteCreateDefaults`. TBD stores and replays these values
@@ -1789,18 +1799,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
     /// is left alone.
     public static let gcHangStacksEnabledDefault = false
-    /// The shipped default for `remotePeerMessagingEnabled`, and the single
-    /// place it lives. The peer bridge ships off; graduation — after a soak in
-    /// which no ghost record outlives its daemon — is a change to this
-    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
-    /// left alone.
-    public static let remotePeerMessagingDefault = false
     /// The shipped default for `ptyHolderEnabled`, and the single place it
-    /// lives. The holder transport ships off; graduation — after a soak in which
-    /// no holder or child process outlives the session that owns it — is a
-    /// change to this constant, with no forcing `UPDATE` migration and every
-    /// explicit opt-out left alone.
-    public static let ptyHolderDefault = false
+    /// lives. The holder transport is graduated: new sessions spawn onto a
+    /// holder unless somebody has chosen otherwise. Because the column carries
+    /// no SQL default, this constant reaches only rows that never chose — an
+    /// explicit `0` is honored forever, and moving the constant needed no
+    /// forcing `UPDATE` migration.
+    public static let ptyHolderDefault = true
     /// The shipped default for `remoteDeleteEnabled`, and the single place it
     /// lives. Delete ships off; graduation — after a soak in which no delete
     /// destroyed a session its user had not confirmed, and every delete that
@@ -1847,6 +1852,14 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `programStatusEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let programStatusEnabledDefault = false
+    /// The shipped default for `transcriptPromptAnswerEnabled`, and the single
+    /// place it lives. Graduation flips this constant.
+    public static let transcriptPromptAnswerDefault = false
+    /// The shipped default for `remoteTranscriptLiveSyncEnabled`, and the
+    /// single place it lives. Ships off; graduation is a change to this
+    /// constant, with no forcing `UPDATE` migration and every explicit opt-out
+    /// left alone.
+    public static let remoteTranscriptLiveSyncEnabledDefault = false
 
     public init(defaultProfileID: UUID? = nil,
                 primaryAgentPreference: PrimaryAgentPreference = .defaultValue,
@@ -1880,7 +1893,6 @@ public struct Config: Codable, Sendable, Equatable {
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
                 gcHangStacksEnabled: Bool = Config.gcHangStacksEnabledDefault,
-                remotePeerMessagingEnabled: Bool = Config.remotePeerMessagingDefault,
                 ptyHolderEnabled: Bool = Config.ptyHolderDefault,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 gcRetainedTranscriptsEnabled: Bool =
@@ -1926,7 +1938,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
         self.gcHangStacksEnabled = gcHangStacksEnabled
-        self.remotePeerMessagingEnabled = remotePeerMessagingEnabled
         self.ptyHolderEnabled = ptyHolderEnabled
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
@@ -2021,11 +2032,6 @@ public struct Config: Codable, Sendable, Equatable {
         // default rather than hardcoding `false`.
         gcHangStacksEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .gcHangStacksEnabled) ?? Config.gcHangStacksEnabledDefault
-        // Same tri-state once more: absent means the sender knew nothing about
-        // the flag, which is the NULL column's situation — follow the shipped
-        // default rather than hardcoding `false`.
-        remotePeerMessagingEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .remotePeerMessagingEnabled) ?? Config.remotePeerMessagingDefault
         // And once more: absent means the sender knew nothing about the flag,
         // which is the NULL column's situation — follow the shipped default
         // rather than hardcoding `false`.
@@ -2072,6 +2078,19 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
         programStatusEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
+        transcriptPromptAnswerEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
+        // Absent means never set, the NULL column's situation; the policy
+        // resolves it.
+        profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingUsageCeilingPercent)
+        profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
+        // Same tri-state: absent means the sender knew nothing about the flag,
+        // the NULL column's situation — follow the shipped default.
+        remoteTranscriptLiveSyncEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteTranscriptLiveSyncEnabled)
+            ?? Config.remoteTranscriptLiveSyncEnabledDefault
         // Absent means the sender knew nothing about global create defaults —
         // the same state as an empty map: no opinion at this level, so every
         // field falls through to its provider-declared `default`.
@@ -2085,6 +2104,14 @@ public struct Config: Codable, Sendable, Equatable {
 }
 
 public extension Config {
+    /// The thresholds profile balancing applies, with unset or out-of-range
+    /// stored values resolved to the shipped ones.
+    var profileBalancingPolicy: ProfilePoolPolicy {
+        ProfilePoolPolicy.resolved(
+            usageCeilingPercent: profileBalancingUsageCeilingPercent,
+            maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
+    }
+
     /// Whether transcript streaming is actually on: the conjunction of the two
     /// flags, and the only form any caller should act on.
     ///
@@ -2252,10 +2279,18 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     public var claudeSessionID: String?
     /// Line count of the captured text (display metadata).
     public var lineCount: Int
+    /// The dev server whose saved final output this entry is, while the entry
+    /// still speaks for that server; nil for every other entry, and once a
+    /// start or stop has detached it (docs/specs/2026-10-11-dev-servers-design.md,
+    /// "Exited servers keep their last output").
+    public var serverName: String?
+    /// That server's exit status; nil when the transport could not observe it.
+    public var exitCode: Int32?
 
     public init(id: UUID, worktreeID: UUID, label: String? = nil,
                 kind: TerminalKind? = nil, closedAt: Date = Date(),
-                claudeSessionID: String? = nil, lineCount: Int = 0) {
+                claudeSessionID: String? = nil, lineCount: Int = 0,
+                serverName: String? = nil, exitCode: Int32? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.label = label
@@ -2263,6 +2298,8 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         self.closedAt = closedAt
         self.claudeSessionID = claudeSessionID
         self.lineCount = lineCount
+        self.serverName = serverName
+        self.exitCode = exitCode
     }
 }
 

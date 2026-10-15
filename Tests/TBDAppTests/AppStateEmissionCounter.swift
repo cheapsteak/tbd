@@ -144,6 +144,9 @@ final class AppStateEmissionTracker {
         _ = state.prStatuses
         _ = state.prObservations
         _ = state.prBindings
+        _ = state.devServerLists
+        _ = state.devServerRunningWorktreeIDs
+        _ = state.devServerActionMessages
         _ = state.prDetachedCounts
         _ = state.modelProfiles
         _ = state.limitHits
@@ -182,6 +185,7 @@ final class AppStateEmissionTracker {
         _ = state.sessionTranscriptLoading
         _ = state.pendingQuestions
         _ = state.programStatusSnapshots
+        _ = state.pendingPrompts
         _ = state.closedTerminalHistories
         _ = state.selectedClosedTerminalIDs
         _ = state.closedTerminalContents
@@ -269,6 +273,9 @@ final class AppStateEmissionTracker {
         "prStatuses",
         "prObservations",
         "prBindings",
+        "devServerLists",
+        "devServerRunningWorktreeIDs",
+        "devServerActionMessages",
         "prDetachedCounts",
         "modelProfiles",
         "limitHits",
@@ -307,6 +314,7 @@ final class AppStateEmissionTracker {
         "sessionTranscriptLoading",
         "pendingQuestions",
         "programStatusSnapshots",
+        "pendingPrompts",
         "closedTerminalHistories",
         "selectedClosedTerminalIDs",
         "closedTerminalContents",

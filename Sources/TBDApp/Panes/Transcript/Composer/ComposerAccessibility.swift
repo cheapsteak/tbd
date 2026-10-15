@@ -25,6 +25,7 @@ enum ComposerAccessibility {
     /// The blocked banner's sentence, and the button beside it.
     static let blockedMessage = "composer.blocked.message"
     static let blockedReveal = "composer.blocked.reveal"
+    static let blockedShowPrompt = "composer.blocked.showPrompt"
     /// The banner raised by a failed send or a refused attachment.
     static let error = "composer.error"
     /// The banner raised by a remote send whose outcome is unknown, and the

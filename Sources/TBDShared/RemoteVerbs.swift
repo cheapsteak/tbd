@@ -16,6 +16,9 @@ import Foundation
 public enum RemoteCapability {
     /// `transcript read <id> [--since <cursor>]` — a live session's conversation.
     public static let transcriptRead = "transcript.read"
+    /// `--tail` and `--before` on `transcript read`. Gates flags, not a verb:
+    /// there is no `transcript tail` subcommand.
+    public static let transcriptTail = "transcript.tail"
     /// `transcript retain <id>`, and `delete <id> --retain`.
     public static let transcriptRetain = "transcript.retain"
     /// `transcript import` — Claude Code JSONL on stdin into the provider's store.
@@ -24,6 +27,10 @@ public enum RemoteCapability {
     public static let transcriptRecall = "transcript.recall"
     /// The `--submit` flag on `send`: stdin is a message, pasted and submitted.
     public static let sendSubmit = "send-submit"
+    /// `answer <session_id> <prompt_id>` — the decision for an open
+    /// `pending_prompt`, as JSON on stdin. A provider declaring it also
+    /// declares `events`.
+    public static let answer = "answer"
 }
 
 /// The argv (after the provider's own `exec` and `args`) for the verbs
@@ -43,6 +50,20 @@ public enum RemoteVerb {
         return argv
     }
 
+    /// `transcript read <id> --tail <n>` — the end of the current conversation.
+    /// Always a reset. Only for a provider that declared
+    /// `RemoteCapability.transcriptTail`; never combined with `--since`.
+    public static func transcriptReadTail(sessionID: String, count: Int) -> [String] {
+        ["transcript", "read", sessionID, "--tail", String(count)]
+    }
+
+    /// `transcript read <id> --before <cursor> --tail <n>` — the page of
+    /// history ending immediately before `before`. Never carries `--since`.
+    /// Only for a provider that declared `RemoteCapability.transcriptTail`.
+    public static func transcriptReadBefore(sessionID: String, before: String, count: Int) -> [String] {
+        ["transcript", "read", sessionID, "--before", before, "--tail", String(count)]
+    }
+
     /// `transcript retain <id>`.
     public static func transcriptRetain(sessionID: String) -> [String] {
         ["transcript", "retain", sessionID]
@@ -60,5 +81,11 @@ public enum RemoteVerb {
     /// Only for a provider that declared `RemoteCapability.sendSubmit`.
     public static func sendSubmit(sessionID: String) -> [String] {
         ["send", sessionID, "--submit"]
+    }
+
+    /// `answer <session_id> <prompt_id>` — the answer payload travels on stdin
+    /// as JSON. Only for a provider that declared `RemoteCapability.answer`.
+    public static func answer(sessionID: String, promptID: String) -> [String] {
+        ["answer", sessionID, promptID]
     }
 }

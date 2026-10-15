@@ -44,6 +44,7 @@ struct HolderStartupReconcileTests {
             // all, and the tmux parity test below relies on this answer.
             tmux: TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true }),
             signaller: signaller,
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
     }
 

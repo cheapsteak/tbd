@@ -769,15 +769,95 @@ the process table — the same argument as every other resource here.
   persist independently, so adoption would buy a mystery-session UI and
   little else, and it cuts against the database-is-intent model the other
   reconcilers already follow.
-- **`OrphanGC`** (hourly, gated on `gcEnabled` as today) gains two sweeps:
-  unlink socket files (and their sibling lock files) with no listening
-  process behind them, and re-run the holder-versus-database check between
+- **`OrphanGC`** (hourly, gated on `gcEnabled` as today) gains three sweeps:
+  unlink socket files (and their sibling lock and log files) with no listening
+  process behind them, unlink the lock-and-log residue of a session whose
+  socket is already gone, and re-run the holder-versus-database check between
   startup reconciles. The socket sweep is mandatory, not hygienic: a
   SIGKILLed holder cannot unlink its own socket, and the tmux precedent on
   this machine was ~7,100 dead socket files, because tmux unlinks lazily on
   rebind and nothing ever rebound. The lock file leaks only as an empty
   file — the kernel released its lock when the holder died — so it is swept
-  for tidiness on the same pass rather than needing its own reclaimer.
+  with the socket on the same pass rather than needing its own reclaimer.
+
+  **The rendezvous sweep has two arms, because the socket is not always the
+  file left behind.** The socket arm decides on a `<uuid>.sock` and unlinks its
+  `<uuid>.lock` and `<uuid>.log` siblings along with it. But a holder that
+  exits cleanly unlinks its own socket, and so does the socket arm itself, so
+  the pair left in either case has no socket for that arm to decide on and
+  survives every later sweep — measured on a development machine, 557 such
+  pairs against 53 live sockets. The socket-less arm reclaims that pair, under
+  `gcEnabled` like every other holder leg and with no switch of its own
+  (`2026-09-07-holder-flag-consolidation-design.md`).
+
+  Its gates, in order, each failing toward keeping:
+
+  - **No sibling socket** — established from the same directory listing the
+    pair is enumerated from, and re-checked immediately before the unlink. A
+    socket at that path means the socket arm's gates are the ones that apply,
+    and this arm never unlinks a socket itself.
+  - **Age** — the pair's newest file must be older than the GC grace window,
+    the same window and constant the socket arm uses and for the same race:
+    a sweep runs on demand from RPC handlers, so it can land between a spawner
+    creating the lock and the holder binding its socket, and reaping there
+    would unlink the lock of a session being born. Newest file rather than
+    oldest, so a week-old lock beside a log written a second ago is kept, and
+    a date that cannot be read counts as too young to touch.
+  - **No session row** — read once for the whole phase, with a failed read
+    skipping the phase rather than proceeding on an empty set, which would
+    read as "nothing is claimed". This gate asks whether TBD still knows the
+    session; it is not what protects a spawn in flight, for the reason below.
+  - **The lock is free** — the same non-blocking acquisition the socket arm
+    makes, released on the same line, so no window is left in which the sweep
+    is the holder of record.
+
+  **Why unlinking a lock is safe here, when unlinking a held lock is the
+  hazard the rendezvous layout is built around.** `HolderLock` leaves its file
+  behind on release precisely because unlinking a lock somebody holds lets a
+  racing spawner create and lock a *different* file at the same path — two
+  holders for one session. The socket arm stays out of that race by anchoring
+  every unlink to a socket it has already proven dead. The socket-less arm has
+  no such anchor, and **the creation lock is what bounds it.** The flock is
+  taken by the spawner before the lock file has any sibling, travels to the
+  holder as an inherited descriptor on the same open file description, and is
+  released only when the holder dies — so a spawn in flight is lock-held for
+  all but the one instant named in the residuals below, and a pair whose lock is
+  free is a pair no spawn is behind.
+
+  Two things about the other gates follow from that, and stating them the other
+  way round would be wrong:
+
+  - **The row gate is not the spawn guard.** A new session's holder is spawned
+    before its row is written, so mid-spawn a UUID legitimately has a lock, a
+    log and no row. What the row covers is the wake and respawn paths, where
+    the row precedes the holder, and the far more common case of a session TBD
+    has finished with.
+  - **The grace window is reinforcement everywhere but the two residuals
+    below.** It is user-settable with no floor, so an argument that leaned on it
+    for the ordinary case would be an argument a configuration change could
+    remove.
+
+  Three residuals, stated rather than papered over. Two are one syscall pair
+  wide and sit on either side of the same gap: `lockIsHeld` can read a free lock
+  an instant before a spawner takes it, and `HolderLock.acquire` opens the lock
+  file with `O_CREAT` *before* it flocks it, so for the instant in between the
+  file exists and is free. Neither is closable with `flock` — holding the lock
+  across the unlink only moves the hazard, leaving a waiting spawner to lock an
+  unlinked inode. What covers both is a coincidence the spawn path does not
+  produce: a spawn beginning, in that one instant, for a UUID whose residue is
+  already past the grace window, while a spawn mints a fresh UUID with no
+  residue at all. **This is the one place the grace window is load-bearing**,
+  and the reason to keep it large relative to a spawn. The third is benign by
+  comparison: the probe itself briefly holds a lock a concurrent
+  `HolderLock.acquire` would then refuse as `alreadyHeld`, which surfaces as a
+  visible spawn failure rather than as two holders, and is a property the socket
+  arm's identical probe already has.
+
+  Reclamation is by unlink rather than quarantine, as on the socket arm. A lock
+  file is empty by construction, and a holder log's only value is postmortem,
+  spent long before a pair is old enough to reach this gate. There is nothing a
+  `tbd gc restore` could put back, so no `ReapRecord` is written and the sweep
+  counts one reclamation per session rather than one per file.
 - **`AgentReaper`** gains a holder-transport leg. Its existing sweep
   enumerates children of tmux server pids and structurally cannot see a
   child re-parented to launchd, so for holder-transport sessions it sweeps by
@@ -896,13 +976,14 @@ when they answer.
 
 ## Rollout
 
-This wholesale-replaces a load-bearing path, so it ships behind a default-off
-flag with a soak and a stated graduation plan.
+This wholesale-replaces a load-bearing path, so it rolls out behind a flag
+that holds new spawns on tmux until a soak and a stated graduation bar are
+met.
 
 - **Flag.** `pty_holder_enabled`, a `config` column added by a `.sql`
   migration with **no SQL `DEFAULT` clause**, so unset stays a third state.
-  The shipped default is `false`, resolved in `ConfigRecord.toModel(...)` the
-  way the **graduation-ready** gates there resolve theirs: a
+  The shipped default is resolved in `ConfigRecord.toModel(...)` the way the
+  **graduation-ready** gates there resolve theirs: a
   `ptyHolderDefault: Bool = Config.ptyHolderDefault` parameter on `toModel`,
   and `pty_holder_enabled ?? ptyHolderDefault` in the body. That is a minority
   of the gates in that file, not all of them — roughly seven follow it, while
@@ -963,79 +1044,75 @@ flag with a soak and a stated graduation plan.
   `feed(byteArray:)`-out shape is the closest existing seam to what the holder
   transport needs, so the third path is cheaper than the second was. Each
   gated branch gets tests for flag-on and flag-off behavior.
-- **Soak.** Enable on a development machine running a real fleet at real
-  load. Ordinary development restarts exercise the re-adoption path
-  continuously — the hardest code in the design gets adversarial testing for
-  free. Graduation gates on field evidence: no double-reader violations, the
-  reconcilers holding (no growth in unclaimed holders or socket litter), and
-  latency flatness re-confirmed under load by re-running the probes that drew
-  the curve in the first place: `scripts/diag/tmux-vs-rawpty-idle.py` for the
-  raw-versus-tmux echo comparison and `scripts/diag/tmux-server-contention.py`
-  for the pane-count control. Both are committed alongside this design, for
-  the reason that a design justified by a latency curve has to ship the tool
-  that can re-draw it — otherwise graduation is a judgement call wearing a
-  measurement's clothes.
+- **Soak.** Enable on a development machine running a real fleet at real load.
+  Ordinary development restarts exercise the re-adoption path continuously —
+  the hardest code in the design gets adversarial testing for free.
 
-  **Flatness is the claim, so flatness is what the threshold has to test.** An
-  absolute latency bound alone would pass a transport that is merely fast on a
-  quiet machine, which is exactly what tmux already is — its p50 is 1.1 ms and
-  imperceptible. The graduation run is therefore a paired measurement, and all
-  four conditions must hold:
+  Graduation rests on sustained field operation: a real fleet, at real size,
+  for long enough that every path in the design has been walked many times.
+  The transport's justification is scaling headroom, and a fleet of that size
+  under real load is the condition the headroom was wanted for, so that is the
+  condition graduation is read from.
 
-  - **Workload:** the design point as stated above — **~150 concurrent sessions
-    at sustained load ≥ 100** on one machine, matched against an idle-machine
-    run of the same probe, interleaved so both arms see the same conditions.
-    Session count and load are two different numbers and both have to be met;
-    validating at 100 sessions would clear a materially lower bar than the
-    design targets.
-  - **Sample:** at least 2,000 keystrokes per arm. This is a bar chosen for
-    graduation, **not** a repeat of the original method: the load-based latency
-    runs behind the headline numbers were small, and their highest-load bucket
-    was explicitly n=4 and directional only. That is precisely why graduation
-    needs a larger sample than the measurements that motivated it — a p90 is
-    the statistic under test, and a p90 from a handful of samples is not one.
-  - **Absolute bound:** p90 keystroke echo at load stays at or under **5 ms**,
-    the ceiling a raw pty was never observed to exceed at any load up to 117.
-  - **Flatness bound:** p90 at load is no more than **2×** p90 at idle. The
-    multiplier is set where it is because it has to sit clear of ordinary
-    scheduling jitter on a loaded machine while still failing anything with a
-    per-keystroke wakeup in the path — and tmux fails it by more than an order
-    of magnitude, so the exact value is not load-bearing. Its p90 went
-    9.3 → 12.7 → 139 ms as load rose; the 139 ms bucket is n=4 and directional
-    only, but even discarding it entirely the 9.3 → 12.7 growth already
-    exceeds nothing-should-grow, and the mechanism is not in doubt: a tmux
-    keystroke costs process wakeups whose latency is scheduling delay.
+  **Why a standing field condition rather than a paired probe run with numeric
+  thresholds.** A thresholded run — a p90 ceiling and a flatness multiplier
+  measured against an interleaved idle arm — is the shape this bar could take
+  instead, and it is rejected on the maintainer's call, for three reasons that
+  are properties of the question rather than of any one run. A probe run is a
+  measurement of a moment, and what the transport had to show is that it holds
+  up; the paired run can be green on a tree whose re-adoption path is broken,
+  because nothing in it restarts a daemon. The numbers such a bar would be set
+  against are weaker than the bar: the load-dependent growth that motivated the
+  design came from buckets whose highest was explicitly n=4 and directional
+  only, so a p90 re-derived at that sample size is not the statistic it looks
+  like. And the raw-pty arm those probes measure is *expected* to be the
+  holder's attached echo path, which is the design's own central claim — so a
+  gate built on it asks the measurement to assume what it is there to check.
+  What discriminates instead is whether a fleet of the design's size runs on
+  the transport every day without the operator noticing, which is also the only
+  condition that covers hibernation, wake, restart and re-adoption. The probes
+  stay in the tree as instruments for re-drawing the curve, below; a question
+  about latency is answered by running them, not by a number frozen into this
+  bullet.
 
-  Any load-dependent growth beyond that flatness bound means the transport has
-  a wakeup in the echo path that the design says it does not, and graduation
-  does not proceed on the theory that the absolute number still looks small.
+  The evidence it was read from, and what kind each piece is. **Measured**, from
+  a development machine's live database: 56 session rows on the holder transport
+  against 9 still on tmux, with a further 34 rows predating the transport column
+  — a fleet that had converted itself by ordinary use rather than by migration,
+  which is what spawn-time-only granularity predicts. Every spawn kind,
+  hibernation and wake, and daemon restart with re-adoption exercised in daily
+  use. **Reported by the operator**: continuous use over weeks at nearly a
+  hundred concurrent sessions, with no perceptible latency regression against
+  the tmux path. The two are kept apart deliberately — a row count is a
+  measurement and a felt absence of lag is a report, and reading the second as
+  the first is how a design talks itself into a number it never took.
 
-  **The run must exercise a real holder-backed session, not the raw-pty arm
-  standing in for one.** The existing probes measure a raw pty and tmux; the
-  raw arm is *expected* to be the holder's attached echo path exactly, because
-  by construction there is no process between the app and the master once a
-  viewer is attached — the holder never reads, and the daemon has stepped off.
-  But that is the design's central claim, and a graduation gate that assumes it
-  is measuring nothing. So the load arm runs against sessions actually spawned
-  on the holder transport with a viewer attached, and the raw-pty arm stays as
-  the reference the holder path is expected to match: if the two diverge, the
-  gap is a process in the path that should not be there, and finding it is the
-  entire value of the measurement. The detached path is a separate question the
-  flatness bound does not speak to at all — nobody is typing into a detached
-  session — and the reconciler and drain evidence cover it instead.
+  The probes committed alongside this design —
+  `scripts/diag/tmux-vs-rawpty-idle.py` for the raw-versus-tmux echo comparison
+  and `scripts/diag/tmux-server-contention.py` for the pane-count control — and
+  the in-app instrument behind `enableTerminalLatencyDiagnostic`, which takes
+  one number on both transports through a single seam, remain the tools for
+  re-drawing the latency curve whenever a question about it arises. A design
+  justified by a latency curve has to ship the tool that can re-draw it. They
+  are instruments, not gates.
 
   **"No double-reader violations" is only evidence if something can see one.**
   A double read is silent by construction — each `read()` takes bytes the other
-  reader never sees — so an absence of reports is not an absence of the fault,
-  and gating the design's central safety property on unaided observation would
-  be the weakest step in the argument. Two positive detectors carry that bar
-  instead. An always-on **reader-count assertion**: the daemon holds explicit
-  per-session reader state, and every transition into reading asserts the count
-  was zero, incrementing a violation counter and logging loudly rather than
-  trusting the arbitration to be correct. And a soak-time **continuity
-  canary**: a known sequence written periodically to a session, whose reader
-  checks it arrives unbroken — a gap is byte theft, positively observed rather
-  than inferred. Graduation reads those two numbers.
+  reader never sees — so an absence of corruption reports is not an absence of
+  the fault, and no count of violations from before the detector existed means
+  anything at all. The daemon therefore holds explicit per-session reader state,
+  and every transition into reading checks that the count was zero,
+  incrementing a violation counter and logging loudly rather than trusting the
+  arbitration to be correct; the census reports that count on a timer even when
+  it is zero, so the absence is an observation rather than a silence. This is a
+  standing detector, not soak instrumentation: it keeps the property observable
+  for as long as two readers remain possible, which is as long as a viewer can
+  attach a pty the daemon may also read.
+
+  **The reconcilers holding** is the other field condition: no growth in
+  unclaimed holders, and no accumulating rendezvous litter — neither the socket
+  a SIGKILLed holder could not unlink, nor the lock and log a clean exit leaves
+  beside it.
 - **Graduation.** Flip `Config.ptyHolderDefault` to `true` — a one-line
   change that reaches everyone who never chose while preserving every
   explicit opt-out. That is the transport's only graduation event: its holder

@@ -201,6 +201,17 @@ def test_hold_reason_tells_the_model_not_to_end_its_turn(
     assert "do not end your turn" in reason
 
 
+def test_hold_reason_tells_a_skipping_orchestrator_how_to_finish(
+    dirs: tuple[Path, Path],
+) -> None:
+    """An orchestrator that deliberately spawned no specialists, told only
+    that they are still running, waits out holds for files nobody will write.
+    The reason must name the way out: the result file with its declaration."""
+    reason = _decision(_run(*dirs))["reason"]
+    assert "specialists_skipped" in reason
+    assert "spawned NO specialists" in reason
+
+
 def test_hold_reason_forbids_polling_the_files_it_already_checks(
     dirs: tuple[Path, Path],
 ) -> None:

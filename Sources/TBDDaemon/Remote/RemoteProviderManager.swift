@@ -34,14 +34,21 @@ public actor RemoteProviderManager {
     /// Everything the remote peer-messaging bridge needs, or nil where nothing
     /// may ever be bridged — mock mode, and the many fixtures that construct
     /// this actor for mirror/adoption coverage. Nil is a stronger statement
-    /// than "the flag is off": it means no bridge can be built at all, so the
-    /// gate below is never even consulted.
+    /// than "no repository has the switch on": it means no bridge can be built
+    /// at all, so the gate is never even consulted.
     private let peerBridging: PeerBridgeWiring?
     /// Binds the PRs a session names in `meta.prs` after adoption, at both
     /// convergence points (`apply` and `applyUpsert`). Installed after the
     /// RPC router exists, because the router owns the binding coordinator;
     /// nil in fixtures that do not exercise it, where naming PRs does nothing.
     private var providerPRBinder: ProviderPRBinder?
+    /// Hands every sighting — after deletion suppression, hint intact — to
+    /// remote transcript background sync, which records the hint and decides
+    /// whether the session's cache needs a sync. Installed after the RPC
+    /// router exists, on the same terms as `providerPRBinder`; nil in fixtures
+    /// that do not exercise it, where it does nothing.
+    typealias TranscriptSightingObserver = @Sendable (_ sessions: [RemoteSessionPayload], _ provider: String) async -> Void
+    private var transcriptSightingObserver: TranscriptSightingObserver?
     static let pollInterval: TimeInterval = 60
     /// The capability a provider must declare in `describe` before TBD opens a
     /// `messages` stream against it.
@@ -456,34 +463,68 @@ public actor RemoteProviderManager {
             await supervisor.start()
         }
 
-        // The peer-messaging bridge, behind two gates that answer different
-        // questions. The **flag** (`remote_peer_messaging_enabled`, default
-        // off) is the user's consent: a provider that declares the capability
-        // while it is off gets nothing — no helper spawned, no record
-        // published, no stream opened — because nothing is constructed at all.
-        // The **capability** is the provider's own declaration: an old shim
-        // never declares `messages`, and invoking a verb it cannot implement
-        // would spawn a child that fails on every reconnect forever.
-        //
-        // Read here rather than at boot, alongside the events gate it mirrors,
-        // so both live at the one place a provider's streams are armed.
-        if let peerBridging,
-           describes[config.name]?.capabilities.contains(Self.messagesCapability) == true,
-           await peerBridging.isEnabled(),
-           let bridge = await peerBridging.make(config, contractMajor(for: config.name)) {
-            // Installed before `start()` for the reason the events supervisor
-            // documents above: `start()` suspends this actor's executor, and a
-            // bridge nothing holds is one `stopAll()` could never reach.
-            peerBridges[config.name] = bridge
-            await bridge.start()
-        }
+        await armPeerBridgeIfWanted(for: config)
 
         loops[config.name] = Task { [weak self, clock] in
             while !Task.isCancelled {
                 await self?.pollOnce(provider: config)
+                // After the poll, not before: the poll is what adopts a new
+                // remote lane, and that lane can be the first one in a
+                // repository with peer messaging on.
+                await self?.rearmPeerBridgeIfWanted(for: config)
                 try? await clock.sleep(for: .seconds(Self.pollInterval))
             }
         }
+    }
+
+    /// The peer-messaging bridge, behind two gates that answer different
+    /// questions. The **switch** is the repositories' consent: a provider gets a
+    /// bridge only when at least one repository it runs sessions in has
+    /// `[remote_sessions] peer_messaging = true` in its committed `tbd.toml`.
+    /// Until then it gets nothing — no helper spawned, no record published, no
+    /// stream opened — because nothing is constructed at all. The
+    /// **capability** is the provider's own declaration: an old shim never
+    /// declares `messages`, and invoking a verb it cannot implement would spawn
+    /// a child that fails on every reconnect forever.
+    ///
+    /// Callers hold the reconfigure lock, so a bridge installed here is always
+    /// one `stopAll()` can reach.
+    private func armPeerBridgeIfWanted(for config: RemoteProviderConfig) async {
+        guard let peerBridging,
+              peerBridges[config.name] == nil,
+              describes[config.name]?.capabilities.contains(Self.messagesCapability) == true,
+              await peerBridging.isEnabled(config),
+              let bridge = await peerBridging.make(config, contractMajor(for: config.name))
+        else { return }
+        // Installed before `start()` for the reason the events supervisor
+        // documents in `startLoop`: `start()` suspends this actor's executor,
+        // and a bridge nothing holds is one `stopAll()` could never reach.
+        peerBridges[config.name] = bridge
+        await bridge.start()
+    }
+
+    /// The poll loop's second chance at the gate, so a repository that turns
+    /// peer messaging on — or a provider's first remote lane in a repository
+    /// that already has it on — opens the stream within one poll interval
+    /// rather than at the next daemon restart.
+    ///
+    /// Takes the reconfigure lock like every other path that installs into
+    /// `peerBridges`, and re-checks cancellation under it: `stopAll()` cancels
+    /// this loop without awaiting it, so a tick that was waiting on the lock
+    /// while its loop was torn down must arm nothing.
+    ///
+    /// Only ever opens. A bridge whose repositories all turn the switch off
+    /// stays up with an empty scope and no shadows — the scope tick has
+    /// already retired every announcement and withdrawn every shadow — and
+    /// closes at the next restart.
+    private func rearmPeerBridgeIfWanted(for config: RemoteProviderConfig) async {
+        guard peerBridging != nil, peerBridges[config.name] == nil, !Task.isCancelled,
+              describes[config.name]?.capabilities.contains(Self.messagesCapability) == true
+        else { return }
+        await acquireReconfigureLock()
+        defer { releaseReconfigureLock() }
+        guard !shuttingDown, !Task.isCancelled, loops[config.name] != nil else { return }
+        await armPeerBridgeIfWanted(for: config)
     }
 
     func pollOnce(provider: RemoteProviderConfig) async {
@@ -561,8 +602,12 @@ public actor RemoteProviderManager {
         let sightedSince = requestStartedAt ?? now
         let sightings = suppressingDeleted(
             sessions, provider: provider, sightedSince: sightedSince, now: now)
+        // The mirror stores each payload without its transcript hint — see
+        // `RemoteSessionPayload.withoutTranscriptHint`. Everything else below
+        // keeps the full sightings.
         let outcome = try await db.remoteSessions.applySnapshot(
-            provider: provider, sessions: sightings, complete: complete, now: now)
+            provider: provider, sessions: sightings.map(\.withoutTranscriptHint),
+            complete: complete, now: now)
         // After the mirror, never before: adoption reads the repo association
         // `applySnapshot` just pinned rather than resolving `meta["repo"]` a
         // second time. Unconditional on `outcome.changed` — a session can
@@ -587,6 +632,9 @@ public actor RemoteProviderManager {
         await syncFilingDecisions(
             sessions: sightings, provider: provider,
             requestStartedAt: sightedSince, now: now)
+        // Every sighting, flag or not: the hint store records hints whatever
+        // the flag says, and background sync reads the flag itself.
+        await transcriptSightingObserver?(sightings, provider)
         if complete {
             lastSuccessfulSnapshotAt[provider] = now
             // A live COMPLETE snapshot supersedes whatever the persisted row
@@ -648,8 +696,10 @@ public actor RemoteProviderManager {
         else { return }
         let outcome: SnapshotOutcome
         do {
+            // Hint stripped for the mirror only — see
+            // `RemoteSessionPayload.withoutTranscriptHint`.
             outcome = try await db.remoteSessions.upsertOne(
-                provider: provider, session: session, now: arrivedAt)
+                provider: provider, session: session.withoutTranscriptHint, now: arrivedAt)
         } catch {
             remoteLogger.error(
                 "events upsert failed for \(provider, privacy: .public)/\(session.id, privacy: .public): \(String(describing: error), privacy: .public)"
@@ -666,6 +716,7 @@ public actor RemoteProviderManager {
         await syncFilingDecisions(
             sessions: [session], provider: provider,
             requestStartedAt: arrivedAt, now: arrivedAt)
+        await transcriptSightingObserver?([session], provider)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
         }
@@ -684,6 +735,13 @@ public actor RemoteProviderManager {
     /// snapshot is applied without it.
     func setProviderPRBinder(_ binder: ProviderPRBinder?) {
         providerPRBinder = binder
+    }
+
+    /// Install (or clear) the observer remote transcript background sync reads
+    /// sightings through. Called once at boot, after the RPC router is built
+    /// and before `start()`, so no sighting is processed without it.
+    func setTranscriptSightingObserver(_ observer: TranscriptSightingObserver?) {
+        transcriptSightingObserver = observer
     }
 
     /// Tell subscribers what adoption changed. Both halves reuse the delta a
@@ -1216,20 +1274,30 @@ public actor RemoteProviderManager {
                 report.providers.append(await bridge.status())
                 report.liveShadowsByPID.merge(await bridge.liveShadows()) { current, _ in current }
             } else {
+                let declares = describes[name]?
+                    .capabilities.contains(Self.messagesCapability) == true
+                // Asked only where the answer explains something: a provider
+                // that declares `messages` and has no bridge either has no
+                // switched-on repository, or has one and is waiting for its
+                // next poll tick to open the stream.
+                var wantsStream: Bool?
+                if declares, let peerBridging, let config = providers[name] {
+                    wantsStream = await peerBridging.isEnabled(config)
+                }
                 report.providers.append(PeerProviderBridgeStatus(
                     provider: name,
-                    declaresMessages: describes[name]?
-                        .capabilities.contains(Self.messagesCapability) == true,
-                    bridged: false))
+                    declaresMessages: declares,
+                    bridged: false,
+                    wantsStream: wantsStream))
             }
         }
         return report
     }
 
     /// Test seam: whether a peer bridge currently exists for `name`. The gate
-    /// in `startLoop` has three branches — flag off, capability absent, both
-    /// satisfied — and this is what makes each of them observable without
-    /// spawning anything.
+    /// in `armPeerBridgeIfWanted` has three branches — no switched-on
+    /// repository, capability absent, both satisfied — and this is what makes
+    /// each of them observable without spawning anything.
     func hasPeerBridge(named name: String) -> Bool {
         peerBridges[name] != nil
     }
@@ -1298,9 +1366,19 @@ public actor RemoteProviderManager {
         enrollments[name] == nil ? 0 : 1
     }
 
+    /// Runs `verb` and records a failing result against the provider's
+    /// health.
+    ///
+    /// `healthNeutralErrorCodes` names verb-level outcomes that say nothing
+    /// about the provider itself — `answer`'s `already_resolved`, say, which
+    /// only means the terminal answered first. An exit-1 failure whose
+    /// `error.code` is in the set is returned as usual but not recorded, so
+    /// it cannot mark the provider `.error` and stale every session's
+    /// snapshot. Any other exit class still counts, whatever its code.
     func invoke(
         providerName: String, verb: [String], stdin: Data?,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        healthNeutralErrorCodes: Set<String> = []
     ) async throws -> ProviderResult {
         guard let config = providers[providerName] ?? loadAdHoc(named: providerName) else {
             throw RemoteProviderError.unknownProvider(providerName)
@@ -1313,6 +1391,10 @@ public actor RemoteProviderManager {
             config, verb: verb, stdin: stdin, timeout: timeout,
             contractVersion: contractMajor(for: providerName))
         if let failure = result.failureClass {
+            if failure == .permanent, let code = result.decodedError?.code,
+               healthNeutralErrorCodes.contains(code) {
+                return result
+            }
             recordFailure(provider: providerName, class: failure, result: result)
         }
         return result

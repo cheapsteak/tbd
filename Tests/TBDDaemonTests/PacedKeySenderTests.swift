@@ -1,10 +1,9 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 
-/// Tier 1 — pure logic plus a `TestClock`. No tmux, no daemon, no filesystem.
+/// Tier 1 — pure logic plus an `EventDrivenTestClock`. No tmux, no daemon, no filesystem.
 ///
 /// `PacedKeySender` owns two things a `--keys` payload depends on: the
 /// tokenizer that decides what a keys string even names, and the 150 ms pause
@@ -69,32 +68,46 @@ struct PacedKeySenderTests {
 
     // MARK: - Pacing
 
+    /// On `EventDrivenTestClock`: arming is signalled from inside the sleep's own
+    /// registration, so the handshake parks on a continuation instead of polling
+    /// `TestClock.checkSuspension()`, whose megaYield starved under the
+    /// saturated fast pass (#1069). The second advance is a re-arm, so it too
+    /// must wait for the sleeper rather than advance blind.
     @Test("keys are sent in order, one pause apart, with no pause after the last")
     func pacedInOrder() async throws {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let recorder = KeyRecorder()
         let sender = PacedKeySender(clock: clock)
 
         async let sent: Void = sender.send(["Escape", "C-c", "Enter"]) { recorder.record($0) }
 
         // The first key goes out with no preceding pause.
-        await clock.advanceWhenSuspended(by: PacedKeySender.interKeyPause)
-        await clock.advanceWhenSuspended(by: PacedKeySender.interKeyPause)
+        try await clock.requireAdvanceWhenArmed(by: PacedKeySender.interKeyPause)
+        try await clock.requireAdvanceWhenArmed(by: PacedKeySender.interKeyPause)
         try await sent
 
         #expect(recorder.keys == ["Escape", "C-c", "Enter"])
+        // No pause after the last key: the send returned with nothing armed.
+        #expect(!clock.hasSleeper)
     }
 
     /// The pause is real virtual time, not a yield: a send that has not been
     /// advanced past its pause has typed only the keys before it.
+    ///
+    /// On `EventDrivenTestClock` for the same reason as `pacedInOrder` (#1069):
+    /// `TestClock.waitForSuspension()` polls `checkSuspension()`, whose
+    /// megaYield starved under the saturated fast pass and reported "no task
+    /// was suspended" for a sleep that had armed (#1070). Arming is signalled
+    /// from the sleep's own registration instead, and "Escape" is recorded
+    /// before that sleep is reached, so the snapshot below is exact.
     @Test("an un-advanced pause holds the sequence at the key it reached")
     func pauseHoldsTheSequence() async throws {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let recorder = KeyRecorder()
         let sender = PacedKeySender(clock: clock)
 
         async let sent: Void = sender.send(["Escape", "Enter"]) { recorder.record($0) }
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         #expect(recorder.keys == ["Escape"])
 
         await clock.advance(by: PacedKeySender.interKeyPause)
@@ -107,7 +120,7 @@ struct PacedKeySenderTests {
     @Test("a throwing send stops the sequence and propagates")
     func throwingSendStops() async throws {
         struct PaneGone: Error {}
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let recorder = KeyRecorder()
         let sender = PacedKeySender(clock: clock)
 
@@ -125,7 +138,7 @@ struct PacedKeySenderTests {
 
     @Test("a one-key sequence needs no pause at all")
     func singleKeyNeedsNoPause() async throws {
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let recorder = KeyRecorder()
         try await PacedKeySender(clock: clock).send(["C-c"]) { recorder.record($0) }
         #expect(recorder.keys == ["C-c"])

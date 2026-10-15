@@ -67,14 +67,17 @@ public actor ProfilePickReservations {
 
     /// Prune expired reservations, fold every held one into its profile's
     /// live count, run the picker, and reserve the winner — all without
-    /// suspending.
+    /// suspending. When nothing is eligible the winner is the picker's
+    /// fallback, which places a session just the same and so reserves too.
     ///
     /// - Parameters:
     ///   - candidates: The candidate list as read from the stores.
     ///   - pickTime: The time the picker judges snapshot staleness against.
+    ///   - policy: The usage ceiling and reading-age thresholds.
     public func pickAndReserve(
         candidates: [ProfilePoolCandidate],
-        pickTime: Date
+        pickTime: Date,
+        policy: ProfilePoolPolicy = .standard
     ) -> Outcome {
         let current = now()
         let expiry = current.addingTimeInterval(-ttl)
@@ -90,9 +93,9 @@ public actor ProfilePickReservations {
             copy.liveSessions += held[candidate.profileID] ?? 0
             return copy
         }
-        let decision = ProfilePoolPicker.pick(candidates: adjusted, now: pickTime)
+        let decision = ProfilePoolPicker.pick(candidates: adjusted, now: pickTime, policy: policy)
         var reservationID: UUID?
-        if let chosen = decision.chosen {
+        if let chosen = decision.chosen ?? decision.fallback?.profileID {
             let id = UUID()
             reservations.append(Reservation(id: id, profileID: chosen, reservedAt: current))
             reservationID = id

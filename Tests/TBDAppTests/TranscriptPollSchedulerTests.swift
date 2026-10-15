@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 @testable import TBDApp
@@ -78,7 +77,7 @@ struct TranscriptPollSchedulerTests {
     /// session nobody is watching.
     @Test("the last holder leaving disarms the session's retire alarm; an earlier one does not")
     func onlyTheLastHolderDisarmsTheRetireAlarm() async {
-        let scheduler = TranscriptPollScheduler(source: TranscriptSource(), clock: TestClock())
+        let scheduler = TranscriptPollScheduler(source: TranscriptSource(), clock: EventDrivenTestClock())
         let first = TranscriptPaneToken()
         let second = TranscriptPaneToken()
         await scheduler.register(
@@ -458,7 +457,7 @@ struct TranscriptPollSchedulerTests {
 /// stamps what it reads with an instant the provisional row's retire deadlines
 /// are later measured against.
 ///
-/// Its own suite because it drives a real poll task on a `TestClock`, which
+/// Its own suite because it drives a real poll task on an `EventDrivenTestClock`, which
 /// wants the clock-driven traits the registration tests above have no use for.
 @Suite("TranscriptPollSchedulerStream", .clockDriven, .serialized)
 struct TranscriptPollSchedulerStreamTests {
@@ -490,7 +489,7 @@ struct TranscriptPollSchedulerStreamTests {
         let files = try Self.files()
         let stamp = Date(timeIntervalSince1970: 1_700_000_000)
         let source = TranscriptSource()
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let scheduler = TranscriptPollScheduler(
             source: source, now: { stamp }, clock: clock)
 
@@ -498,7 +497,7 @@ struct TranscriptPollSchedulerStreamTests {
         await scheduler.register(
             sessionID: "s1", path: files.transcript, streamPath: files.stream,
             tier: .foreground, token: pane)
-        await clock.advanceWhenSuspended(by: .milliseconds(100))
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(100))
 
         let tailed = await pollUntilTrue(timeout: .seconds(10)) {
             await source.provisional(sessionID: "s1") != nil

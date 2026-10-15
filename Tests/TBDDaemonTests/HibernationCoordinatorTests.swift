@@ -1,6 +1,6 @@
-import Clocks
 import Testing
 import Foundation
+import GRDB
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -19,14 +19,13 @@ private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
     )
 }
 
-/// `.clockDriven` is applied at SUITE level even though only the three
-/// park-poll tests below drive a `TestClock`. The trait is a four-minute time
+/// `.clockDriven` is applied at SUITE level even though only the park-poll
+/// tests below drive an `EventDrivenTestClock`. The trait is a four-minute time
 /// limit — a hang-catcher, not a perf budget — so it costs the other tests
 /// nothing and it catches the one failure mode virtual time introduces here (a
-/// `TestClock` sleep nobody advances hangs forever instead of going red).
-/// `.serialized` is deliberately NOT applied: three clock-driven tests out of
-/// ~35 don't justify serializing the whole suite, and it stays available as
-/// the documented escape hatch if the arming handshake ever flakes under load.
+/// test-clock sleep nobody advances hangs forever instead of going red).
+/// `.serialized` is deliberately NOT applied: a handful of clock-driven tests
+/// out of ~35 don't justify serializing the whole suite.
 @Suite("HibernationCoordinator", .clockDriven)
 struct HibernationCoordinatorTests {
 
@@ -63,7 +62,7 @@ struct HibernationCoordinatorTests {
     private func coordinator(_ db: TBDDatabase) -> HibernationCoordinator {
         HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
     }
 
     // MARK: - Manual hibernate
@@ -91,6 +90,7 @@ struct HibernationCoordinatorTests {
             db: db,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
         let parked = try #require(try await db.terminals.get(id: terminalID))
@@ -146,6 +146,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let router = RPCRouter(
             db: db,
@@ -218,6 +219,7 @@ struct HibernationCoordinatorTests {
             db: db,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let router = RPCRouter(
             db: db,
@@ -276,6 +278,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -324,6 +327,7 @@ struct HibernationCoordinatorTests {
             tmux: failingTmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         #expect(await coordinator.manualHibernate(terminalID: terminalID) != .ok)
@@ -396,6 +400,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         #expect(await coordinator.manualHibernate(terminalID: terminalID) != .ok)
@@ -438,7 +443,7 @@ struct HibernationCoordinatorTests {
     @Test func wakeCannotOvertakeStagedHibernation() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let recorded = RecordedTmuxCommands()
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: recorded.append,
@@ -450,16 +455,17 @@ struct HibernationCoordinatorTests {
             exitPollAttempts: 1,
             exitPollInterval: .milliseconds(200),
             clock: clock,
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         let hibernate = Task {
             await coordinator.manualHibernate(terminalID: terminalID)
         }
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
 
         #expect(await coordinator.wake(terminalID: terminalID) == .inFlight)
-        await clock.advanceWhenSuspended(by: .milliseconds(200))
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(200))
         #expect(await hibernate.value == .ok)
         #expect(try await db.terminals.get(id: terminalID)?.isParked == true)
         let respawns = recorded.snapshot().filter { $0.contains("respawn-window") }
@@ -572,6 +578,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let serverLock = HibernationServerLockGate()
         let holder = serverLock.hold(tmux, server: "tbd-hib")
@@ -621,6 +628,7 @@ struct HibernationCoordinatorTests {
             now: dates.provider,
             exitPollAttempts: 1,
             exitPollInterval: .milliseconds(1),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: ActuationLog(path: try sweepLogPath()))
 
         await coord.sweep()
@@ -676,6 +684,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let serverLock = HibernationServerLockGate()
         let holder = serverLock.hold(tmux, server: "tbd-hib")
@@ -717,6 +726,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coord.setInputActivity(inputActivity)
         let serverLock = HibernationServerLockGate()
@@ -767,6 +777,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let serverLock = HibernationServerLockGate()
         let holder = serverLock.hold(tmux, server: "tbd-hib")
@@ -847,13 +858,13 @@ struct HibernationCoordinatorTests {
         // dryRun default paneCurrentCommand is "zsh" (not claude) → poll sees the
         // process leave immediately after `/exit`.
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), clock: clock, actuationLog: makeTestActuationLog())
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), clock: clock, sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let park = Task { await coord.manualHibernate(terminalID: terminalID) }
         // Unblocks the single verify-exit poll attempt.
-        await clock.advanceWhenSuspended(by: coord.exitPollInterval)
+        try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
         let result = await park.value
 
         #expect(result == .ok)
@@ -889,16 +900,16 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" }  // claude reports its version as pane_current_command
         )
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let pollInterval: Duration = .milliseconds(200)
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            exitPollAttempts: 3, exitPollInterval: pollInterval, clock: clock, actuationLog: makeTestActuationLog())
+            exitPollAttempts: 3, exitPollInterval: pollInterval, clock: clock, sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let park = Task { await coord.manualHibernate(terminalID: terminalID) }
         // Exhaust the whole poll window: one advance per attempt.
         for _ in 0..<3 {
-            await clock.advanceWhenSuspended(by: pollInterval)
+            try await clock.requireAdvanceWhenArmed(by: pollInterval)
         }
         let result = await park.value
 
@@ -921,9 +932,12 @@ struct HibernationCoordinatorTests {
     /// (SIGTERM while claude is still exiting) and never escalating (a wedged
     /// claude polled forever).
     ///
-    /// The "hasn't escalated yet" half is proved by `waitForSuspension()`: the
-    /// coordinator is parked on attempt 3's sleep, which means it completed
-    /// attempts 1–2, observed claude both times, and did NOT leave the loop.
+    /// The "hasn't escalated yet" half waits until the coordinator is either
+    /// parked on attempt 3's sleep or has sent the interrupt, then asserts it
+    /// is the former: parked means it completed attempts 1–2, observed claude
+    /// both times, and did NOT leave the loop. Reading straight after the
+    /// advance would prove nothing, because `advance` resumes attempt 2's
+    /// sleeper without running what follows it.
     @Test func escalatesOnlyAfterExactlyTheConfiguredAttemptCount() async throws {
         let (db, _, terminalID) = try await setup(activityState: .idle)
         let recorded = RecordedTmuxCommands()
@@ -932,12 +946,12 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" }  // still claude, every attempt
         )
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let pollInterval: Duration = .milliseconds(200)
         let attempts = 3
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            exitPollAttempts: attempts, exitPollInterval: pollInterval, clock: clock, actuationLog: makeTestActuationLog())
+            exitPollAttempts: attempts, exitPollInterval: pollInterval, clock: clock, sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         func interruptSent() -> Bool {
             recorded.snapshot()
                 .map { $0.joined(separator: " ") }
@@ -948,14 +962,17 @@ struct HibernationCoordinatorTests {
 
         // N-1 attempts: still inside the poll window.
         for _ in 0..<(attempts - 1) {
-            await clock.advanceWhenSuspended(by: pollInterval)
+            try await clock.requireAdvanceWhenArmed(by: pollInterval)
         }
-        await clock.waitForSuspension()  // armed for attempt N ⇒ N-1 are done
+        // Armed for attempt N ⇒ N-1 are done; an early escalation shows as C-c.
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            clock.hasSleeper || interruptSent()
+        } == .satisfied)
         #expect(!interruptSent(),
                 "must not escalate before the poll window is exhausted; got: \(recorded.snapshot())")
 
         // The Nth (final) attempt: the window is exhausted, so escalate.
-        await clock.advanceWhenSuspended(by: pollInterval)
+        try await clock.requireAdvanceWhenArmed(by: pollInterval)
         let result = await park.value
         #expect(result == .ok)
         #expect(interruptSent(),
@@ -1003,7 +1020,7 @@ struct HibernationCoordinatorTests {
         // same hook in dryRun) and must persist it into `suspendedSnapshot`.
         let tmux = TmuxManager(dryRun: true, dryRunCapturePane: { _, _ in "FROZEN PANE" })
         let coord = HibernationCoordinator(
-            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let result = await coord.manualHibernate(terminalID: terminalID)
         #expect(result == .ok)
@@ -1066,7 +1083,7 @@ struct HibernationCoordinatorTests {
         let (db, _, terminalID) = try await setup()
         let recorded = RecordedTmuxCommands()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         _ = await coord.manualHibernate(terminalID: terminalID)
         #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
@@ -1124,7 +1141,7 @@ struct HibernationCoordinatorTests {
         let (db, _, terminalID) = try await setup()
         let recorded = RecordedTmuxCommands()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         let result = await coord.wake(terminalID: terminalID)
         #expect(result == .notHibernated)
         #expect(recorded.snapshot().isEmpty,
@@ -1142,6 +1159,7 @@ struct HibernationCoordinatorTests {
         let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.wake(terminalID: terminalID)
                 == .sessionGone(paneID: "%0", detail: .paneMissing))
@@ -1156,6 +1174,7 @@ struct HibernationCoordinatorTests {
             dryRunPaneSendTarget: { _, _ in .dead(terminalID: terminalID.uuidString) })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.wake(terminalID: terminalID)
                 == .sessionGone(paneID: "%0", detail: .processExited))
@@ -1170,6 +1189,7 @@ struct HibernationCoordinatorTests {
                                dryRunPaneSendTarget: { _, _ in .live(terminalID: stranger) })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.wake(terminalID: terminalID)
                 == .sessionGone(paneID: "%0",
@@ -1186,6 +1206,7 @@ struct HibernationCoordinatorTests {
                                dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         _ = await coord.wake(terminalID: terminalID)
         let joined = recorded.snapshot().map { $0.joined(separator: " ") }
@@ -1207,6 +1228,7 @@ struct HibernationCoordinatorTests {
         })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
     }
@@ -1220,6 +1242,7 @@ struct HibernationCoordinatorTests {
         let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: { _, _ in .unreachable })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let result = await coord.wake(terminalID: terminalID)
         #expect(result == .paneUnreadable(paneID: "%0", server: "tbd-hib"))
@@ -1251,6 +1274,7 @@ struct HibernationCoordinatorTests {
                                dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
     }
@@ -1264,6 +1288,7 @@ struct HibernationCoordinatorTests {
         })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         #expect(await coord.wake(terminalID: terminalID) == .notHibernated)
     }
@@ -1277,9 +1302,46 @@ struct HibernationCoordinatorTests {
                                dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         #expect((await coord.wake(terminalID: terminalID)).isOk)
         #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
+    }
+
+    /// A wake whose replacement agent launched but whose row could not be
+    /// un-parked still launched a session under its `--name`, so the title
+    /// store must hold that name as given — releasing it would put back an
+    /// entry the running session no longer carries.
+    @Test func wakeThatLaunchedButCouldNotUnparkConfirmsItsTitle() async throws {
+        let (db, worktreeID, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: """
+                CREATE TRIGGER reject_unpark BEFORE UPDATE ON terminal
+                WHEN OLD.hibernatedAt IS NOT NULL AND NEW.hibernatedAt IS NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'unpark rejected');
+                END;
+                """)
+        }
+        let titles = ClaudeSessionTitleStore()
+        await titles.record(terminalID: terminalID, worktreeID: worktreeID, title: "before-wake")
+        let tmux = TmuxManager(dryRun: true, dryRunWindowIsDead: { _ in true },
+                               dryRunPaneSendTarget: { _, _ in .absent })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: titles,
+            actuationLog: makeTestActuationLog())
+
+        let result = await coord.wake(terminalID: terminalID)
+        guard case .respawnFailed(let reason) = result, reason.contains("launched") else {
+            Issue.record("expected the launched-but-still-parked failure, got \(result)")
+            return
+        }
+        // The worktree's display name, the only Claude terminal's title.
+        #expect(await titles.lastApplied(terminalID: terminalID) == "wt",
+                "a wake that launched under its --name did not keep that name")
+        #expect(await titles.isReserved(terminalID: terminalID) == false)
     }
 
     @Test func wakeUnknownTerminalNotFound() async throws {
@@ -1319,7 +1381,7 @@ struct HibernationCoordinatorTests {
         let (db, _, terminalID) = try await setup()
         let recorded = RecordedTmuxCommands()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         // Legacy park: only suspendedAt set, hibernatedAt nil.
         try await db.terminals.setSuspended(id: terminalID, sessionID: "sess-1")
@@ -1366,6 +1428,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 9999),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         #expect(await coord.wake(terminalID: terminalID) == .paneBusy(pid: 9999))
@@ -1390,6 +1453,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 4242),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         #expect(await coord.wake(terminalID: terminalID).isOk)
@@ -1412,6 +1476,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
             paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 9999),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         #expect(await coord.wake(terminalID: terminalID).isOk)
@@ -1434,7 +1499,7 @@ struct HibernationCoordinatorTests {
         let recorded = RecordedTmuxCommands()
         let serverHookCalls = RecordedTmuxCommands()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         await coord.setOnServerCreated { server in serverHookCalls.append([server]) }
 
         let wake = await coord.wake(terminalID: terminalID)
@@ -1467,7 +1532,7 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunWindowIsDead: { $0 == "@0" }
         )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         await coord.setOnServerCreated { server in serverHookCalls.append([server]) }
 
         let wake = await coord.wake(terminalID: terminalID)
@@ -1510,12 +1575,13 @@ struct HibernationCoordinatorTests {
             db: db,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         let wake = await coord.wake(terminalID: terminalID)
 
-        #expect(wake.isOk)
         let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(wake == .ok(sessionIncarnationID: after.sessionIncarnationID))
         #expect(!after.isParked)
         #expect(after.tmuxWindowID == "@mock-0")
         #expect(after.tmuxPaneID == "%mock-0")
@@ -1551,6 +1617,7 @@ struct HibernationCoordinatorTests {
             db: db,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         let wake = await coord.wake(terminalID: terminalID)
@@ -1713,6 +1780,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         recorder.arm(matching: "claude --resume sess-1")
@@ -1759,7 +1827,7 @@ struct HibernationCoordinatorTests {
         let recorded = RecordedTmuxCommands()
         // No dryRunWindowIsDead: the window EXISTS — ownership must win.
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let wake = await coord.wake(terminalID: terminalID)
         #expect(wake.isOk)
@@ -1790,7 +1858,7 @@ struct HibernationCoordinatorTests {
         )
         let recorded = RecordedTmuxCommands()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let wake = await coord.wake(terminalID: terminalID)
         #expect(wake.isOk)
@@ -1825,6 +1893,7 @@ struct HibernationCoordinatorTests {
             tmux: tmux,
             subscriptions: deltas.subscriptions(),
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let databaseGate = BlockingDatabaseWriter()
         let heldWriter = databaseGate.hold(db)
@@ -1910,7 +1979,7 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunWindowIsDead: { _ in true }
         )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         async let wakeA = coord.wake(terminalID: terminalA)
         async let wakeB = coord.wake(terminalID: terminalB.id)
@@ -1974,7 +2043,7 @@ struct HibernationCoordinatorTests {
             dryRunRecorder: { recorded.append($0) },
             dryRunWindowIsDead: { _ in true }
         )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         async let wakeA = coord.wake(terminalID: terminalA.id)
         async let wakeB = coord.wake(terminalID: terminalB.id)
@@ -2060,7 +2129,7 @@ struct HibernationCoordinatorTests {
             dryRunWindowIsDead: { $0 == "@0" },
             dryRunCreateWindowError: { _ in TmuxError.unexpectedOutput("no server running") }
         )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let wake = await coord.wake(terminalID: terminalID)
         guard case .respawnFailed(let reason) = wake else {
@@ -2086,6 +2155,7 @@ struct HibernationCoordinatorTests {
             db: db,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         recorder.arm(matching: "new-window")
@@ -2117,7 +2187,7 @@ struct HibernationCoordinatorTests {
             dryRun: true,
             dryRunRespawnWindowError: { $0 == "@0" ? TmuxError.unexpectedOutput("pane died") : nil }
         )
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let wake = await coord.wake(terminalID: terminalID)
         guard case .respawnFailed(let reason) = wake else {
@@ -2147,6 +2217,7 @@ struct HibernationCoordinatorTests {
             db: db,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         guard case .respawnFailed = await coord.wake(terminalID: terminalID) else {
@@ -2186,6 +2257,7 @@ struct HibernationCoordinatorTests {
             db: db,
             tmux: tmux,
             configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         guard case .respawnFailed = await coord.wake(terminalID: terminalID) else {
@@ -2233,6 +2305,7 @@ struct HibernationCoordinatorTests {
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: host
             ),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog()
         )
         let wake = await coord.wake(terminalID: terminalID)
@@ -2261,7 +2334,7 @@ struct HibernationCoordinatorTests {
             modelProfileResolver: ModelProfileResolver(
                 profiles: db.modelProfiles, repos: db.repos, config: db.config,
                 keychain: { _ in nil }),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
     }
 
     /// Wake refuses when the pinned profile ID no longer exists, returning
@@ -2337,6 +2410,7 @@ struct HibernationCoordinatorTests {
             modelProfileResolver: wakeResolver,
             subscriptions: subscriptions,
             configDirManager: configDirs,
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let swapRouter = RPCRouter(
             db: db,
@@ -2405,6 +2479,7 @@ struct HibernationCoordinatorTests {
             modelProfileResolver: wakeResolver,
             subscriptions: subscriptions,
             configDirManager: configDirs,
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         let swapRouter = RPCRouter(
             db: db,
@@ -2484,6 +2559,7 @@ struct HibernationCoordinatorTests {
             dryRunWindowPresence: { _, _ in .unknown })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
 
         let result = await coord.wake(terminalID: terminalID)
@@ -2520,7 +2596,7 @@ struct HibernationCoordinatorTests {
             dryRun: true,
             dryRunPaneCurrentCommand: { _, _ in "1.2.3" },
             dryRunPaneSendTarget: { _, _ in .live(terminalID: terminalID.uuidString) })
-        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+        let coord = HibernationCoordinator(db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
         let reconciled = try #require(try await db.terminals.get(id: terminalID))
@@ -2610,6 +2686,7 @@ struct HibernationCoordinatorTests {
             dryRunPaneSendTarget: { _, _ in .live(terminalID: UUID().uuidString) })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
@@ -2635,6 +2712,7 @@ struct HibernationCoordinatorTests {
             dryRunPaneSendTarget: { _, _ in .live(terminalID: nil) })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
@@ -2658,6 +2736,7 @@ struct HibernationCoordinatorTests {
             dryRunPaneSendTarget: { _, _ in .dead(terminalID: UUID().uuidString) })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
@@ -2678,6 +2757,7 @@ struct HibernationCoordinatorTests {
             dryRunPaneSendTarget: { _, _ in .absent })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
@@ -2701,6 +2781,7 @@ struct HibernationCoordinatorTests {
             })
         let coord = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coord.reconcileOnStartup()
 
@@ -2735,7 +2816,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(
             db: db, tmux: tmux,
             subscriptions: recorder.subscriptions(),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let result = await coord.manualHibernate(terminalID: terminalID)
         #expect(result == .ok)
@@ -2757,7 +2838,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(
             db: db, tmux: tmux,
             subscriptions: recorder.subscriptions(),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         _ = await coord.manualHibernate(terminalID: terminalID)
         let wake = await coord.wake(terminalID: terminalID)
@@ -2781,7 +2862,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             subscriptions: recorder.subscriptions(),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let ok = await coord.setKeepWarm(terminalID: terminalID, keepWarm: true)
         #expect(ok)
@@ -2803,7 +2884,7 @@ struct HibernationCoordinatorTests {
         let coord = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             subscriptions: recorder.subscriptions(),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
 
         let ok = await coord.setKeepWarm(terminalID: terminalID, keepWarm: true)
         #expect(ok)
@@ -2859,6 +2940,7 @@ struct HibernationCoordinatorTests {
             configDirManager: isolatedConfigDirManager(),
             now: dates.provider,
             exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: ActuationLog(path: logPath))
     }
 

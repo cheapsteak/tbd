@@ -127,7 +127,19 @@ struct CapacityContractTests {
             profiles: [], profileBalancingEnabled: true))
         let onBalancing = try #require(on["balancing"] as? [String: Any])
         #expect(onBalancing["enabled"] as? Bool == true)
-        #expect(onBalancing.count == 1)
+        // The thresholds in effect ride along: the ceiling always (the shipped
+        // value when unset), the reading age only when one is set.
+        #expect(onBalancing["usageCeilingPercent"] as? Int == ProfilePoolPolicy.defaultUsageCeilingPercent)
+        #expect(onBalancing["maxReadingAgeSeconds"] == nil)
+        #expect(onBalancing.count == 2)
+
+        var tuned = ModelProfileListResult(profiles: [], profileBalancingEnabled: true)
+        tuned.profileBalancingUsageCeilingPercent = 90
+        tuned.profileBalancingMaxReadingAgeSeconds = 1800
+        let tunedBalancing = try #require(
+            try composedProfileListJSON(tuned)["balancing"] as? [String: Any])
+        #expect(tunedBalancing["usageCeilingPercent"] as? Int == 90)
+        #expect(tunedBalancing["maxReadingAgeSeconds"] as? Int == 1800)
 
         let off = try composedProfileListJSON(ModelProfileListResult(
             profiles: [], profileBalancingEnabled: false))

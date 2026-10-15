@@ -68,6 +68,67 @@ struct RemoteTranscriptCachedSnapshotTests {
         #expect(transcript.path.hasPrefix(home.path), "the path must follow TBD_HOME")
     }
 
+    @Test("a cache file seeds state.json's head; hasEarlier waits for a sync even with a before cursor")
+    func seedsHeadButNotHasEarlier() throws {
+        defer { cleanUp() }
+        _ = try writeCache(try fixtureText(), generation: 2)
+        let stateURL = directory.appendingPathComponent(TBDConstants.remoteTranscriptStateFileName)
+
+        try #"{"generation":2,"length":0,"head":3,"before":"b-1"}"#
+            .write(to: stateURL, atomically: true, encoding: .utf8)
+        let seed = try #require(
+            RemoteTranscriptSyncSnapshot.cached(for: Self.selection, environment: environment))
+        #expect(seed.generation == 2)
+        #expect(seed.head == 3)
+        #expect(seed.hasEarlier == false, "only a sync may say there is earlier history")
+        #expect(seed.earlier == .idle)
+    }
+
+    /// With the flag off the daemon refuses `remote.transcriptLoadEarlier`, so
+    /// a pane that loaded on the strength of a `before` left on disk would show
+    /// a failed load. Before any sync answers, the pane must start no load and
+    /// show no header — even at the top of the table.
+    @Test("a cache with a before cursor but no sync yet shows no overlay and starts no load")
+    func beforeCursorWithoutASyncDoesNothing() async throws {
+        defer { cleanUp() }
+        _ = try writeCache(try fixtureText(), generation: 2)
+        try #"{"generation":2,"length":0,"head":3,"before":"b-1"}"#.write(
+            to: directory.appendingPathComponent(TBDConstants.remoteTranscriptStateFileName),
+            atomically: true, encoding: .utf8)
+        let loads = FireRecorder<Int>()
+        let driver = RemoteTranscriptSyncDriver(
+            selection: Self.selection,
+            sync: { _ in throw CancellationError() },
+            loadEarlier: { _ in
+                loads.record(1)
+                return RemoteTranscriptLoadEarlierResult(
+                    generation: 2, head: 4, reachedStart: false, expired: false)
+            },
+            initialSnapshot: .cached(for: Self.selection, environment: environment),
+            clock: EventDrivenTestClock())
+        defer { driver.stop() }
+
+        driver.noteNearTop(true)
+        driver.loadEarlier(trigger: .button)
+        await settle()
+        #expect(loads.values.isEmpty, "a load started before any sync reported hasEarlier")
+        #expect(driver.snapshot.earlier == .idle)
+        #expect(RemoteTranscriptEarlierHeader.Content.resolve(
+            state: driver.snapshot.earlier, hasEarlier: driver.snapshot.hasEarlier, nearTop: true)
+            == .hidden)
+    }
+
+    @Test("a state.json from before head existed seeds head 0")
+    func olderStateSeedsHeadZero() throws {
+        defer { cleanUp() }
+        _ = try writeCache(try fixtureText(), generation: 4)
+        let seed = try #require(
+            RemoteTranscriptSyncSnapshot.cached(for: Self.selection, environment: environment))
+        #expect(seed.generation == 4)
+        #expect(seed.head == 0)
+        #expect(seed.hasEarlier == false)
+    }
+
     @Test("a missing or unreadable state.json seeds generation 0; the first sync's generation decides")
     func unreadableStateSeedsZero() throws {
         defer { cleanUp() }

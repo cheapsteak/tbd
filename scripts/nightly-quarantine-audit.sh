@@ -382,7 +382,7 @@ analyze() {
     echo "### Findings (${#findings[@]})"
     echo
     local f
-    for f in "${findings[@]}"; do echo "- $f"; echo; done
+    for f in "${findings[@]}"; do echo "- $f"; echo; done  # non-empty: the else of the length check
   fi
   echo
 
@@ -397,7 +397,7 @@ analyze() {
     echo "### Informational (${#informational[@]}) — not findings"
     echo
     local i
-    for i in "${informational[@]}"; do echo "- $i"; echo; done
+    for i in "${informational[@]}"; do echo "- $i"; echo; done  # non-empty: inside the length check
   fi
 
   [[ ${#findings[@]} -eq 0 ]]

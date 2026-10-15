@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import TBDShared
 import Testing
@@ -10,11 +9,12 @@ import TestSupport
 /// **detached → write the pty directly; attached → inject through the app and
 /// wait for its answer; no usable answer before the deadline → write anyway.**
 ///
-/// Every deadline here runs on a `TestClock`, so nothing sleeps in real time.
-/// The only real-time waits are `waitFor` polls for a frame to have reached the
-/// harness — the scheduling handshake that `Tests/CLAUDE.md`'s clock-seam note
-/// sanctions, because `Task { await courier.deliver(…) }` only *schedules* the
-/// call.
+/// Every deadline here runs on an `EventDrivenTestClock`, so nothing sleeps in
+/// real time. The only real-time waits are `waitFor` polls for a frame to have
+/// reached the harness — the scheduling handshake that `Tests/CLAUDE.md`'s
+/// clock-seam note sanctions, because `Task { await courier.deliver(…) }` only
+/// *schedules* the call — and one `settle()` before a negative read, because
+/// `advance` returns before a resumed sleeper has run.
 ///
 /// `.clockDriven` at suite level: most of these tests await a value that a
 /// broken courier would never produce, so each needs its own hang bound.
@@ -123,7 +123,7 @@ struct HolderInjectionRoutingTests {
     func detachedSessionIsWrittenDirectly() async throws {
         let harness = Harness()
         harness.attachment = nil
-        let courier = harness.makeCourier(clock: TestClock())
+        let courier = harness.makeCourier(clock: EventDrivenTestClock())
 
         let outcome = await courier.deliver(
             terminalID: UUID(), bytes: Data("echo hi\r".utf8))
@@ -137,7 +137,7 @@ struct HolderInjectionRoutingTests {
     func attachedSessionIsInjectedThroughTheApp() async throws {
         let harness = Harness()
         harness.attachment = 7
-        let courier = harness.makeCourier(clock: TestClock())
+        let courier = harness.makeCourier(clock: EventDrivenTestClock())
         let terminalID = UUID()
 
         let delivery = Task { await courier.deliver(terminalID: terminalID, bytes: Data("hi\r".utf8)) }
@@ -169,13 +169,13 @@ struct HolderInjectionRoutingTests {
     func missingAckFallsBackToADirectWrite() async throws {
         let harness = Harness()
         harness.attachment = 7
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
 
-        await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
+        try await clock.requireAdvanceWhenArmed(by: HolderInputTiming.injectionAckDeadline)
 
         #expect(await delivery.value == .daemonWrote(.ackDeadlineElapsed))
         #expect(harness.directWrites == [Data("prompt".utf8)],
@@ -202,15 +202,21 @@ struct HolderInjectionRoutingTests {
     func deadlineIsNotReachedEarly() async throws {
         let harness = Harness()
         harness.attachment = 7
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
         let injection = try harness.decodeOnlyInjection()
 
-        await clock.advanceWhenSuspended(
+        try await clock.requireAdvanceWhenArmed(
             by: HolderInputTiming.injectionAckDeadline - .milliseconds(1))
+        // `advance` returns before any sleeper it resumed has run, so a
+        // deadline that had already elapsed would not yet have expired the
+        // injection here. Settling first lets a too-short deadline land before
+        // the ack does; without it the ack would win the race and this test
+        // would pass whatever the deadline.
+        await settle()
         courier.acknowledge(
             SidecarInjectionAck(injectionID: injection.header.injectionID, written: true))
 
@@ -234,7 +240,7 @@ struct HolderInjectionRoutingTests {
         // A clock that is never advanced: if this path waited for the deadline
         // instead of acting on the ack, the test would hang out to
         // `.clockDriven` rather than pass for the wrong reason.
-        let courier = harness.makeCourier(clock: TestClock())
+        let courier = harness.makeCourier(clock: EventDrivenTestClock())
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
@@ -254,14 +260,14 @@ struct HolderInjectionRoutingTests {
     func lateAckIsObservedAndNotSuppressed() async throws {
         let harness = Harness()
         harness.attachment = 7
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
         let injection = try harness.decodeOnlyInjection()
 
-        await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
+        try await clock.requireAdvanceWhenArmed(by: HolderInputTiming.injectionAckDeadline)
         #expect(await delivery.value == .daemonWrote(.ackDeadlineElapsed))
         #expect(harness.directWrites.count == 1)
 
@@ -285,7 +291,7 @@ struct HolderInjectionRoutingTests {
         harness.sendFrameError = SidecarGone()
         // Never advanced: reaching the deadline for a frame that was never sent
         // would be five wasted seconds on every send to a dead sidecar.
-        let courier = harness.makeCourier(clock: TestClock())
+        let courier = harness.makeCourier(clock: EventDrivenTestClock())
 
         let outcome = await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8))
 
@@ -315,12 +321,12 @@ struct HolderInjectionRoutingTests {
         let harness = Harness()
         harness.attachment = 7
         harness.directWriteError = NoDescriptor()
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let courier = harness.makeCourier(clock: clock)
 
         let delivery = Task { await courier.deliver(terminalID: UUID(), bytes: Data("prompt".utf8)) }
         try await waitFor("the injection frame to reach the sidecar") { harness.frames.count == 1 }
-        await clock.advanceWhenSuspended(by: HolderInputTiming.injectionAckDeadline)
+        try await clock.requireAdvanceWhenArmed(by: HolderInputTiming.injectionAckDeadline)
 
         guard case .notDelivered(let reason) = await delivery.value else {
             Issue.record(
@@ -396,7 +402,7 @@ struct HolderInjectionRoutingTests {
     func oversizeInjectionIsRefusedAtTheCap() async throws {
         let harness = Harness()
         harness.attachment = 7
-        let courier = harness.makeCourier(clock: TestClock())
+        let courier = harness.makeCourier(clock: EventDrivenTestClock())
         let overCap = Data(
             repeating: 0x61, count: HolderInjectionCourier.maxInjectionBytes + 1)
 

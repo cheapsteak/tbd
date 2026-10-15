@@ -141,7 +141,7 @@ extension RPCRouter {
         return nil
     }
 
-    private static func staleSnapshotMutationResponse(provider: String) -> RPCResponse {
+    static func staleSnapshotMutationResponse(provider: String) -> RPCResponse {
         RPCResponse(error: "provider '\(provider)' inventory is stale; refresh must recover before changing remote sessions")
     }
 
@@ -172,7 +172,7 @@ extension RPCRouter {
     /// Turns a provider timeout into a message the app can show, instead of
     /// letting `ProviderRunError.timeout`'s raw enum description
     /// (`timeout(verb: "stop")`) leak through the router's catch-all.
-    private static func friendlyMessage(for error: ProviderRunError, provider: String) -> String {
+    static func friendlyMessage(for error: ProviderRunError, provider: String) -> String {
         switch error {
         case .timeout(let verb):
             return "provider '\(provider)' timed out running '\(verb)'"
@@ -359,7 +359,7 @@ extension RPCRouter {
     /// Delegates to the manager rather than deriving it a second time, so
     /// this gate and the remote lane's archive/revive routing can never
     /// disagree about what a provider declared.
-    private func declaredCapabilities(_ manager: RemoteProviderManager, provider: String) async -> Set<String> {
+    func declaredCapabilities(_ manager: RemoteProviderManager, provider: String) async -> Set<String> {
         await manager.declaredCapabilities(provider: provider)
     }
 
@@ -368,7 +368,7 @@ extension RPCRouter {
     /// defaults to the `<verb> <id>` shape the session-addressed verbs use;
     /// the exchange verbs pass their own, because `transcript import` takes no id
     /// and `transcript recall` takes a key rather than one.
-    private static func missingCapabilityResponse(
+    static func missingCapabilityResponse(
         provider: String, capability: String, section: String? = nil
     ) -> RPCResponse {
         RPCResponse(error:
@@ -914,6 +914,77 @@ extension RPCRouter {
         return response
     }
 
+    /// `remote.transcriptLoadEarlier` — one page of history above the cache,
+    /// fetched with `transcript read <id> --before <before> --tail 12` and
+    /// prepended on the session's lane
+    /// (`docs/specs/2026-09-25-remote-session-transcript-design.md` § RPCs).
+    ///
+    /// Gate order: remote backends, the cloud gate, the live-sync flag (read
+    /// now, never cached), `transcript.tail`, dismissal, then a cache holding a
+    /// `before`. `RemoteTranscriptSync.loadEarlier` checks none of these
+    /// itself.
+    ///
+    /// The cache's `generation` is noted here, as the request arrives. When a
+    /// sync queued ahead of the load on the lane changes it, the load makes no
+    /// provider call and the result carries the new generation and head with
+    /// `reachedStart` false — the pane handles it as any generation change.
+    func handleRemoteTranscriptLoadEarlier(_ paramsData: Data) async throws -> RPCResponse {
+        guard let manager = try await remoteGate(), let sync = remoteTranscriptSync else {
+            return Self.remoteBackendsDisabledResponse
+        }
+        let params = try decoder.decode(RemoteTranscriptLoadEarlierParams.self, from: paramsData)
+        if let refusal = try await cloudGate(provider: params.provider) { return refusal }
+        guard try await db.config.get().remoteTranscriptLiveSyncEnabled else {
+            return RPCResponse(error: Self.loadEarlierFlagOffRefusal)
+        }
+        guard await declaredCapabilities(manager, provider: params.provider)
+            .contains(RemoteCapability.transcriptTail) else {
+            return Self.missingCapabilityResponse(
+                provider: params.provider, capability: RemoteCapability.transcriptTail,
+                section: "transcript read --tail and --before")
+        }
+        if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
+            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+        }
+        let cache = sync.cache(provider: params.provider, sessionID: params.sessionID)
+        guard let state = cache.peekState(), state.before != nil, !state.pendingPrepend else {
+            return RPCResponse(error: Self.loadEarlierNothingAboveRefusal)
+        }
+        let response: RPCResponse
+        do {
+            let outcome = try await sync.loadEarlier(
+                provider: params.provider, sessionID: params.sessionID,
+                requestGeneration: state.generation)
+            response = try RPCResponse(result: RemoteTranscriptLoadEarlierResult(
+                generation: outcome.generation, head: outcome.head,
+                reachedStart: outcome.reachedStart, expired: outcome.expired))
+        } catch let error as ProviderRunError {
+            remoteHandlerLogger.error(
+                "remote.transcriptLoadEarlier provider=\(params.provider, privacy: .public) timed out")
+            response = RPCResponse(error: Self.friendlyMessage(for: error, provider: params.provider))
+        } catch let error as RemoteTranscriptSyncError {
+            response = RPCResponse(error: error.localizedDescription)
+        }
+        // Checked again once the page is written, for the same race
+        // `handleRemoteTranscriptSync` closes: a dismiss landing after the
+        // check above must not leave a prepended page behind.
+        if try await isDismissed(provider: params.provider, sessionID: params.sessionID) {
+            await sync.discard(provider: params.provider, sessionID: params.sessionID)
+            return RPCResponse(error: Self.transcriptSyncDismissedRefusal)
+        }
+        return response
+    }
+
+    /// What `remote.transcriptLoadEarlier` answers while
+    /// `remote_transcript_live_sync_enabled` is off.
+    static let loadEarlierFlagOffRefusal =
+        "loading earlier transcript history is off (remote_transcript_live_sync_enabled)"
+
+    /// What `remote.transcriptLoadEarlier` answers for a cache with no
+    /// `before`: one built by forward reads, one that already reached the
+    /// conversation's beginning, or none at all.
+    static let loadEarlierNothingAboveRefusal = "no earlier transcript history to load"
+
     private func isDismissed(provider: String, sessionID: String) async throws -> Bool {
         try await db.remoteSessions.row(provider: provider, sessionID: sessionID)?.dismissed == true
     }
@@ -930,7 +1001,12 @@ extension RPCRouter {
     /// of truth, and a session it has not reported yet is not known to be in
     /// either state. A `gone` row — one the provider stopped reporting — reads
     /// as exited.
-    static func sendMessageStateRefusal(_ row: RemoteSessionRow?) -> String? {
+    ///
+    /// `promptAnswerable` says whether the prompt a `waiting_input` agent is
+    /// blocked on can be answered from its transcript card: the
+    /// transcript-prompt-answer flag is on and the provider declares `answer`.
+    /// It picks which way the refusal points — at the card, or at the terminal.
+    static func sendMessageStateRefusal(_ row: RemoteSessionRow?, promptAnswerable: Bool) -> String? {
         guard let row else { return nil }
         if row.gone
             || row.state == RemoteProcessState.exited.rawValue
@@ -938,7 +1014,7 @@ extension RPCRouter {
             return sendMessageExitedRefusal
         }
         if row.agentState == RemoteAgentState.waitingInput.rawValue {
-            return sendMessageWaitingInputRefusal
+            return promptAnswerable ? sendMessageWaitingInputAnswerOnCardRefusal : sendMessageWaitingInputRefusal
         }
         return nil
     }
@@ -947,6 +1023,19 @@ extension RPCRouter {
 
     static let sendMessageWaitingInputRefusal =
         "the agent is waiting on a prompt; answer it in the terminal"
+
+    /// The `waiting_input` refusal when the prompt can be answered from its
+    /// transcript card (`remote.answer`): the session mirrors a pending
+    /// prompt, and the provider can answer it.
+    static let sendMessageWaitingInputAnswerOnCardRefusal =
+        "the agent is waiting on a prompt; answer it on the card in the transcript"
+
+    /// Whether a prompt on `provider`'s sessions can be answered from the
+    /// transcript: the flag is on and the provider declares `answer`.
+    func remotePromptAnswerable(_ manager: RemoteProviderManager, provider: String) async throws -> Bool {
+        guard try await db.config.get().transcriptPromptAnswerEnabled else { return false }
+        return await declaredCapabilities(manager, provider: provider).contains(RemoteCapability.answer)
+    }
 
     /// `remote.sendMessage` — submit `text` as one message through
     /// `send <id> --submit`, the provider pasting it and pressing Enter
@@ -957,7 +1046,9 @@ extension RPCRouter {
     ///   `--submit` otherwise;
     /// - when the provider's snapshot is stale, as `remote.send` is;
     /// - while the mirrored `agent_state` is `waiting_input`: the agent is
-    ///   blocked on a prompt, and the Enter would choose its highlighted option;
+    ///   blocked on a prompt, and the Enter would choose its highlighted option.
+    ///   The refusal points at the transcript card when `remote.answer` can
+    ///   answer the prompt, and at the terminal otherwise;
     /// - when the session has exited.
     ///
     /// Sends to one session are serialized (`RemoteSendMessageSerializer`), and
@@ -1002,7 +1093,14 @@ extension RPCRouter {
             return Self.staleSnapshotMutationResponse(provider: params.provider)
         }
         let row = try await db.remoteSessions.row(provider: params.provider, sessionID: params.sessionID)
-        if let refusal = Self.sendMessageStateRefusal(row) {
+        // The refusal points at the card only when there is one to point at:
+        // a mirrored pending prompt the provider can answer.
+        var answerable = false
+        if row?.agentState == RemoteAgentState.waitingInput.rawValue,
+           row?.decodedPayload?.effectivePendingPrompt != nil {
+            answerable = try await remotePromptAnswerable(manager, provider: params.provider)
+        }
+        if let refusal = Self.sendMessageStateRefusal(row, promptAnswerable: answerable) {
             return RPCResponse(error: refusal)
         }
         let actuationID = try await beginActuation(

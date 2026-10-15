@@ -8,11 +8,22 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "nightwatch")
 /// `DaywatchRunner`, with the one-time reconcile for the combination
 /// `NightwatchHolderGate` forbids.
 ///
-/// A persisted watch mode alongside the effective pty-holder flag is reachable
-/// only by an install that combined the two on a daemon older than the gate.
-/// The two switch refusals make it unre-enterable, so the reconcile runs once
-/// per such install and is otherwise a no-op. It is the one write to the watch
-/// mode not behind a user gesture, because at boot none is available.
+/// Two kinds of install reach a persisted watch mode while the holder hazard
+/// is live: one that combined the two on a daemon older than the gate, and one
+/// that left a watch mode on and never touched the holder toggle, whose
+/// effective flag reads on through the shipped default. The two switch
+/// refusals make the pair unre-enterable by gesture, and the mode write below
+/// means every later boot reads `.off` — so this fires at most once per install
+/// and is otherwise a no-op. It is the one write to the watch mode not behind a
+/// user gesture, because at boot none is available.
+///
+/// `holderSupported` is one term of the hazard and is not optional here: a
+/// daemon that cannot start a holder spawns no holder-backed session, so it
+/// must leave a persisted watch mode running rather than take it away. The
+/// other term — whether a holder session is already alive — this step reads
+/// from the database itself, because `canSpawn` false does not mean
+/// holder-free: a helper that went missing while holders were running leaves
+/// live holder rows on a daemon that cannot spawn another.
 ///
 /// The mode write and the `.modelProfilesChanged` broadcast that reflects it
 /// are the durable part of this reconcile and always happen together. The
@@ -28,10 +39,14 @@ enum NightwatchHolderBootReconcile {
     static func run(
         db: TBDDatabase,
         subscriptions: StateSubscriptionManager,
+        holderSupported: Bool,
         applyMode: (NightwatchMode) async -> Void
     ) async throws -> NightwatchMode? {
         let config = try await db.config.get()
-        guard NightwatchHolderGate.bootMustTurnModeOff(config) else {
+        guard NightwatchHolderGate.bootMustTurnModeOff(
+            config,
+            holderSupported: holderSupported,
+            holderSessionsLive: try await db.terminals.hasLiveHolderSession()) else {
             await applyMode(config.nightwatchMode)
             return config.nightwatchMode
         }

@@ -106,15 +106,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.gcHangStacksEnabledDefault`, never through `?? false`.
     var gc_hang_stacks_enabled: Bool?
-    /// The remote peer messaging gate (design 2026-08-29, "Flag and
-    /// rollout"). **Genuinely tri-state**, same shape as
-    /// `gc_orphan_processes_enabled`: the
-    /// `20260830003851_config_remote_peer_messaging` migration carries no SQL
-    /// default, so `nil` here means "never chose" rather than "off". Resolve it
-    /// through `Config.remotePeerMessagingDefault`, never through `?? false`.
-    var remote_peer_messaging_enabled: Bool?
+    // `remote_peer_messaging_enabled` stays in the table (migration
+    // `20260830003851_config_remote_peer_messaging`) but is read by nothing:
+    // peer messaging is switched per repository in its `tbd.toml` instead.
     /// The pty-holder transport gate. **Genuinely tri-state**, same shape as
-    /// `remote_peer_messaging_enabled`: the
+    /// `gc_hang_stacks_enabled`: the
     /// `20260831055718_config_pty_holder` migration carries no SQL default, so
     /// `nil` here means "never chose" rather than "off". Resolve it through
     /// `Config.ptyHolderDefault`, never through `?? false`.
@@ -166,6 +162,12 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.profileBalancingEnabledDefault`, never through
     /// `?? false`.
     var profile_balancing_enabled: Bool?
+    /// Balancing's usage ceiling, in percent (design 2026-09-05 §5). NULL
+    /// means never set; `ProfilePoolPolicy.resolved` supplies the shipped 85.
+    var profile_balancing_usage_ceiling_percent: Int?
+    /// Balancing's maximum reading age, in seconds. NULL means never set,
+    /// which keeps each credential kind's own cadence-relative window.
+    var profile_balancing_max_reading_age_seconds: Int?
     /// Schedule-based PR polling gate. **Genuinely tri-state**: the
     /// `20261002143454_config_pr_poll_schedule` migration carries no SQL default, so
     /// `nil` means "never chose". Resolve it through
@@ -176,6 +178,19 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` means "never chose". Resolve it through
     /// `Config.programStatusEnabledDefault`, never through `?? false`.
     var program_status_enabled: Bool?
+    /// Answering question and permission prompts from the transcript.
+    /// **Genuinely tri-state**: the
+    /// `20261010025458_config_transcript_prompt_answer` migration carries no SQL
+    /// default, so `nil` means "never chose". Resolve it through
+    /// `Config.transcriptPromptAnswerDefault`, never through `?? false`.
+    var transcript_prompt_answer_enabled: Bool?
+    /// Live remote transcript sync gate: tail-first loading, earlier-history
+    /// loading and hint-driven background sync. **Genuinely tri-state**: the
+    /// `20261008230000_config_remote_transcript_live_sync` migration carries
+    /// no SQL default, so `nil` means "never chose". Resolve it through
+    /// `Config.remoteTranscriptLiveSyncEnabledDefault`, never through
+    /// `?? false`.
+    var remote_transcript_live_sync_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -221,9 +236,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcHangStacksDefault: same shape once more, for
     ///   `gc_hang_stacks_enabled` — the hang-stack reclaimer's soak gate,
     ///   which also governs the app-side write-time cap.
-    /// - Parameter remotePeerMessagingDefault: same shape once more, for
-    ///   `remote_peer_messaging_enabled` — the remote peer messaging bridge's
-    ///   soak gate.
     /// - Parameter ptyHolderDefault: same shape once more, for
     ///   `pty_holder_enabled` — the pty-holder transport's soak gate.
     /// - Parameter remoteDeleteDefault: and the last of them, for
@@ -248,6 +260,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   the same way rather than to a hardcoded `.off`.
     /// - Parameter profileBalancingDefault: same shape again, for
     ///   `profile_balancing_enabled` — the launch policy's soak gate.
+    /// - Parameter prPollScheduleDefault: same shape again, for
+    ///   `pr_poll_schedule_enabled`.
+    /// - Parameter transcriptPromptAnswerDefault: same shape again, for
+    ///   `transcript_prompt_answer_enabled`.
+    /// - Parameter remoteTranscriptLiveSyncDefault: same shape again, for
+    ///   `remote_transcript_live_sync_enabled` — the live remote transcript
+    ///   sync's soak gate.
     /// - Parameter programStatusDefault: same shape again, for
     ///   `program_status_enabled` — the Program Status Protocol's soak gate.
     func toModel(
@@ -258,7 +277,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
         gcHangStacksDefault: Bool = Config.gcHangStacksEnabledDefault,
-        remotePeerMessagingDefault: Bool = Config.remotePeerMessagingDefault,
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
@@ -267,6 +285,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         updateModeDefault: UpdateMode = Config.updateModeDefault,
         profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
         prPollScheduleDefault: Bool = Config.prPollScheduleDefault,
+        transcriptPromptAnswerDefault: Bool = Config.transcriptPromptAnswerDefault,
+        remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         programStatusDefault: Bool = Config.programStatusEnabledDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
@@ -331,9 +351,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // And once more, for the hang-stack reclaimer's gate —
             // NOT `?? false`.
             gcHangStacksEnabled: gc_hang_stacks_enabled ?? gcHangStacksDefault,
-            // And once more, for the remote peer messaging bridge's gate —
-            // NOT `?? false`.
-            remotePeerMessagingEnabled: remote_peer_messaging_enabled ?? remotePeerMessagingDefault,
             // And once more, for the pty-holder transport's gate — NOT `?? false`.
             ptyHolderEnabled: pty_holder_enabled ?? ptyHolderDefault,
             // And truly the last of them, for the remote-delete gate —
@@ -370,6 +387,17 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Passed straight through, NULL included: "not yet minted" is a real
         // state and has no default to resolve to.
         config.modelProxyPort = model_proxy_port
+        // Passed straight through as well: `Config.profileBalancingPolicy`
+        // resolves NULL, and a hand-edited out-of-range value, to the shipped
+        // thresholds in one place.
+        config.profileBalancingUsageCeilingPercent = profile_balancing_usage_ceiling_percent
+        config.profileBalancingMaxReadingAgeSeconds = profile_balancing_max_reading_age_seconds
+        // Transcript prompt-answer gate — NOT `?? false`.
+        config.transcriptPromptAnswerEnabled =
+            transcript_prompt_answer_enabled ?? transcriptPromptAnswerDefault
+        // Live remote transcript sync gate — NOT `?? false`.
+        config.remoteTranscriptLiveSyncEnabled =
+            remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
         // Program Status Protocol gate — NOT `?? false`. Assigned after
         // construction, like the proxy fields above, to keep the initializer
         // call inside the type-checker's budget.
@@ -795,20 +823,7 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the remote peer messaging gate (default OFF, soaking) — the
-    /// single opt-in for shadow peers and the provider `messages` stream. The
-    /// column is written on every call, because writing either value is the
-    /// explicit gesture that lifts it out of NULL forever after.
-    public func setRemotePeerMessagingEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET remote_peer_messaging_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the pty-holder transport gate (default OFF, soaking). It gates
+    /// Persist the pty-holder transport gate (default ON). It gates
     /// which transport a session is *spawned* onto; a session records its
     /// transport at creation and keeps it for life, so flipping this never
     /// migrates a running session. The column is written on every call, because
@@ -866,6 +881,30 @@ public struct ConfigStore: Sendable {
         }
     }
 
+    /// Persist balancing's usage ceiling, in percent; nil returns the column to
+    /// NULL, which follows the shipped default. The RPC handler validates the
+    /// range before calling.
+    public func setProfileBalancingUsageCeilingPercent(_ percent: Int?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET profile_balancing_usage_ceiling_percent = ? WHERE id = ?",
+                arguments: [percent, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist balancing's maximum reading age, in seconds; nil returns the
+    /// column to NULL, which keeps each credential kind's own window. The RPC
+    /// handler validates the range before calling.
+    public func setProfileBalancingMaxReadingAgeSeconds(_ seconds: Int?) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET profile_balancing_max_reading_age_seconds = ? WHERE id = ?",
+                arguments: [seconds, Self.singletonID]
+            )
+        }
+    }
+
     /// Persist the schedule-based PR polling gate. Written on every call, so
     /// either value is the explicit gesture that lifts the column out of NULL.
     public func setPRPollScheduleEnabled(_ enabled: Bool) async throws {
@@ -884,6 +923,30 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET program_status_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the transcript prompt-answer gate. Written on every call, so either
+    /// value is the explicit gesture that lifts the column out of NULL.
+    public func setTranscriptPromptAnswerEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET transcript_prompt_answer_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the live remote transcript sync gate (default OFF while it
+    /// soaks). Written on every call, so either value is the explicit gesture
+    /// that lifts the column out of NULL. Read fresh at every decision, so a
+    /// change applies on the next sync without a restart.
+    public func setRemoteTranscriptLiveSyncEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET remote_transcript_live_sync_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

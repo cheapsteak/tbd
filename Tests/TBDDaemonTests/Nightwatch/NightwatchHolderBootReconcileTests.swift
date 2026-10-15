@@ -3,10 +3,12 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The boot reconcile for an install that combined a watch mode with the
-/// pty-holder transport on a daemon older than the gate: the mode is turned
-/// off once, the user is told why, and the runner is not started. Every other
-/// combination re-applies the persisted mode unchanged.
+/// The boot reconcile for an install that carries a watch mode while the
+/// pty-holder hazard is live — one that combined the two on a daemon older
+/// than the gate, or one that never touched the holder toggle and picked the
+/// graduated default up: the mode is turned off once, the user is told why,
+/// and the runner is not started. Every other combination, including a daemon
+/// that cannot start a holder at all, re-applies the persisted mode unchanged.
 @Suite("Nightwatch/holder boot reconcile")
 struct NightwatchHolderBootReconcileTests {
 
@@ -49,7 +51,9 @@ struct NightwatchHolderBootReconcileTests {
     /// captures every broadcast delta (synchronously — `broadcast(delta:)`
     /// fans out before returning, so the snapshot is complete once `run`
     /// returns) and hands both the result and the collector back.
-    private func run(_ db: TBDDatabase, _ applied: AppliedModes) async throws -> (NightwatchMode?, BroadcastDeltas) {
+    private func run(
+        _ db: TBDDatabase, _ applied: AppliedModes, holderSupported: Bool = true
+    ) async throws -> (NightwatchMode?, BroadcastDeltas) {
         let broadcasts = BroadcastDeltas()
         let subscriptions = StateSubscriptionManager()
         subscriptions.addSubscriber { data in
@@ -59,7 +63,7 @@ struct NightwatchHolderBootReconcileTests {
             return true
         }
         let result = try await NightwatchHolderBootReconcile.run(
-            db: db, subscriptions: subscriptions,
+            db: db, subscriptions: subscriptions, holderSupported: holderSupported,
             applyMode: { await applied.append($0) })
         return (result, broadcasts)
     }
@@ -92,6 +96,54 @@ struct NightwatchHolderBootReconcileTests {
         #expect(await applied.modes.isEmpty)
         #expect(broadcasts.count(matching: isModelProfilesChanged) == 1)
         #expect(broadcasts.count(matching: isNotificationReceived) == 1)
+    }
+
+    /// The same install on a daemon that could not find the `TBDHolder`
+    /// helper: no holder-backed session can be spawned, so the watch mode is
+    /// re-applied untouched and nothing is written or announced. This is the
+    /// state the graduated default makes ordinary — the flag reads on without
+    /// anybody choosing it — so a reconcile that ignored `holderSupported`
+    /// would silently stop Nightwatch on every such install.
+    @Test func anUnsupportedDaemonLeavesTheModeAlone() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPtyHolderEnabled(true)
+        try await db.config.setNightwatchMode(.nightwatch)
+        let wt = try await makeWorktree(db)
+        let applied = AppliedModes()
+
+        let (result, broadcasts) = try await run(db, applied, holderSupported: false)
+
+        #expect(result == .nightwatch)
+        #expect(try await db.config.get().nightwatchMode == .nightwatch)
+        #expect(await applied.modes == [.nightwatch])
+        #expect(try await db.notifications.unread(worktreeID: wt.id).isEmpty)
+        #expect(broadcasts.count(matching: isModelProfilesChanged) == 0)
+        #expect(broadcasts.count(matching: isNotificationReceived) == 0)
+    }
+
+    /// The same unsupported daemon, but holding one adopted holder session.
+    /// `canSpawn` false is not "holder-free" — the registry is built without
+    /// its binary so adoption survives an upgrade that moved it — so the
+    /// hazard is live and the mode is turned off with the usual notification.
+    @Test func aLiveHolderSessionOnAnUnsupportedDaemonStillTurnsTheModeOff() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setPtyHolderEnabled(false)
+        try await db.config.setNightwatchMode(.nightwatch)
+        let wt = try await makeWorktree(db)
+        _ = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder, holderPID: 9101, childPID: 0)
+        #expect(try await db.terminals.hasLiveHolderSession() == true,
+                "the fixture never armed the hazard")
+        let applied = AppliedModes()
+
+        let (result, broadcasts) = try await run(db, applied, holderSupported: false)
+
+        #expect(result == nil)
+        #expect(try await db.config.get().nightwatchMode == .off)
+        #expect(await applied.modes.isEmpty)
+        #expect(try await db.notifications.unread(worktreeID: wt.id).count == 1)
+        #expect(broadcasts.count(matching: isModelProfilesChanged) == 1)
     }
 
     @Test func deskScratchWorktreeIsPreferredForTheNotification() async throws {

@@ -144,6 +144,46 @@ struct TokenUsageHeaderParserTests {
         ]))
         #expect(buckets.map(\.kind) == ["session", "weekly_all"])
     }
+
+    // MARK: limitReachedBuckets (a 429's headers)
+
+    @Test func limitReachedReadsAFullWindowAsTheReading() {
+        let buckets = TokenUsageHeaderParser.limitReachedBuckets(from: headers([
+            "anthropic-ratelimit-unified-5h-utilization": "1.0",
+            "anthropic-ratelimit-unified-5h-status": "rejected",
+            "anthropic-ratelimit-unified-7d-utilization": "0.4",
+            "anthropic-ratelimit-unified-7d-status": "allowed",
+        ]))
+        #expect(buckets?.first { $0.kind == "session" }?.percent == 100)
+        #expect(buckets?.first { $0.kind == "session" }?.severity == "critical")
+        #expect(buckets?.first { $0.kind == "weekly_all" }?.percent == 40)
+    }
+
+    /// A refused window is full whatever its utilization rounds to: it is
+    /// refusing requests, and a 97% bar would show the picker headroom that
+    /// is not there.
+    @Test func limitReachedTreatsARefusedWindowAsFull() {
+        let buckets = TokenUsageHeaderParser.limitReachedBuckets(from: headers([
+            "anthropic-ratelimit-unified-5h-utilization": "0.2",
+            "anthropic-ratelimit-unified-5h-status": "allowed",
+            "anthropic-ratelimit-unified-7d-utilization": "0.97",
+            "anthropic-ratelimit-unified-7d-status": "rejected",
+        ]))
+        #expect(buckets?.first { $0.kind == "weekly_all" }?.percent == 100)
+        #expect(buckets?.first { $0.kind == "session" }?.percent == 20)
+    }
+
+    /// A 429 whose windows all report room is not the usage limit speaking,
+    /// so it is not a reading to route on.
+    @Test func limitReachedIsNilWhenNoWindowIsFull() {
+        #expect(TokenUsageHeaderParser.limitReachedBuckets(from: headers([
+            "anthropic-ratelimit-unified-5h-utilization": "0.3",
+            "anthropic-ratelimit-unified-5h-status": "allowed",
+            "anthropic-ratelimit-unified-7d-utilization": "0.5",
+            "anthropic-ratelimit-unified-7d-status": "allowed_warning",
+        ])) == nil)
+        #expect(TokenUsageHeaderParser.limitReachedBuckets(from: [:]) == nil)
+    }
 }
 
 // MARK: - Probe fetcher over a mocked HTTP session
@@ -289,6 +329,24 @@ struct TokenProfileUsageFetcherTests {
         #expect(json["model"] as? String == TokenProfileUsageFetcher.probeModel)
     }
 
+    /// A Claude Code OAuth token's request without the Claude Code system
+    /// prompt is refused with a header-less 429, so the probe would read no
+    /// usage at all. The model must be one the API still serves.
+    @Test func probeBodyCarriesTheClaudeCodeSystemPromptOnACurrentModel() async throws {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                             headerFields: successHeaders)!, Data("{}".utf8))
+        }
+        _ = await makeTokenFetcher().fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+
+        let body = try #require(TokenProbeMockURLProtocol.lastBody)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["system"] as? String == TokenProfileUsageFetcher.probeSystemPrompt)
+        #expect(TokenProfileUsageFetcher.probeSystemPrompt
+            == "You are Claude Code, Anthropic's official CLI for Claude.")
+        #expect(json["model"] as? String == "claude-haiku-5-5")
+    }
+
     @Test func capturesOrganizationIDHeader() async {
         let headers = successHeaders.merging(
             ["anthropic-organization-id": "org_abc123"]) { _, new in new }
@@ -356,21 +414,115 @@ struct TokenProfileUsageFetcherTests {
     @Test func rateLimitedProbeCarriesRetryAfter() async {
         TokenProbeMockURLProtocol.handler = { req in
             (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
-                             headerFields: ["Retry-After": "120"])!, Data())
+                             headerFields: [
+                                "Retry-After": "120",
+                                "anthropic-ratelimit-unified-5h-utilization": "0.4",
+                                "anthropic-ratelimit-unified-5h-status": "allowed",
+                             ])!, Data())
         }
         let status = await makeTokenFetcher()
             .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
         #expect(status == .rateLimited(retryAfter: 120))
     }
 
+    /// The account at its limit refuses the probe with a 429 that still
+    /// carries the utilization headers. That is a reading — the window full,
+    /// read just now — and must be recorded as one, or the profile keeps its
+    /// pre-limit numbers and goes stale for as long as it stays full.
+    @Test func rateLimitedProbeAtTheUsageLimitIsAReading() async {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: [
+                                "Retry-After": "3601",
+                                "anthropic-organization-id": "org_acme",
+                                "anthropic-ratelimit-unified-5h-utilization": "1.02",
+                                "anthropic-ratelimit-unified-5h-status": "rejected",
+                                "anthropic-ratelimit-unified-5h-reset": "1788000000",
+                                "anthropic-ratelimit-unified-7d-utilization": "0.31",
+                                "anthropic-ratelimit-unified-7d-status": "allowed",
+                             ])!, Data())
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+
+        guard case .limitReached(let buckets, let organizationID, let retryAfter) = status else {
+            Issue.record("expected .limitReached, got \(status)"); return
+        }
+        #expect(organizationID == "org_acme")
+        #expect(retryAfter == 3601)
+        #expect(status.kind == .ok)
+        #expect(status.failureReason == nil)
+        let session = buckets.first { $0.kind == "session" }
+        // 1.02 utilization reads as exactly full, not 102%.
+        #expect(session?.percent == 100)
+        #expect(session?.resetsAt == Date(timeIntervalSince1970: 1_788_000_000))
+        #expect(buckets.first { $0.kind == "weekly_all" }?.percent == 31)
+    }
+
+    /// A 429 whose headers name no full window stays a rate-limit failure on
+    /// the timed schedule, with its `Retry-After`.
+    @Test func rateLimitedProbeWithRoomInEveryWindowStaysRateLimited() async {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: [
+                                "Retry-After": "30",
+                                "anthropic-ratelimit-unified-5h-utilization": "0.4",
+                                "anthropic-ratelimit-unified-5h-status": "allowed",
+                             ])!, Data())
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+        #expect(status == .rateLimited(retryAfter: 30))
+    }
+
     @Test func rateLimitedProbeWithoutRetryAfterStillMapsToRateLimited() async {
         TokenProbeMockURLProtocol.handler = { req in
             (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
-                             headerFields: nil)!, Data())
+                             headerFields: [
+                                "anthropic-ratelimit-unified-7d-utilization": "0.5",
+                                "anthropic-ratelimit-unified-7d-status": "allowed",
+                             ])!, Data())
         }
         let status = await makeTokenFetcher()
             .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
         #expect(status == .rateLimited(retryAfter: nil))
+    }
+
+    /// A 429 with no `anthropic-ratelimit-unified-*` headers is the API
+    /// refusing the request itself — what a Claude Code OAuth token gets for a
+    /// request without the Claude Code system prompt — not the account's
+    /// usage limit. It recurs however long the caller waits, so it must not
+    /// read as a transient `.rateLimited`, and the body slice that names the
+    /// refusal is kept, redacted.
+    @Test func probeRefusedWithoutUnifiedHeadersIsAnHTTPErrorNotARateLimit() async {
+        let refusal = #"{"type":"error","error":{"type":"rate_limit_error","message":"Error sk-ant-oat01-SECRET"}}"#
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: ["Retry-After": "60"])!, Data(refusal.utf8))
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-SECRET"))
+        guard case .httpError(let code, let detail) = status else {
+            Issue.record("expected .httpError, got \(status)"); return
+        }
+        #expect(code == 429)
+        #expect(detail?.contains("rate_limit_error") == true)
+        #expect(detail?.contains("sk-ant-oat01-SECRET") == false)
+        #expect(status.kind == .unknown)
+        #expect(status.retryAfter == nil)
+    }
+
+    /// Other Anthropic headers do not make a 429 the account's answer: only
+    /// the unified rate-limit headers do. A refusal that carries
+    /// `anthropic-organization-id` alone is still the request being refused.
+    @Test func probeRefusedWithOnlyAnOrganizationHeaderIsAnHTTPError() async {
+        TokenProbeMockURLProtocol.handler = { req in
+            (HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: "HTTP/1.1",
+                             headerFields: ["anthropic-organization-id": "org_acme"])!, Data())
+        }
+        let status = await makeTokenFetcher()
+            .fetchUsage(credential: .token("sk-ant-oat01-TEST"))
+        #expect(status == .httpError(429, detail: nil))
     }
 
     /// 5xx is the server's problem and may clear on its own, so it stays a

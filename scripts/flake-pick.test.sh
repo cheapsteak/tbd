@@ -99,6 +99,19 @@ test_a_test_at_the_threshold_is_picked() {
   assert_eq "and the places" '["branch:a","night:2026-10-02"]' "$(jq -c .places "$w/out/target.json")"
 }
 
+test_an_issue_with_nightly_only_failures_is_never_picked() {
+  local w out mutant
+  w="$(world)"
+  issue "$w" '{"number": 10, "failures": [["night:2026-10-01", "2026-10-01T11:00:00Z"], ["night:2026-10-02", "2026-10-02T11:00:00Z"], ["night:2026-10-03", "2026-10-03T11:00:00Z"]]}'
+  out="$(pick "$w")"
+  assert_eq "three nights, open, never picked" "rc=3 none" "$(head -1 <<< "$out")"
+  assert_contains "and the reason names it" "$out" "#10: skipped (nightly-only failures"
+  mutant="$(mutant_of 's/^    if not fl.has_ci_place\(state\):$/    if False:/' "$PICK")"
+  out="$(pick "$w" "$mutant")"
+  assert_lacks "mutation: without its own check the picker gives only the threshold" "$out" "nightly-only failures"
+  assert_eq "which still refuses it: the two checks back each other up" "rc=3 none" "$(head -1 <<< "$out")"
+}
+
 test_a_closed_issue_is_not_picked() {
   local w; w="$(world)"
   issue "$w" "{\"number\": 10, \"state\": \"CLOSED\", $TWO, \"failures\": [[\"branch:a\", \"2026-10-01T10:00:00Z\"], [\"branch:b\", \"2026-10-01T10:00:00Z\"], [\"branch:c\", \"2026-10-03T10:00:00Z\"]]}"
@@ -128,6 +141,35 @@ test_an_unreadable_attempt_record_blocks_the_test() {
   assert_eq "its attempts are unknown, so it is not picked" "rc=3 none" "$(picked "$w")"
   mutant="$(mutant_of 's/^    if view.unreadable:$/    if False:/' "$PICK")"
   assert_eq "mutation: without the check it is picked every night" "rc=0 #10" "$(picked "$w" "$mutant")"
+}
+
+# An attempt comment as a writer of schema version 2 would stamp it.
+NEWER_ATTEMPTS="$(python3 - "$HERE" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+import flake_lib as fl
+a = fl.Attempt(run_id=1, started_at="2026-10-01T00:00:00Z", main_sha="b" * 40, episode=0, outcome="no-diff")
+body = fl.render_attempts([a], "cheapsteak/tbd")
+newer = body.replace(" v1 -->", " v2 -->", 1).replace('"schema":1', '"schema":2')
+assert newer.startswith("<!-- flakefix-attempts v2 -->") and '"schema":2' in newer
+print(newer)
+PY
+)"
+
+test_an_attempt_record_in_a_newer_schema_refuses_the_pick() {
+  local w out mutant comments
+  comments="$(jq -nc --arg b "$NEWER_ATTEMPTS" --arg bot "$BOT" '[[$bot, "Bot", $b]]')"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"comments\": $comments}"
+  issue "$w" "{\"number\": 11, \"test\": \"$OTHER\", $TWO}"
+  out="$(pick "$w")"
+  assert_eq "the whole pick refuses, not just that issue" "rc=2 none" "$(head -1 <<< "$out")"
+  assert_contains "naming the comment, its version and the version read" "$out" \
+    "refused: #10 comment 1010: the bot's attempt comment declares schema version 2, newer than the versions this code reads (1)"
+  assert_eq "a dispatch refuses too" "rc=2 none" "$(picked "$w" "$HERE" --issue 10)"
+  mutant="$(mutant_of 's/^    unreadable = \[v for v in _declared\(body, prefix, payload\) if not \(_is_version\(v\) and v in READABLE_SCHEMAS\)\]$/    unreadable = []/' "$HERE/flake_lib.py")"
+  assert_eq "mutation: without the check the newer record is misread as this version, and its test picked" "rc=0 #10" "$(picked "$w" "$mutant")"
+  mutant="$(mutant_of 's/^    except \(Refused, fl.UnsupportedSchema\) as error:$/    except Refused as error:/' "$PICK")"
+  assert_eq "mutation: uncaught, it is a crash, not a refusal" "rc=1 none" "$(picked "$w" "$mutant")"
 }
 
 test_the_watchlist_is_never_picked() {
@@ -184,7 +226,7 @@ test_a_session_failure_abort_is_retried_once_without_a_new_failure() {
   w="$(world)"
   issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$one]}"
   assert_eq "one session-failure abort: picked again at once" "rc=0 #10" "$(picked "$w")"
-  mutant="$(mutant_of 's/^    if outcome == "aborted" and last.session_failed:$/    if False:/' "$PICK")"
+  mutant="$(mutant_of 's/^    if told_nothing\(last\):$/    if False:/' "$PICK")"
   assert_eq "mutation: treated as any abort it waits for a new failure" "rc=3 none" "$(picked "$w" "$mutant")"
   w="$(world)"
   issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$one, $two]}"
@@ -197,6 +239,23 @@ test_a_session_failure_abort_is_retried_once_without_a_new_failure() {
   w="$(world)"
   issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$(attempt aborted 2026-10-02T12:00:00Z '"session_failed": null')]}"
   assert_eq "an abort for any other reason still waits" "rc=3 none" "$(picked "$w")"
+}
+
+# A verified candidate that `publish` lost to `main` moving during the run (a
+# replay that conflicted, a workflow refusal that outlived the replay) said
+# nothing about the test either: retried at once, under the same bound.
+test_a_publish_race_abort_is_retried_once_without_a_new_failure() {
+  local w mutant raced session
+  raced="$(attempt aborted 2026-10-03T12:00:00Z '"publish_raced": true')"
+  session="$(attempt aborted 2026-10-02T12:00:00Z '"session_failed": true')"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$raced]}"
+  assert_eq "one publish-race abort: picked again at once" "rc=0 #10" "$(picked "$w")"
+  mutant="$(mutant_of 's/bool\(attempt.session_failed or attempt.publish_raced\)/bool(attempt.session_failed)/' "$PICK")"
+  assert_eq "mutation: treated as any abort it waits for a new failure (the lock-out)" "rc=3 none" "$(picked "$w" "$mutant")"
+  w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"attempts\": [$session, $raced]}"
+  assert_eq "after a session failure with no failure between: waits" "rc=3 none" "$(picked "$w")"
 }
 
 test_the_later_failure_clause_is_load_bearing() {
@@ -320,6 +379,37 @@ test_the_brief_never_contains_human_comment_text() {
   assert_lacks "no issue title" "$brief" "TITLE-INJECTION"
   assert_contains "the signatures are there" "$brief" "sig a"
   assert_contains "with run links" "$brief" "https://github.com/$REPO/actions/runs/1000/attempts/1"
+}
+
+# The flaky list a coverage claim is checked against (§5, §6.1): every other
+# open `flaky` issue's test ID, from the bot's own ledger state alone.
+test_the_brief_lists_the_other_open_flaky_tests() {
+  local w brief mutant; w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO}"
+  issue "$w" "{\"number\": 11, \"test\": \"TBDDaemonTests.ClockTestSupportTests/advanceWhenSuspended()\", $ONE}"
+  issue "$w" "{\"number\": 12, \"test\": \"TBDDaemonTests.WatchedTests/onTheWatchlist()\", \"labels\": [\"flaky\", \"flake-watchlist\"], $ONE}"
+  issue "$w" "{\"number\": 13, \"test\": \"TBDDaemonTests.ClosedTests/closedOne()\", \"state\": \"CLOSED\", $ONE}"
+  issue "$w" "{\"number\": 14, \"test\": \"TBDDaemonTests.ForgedTests/forgedOne()\", \"ledger_author\": [\"mallory\", \"User\"], $ONE}"
+  assert_eq "picked" "rc=0 #10" "$(picked "$w" "$HERE" --issue 10)"
+  brief="$(cat "$w/out/brief.md")"
+  assert_contains "another open flaky test is listed with its issue" "$brief" '- `TBDDaemonTests.ClockTestSupportTests/advanceWhenSuspended()` (#11)'
+  assert_lacks "not the target itself" "$(sed -n '/## Tests on the flaky list/,$p' <<< "$brief")" "HolderLockTests"
+  assert_lacks "not the watchlist" "$brief" "onTheWatchlist"
+  assert_lacks "not a closed issue" "$brief" "closedOne"
+  assert_lacks "not a test only a forged ledger names" "$brief" "forgedOne"
+  mutant="$(mutant_of 's/^    listed = flaky_list\(views or \{\}, view.number\)$/    listed = []/' "$PICK")"
+  picked "$w" "$mutant" --issue 10 > /dev/null
+  assert_lacks "mutation: without the list it is not there" "$(cat "$w/out/brief.md")" "advanceWhenSuspended"
+  w="$(world)"; issue "$w" "{\"number\": 10, $TWO}"
+  picked "$w" > /dev/null
+  assert_contains "an empty list says so" "$(sed -n '/## Tests on the flaky list/,$p' "$w/out/brief.md")" "None."
+}
+
+test_the_brief_names_an_earlier_attempts_rename() {
+  local w; w="$(world)"
+  issue "$w" "{\"number\": 10, $TWO, \"prs\": [{\"number\": 77, \"outcome\": \"closed-unmerged\", \"merge_sha\": null, \"episode\": 0}], \"attempts\": [$(attempt pr-opened 2026-09-30T06:00:00Z '"pr": 77, "verdict": "pass", "target_change": "renamed", "renamed_to": "TBDSharedTests.HolderLockTests/lockIsFreedOnRelease()"')]}"
+  assert_eq "picked" "rc=0 #10" "$(picked "$w")"
+  assert_contains "the attempt says it renamed the target" "$(cat "$w/out/brief.md")" 'renamed the target to `TBDSharedTests.HolderLockTests/lockIsFreedOnRelease()`'
 }
 
 test_a_forged_state_comment_is_not_read() {

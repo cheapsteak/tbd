@@ -278,7 +278,7 @@ struct PendingQuestionDeltaOrderingTests {
 
 /// The app-side read path's other half: the app parses the JSONL, so it is the
 /// party that sees a capture's `tool_use` line land — and it owes the daemon a
-/// report, or the answered card lingers until `PendingQuestionExpirySweep`
+/// report, or the answered card lingers until `PendingPromptExpirySweep`
 /// reaps it up to fifteen minutes later.
 ///
 /// Every case drives a real `AskUserQuestionMerger.merge` result rather than a

@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 import TestSupport
@@ -6,8 +5,10 @@ import TestSupport
 @testable import TBDShared
 
 // Tier 1 (docs/specs/2026-07-24-test-hardening-design.md §3): in-process,
-// deterministic, driven entirely by virtual time. The only real sleeping is the
-// scheduling handshake inside `advanceWhenSuspended`.
+// deterministic, driven entirely by virtual time on an `EventDrivenTestClock`.
+// The only real waiting is the arming handshake inside its strict waits. Each
+// read follows `requireSleeperArmed()`: the loop re-arms only after a tick's
+// fetch has finished, so a re-armed sleeper means the pass before it is done.
 //
 // DEFECT UNDER TEST: PR facts are a side effect of an app being open. Before
 // `PRPoller`, `PRStatusManager.fetchAll` ran only inside the `pr.list` RPC
@@ -119,16 +120,16 @@ struct PRPollerTests {
         let (db, wtID) = try await Self.makeDB()
         let gh = CountingGH(nodes: [Self.nodeJSON(number: 41, head: "tbd/w")])
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
             isForeground: { false }, clock: clock)
 
         await poller.start()
         // 300s background cadence, 150s tick: due on the second advance.
-        await clock.advanceWhenSuspended(by: Self.tick)
-        await clock.advanceWhenSuspended(by: Self.tick)
-        await clock.waitForSuspension()
+        try await clock.requireAdvanceWhenArmed(by: Self.tick)
+        try await clock.requireAdvanceWhenArmed(by: Self.tick)
+        try await clock.requireSleeperArmed()
 
         let queries = await gh.branchQueries
         #expect(queries == 1, "expected 1 daemon-driven fetch with no app connected, observed \(queries)")
@@ -143,14 +144,14 @@ struct PRPollerTests {
         let (db, _) = try await Self.makeDB()
         let gh = CountingGH()
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
             isForeground: { true }, clock: clock)
 
         await poller.start()
-        await clock.advanceWhenSuspended(by: Self.tick)
-        await clock.waitForSuspension()
+        try await clock.requireAdvanceWhenArmed(by: Self.tick)
+        try await clock.requireSleeperArmed()
 
         let queries = await gh.branchQueries
         #expect(queries == 1, "expected the 30s foreground cadence to be due after one 150s tick, observed \(queries) fetches")
@@ -165,20 +166,20 @@ struct PRPollerTests {
         let (db, _) = try await Self.makeDB()
         let gh = CountingGH()
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
             isForeground: { false }, clock: clock)
 
         await poller.start()
-        await clock.advanceWhenSuspended(by: Self.tick)
-        await clock.waitForSuspension()
+        try await clock.requireAdvanceWhenArmed(by: Self.tick)
+        try await clock.requireSleeperArmed()
 
         let early = await gh.branchQueries
         #expect(early == 0, "150s waited against the 300s background cadence should not have fetched; observed \(early)")
 
-        await clock.advanceWhenSuspended(by: Self.tick)
-        await clock.waitForSuspension()
+        try await clock.requireAdvanceWhenArmed(by: Self.tick)
+        try await clock.requireSleeperArmed()
         let after = await gh.branchQueries
         #expect(after == 1, "the 300s background cadence should be due after two 150s ticks, observed \(after)")
         await poller.stop()
@@ -198,7 +199,7 @@ struct PRPollerTests {
         await manager.setOnMergedTransition { id, number in await recorder.record(id, number) }
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
-            isForeground: { true }, clock: TestClock<Duration>())
+            isForeground: { true }, clock: EventDrivenTestClock())
 
         await poller.tick()
         await poller.tick()
@@ -302,7 +303,7 @@ struct PRPollerTests {
         let router = Self.makeRouter(db: db, manager: PRStatusManager(ghRunner: { _, _ in nil }))
         let cache = router.branchTrackingCache
         let poller = Self.makePoller(
-            router: router, isForeground: { false }, clock: TestClock<Duration>())
+            router: router, isForeground: { false }, clock: EventDrivenTestClock())
 
         // Prime an entry for a worktree that is about to leave the poll set.
         _ = await cache.upstreamBranchName(worktreePath: "/gone", branch: "tbd/w") {
@@ -335,7 +336,7 @@ struct PRPollerTests {
         let manager = PRStatusManager(ghRunner: { args, path in await gh.run(args: args, repoPath: path) })
         let poller = Self.makePoller(
             router: Self.makeRouter(db: db, manager: manager),
-            isForeground: { false }, clock: TestClock<Duration>())
+            isForeground: { false }, clock: EventDrivenTestClock())
 
         try await poller.fetchOnce()
         #expect(await manager.observation(for: wtID) != nil,

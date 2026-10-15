@@ -6,7 +6,7 @@ struct TerminalCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "terminal",
         abstract: "Manage terminals",
-        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self, TerminalCompletions.self]
+        subcommands: [TerminalCreate.self, TerminalList.self, TerminalSend.self, TerminalWake.self, TerminalMigrate.self, TerminalClose.self, TerminalOutput.self, TerminalConversation.self, TerminalFocus.self, TerminalPin.self, TerminalUnpin.self, TerminalSwapProfile.self, TerminalContinueInCodex.self, TerminalContinueInClaude.self, TerminalCompletions.self]
     )
 }
 
@@ -303,6 +303,87 @@ struct TerminalWake: AsyncParsableCommand {
                 ? "Terminal woken."
                 : "Terminal already awake (no-op)\(prompt != nil ? " — prompt NOT delivered" : "").")
         }
+    }
+}
+
+// MARK: - terminal migrate
+
+struct TerminalMigrate: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "migrate",
+        abstract: "Move a session from the tmux transport to the pty holder, in place.",
+        discussion: """
+            Same tab, label, pin and Claude session id. A running session is
+            paused and resumed on the holder, so typed-but-unsent input is
+            lost; a session that is mid-turn or waiting on a permission prompt
+            is skipped, and can be retried once it settles.
+
+            Prints one line per session: the outcome, and the reason for any
+            session that did not move or did not restart. Exits non-zero if any
+            session was refused, or moved onto the holder without its program
+            being started again.
+            """
+    )
+
+    @Argument(help: "Terminal ID to move")
+    var terminal: String?
+
+    @Flag(name: .long, help: "Move every session TBD tracks")
+    var all = false
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        let terminalID: UUID?
+        switch (terminal, all) {
+        case (nil, false):
+            throw CLIError.invalidArgument("Pass a terminal ID or --all")
+        case (.some, true):
+            throw CLIError.invalidArgument("Pass a terminal ID or --all, not both")
+        case (let raw?, false):
+            guard let parsed = UUID(uuidString: raw) else {
+                throw CLIError.invalidArgument("Invalid terminal ID: \(raw)")
+            }
+            terminalID = parsed
+        case (nil, true):
+            terminalID = nil
+        }
+
+        let client = SocketClient()
+        let result: TerminalMigrateTransportResult = try client.call(
+            method: RPCMethod.terminalMigrateTransport,
+            params: TerminalMigrateTransportParams(terminalID: terminalID),
+            resultType: TerminalMigrateTransportResult.self
+        )
+
+        if json {
+            printJSON(result)
+        } else {
+            for line in Self.reportLines(result) { print(line) }
+        }
+        if !result.refused.isEmpty || !result.movedNotResumed.isEmpty { throw ExitCode(1) }
+    }
+
+    /// One line per session, grouped by outcome. A skip, a refusal and a move
+    /// that did not restart each carry a reason: what did not move, and why, is
+    /// the point of a fleet run.
+    ///
+    /// `moved, not restarted` is kept apart from `refused` because the two mean
+    /// opposite things to whoever reads the line: a refused session is still on
+    /// tmux, while this one is on the holder and comes back there when it is
+    /// next woken.
+    static func reportLines(_ result: TerminalMigrateTransportResult) -> [String] {
+        var lines: [String] = []
+        lines += result.migrated.map { "\($0.uuidString)  migrated" }
+        lines += result.alreadyHolder.map { "\($0.uuidString)  already on the holder" }
+        lines += result.movedNotResumed.map {
+            "\($0.terminalID.uuidString)  moved, not restarted: \($0.reason)"
+        }
+        lines += result.skipped.map { "\($0.terminalID.uuidString)  skipped: \($0.reason)" }
+        lines += result.refused.map { "\($0.terminalID.uuidString)  refused: \($0.reason)" }
+        if lines.isEmpty { lines.append("No sessions.") }
+        return lines
     }
 }
 
@@ -735,6 +816,66 @@ struct TerminalContinueInCodex: AsyncParsableCommand {
             print("  Terminal: \(result.terminalID)")
             print("  Thread:   \(result.threadID)")
         }
+    }
+}
+
+// MARK: - terminal continue-in-claude
+
+struct TerminalContinueInClaude: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "continue-in-claude",
+        abstract: "Replace an idle Codex terminal with Claude in the same tab"
+    )
+
+    @Option(name: .long, help: "Codex terminal ID (UUID)")
+    var terminal: String
+
+    @Option(name: .long, help: "Claude profile name or UUID (defaults to the logged-in account)")
+    var profile: String?
+
+    @Flag(name: .long, help: "Output JSON")
+    var json = false
+
+    mutating func run() async throws {
+        guard let terminalID = UUID(uuidString: terminal) else {
+            throw CLIError.invalidArgument("Invalid terminal ID: \(terminal)")
+        }
+
+        let client = SocketClient()
+        var profileID: UUID? = nil
+        var accountLabel = "Default (logged in)"
+        if let profile {
+            let list = try client.call(
+                method: RPCMethod.modelProfileList,
+                resultType: ModelProfileListResult.self
+            )
+            let entry = try resolveProfile(named: profile, in: list.profiles)
+            profileID = entry.profile.id
+            accountLabel = entry.profile.name
+        }
+
+        let updated: Terminal = try client.call(
+            method: RPCMethod.terminalContinueInClaude,
+            params: TerminalContinueInClaudeParams(
+                sourceTerminalID: terminalID,
+                profileID: profileID,
+                cols: nil,
+                rows: nil),
+            resultType: Terminal.self)
+
+        if json {
+            printJSON(updated)
+        } else {
+            print(Self.plainOutput(terminal: updated, accountLabel: accountLabel))
+        }
+    }
+
+    static func plainOutput(terminal: Terminal, accountLabel: String) -> String {
+        """
+        Continued in Claude:
+          Terminal: \(terminal.id)
+          Account:  \(accountLabel)
+        """
     }
 }
 

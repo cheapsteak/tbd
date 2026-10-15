@@ -77,9 +77,10 @@ enum ActivityBucket: String, CaseIterable, Hashable {
     }
 }
 
-/// A collapsed run of non-narrative transcript rows. The first child ID is the
-/// stable identity, so an append-only poll can extend the active group without
-/// losing the user's disclosure state.
+/// A collapsed run of non-narrative transcript rows. Its identity is one member's
+/// ID, chosen by `TranscriptPresentation.build` so that both an append-only poll
+/// and a prepend of earlier history leave it unchanged, along with the user's
+/// disclosure state that is keyed by it.
 struct ActivityGroupSummary: Hashable {
     let id: String
     /// Total grouped rows. Drives the ≥2 unwrap rule and nothing user-visible —
@@ -247,50 +248,106 @@ struct TranscriptPresentation {
     /// the same underlying array storage is re-read from
     /// `appState.sessionTranscripts[sid]`, and `Array.==` short-circuits on
     /// identical buffers.
+    ///
+    /// `pendingPrompts` is the item-id → card map from `PendingPromptMerge`,
+    /// whose merged list is what `items` must be. It joins the memo key.
+    ///
+    /// `windowStartIDs` matters only to a pane that prepends earlier history
+    /// (the remote transcript); every other caller passes nothing. See
+    /// `groupKeyID(of:windowStartIDs:)` for what it changes.
     nonisolated static func build(
         items: [TranscriptItem],
         expansionOverrides: [String: Bool] = [:],
+        pendingPrompts: [String: PendingPromptPresentation] = [:],
+        windowStartIDs: Set<String> = [],
         memo: TranscriptPresentationMemo = .shared
     ) -> TranscriptPresentation {
-        memo.presentation(items: items, expansionOverrides: expansionOverrides, compute: compute)
+        memo.presentation(
+            items: items,
+            expansionOverrides: expansionOverrides,
+            pendingPrompts: pendingPrompts,
+            windowStartIDs: windowStartIDs,
+            compute: compute)
+    }
+
+    /// The ID a pane records as a window start: its first item that renders,
+    /// skipping hidden ones (`thinking`), which never become a group member.
+    nonisolated static func windowStartID(of items: [TranscriptItem]) -> String? {
+        items.first { !isHiddenInTranscript($0) }?.id
+    }
+
+    /// The member whose ID names an activity group.
+    ///
+    /// By default it is the FIRST member: an append-only poll only ever adds
+    /// members after it, so the live group keeps its identity — and with it
+    /// the user's disclosure state and the table row — as tool calls stream in.
+    ///
+    /// A pane that loads earlier history adds rows BEFORE the first one, and a
+    /// page ending in activity extends the group the window starts inside at
+    /// its front, which would rename it on every prepend. No rule over one
+    /// snapshot can be stable under both directions: a run growing at its back
+    /// wants a key from its front, and a run growing at its front wants one from
+    /// its back, and one run can do both. So that pane passes the IDs that have
+    /// started its loaded window (`windowStartID(of:)`, recorded at each read),
+    /// and a group holding one is keyed by the LAST such member. Each prepend
+    /// records a start earlier in the transcript than the one before, so the
+    /// last start in a group is the oldest observation: the same member before
+    /// and after any number of prepends. Appends never add a start, so the key
+    /// is unchanged by them too. A group holding no start is one a prepend
+    /// cannot reach, and keeps first-member keying.
+    private nonisolated static func groupKeyID(
+        of members: [TranscriptRenderNode],
+        windowStartIDs: Set<String>
+    ) -> String? {
+        guard !windowStartIDs.isEmpty,
+              let start = members.last(where: { windowStartIDs.contains($0.id) }) else {
+            return members.first?.id
+        }
+        return start.id
     }
 
     private nonisolated static func compute(
         items: [TranscriptItem],
-        expansionOverrides: [String: Bool]
+        expansionOverrides: [String: Bool],
+        pendingPrompts: [String: PendingPromptPresentation],
+        windowStartIDs: Set<String>
     ) -> TranscriptPresentation {
-        let baseNodes = transcriptRenderNodes(from: items)
+        let baseNodes = transcriptRenderNodes(from: items, pendingPrompts: pendingPrompts)
         var projected: [TranscriptRenderNode] = []
         projected.reserveCapacity(baseNodes.count)
         var pendingActivity: [TranscriptRenderNode] = []
 
-        func flushActivity() {
-            guard let first = pendingActivity.first else { return }
+        /// `liftedRequireResponse` is whether a row lifted out of this run as
+        /// a card would have made the group require a response. It counts as
+        /// if the row were still a member, so a group that expands for an
+        /// `AskUserQuestion` stays expanded while that question shows as a
+        /// card, and folds back without changing its disclosure.
+        func emitGroup(_ members: [TranscriptRenderNode], groupID: String,
+                       liftedRequireResponse: Bool = false) {
+            guard let first = members.first else { return }
             // A run of exactly one activity is not worth wrapping: a "Read 1
             // file" summary repeats what the row underneath already says and
             // offers a disclosure control with nothing behind it. Emit the row
             // itself, as if it had never been grouped. Both renderers inherit
             // this — neither can see a one-item summary node. (Claude Code
             // collapses only runs of two or more for the same reason.)
-            if pendingActivity.count == 1 {
+            if members.count == 1 {
                 projected.append(first)
-                pendingActivity.removeAll(keepingCapacity: true)
                 return
             }
-            let groupID = "\(first.id)#activity-group"
-            let requiresResponse = pendingActivity.contains(where: isResponseRequired)
-            let errorCount = pendingActivity.reduce(into: 0) { total, node in
+            let requiresResponse = liftedRequireResponse || members.contains(where: isResponseRequired)
+            let errorCount = members.reduce(into: 0) { total, node in
                 if isError(node) { total += 1 }
             }
-            let pendingCount = pendingActivity.reduce(into: 0) { total, node in
+            let pendingCount = members.reduce(into: 0) { total, node in
                 if isPending(node) { total += 1 }
             }
             let defaultsExpanded = requiresResponse || errorCount > 0
             let isExpanded = expansionOverrides[groupID] ?? defaultsExpanded
-            let tally = activityTally(of: pendingActivity)
+            let tally = activityTally(of: members)
             let summary = ActivityGroupSummary(
                 id: groupID,
-                itemCount: pendingActivity.count,
+                itemCount: members.count,
                 bucketCounts: tally.counts,
                 mcpServers: tally.mcpServers,
                 errorCount: errorCount,
@@ -303,8 +360,33 @@ struct TranscriptPresentation {
                 kind: .activityGroupSummary(summary),
                 badgeUsage: nil
             ))
-            if isExpanded { projected.append(contentsOf: pendingActivity) }
-            pendingActivity.removeAll(keepingCapacity: true)
+            if isExpanded { projected.append(contentsOf: members) }
+        }
+
+        // A run of activity, flushed when a narrative bubble (or the end)
+        // closes it.
+        //
+        // A row carrying a prompt card is LIFTED out: a card is always a
+        // standalone row, emitted after whatever remains of its run. Only the
+        // carded row moves — a second tool call beside it stays grouped. The
+        // group id is still keyed on the WHOLE run's first member, lifted rows
+        // included, so lifting never renames the group and the row folds back
+        // into the same group, disclosure state intact, once its prompt
+        // resolves. A pane that prepends earlier history keys it on the run's
+        // last window start instead (`groupKeyID`), over the same whole run.
+        func flushActivity() {
+            guard let first = pendingActivity.first else { return }
+            defer { pendingActivity.removeAll(keepingCapacity: true) }
+            let keyID = groupKeyID(of: pendingActivity, windowStartIDs: windowStartIDs) ?? first.id
+            let groupID = "\(keyID)#activity-group"
+            guard pendingActivity.contains(where: { $0.pendingPrompt != nil }) else {
+                emitGroup(pendingActivity, groupID: groupID)
+                return
+            }
+            let lifted = pendingActivity.filter { $0.pendingPrompt != nil }
+            emitGroup(pendingActivity.filter { $0.pendingPrompt == nil }, groupID: groupID,
+                      liftedRequireResponse: lifted.contains(where: isResponseRequired))
+            projected.append(contentsOf: lifted)
         }
 
         for node in baseNodes {
@@ -536,10 +618,10 @@ struct TranscriptPresentation {
 
 /// Size-1 memo behind `TranscriptPresentation.build`.
 ///
-/// Only the most recent `(items, expansionOverrides)` pair is retained: the
-/// access pattern is a single view re-reading one session's transcript many
-/// times in a row, so a deeper cache would buy nothing and pin transcript
-/// arrays alive.
+/// Only the most recent `(items, expansionOverrides, pendingPrompts, windowStartIDs)` input is
+/// retained: the access pattern is a single view re-reading one session's
+/// transcript many times in a row, so a deeper cache would buy nothing and pin
+/// transcript arrays alive.
 ///
 /// Both view call sites hold their OWN instance in `@State` rather than using
 /// `.shared`, so the live pane and Session History cannot evict each other out
@@ -559,6 +641,8 @@ final class TranscriptPresentationMemo: @unchecked Sendable {
     private struct Entry {
         let items: [TranscriptItem]
         let expansionOverrides: [String: Bool]
+        let pendingPrompts: [String: PendingPromptPresentation]
+        let windowStartIDs: Set<String>
         let presentation: TranscriptPresentation
     }
 
@@ -570,18 +654,23 @@ final class TranscriptPresentationMemo: @unchecked Sendable {
     func presentation(
         items: [TranscriptItem],
         expansionOverrides: [String: Bool],
-        compute: ([TranscriptItem], [String: Bool]) -> TranscriptPresentation
+        pendingPrompts: [String: PendingPromptPresentation] = [:],
+        windowStartIDs: Set<String> = [],
+        compute: ([TranscriptItem], [String: Bool], [String: PendingPromptPresentation], Set<String>)
+            -> TranscriptPresentation
     ) -> TranscriptPresentation {
         lock.lock()
         let cached = entry
         lock.unlock()
 
-        // Full value equality on BOTH inputs. A tool call gains its result in
+        // Full value equality on EVERY input. A tool call gains its result in
         // place, leaving `count` and the last item's ID untouched, so any
         // cheaper key would serve a stale transcript.
         if let cached,
            cached.items == items,
-           cached.expansionOverrides == expansionOverrides {
+           cached.expansionOverrides == expansionOverrides,
+           cached.pendingPrompts == pendingPrompts,
+           cached.windowStartIDs == windowStartIDs {
             lock.lock()
             hitCount += 1
             lock.unlock()
@@ -591,10 +680,15 @@ final class TranscriptPresentationMemo: @unchecked Sendable {
         // Computed outside the lock: two threads racing here recompute
         // independently and the loser's identical result is simply discarded,
         // which is cheaper than serializing a 70 ms projection.
-        let fresh = compute(items, expansionOverrides)
+        let fresh = compute(items, expansionOverrides, pendingPrompts, windowStartIDs)
 
         lock.lock()
-        entry = Entry(items: items, expansionOverrides: expansionOverrides, presentation: fresh)
+        entry = Entry(
+            items: items,
+            expansionOverrides: expansionOverrides,
+            pendingPrompts: pendingPrompts,
+            windowStartIDs: windowStartIDs,
+            presentation: fresh)
         missCount += 1
         lock.unlock()
         return fresh

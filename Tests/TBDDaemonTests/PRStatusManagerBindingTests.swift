@@ -1,4 +1,3 @@
-import Clocks
 import Testing
 import Foundation
 @testable import TBDDaemonLib
@@ -948,14 +947,14 @@ struct PRStatusManagerBindingTests {
 
     @Test("a hung mergeability recheck is terminated once its deadline elapses",
           .clockDriven)
-    func recheckIsBoundedByADeadline() async {
+    func recheckIsBoundedByADeadline() async throws {
         // Single-flight caps how MANY rechecks are live and can never end one:
         // a `glab` that hangs stays for the life of the daemon, and no
         // reconciler covers a forge CLI subprocess. The deadline is the half
         // that caps the LIFETIME, and it has to reach the call itself —
         // cancellation, which `runCLI` turns into a terminate on the child —
         // rather than merely stop this side waiting for it.
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let gl = GitLabFake()
         let recheck = CancellableRecheck()
         let manager = PRStatusManager(
@@ -974,7 +973,7 @@ struct PRStatusManagerBindingTests {
         #expect(await recheck.wasEntered(), "no recheck was issued for a deadline to bound")
 
         // Virtual time: the bound is proven without spending it.
-        await clock.advanceWhenSuspended(by: PRStatusManager.recheckTimeout)
+        try await clock.requireAdvanceWhenArmed(by: PRStatusManager.recheckTimeout)
 
         #expect(await recheck.wasCancelled(),
                 "the recheck was still running after its deadline elapsed")
@@ -1078,7 +1077,7 @@ struct PRStatusManagerBindingTests {
         // virtual time at all, so a build that had started killing children
         // outright would still pass here while the previous test is what pins
         // the grace being spent only on a child that needs it.
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let gl = GitLabFake()
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-glab-term-\(UUID().uuidString)")
@@ -1116,7 +1115,7 @@ struct PRStatusManagerBindingTests {
             String(contentsOf: pidFile, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines)))
 
-        await clock.advanceWhenSuspended(by: PRStatusManager.recheckTimeout)
+        try await clock.requireAdvanceWhenArmed(by: PRStatusManager.recheckTimeout)
 
         try await waitFor("the recheck child to exit on SIGTERM alone") {
             kill(childPID, 0) != 0 && errno == ESRCH

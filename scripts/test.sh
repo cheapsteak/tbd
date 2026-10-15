@@ -30,6 +30,9 @@
 #      the host Claude store a profile dir mirrors, or a tmux socket — lands
 #      there instead of in the real one. This catches leaks nobody has
 #      diagnosed yet, including ones in code that has no injection seam at all.
+#      `DEV_SERVERS_DIR` points the shared dev-server running-file directory
+#      (`~/.local/state/dev-servers`, docs/dev-servers.md) at the same scratch,
+#      so no test reads or writes running files a real server published.
 #      `TBD_TEST_SCRATCH_ROOT` names that scratch dir itself, for the handful of
 #      fixtures that must mint a socket-bearing root of their own (see
 #      "NAMING THE RUN ROOT" beside the `env` prefix below).
@@ -725,6 +728,12 @@ asks_for_a_listing() {
   return 1
 }
 
+# `prune_debug_dsyms`, which `cleanup` below calls. Loaded from beside this
+# script rather than from the repository it tests, so a fixture repository needs
+# no copy of it.
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/dsym-prune-lib.sh"
+
 # Sourced rather than executed: `scripts/test.test.sh` wants the helpers above
 # without the run below. The siblings in this directory express the same thing
 # as `main "$@"` under the inverse condition; this script stays straight-line
@@ -737,6 +746,7 @@ fi
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
+repo_toplevel="$PWD"
 
 # On in CI, off on a developer box. See "WHY DETECTION IS CI-ONLY" above.
 fingerprint=0
@@ -902,6 +912,11 @@ reclaim_abandoned_run_roots "$RUN_ROOT_DIR"
 # there. It was previously left to individual tests to remember, which is
 # exactly the shape the run-wide fence exists to replace.
 #
+# DEV_SERVERS_DIR is the sixth leg, and the store is not TBD's at all: any tool
+# on the machine reads the shared running-file directory, so a test that wrote
+# there would put fake servers in front of other tools, and a GC test could
+# delete a real server's stale file.
+#
 # TMUX_TMPDIR is the fifth, and the store it fences is not a TBD one at all:
 # `/tmp/tmux-<uid>`, shared by every tmux server this user runs. Nothing in
 # `Sources/` or `Tests/` ever passes an absolute `-S <path>`; every call site
@@ -946,10 +961,19 @@ tmux_tmpdir="$scratch_home/tmux"
 # regardless. So both sweeps run BEFORE the scratch dir goes away, and both take
 # it as an argument so `reclaim_abandoned_run_roots` can run the same two passes
 # over a root some earlier run never got to.
+#
+# THE .dSYM PRUNE RIDES ALONG, AND IT MUST NEVER DECIDE THE EXIT STATUS. Linking
+# the test bundle writes a 646 MB `TBDPackageTests.dSYM` (plus one per product)
+# that nothing local reads — see scripts/dsym-prune-lib.sh — so the trap drops
+# them on every exit, red, green or TERMed. bash keeps the status `exit` was
+# given when an EXIT trap returns normally, but a failing command under `set -e`
+# inside the trap would replace it; hence the `|| true`. Skipped under CI and
+# with TBD_KEEP_DSYM=1, and held off while another build here is running.
 cleanup() {
   sweep_tmux_servers "$scratch_home"
   sweep_holders "$scratch_home"
   rm -rf "$scratch_home"
+  prune_debug_dsyms "$repo_toplevel" >&2 || true
 }
 # EXIT alone is sufficient, including when this wrapper is killed:
 # `scripts/nightly-flake-stress.sh` TERMs it when its outer deadline fires, and
@@ -1065,6 +1089,7 @@ run_fenced_suite() {
     TBD_SOCKET_PATH="$sanctioned_home/sock" \
     TBD_CLAUDE_HOST_HOME="$sanctioned_home/claude-host" \
     TBD_TEST_CODEX_HOME="$sanctioned_home/codex-host" \
+    DEV_SERVERS_DIR="$sanctioned_home/dev-servers" \
     TMUX_TMPDIR="$tmux_tmpdir" \
     TBD_SWIFT_LOCK_PATH="$swift_lock_path" \
     HOME="$fake_home" \

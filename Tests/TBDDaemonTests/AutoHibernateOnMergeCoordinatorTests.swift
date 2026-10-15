@@ -35,6 +35,7 @@ struct AutoHibernateOnMergeCoordinatorTests {
         let hibernation = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
             subscriptions: subs, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: logPath.map { ActuationLog(path: $0) } ?? makeTestActuationLog())
         let coord = AutoHibernateOnMergeCoordinator(
             db: db, hibernation: hibernation, subscriptions: subs)

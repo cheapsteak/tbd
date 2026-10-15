@@ -24,6 +24,9 @@ struct TableTranscriptView: NSViewRepresentable {
     /// Jump-to-bottom request token: incrementing it asks the coordinator to
     /// scroll to the last row.
     let scrollToBottomToken: Int
+    /// Scroll-to-row request: a new token asks the coordinator to bring the
+    /// row whose node id equals `itemID` into view, once per token.
+    var scrollToItem: TranscriptScrollRequest?
     /// Bumped by the pane whenever the USER toggles an activity group open or
     /// shut. The node array that arrives with a bumped token is the result of a
     /// disclosure gesture, not of streaming, so the coordinator anchors the
@@ -42,6 +45,20 @@ struct TableTranscriptView: NSViewRepresentable {
     /// place Escape in the composer returns focus to. Nil where nothing needs
     /// that handle — Session History mounts no composer.
     var onTableReady: (@MainActor (NSTableView) -> Void)?
+    /// Bumped by a pane in the SAME update that delivers a node array with
+    /// history added at its front. Like `activityToggleToken`, it says WHY the
+    /// array changed: a node array that arrives with a moved token is earlier
+    /// history arriving above the reader, so the coordinator holds the top
+    /// visible row where it was on screen instead of leaving the clip at its old
+    /// document offset (which would show whatever now sits there). Only the
+    /// remote pane bumps it; every other pane leaves it at 0 and keeps today's
+    /// behavior.
+    var prependToken: Int = 0
+    /// Called with whether the table is scrolled near its top — the first
+    /// visible row index is at most `Coordinator.nearTopRowThreshold` — on each
+    /// transition of that answer, whether a scroll or an update caused it. Nil
+    /// where nobody loads earlier history.
+    var onNearTop: (@MainActor (Bool) -> Void)?
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
@@ -103,7 +120,12 @@ struct TableTranscriptView: NSViewRepresentable {
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
         coordinator.lastScrollToken = scrollToBottomToken
+        coordinator.lastScrollItemToken = scrollToItem?.token
         coordinator.lastActivityToggleToken = activityToggleToken
+        // Seed the prepend token so the first `updateNSView` does not read a
+        // pane's already-bumped token as a prepend.
+        coordinator.lastPrependToken = prependToken
+        coordinator.onNearTop = onNearTop
         // Seed the root the first composition below happens against, so the
         // first `updateNSView` does not read as a transition.
         coordinator.lastLinkRoot = linkRoot
@@ -173,12 +195,19 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.lastScrollToken = scrollToBottomToken
             coordinator.scrollToEnd(animated: true)
         }
+        coordinator.onNearTop = onNearTop
+        let nodes = nodesProvider()
         coordinator.update(
-            nodes: nodesProvider(),
+            nodes: nodes,
             atBottom: $atBottom,
             activityToggleToken: activityToggleToken,
-            linkRoot: linkRoot
+            linkRoot: linkRoot,
+            prependToken: prependToken
         )
+        if let request = scrollToItem, request.token != coordinator.lastScrollItemToken {
+            coordinator.lastScrollItemToken = request.token
+            coordinator.scrollToRow(withNodeID: request.itemID)
+        }
     }
 
     // MARK: - Coordinator
@@ -198,11 +227,51 @@ struct TableTranscriptView: NSViewRepresentable {
         var nodes: [TranscriptRenderNode] = []
         var previousNodes: [TranscriptRenderNode] = []
         var lastScrollToken = 0
+        var lastScrollItemToken: Int?
         /// Last activity-group toggle token seen by `update`. A token that has
         /// MOVED means this node array came from the user opening or shutting a
         /// group, which must keep the clicked row where it is rather than
         /// re-pinning the tail.
         var lastActivityToggleToken = 0
+        /// Last prepend token seen by `update`. A token that has MOVED means this
+        /// node array carries earlier history added at its front, so the top
+        /// visible row is held still across the reload (see `PrependAnchor`).
+        var lastPrependToken = 0
+
+        /// First-visible-row index at or below which the table counts as "near
+        /// the top" for `onNearTop` — about five rows of runway before the reader
+        /// reaches the first row, so earlier history can start loading first.
+        static let nearTopRowThreshold = 5
+        /// See `TableTranscriptView.onNearTop`. Refreshed every `updateNSView`.
+        var onNearTop: (@MainActor (Bool) -> Void)?
+        /// The near-top answer last reported, so `onNearTop` fires on transitions
+        /// only. Nil until the first report.
+        private var lastNearTop: Bool?
+
+        /// Where the reader was looking when a prepend arrived: the first visible
+        /// row that carries a stable id and that row's offset from the viewport
+        /// top, plus the viewport's distance from the document bottom as the
+        /// fallback when no visible row has a stable id (or the row is gone).
+        ///
+        /// Restoring by row IDENTITY, not by document offset, is what survives
+        /// lazy measurement: the rows inserted above carry per-kind ESTIMATES
+        /// until they realize, so any absolute offset computed before the reload
+        /// is wrong after it. `rect(ofRow:)` of the anchor row, read after the
+        /// reload, already sums whatever heights the rows above currently have.
+        struct PrependAnchor: Equatable {
+            let id: String?
+            let offset: CGFloat
+            let gapToBottom: CGFloat
+        }
+        /// The anchor of the last prepend, held until the reader scrolls, the
+        /// width changes, or an update changes the rows again. While held, a realize-time height correction of
+        /// a row ABOVE the anchor (an estimated row realizing in AppKit's overdraw
+        /// region) re-pins the anchor, so heights settling above the reader never
+        /// drag the rows they are reading.
+        private(set) var pendingPrependAnchor: PrependAnchor?
+        /// Set while the coordinator itself moves the clip to restore an anchor,
+        /// so the bounds observer can tell that scroll from the reader's.
+        private var isRestoringAnchor = false
 
         /// The worktree root the entries in `composedCache` were composed
         /// against. Optional so "never set" is distinguishable from the empty
@@ -612,6 +681,12 @@ struct TableTranscriptView: NSViewRepresentable {
                 ctx.duration = 0
                 tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
             }
+            // A row above a held prepend anchor just changed height, which moved
+            // the anchor by the same amount: re-pin it. Rows at or below the
+            // anchor cannot move it, and outside a prepend nothing is held.
+            if let anchor = pendingPrependAnchor, row < anchorRowIndex(anchor) {
+                restorePrependAnchor(anchor)
+            }
         }
 
         /// Builds the cell for `node`, measuring its exact height as a side effect
@@ -988,6 +1063,8 @@ struct TableTranscriptView: NSViewRepresentable {
         ///   estimate error.
         /// * askUserQuestion (a hosted SwiftUI card): a calibrated constant; the
         ///   realized card measures exactly and corrects.
+        /// * prompt cards: the permission card and the interactive question card
+        ///   each have their own count-driven estimate.
         static func estimate(for node: TranscriptRenderNode?, width: CGFloat) -> CGFloat {
             guard let node else { return 32 }
             switch node.kind {
@@ -1003,6 +1080,13 @@ struct TableTranscriptView: NSViewRepresentable {
                 // AskUserQuestion is the one toolCall that stays a hosted SwiftUI
                 // card (its activity presentation is nil); every other toolCall is
                 // a one-line chrome activity row.
+                if let prompt = node.pendingPrompt, prompt.rendersAsPromptCard, prompt.kind == .permission {
+                    return permissionCardEstimate(prompt)
+                }
+                if let prompt = node.pendingPrompt, prompt.rendersAsPromptCard, prompt.kind == .question,
+                   prompt.rendersAsInteractiveQuestionCard {
+                    return interactiveQuestionCardEstimate(prompt)
+                }
                 if name == "AskUserQuestion" { return askUserQuestionEstimate(inputJSON: inputJSON) }
                 return activityRowHeight(style: .chrome)
             }
@@ -1060,6 +1144,53 @@ struct TableTranscriptView: NSViewRepresentable {
         /// construction rather than by review.
         private struct AskCardInput: Decodable {
             let questions: [AskUserQuestionCard.Question]
+        }
+
+        /// Estimated height of an unrealized permission prompt card: its fixed
+        /// preview and footer, the title, and one line per suggestion. The
+        /// realized card measures exactly and corrects.
+        static func permissionCardEstimate(_ prompt: PendingPromptPresentation) -> CGFloat {
+            let chrome: CGFloat = 8 + 16 + 20 + 18
+            var height = chrome + PermissionPromptCard.previewHeight + PermissionPromptCard.footerHeight
+            if prompt.hasSuggestions {
+                height += 14 + 16 * CGFloat(prompt.suggestionLines.count)
+            }
+            return height
+        }
+
+        /// Estimated height of an unrealized interactive question card
+        /// (`InteractiveQuestionCard`), corrected exactly when the card realizes.
+        ///
+        /// That card is laid out differently from the static AskUserQuestion
+        /// card `askUserQuestionEstimate` models: compact option rows rather
+        /// than one bubble each, descriptions cut to two lines, an Other row
+        /// under every question, and one fixed footer. Its height therefore
+        /// follows the counts alone. Line heights are the fonts' one-line
+        /// heights rounded down, so what error remains is on the low side.
+        static func interactiveQuestionCardEstimate(_ prompt: PendingPromptPresentation) -> CGFloat {
+            // Outer vertical padding, the role header line and its spacing, and
+            // the bubble's vertical padding.
+            let chrome: CGFloat = 8 + (12 + 3) + 16
+            var height = chrome + InteractiveQuestionCard.footerHeight
+            for question in prompt.questions {
+                // The stack spacing that separates this block from what follows.
+                height += 10
+                if let header = question.header, !header.isEmpty, header != question.text {
+                    height += 12 + 4
+                }
+                // The question line, the block's spacing, the options' top padding.
+                height += 13 + 4 + 4
+                for option in question.options {
+                    // Row padding and its label line, then the row spacing.
+                    height += 6 + 14 + 2
+                    if let description = option.description, !description.isEmpty {
+                        height += 2 + 12
+                    }
+                }
+                // The Other row: its text field and the row padding.
+                height += 22 + 6
+            }
+            return height
         }
 
         static func askUserQuestionEstimate(inputJSON: String) -> CGFloat {
@@ -1846,11 +1977,20 @@ struct TableTranscriptView: NSViewRepresentable {
         /// node's `contentVersion` folds in `isExpanded`), so without this signal
         /// the tail-follow below would re-pin the bottom and translate everything
         /// on screen upward by the height of the rows just revealed.
+        ///
+        /// `prependToken` is the same kind of signal for earlier history arriving
+        /// at the FRONT of the array (only the remote pane bumps it). A prepend
+        /// also classifies as a `.rebuild`; with the viewport away from the
+        /// bottom, the reload would leave the clip at its old document offset, so
+        /// the reader would see whatever rows now sit there. A moved token
+        /// instead holds the top visible row still (see `PrependAnchor`). At the
+        /// bottom the ordinary tail-follow already keeps the view still.
         func update(
             nodes newNodes: [TranscriptRenderNode],
             atBottom: Binding<Bool>,
             activityToggleToken: Int,
-            linkRoot: String
+            linkRoot: String,
+            prependToken: Int = 0
         ) {
             // Keep the observer's binding fresh (SwiftUI hands us a new binding
             // each update).
@@ -1861,10 +2001,29 @@ struct TableTranscriptView: NSViewRepresentable {
             // genuine streaming append.
             let isActivityToggle = activityToggleToken != lastActivityToggleToken
             lastActivityToggleToken = activityToggleToken
+            // The prepend token likewise, so a token bumped on a `.noop` cannot
+            // anchor a later, unrelated rebuild.
+            let isPrepend = prependToken != lastPrependToken
+            lastPrependToken = prependToken
             // `scrollView` must exist (downstream `scrollToEnd` / `isAtBottom`
             // read it via the stored property); bind it only to gate on presence.
             guard let tableView, scrollView != nil else { return }
+            // Whatever this update does to the rows or the clip, report a changed
+            // near-top answer once it has landed. Deferred rather than called
+            // here because `update` runs inside SwiftUI's `updateNSView`, where a
+            // pane writing state from the callback would be a mid-update mutation.
+            defer {
+                if onNearTop != nil {
+                    DispatchQueue.main.async { [weak self] in self?.reportNearTopIfChanged() }
+                }
+            }
             let step = TranscriptStreamPlan.step(previous: previousNodes, next: newNodes)
+            // A held anchor describes the array it was restored into: rows that
+            // change again (or a new prepend) supersede it. A `.noop` — SwiftUI
+            // re-rendering the pane, e.g. for state the pane wrote from
+            // `onNearTop` — leaves it held so heights still settling above the
+            // reader keep re-pinning it.
+            if step != .noop || isPrepend { pendingPrependAnchor = nil }
 
             // Worktree-root change: the composed blocks carry the `.link` ranges
             // the link pass baked in, and `composedCache` is keyed by
@@ -1888,6 +2047,7 @@ struct TableTranscriptView: NSViewRepresentable {
             let width = columnWidth
             if abs(width - cachedColumnWidth) > 0.5 {
                 cachedColumnWidth = width
+                pendingPrependAnchor = nil
                 heightCache.removeAll(keepingCapacity: true)
                 estimateCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
@@ -1910,6 +2070,9 @@ struct TableTranscriptView: NSViewRepresentable {
             }
 
             let wasAtBottom = isAtBottom()
+            // Capture BEFORE `nodes` is replaced: the visible rows are read off
+            // the old geometry and the old node array.
+            let prependAnchor = isPrepend && !wasAtBottom ? capturePrependAnchor() : nil
             let oldCount = nodes.count
             nodes = newNodes
             previousNodes = newNodes
@@ -1972,6 +2135,26 @@ struct TableTranscriptView: NSViewRepresentable {
             // reloaded; `.append` and `.updateLast` leave the rows above the tail
             // showing their previously composed (unlinked) prose.
             if rootChanged, step != .rebuild { tableView.reloadData() }
+
+            // A prepend away from the bottom: put the reader's row back where it
+            // was, synchronously, so no frame ever shows the clip at its stale
+            // offset. Then hold the anchor so heights settling above it re-pin it
+            // (`correctRowHeightIfNeeded`), and re-assert once more on the next
+            // turn, after AppKit's first layout of the new rows — the same
+            // double pin the initial open uses. No tail-follow: the reader is not
+            // at the bottom, and `wasAtBottom` already rules it out below.
+            if let prependAnchor {
+                // Size the document for the new rows (row heights come from the
+                // caches and per-kind estimates; nothing is realized or measured
+                // here) so the clip can be placed against the new extent.
+                tableView.tile()
+                restorePrependAnchor(prependAnchor)
+                pendingPrependAnchor = prependAnchor
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let held = self.pendingPrependAnchor else { return }
+                    self.restorePrependAnchor(held)
+                }
+            }
 
             // Follow the tail only for content the SESSION produced. A user-driven
             // disclosure toggle keeps the viewport exactly where it is, so the row
@@ -2075,6 +2258,11 @@ struct TableTranscriptView: NSViewRepresentable {
         }
 
         @objc private func clipBoundsDidChange() {
+            // The reader moved the viewport: a held prepend anchor no longer
+            // describes where they are looking, so stop re-pinning it. The
+            // coordinator's own restore scroll is the one move that keeps it.
+            if !isRestoringAnchor { pendingPrependAnchor = nil }
+            reportNearTopIfChanged()
             guard let binding = atBottomBinding else { return }
             let value = isViewportAtBottomForButton()
             // Only write on a transition so a scroll gesture flips the flag at
@@ -2082,6 +2270,92 @@ struct TableTranscriptView: NSViewRepresentable {
             if binding.wrappedValue != value {
                 binding.wrappedValue = value
             }
+        }
+
+        // MARK: Prepend anchor / near top
+
+        /// Whether a node id can anchor a prepend. The positional fallback ids
+        /// `TranscriptParser` and `IncrementalTranscript` mint for records with
+        /// no `uuid` (`line-<n>`, `tail-<n>`) count lines from the start of the
+        /// file, so after a prepend the same id names a DIFFERENT record.
+        static func anchorID(_ id: String) -> Bool {
+            !(id.hasPrefix("line-") || id.hasPrefix("tail-"))
+        }
+
+        /// Records the first visible row with a stable id, its offset from the
+        /// viewport top, and the viewport's distance from the document bottom.
+        /// Reads the CURRENT (pre-reload) geometry and node array.
+        private func capturePrependAnchor() -> PrependAnchor? {
+            guard let tableView, let scrollView else { return nil }
+            let clip = scrollView.contentView
+            let visible = tableView.rows(in: clip.documentVisibleRect)
+            var anchorID: String?
+            var offset: CGFloat = 0
+            if visible.location != NSNotFound {
+                for row in visible.location..<(visible.location + visible.length)
+                where row < nodes.count && Self.anchorID(nodes[row].id) {
+                    anchorID = nodes[row].id
+                    offset = tableView.rect(ofRow: row).minY - clip.bounds.minY
+                    break
+                }
+            }
+            return PrependAnchor(id: anchorID, offset: offset, gapToBottom: viewportGapToBottom())
+        }
+
+        /// The row index a held anchor protects: its row when that row is still
+        /// present, else (bottom-distance fallback) the first visible row — a
+        /// height change above either moves what the reader sees.
+        private func anchorRowIndex(_ anchor: PrependAnchor) -> Int {
+            if let id = anchor.id, let index = nodes.firstIndex(where: { $0.id == id }) {
+                return index
+            }
+            guard let tableView, let scrollView else { return 0 }
+            let first = tableView.rows(in: scrollView.contentView.documentVisibleRect).location
+            return first == NSNotFound ? 0 : first
+        }
+
+        /// Moves the clip so the anchor row sits at its recorded offset from the
+        /// viewport top, or — when the anchor has no row in the current array —
+        /// so the viewport keeps its recorded distance from the bottom. Reads
+        /// `rect(ofRow:)` NOW, so it accounts for whatever heights (exact or
+        /// estimated) the rows above currently have; calling it again after any
+        /// of them changes is what keeps the anchor pinned. Idempotent.
+        func restorePrependAnchor(_ anchor: PrependAnchor) {
+            guard !isRestoringAnchor, let tableView, let scrollView else { return }
+            let clip = scrollView.contentView
+            let documentHeight = tableView.frame.height
+            let maxOrigin = max(0, documentHeight - clip.bounds.height)
+            let target: CGFloat
+            if let id = anchor.id, let index = nodes.firstIndex(where: { $0.id == id }) {
+                target = tableView.rect(ofRow: index).minY - anchor.offset
+            } else {
+                target = documentHeight - clip.bounds.height - anchor.gapToBottom
+            }
+            let clamped = min(max(0, target), maxOrigin)
+            guard abs(clamped - clip.bounds.origin.y) > 0.25 else { return }
+            isRestoringAnchor = true
+            defer { isRestoringAnchor = false }
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: clamped))
+            scrollView.reflectScrolledClipView(clip)
+        }
+
+        /// Whether the first visible row is within `nearTopRowThreshold` of the
+        /// top. An empty table counts as near the top; the pane decides whether
+        /// there is anything earlier to load.
+        private func isNearTop() -> Bool {
+            guard let tableView, let scrollView, tableView.numberOfRows > 0 else { return true }
+            let first = tableView.rows(in: scrollView.contentView.documentVisibleRect).location
+            return first == NSNotFound || first <= Self.nearTopRowThreshold
+        }
+
+        /// Calls `onNearTop` when the near-top answer differs from the last one
+        /// reported (always, the first time).
+        func reportNearTopIfChanged() {
+            guard let onNearTop else { return }
+            let value = isNearTop()
+            guard value != lastNearTop else { return }
+            lastNearTop = value
+            onNearTop(value)
         }
 
         deinit {
@@ -2121,6 +2395,18 @@ struct TableTranscriptView: NSViewRepresentable {
             let viewportHeight = scrollView.contentView.bounds.height
             let threshold = max(400, viewportHeight * 0.5)
             return viewportGapToBottom() <= threshold
+        }
+
+        /// Brings the row for `nodeID` into view; falls back to the end when no
+        /// row carries that id (an appended card sits at the tail).
+        func scrollToRow(withNodeID nodeID: String) {
+            guard let tableView else { return }
+            guard let row = nodes.firstIndex(where: { $0.id == nodeID }),
+                  row < tableView.numberOfRows else {
+                scrollToEnd(animated: true)
+                return
+            }
+            tableView.scrollRowToVisible(row)
         }
 
         func scrollToEnd(animated: Bool) {

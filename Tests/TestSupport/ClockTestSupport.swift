@@ -134,7 +134,7 @@ public extension Trait where Self == TimeLimitTrait {
     ///   the first bad step. Their one non-throwing guard, `next()`, sits last
     ///   with nothing behind it to inherit the run, so at most one 45 s guard
     ///   elapses in any single run and 270 s describes a run that cannot
-    ///   happen (see "The event-driven alternative" below).
+    ///   happen (see "The event-driven clock" below).
     /// - In `PaneRepairCoordinatorTests`, **6 of 13** tests have a worst case
     ///   above 240 s (counting `waitFor` at 90 s and each clock wait at 45 s),
     ///   not just the one 6-deep chain (540 s) usually cited. Four of the sites
@@ -219,9 +219,20 @@ public extension TestClock {
     /// Non-throwing: a missing sleeper is reported via `Issue.record` at the
     /// caller's source location rather than thrown, so call sites stay free of
     /// `try` noise.
+    ///
+    /// `timeout` is ``waitForSuspension(timeout:pollInterval:sourceLocation:)``'s
+    /// hang guard, passed through, the way
+    /// `EventDrivenTestClock.requireAdvanceWhenArmed(by:timeout:)` passes its
+    /// own. Ordinary call sites take the 45 s default, which is one leg of the
+    /// triple derived on ``clockDriven``; a suite whose arming has been seen
+    /// starving belongs on `EventDrivenTestClock` instead. The exception is a
+    /// call site where this polled probe is itself the thing under test, which
+    /// cannot migrate without ceasing to test it: `ClockTestSupportTests`
+    /// passes ``TestDeadlines/saturatedPass`` there.
     func advanceWhenSuspended(by duration: Duration,
+                              timeout: Swift.Duration = .seconds(45),
                               sourceLocation: SourceLocation = #_sourceLocation) async {
-        await waitForSuspension(sourceLocation: sourceLocation)
+        await waitForSuspension(timeout: timeout, sourceLocation: sourceLocation)
         await advance(by: duration)
     }
 
@@ -292,7 +303,7 @@ public extension TestClock {
     /// emitted from inside the critical section that registers the sleeper, as
     /// an explicit ladder of `requireAdvanceWhenArmed` closed by a
     /// `requireSleeperArmed` — the re-arm being the proof that the tick before
-    /// it finished. `Tests/CLAUDE.md`, "The event-driven alternative".
+    /// it finished. `Tests/CLAUDE.md`, "The event-driven clock".
     ///
     /// - Parameters:
     ///   - what: names the effect being waited for, for the timeout diagnostic.
@@ -449,7 +460,7 @@ public extension TestClock {
     ///     shape means a chain that size pays every guard rather than stopping
     ///     at the first miss (contrast `EventDrivenTestClock`'s strict pair,
     ///     `requireSleeperArmed` / `requireAdvanceWhenArmed`, under "The
-    ///     event-driven alternative" below, where a miss throws immediately).
+    ///     event-driven clock" below, where a miss throws immediately).
     ///     ("Fast pass", not "live": tier-3 `TBDDaemonLiveTests` pins its own
     ///     limit and is unaffected.) That is
     ///     consistent with the invariant — only a failing test walks the whole

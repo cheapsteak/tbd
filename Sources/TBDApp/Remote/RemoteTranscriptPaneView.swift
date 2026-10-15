@@ -17,7 +17,17 @@ import TBDShared
 ///   non-blocking "Syncing…" while records already cached stay readable. The
 ///   full-pane loading state is only for a session with no cache file yet;
 /// - `refreshToken` – bumped on every completed sync, so an append that moved
-///   none of the other three is still read.
+///   none of the other three is still read;
+/// - `head` – bumped by the daemon on every prepend of earlier history. A
+///   change under the same generation re-reads the whole file and bumps the
+///   table's `prependToken` in the same update, so the top visible row stays
+///   where it was on screen (`ReadPlan`);
+/// - `hasEarlier` / `earlier` – whether history above the cache can be
+///   loaded, and where loading it stands. The table's near-top transitions go
+///   out through `onNearTop` (the driver decides whether to load), and the
+///   header overlay (`RemoteTranscriptEarlierHeader`) shows the state; its
+///   retry button calls `onLoadEarlier`. The pane never reads the flag: with
+///   it off `hasEarlier` is always false and the header never shows.
 ///
 /// Items are published into `AppState.sessionTranscripts` under
 /// `RemoteTranscriptTail.storeKey`, where `TranscriptOverlayView` finds them.
@@ -37,6 +47,13 @@ struct RemoteTranscriptPaneView: View {
     var refreshToken: Int = 0
     /// The last sync's failure, if the most recent one failed.
     var syncError: String?
+    var head: Int = 0
+    var hasEarlier = false
+    var earlier: RemoteTranscriptEarlierState = .idle
+    /// Each near-top transition of the table.
+    var onNearTop: @MainActor (Bool) -> Void = { _ in }
+    /// The header's "Load earlier messages" button.
+    var onLoadEarlier: @MainActor () -> Void = {}
 
     @Environment(AppState.self) var appState
 
@@ -45,13 +62,45 @@ struct RemoteTranscriptPaneView: View {
     @State private var presentationMemo = TranscriptPresentationMemo()
     @State private var atBottom = true
     @State private var scrollToBottomToken = 0
+    @State private var promptScroll: TranscriptScrollRequest?
     @State private var activityGroupExpansion: [String: Bool] = [:]
     @State private var activityToggleToken = 0
+    /// Stable `createdAt` for a remote prompt card; see `PromptFirstSeenDates`.
+    @State private var promptFirstSeen = PromptFirstSeenDates()
+    @State private var prependToken = 0
+    @State private var isNearTop = false
+    /// The generation and head of the last successful read, so `ReadPlan`
+    /// can tell a prepend from a reset.
+    @State private var lastRead: ReadPlan.Mark?
+    /// Every item ID that has started the loaded window, so an activity group
+    /// that earlier history extends at its front keeps its identity (see
+    /// `TranscriptPresentation.groupKeyID`). Cleared on a new conversation or
+    /// session, whose window shares no IDs with this one.
+    @State private var windowStartIDs: Set<String> = []
 
     private var storeKey: String { RemoteTranscriptTail.storeKey(selection) }
 
     private var items: [TranscriptItem] {
         appState.sessionTranscripts[storeKey] ?? []
+    }
+
+    private var promptTarget: PromptAnswerTarget {
+        .remote(provider: selection.provider, sessionID: selection.sessionID)
+    }
+
+    /// The session's open dialog as a card: its effective pending prompt,
+    /// while the provider reports `waiting_input`.
+    private var livePrompts: [PendingPromptPresentation] {
+        PendingPromptMerge.livePrompts(
+            appState: appState, selection: selection, firstSeen: promptFirstSeen)
+    }
+
+    /// `items` with the prompt cards merged in. View-time only: the tail's
+    /// `read()` stays the one writer of `sessionTranscripts[storeKey]`.
+    private func merged(_ items: [TranscriptItem]) -> PendingPromptMerge.Merged {
+        PendingPromptMerge.apply(
+            items: items,
+            prompts: appState.promptCardRetention.cards(live: livePrompts, for: promptTarget))
     }
 
     /// Everything that should cause a re-read. `.task(id:)` restarts on any
@@ -60,7 +109,32 @@ struct RemoteTranscriptPaneView: View {
         let key: String
         let path: String?
         let generation: Int
+        let head: Int
         let refreshToken: Int
+    }
+
+    /// How a read relates to the one before it.
+    enum ReadPlan: Equatable {
+        /// Same generation and head: whatever was appended is read on.
+        case incremental
+        /// Same generation, new head: earlier history landed at the front.
+        /// The file is re-read whole and the table told to hold its top row.
+        case anchoredReread
+        /// New generation: a new conversation. The table's `.id` rebuilds it,
+        /// which opens it at the bottom.
+        case resetToBottom
+
+        struct Mark: Equatable {
+            let generation: Int
+            let head: Int
+        }
+
+        static func next(previous: Mark?, current: Mark) -> ReadPlan {
+            guard let previous else { return .incremental }
+            if previous.generation != current.generation { return .resetToBottom }
+            if previous.head != current.head { return .anchoredReread }
+            return .incremental
+        }
     }
 
     var body: some View {
@@ -84,18 +158,33 @@ struct RemoteTranscriptPaneView: View {
         }
         .environmentObject(overlayCoordinator)
         .task(id: ReadRequest(
-            key: storeKey, path: path, generation: generation, refreshToken: refreshToken)
+            key: storeKey, path: path, generation: generation, head: head,
+            refreshToken: refreshToken)
         ) {
             await read()
         }
         .onChange(of: selection) { old, _ in
             release(RemoteTranscriptTail.storeKey(old))
+            appState.promptCardRetention.forgetLive(
+                for: .remote(provider: old.provider, sessionID: old.sessionID))
             overlayCoordinator.close()
             activityGroupExpansion.removeAll()
+            windowStartIDs.removeAll()
+            lastRead = nil
         }
         .onDisappear {
             release(storeKey)
+            appState.promptCardRetention.forgetLive(for: promptTarget)
             overlayCoordinator.close()
+        }
+        // Prompt-card bookkeeping, outside any body evaluation; see
+        // `PromptCardRetention`.
+        .onChange(of: livePrompts, initial: true) { _, live in
+            appState.promptCardRetention.observe(live: live, for: promptTarget)
+        }
+        .onChange(of: merged(items).settled, initial: true) { _, settled in
+            appState.promptCardRetention.settle(settled)
+            appState.promptAnswers.forget(settled)
         }
     }
 
@@ -153,9 +242,12 @@ struct RemoteTranscriptPaneView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
+            let withCards = merged(items)
             let presentation = TranscriptPresentation.build(
-                items: items,
+                items: withCards.items,
                 expansionOverrides: activityGroupExpansion,
+                pendingPrompts: withCards.prompts,
+                windowStartIDs: windowStartIDs,
                 memo: presentationMemo
             )
             TableTranscriptView(
@@ -174,10 +266,23 @@ struct RemoteTranscriptPaneView: View {
                 ),
                 atBottom: $atBottom,
                 scrollToBottomToken: scrollToBottomToken,
+                scrollToItem: promptScroll,
                 activityToggleToken: activityToggleToken,
                 linkRoot: "",
-                nodesProvider: { presentation.nodes }
+                nodesProvider: { presentation.nodes },
+                prependToken: prependToken,
+                onNearTop: { near in
+                    isNearTop = near
+                    onNearTop(near)
+                }
             )
+            .overlay(alignment: .top) {
+                let content = RemoteTranscriptEarlierHeader.Content.resolve(
+                    state: earlier, hasEarlier: hasEarlier, nearTop: isNearTop)
+                if content != .hidden {
+                    RemoteTranscriptEarlierHeader(content: content, onRetry: onLoadEarlier)
+                }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if !atBottom {
                     Button {
@@ -209,7 +314,13 @@ struct RemoteTranscriptPaneView: View {
         let state = appState.remoteComposerState(for: selection)
         if state != .hidden {
             Divider()
-            MessageComposerView(target: .remote(selection), state: state.composerState)
+            let cardID = merged(items).answerableCardItemID
+            MessageComposerView(
+                target: .remote(selection),
+                state: state.composerState(promptAnswerable: cardID != nil),
+                promptHint: cardID.map { id in
+                    { promptScroll = .next(after: promptScroll, itemID: id) }
+                })
                 .id(ComposerKey.remote(selection))
         }
     }
@@ -217,11 +328,28 @@ struct RemoteTranscriptPaneView: View {
     private func read() async {
         guard let path else { return }
         let key = storeKey
-        guard let fresh = await tail.read(key: key, path: path, generation: generation),
+        let mark = ReadPlan.Mark(generation: generation, head: head)
+        let plan = ReadPlan.next(previous: lastRead, current: mark)
+        guard let fresh = await tail.read(
+            key: key, path: path, generation: generation, head: head),
               !Task.isCancelled
         else { return }
+        // Only a read that landed moves the mark, so a prepend whose re-read
+        // failed is still anchored when the next read succeeds.
+        lastRead = mark
+        if plan == .resetToBottom { windowStartIDs.removeAll() }
+        // `fresh` is the read before prompt cards merge in, so a card is never
+        // recorded as a window start.
+        if let start = TranscriptPresentation.windowStartID(of: fresh) {
+            windowStartIDs.insert(start)
+        }
         if appState.sessionTranscripts[key] != fresh {
             appState.sessionTranscripts[key] = fresh
+            // Same main-actor turn as the items, so the table sees the new
+            // rows and the reason for them in one update.
+            if plan == .anchoredReread {
+                prependToken &+= 1
+            }
         }
     }
 

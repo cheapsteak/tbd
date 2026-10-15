@@ -27,7 +27,8 @@ struct AccountPickerSheet: View {
             balancingOn: appState.daemonCapabilities?.profileBalancingEnabled ?? false,
             liveCount: { profileID in appState.liveSessionCount(forProfile: profileID) },
             defaultProfileID: appState.defaultProfileID,
-            now: Date()
+            now: Date(),
+            policy: appState.daemonCapabilities?.profileBalancingPolicy ?? .standard
         )
     }
 

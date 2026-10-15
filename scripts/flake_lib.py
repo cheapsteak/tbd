@@ -20,6 +20,9 @@ in one place:
   sentinel AND its author is the bot's App account, `BOT_LOGIN` with user type
   `Bot`. GitHub reserves the `[bot]` suffix for Apps, so nobody else can author
   a comment under that login; anyone can type the sentinel.
+- **Schema versions** (spec §4.4). A bot comment that declares a version this
+  code does not read (`READABLE_SCHEMAS`) raises `UnsupportedSchema`: it is a
+  newer or retired format, not a corrupt comment, and is never read as empty.
 
 Stdlib only, Python 3.12 (ubuntu-latest's `python3`).
 
@@ -271,12 +274,25 @@ def retry_records(path: Path) -> list[dict]:
 
 # --- the ledger's state ------------------------------------------------------------
 
+# The schema version every writer stamps, twice: in the sentinel (`v1`) and as
+# the JSON block's `schema` key. One version covers all three comment kinds.
 SCHEMA = 1
-SENTINEL = "<!-- flake-ledger v1 -->"
+# The versions this code reads. A trusted comment declaring any other version
+# – a later writer's, or one this code no longer reads – is not corrupt, and
+# is never read as if it were: its reader raises `UnsupportedSchema` and the
+# whole command stops (spec §4.4, §8). An older version stays listed here for
+# as long as the readers can read it.
+READABLE_SCHEMAS = frozenset({1})
+# A sentinel is its prefix, the version, and ` -->`. Readers match the prefix,
+# so a comment under another version's sentinel is still found and judged.
+SENTINEL_PREFIX = "<!-- flake-ledger v"
+ATTEMPTS_SENTINEL_PREFIX = "<!-- flakefix-attempts v"
+WATCHLIST_SENTINEL_PREFIX = "<!-- flake-watchlist v"
+SENTINEL = f"{SENTINEL_PREFIX}{SCHEMA} -->"
 STATE_BEGIN, STATE_END = "<!-- flake-ledger-state", "flake-ledger-state -->"
-ATTEMPTS_SENTINEL = "<!-- flakefix-attempts v1 -->"
+ATTEMPTS_SENTINEL = f"{ATTEMPTS_SENTINEL_PREFIX}{SCHEMA} -->"
 ATTEMPTS_BEGIN, ATTEMPTS_END = "<!-- flakefix-attempts-state", "flakefix-attempts-state -->"
-WATCHLIST_SENTINEL = "<!-- flake-watchlist v1 -->"
+WATCHLIST_SENTINEL = f"{WATCHLIST_SENTINEL_PREFIX}{SCHEMA} -->"
 WATCHLIST_BEGIN, WATCHLIST_END = "<!-- flake-watchlist-state", "flake-watchlist-state -->"
 
 # GitHub refuses a comment body over 65,536 characters; keep headroom.
@@ -284,6 +300,11 @@ MAX_COMMENT_CHARS = 60000
 # Spec §4.3: a test qualifies once its current episode spans this many distinct
 # occurrence keys.
 QUALIFY_DISTINCT_OCCURRENCES = 2
+# Spec §4.3: a nightly stress failure's occurrence key starts with this. The
+# nightly run loads the machine on purpose, so its failures measure load
+# sensitivity; a test qualifies only once one of its current episode's
+# failures is somewhere else – a PR, a branch, or `main` in CI.
+NIGHT_PREFIX = "night:"
 # The human-readable failure list shows at most this many, newest first. The
 # JSON block keeps every failure (or, past the body limit, its folded count).
 HUMAN_FAILURE_ROWS = 200
@@ -396,9 +417,24 @@ def current_count(state: State) -> int:
     return len(current_failures(state)) + sum(f.count for f in _current_folded(state))
 
 
+def is_ci_place(occurrence: str) -> bool:
+    """Whether an occurrence key names a CI run – a PR, a branch, or `main` –
+    rather than a night of the stress loop (spec §4.3)."""
+    return not occurrence.startswith(NIGHT_PREFIX)
+
+
+def has_ci_place(state: State) -> bool:
+    """Whether the current episode holds a failure outside the nightly stress
+    run, folded counts included."""
+    return any(is_ci_place(o) for o in distinct_occurrences(state))
+
+
 def qualifies(state: State) -> bool:
-    """Spec §4.3: the current episode spans two or more distinct occurrence
-    keys, or the current episode is a recurrence with at least one failure."""
+    """Spec §4.3: the current episode holds a failure in a CI run, not only
+    in the nightly stress loop, and either spans two or more distinct
+    occurrence keys or is a recurrence with at least one failure."""
+    if not has_ci_place(state):
+        return False
     if state.episode > 0 and current_count(state) > 0:
         return True
     return len(distinct_occurrences(state)) >= QUALIFY_DISTINCT_OCCURRENCES
@@ -445,6 +481,67 @@ def _parse_json_block(body: str, begin: str, end: str) -> dict | None:
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+class UnsupportedSchema(Exception):
+    """A trusted bot comment declares a schema version this code does not read
+    (`READABLE_SCHEMAS`). Not corruption: a newer writer's comment, or an older
+    one after a rollback, read as unparsable would be skipped and its history
+    restarted, so every reader stops instead (spec §4.4, §8)."""
+
+
+_DECLARED_VERSION = re.compile(r"(\d{1,9}) -->")
+
+
+def _is_version(value) -> bool:
+    # `True == 1` in Python: a boolean is not a version.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _declared(body: str, prefix: str, payload: dict | None) -> list:
+    """What the sentinel and the block declare, as written: an int for a
+    well-formed version, else the raw spelling, which no reader reads."""
+    found = []
+    if body.startswith(prefix):
+        rest = body[len(prefix):].split("\n", 1)[0].rstrip()
+        match = _DECLARED_VERSION.fullmatch(rest)
+        found.append(int(match.group(1)) if match else rest[:40])
+    if payload and "schema" in payload:
+        found.append(payload["schema"])
+    return found
+
+
+def declared_versions(body: str, prefix: str, begin: str, end: str) -> list:
+    """The schema versions a comment declares: its sentinel's, then its JSON
+    block's `schema`, each when it is there. A corrupt comment's block may
+    declare none."""
+    return _declared(body, prefix, _parse_json_block(body, begin, end))
+
+
+def _versioned_payload(body: str, prefix: str, begin: str, end: str, what: str) -> dict | None:
+    """A bot comment's JSON block, parsed once: None when the comment is
+    corrupt (no block, or a block that declares no version). Raises
+    `UnsupportedSchema` when the sentinel or the block declares a version
+    outside `READABLE_SCHEMAS`, so a block returned is one this code reads."""
+    payload = _parse_json_block(body, begin, end)
+    unreadable = [v for v in _declared(body, prefix, payload) if not (_is_version(v) and v in READABLE_SCHEMAS)]
+    if unreadable:
+        versions = [v for v in unreadable if _is_version(v)]
+        if len(versions) == len(unreadable):
+            version = max(versions)
+            age = "newer than" if version > max(READABLE_SCHEMAS) else "not one of"
+        else:
+            # A spelling this code does not know – `v2.0`, `"2"` – is a format
+            # it cannot read, not a corrupt comment to skip.
+            version = json.dumps(next(v for v in unreadable if not _is_version(v)))
+            age = "not a version spelled as"
+        raise UnsupportedSchema(
+            f"the bot's {what} comment declares schema version {version}, {age} the versions this code reads "
+            f"({', '.join(str(v) for v in sorted(READABLE_SCHEMAS))}); stopping rather than reading it as empty"
+        )
+    # Every declared version is readable here, so a block declaring one is
+    # a block this code reads; one declaring none is corrupt.
+    return payload if payload and "schema" in payload else None
 
 
 def code_span(text: str) -> str:
@@ -510,8 +607,8 @@ def _human(state: State, repo: str, rows: int) -> str:
         "",
         f"**Failures:** {failure_count(state)} recorded in all. The current episode "
         f"(episode {state.episode + 1}) has {current_count(state)}, across {len(distinct)} "
-        f"distinct places (threshold: {QUALIFY_DISTINCT_OCCURRENCES}). Qualifies for a fix "
-        f"attempt: {'yes' if qualifies(state) else 'no'}.",
+        f"distinct places (threshold: {QUALIFY_DISTINCT_OCCURRENCES}, at least one of them a CI run "
+        f"rather than the nightly stress loop). Qualifies for a fix attempt: {'yes' if qualifies(state) else 'no'}.",
     ]
     if state.links:
         refs = ", ".join(f"#{n}" for n in state.links)
@@ -627,11 +724,13 @@ def render_comment(state: State, repo: str) -> str:
 def parse_comment(body: str, login: str | None, user_type: str | None) -> State | None:
     """The state in a ledger comment, or None. A comment is state only when its
     author is the bot (`trusted_author`), it starts with the sentinel, and its
-    JSON block parses with this schema: a forged comment is never state."""
-    if not trusted_author(login, user_type) or not body.startswith(SENTINEL):
+    JSON block parses with a readable schema: a forged comment is never state.
+    A bot comment declaring a version this code does not read raises
+    `UnsupportedSchema` instead of reading as None."""
+    if not trusted_author(login, user_type) or not body.startswith(SENTINEL_PREFIX):
         return None
-    payload = _parse_json_block(body, STATE_BEGIN, STATE_END)
-    if not payload or payload.get("schema") != SCHEMA:
+    payload = _versioned_payload(body, SENTINEL_PREFIX, STATE_BEGIN, STATE_END, "ledger")
+    if not payload:
         return None
     return _state_from_payload(payload)
 
@@ -675,9 +774,10 @@ def render_watchlist(states: list[State], repo: str) -> str:
         WATCHLIST_SENTINEL,
         "### Flake watchlist",
         "",
-        f"Tests that have failed in fewer than {QUALIFY_DISTINCT_OCCURRENCES} distinct places and have no issue of "
-        "their own. A test that fails in a second place gets its own issue, seeded with the history kept here, "
-        "and leaves this list.",
+        f"Tests that have failed but do not qualify for an issue of their own: fewer than {QUALIFY_DISTINCT_OCCURRENCES} "
+        "distinct places, or failures only in the nightly stress loop, which loads the machine on purpose. A test "
+        f"that fails in {QUALIFY_DISTINCT_OCCURRENCES} places, at least one of them a CI run (a PR, a branch or `main`), "
+        "gets its own issue, seeded with the history kept here, and leaves this list.",
         "",
     ]
     lines += [_watch_line(s, repo) for s in ordered] or ["Nothing here: no test is on this part of the watchlist."]
@@ -692,11 +792,12 @@ def render_watchlist(states: list[State], repo: str) -> str:
 
 def parse_watchlist(body: str, login: str | None, user_type: str | None) -> list[State] | None:
     """The states in one watchlist comment, or None: only a comment the bot
-    wrote (`trusted_author`), under the sentinel, whose block parses."""
-    if not trusted_author(login, user_type) or not body.startswith(WATCHLIST_SENTINEL):
+    wrote (`trusted_author`), under the sentinel, whose block parses. Raises
+    `UnsupportedSchema` as `parse_comment` does."""
+    if not trusted_author(login, user_type) or not body.startswith(WATCHLIST_SENTINEL_PREFIX):
         return None
-    payload = _parse_json_block(body, WATCHLIST_BEGIN, WATCHLIST_END)
-    if not payload or payload.get("schema") != SCHEMA or not isinstance(payload.get("tests"), list):
+    payload = _versioned_payload(body, WATCHLIST_SENTINEL_PREFIX, WATCHLIST_BEGIN, WATCHLIST_END, "watchlist")
+    if not payload or not isinstance(payload.get("tests"), list):
         return None
     states = [_state_from_payload(t) for t in payload["tests"]]
     if any(s is None for s in states):
@@ -708,6 +809,8 @@ def parse_watchlist(body: str, login: str | None, user_type: str | None) -> list
 
 ATTEMPT_OUTCOMES = ("aborted", "no-diff", "push-refused", "pr-opened")
 ATTEMPT_NOTES_CHARS = 4000
+# Attempt fields added after the schema shipped, written only when set.
+OPTIONAL_ATTEMPT_FIELDS = ("target_change", "renamed_to")
 
 
 @dataclass(frozen=True)
@@ -724,34 +827,55 @@ class Attempt:
     false_pass: float | None = None  # None means unknown
     weak: bool | None = None
     protected_touched: list[str] | None = None
-    verdict: str | None = None  # "pass" | "fail"
+    verdict: str | None = None  # "pass" | "fail"; None when nothing was stress-run
+    # `pr-opened` only: "renamed" or "retired" when the candidate renamed,
+    # moved or retired the target test, declared it, and the diff bore it out
+    # (§6.4); the PR then stays a draft for a human. `renamed_to` is the new ID.
+    target_change: str | None = None
+    renamed_to: str | None = None
     # `aborted` only: True when a fixer session failed (an outage, an expired
     # token, a crash) and left no commit, so the attempt tried nothing (§5).
     session_failed: bool | None = None
+    # `aborted` only: True when `publish` lost a verified candidate to `main`
+    # moving during the run – its replay onto the new `main` conflicted, or a
+    # workflow refusal outlived the replay – so the attempt said nothing about
+    # the test (§5, §8).
+    publish_raced: bool | None = None
 
 
 def render_attempts(attempts: list[Attempt], repo: str) -> str:
     lines = [ATTEMPTS_SENTINEL, "### Fix attempts", ""]
     for a in attempts:
-        extra = f", PR #{a.pr}, verdict {a.verdict}" if a.pr else ""
+        extra = f", PR #{a.pr}, verdict {a.verdict or 'none, nothing stress-run'}" if a.pr else ""
+        if a.target_change == "renamed":
+            extra += f", target renamed to `{a.renamed_to}`"
+        elif a.target_change == "retired":
+            extra += ", target retired"
         lines.append(
             f"- [{a.started_at}]({run_url(repo, a.run_id, 1)}) on `{a.main_sha[:12]}`: "
             f"{a.outcome}{extra} (episode {a.episode + 1})"
         )
-    payload = {"schema": SCHEMA, "attempts": [asdict(a) for a in attempts]}
+    # The target-change fields are written only when set, so an entry without
+    # one still parses for a reader that predates them.
+    payload = {"schema": SCHEMA, "attempts": [
+        {k: v for k, v in asdict(a).items() if not (k in OPTIONAL_ATTEMPT_FIELDS and v is None)} for a in attempts]}
     return "\n".join(lines) + "\n\n" + _json_block(ATTEMPTS_BEGIN, ATTEMPTS_END, payload)
 
 
 def parse_attempts(body: str, login: str | None, user_type: str | None) -> list[Attempt] | None:
-    """The attempts in an attempt comment, or None unless the bot wrote it."""
-    if not trusted_author(login, user_type) or not body.startswith(ATTEMPTS_SENTINEL):
+    """The attempts in an attempt comment, or None unless the bot wrote it.
+    Raises `UnsupportedSchema` as `parse_comment` does."""
+    if not trusted_author(login, user_type) or not body.startswith(ATTEMPTS_SENTINEL_PREFIX):
         return None
-    payload = _parse_json_block(body, ATTEMPTS_BEGIN, ATTEMPTS_END)
-    if not payload or payload.get("schema") != SCHEMA:
+    payload = _versioned_payload(body, ATTEMPTS_SENTINEL_PREFIX, ATTEMPTS_BEGIN, ATTEMPTS_END, "attempt")
+    if not payload:
         return None
+    known = {f.name for f in fields(Attempt)}
     try:
-        return [Attempt(**a) for a in payload.get("attempts", [])]
-    except TypeError:
+        # Unknown keys are a later writer's additions: dropped, not fatal, so a
+        # reader older than its writer still reads every entry.
+        return [Attempt(**{k: v for k, v in a.items() if k in known}) for a in payload.get("attempts", [])]
+    except (TypeError, AttributeError):
         return None
 
 

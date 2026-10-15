@@ -31,7 +31,10 @@ extension AppState {
         do {
             try await daemonClient.removeRepo(repoID: repoID, force: force)
             repos.removeAll { $0.id == repoID }
-            worktrees.removeValue(forKey: repoID)
+            let removed = worktrees.removeValue(forKey: repoID) ?? []
+            for worktree in removed {
+                forgetDevServerState(worktreeID: worktree.id)
+            }
         } catch {
             logger.error("Failed to remove repo: \(error)")
             handleConnectionError(error)

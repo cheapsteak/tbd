@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import Testing
 @testable import TBDApp
@@ -14,7 +13,7 @@ import TestSupport
 /// the view contributes only the `$model.text` binding, the `onChange`, the
 /// `.task(id:)` and the `onDisappear` that call into it.
 ///
-/// Everything is virtual or injected: the debounce runs on a `TestClock`, and
+/// Everything is virtual or injected: the debounce runs on an `EventDrivenTestClock`, and
 /// content files go to a per-test temp directory through
 /// `noteContentPathResolver` rather than a `TBD_HOME`-derived path —
 /// `TBD_HOME` is process-global and concurrently running daemon suites
@@ -57,7 +56,7 @@ struct NotePaneModelTests {
         let defaults: UserDefaults
         let dir: URL
         let state: AppState
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let model: NotePaneModel
         let worktreeID = UUID()
 
@@ -114,10 +113,10 @@ struct NotePaneModelTests {
         }
     }
 
-    private func withHarness(_ body: (Harness) async -> Void) async {
+    private func withHarness(_ body: (Harness) async throws -> Void) async rethrows {
         let harness = Harness()
-        await body(harness)
-        harness.tearDown()
+        defer { harness.tearDown() }
+        try await body(harness)
     }
 
     /// THE regression this suite exists for.
@@ -128,8 +127,8 @@ struct NotePaneModelTests {
     /// back holding pre-edit text — so the first edit is lost, and the second
     /// save writes stale-base-plus-new-keystrokes over it.
     @Test("a history round trip inside the debounce window keeps the edit")
-    func historyRoundTripDuringDebounceKeepsTheEdit() async {
-        await withHarness { h in
+    func historyRoundTripDuringDebounceKeepsTheEdit() async throws {
+        try await withHarness { h in
             let noteA = h.seedNote(content: "base A")
             let noteB = h.seedNote(content: "base B")
 
@@ -154,7 +153,7 @@ struct NotePaneModelTests {
             // destructive rather than merely late: the next save is composed
             // from the text the editor is holding.
             h.type(h.model.text + " + second edit")
-            await h.clock.advanceWhenSuspended(by: Self.debounce)
+            try await h.clock.requireAdvanceWhenArmed(by: Self.debounce, timeout: TestDeadlines.saturatedPass)
             await h.model.pendingSaveTask?.value
 
             #expect(h.onDisk(noteA) == "base A + first edit + second edit",
@@ -231,15 +230,15 @@ struct NotePaneModelTests {
     /// up showing A's text under B's title, with `loaded` true, and the next
     /// keystroke would write A's words into B's file.
     @Test("a stale load does not overwrite a newer note")
-    func aStaleLoadDoesNotOverwriteANewerNote() async {
-        await withHarness { h in
+    func aStaleLoadDoesNotOverwriteANewerNote() async throws {
+        try await withHarness { h in
             let gate = ReleaseGate()
             let noteA = h.seedNote(content: nil, hasLegacyContent: true)
             let noteB = h.seedNote(content: "base B")
             let clock = h.clock
             h.state.noteLegacyContentFetcher = { _ in
                 // Park twice: the clock sleep is what lets the test prove the
-                // fetch was entered (`advanceWhenSuspended` waits for it), the
+                // fetch was entered (`requireAdvanceWhenArmed` waits for it), the
                 // gate is what holds it there until the test is ready.
                 try? await clock.sleep(for: .seconds(1))
                 await gate.wait()
@@ -249,7 +248,7 @@ struct NotePaneModelTests {
             let staleLoad = Task { @MainActor in
                 await h.model.load(noteID: noteA, worktreeID: h.worktreeID, appState: h.state)
             }
-            await h.clock.advanceWhenSuspended(by: .seconds(1))
+            try await h.clock.requireAdvanceWhenArmed(by: .seconds(1), timeout: TestDeadlines.saturatedPass)
 
             // What `.task(id:)` does when the pane's note is swapped.
             staleLoad.cancel()

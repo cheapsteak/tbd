@@ -33,6 +33,9 @@ These get reaped:
 - **Untracked remote transcript caches** — `~/tbd/remote-transcripts/<provider>/<session>/`
   directories that no undismissed `remote_session` row or unarchived `worktree` row refers
   to and that nothing has written to within `gcGraceSeconds` (see below).
+- **Stale dev-server running files** — `*.json` files in `~/.local/state/dev-servers/`
+  (`DEV_SERVERS_DIR`) whose process is gone and that are older than `gcGraceSeconds`
+  (see below).
 
 ## Philosophy: orphaned, not idle
 
@@ -138,8 +141,9 @@ worktrees Claude Code itself removed before TBD ever swept them. That residue is
 
 Every non-Bedrock model profile gets an isolated Claude config directory at
 `~/tbd/profiles/<uuid>/`, created lazily — on session spawn, when the profile's
-`CLAUDE_CONFIG_DIR` is resolved, and on OAuth login prep
-(`modelProfile.prepareConfigDir`, called before `tbd profile login`). Exactly one
+`CLAUDE_CONFIG_DIR` is resolved; on OAuth login prep
+(`modelProfile.prepareConfigDir`, called before `tbd profile login`); and before
+`tbd profile exec` runs a command (`modelProfile.execEnvironment`). Exactly one
 `model_profiles` row points at it, and it is the *only* pointer: nothing on disk records
 which profile a directory belongs to beyond the UUID in its name.
 
@@ -361,6 +365,25 @@ rows (`rows-unreadable`, which skips the leg), and a failed removal (`remove-fai
 Only `<root>/<provider>/<session>` directories are candidates; stray files and emptied
 provider directories are left alone. No reap record is written: nothing here could be
 restored that a sync would not rebuild.
+
+## Dev-server running files
+
+A server reports its URLs by writing a running file into the shared directory
+`~/.local/state/dev-servers/`, which outlives the worktree and the request that created it
+(contract: [`docs/dev-servers.md`](dev-servers.md)). `OrphanGC` is its named reconciler, under
+`gcEnabled` alone, with no soak flag. The leg only reads and deletes files; it never signals a
+process. A file is deleted (`REAP dev-server-file`) only when its process is gone, by pid and
+start time. Four things keep a file:
+
+- **Live** (`KEEP live`) – the process exists, is not a zombie, and its start time matches.
+- **Unknown** (`KEEP unknown`) – the process probe failed: the kernel read errored or returned
+  no start time. A failed read is not a dead process, so the file is kept whatever its age.
+- **Inside the grace** (`KEEP grace`) – the file's modification date is younger than
+  `gcGraceSeconds`, or cannot be read.
+- **Malformed or newer version** – a file TBD cannot decode has no defined liveness, and another
+  tool may own a newer format, so it is not a candidate.
+
+A dry run plans every line without touching disk, as every leg does.
 
 ## Cadence and the `gcEnabled` gate
 

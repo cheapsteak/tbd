@@ -122,6 +122,17 @@ extension WorktreeLifecycle {
             archivedHeadSHA: capturedSHA
         )
 
+        // Dev servers TBD started in its tabs stop first, while those tabs'
+        // processes are alive to be signalled, and before the archive hook
+        // runs. Archive can fire with no user gesture, so this only signals
+        // tab process groups: no declared `stop` or `status` command runs,
+        // and no pid a running file names is signalled. After the
+        // status flip, so a concurrent `server.start` is
+        // refused rather than racing the teardown. A failure is logged and
+        // the archive continues: the tab teardown below still ends what TBD
+        // started.
+        await stopDevServersForArchive(worktree: worktree)
+
         // Capture each terminal's scrollback into Closed Terminals history,
         // then kill its tmux window, reaping any wedged agent that survives
         // kill-window's SIGHUP. The archived worktree row and its history rows
@@ -136,7 +147,8 @@ extension WorktreeLifecycle {
             // reader it is captured from.
             if terminal.transport == .holder {
                 await Self.recordHolderClosedTerminal(
-                    terminal, registry: holderRegistry, history: db.terminalHistory)
+                    terminal, registry: holderRegistry, resolver: holderScreenResolver,
+                    history: db.terminalHistory)
                 if let failure = await disposeHolder(for: terminal) {
                     archiveLogger.warning(
                         "archive left a holder running: \(failure, privacy: .public)")
@@ -148,14 +160,46 @@ extension WorktreeLifecycle {
 
         // Delete terminals from db
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
+        await sessionTitles.forget(worktreeID: worktreeID)
         try await db.tabs.deleteForWorktree(worktreeID: worktreeID)
+        // No server may read *Exited* after archive.
+        // A holder server's exit — including the one archive's own stop
+        // caused — is stamped only while its terminal row exists, so after
+        // the delete above nothing can re-attach an entry this clears.
+        await detachDevServerOutputsForArchive(worktreeID: worktreeID)
         for terminal in terminals {
             await pendingQuestions.clear(terminalID: terminal.id)
-            await subscriptions?.broadcastPendingQuestions(
+            await subscriptions?.broadcastPendingPrompts(
                 terminalID: terminal.id, from: pendingQuestions)
         }
 
         return (worktree.worktree, repo)
+    }
+
+    /// Archive's dev-server stop, shared by `beginArchiveWorktree` and
+    /// reconcile's archive of a vanished worktree: signals the process groups
+    /// of servers running in TBD tabs only (no repo command runs, no running
+    /// file's pid is signalled), and a server that did not stop or was left
+    /// running is logged while the archive continues. A no-op when no
+    /// operations are wired.
+    func stopDevServersForArchive(worktree: LocalWorktree) async {
+        guard let devServerOperations else { return }
+        for report in await devServerOperations.stopAllForArchive(worktree: worktree)
+        where !report.succeeded {
+            archiveLogger.warning("""
+                archive: dev server \(report.name, privacy: .public) in \
+                \(worktree.id, privacy: .public) did not stop: \
+                \(report.message ?? "unknown", privacy: .public)
+                """)
+        }
+    }
+
+    /// Archive's last dev-server step, run once the worktree's terminal rows
+    /// are deleted: no saved output may make a server read *Exited* after a
+    /// revive. Never throws; a no-op when no operations are wired.
+    func detachDevServerOutputsForArchive(worktreeID: UUID) async {
+        guard devServerOperations != nil else { return }
+        await db.terminalHistory.detachAllServerOutputs(worktreeID: worktreeID)
     }
 
     /// Phase 2 (slow, fire-and-forget): Runs archive hook and removes git worktree.

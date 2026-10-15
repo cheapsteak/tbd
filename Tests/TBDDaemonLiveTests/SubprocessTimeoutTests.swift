@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import Testing
@@ -36,32 +35,31 @@ import TestSupport
 ///    `--filter '^TBDDaemonLiveTests\.' --no-parallel` on an otherwise-idle
 ///    machine, so real arming latency here is milliseconds.
 ///
-/// One residual, stated rather than glossed: `waitForSuspension`'s default is
-/// now 45 s, so a test that waited **twice** would need 90 s and would trip this
-/// 60 s limit, where at the old 15 s default two waits cost only 30 s. No test
-/// here chains two — the suite's two `advanceWhenSuspended` sites are in
-/// different `@Test`s, one each — and in the quiet pass a healthy handshake
-/// returns in milliseconds, so only a genuine hang ever pays the timeout, which
-/// is exactly what this limit is here to catch.
+/// One residual, stated rather than glossed: `requireSleeperArmed`'s default is
+/// 45 s, so a test that waited **twice** would need 90 s and would trip this
+/// 60 s limit. No test here chains two — each of the suite's
+/// `requireAdvanceWhenArmed` sites is in its own `@Test` — and in the quiet
+/// pass a healthy handshake returns in milliseconds, so only a genuine hang
+/// ever pays the timeout, which is exactly what this limit is here to catch.
 @Suite("Subprocess timeout / kill path", .timeLimit(.minutes(1)))
 struct SubprocessTimeoutTests {
 
     /// Far enough out that the real watchdog cannot reach it inside the suite's
-    /// one-minute hang limit, so only the `TestClock` can fire the deadline.
+    /// one-minute hang limit, so only the `EventDrivenTestClock` can fire the deadline.
     private static let unreachableTimeout: Duration = .seconds(600)
 
     /// How long `pseudoTerminalRunTimesOutAndKillsTheChild` waits to observe
-    /// the child disappear. Kept small enough that one `advanceWhenSuspended`
+    /// the child disappear. Kept small enough that one `requireAdvanceWhenArmed`
     /// guard (45 s) plus this budget still fits the suite's 60 s limit.
     private static let killObservationBudget: Duration = .seconds(10)
 
-    @Test func runExternalCommandThrowsTimedOutOnSlowBinary() async {
+    @Test func runExternalCommandThrowsTimedOutOnSlowBinary() async throws {
         // Assert the OUTCOME (throws .timedOut), never wall-clock timing. The
         // `sleep 30` guarantees the child never finishes on its own, so a thrown
         // error can only mean the deadline fired — and the deadline now fires
         // because this test advanced virtual time, not because the runner
         // happened to be fast enough.
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let call = Task {
             try await TmuxManager.runExternalCommand(
                 executable: "/bin/sleep",
@@ -71,7 +69,7 @@ struct SubprocessTimeoutTests {
                 clock: clock
             )
         }
-        await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
+        try await clock.requireAdvanceWhenArmed(by: Self.unreachableTimeout)
         do {
             _ = try await call.value
             Issue.record("expected runExternalCommand to time out, but it returned")
@@ -100,12 +98,12 @@ struct SubprocessTimeoutTests {
             arguments: ["-c", "yes x | head -c \(bytes)"],
             label: "big-output-test",
             timeout: Self.unreachableTimeout,
-            clock: TestClock()
+            clock: EventDrivenTestClock()
         )
         #expect(out.utf8.count == bytes)
     }
 
-    @Test func runExternalCommandTimesOutPromptlyWhenGrandchildHoldsPipeOpen() async {
+    @Test func runExternalCommandTimesOutPromptlyWhenGrandchildHoldsPipeOpen() async throws {
         // Any spawned process can fork background grandchildren that
         // inherit the pipe write ends. The deadline
         // kills only the DIRECT child, so EOF never arrives on the pipes. The
@@ -125,7 +123,7 @@ struct SubprocessTimeoutTests {
         // The plain `sleep 120 &` grandchild is NOT killed and may linger up to
         // 120s after the suite — harmless orphanage locally, irrelevant on
         // ephemeral CI runners.
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let call = Task {
             try await TmuxManager.runExternalCommand(
                 executable: "/bin/sh",
@@ -135,7 +133,7 @@ struct SubprocessTimeoutTests {
                 clock: clock
             )
         }
-        await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
+        try await clock.requireAdvanceWhenArmed(by: Self.unreachableTimeout)
         do {
             _ = try await call.value
             Issue.record("expected runExternalCommand to time out, but it returned")
@@ -164,7 +162,7 @@ struct SubprocessTimeoutTests {
             arguments: ["-c", "sleep 30 & echo hi"],
             label: "grandchild-pipe-eof-test",
             timeout: Self.unreachableTimeout,
-            clock: TestClock()
+            clock: EventDrivenTestClock()
         )
         #expect(out == "hi\n")
     }
@@ -177,7 +175,7 @@ struct SubprocessTimeoutTests {
             arguments: ["ok"],
             label: "fast",
             timeout: Self.unreachableTimeout,
-            clock: TestClock()
+            clock: EventDrivenTestClock()
         )
         #expect(out.contains("ok"))
     }
@@ -191,7 +189,7 @@ struct SubprocessTimeoutTests {
     /// `runExternalCommand`, which has no `stdio` parameter of its own.
     ///
     /// The kill is asserted, not assumed, and the observation is deliberately
-    /// argv-based rather than pid-file-based. Under a `TestClock` the deadline
+    /// argv-based rather than pid-file-based. Under an `EventDrivenTestClock` the deadline
     /// is armed BEFORE `Process.run()` and fires the instant the test advances,
     /// so the child is killed on arrival — it may never execute a single line,
     /// and anything it was asked to write down would race. Its argv, by
@@ -221,7 +219,7 @@ struct SubprocessTimeoutTests {
     @Test func pseudoTerminalRunTimesOutAndKillsTheChild() async throws {
         let marker = "tbd-pty-timeout-\(UUID().uuidString)"
 
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let call = Task {
             try await runBoundedProcess(
                 executable: "/bin/sh",
@@ -232,7 +230,7 @@ struct SubprocessTimeoutTests {
                 clock: clock
             )
         }
-        await clock.advanceWhenSuspended(by: Self.unreachableTimeout)
+        try await clock.requireAdvanceWhenArmed(by: Self.unreachableTimeout)
         let outcome = try await call.value
         guard case .timedOut = outcome else {
             Issue.record("expected .timedOut under .pseudoTerminal, got \(outcome)")

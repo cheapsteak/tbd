@@ -81,6 +81,12 @@ public actor OrphanGC {
     /// The `~/tbd/repos` root the unsent-prompt leg walks. `TBDConstants` in
     /// production; tests pass a temp directory.
     private let unsentPromptsReposBase: URL
+    /// The shared dev-server running-file directory the stale-file leg
+    /// walks. `TBDConstants.devServersDir()` in production (honors
+    /// `DEV_SERVERS_DIR`); tests pass a temp directory.
+    private let devServersStore: DevServerRunningFileStore
+    /// Liveness read for that leg. `.live` in production.
+    private let devServerProbe: DevServerProcessProbe
     private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -177,6 +183,8 @@ public actor OrphanGC {
         attachmentsBase: URL? = nil,
         remoteTranscriptsEnvironment: [String: String]? = nil,
         reposBase: URL? = nil,
+        devServersBase: URL? = nil,
+        devServerProbe: DevServerProcessProbe? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
         rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
@@ -240,6 +248,9 @@ public actor OrphanGC {
         self.remoteTranscriptsEnvironment = remoteTranscriptsEnvironment
             ?? ProcessInfo.processInfo.environment
         self.unsentPromptsReposBase = reposBase ?? TBDConstants.reposDir
+        self.devServersStore = DevServerRunningFileStore(
+            directory: devServersBase ?? TBDConstants.devServersDir())
+        self.devServerProbe = devServerProbe ?? .live
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -269,6 +280,7 @@ public actor OrphanGC {
         // Same reasoning as `hangStacksReaped`: unsent-prompt files produce no
         // `ReapRecord`.
         var unsentPromptsReaped = 0
+        var devServerFilesReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
@@ -354,6 +366,13 @@ public actor OrphanGC {
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
+        // After the socket arm, deliberately: anything that arm reclaimed took
+        // its lock and log with it, so this one only ever sees residue the
+        // socket arm structurally cannot reach.
+        await reclaimHolderRendezvousOrphanPairs(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
+        )
+
         await reclaimModelProxyFiles(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
@@ -370,6 +389,9 @@ public actor OrphanGC {
 
         reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
 
+        reclaimStaleDevServerFiles(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &devServerFilesReaped)
+
         await reclaimHangStacks(
             config: config, dryRun: dryRun, planned: &planned, reaped: &hangStacksReaped
         )
@@ -381,7 +403,7 @@ public actor OrphanGC {
         }
 
         if reaped > 0 { broadcast(.reapRecordsChanged) }
-        return .init(planned: planned, reaped: reaped + hangStacksReaped + unsentPromptsReaped)
+        return .init(planned: planned, reaped: reaped + hangStacksReaped + unsentPromptsReaped + devServerFilesReaped)
     }
 
     // MARK: - Unsent first messages
@@ -446,6 +468,56 @@ public actor OrphanGC {
                     \(error.localizedDescription, privacy: .public)
                     """)
                 }
+            }
+        }
+    }
+
+    // MARK: - Dev server running files
+
+    /// Deletes running files in the shared dev-server directory whose
+    /// process is definitely gone (`DevServerRunningFileStore.liveness`
+    /// reads stale; a probe that fails reads unknown and keeps the file) and whose
+    /// modification date is at least `gcGraceSeconds` old
+    /// (docs/specs/2026-10-11-dev-servers-design.md, "Who reclaims what").
+    ///
+    /// Under `gcEnabled` alone. Reads and deletes files only; it never
+    /// signals a process. Malformed and newer-version files are kept: another
+    /// tool may own them. No `ReapRecord`.
+    private func reclaimStaleDevServerFiles(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) {
+        let asOf = now()
+        for entry in devServersStore.scan().entries {
+            switch DevServerRunningFileStore.liveness(of: entry.file, probe: devServerProbe) {
+            case .stale:
+                break
+            case .live:
+                planned.append("KEEP live \(entry.path)")
+                continue
+            case .unknown:
+                // A failed probe is not a dead process: keep the file.
+                planned.append("KEEP unknown \(entry.path)")
+                continue
+            }
+            guard let modified = entry.modifiedAt,
+                  asOf.timeIntervalSince(modified) >= TimeInterval(config.gcGraceSeconds) else {
+                planned.append("KEEP grace \(entry.path)")
+                continue
+            }
+            planned.append("REAP dev-server-file \(entry.path)")
+            // The outer `gcEnabled || dryRun` guard means every line below
+            // runs only with gcEnabled == true.
+            guard !dryRun else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: entry.path)
+                reaped += 1
+                logger.info("gc: reclaimed stale dev server file \(entry.path, privacy: .public)")
+            } catch {
+                planned.append("KEEP remove-failed \(entry.path)")
+                logger.warning("""
+                gc: could not remove \(entry.path, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
             }
         }
     }
@@ -946,6 +1018,77 @@ public actor OrphanGC {
                 // one holder's residue, and `reaped` is what the sweep reports
                 // as things reclaimed. No `ReapRecord` is written — these files
                 // are unlinked, not quarantined, and there is nothing a
+                // `tbd gc restore` could put back.
+                reaped += 1
+            }
+        }
+    }
+
+    /// Unlinks the `<uuid>.lock` and `<uuid>.log` a holder left behind with no
+    /// `<uuid>.sock` beside them — the socket-less arm of the same reconciler
+    /// (`docs/specs/2026-08-30-pty-holder-session-transport-design.md`,
+    /// "Reconciliation").
+    ///
+    /// A holder that exits cleanly unlinks its own socket, and a sweep that
+    /// reaped a socket for it already did. Either way the pair that is left has
+    /// no socket for the phase above to decide on, so without this one it
+    /// survives every sweep forever: measured on a development machine, 557
+    /// such pairs against 53 live sockets.
+    ///
+    /// Runs under `gcEnabled`, with no flag of its own, exactly like the socket
+    /// arm and for the same reason — holder-ness is a transport property, not a
+    /// separate opt-in (`docs/specs/2026-09-07-holder-flag-consolidation-design.md`).
+    /// `dryRun` bypasses `gcEnabled` as it does everywhere in `sweep`.
+    ///
+    /// **This phase reads rows, where the socket arm deliberately does not.**
+    /// The socket arm anchors every unlink to a socket it has proven dead; this
+    /// one has no such anchor, so it asks whether TBD still knows the session
+    /// at all. A failed read skips the phase rather than proceeding on an empty
+    /// set, which would read as "nothing is claimed".
+    ///
+    /// The row is not what makes the arm safe against a spawn in flight — a
+    /// fresh spawn's row is written *after* its holder — and the collector's
+    /// own doc comment carries that argument, which rests on the creation lock.
+    /// Rows are read once, before any gate; a row that commits during the phase
+    /// belongs to a session whose lock is held for the whole spawn, which the
+    /// collector's last gate reads.
+    private func reclaimHolderRendezvousOrphanPairs(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let candidates = holderRendezvousCollector.orphanPairCandidates()
+        guard !candidates.isEmpty else { return }
+
+        guard let terminals = try? await db.terminals.list() else {
+            logger.error("""
+            gc: session rows unreadable this sweep — skipping the holder-rendezvous-pair phase
+            """)
+            planned.append("KEEP rows-unreadable holder-rendezvous-pair phase")
+            return
+        }
+        let claimed = Set(terminals.map(\.id))
+
+        for pair in candidates {
+            switch holderRendezvousCollector.decideOrphanPair(
+                pair, graceSeconds: config.gcGraceSeconds, claimedSessionIDs: claimed
+            ) {
+            case .keep(let reason):
+                planned.append("KEEP \(reason) \(pair.lockPath)")
+                logger.debug("""
+                gc: keep \(reason, privacy: .public) \(pair.lockPath, privacy: .public)
+                """)
+            case .reap:
+                planned.append("REAP holder-rendezvous-pair \(pair.lockPath)")
+                // The outer `gcEnabled || dryRun` guard means every line below
+                // runs only with gcEnabled == true.
+                guard !dryRun else { continue }
+                let removed = holderRendezvousCollector.reapOrphanPair(pair)
+                if removed.isEmpty {
+                    planned.append("KEEP unlink-failed \(pair.lockPath)")
+                    continue
+                }
+                // Counted once per session, as the socket arm counts its
+                // triple: the files are one holder's residue. No `ReapRecord` —
+                // these are unlinked, not quarantined, and there is nothing a
                 // `tbd gc restore` could put back.
                 reaped += 1
             }

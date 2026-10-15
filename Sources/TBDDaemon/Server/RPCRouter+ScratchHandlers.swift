@@ -117,7 +117,8 @@ extension RPCRouter {
             if t.transport == .holder {
                 if keepsHistory {
                     await WorktreeLifecycle.recordHolderClosedTerminal(
-                        t, registry: holderRegistry, history: db.terminalHistory)
+                        t, registry: holderRegistry, resolver: holderScreenResolver,
+                        history: db.terminalHistory)
                 }
                 if let failure = await disposeHolder(for: t) {
                     scratchLogger.warning(
@@ -143,10 +144,11 @@ extension RPCRouter {
             }
         }
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
+        await lifecycle.sessionTitles.forget(worktreeID: wt.id)
         try await db.tabs.deleteForWorktree(worktreeID: wt.id)
         for t in terminals {
             await pendingQuestions.clear(terminalID: t.id)
-            await broadcastPendingQuestions(terminalID: t.id)
+            await broadcastPendingPrompts(terminalID: t.id)
             ClaudeHookOverlay.removePerSessionOverlay(sessionKey: t.id.uuidString)
         }
     }

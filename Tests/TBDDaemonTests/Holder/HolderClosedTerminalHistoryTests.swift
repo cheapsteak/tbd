@@ -7,12 +7,13 @@ import Testing
 /// Closed Terminals history for a holder row, through the one helper every
 /// history-keeping holder teardown calls (`recordHolderClosedTerminal`).
 ///
-/// The two branches are the whole rule: a reader that is draining is the live
-/// store and its screen is captured; a reader suspended for an attach holds a
-/// screen frozen at the moment the viewer arrived, so the entry is written
-/// without one. Both are driven against a real `HolderReader` over a
-/// socketpair — the reader's drain state is what decides, so a fake would be
-/// testing the fake.
+/// These are the two branches a daemon with no viewer to ask has: a reader that
+/// is draining is the live store and its screen is captured; a reader suspended
+/// for an attach holds a screen frozen at the moment the viewer arrived, so the
+/// entry is written without one. Both are driven against a real `HolderReader`
+/// over a socketpair — the reader's drain state is what decides, so a fake
+/// would be testing the fake. What a viewer holding the pty contributes is
+/// `HolderClosedTerminalPullTests`.
 @Suite struct HolderClosedTerminalHistoryTests {
 
     private static let esc = "\u{1b}"
@@ -79,7 +80,7 @@ import Testing
         try await reader.start()
 
         await WorktreeLifecycle.recordHolderClosedTerminal(
-            fx.terminal, reader: reader, history: fx.db.terminalHistory)
+            fx.terminal, reader: reader, resolver: nil, history: fx.db.terminalHistory)
         await reader.stop()
 
         let entries = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
@@ -118,7 +119,7 @@ import Testing
         #expect(await reader.renderScreen().contains("red marker line"))
 
         await WorktreeLifecycle.recordHolderClosedTerminal(
-            fx.terminal, reader: reader, history: fx.db.terminalHistory)
+            fx.terminal, reader: reader, resolver: nil, history: fx.db.terminalHistory)
         await reader.stop()
 
         let entries = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
@@ -170,7 +171,7 @@ import Testing
         defer { fx.cleanup() }
 
         await WorktreeLifecycle.recordHolderClosedTerminal(
-            fx.terminal, registry: nil, history: fx.db.terminalHistory)
+            fx.terminal, registry: nil, resolver: nil, history: fx.db.terminalHistory)
 
         let entries = try await fx.db.terminalHistory.list(worktreeID: fx.terminal.worktreeID)
         #expect(entries.map(\.id) == [fx.terminal.id])

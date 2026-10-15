@@ -121,6 +121,10 @@ public enum RPCErrorCode: String, Sendable {
     /// `woken: false` no-op, because there is no live session behind the row:
     /// the caller's `prompt` went nowhere and the terminal needs recovery.
     case terminalSessionGone
+    /// An in-place provider continuation was aimed at a terminal whose durable
+    /// provider identity is not the required source provider. This includes a
+    /// repeated Continue-in-Claude request after the row already became Claude.
+    case terminalWrongProvider
 }
 
 // MARK: - RPC Method Names
@@ -142,6 +146,7 @@ public enum RPCMethod {
     public static let worktreeForget = "worktree.forget"
     public static let terminalCreate = "terminal.create"
     public static let terminalContinueInCodex = "terminal.continueInCodex"
+    public static let terminalContinueInClaude = "terminal.continueInClaude"
     public static let terminalList = "terminal.list"
     public static let terminalSend = "terminal.send"
     public static let terminalFocus = "terminal.focus"
@@ -207,7 +212,15 @@ public enum RPCMethod {
     public static let modelProfileUsageRefresh = "modelProfile.usageRefresh"
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
+    public static let modelProfileExecEnvironment = "modelProfile.execEnvironment"
+
+    /// Methods served only on the daemon's Unix socket, never on its loopback
+    /// HTTP transport. The socket's mode admits only its owner; a loopback port
+    /// answers any local process, under any user. A method whose result carries
+    /// a secret belongs here.
+    public static let socketOnly: Set<String> = [modelProfileExecEnvironment]
     public static let terminalSwapProfile = "terminal.swapProfile"
+    public static let terminalMigrateTransport = "terminal.migrateTransport"
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
     public static let terminalSessionEnded = "terminal.sessionEnded"
@@ -222,6 +235,20 @@ public enum RPCMethod {
     /// Every terminal's current program-status snapshot (main entry and task
     /// entries). Empty while `program_status_enabled` is off.
     public static let terminalProgramStatusList = "terminal.programStatusList"
+    /// Answering prompts from the transcript
+    /// (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`).
+    /// `prompt.note` – a `PreToolUse`/`PostToolUse` hook records a tool call.
+    public static let promptNote = "prompt.note"
+    /// `prompt.register` – a `PermissionRequest` hook registers its open dialog.
+    public static let promptRegister = "prompt.register"
+    /// `prompt.await` – the hook's long-poll until the dialog resolves. Served
+    /// only on the daemon socket, around the RPC concurrency limiter.
+    public static let promptAwait = "prompt.await"
+    /// `prompt.answer` – the app answers a local prompt.
+    public static let promptAnswer = "prompt.answer"
+    /// `prompt.ack` – the hook reports that it printed (or failed to print)
+    /// the decision a `prompt.await` reply handed it.
+    public static let promptAck = "prompt.ack"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
@@ -320,6 +347,14 @@ public enum RPCMethod {
     /// its own: `config.get` already carries the resolved value, as does
     /// `daemon.capabilities`.
     public static let configSetProfileBalancingEnabled = "config.setProfileBalancingEnabled"
+    /// Balancing's usage ceiling (`profile_balancing_usage_ceiling_percent`):
+    /// the percent of any window at or above which an account counts as full
+    /// (design 2026-09-05 §5). Nil restores the shipped default.
+    public static let configSetProfileBalancingUsageCeiling = "config.setProfileBalancingUsageCeiling"
+    /// Balancing's maximum reading age
+    /// (`profile_balancing_max_reading_age_seconds`). Nil restores each
+    /// credential kind's own window.
+    public static let configSetProfileBalancingMaxReadingAge = "config.setProfileBalancingMaxReadingAge"
     /// The schedule-based PR polling gate (`pr_poll_schedule_enabled`). Takes
     /// effect at once: the daemon stops the running PR driver and starts the
     /// other. Reading needs no method of its own: `config.get` and
@@ -331,6 +366,17 @@ public enum RPCMethod {
     /// the change. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetProgramStatusEnabled = "config.setProgramStatusEnabled"
+    /// The transcript prompt-answer gate (`transcript_prompt_answer_enabled`).
+    /// Hook changes reach a session on its next start. Reading needs no method
+    /// of its own: `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetTranscriptPromptAnswerEnabled = "config.setTranscriptPromptAnswerEnabled"
+    /// The live remote transcript sync gate
+    /// (`remote_transcript_live_sync_enabled`). Takes effect on the next sync —
+    /// the daemon reads it fresh at every decision — and turning it off drops
+    /// background sync's queue. Reading needs no method of its own:
+    /// `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetRemoteTranscriptLiveSyncEnabled =
+        "config.setRemoteTranscriptLiveSyncEnabled"
     /// Per-profile opt-out from the balancing pool. Reading needs no method of
     /// its own: the opt-out is already carried in `model.profiles` as
     /// `ModelProfile.poolOptOut`.
@@ -368,11 +414,23 @@ public enum RPCMethod {
     /// provider declares `transcript.read`. Design:
     /// `docs/specs/2026-09-25-remote-session-transcript-design.md`.
     public static let remoteTranscriptSync = "remote.transcriptSync"
+    /// Prepends one page of earlier history to a session's transcript cache
+    /// through `transcript read <id> --before <cursor> --tail 12`, on the
+    /// session's lane. Refused while `remote_transcript_live_sync_enabled` is
+    /// off, unless the provider declares `transcript.tail`, for a dismissed
+    /// session, and when the cache holds no `before`. The result is a
+    /// `RemoteTranscriptLoadEarlierResult`.
+    public static let remoteTranscriptLoadEarlier = "remote.transcriptLoadEarlier"
     /// Submits a message to a remote session through `send <id> --submit`, the
     /// provider pasting it and pressing Enter. Distinct from `remote.send`,
     /// which delivers raw keystrokes. Refused unless the provider declares
     /// `send-submit`.
     public static let remoteSendMessage = "remote.sendMessage"
+    /// Answers a remote session's pending prompt through the provider's
+    /// `answer <session_id> <prompt_id>` verb, the answer payload on stdin.
+    /// Refused unless the provider declares `answer`, or while
+    /// `config.transcriptPromptAnswerEnabled` is off.
+    public static let remoteAnswer = "remote.answer"
     /// Lists the receipts TBD holds. Deliberately absent from
     /// `providerNamedRemoteMethods` below: it invokes no provider verb, and its
     /// `provider` field is an optional *filter* rather than an address, so
@@ -414,17 +472,10 @@ public enum RPCMethod {
         remoteSend, remoteLog, remoteRename, remoteDismiss,
         remoteRetain, remoteImport, remoteRecall, remoteTranscript, remoteDelete,
         remoteSetPin, remoteReportAttachExit, remoteReconnect,
-        remoteTranscriptSync, remoteSendMessage,
+        remoteTranscriptSync, remoteSendMessage, remoteAnswer, remoteTranscriptLoadEarlier,
     ]
 
     public static let configSetRemoteBackends = "config.setRemoteBackends"
-    /// The remote peer-messaging gate (`remote_peer_messaging_enabled`) — the
-    /// feature's only opt-in, and the write half of what `peer.status` reports.
-    /// Reading needs no method of its own: `config.get` already carries the
-    /// resolved value, and `peer.status` carries it beside the link states it
-    /// explains.
-    public static let configSetRemotePeerMessagingEnabled =
-        "config.setRemotePeerMessagingEnabled"
     /// The pty-holder transport gate (`pty_holder_enabled`) — the feature's only
     /// opt-in. Reading needs no method of its own: `config.get` already carries
     /// the resolved value.
@@ -687,6 +738,75 @@ public enum TerminalSwapMode: String, Codable, Sendable, Equatable {
     case fork
 }
 
+/// `terminal.migrateTransport` — move a session from the tmux transport to the
+/// pty holder in place.
+public struct TerminalMigrateTransportParams: Codable, Sendable {
+    /// The session to move. `nil` means every session TBD tracks.
+    public let terminalID: UUID?
+    public init(terminalID: UUID?) {
+        self.terminalID = terminalID
+    }
+}
+
+/// One session a migration did not move, and why.
+public struct TerminalMigrationSkip: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    public let reason: String
+    public init(terminalID: UUID, reason: String) {
+        self.terminalID = terminalID
+        self.reason = reason
+    }
+}
+
+/// What a `terminal.migrateTransport` call came to, one list per outcome.
+///
+/// Five outcomes rather than two, because they ask different things of the
+/// person. A **skip** names a state they can change and retry (a busy turn, a
+/// rail refusing the pause) and the session is still on tmux. A **refusal**
+/// does not help until the named fact changes (no holder can be started) and
+/// the session is still on tmux. **`movedNotResumed`** is neither: the row is
+/// holder-backed and will come back there when it is next woken, but its
+/// program was not started again now — grouping it with the refusals would
+/// tell a person a session "can't be moved" that has in fact moved, and would
+/// undercount the run. A fleet run reports every session it considered,
+/// including the ones already on the holder.
+public struct TerminalMigrateTransportResult: Codable, Sendable, Equatable {
+    public let migrated: [UUID]
+    /// Sessions now recorded on the holder whose program was not started again:
+    /// the rewrite landed and the wake that follows it did not. Each carries
+    /// the wake's own reason.
+    public let movedNotResumed: [TerminalMigrationSkip]
+    public let skipped: [TerminalMigrationSkip]
+    public let refused: [TerminalMigrationSkip]
+    /// Sessions that were already holder-backed; nothing was done to them.
+    public let alreadyHolder: [UUID]
+    public init(
+        migrated: [UUID],
+        movedNotResumed: [TerminalMigrationSkip] = [],
+        skipped: [TerminalMigrationSkip],
+        refused: [TerminalMigrationSkip],
+        alreadyHolder: [UUID] = []
+    ) {
+        self.migrated = migrated
+        self.movedNotResumed = movedNotResumed
+        self.skipped = skipped
+        self.refused = refused
+        self.alreadyHolder = alreadyHolder
+    }
+    private enum CodingKeys: String, CodingKey {
+        case migrated, movedNotResumed, skipped, refused, alreadyHolder
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        migrated = try c.decode([UUID].self, forKey: .migrated)
+        movedNotResumed = try c.decodeIfPresent(
+            [TerminalMigrationSkip].self, forKey: .movedNotResumed) ?? []
+        skipped = try c.decode([TerminalMigrationSkip].self, forKey: .skipped)
+        refused = try c.decode([TerminalMigrationSkip].self, forKey: .refused)
+        alreadyHolder = try c.decodeIfPresent([UUID].self, forKey: .alreadyHolder) ?? []
+    }
+}
+
 public struct TerminalSwapProfileParams: Codable, Sendable {
     public let terminalID: UUID
     public let newProfileID: UUID?
@@ -918,6 +1038,11 @@ public struct ModelProfileListResult: Codable, Sendable {
     /// Whether profile balancing is enabled. Absent on older daemons (fall
     /// through to the shipped default on the app side).
     public let profileBalancingEnabled: Bool?
+    /// Balancing's usage ceiling and maximum reading age as stored: nil when
+    /// never set (or from an older daemon). `profileBalancingPolicy` resolves
+    /// them.
+    public var profileBalancingUsageCeilingPercent: Int?
+    public var profileBalancingMaxReadingAgeSeconds: Int?
     public init(
         profiles: [ModelProfileWithUsage],
         defaultID: UUID? = nil,
@@ -931,7 +1056,9 @@ public struct ModelProfileListResult: Codable, Sendable {
         gcEnabled: Bool = true,
         autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
         globalRemoteCreateDefaults: [String: String] = [:],
-        profileBalancingEnabled: Bool? = nil
+        profileBalancingEnabled: Bool? = nil,
+        profileBalancingUsageCeilingPercent: Int? = nil,
+        profileBalancingMaxReadingAgeSeconds: Int? = nil
     ) {
         self.profiles = profiles
         self.defaultID = defaultID
@@ -946,6 +1073,8 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.autoCreateNotesEnabled = autoCreateNotesEnabled
         self.globalRemoteCreateDefaults = globalRemoteCreateDefaults
         self.profileBalancingEnabled = profileBalancingEnabled
+        self.profileBalancingUsageCeilingPercent = profileBalancingUsageCeilingPercent
+        self.profileBalancingMaxReadingAgeSeconds = profileBalancingMaxReadingAgeSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -984,6 +1113,17 @@ public struct ModelProfileListResult: Codable, Sendable {
         // the app falls through to the shipped defaults on the Config side.
         profileBalancingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .profileBalancingEnabled)
+        profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingUsageCeilingPercent)
+        profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
+    }
+
+    /// The thresholds balancing applies, resolved from the stored values.
+    public var profileBalancingPolicy: ProfilePoolPolicy {
+        ProfilePoolPolicy.resolved(
+            usageCeilingPercent: profileBalancingUsageCeilingPercent,
+            maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
     }
 }
 
@@ -1049,6 +1189,62 @@ public struct ModelProfilePrepareConfigDirResult: Codable, Sendable {
     /// (`~/tbd/profiles/<lowercased-uuid>/claude`).
     public let configDirPath: String
     public init(configDirPath: String) { self.configDirPath = configDirPath }
+}
+
+/// Params for `modelProfile.execEnvironment` — the environment a process run
+/// under a profile needs, for `tbd profile exec`.
+public struct ModelProfileExecEnvironmentParams: Codable, Sendable {
+    public let id: UUID
+    public init(id: UUID) { self.id = id }
+}
+
+/// Result of `modelProfile.execEnvironment`: what a Claude session spawned on
+/// the profile gets in its environment from the profile — its routing keys
+/// (`CLAUDE_CONFIG_DIR`, base URL, model, Bedrock region and AWS profile), its
+/// credential (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`), and the
+/// free-form env overrides at global and profile scope.
+///
+/// **This is the one RPC result that carries a whole secret.** Everywhere else
+/// a token profile is shown only by its masked tail. This result exists so
+/// `tbd profile exec` can put the credential into a child process's
+/// environment, which is where a spawned session's credential goes too. It is
+/// served only on the daemon's Unix socket (`RPCMethod.socketOnly`), whose mode
+/// admits only its owner: the same boundary as the 0600 file the daemon reads
+/// it from. The loopback HTTP transport refuses it. `description`,
+/// `debugDescription` and `customMirror` name the keys only, so printing,
+/// interpolating or dumping the value cannot reveal the secret.
+public struct ModelProfileExecEnvironmentResult: Codable, Sendable,
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable
+{
+    public let profileID: UUID
+    public let name: String
+    public let kind: CredentialKind
+    /// Variables to set in the child's environment. Holds the credential for a
+    /// token or API-key profile.
+    public let environment: [String: String]
+
+    public init(profileID: UUID, name: String, kind: CredentialKind, environment: [String: String]) {
+        self.profileID = profileID
+        self.name = name
+        self.kind = kind
+        self.environment = environment
+    }
+
+    public var description: String {
+        "ModelProfileExecEnvironmentResult(profile: \(name), kind: \(kind.rawValue), "
+            + "keys: [\(environment.keys.sorted().joined(separator: ", "))])"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(self, children: [
+            "profileID": profileID,
+            "name": name,
+            "kind": kind,
+            "environmentKeys": environment.keys.sorted(),
+        ])
+    }
 }
 
 public struct NotificationsListResult: Codable, Sendable {
@@ -1870,12 +2066,71 @@ public struct RemoteTranscriptSyncParams: Codable, Sendable {
 /// - `caughtUp` — false when the sync stopped at its page cap with the
 ///   provider still reporting `more`; the next sync resumes from the stored
 ///   cursor.
+/// - `head` — bumped on every prepend of earlier history under the same
+///   generation. A reader whose `head` differs rereads the file while holding
+///   its top visible row still.
+/// - `hasEarlier` — earlier history can be loaded now: the live-sync flag is
+///   on, the provider declares `transcript.tail`, and the cache holds a
+///   `before`. Always false with the flag off.
+///
+/// An older daemon sends neither `head` nor `hasEarlier`; they decode as `0`
+/// and `false`.
 public struct RemoteTranscriptSyncResult: Codable, Sendable, Equatable {
     public let path: String
     public let generation: Int
     public let caughtUp: Bool
-    public init(path: String, generation: Int, caughtUp: Bool) {
+    public let head: Int
+    public let hasEarlier: Bool
+    public init(path: String, generation: Int, caughtUp: Bool, head: Int = 0, hasEarlier: Bool = false) {
         self.path = path; self.generation = generation; self.caughtUp = caughtUp
+        self.head = head; self.hasEarlier = hasEarlier
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case path, generation, caughtUp, head, hasEarlier
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        path = try c.decode(String.self, forKey: .path)
+        generation = try c.decode(Int.self, forKey: .generation)
+        caughtUp = try c.decode(Bool.self, forKey: .caughtUp)
+        head = try c.decodeIfPresent(Int.self, forKey: .head) ?? 0
+        hasEarlier = try c.decodeIfPresent(Bool.self, forKey: .hasEarlier) ?? false
+    }
+}
+
+/// Params for `remote.transcriptLoadEarlier` — prepend one page of earlier
+/// history to a session's transcript cache. The result is a
+/// `RemoteTranscriptLoadEarlierResult`.
+public struct RemoteTranscriptLoadEarlierParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public init(provider: String, sessionID: String) {
+        self.provider = provider; self.sessionID = sessionID
+    }
+}
+
+/// Result of `remote.transcriptLoadEarlier`.
+///
+/// - `generation` — the cache's generation after the call. One that differs
+///   from the reader's means a sync replaced the file before the load ran: the
+///   load fetched nothing, and the reader discards what it holds and rereads.
+/// - `head` — bumped by every prepend. A reader whose `head` differs rereads
+///   the file while holding its top visible row still.
+/// - `reachedStart` — nothing earlier remains to load: the cache holds the
+///   conversation's beginning, or the history above it can no longer be
+///   fetched.
+/// - `expired` — the provider answered `cursor_expired`; implies
+///   `reachedStart`. The pane says earlier history is no longer available.
+public struct RemoteTranscriptLoadEarlierResult: Codable, Sendable, Equatable {
+    public let generation: Int
+    public let head: Int
+    public let reachedStart: Bool
+    public let expired: Bool
+    public init(generation: Int, head: Int, reachedStart: Bool, expired: Bool) {
+        self.generation = generation; self.head = head
+        self.reachedStart = reachedStart; self.expired = expired
     }
 }
 
@@ -1921,6 +2176,20 @@ public enum RemoteSendOutcome: String, Codable, Sendable, Equatable {
 public struct RemoteSendMessageResult: Codable, Sendable, Equatable {
     public let outcome: RemoteSendOutcome
     public init(outcome: RemoteSendOutcome) { self.outcome = outcome }
+}
+
+/// Params for `remote.answer`. The result is a `PromptAnswerResult`.
+public struct RemoteAnswerParams: Codable, Sendable {
+    public let provider: String
+    public let sessionID: String
+    public let promptID: String
+    public let answer: PromptAnswer
+    public init(provider: String, sessionID: String, promptID: String, answer: PromptAnswer) {
+        self.provider = provider
+        self.sessionID = sessionID
+        self.promptID = promptID
+        self.answer = answer
+    }
 }
 
 /// Params for `remote.delete` — destroy a provider-hosted session
@@ -2020,17 +2289,6 @@ public struct ConfigSetRemoteBackendsParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setRemotePeerMessagingEnabled` — the remote peer
-/// messaging gate (default OFF during soak), which is the single opt-in for
-/// shadow peers and for a provider's `messages` stream. Writing either value is
-/// the explicit gesture that lifts the column out of its NULL "never chose"
-/// state, so an operator who turns the feature off stays off when the shipped
-/// default graduates.
-public struct ConfigSetPeerMessagingEnabledParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setPtyHolderEnabled` — the pty-holder transport gate
 /// (default OFF during soak), which decides whether a *new* session is spawned
 /// onto a holder rather than into a tmux window. Writing either value is the
@@ -2107,16 +2365,23 @@ public struct GCSweepResult: Codable, Sendable, Equatable {
 /// **The last pair is the answer to the stale-shim problem.** An old shim never
 /// declares the `messages` capability, so TBD never invokes it and the feature
 /// silently does nothing — the failure this contract's users have been bitten
-/// by. `messagingEnabled` plus each provider's `declaresMessages` makes that
-/// visible instead of silent
+/// by. `repos` plus each provider's `declaresMessages` makes that visible
+/// instead of silent
 /// (`docs/specs/2026-08-29-remote-peer-messaging-design.md`, § "Conformance").
 ///
 /// Every field is a fact TBD holds, never an inference: nothing here is derived
 /// from a record's contents or from a path.
 public struct PeerBridgeStatus: Codable, Sendable, Equatable {
-    /// Resolved `remote_peer_messaging_enabled` — the config value, or the
-    /// shipped default when nobody has chosen.
-    public let messagingEnabled: Bool
+    /// Every registered repository's peer-messaging switch, as its committed
+    /// `tbd.toml` states it, with any problem the file has. Nil from a daemon
+    /// that predates the per-repository switch.
+    public let repos: [PeerMessagingRepoStatus]?
+    /// **Compatibility only — read `repos` instead.** True when any registered
+    /// repository has peer messaging switched on. Emitted so an older `tbd`
+    /// CLI, which decodes this field as required, keeps decoding `peer.status`
+    /// from a newer daemon (the installed CLI often lags the daemon). Nothing in
+    /// the current CLI reads it; remove it once old CLIs are gone.
+    public let messagingEnabled: Bool?
     /// True when the daemon has a remote-provider manager at all. False means
     /// `remote_backends_enabled` was off at boot, so no provider is described
     /// and `providers` is empty for that reason rather than for want of one.
@@ -2133,17 +2398,46 @@ public struct PeerBridgeStatus: Codable, Sendable, Equatable {
     public let lastSweep: PeerShadowSweep?
 
     public init(
-        messagingEnabled: Bool,
+        repos: [PeerMessagingRepoStatus]? = nil,
         remoteBackendsLive: Bool,
         providers: [PeerProviderBridgeStatus],
         shadows: [PeerShadowArtifactRow],
         lastSweep: PeerShadowSweep?
     ) {
-        self.messagingEnabled = messagingEnabled
+        self.repos = repos
+        self.messagingEnabled = repos?.contains(where: \.enabled) ?? false
         self.remoteBackendsLive = remoteBackendsLive
         self.providers = providers
         self.shadows = shadows
         self.lastSweep = lastSweep
+    }
+}
+
+/// One repository's peer-messaging switch, read from the `tbd.toml` in its
+/// registered main checkout.
+///
+/// `[remote_sessions] peer_messaging = true` turns it on; anything else is off.
+/// A value TBD could not understand is off too, and is named in `problems` so
+/// the listing can say why a repository someone meant to switch on is not.
+public struct PeerMessagingRepoStatus: Codable, Sendable, Equatable {
+    public let repoID: UUID
+    public let repoName: String
+    /// The `tbd.toml` the switch was read from.
+    public let tomlPath: String
+    public let enabled: Bool
+    /// Why the file gave no clear answer; empty when it did, including when the
+    /// file, table or key is simply absent.
+    public let problems: [String]
+
+    public init(
+        repoID: UUID, repoName: String, tomlPath: String, enabled: Bool,
+        problems: [String] = []
+    ) {
+        self.repoID = repoID
+        self.repoName = repoName
+        self.tomlPath = tomlPath
+        self.enabled = enabled
+        self.problems = problems
     }
 }
 
@@ -2154,11 +2448,14 @@ public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
     /// **False is the stale-shim signal**, and it is reported rather than
     /// inferred from an empty listing.
     public let declaresMessages: Bool
-    /// Whether a bridge is constructed for it right now. False with
-    /// `declaresMessages == true` and the flag on means the gate refused for
-    /// another reason — most plausibly a flag flipped after the last time poll
-    /// loops were armed, which a daemon restart resolves.
+    /// Whether a bridge is constructed for it right now.
     public let bridged: Bool
+    /// For a provider that declares `messages` and has no bridge: whether at
+    /// least one repository it runs sessions in has peer messaging switched on
+    /// right now. True means the stream opens at the provider's next poll tick;
+    /// false means no repository asks for one. Nil when bridged, when the
+    /// provider declares no `messages`, or from an older daemon.
+    public let wantsStream: Bool?
     /// `"up"` / `"down"`, or nil when nothing is bridged.
     public let linkState: String?
     /// The origin label the far side declared in its `hello`, or nil before one
@@ -2170,6 +2467,10 @@ public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
     /// never mirrored — a `peer` line carrying no session id, or one naming a
     /// session TBD adopted no worktree row for.
     public let unmirroredHandles: [String]
+    /// Handles the far side announced for sessions in a repository whose
+    /// `tbd.toml` does not switch peer messaging on, so TBD publishes no shadow
+    /// for them. Nil from an older daemon.
+    public let switchedOffHandles: [String]?
     /// The divergence between the provider's own `peer-inventory` and what TBD
     /// asked it to publish. TBD cannot sweep the far host, so this is the
     /// mitigation: a provider that leaks is visible as a difference.
@@ -2183,10 +2484,12 @@ public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
         provider: String,
         declaresMessages: Bool,
         bridged: Bool,
+        wantsStream: Bool? = nil,
         linkState: String? = nil,
         remoteOrigin: String? = nil,
         shadowCount: Int = 0,
         unmirroredHandles: [String] = [],
+        switchedOffHandles: [String]? = nil,
         inventorySurplus: [String] = [],
         inventoryMissing: [String] = [],
         drops: [String: Int] = [:]
@@ -2194,10 +2497,12 @@ public struct PeerProviderBridgeStatus: Codable, Sendable, Equatable {
         self.provider = provider
         self.declaresMessages = declaresMessages
         self.bridged = bridged
+        self.wantsStream = wantsStream
         self.linkState = linkState
         self.remoteOrigin = remoteOrigin
         self.shadowCount = shadowCount
         self.unmirroredHandles = unmirroredHandles
+        self.switchedOffHandles = switchedOffHandles
         self.inventorySurplus = inventorySurplus
         self.inventoryMissing = inventoryMissing
         self.drops = drops
@@ -2506,6 +2811,28 @@ public struct TerminalContinueInCodexResult: Codable, Sendable, Equatable {
     public init(terminalID: UUID, threadID: String) {
         self.terminalID = terminalID
         self.threadID = threadID
+    }
+}
+
+/// Replace one tmux-backed Codex process with a fresh Claude process in the
+/// same durable terminal row and window. A nil profile selects Claude's
+/// ambient login.
+public struct TerminalContinueInClaudeParams: Codable, Sendable {
+    public let sourceTerminalID: UUID
+    public let profileID: UUID?
+    public let cols: Int?
+    public let rows: Int?
+
+    public init(
+        sourceTerminalID: UUID,
+        profileID: UUID? = nil,
+        cols: Int? = nil,
+        rows: Int? = nil
+    ) {
+        self.sourceTerminalID = sourceTerminalID
+        self.profileID = profileID
+        self.cols = cols
+        self.rows = rows
     }
 }
 
@@ -3603,6 +3930,21 @@ public struct ConfigSetProfileBalancingEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setProfileBalancingUsageCeiling`. `percent` must lie in
+/// `ProfilePoolPolicy.usageCeilingRange`; nil restores the shipped default.
+public struct ConfigSetBalancingUsageCeilingParams: Codable, Sendable {
+    public var percent: Int?
+    public init(percent: Int?) { self.percent = percent }
+}
+
+/// Params for `config.setProfileBalancingMaxReadingAge`. `seconds` must lie in
+/// `ProfilePoolPolicy.maxReadingAgeRange`; nil restores each credential kind's
+/// own window.
+public struct ConfigSetBalancingMaxReadingAgeParams: Codable, Sendable {
+    public var seconds: Int?
+    public init(seconds: Int?) { self.seconds = seconds }
+}
+
 /// Params for `config.setPRPollScheduleEnabled` — the gate for schedule-based PR
 /// polling, which checks each pull request as often as its status needs within
 /// a GitHub API budget instead of every worktree on a fixed interval (default
@@ -3616,6 +3958,24 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
 /// Status Protocol (OSC 7501) on pty-holder sessions (default OFF during soak).
 /// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
 public struct ConfigSetProgramStatusEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setTranscriptPromptAnswerEnabled` — the gate for
+/// answering Claude's question and permission dialogs from the transcript
+/// (default OFF during soak). Design:
+/// `docs/specs/2026-10-09-transcript-prompt-answer-design.md`.
+public struct ConfigSetPromptAnswerParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setRemoteTranscriptLiveSyncEnabled` — the gate for
+/// tail-first loading, earlier-history loading and hint-driven background
+/// sync of remote session transcripts (default OFF during soak). Design:
+/// `docs/specs/2026-09-25-remote-session-transcript-design.md` § Gating.
+public struct ConfigSetRemoteLiveSyncEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -3943,10 +4303,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// `config.get` so the toggle and the daemon can never disagree about which
     /// of them last wrote the column.
     public let updateMode: UpdateMode
-    /// Whether the pty-holder transport gate (`pty_holder_enabled`) is set.
-    /// Default OFF while it soaks. Read at spawn time, so the Settings toggle
-    /// reads it back from here rather than from a local guess — and a session
-    /// already running keeps the transport it was created on either way.
+    /// Whether the pty-holder transport gate (`pty_holder_enabled`) is set,
+    /// as this daemon resolved it. Default ON. Read at spawn time, so the
+    /// Settings toggle reads it back from here rather than from a local guess
+    /// — and a session already running keeps the transport it was created on
+    /// either way.
     public let ptyHolderEnabled: Bool
     /// Whether this daemon could actually put a new session on a holder — that
     /// is, whether it located the `TBDHolder` helper beside its own binary
@@ -3954,9 +4315,23 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// `controlModeSupported` is, so the app never inspects the filesystem.
     ///
     /// With the flag on and this false, every create silently falls back to
-    /// tmux — so Settings disables the toggle and says why rather than offering
-    /// a switch that would change nothing.
+    /// tmux — so Settings says why, and greys the toggle out in the one state
+    /// where neither direction would change anything (already off, no helper).
+    /// Turning the transport off stays available, because the effective flag is
+    /// what `NightwatchHolderGate` reads whether a holder can start or not.
     public let ptyHolderSupported: Bool
+    /// Whether any session on the pty-holder transport is still alive on this
+    /// daemon. The third term of `NightwatchHolderGate.watchModesBlocked`, sent
+    /// so the app's watch-mode controls reach the same verdict the daemon's
+    /// refusal will: a daemon whose `TBDHolder` helper went missing reports
+    /// `ptyHolderSupported == false` and may still be holding several adopted
+    /// sessions.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives. Absent on the wire
+    /// reads false, like `ptyHolderSupported`: a daemon that never sent it is
+    /// one that has no holder path to report.
+    public var ptyHolderSessionsLive: Bool = false
     /// Whether the model-proxy gate (`model_proxy_enabled`) is set. Default OFF
     /// while it soaks. Read at spawn time, so the Settings toggle reads it back
     /// from here rather than from a local guess — and a session already running
@@ -4012,6 +4387,30 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `modelProxyEnabled` gives.
     public var programStatusEnabled: Bool = Config.programStatusEnabledDefault
+    /// Whether answering prompts from the transcript is on
+    /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
+    /// Resolved through `Config.transcriptPromptAnswerDefault`.
+    public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
+    /// Balancing's usage ceiling and maximum reading age as stored, nil when
+    /// never set, so the app runs the picker under the daemon's thresholds.
+    /// Assigned after construction, for the type-checker reason
+    /// `modelProxyEnabled` gives. `profileBalancingPolicy` resolves them.
+    public var profileBalancingUsageCeilingPercent: Int?
+    public var profileBalancingMaxReadingAgeSeconds: Int?
+
+    /// The thresholds balancing applies, resolved from the stored values.
+    public var profileBalancingPolicy: ProfilePoolPolicy {
+        ProfilePoolPolicy.resolved(
+            usageCeilingPercent: profileBalancingUsageCeilingPercent,
+            maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
+    }
+    /// Whether live remote transcript sync is on
+    /// (`remote_transcript_live_sync_enabled`). Default OFF while it soaks.
+    /// Resolved through `Config.remoteTranscriptLiveSyncEnabledDefault`.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `modelProxyEnabled` gives.
+    public var remoteTranscriptLiveSyncEnabled: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
 
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
@@ -4028,7 +4427,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 claudeCloudLive: Bool = false,
                 remoteDeleteEnabled: Bool = Config.remoteDeleteEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
-                ptyHolderEnabled: Bool = Config.ptyHolderDefault,
+                ptyHolderEnabled: Bool = false,
                 ptyHolderSupported: Bool = false,
                 modelProxyEnabled: Bool = Config.modelProxyDefault,
                 modelProxySupported: Bool = false,
@@ -4107,16 +4506,20 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // whole decode.
         updateMode = (try? c.decode(UpdateMode.self, forKey: .updateMode))
             ?? Config.updateModeDefault
-        // New fields for the pty-holder transport gate. A daemon that does not
-        // send `ptyHolderEnabled` has no holder path at all, so fall through to
-        // the shipped default rather than assuming the transport is live.
-        // `supported` is a fact about THIS daemon's own installation, so an
-        // absent value is honestly false — which greys the toggle out on an
-        // older daemon instead of offering a switch it would ignore.
+        // New fields for the pty-holder transport gate. Both absences read
+        // false rather than resolving through the shipped default: a daemon
+        // that does not send `ptyHolderEnabled` has no holder path at all, so
+        // it is running no holder-backed session whatever this install's
+        // default says, and calling the transport live there would grey out the
+        // Nightwatch controls that daemon can still honor. This is a different
+        // question from the config column's NULL: there, nobody chose; here,
+        // the sender does not know the field exists.
         ptyHolderEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .ptyHolderEnabled) ?? Config.ptyHolderDefault
+            Bool.self, forKey: .ptyHolderEnabled) ?? false
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
+        ptyHolderSessionsLive = try c.decodeIfPresent(
+            Bool.self, forKey: .ptyHolderSessionsLive) ?? false
         // New fields for the model proxy. A daemon that does not send
         // `modelProxyEnabled` runs no proxy at all, so fall through to the
         // shipped defaults rather than assuming the route is live. `supported`,
@@ -4146,6 +4549,19 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // shipped default.
         programStatusEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
+        transcriptPromptAnswerEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
+        // Absent from a daemon that predates the thresholds: the shipped ones.
+        profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingUsageCeilingPercent)
+        profileBalancingMaxReadingAgeSeconds = try c.decodeIfPresent(
+            Int.self, forKey: .profileBalancingMaxReadingAgeSeconds)
+        // New field for the live remote transcript sync gate. A daemon that
+        // does not send it knows nothing about the feature, so fall through to
+        // the shipped default.
+        remoteTranscriptLiveSyncEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .remoteTranscriptLiveSyncEnabled)
+            ?? Config.remoteTranscriptLiveSyncEnabledDefault
     }
 }
 
@@ -4528,18 +4944,37 @@ public struct TerminalActivityEventParams: Codable, Sendable {
     /// Absent for the existing agent-hook bridge. Optional so older clients'
     /// payloads continue to decode unchanged.
     public let origin: TerminalActivityEventOrigin?
+    /// Set by the Claude `UserPromptSubmit` hook (`--session-title`): asks the
+    /// daemon for the session's title when it has changed since the session
+    /// was last given one. Absent from Codex hooks and older overlays, which
+    /// therefore never receive a title.
+    public let wantsSessionTitle: Bool?
     public init(
         terminalID: UUID,
         activityState: TerminalActivityState,
         sessionID: String? = nil,
         sessionIncarnationID: UUID? = nil,
-        origin: TerminalActivityEventOrigin? = nil
+        origin: TerminalActivityEventOrigin? = nil,
+        wantsSessionTitle: Bool? = nil
     ) {
         self.terminalID = terminalID
         self.activityState = activityState
         self.sessionID = sessionID
         self.sessionIncarnationID = sessionIncarnationID
         self.origin = origin
+        self.wantsSessionTitle = wantsSessionTitle
+    }
+}
+
+/// Result of `terminal.activityEvent` when the request set
+/// `wantsSessionTitle`. Every other request gets an empty success.
+public struct TerminalActivityEventResult: Codable, Sendable, Equatable {
+    /// The title the session should take, via the hook's
+    /// `hookSpecificOutput.sessionTitle`. Nil when the session already carries
+    /// the title TBD wants for it.
+    public let sessionTitle: String?
+    public init(sessionTitle: String?) {
+        self.sessionTitle = sessionTitle
     }
 }
 
@@ -4700,7 +5135,7 @@ public struct TerminalAskUserQuestionClearedParams: Codable, Sendable {
 }
 
 /// Reports that the app observed a pending capture's `tool_use` line in the
-/// JSONL, so the daemon can drop it from `PendingQuestionStore`.
+/// JSONL, so the daemon can drop it from `PendingPromptStore`.
 ///
 /// This is the lazy clean-up `terminal.transcript` performs for itself, made
 /// callable by the reader that replaces it: the app is the party that parses
@@ -4745,6 +5180,143 @@ public struct TerminalProgramStatusListResult: Codable, Sendable {
     public let snapshots: [ProgramStatusSnapshot]
     public init(snapshots: [ProgramStatusSnapshot]) {
         self.snapshots = snapshots
+    }
+}
+
+// MARK: - Prompt Params
+//
+// Answering prompts from the transcript
+// (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`). A "prompt" here
+// is an open Claude Code dialog, unrelated to `PendingPromptCoordinator`'s
+// queued first message.
+
+/// Which hook a `prompt.note` comes from.
+public enum PromptNotePhase: String, Codable, Sendable {
+    /// `PreToolUse`: a tool call is about to run or ask.
+    case pre
+    /// `PostToolUse` / `PostToolUseFailure`: the call finished, so any prompt
+    /// still open for it was answered in the terminal.
+    case post
+}
+
+/// Params for `prompt.note`. Returns `.ok()` and never a decision.
+public struct PromptNoteParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let sessionID: String
+    public let phase: PromptNotePhase
+    public let toolUseID: String
+    public let toolName: String
+    /// `PromptInputHash.of(toolName:toolInput:)` of `tool_input` (`questions`
+    /// alone for `AskUserQuestion`). On `post` it lets the daemon close
+    /// an unpaired prompt showing the same call; nil when the payload had no
+    /// `tool_input`.
+    public let inputHash: String?
+    public init(terminalID: UUID, sessionID: String, phase: PromptNotePhase,
+                toolUseID: String, toolName: String, inputHash: String?) {
+        self.terminalID = terminalID
+        self.sessionID = sessionID
+        self.phase = phase
+        self.toolUseID = toolUseID
+        self.toolName = toolName
+        self.inputHash = inputHash
+    }
+}
+
+/// Params for `prompt.register`, sent by the `PermissionRequest` hook.
+public struct PromptRegisterParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let sessionID: String
+    public let toolName: String
+    public let toolInputJSON: String
+    public let suggestionsJSON: String?
+    /// `PromptInputHash.of(toolName:toolInput:)` of `tool_input`, matched
+    /// against `prompt.note`.
+    public let inputHash: String
+    /// Set on a re-register after a reconnect, so the prompt keeps its id and
+    /// pairing.
+    public let knownPromptID: String?
+    public let knownToolUseID: String?
+    public init(terminalID: UUID, sessionID: String, toolName: String, toolInputJSON: String,
+                suggestionsJSON: String?, inputHash: String,
+                knownPromptID: String? = nil, knownToolUseID: String? = nil) {
+        self.terminalID = terminalID
+        self.sessionID = sessionID
+        self.toolName = toolName
+        self.toolInputJSON = toolInputJSON
+        self.suggestionsJSON = suggestionsJSON
+        self.inputHash = inputHash
+        self.knownPromptID = knownPromptID
+        self.knownToolUseID = knownToolUseID
+    }
+}
+
+/// Result of `prompt.register`.
+public enum PromptRegisterResult: Codable, Sendable, Equatable {
+    /// `{"registered":{"promptID":"…","toolUseID":"…"}}`. `toolUseID` is the
+    /// tool call the daemon paired the prompt with, absent while unpaired;
+    /// the hook sends it back as `knownToolUseID` when it registers again
+    /// after a reconnect, so a restarted daemon keeps the pairing. A reply
+    /// without it (an older daemon) decodes with `toolUseID` nil.
+    case registered(promptID: String, toolUseID: String? = nil)
+    /// The flag is off: the hook exits silently at once and the terminal
+    /// stays in charge.
+    case disabled
+}
+
+/// Params for `prompt.await`.
+public struct PromptAwaitParams: Codable, Sendable {
+    public let promptID: String
+    public init(promptID: String) { self.promptID = promptID }
+}
+
+/// Result of `prompt.await`.
+public enum PromptAwaitResult: Codable, Sendable, Equatable {
+    /// The app answered: the hook prints `hookOutput` verbatim and exits 0.
+    case answered(hookOutput: String)
+    /// The prompt resolved some other way: the hook prints nothing.
+    case resolvedElsewhere
+}
+
+/// The reply `prompt.await` sends on the daemon socket.
+///
+/// With `.answered` it carries `deliveryToken`. The hook prints the decision
+/// to stdout and then calls `prompt.ack` with that token: `delivered: true`
+/// once the decision is printed, `false` when printing failed. `prompt.answer`
+/// waits for that ack (5 s) before it reports `delivered`; no ack reads as
+/// `already_resolved`. `deliveryToken` is nil with `.resolvedElsewhere`, which
+/// needs no ack.
+public struct PromptAwaitReply: Codable, Sendable, Equatable {
+    public let result: PromptAwaitResult
+    public let deliveryToken: UUID?
+    public init(result: PromptAwaitResult, deliveryToken: UUID?) {
+        self.result = result
+        self.deliveryToken = deliveryToken
+    }
+}
+
+/// Params for `prompt.ack`. Returns `.ok()`; an unknown or late token is
+/// ignored.
+public struct PromptAckParams: Codable, Sendable {
+    /// The `deliveryToken` from the `prompt.await` reply.
+    public let token: UUID
+    /// Whether the decision reached the hook's stdout.
+    public let delivered: Bool
+    public init(token: UUID, delivered: Bool) {
+        self.token = token
+        self.delivered = delivered
+    }
+}
+
+/// Params for `prompt.answer`. The result is a `PromptAnswerResult`; a hook
+/// that is reconnecting is a retryable RPC error rather than an outcome.
+public struct PromptAnswerParams: Codable, Sendable {
+    public let terminalID: UUID
+    public let promptID: String
+    public let answer: PromptAnswer
+    public init(terminalID: UUID, promptID: String, answer: PromptAnswer) {
+        self.terminalID = terminalID
+        self.promptID = promptID
+        self.answer = answer
     }
 }
 

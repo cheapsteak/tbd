@@ -86,7 +86,10 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// acts too, and acts differently — see `ActuationBranch`.
     case terminalRecreateWindow
     case terminalSwapProfile
+    /// Parks a session, rewrites its transport and wakes it on the pty holder.
+    case terminalMigrateTransport
     case terminalContinueInCodex
+    case terminalContinueInClaude
     case terminalHistoryRevive
     /// Creates a worktree and spawns its primary terminals. The row names the
     /// worktree, not a terminal: those are minted inside the lifecycle phase.
@@ -123,6 +126,21 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// second one, for the same reason `remoteArchive` sits under
     /// `worktreeArchive`: one intent, one row.
     case remoteDelete
+    /// Answers a local session's open dialog (an `AskUserQuestion` picker or a
+    /// tool permission prompt) from the transcript: the decision goes to the
+    /// session's waiting `PermissionRequest` hook, which hands it to Claude
+    /// Code. A `send` — input into the session — and one row per answer.
+    case promptAnswer
+    /// Answers a remote session's open dialog from the transcript through the
+    /// provider's `answer <session_id> <prompt_id>` verb. A `send`, like
+    /// `remoteSendMessage`, and one row per answer.
+    case remoteAnswer
+    /// Starts declared dev servers in a worktree: one row per call naming the
+    /// worktree; each server's tab is spawned (or respawned) underneath it.
+    case serverStart
+    /// Stops dev servers: a declared `stop` command or a process-group kill,
+    /// then the server's tab is closed. One row per call naming the worktree.
+    case serverStop
 
     /// The exact public method name that carries this surface's requests.
     var method: String {
@@ -144,7 +162,9 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .worktreeResume: return RPCMethod.worktreeResume
         case .terminalRecreateWindow: return RPCMethod.terminalRecreateWindow
         case .terminalSwapProfile: return RPCMethod.terminalSwapProfile
+        case .terminalMigrateTransport: return RPCMethod.terminalMigrateTransport
         case .terminalContinueInCodex: return RPCMethod.terminalContinueInCodex
+        case .terminalContinueInClaude: return RPCMethod.terminalContinueInClaude
         case .terminalHistoryRevive: return RPCMethod.terminalHistoryRevive
         case .worktreeCreate: return RPCMethod.worktreeCreate
         case .scratchCreate: return RPCMethod.scratchCreate
@@ -157,6 +177,10 @@ enum ActuationSurface: CaseIterable, Sendable {
         case .remoteArchive: return RPCMethod.remoteArchive
         case .remoteUnarchive: return RPCMethod.remoteUnarchive
         case .remoteDelete: return RPCMethod.remoteDelete
+        case .promptAnswer: return RPCMethod.promptAnswer
+        case .remoteAnswer: return RPCMethod.remoteAnswer
+        case .serverStart: return RPCMethod.serverStart
+        case .serverStop: return RPCMethod.serverStop
         }
     }
 
@@ -165,14 +189,16 @@ enum ActuationSurface: CaseIterable, Sendable {
     /// `hibernate`/`wake` while keeping their own `method`.
     var kind: ActuationKind {
         switch self {
-        case .terminalSend, .remoteSend, .remoteSendMessage: return .send
+        case .terminalSend, .remoteSend, .remoteSendMessage, .promptAnswer, .remoteAnswer: return .send
         case .terminalCreate, .terminalRecreateWindow, .terminalSwapProfile,
+             .terminalMigrateTransport,
              .terminalContinueInCodex, .terminalHistoryRevive, .worktreeCreate,
+             .terminalContinueInClaude,
              .scratchCreate, .worktreeRevive, .worktreeReviveConversationFresh,
-             .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive: return .spawn
+             .worktreeRerunPreSession, .remoteCreate, .remoteUnarchive, .serverStart: return .spawn
         case .terminalDelete, .worktreeArchive, .worktreeForget, .repoRemove,
              .scratchDelete, .scratchArchive, .remoteStop, .remoteArchive,
-             .remoteDelete: return .dispose
+             .remoteDelete, .serverStop: return .dispose
         case .terminalHibernate, .terminalSuspend, .worktreeSuspend: return .hibernate
         case .terminalWake, .terminalResume, .worktreeResume: return .wake
         }

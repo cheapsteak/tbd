@@ -54,10 +54,18 @@ struct RuntimeIntegrationRefresher {
     }
 }
 
-/// The repositories one provider hosts sessions in, remembered across a failed
-/// read.
+/// The repositories one provider hosts sessions in **and** that have peer
+/// messaging switched on in their `tbd.toml`, remembered across a failed read.
 ///
-/// The scope is recomputed from the worktree table on every reconcile tick, and
+/// Both halves are the design's outward scoping rule: TBD announces its own
+/// sessions to a provider only for a repository the provider hosts a session
+/// in, and only when that repository has `[remote_sessions] peer_messaging =
+/// true`. A repository with the switch off is left out of the scope exactly as
+/// one with no remote lane is, so turning the switch off retires every
+/// announcement for that repository on the next tick, with no restart.
+///
+/// The scope is recomputed from the worktree table and the switches on every
+/// reconcile tick, and
 /// **scope retirement unannounces**: a repository leaving the scope withdraws
 /// its roster registration and writes `peer-gone` for every local session
 /// announced on it. A resolver that answered a transient database error with
@@ -105,6 +113,20 @@ actor ProviderRepoScope {
     /// test without a database that can be made to fail.
     private let listWorktrees: @Sendable () async throws -> [Worktree]
 
+    /// The repository's registered main checkout, or nil when TBD has no row
+    /// for it. Throws when the row could not be read, which counts as a failed
+    /// read of the whole scope.
+    private let checkoutPath: @Sendable (UUID) async throws -> String?
+
+    /// Whether the `tbd.toml` in a checkout switches peer messaging on. A file
+    /// read, never a database read, so it can still be asked when the database
+    /// cannot.
+    private let switchIsOn: @Sendable (String) -> Bool
+
+    /// Repository → main checkout, from the last read that succeeded. What lets
+    /// a failed read still re-read every replayed repository's switch.
+    private var checkoutPaths: [UUID: String] = [:]
+
     /// The scope the last successful read produced; `nil` until one has
     /// succeeded. The optionality *is* the fix — it is what keeps "no scope
     /// known" distinguishable from "the scope is empty".
@@ -120,21 +142,38 @@ actor ProviderRepoScope {
 
     init(
         provider: String,
-        listWorktrees: @escaping @Sendable () async throws -> [Worktree]
+        listWorktrees: @escaping @Sendable () async throws -> [Worktree],
+        checkoutPath: @escaping @Sendable (UUID) async throws -> String?,
+        switchIsOn: @escaping @Sendable (String) -> Bool
     ) {
         self.provider = provider
         self.listWorktrees = listWorktrees
+        self.checkoutPath = checkoutPath
+        self.switchIsOn = switchIsOn
     }
 
-    /// The repositories this provider currently hosts sessions in, the last
-    /// known good set if this read failed, or `nil` if no read has ever
-    /// succeeded.
+    /// The repositories this provider currently hosts sessions in that have
+    /// peer messaging on; if this read failed, the last known good set
+    /// narrowed to the repositories whose switch is still on; or `nil` if no
+    /// read has ever succeeded.
+    ///
+    /// **A failed read may keep a repository out, never a switched-off one
+    /// in.** The replay re-reads each repository's `tbd.toml` from the
+    /// checkout the last good read recorded, so a repository switched off
+    /// while the database is failing leaves the scope on the very next tick.
+    /// The asymmetry is deliberate: the switch is consent to share, and stale
+    /// consent is not consent.
     func resolve() async -> Set<UUID>? {
         do {
             let rows = try await listWorktrees()
-            let scope = Set(rows.compactMap { row in
-                row.providerBinding?.provider == provider ? row.repoID : nil
-            })
+            var scope: Set<UUID> = []
+            var paths: [UUID: String] = [:]
+            for repoID in PeerMessagingStreamGate.repos(hostedBy: provider, in: rows) {
+                guard let path = try await checkoutPath(repoID) else { continue }
+                paths[repoID] = path
+                if switchIsOn(path) { scope.insert(repoID) }
+            }
+            checkoutPaths = paths
             if consecutiveFailures > 0 {
                 peerScopeLogger.notice("""
                     repo scope for provider \(self.provider, privacy: .public) is fresh again \
@@ -165,7 +204,9 @@ actor ProviderRepoScope {
                     \(String(describing: error), privacy: .public)
                     """)
             }
-            return lastKnownGood
+            return lastKnownGood.map { known in
+                known.filter { repoID in checkoutPaths[repoID].map(switchIsOn) ?? false }
+            }
         }
     }
 }
@@ -186,7 +227,7 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
     /// Timer that expires stranded `AskUserQuestion` captures (step
     /// 11a-questions). `nil` in mock mode.
-    nonisolated(unsafe) var pendingQuestionExpirySweep: PendingQuestionExpirySweep?
+    nonisolated(unsafe) var pendingPromptExpirySweep: PendingPromptExpirySweep?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
     /// Hourly orphan-maintenance task (orphan GC + scratch terminal
     /// reconciliation). `nil` in mock mode. See `orphanGC` for the actor it
@@ -204,6 +245,18 @@ public final class Daemon: Sendable {
     /// Internal rather than public because the holder types are: nothing
     /// outside `TBDDaemonLib` has any business holding a pty master.
     nonisolated(unsafe) var holderRegistry: HolderRegistry?
+    /// Keeps the sidebar's "dev server running" set current
+    /// (docs/specs/2026-10-11-dev-servers-design.md, "Sidebar dot"). `nil` in
+    /// mock mode. Internal because the type is.
+    nonisolated(unsafe) var devServerMonitor: DevServerRunningFileMonitor?
+    /// Logs the holder transport's reader census — the double-reader violation
+    /// count — once at startup and then hourly. `nil` in mock mode.
+    ///
+    /// The counter itself is always on and costs a dictionary write per reader
+    /// transition; this task is only how a human reads it back weeks later,
+    /// because the count lives in daemon memory and signposts are a ring
+    /// buffer. See `HolderRegistry.reportReaderCensusPeriodically`.
+    nonisolated(unsafe) var holderReaderCensusTask: Task<Void, Never>?
     /// The one `ModelProxySupervisor` for this TBD home. Owned here so
     /// shutdown can take the watch away, and so the config RPC that flips
     /// `model_proxy_enabled` can reach the same instance the lifecycle, the
@@ -626,20 +679,24 @@ public final class Daemon: Sendable {
     /// Everything a peer-messaging bridge needs, assembled at the one place the
     /// daemon knows all of it.
     ///
-    /// The gate itself is NOT here. `remote_peer_messaging_enabled` is read
-    /// through `isEnabled`, at the moment a provider's streams are armed, next
-    /// to the `events` capability gate it mirrors — so a provider that declares
-    /// `messages` while the flag is off gets nothing built at all: no helper
-    /// spawned, no record published, no stream opened. What this function
-    /// decides is only *how* to build one when both gates pass.
+    /// The gate is per repository, not per machine. `isEnabled` answers for one
+    /// provider: open its `messages` stream when at least one repository it
+    /// runs sessions in has `[remote_sessions] peer_messaging = true` in its
+    /// committed `tbd.toml` (see `RepoPeerMessagingSwitches` for which
+    /// checkout's file counts). It is asked where a provider's streams are
+    /// armed, next to the `events` capability gate it mirrors, and again on
+    /// every poll tick while no bridge exists — so a provider that declares
+    /// `messages` gets nothing built until a repository asks for it, and gets
+    /// its stream within a poll interval once one does, with no restart.
     ///
     /// The scope closure is the design's outward scoping rule, expressed once:
     /// TBD's own sessions are announced to a provider only for the
-    /// repositories that provider actually hosts sessions in, so a remote lane
-    /// in one project can never reach local sessions in another. It resolves
-    /// through a `ProviderRepoScope`, so a database read that fails replays the
-    /// last known scope instead of reporting an empty one — see that type for
-    /// why the difference is load-bearing.
+    /// repositories that provider actually hosts sessions in and that have the
+    /// switch on, so a remote lane in one project can never reach local
+    /// sessions in another. It resolves through a `ProviderRepoScope`, so a
+    /// database read that fails replays the last known scope instead of
+    /// reporting an empty one — see that type for why the difference is
+    /// load-bearing. The site resolver applies the same switch inward.
     static func makePeerBridging(
         database: TBDDatabase,
         roster: PeerRosterRunner,
@@ -647,30 +704,37 @@ public final class Daemon: Sendable {
         sessionsDirectory: URL,
         origin: String = PeerLinkOrigin.local()
     ) -> PeerBridgeWiring {
-        PeerBridgeWiring(
-            isEnabled: {
-                let config = try? await database.config.get()
-                return config?.remotePeerMessagingEnabled
-                    ?? Config.remotePeerMessagingDefault
+        let switches = makePeerMessagingSwitches(database: database)
+        return PeerBridgeWiring(
+            isEnabled: { config in
+                do {
+                    let rows = try await database.worktrees.list(excludeArchived: true)
+                    return try await PeerMessagingStreamGate.shouldOpenStream(
+                        provider: config.name, worktrees: rows,
+                        repoIsOn: { try await switches.isOn(repoID: $0) })
+                } catch {
+                    // Fails closed: an unreadable database opens nothing, and
+                    // the next poll tick asks again.
+                    daemonLogger.error("""
+                        could not decide whether to open \(config.name, privacy: .public)'s \
+                        messages stream: \(String(describing: error), privacy: .public)
+                        """)
+                    return false
+                }
             },
             make: { config, contractVersion in
                 // One resolver per bridge, living exactly as long as the
                 // bridge does. Last-known-good is per-provider state and the
                 // provider is fixed the moment the bridge is built, so this is
                 // the narrowest scope that can hold it.
-                let scope = ProviderRepoScope(
-                    provider: config.name,
-                    listWorktrees: {
-                        try await database.worktrees.list(excludeArchived: true)
-                    })
+                let scope = makeRepoScope(
+                    provider: config.name, database: database, switches: switches)
                 let bridge = PeerBridge.make(
                     config: config,
                     contractVersion: contractVersion,
                     origin: origin,
-                    siteResolver: WorktreeShadowPeerSiteResolver(
-                        provider: config.name,
-                        worktrees: database.worktrees,
-                        repos: database.repos),
+                    siteResolver: makeShadowSiteResolver(
+                        provider: config.name, database: database, switches: switches),
                     // The real ledger, never `UnrecordedShadowPeerArtifacts`: a
                     // shadow published through that recorder is one nothing can
                     // recognise afterwards, so its helper, socket and record
@@ -691,6 +755,36 @@ public final class Daemon: Sendable {
                     })
                 return bridge
             })
+    }
+
+    /// The per-repository switches, read from each repo row's main checkout.
+    /// One of the three pieces `makePeerBridging` composes, split out so a test
+    /// can drive exactly what production builds.
+    static func makePeerMessagingSwitches(database: TBDDatabase) -> RepoPeerMessagingSwitches {
+        RepoPeerMessagingSwitches(repo: { id in try await database.repos.get(id: id) })
+    }
+
+    /// The outward scope for one provider: its hosted repositories that have
+    /// the switch on.
+    static func makeRepoScope(
+        provider: String, database: TBDDatabase, switches: RepoPeerMessagingSwitches
+    ) -> ProviderRepoScope {
+        ProviderRepoScope(
+            provider: provider,
+            listWorktrees: { try await database.worktrees.list(excludeArchived: true) },
+            checkoutPath: { try await database.repos.get(id: $0)?.path },
+            switchIsOn: { switches.setting(checkoutPath: $0).enabled })
+    }
+
+    /// The inward site resolver for one provider, applying the same switch.
+    static func makeShadowSiteResolver(
+        provider: String, database: TBDDatabase, switches: RepoPeerMessagingSwitches
+    ) -> WorktreeShadowPeerSiteResolver {
+        WorktreeShadowPeerSiteResolver(
+            provider: provider,
+            worktrees: database.worktrees,
+            repos: database.repos,
+            peerMessagingOn: { switches.setting(for: $0).enabled })
     }
 
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.
@@ -841,7 +935,8 @@ public final class Daemon: Sendable {
         // One reservation ledger for the whole daemon: the lifecycle and the
         // router hold copies of this resolver, and a balanced pick is only
         // atomic across spawns that share the same ledger. The stale-account
-        // latch is shared the same way, so it holds to once across spawns.
+        // and fallback latches are shared the same way, so each holds to once
+        // across spawns.
         let modelProfileResolver = ModelProfileResolver(
             profiles: database.modelProfiles,
             repos: database.repos,
@@ -849,9 +944,11 @@ public final class Daemon: Sendable {
             candidateSource: profilePoolCandidateSource,
             reservations: ProfilePickReservations(),
             staleAlerts: StaleAccountAlerts(
+                notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs)),
+            fallbackAlerts: BalancingFallbackAlerts(
                 notify: StaleAccountAlerts.notifier(db: database, subscriptions: subs))
         )
-        let pendingQuestions = PendingQuestionStore()
+        let pendingQuestions = PendingPromptStore()
 
         // The control-mode bridge is shared by lifecycle + router so every
         // `ensureServer()` call site can open a gated control connection
@@ -1003,6 +1100,45 @@ public final class Daemon: Sendable {
                 })
         }
 
+        // The read direction of the same arrangement: ask the viewer that holds
+        // a session's pty what is on its screen. Built from the sidecar alone —
+        // unlike the courier it needs no fallback writer, because the fallback
+        // for a read is the daemon's own retained emulator and that belongs to
+        // the resolver above it. Gated on the registry for the same reason the
+        // courier is: with no registry there is no holder transport in this
+        // daemon, so there is nothing to pull from. Its reply and
+        // connection-lost sinks are installed at step 9a, before the sidecar
+        // listens, because a connection captures its sinks at adopt time.
+        let holderScreenPull: HolderScreenPull? = holderRegistry.map { _ in
+            HolderScreenPull(
+                sendFrame: { [fdVendingServer] frame in
+                    try await fdVendingServer.sendFrame(frame)
+                })
+        }
+
+        // Which store answers a machine read, decided in one place. The census
+        // ledger (`ptyReader`) is the routing fact and the reader is the
+        // daemon's own store; the pull reaches a viewer's. Built from the
+        // registry, so it exists exactly when a holder session can.
+        let holderScreenResolver: HolderScreenResolver? = holderRegistry.map { registry in
+            HolderScreenResolver(
+                ptyReader: { terminalID in
+                    await registry.ptyReader(for: terminalID)
+                },
+                daemonStore: { terminalID in
+                    guard let reader = await registry.reader(for: terminalID) else { return nil }
+                    return HolderDaemonStore(
+                        screen: { maxLines in try await reader.screen(maxLines: maxLines) },
+                        modeReading: { await reader.modeReading() },
+                        // A `nonisolated let` on the reader, read here rather
+                        // than taken from the viewer's reply: a viewer's
+                        // emulator was seeded by this reader's attach preamble
+                        // and can carry no provenance the reader lacked.
+                        observedChildFromStart: reader.observedChildFromStart)
+                },
+                pull: holderScreenPull)
+        }
+
         var lifecycle = WorktreeLifecycle(
             db: database, git: git, tmux: tmux, hooks: hooks,
             subscriptions: subs,
@@ -1011,7 +1147,39 @@ public final class Daemon: Sendable {
         )
         lifecycle.controlMode = controlModeBridge
         lifecycle.holderRegistry = holderRegistry
+        // The history-keeping teardowns go through the resolver so a viewed
+        // tab's Closed Terminals entry carries the screen the person was
+        // looking at rather than the one frozen at their attach.
+        lifecycle.holderScreenResolver = holderScreenResolver
+        // Dev servers' last output on the holder transport
+        // (docs/specs/2026-10-11-dev-servers-design.md, "Exited servers keep
+        // their last output"): the registry hands an ended session to the
+        // recorder before releasing its reader. Installed before startup
+        // adoption (step 8e) so a server that ended during an outage, whose
+        // status rides the hand-over, is seen too. The recorder ignores every
+        // tab that is not a dev server's. Nil registry in mock mode.
+        if let holderRegistry {
+            let recorder = DevServerFinalOutputRecorder(db: database, resolver: holderScreenResolver)
+            await holderRegistry.setSessionEndedObserver { terminalID, status, reader in
+                await recorder.sessionEnded(terminalID: terminalID, status: status) {
+                    await reader.closedTerminalCapture()
+                }
+            }
+        }
         lifecycle.modelProxySupervisor = modelProxySupervisor
+        // Dev servers (docs/specs/2026-10-11-dev-servers-design.md). The
+        // lifecycle gets its operations before it is copied into the router
+        // below, so archive stops servers through the same collaborators
+        // `server.stop` uses. Skipped in mock mode.
+        let devServerTabInspector = ProductionDevServerTabInspector(
+            tmux: tmux, holderRegistry: holderRegistry, signaller: ProductionProcessSignaller())
+        if mockMode == nil {
+            lifecycle.devServerOperations = DevServerOperations(
+                db: database, tabInspector: devServerTabInspector,
+                commandRunner: ProductionDevServerCommandRunner(), stopper: DevServerStopper(),
+                runningFiles: DevServerRunningFileStore(), probe: .live,
+                environment: ProcessInfo.processInfo.environment)
+        }
 
         // Queued prompt on worktree creation (design 2026-08-10). Constructed
         // here — before `lifecycle` is copied by value into the RPC router
@@ -1021,10 +1189,10 @@ public final class Daemon: Sendable {
         // below). Skipped in mock mode, like every other rail: with no
         // coordinator the parking RPC refuses, so nothing new is ever parked
         // and nothing already in the column is ever typed.
-        let pendingPrompts: PendingPromptCoordinator? = mockMode == nil
+        let pendingPromptCoordinator: PendingPromptCoordinator? = mockMode == nil
             ? PendingPromptCoordinator(db: database, subscriptions: subs)
             : nil
-        lifecycle.pendingPromptCoordinator = pendingPrompts
+        lifecycle.pendingPromptCoordinator = pendingPromptCoordinator
 
         // Orphan-GC: constructed here — before `lifecycle` gets copied into
         // the RPC router / auto-archive coordinator below (both take a
@@ -1158,6 +1326,15 @@ public final class Daemon: Sendable {
         // `remoteManager.start()`, so no snapshot is applied without it.
         await remoteManager?.setProviderPRBinder(
             ProviderPRBinder(db: database, coordinator: rpcRouter.prBindingCoordinator))
+        // Remote transcript background sync reads the sightings the manager
+        // already processes, and feeds the hint store the router's transcript
+        // sync reads. Installed before `remoteManager.start()` for the same
+        // reason: no sighting is processed without it.
+        if let background = rpcRouter.remoteTranscriptBackgroundSync {
+            await remoteManager?.setTranscriptSightingObserver { sessions, provider in
+                await background.observe(sessions: sessions, provider: provider)
+            }
+        }
         // And the holder registry, for the same reason and on the same terms:
         // the park path reads a holder session's screen through the reader the
         // spawn path registered, so all three must hold ONE registry.
@@ -1165,8 +1342,8 @@ public final class Daemon: Sendable {
         // Queued prompt, second half: route the parking RPC and the readiness
         // and confirmation hooks to the coordinator, and give it the paste
         // path's send seam.
-        if let pendingPrompts {
-            await rpcRouter.attachPendingPromptCoordinator(pendingPrompts)
+        if let pendingPromptCoordinator {
+            await rpcRouter.attachPendingPromptCoordinator(pendingPromptCoordinator)
         }
         rpcRouter.controlMode = controlModeBridge
         // `terminal.output` renders a holder-backed session from the same
@@ -1175,11 +1352,13 @@ public final class Daemon: Sendable {
         // pty master and quietly steal bytes from each other.
         rpcRouter.holderRegistry = holderRegistry
         rpcRouter.holderInjectionCourier = holderInjectionCourier
+        rpcRouter.holderScreenResolver = holderScreenResolver
         // One supervisor across the router, the lifecycle and the coordinator,
         // for the registry's reason: two would each try to own one home's
         // `proxy.lock`, and `daemon.capabilities` would report a proxy no
         // spawn was routed through.
         rpcRouter.modelProxySupervisor = modelProxySupervisor
+        rpcRouter.devServerTabInspector = devServerTabInspector
         await rpcRouter.hibernationCoordinator.setModelProxySupervisor(modelProxySupervisor)
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the
@@ -1398,9 +1577,9 @@ public final class Daemon: Sendable {
         // listeners serve, both because `terminal.output` needs the readers and
         // because the liveness debt starts accruing the moment the daemon is up.
         //
-        // With `pty_holder_enabled` off there are no such rows and this is a
-        // single query — it cannot delay the socket bind for anyone who has not
-        // opted in.
+        // On an install with no holder-backed session rows — one that opted
+        // the transport off — this is a single query and cannot delay the
+        // socket bind at all.
         //
         // **The ordering was reconsidered and stands, because the phase is now
         // bounded.** Adopting first costs everyone the phase's duration, and
@@ -1424,6 +1603,25 @@ public final class Daemon: Sendable {
             deferredHolderAdoptions = await holderRegistry.adoptAll()
         }
 
+        // 8f. Build the dev-server monitor and install the router's hooks
+        // into it BEFORE the socket and HTTP servers serve (steps 9, 10): the
+        // hooks are plain `nonisolated(unsafe)` vars a request handler reads,
+        // so assigning them while requests run would race, and a
+        // `server.start`/`server.stop` served before the assignment would
+        // skip its refresh. `refresh()` works before `start()` (step
+        // 11a-dev-servers); until then the summary is empty.
+        var devServerMonitor: DevServerRunningFileMonitor?
+        if mockMode == nil {
+            let monitor = DevServerRunningFileMonitor(
+                db: database, runningFiles: DevServerRunningFileStore(),
+                tabInspector: devServerTabInspector,
+                broadcast: { [subs] delta in subs.broadcast(delta: delta) })
+            devServerMonitor = monitor
+            self.devServerMonitor = monitor
+            rpcRouter.onDevServersChanged = { [monitor] in await monitor.refresh() }
+            rpcRouter.devServerSummaryProvider = { [monitor] in await monitor.runningWorktreeIDs() }
+        }
+
         // 9. Start socket server
         let sock = SocketServer(router: rpcRouter)
         self.socketServer = sock
@@ -1431,6 +1629,16 @@ public final class Daemon: Sendable {
         // is built above, before the server exists, so it can't be an init dep).
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
         try await sock.start()
+
+        // Pending provider replacements recover only after the socket is live:
+        // Codex readiness arrives through the SessionStart hook RPC, so a
+        // pre-bind recovery would always time out despite a healthy process.
+        // The durable row remains Codex throughout the pass. It is NOT run
+        // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
+        // for that hook, serially, so awaiting it would hold every later boot
+        // step (the sidecar, the HTTP server) behind N × 15 s. The maintenance
+        // task in step 11a-gc runs the same pass immediately after boot, off the
+        // critical path, and then hourly.
 
         // 9c. Finish the holder sessions the startup budget did not reach.
         //
@@ -1486,6 +1694,19 @@ public final class Daemon: Sendable {
         if let holderInjectionCourier {
             await fdVendingServer.setOnInjectionAck { ack in
                 holderInjectionCourier.acknowledge(ack)
+            }
+        }
+        // A viewer's answer to one screen request, and the end of the
+        // connection that carried it. Both sinks go to the same actor: the
+        // reply resolves a waiting pull, and a connection that ends fails every
+        // pull still outstanding on it rather than leaving them to the bound.
+        // Nil-safe by construction, like the ack sink above.
+        if let holderScreenPull {
+            await fdVendingServer.setOnScreenReply { reply, epoch in
+                holderScreenPull.record(reply, epoch: epoch)
+            }
+            await fdVendingServer.setOnConnectionLost { epoch in
+                holderScreenPull.connectionLost(epoch: epoch)
             }
         }
 
@@ -1578,6 +1799,26 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-dev-servers. Start the monitor step 8f built and wired: its
+            // initial read, the running-file directory watch and the 10 s
+            // liveness recheck. Reads only. Started after the bind rather
+            // than before it, so its tab reads never delay the socket.
+            await devServerMonitor?.start()
+
+            // 11a-reader-census. Record the holder transport's double-reader
+            // violation count where a human can read it back. The detector is
+            // always on inside `HolderRegistry` — every transition into reading
+            // asserts the session had no reader — but the count lives in daemon
+            // memory, so without a persisted line "did the soak see any
+            // violations?" is answerable only by an absence, which is exactly
+            // the unaided observation the detector replaces. One `.notice` at
+            // startup and one an hour after that.
+            if let holderRegistry {
+                self.holderReaderCensusTask = Task {
+                    await holderRegistry.reportReaderCensusPeriodically()
+                }
+            }
+
             // 11a-questions. Expire stranded AskUserQuestion captures. This
             // ran as a side effect of `terminal.transcript` until the app
             // started reading transcripts itself; on that path the handler is
@@ -1585,14 +1826,14 @@ public final class Daemon: Sendable {
             // socket bind above (step 9) — the boot path already blocks that
             // bind for minutes on a large archive set, and work added ahead of
             // it makes a slow start indistinguishable from a dead daemon.
-            let questionSweep = PendingQuestionExpirySweep(
+            let questionSweep = PendingPromptExpirySweep(
                 store: pendingQuestions,
                 onReap: { [weak subs, pendingQuestions] terminalID in
-                    await subs?.broadcastPendingQuestions(
+                    await subs?.broadcastPendingPrompts(
                         terminalID: terminalID, from: pendingQuestions)
                 }
             )
-            self.pendingQuestionExpirySweep = questionSweep
+            self.pendingPromptExpirySweep = questionSweep
             await questionSweep.start()
 
             // 11a-shadow. Reclaim the durable artifacts of shadow peers — a
@@ -1603,7 +1844,7 @@ public final class Daemon: Sendable {
             // Code's own reaper provably will not collect) and then on its own
             // tick.
             //
-            // Not gated on `remotePeerMessagingEnabled`: this is the
+            // Not gated on any repository's peer-messaging switch: this is the
             // reclaimer's ledger rather than the feature, its whitelist is
             // empty on any install that never published a shadow, and gating it
             // would strand every artifact the moment somebody turned the
@@ -1633,8 +1874,13 @@ public final class Daemon: Sendable {
             // `orphanGC` is always non-nil here.
             if let orphanGC {
                 let maintenanceLifecycle = lifecycle
-                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog] in
+                self.gcTask = Task { [orphanGC, maintenanceLifecycle, actuationLog, rpcRouter] in
                     // Sweep once immediately (cold recovery), then every hour.
+                    // The immediate pass is also the post-socket recovery of any
+                    // Continue in Claude transaction a crash left pending: it
+                    // waits on hook-delivered readiness, so it runs here, off
+                    // the boot path, rather than serially before the listeners.
+                    await rpcRouter.reconcilePendingContinueInClaude()
                     await Self.performOrphanMaintenance(
                         orphanGC: orphanGC,
                         lifecycle: maintenanceLifecycle,
@@ -1644,6 +1890,7 @@ public final class Daemon: Sendable {
                         // swiftlint:disable:next no_raw_task_sleep - legacy sleep, see docs/specs/2026-07-24-test-hardening-design.md
                         try? await Task.sleep(for: .seconds(3600))
                         guard !Task.isCancelled else { break }
+                        await rpcRouter.reconcilePendingContinueInClaude()
                         await Self.performOrphanMaintenance(
                             orphanGC: orphanGC,
                             lifecycle: maintenanceLifecycle,
@@ -1826,6 +2073,11 @@ public final class Daemon: Sendable {
                 tokenFetcher: TokenProfileUsageFetcher(),
                 profileSecret: { id in try? ModelProfileKeychain.load(id: id.uuidString) },
                 broadcast: { [weak subs] in subs?.broadcast(delta: .modelProfilesChanged) },
+                // Token profiles join the cadence only while balancing is on:
+                // their probe is billed, and balancing is what routes on it.
+                tokenCadenceEnabled: { [database] in
+                    (try? await database.config.get().profileBalancingEnabled) ?? false
+                },
                 loadPersisted: { [database] in
                     (try? await database.oauthUsageSnapshots.loadAll()) ?? [:]
                 },
@@ -1838,11 +2090,12 @@ public final class Daemon: Sendable {
             )
             self.oauthUsagePoller = oauthPoller
             rpcRouter.oauthUsagePoller = oauthPoller
-            // Token profiles are kept off the 90s cadence because their usage
-            // probe is a real billed request; they refresh when a session using
-            // them finishes a turn instead. The store detects the edge (both of
-            // its activity writers commit it); this is the one place it is
-            // wired to a consumer.
+            // Token profiles probe at most every five minutes on the cadence,
+            // and only while balancing is on, because their usage probe is a
+            // real billed request; a session using one that finishes a turn
+            // refreshes it too, under the same floor. The store detects the
+            // edge (both of its activity writers commit it); this is the one
+            // place it is wired to a consumer.
             database.terminals.activityTransitions.onSessionBecameIdle { [weak oauthPoller] profileID in
                 Task { await oauthPoller?.noteSessionBecameIdle(profileID: profileID) }
             }
@@ -1971,6 +2224,7 @@ public final class Daemon: Sendable {
             do {
                 try await NightwatchHolderBootReconcile.run(
                     db: database, subscriptions: subs,
+                    holderSupported: holderRegistry?.canSpawn == true,
                     applyMode: { await runner.apply(mode: $0) })
             } catch {
                 reconcileLogger.error("Failed to restore daywatch mode on boot: \(String(describing: error), privacy: .public)")
@@ -2140,6 +2394,9 @@ public final class Daemon: Sendable {
         // thread parks on its wake pipe rather than exiting.
         await holderRegistry?.releaseAll()
 
+        // Stop the dev server running-file watch and its recheck loop.
+        await devServerMonitor?.stop()
+
         // Take the watch away, and leave the proxy running. That is deliberate
         // and it is not the same gesture as turning the feature off: a proxy
         // outliving its daemon is the point of a separate process, sessions
@@ -2148,7 +2405,7 @@ public final class Daemon: Sendable {
         // `beginDraining` is what the flag's off-flip calls; shutdown must not.
         await modelProxySupervisor?.stop()
 
-        if let questionSweep = pendingQuestionExpirySweep {
+        if let questionSweep = pendingPromptExpirySweep {
             await questionSweep.stop()
         }
 
@@ -2233,6 +2490,7 @@ public final class Daemon: Sendable {
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
         reaperTask?.cancel()
+        holderReaderCensusTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()
         shadowPeerReconcilerTask?.cancel()
@@ -2243,6 +2501,17 @@ public final class Daemon: Sendable {
         }
         if let http = httpServer {
             await http.stop()
+        }
+
+        // Settle the open transcript prompts only now, after the socket has
+        // closed every `prompt.await` connection. Resolving them first would
+        // tell each waiting hook "resolved elsewhere" and it would exit for
+        // good; a hook that instead sees its connection drop reconnects to the
+        // next daemon and registers again, keeping its prompt answerable.
+        // This releases whatever the closes did not reach — chiefly a
+        // `prompt.answer` still waiting for a delivery ack.
+        if let router = self.router {
+            await router.pendingQuestions.resolveAll()
         }
 
         // Remove the PID file only if it still names this process. During a

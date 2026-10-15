@@ -1586,6 +1586,228 @@ struct TableTranscriptHarness {
                     + "(gap=\(gapToBottom(scene)))"))
     }
 
+    // MARK: - Prepend anchor and near-top signal
+
+    /// One assistant bubble whose length cycles with `n`, so rows differ in
+    /// height and a mis-anchor by a row or two cannot land on an equal offset.
+    private static func prependBubble(id: String, n: Int) -> TranscriptItem {
+        let sentences = 2 + (n % 3) * 2
+        return .assistantText(
+            id: id,
+            text: "Message \(n): "
+                + String(repeating: "a remote record whose prose wraps across the column. ", count: sentences),
+            timestamp: nil,
+            usage: nil
+        )
+    }
+
+    /// 50 records with stable (uuid-shaped) ids — more than the bottom-window
+    /// precompute measures, so rows above the reader carry estimates — and the
+    /// same 50 with 12 earlier records added at the front.
+    private static func prependArrays() -> (before: [TranscriptRenderNode], after: [TranscriptRenderNode]) {
+        let base = (0..<50).map { prependBubble(id: "rec-\($0)", n: $0) }
+        let earlier = (0..<12).map { prependBubble(id: "early-\($0)", n: 100 + $0) }
+        return (transcriptRenderNodes(from: base), transcriptRenderNodes(from: earlier + base))
+    }
+
+    /// Scrolls so `row`'s top sits `below` points under the viewport top.
+    private func park(row: Int, below: CGFloat, in scene: Scene) {
+        let clip = scene.scrollView.contentView
+        let target = max(0, scene.tableView.rect(ofRow: row).minY - below)
+        clip.scroll(to: NSPoint(x: 0, y: target))
+        scene.scrollView.reflectScrolledClipView(clip)
+        settle(scene.tableView)
+    }
+
+    private func scroll(_ scene: Scene, toY y: CGFloat) {
+        let clip = scene.scrollView.contentView
+        let maxY = max(0, scene.tableView.frame.height - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: 0, y: min(max(0, y), maxY)))
+        scene.scrollView.reflectScrolledClipView(clip)
+    }
+
+    @Test("a prepend keeps the top visible row where it was")
+    func prependKeepsTopRowAnchored() async throws {
+        let suiteName = "table-harness-prepend-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let (before, after) = Self.prependArrays()
+        let scene = makeScene(items: [], appState: appState, fixedSize: true, nodes: before)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        let primedWidth = primeScene(scene, nodes: before)
+
+        park(row: 20, below: 150, in: scene)
+        #expect(gapToBottom(scene) > 120,
+                Comment(rawValue: "precondition: the viewport must be clear of the tail-follow "
+                    + "threshold (gap=\(gapToBottom(scene)))"))
+        let anchorID = before[20].id
+        let offsetBefore = screenOffset(of: 20, in: scene)
+
+        scene.coordinator.update(
+            nodes: after, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
+            prependToken: 1)
+        #expect(scene.tableView.bounds.width == primedWidth,
+                "the column width moved, so the prepend took the width-change branch")
+        let index = try #require(after.firstIndex { $0.id == anchorID })
+        #expect(index == 32)
+
+        // The first frame after the prepend is what the reader sees.
+        let offsetFirstFrame = screenOffset(of: index, in: scene)
+        #expect(abs(offsetFirstFrame - offsetBefore) <= 1.0,
+                Comment(rawValue: "the anchor row moved in the first frame: "
+                    + "before=\(offsetBefore) firstFrame=\(offsetFirstFrame)"))
+
+        // Let AppKit lay the new rows out, run the deferred re-pin, and let any
+        // estimated row above the anchor realize and correct its height.
+        scene.tableView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        settle(scene.tableView)
+
+        let offsetAfter = screenOffset(of: index, in: scene)
+        #expect(abs(offsetAfter - offsetBefore) <= 1.0,
+                Comment(rawValue: "the anchor row moved on screen across the prepend: "
+                    + "before=\(offsetBefore) after=\(offsetAfter)"))
+    }
+
+    @Test("a prepend while at the bottom stays at the bottom")
+    func prependAtBottomStaysAtBottom() async throws {
+        let suiteName = "table-harness-prepend-bottom-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let (before, after) = Self.prependArrays()
+        let scene = makeScene(items: [], appState: appState, fixedSize: true, nodes: before)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        primeScene(scene, nodes: before)
+        scene.coordinator.scrollToEnd(animated: false)
+        settle(scene.tableView)
+        #expect(gapToBottom(scene) <= 120, "precondition: the viewport starts at the bottom")
+
+        scene.coordinator.update(
+            nodes: after, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "",
+            prependToken: 1)
+        scene.tableView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        settle(scene.tableView)
+
+        #expect(gapToBottom(scene) <= 120,
+                Comment(rawValue: "a prepend at the bottom must leave the viewport at the bottom "
+                    + "(gap=\(gapToBottom(scene)))"))
+    }
+
+    @Test("with no stable id on screen, a prepend keeps the distance from the bottom")
+    func prependWithoutStableIDKeepsBottomDistance() async throws {
+        let suiteName = "table-harness-prepend-lineid-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        // Positional ids, as the parsers mint for records with no uuid: after the
+        // prepend, `line-20` names a DIFFERENT record (the old one is `line-32`).
+        let base = (0..<50).map { Self.prependBubble(id: "line-\($0)", n: $0) }
+        let grown = (0..<62).map { index in
+            Self.prependBubble(id: "line-\(index)", n: index < 12 ? 100 + index : index - 12)
+        }
+        let before = transcriptRenderNodes(from: base)
+        let after = transcriptRenderNodes(from: grown)
+        #expect(!TableTranscriptView.Coordinator.anchorID("line-20"))
+        #expect(!TableTranscriptView.Coordinator.anchorID("tail-3"))
+        #expect(TableTranscriptView.Coordinator.anchorID("rec-20"))
+
+        let scene = makeScene(items: [], appState: appState, fixedSize: true, nodes: before)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        primeScene(scene, nodes: before)
+        park(row: 20, below: 150, in: scene)
+        let gapBefore = gapToBottom(scene)
+        #expect(gapBefore > 120, "precondition: the viewport must be clear of the tail-follow threshold")
+        let offsetBefore = screenOffset(of: 20, in: scene)
+
+        scene.coordinator.update(
+            nodes: after, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
+            prependToken: 1)
+        scene.tableView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        settle(scene.tableView)
+
+        let gapAfter = gapToBottom(scene)
+        #expect(abs(gapAfter - gapBefore) <= 1.0,
+                Comment(rawValue: "the distance from the bottom moved: before=\(gapBefore) after=\(gapAfter)"))
+        // The record the reader was looking at (now row 32) stays put too.
+        let offsetAfter = screenOffset(of: 32, in: scene)
+        #expect(abs(offsetAfter - offsetBefore) <= 1.0,
+                Comment(rawValue: "the record on screen moved: before=\(offsetBefore) after=\(offsetAfter)"))
+    }
+
+    /// Pins the gate: local panes and Session History never bump the token, so a
+    /// rebuild that happens to look like a prepend keeps today's behavior — the
+    /// clip stays at its document offset and the old rows move down by the
+    /// height inserted above them.
+    @Test("a rebuild without a prepend token behaves as before")
+    func rebuildWithoutPrependTokenUnchanged() async throws {
+        let suiteName = "table-harness-prepend-gate-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let (before, after) = Self.prependArrays()
+        let scene = makeScene(items: [], appState: appState, fixedSize: true, nodes: before)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        primeScene(scene, nodes: before)
+        park(row: 20, below: 150, in: scene)
+        let offsetBefore = screenOffset(of: 20, in: scene)
+        let originBefore = scene.scrollView.contentView.bounds.origin.y
+
+        scene.coordinator.update(
+            nodes: after, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+        #expect(scene.coordinator.pendingPrependAnchor == nil)
+        // Read before any realize-time correction can move rows above the clip.
+        #expect(abs(scene.scrollView.contentView.bounds.origin.y - originBefore) <= 0.5,
+                "without the token the clip must keep its document offset")
+        scene.tableView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        settle(scene.tableView)
+
+        let inserted = scene.tableView.rect(ofRow: 12).minY
+        #expect(inserted > 300, Comment(rawValue: "precondition: 12 rows inserted (\(inserted) pt)"))
+        let moved = screenOffset(of: 32, in: scene) - offsetBefore
+        #expect(moved >= inserted * 0.5,
+                Comment(rawValue: "without the token the row must move down by about the inserted "
+                    + "height (moved=\(moved) inserted=\(inserted))"))
+    }
+
+    @Test("near-top reports transitions only")
+    func nearTopReportsTransitions() throws {
+        let suiteName = "table-harness-neartop-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let (before, _) = Self.prependArrays()
+        let scene = makeScene(items: [], appState: appState, fixedSize: true, nodes: before)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        primeScene(scene, nodes: before)
+        scene.coordinator.startObservingScroll()
+        scene.coordinator.scrollToEnd(animated: false)
+        settle(scene.tableView)
+
+        final class Recorder { var values: [Bool] = [] }
+        let recorder = Recorder()
+        scene.coordinator.onNearTop = { recorder.values.append($0) }
+
+        scroll(scene, toY: 0)
+        #expect(recorder.values == [true])
+        scroll(scene, toY: scene.tableView.rect(ofRow: 3).minY + 1)
+        #expect(recorder.values == [true], "row 3 at the top is still near the top")
+        scroll(scene, toY: .greatestFiniteMagnitude)
+        #expect(recorder.values == [true, false])
+        scroll(scene, toY: 0)
+        #expect(recorder.values == [true, false, true])
+        #expect(TableTranscriptView.Coordinator.nearTopRowThreshold == 5)
+    }
+
     // MARK: - Image-attachment height estimate
 
     /// FIX 3: the arithmetic estimate must include an image term. The exact path

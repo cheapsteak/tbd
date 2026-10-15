@@ -423,7 +423,7 @@ enum ProfileUsagePresentation {
     /// Cadence-relative — roughly 3x the polling interval for that kind — and
     /// therefore NOT a single shared constant. Signed-in profiles are swept
     /// every ~90s, so five minutes means several consecutive misses. Token
-    /// profiles refresh on a five-minute activity floor, so the same five
+    /// profiles refresh on a five-minute cadence, so the same five
     /// minutes would mark every one of them stale the instant it was fetched:
     /// a permanent false alarm on correct data. Fifteen minutes is three
     /// missed opportunities for that kind.

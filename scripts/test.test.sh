@@ -135,6 +135,7 @@ fake_swift_invocation="$(wc -l < "$FAKE_SWIFT_DUMP.count" | tr -d ' ')"
   echo "TBD_SOCKET_PATH=${TBD_SOCKET_PATH:-<unset>}"
   echo "TBD_CLAUDE_HOST_HOME=${TBD_CLAUDE_HOST_HOME:-<unset>}"
   echo "TBD_TEST_CODEX_HOME=${TBD_TEST_CODEX_HOME:-<unset>}"
+  echo "DEV_SERVERS_DIR=${DEV_SERVERS_DIR:-<unset>}"
   echo "TMUX_TMPDIR=${TMUX_TMPDIR:-<unset>}"
   echo "tmux-tmpdir-mode=$(stat -f '%Lp' "${TMUX_TMPDIR:-/nonexistent}" 2>/dev/null)"
   echo "TBD_SWIFT_LOCK_PATH=${TBD_SWIFT_LOCK_PATH:-<unset>}"
@@ -260,12 +261,17 @@ STUB
 # it sees (the lock-contention cases in section 7). `pipefail` is on for this
 # file, and `tee` never fails, so `RUN_RC` is still the wrapper's own status.
 # Empty means `/dev/null`, which is every other case.
+#
+# `TBD_KEEP_DSYM=1` is the default for the same reason `TMUX_TMPDIR` is pinned:
+# the wrapper's EXIT trap deletes the `.dSYM` bundles under the repository it
+# ran in, and most cases run in the REAL checkout. It sits before `RUN_ENV`, so
+# a case that wants the prune passes `TBD_KEEP_DSYM=`.
 RUN_CWD=""
 RUN_TEE=""
 run_script() {
   local script="$1" fix="$2"; shift 2
   RUN_OUT="$(cd "${RUN_CWD:-.}" && env -u CI -u TBD_HOME -u TBD_SOCKET_PATH -u TBD_CLAUDE_HOST_HOME \
-                 -u TBD_TEST_CODEX_HOME -u TBD_TEST_SCRATCH_ROOT \
+                 -u TBD_TEST_CODEX_HOME -u TBD_TEST_SCRATCH_ROOT -u DEV_SERVERS_DIR \
                  -u TBD_SWIFT_LOCK_PATH -u CFFIXED_USER_HOME \
                  -u TBD_SWIFT_JOBS -u TBD_SWIFT_LOCK_TIMEOUT_SECONDS \
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
@@ -277,6 +283,7 @@ run_script() {
                  -u TBD_SWIFT_QUEUE_YIELD_SECONDS \
                  -u FAKE_REMOTE_VERIFY_RC -u FAKE_REMOTE_VERIFY_LOG \
                  -u FAKE_REMOTE_VERIFY_COUNT -u FAKE_REMOTE_VERIFY_ARGV \
+                 TBD_KEEP_DSYM=1 \
                  ${RUN_ENV[@]+"${RUN_ENV[@]}"} \
                  HOME="$fix/home" \
                  TMPDIR="$fix/tmp" \
@@ -299,6 +306,9 @@ run_wrapper() { run_script "$SCRIPT" "$@"; }
 MUTANT_DIR="$(mktmpd)"
 MUTANT_SEQ=0
 trap 'rm -rf "$MUTANT_DIR"' EXIT
+# A mutant of scripts/test.sh sources its libraries from beside itself, as the
+# real one does, so they have to be beside it here too.
+cp "$HERE/dsym-prune-lib.sh" "$MUTANT_DIR/"
 mutant_of() {
   local source_script="$1" sed_expr="$2" out
   MUTANT_SEQ=$((MUTANT_SEQ + 1))
@@ -831,8 +841,35 @@ test_no_fingerprint_leaves_containment_intact() {
   assert_contains "TBD_SOCKET_PATH is under the scratch dir" "$dump" "/sanctioned/tbd/sock"
   assert_contains "TBD_CLAUDE_HOST_HOME is under the scratch dir" "$dump" "/sanctioned/tbd/claude-host"
   assert_contains "TBD_TEST_CODEX_HOME is under the scratch dir" "$dump" "/sanctioned/tbd/codex-host"
+  assert_contains "DEV_SERVERS_DIR is under the scratch dir" "$dump" "/sanctioned/tbd/dev-servers"
   assert_contains "TBD_TEST_SCRATCH_ROOT is a scratch dir" "$dump" "TBD_TEST_SCRATCH_ROOT=/tmp/tbd-test-home."
   assert_contains "decoys are still armed" "$dump" "decoy-mode tbd=0"
+  rmfix "$fix"
+}
+
+test_dev_servers_dir_is_fenced_under_the_scratch_dir() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(DEV_SERVERS_DIR="$fix/callers-dev-servers")
+  run_wrapper "$fix"
+  RUN_ENV=()
+  assert_ok "a clean run exits 0" "$RUN_RC"
+  local dump; dump="$(dump_of "$fix")"
+  assert_contains "DEV_SERVERS_DIR is under the scratch dir" "$dump" "/sanctioned/tbd/dev-servers"
+  assert_missing "the caller's DEV_SERVERS_DIR is discarded" "$dump" "DEV_SERVERS_DIR=$fix/callers-dev-servers"
+  rmfix "$fix"
+}
+
+# MUTATION. Drop the pin and the caller's real running-file directory
+# reaches the suite.
+test_dev_servers_dir_pin_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" '/^ +DEV_SERVERS_DIR="\$sanctioned_home\/dev-servers" \\$/d')"
+  RUN_ENV=(DEV_SERVERS_DIR="$fix/callers-dev-servers")
+  run_script "$mutant" "$fix"
+  RUN_ENV=()
+  local dump; dump="$(dump_of "$fix")"
+  assert_contains "without the pin the caller's value survives" "$dump" "DEV_SERVERS_DIR=$fix/callers-dev-servers"
+  assert_missing "and nothing points at the scratch dir" "$dump" "/sanctioned/tbd/dev-servers"
   rmfix "$fix"
 }
 
@@ -2727,6 +2764,117 @@ test_a_76_with_the_valve_off_is_propagated_untouched() {
   assert_eq "76 is just an exit status when the valve is off" "76" "$RUN_RC"
   assert_eq "and it came from a run that reached the compiler" "1" "$(swift_invocations "$fix")"
   assert_eq "and nothing is dispatched" "0" "$(remote_verify_dispatches "$fix")"
+  rmfix "$fix"
+}
+
+# ---------------------------------------------------------------------------
+# 8. The .dSYM prune in the EXIT trap
+#
+# Every case runs in a fixture repository whose `.build` holds the two shapes a
+# real debug build leaves: a product's bundle beside its binary, and the test
+# bundle's, nested inside the `.xctest`. A plugin-cache bundle stands in for
+# everything the prune must leave alone.
+# ---------------------------------------------------------------------------
+
+mk_dsym_fixture() {
+  local repo="$1/repo" debug="$1/repo/.build/arm64-apple-macosx/debug"
+  mkdir -p "$debug/TBDCLI.dSYM/Contents/Resources/DWARF" \
+           "$debug/TBDPackageTests.xctest/Contents/MacOS/TBDPackageTests.dSYM/Contents" \
+           "$repo/.build/plugins/cache/SomePlugin.dSYM"
+  : > "$debug/TBDCLI"
+  : > "$debug/TBDCLI.dSYM/Contents/Resources/DWARF/TBDCLI"
+  : > "$debug/TBDPackageTests.xctest/Contents/MacOS/TBDPackageTests"
+}
+
+dsyms_left() {
+  find "$1/repo/.build" -type d -name '*.dSYM' -prune -print 2>/dev/null \
+    | sed "s|^$1/repo/.build/||" | sort | tr '\n' ' '
+}
+
+run_dsym_case() {
+  local fix="$1" script="${2:-$SCRIPT}"
+  mk_repo_fixture "$fix" >/dev/null
+  mk_dsym_fixture "$fix"
+  RUN_CWD="$fix/repo"
+  run_script "$script" "$fix"
+  RUN_CWD=""
+}
+
+test_a_run_prunes_the_debug_dsyms_and_nothing_else() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(TBD_KEEP_DSYM=)
+  run_dsym_case "$fix"
+  RUN_ENV=()
+  assert_ok "the run is green" "$RUN_RC"
+  assert_eq "only the plugin-cache bundle survives" "plugins/cache/SomePlugin.dSYM " "$(dsyms_left "$fix")"
+  assert_eq "the binary beside the bundle is kept" "yes" \
+    "$([ -f "$fix/repo/.build/arm64-apple-macosx/debug/TBDCLI" ] && echo yes || echo no)"
+  assert_contains "the prune says what it removed" "$RUN_OUT" "Removed 2 debug-symbol bundle(s)"
+  rmfix "$fix"
+}
+
+test_a_red_run_prunes_and_keeps_its_exit_status() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(TBD_KEEP_DSYM= FAKE_SWIFT_RC=3)
+  run_dsym_case "$fix"
+  RUN_ENV=()
+  assert_eq "a red suite's status survives the prune" "3" "$RUN_RC"
+  assert_eq "and the bundles are still pruned" "plugins/cache/SomePlugin.dSYM " "$(dsyms_left "$fix")"
+  rmfix "$fix"
+}
+
+# A prune that fails must not become the run's status: the trap's `|| true` is
+# what stands between a stray failure there and a green suite reported red.
+test_a_failing_prune_does_not_change_the_exit_status() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" 's/prune_debug_dsyms "\$repo_toplevel" >&2 \|\| true/prune_debug_dsyms "$repo_toplevel" >\&2; false || true/')"
+  RUN_ENV=(TBD_KEEP_DSYM=)
+  run_dsym_case "$fix" "$mutant"
+  RUN_ENV=()
+  assert_ok "a green run stays green past the prune" "$RUN_RC"
+  rmfix "$fix"
+  # And the guard is load-bearing: without the `|| true`, a failing prune
+  # under `set -e` replaces the run's status.
+  fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" 's/prune_debug_dsyms "\$repo_toplevel" >&2 \|\| true/prune_debug_dsyms "$repo_toplevel" >\&2; false/')"
+  RUN_ENV=(TBD_KEEP_DSYM=)
+  run_dsym_case "$fix" "$mutant"
+  RUN_ENV=()
+  assert_nonzero "MUTANT: an unguarded failing prune turns the run red" "$RUN_RC"
+  rmfix "$fix"
+}
+
+test_keep_dsym_keeps_them() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(TBD_KEEP_DSYM=1)
+  run_dsym_case "$fix"
+  RUN_ENV=()
+  assert_ok "the run is green" "$RUN_RC"
+  assert_eq "TBD_KEEP_DSYM=1 keeps every bundle" \
+    "arm64-apple-macosx/debug/TBDCLI.dSYM arm64-apple-macosx/debug/TBDPackageTests.xctest/Contents/MacOS/TBDPackageTests.dSYM plugins/cache/SomePlugin.dSYM " \
+    "$(dsyms_left "$fix")"
+  rmfix "$fix"
+}
+
+test_ci_keeps_them() {
+  local fix; fix="$(mkfix)"
+  RUN_ENV=(TBD_KEEP_DSYM= CI=true)
+  run_dsym_case "$fix"
+  RUN_ENV=()
+  assert_eq "CI keeps every bundle" \
+    "arm64-apple-macosx/debug/TBDCLI.dSYM arm64-apple-macosx/debug/TBDPackageTests.xctest/Contents/MacOS/TBDPackageTests.dSYM plugins/cache/SomePlugin.dSYM " \
+    "$(dsyms_left "$fix")"
+  rmfix "$fix"
+}
+
+test_the_trap_prune_is_load_bearing() {
+  local fix mutant; fix="$(mkfix)"
+  mutant="$(mutant_of "$SCRIPT" '/^  prune_debug_dsyms "\$repo_toplevel"/d')"
+  RUN_ENV=(TBD_KEEP_DSYM=)
+  run_dsym_case "$fix" "$mutant"
+  RUN_ENV=()
+  assert_contains "MUTANT: without the trap's prune the bundles survive" \
+    "$(dsyms_left "$fix")" "TBDCLI.dSYM"
   rmfix "$fix"
 }
 

@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import TestSupport
@@ -142,9 +141,9 @@ struct AttachRPCOrchestrationTests {
         // passes its own short value explicitly.
         readyTimeout: Duration = .seconds(600),
         commandProvider: (@Sendable (String) async -> TmuxControlCommandClient?)? = nil,
-        // The two tests that exercise the ready-timer pass a `TestClock` and
-        // advance it; everyone else keeps the real clock plus the sentinel
-        // timeout above, so the timer simply never fires.
+        // The two tests that exercise the ready-timer pass an
+        // `EventDrivenTestClock` and advance it; everyone else keeps the real
+        // clock plus the sentinel timeout above, so the timer simply never fires.
         clock: (any Clock<Duration>)? = nil
     ) -> TmuxControlModeBridge {
         TmuxControlModeBridge(
@@ -304,7 +303,7 @@ struct AttachRPCOrchestrationTests {
         await vending.adoptConnection(fd: serverSide)
         let (router, db) = try makeRouterAndDB()
         let worktreeID = try await makeWorktree(in: db)
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let readyTimeout: Duration = .seconds(5)
         router.controlMode = bridge(
             supervisor: supervisor,
@@ -323,12 +322,12 @@ struct AttachRPCOrchestrationTests {
         defer { Darwin.close(rxFD) }
 
         // No attach.ready is ever sent. Advancing past the timeout fires the
-        // ready-timer — `advanceWhenSuspended` also proves the detached timer
-        // task actually armed, which the old wall-clock sleep only assumed.
+        // ready-timer — `requireAdvanceWhenArmed` also proves the detached
+        // timer task actually armed, which a wall-clock sleep would only assume.
         // The daemon must then detach, closing the write end: EOF on the
         // vended read fd (a blocking read, so it is the teardown itself that
         // unblocks the assertion).
-        await clock.advanceWhenSuspended(by: readyTimeout)
+        try await clock.requireAdvanceWhenArmed(by: readyTimeout)
         var buffer = [UInt8](repeating: 0, count: 8)
         let count = buffer.withUnsafeMutableBytes { Darwin.read(rxFD, $0.baseAddress, $0.count) }
         #expect(count == 0, "un-acked attach must be torn down (EOF on the vended fd)")
@@ -405,7 +404,7 @@ struct AttachRPCOrchestrationTests {
         let (router, db) = try makeRouterAndDB()
         let (client, recorder) = makeFakeClient()
         let worktreeID = try await makeWorktree(in: db, tmuxServer: "tbd-timeout-test")
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let readyTimeout: Duration = .seconds(5)
         router.controlMode = bridge(
             supervisor: supervisor,
@@ -431,8 +430,11 @@ struct AttachRPCOrchestrationTests {
         try await waitFor("pause batch write") { recorder.writes.count >= 1 }
 
         // Let the ready-timeout fire while the replay is in flight: the acked
-        // attach must NOT be torn down (no EOF on the vended fd).
-        await clock.advanceWhenSuspended(by: readyTimeout)
+        // attach must NOT be torn down (no EOF on the vended fd). `advance`
+        // resumes the timer without running it, so settle before the read:
+        // a teardown that would land must get its turn first.
+        try await clock.requireAdvanceWhenArmed(by: readyTimeout)
+        await settle()
         let flags = fcntl(rxFD, F_GETFL)
         _ = fcntl(rxFD, F_SETFL, flags | O_NONBLOCK)
         var probe = [UInt8](repeating: 0, count: 8)

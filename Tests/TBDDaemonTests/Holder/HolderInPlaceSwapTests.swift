@@ -426,7 +426,7 @@ struct HolderInPlaceSwapTests {
             expectedState: TerminalReplacementSnapshot(terminal: terminal),
             profileID: fixture.destProfileID))
 
-        let result = await fixture.router.hibernationCoordinator.wakeHolderForProfileSwap(
+        let result = await fixture.router.hibernationCoordinator.wakeHolderAfterInPlaceChange(
             terminal: rehomed,
             worktree: try await fixture.local(),
             sessionID: Self.sessionID,
@@ -450,6 +450,45 @@ struct HolderInPlaceSwapTests {
                 "a refused wake un-did the re-home; the swap must stand at the account level")
         #expect(after.holderPID == nil && after.childPID == nil,
                 "a refused wake recorded processes nothing started")
+    }
+
+    /// The swap reserves the session title its wake's `--name` carries, and
+    /// only the wake knows whether a session launched under it. A refused
+    /// wake launched nothing, so the reservation is released and the entry
+    /// the session had before is back.
+    @Test("the swap's refused wake releases the title it reserved")
+    func swapWakeRefusalReleasesTheReservedTitle() async throws {
+        let fixture = try await Self.makeFixture(spawner: nil)
+        defer { fixture.tearDown() }
+        let terminal = try await Self.holderRow(fixture, parked: true)
+        let titles = fixture.router.lifecycle.sessionTitles
+        await titles.record(
+            terminalID: terminal.id, worktreeID: fixture.worktree.id, title: "before-swap")
+        let spawnTitle = await ClaudeSessionTitle.forSpawn(
+            db: fixture.db, store: titles, worktreeID: fixture.worktree.id,
+            displayName: fixture.worktree.displayName, terminalID: terminal.id)
+        #expect(await titles.isReserved(terminalID: terminal.id))
+
+        let result = await fixture.router.hibernationCoordinator.wakeHolderAfterInPlaceChange(
+            terminal: terminal,
+            worktree: try await fixture.local(),
+            sessionID: Self.sessionID,
+            expectedReplacementState: TerminalReplacementSnapshot(terminal: terminal),
+            spawnCommand: "claude --resume \(Self.sessionID)",
+            env: ["TBD_TERMINAL_ID": terminal.id.uuidString],
+            attachment: .unproxied([:]),
+            cols: 80,
+            rows: 24,
+            spawnTitle: spawnTitle)
+
+        guard case .respawnFailed = result else {
+            Issue.record("expected .respawnFailed from a daemon that cannot spawn, got \(result)")
+            return
+        }
+        #expect(await titles.lastApplied(terminalID: terminal.id) == "before-swap",
+                "a refused wake kept a title no session launched with")
+        #expect(await titles.isReserved(terminalID: terminal.id) == false,
+                "a refused wake left its reservation behind")
     }
 }
 

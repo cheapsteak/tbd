@@ -110,7 +110,7 @@ extension TBDHomeSerialized {
 
         let coordinator = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         _ = await coordinator.wake(terminalID: terminal.id)
 
         let entry = try #require(statusLine(inOverlayFor: terminal.id.uuidString),
@@ -139,7 +139,7 @@ extension TBDHomeSerialized {
 
         let coordinator = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         _ = await coordinator.wake(terminalID: terminal.id)
 
         let entry = try #require(statusLine(inOverlayFor: terminal.id.uuidString),
@@ -156,7 +156,7 @@ extension TBDHomeSerialized {
 
         let coordinator = HibernationCoordinator(
             db: db, tmux: TmuxManager(dryRun: true),
-            configDirManager: isolatedConfigDirManager(), actuationLog: makeTestActuationLog())
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
         _ = await coordinator.wake(terminalID: terminal.id)
 
         // TBD's per-session `--settings` outranks the operator's `statusLine`

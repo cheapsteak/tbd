@@ -6,19 +6,27 @@ this file for every piece of text it posts and for the attempt record. Reads
 and writes go through `flake-ledger.py`'s `gh` helpers, so a write refuses to
 run without the App token in FLAKE_WRITE_TOKEN, exactly as the ledger's do.
 
-    body --attempt-dir A --repo R --commits F --out F
+    body --attempt-dir A --repo R --commits F [--replayed OLD NEW] --out F
         the draft PR's body (the template's bug-fix variant).
-    status --attempt-dir A
+    status --attempt-dir A [--replayed OLD NEW]
         `<state>\\t<description>` for the `flakefix/stress` commit status.
+        --replayed names the `main` the candidate was stress-checked on and
+        the `main` it was replayed onto (§7); both texts then say so.
     issue-comment --attempt-dir A --kind failed|no-diff|push-refused|aborted
                   [--pr N] [--detail F] --out F
         the visible comment an attempt posts on its issue.
-    entry --pick-dir P --attempt-dir A --outcome O [--pr N] [--reason TEXT] [--session-failed] --out F
+    entry --pick-dir P --attempt-dir A --outcome O [--pr N] [--reason TEXT]
+          [--session-failed | --publish-raced] --out F
         the attempt entry, as flake_lib.Attempt JSON.
     record --repo R --issue N --entry F
         appends the entry to the issue's attempt comment, or creates it. A
         re-run of the same `fix` run replaces its own entry instead of adding
         a second. Only a comment the bot wrote is ever edited.
+    check-attempts --repo R --issue N
+        reads the issue's attempt comment as `record` will, writing nothing:
+        exit 3 when a bot attempt comment does not parse or is in a schema
+        this code does not read, so `open` refuses before it pushes or posts;
+        exit 2 when the comments cannot be read at all.
     comment --repo R --issue N --body F
         posts one issue comment.
     promote-resolve --repo R --sha S
@@ -44,6 +52,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict, fields
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -63,6 +72,16 @@ WEAK_CLAUSE = "weak evidence"
 WEAK_LABEL = "flakefix-weak-evidence"
 WEAK_LABEL_COLOR = "FBCA04"
 WEAK_LABEL_DESCRIPTION = "Flake fix whose stress evidence is weak: weigh it against the diff"
+# A candidate that renamed, moved or retired its target test (§6.4): the PR
+# stays a draft, and promote never readies one carrying this label (§7).
+NEEDS_HUMAN_LABEL = "flakefix-needs-human"
+NEEDS_HUMAN_LABEL_COLOR = "D93F0B"
+NEEDS_HUMAN_LABEL_DESCRIPTION = "Flake fix that renamed or retired its target test: a human must judge coverage"
+LABELS = {
+    "weak": (WEAK_LABEL, WEAK_LABEL_COLOR, WEAK_LABEL_DESCRIPTION),
+    "needs-human": (NEEDS_HUMAN_LABEL, NEEDS_HUMAN_LABEL_COLOR, NEEDS_HUMAN_LABEL_DESCRIPTION),
+}
+COVERAGE_NOTE = "a human must judge whether coverage is preserved"
 FAILING_LINES_IN_COMMENT = 60
 NOTES_IN_BODY = 20000
 
@@ -110,9 +129,49 @@ def pct(x: float) -> str:
 # --- the status ------------------------------------------------------------------------
 
 
-def status(verdict: dict) -> tuple[str, str]:
-    """Spec §6.5, §7. Success says what was observed, never "fixed"."""
+def replay_note(replayed: tuple[str, str] | None) -> str:
+    """Spec §7: the verdict was measured on one `main`, the PR carries the
+    candidate replayed onto a later one."""
+    if not replayed:
+        return ""
+    old, new = replayed
+    return (f"stress-checked on {old[:7]}; replayed onto main {new[:7]} "
+            "because main's workflow files changed during the run")
+
+
+def fit(text: str) -> str:
+    return text if len(text) <= STATUS_MAX else text[: STATUS_MAX - 1] + "…"
+
+
+def status(verdict: dict, replayed: tuple[str, str] | None = None) -> tuple[str, str]:
+    """Spec §6.5, §7. Success says what was observed, never "fixed". A replay
+    note goes after the verdict's own text, so a cut falls on the note and
+    never on the weak-evidence clause promote reads back."""
+    state, text = _status(verdict)
+    note = replay_note(replayed)
+    return state, fit(f"{text}; {note}" if note else text)
+
+
+def target_change(verdict: dict) -> dict | None:
+    """The verdict's honored change to the target (§6.4), or None."""
+    change = verdict.get("target_change")
+    if isinstance(change, dict) and change.get("kind") in ("renamed", "retired"):
+        return change
+    return None
+
+
+def _status(verdict: dict) -> tuple[str, str]:
     v = verdict.get("verdict")
+    change = target_change(verdict)
+    if v == "ineligible" and change:
+        if change["kind"] == "renamed":
+            part = f"target test renamed; no failure observed in {verdict['iterations']} runs under its new ID"
+        else:
+            part = "target test retired; nothing was stress-run"
+        if change["kind"] == "renamed" and verdict.get("weak"):
+            part += f"; {WEAK_CLAUSE}"
+        parts = [part] + (["touches " + ", ".join(verdict["protected"])] if verdict.get("protected") else [])
+        return "failure", "not eligible for ready, a human must judge: " + "; ".join(parts)
     if v == "pass":
         text = f"no failure observed in {verdict['iterations']} runs"
         if verdict.get("weak"):
@@ -120,13 +179,13 @@ def status(verdict: dict) -> tuple[str, str]:
                 text += f"; {WEAK_CLAUSE}: bound unknown"
             else:
                 text += f"; {WEAK_CLAUSE}: a no-op would pass {pct(verdict['false_pass'])} of the time"
-        return "success", text[:STATUS_MAX]
+        return "success", text
     if v == "ineligible":
         text = "not eligible for ready, a human must judge: touches " + ", ".join(verdict.get("protected") or [])
-        return "failure", (text if len(text) <= STATUS_MAX else text[: STATUS_MAX - 1] + "…")
+        return "failure", text
     reasons = verdict.get("reasons") or ["the stress run failed"]
     text = f"stress failed: target failed in {verdict.get('target_failures', 0)} of {verdict.get('iterations')} runs; {reasons[0]}"
-    return "failure", (text if len(text) <= STATUS_MAX else text[: STATUS_MAX - 1] + "…")
+    return "failure", text
 
 
 # --- the PR body -------------------------------------------------------------------------
@@ -145,7 +204,7 @@ def numbers_line(verdict: dict) -> str:
     )
 
 
-def body(pick: Path, attempt: Path, repo: str, commits: str) -> str:
+def body(pick: Path, attempt: Path, repo: str, commits: str, replayed: tuple[str, str] | None = None) -> str:
     # The target comes from the pick, uploaded before any session ran.
     target = read_json(pick / "target.json")
     verdict = read_json(attempt / "verify" / "verdict.json")
@@ -155,7 +214,17 @@ def body(pick: Path, attempt: Path, repo: str, commits: str) -> str:
         verdict["baseline"] = f"{f} of {v}"
     notes = sanitize(read_text(attempt / "flakefix-notes.md").strip())[:NOTES_IN_BODY]
     test = target["test_id"]
+    change = target_change(verdict)
     out = []
+    if change:
+        # §6.4, §7: first, above everything, so no reviewer misses it.
+        if change["kind"] == "renamed":
+            what = f"`{test}` is now `{change['to']}`, and the stress run below is for the new ID."
+        else:
+            what = (f"`{test}` is gone, so nothing was stress-run and no stress verdict is claimed. "
+                    f"The session's reason: {sanitize(change.get('reason') or 'none given')}")
+        out += [f"> **The target test was {change['kind']}; {COVERAGE_NOTE}.** {what} "
+                f"This PR stays a draft that the bot never marks ready, labelled `{NEEDS_HUMAN_LABEL}`.", ""]
     if verdict.get("weak"):
         out += [
             f"> **Weak evidence.** {numbers_line(verdict)}. A clean run here says little on its own; "
@@ -186,7 +255,14 @@ def body(pick: Path, attempt: Path, repo: str, commits: str) -> str:
         "## Evidence & verification",
         "",
     ]
-    if not verdict.get("weak"):
+    if replayed:
+        out += [
+            f"**Replayed.** The candidate was {replay_note(replayed)}: GitHub refuses the bot's push of a branch "
+            "whose workflow files differ from `main`'s. The verdict below is for the candidate on "
+            f"`{replayed[0][:12]}`; this PR's own CI runs on the replayed commits, and promotion waits for it.",
+            "",
+        ]
+    if not verdict.get("weak") and not (change and change["kind"] == "retired"):
         out += [f"Numbers: {numbers_line(verdict)}.", ""]
     out += [sanitize(read_text(attempt / "verify" / "verdict.md").strip()), ""]
     run_url = read_text(attempt / "run_url").strip()
@@ -202,8 +278,8 @@ def issue_comment(attempt: Path, kind: str, pr: str | None, detail: str) -> str:
     notes = sanitize(read_text(attempt / "flakefix-notes.md").strip())
     run_url = read_text(attempt / "run_url").strip()
     head = {
-        "failed": f"### Flake fix attempt: not eligible for ready\n\nThe verifier failed the candidate, or it touches a file the verdict depends on. "
-                  f"Draft PR #{pr} stays open for a human to read, finish, or close.",
+        "failed": f"### Flake fix attempt: not eligible for ready\n\nThe verifier failed the candidate, it touches a file the verdict "
+                  f"depends on, or it renamed or retired the target test. Draft PR #{pr} stays open for a human to read, finish, or close.",
         "no-diff": "### Flake fix attempt: no change\n\nThe fixer session made no commits, so no PR was opened.",
         "push-refused": "### Flake fix attempt: the push was refused\n\nNo PR was opened.",
     }[kind]
@@ -220,7 +296,7 @@ def issue_comment(attempt: Path, kind: str, pr: str | None, detail: str) -> str:
 
 
 def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str,
-          session_failed: bool = False) -> dict:
+          session_failed: bool = False, publish_raced: bool = False) -> dict:
     target = read_json(pick / "target.json")
     notes = read_text(attempt / "flakefix-notes.md").strip() if attempt.is_dir() else ""
     if reason:
@@ -233,39 +309,61 @@ def entry(pick: Path, attempt: Path, outcome: str, pr: int | None, reason: str,
         outcome=outcome,
         notes=notes[: fl.ATTEMPT_NOTES_CHARS],
         session_failed=True if outcome == "aborted" and session_failed else None,
+        publish_raced=True if outcome == "aborted" and publish_raced else None,
     )
     if outcome == "pr-opened":
         verdict = read_json(attempt / "verify" / "verdict.json")
+        change = target_change(verdict)
+        stressed = not (change and change["kind"] == "retired" and verdict.get("verdict") != "fail")
         record = fl.Attempt(
             **{**asdict(record), "pr": pr, "scope": verdict.get("scope"), "n": verdict.get("n"),
                "false_pass": verdict.get("false_pass"), "weak": bool(verdict.get("weak")),
                "protected_touched": list(verdict.get("protected") or []),
-               # The stress verdict; a protected file is recorded beside it.
-               "verdict": "fail" if verdict.get("verdict") == "fail" else "pass"}
+               # The stress verdict; a protected file and a renamed or retired
+               # target are recorded beside it. A retirement ran nothing.
+               "verdict": ("fail" if verdict.get("verdict") == "fail" else "pass") if stressed else None,
+               "target_change": change["kind"] if change else None,
+               "renamed_to": change["to"] if change and change["kind"] == "renamed" else None}
         )
     return asdict(record)
+
+
+def attempt_comment(repo: str, issue: int) -> tuple[int, list[fl.Attempt]] | None:
+    """The bot's attempt comment on ISSUE and its entries, or None when it has
+    none yet. Raises Malformed, having written nothing, when the bot's comment
+    does not parse or is in a schema this code does not read: a fresh comment
+    beside it, or an edit over it, would lose or misread its history."""
+    comments = ledger.gh_lines("api", "--paginate", f"repos/{repo}/issues/{issue}/comments?per_page=100", "--jq", ".[]")
+    mine = None
+    for c in sorted(comments, key=lambda c: c["id"]):
+        text = c.get("body") or ""
+        user = c.get("user") or {}
+        if not text.startswith(fl.ATTEMPTS_SENTINEL_PREFIX):
+            continue
+        if not fl.trusted_author(user.get("login"), user.get("type")):
+            print(f"flake-pr: ignoring an attempt sentinel by {user.get('login')!r} on #{issue}", file=sys.stderr)
+            continue
+        try:
+            attempts = fl.parse_attempts(text, user.get("login"), user.get("type"))
+        except fl.UnsupportedSchema as error:
+            # Not corrupt: a format this code does not read. A fresh comment
+            # beside it, or an edit over it, would misread the history.
+            raise Malformed(f"#{issue} comment {c['id']}: {error}") from None
+        if attempts is None:
+            # Fail closed: overwriting an unreadable record would lose history.
+            raise Malformed(f"#{issue}: the bot's own attempt comment {c['id']} does not parse")
+        # The oldest is the one written; every later bot comment is still
+        # read, so one in another schema stops publish as it stops the ledger.
+        if mine is None:
+            mine = (int(c["id"]), attempts)
+    return mine
 
 
 def record(repo: str, issue: int, new: dict) -> None:
     known = {f.name for f in fields(fl.Attempt)}
     if set(new) - known or new.get("outcome") not in fl.ATTEMPT_OUTCOMES:
         raise Malformed(f"not an attempt entry: {sorted(set(new) - known)} {new.get('outcome')!r}")
-    comments = ledger.gh_lines("api", "--paginate", f"repos/{repo}/issues/{issue}/comments?per_page=100", "--jq", ".[]")
-    mine = None
-    for c in sorted(comments, key=lambda c: c["id"]):
-        text = c.get("body") or ""
-        user = c.get("user") or {}
-        if not text.startswith(fl.ATTEMPTS_SENTINEL):
-            continue
-        if not fl.trusted_author(user.get("login"), user.get("type")):
-            print(f"flake-pr: ignoring an attempt sentinel by {user.get('login')!r} on #{issue}", file=sys.stderr)
-            continue
-        attempts = fl.parse_attempts(text, user.get("login"), user.get("type"))
-        if attempts is None:
-            # Fail closed: overwriting an unreadable record would lose history.
-            raise Malformed(f"#{issue}: the bot's own attempt comment {c['id']} does not parse")
-        mine = (int(c["id"]), attempts)
-        break
+    mine = attempt_comment(repo, issue)
     attempt = fl.Attempt(**new)
     if mine is None:
         ledger.gh_write("api", "-X", "POST", f"repos/{repo}/issues/{issue}/comments",
@@ -306,12 +404,14 @@ def render_bounded(attempts: list[fl.Attempt], repo: str) -> str:
         keep += 1
 
 
-def ensure_weak_label(repo: str, pr: int) -> None:
+def ensure_label(repo: str, pr: int, which: str) -> None:
+    """Puts one of the bot's PR labels on PR, creating it if it is missing."""
+    name, color, description = LABELS[which]
     names = [label["name"] for label in ledger.gh_lines("api", "--paginate", f"repos/{repo}/labels?per_page=100", "--jq", ".[] | {name}")]
-    if WEAK_LABEL not in names:
+    if name not in names:
         ledger.gh_write("api", "-X", "POST", f"repos/{repo}/labels",
-                        payload={"name": WEAK_LABEL, "color": WEAK_LABEL_COLOR, "description": WEAK_LABEL_DESCRIPTION})
-    ledger.gh_write("api", "-X", "POST", f"repos/{repo}/issues/{pr}/labels", payload={"labels": [WEAK_LABEL]})
+                        payload={"name": name, "color": color, "description": description})
+    ledger.gh_write("api", "-X", "POST", f"repos/{repo}/issues/{pr}/labels", payload={"labels": [name]})
 
 
 # --- promotion (spec §6.5, §7) -------------------------------------------------------------
@@ -420,6 +520,9 @@ def promote_decision(facts: dict) -> str:
             return "SKIP the PR's head is in another repository"
         if not fl.trusted_author(pr["author"], pr["author_type"]):
             return f"SKIP the PR was opened by {pr['author']}, not the bot"
+        # A renamed or retired target (§6.4): only a human marks it ready.
+        if NEEDS_HUMAN_LABEL in pr["labels"]:
+            return f"SKIP the PR is labelled {NEEDS_HUMAN_LABEL}: its target test was renamed or retired, and {COVERAGE_NOTE}"
         # A human who returns the PR to draft is holding it; the bot never
         # overrides that. Only a human marking it ready releases the hold.
         held = [d for d in facts["drafted"] if not fl.trusted_author(d["actor"], d["actor_type"])]
@@ -476,9 +579,11 @@ def main(argv: list[str]) -> int:
     p.add_argument("--attempt-dir", type=Path, required=True)
     p.add_argument("--repo", required=True)
     p.add_argument("--commits", type=Path, required=True)
+    p.add_argument("--replayed", nargs=2, metavar=("OLD", "NEW"))
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("status")
     p.add_argument("--attempt-dir", type=Path, required=True)
+    p.add_argument("--replayed", nargs=2, metavar=("OLD", "NEW"))
     p = sub.add_parser("issue-comment")
     p.add_argument("--attempt-dir", type=Path, required=True)
     p.add_argument("--kind", choices=("failed", "no-diff", "push-refused"), required=True)
@@ -491,15 +596,21 @@ def main(argv: list[str]) -> int:
     p.add_argument("--outcome", choices=fl.ATTEMPT_OUTCOMES, required=True)
     p.add_argument("--pr", type=int)
     p.add_argument("--reason", default="")
-    p.add_argument("--session-failed", action="store_true")
+    kind = p.add_mutually_exclusive_group()
+    kind.add_argument("--session-failed", action="store_true")
+    kind.add_argument("--publish-raced", action="store_true")
     p.add_argument("--out", type=Path, required=True)
     p = sub.add_parser("record")
     p.add_argument("--repo", required=True)
     p.add_argument("--issue", type=int, required=True)
     p.add_argument("--entry", type=Path, required=True)
-    p = sub.add_parser("weak-label")
+    p = sub.add_parser("check-attempts")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--issue", type=int, required=True)
+    p = sub.add_parser("label")
     p.add_argument("--repo", required=True)
     p.add_argument("--pr", type=int, required=True)
+    p.add_argument("--which", choices=sorted(LABELS), required=True)
     p = sub.add_parser("comment")
     p.add_argument("--repo", required=True)
     p.add_argument("--issue", type=int, required=True)
@@ -522,18 +633,32 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "body":
-            args.out.write_text(body(args.pick_dir, args.attempt_dir, args.repo, read_text(args.commits)))
+            replayed = tuple(args.replayed) if args.replayed else None
+            args.out.write_text(body(args.pick_dir, args.attempt_dir, args.repo, read_text(args.commits), replayed))
         elif args.command == "status":
-            state, text = status(read_json(args.attempt_dir / "verify" / "verdict.json"))
+            replayed = tuple(args.replayed) if args.replayed else None
+            state, text = status(read_json(args.attempt_dir / "verify" / "verdict.json"), replayed)
             print(f"{state}\t{text}")
         elif args.command == "issue-comment":
             detail = read_text(args.detail) if args.detail else ""
             args.out.write_text(issue_comment(args.attempt_dir, args.kind, args.pr, detail))
         elif args.command == "entry":
             args.out.write_text(json.dumps(entry(args.pick_dir, args.attempt_dir, args.outcome, args.pr, args.reason,
-                                              args.session_failed)) + "\n")
+                                              args.session_failed, args.publish_raced)) + "\n")
         elif args.command == "record":
             record(args.repo, args.issue, read_json(args.entry))
+        elif args.command == "check-attempts":
+            try:
+                attempt_comment(args.repo, args.issue)
+            except Malformed as error:
+                # 3, not 2: the record itself is unreadable, which a retry
+                # cannot change; a failed read stays 2.
+                print(f"flake-pr: {error}", file=sys.stderr)
+                summary = os.environ.get("GITHUB_STEP_SUMMARY")
+                if summary:
+                    with open(summary, "a") as handle:
+                        handle.write(f"Publishing refused, nothing pushed or written: {error}\n")
+                return 3
         elif args.command == "promote-facts":
             facts = promote_facts(args.repo, args.branch, args.sha, args.trigger, args.conclusion, args.event,
                                   args.run_id, args.run_created_at)
@@ -542,8 +667,8 @@ def main(argv: list[str]) -> int:
             print(promote_resolve(args.repo, args.sha))
         elif args.command == "promote-decide":
             print(promote_decision(read_json(args.facts)))
-        elif args.command == "weak-label":
-            ensure_weak_label(args.repo, args.pr)
+        elif args.command == "label":
+            ensure_label(args.repo, args.pr, args.which)
         else:
             ledger.gh_write("api", "-X", "POST", f"repos/{args.repo}/issues/{args.issue}/comments",
                             payload={"body": read_text(args.body)})

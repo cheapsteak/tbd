@@ -2,7 +2,7 @@
 
 TBD lets you set arbitrary `KEY=VALUE` environment variables on the **primary agent** sessions it spawns — both `claude` and `codex`. The motivating case is routing a repo's Claude sessions through AWS Bedrock (`CLAUDE_CODE_USE_BEDROCK=1` and friends), but the mechanism is generic: any environment variable a spawned agent needs can be set without a code change.
 
-Overrides apply **only** to the spawned primary agent terminal. Plain shell terminals and `setup`/`preSession` hook terminals do **not** receive them.
+Overrides apply **only** to the spawned primary agent terminal. Plain shell terminals and `setup`/`preSession` hook terminals do **not** receive them. The one other place they reach is a command run with [`tbd profile exec`](profile-exec.md), which gets the global and profile scopes (it runs in no repo).
 
 ## Scopes
 

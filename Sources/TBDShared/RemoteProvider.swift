@@ -132,6 +132,19 @@ public enum ProviderFailureClass: Sendable, Equatable {
     }
 }
 
+/// The optional `transcript` hint on a Session object
+/// (`docs/remote-provider-contract.md` § Transcript hint). A change signal
+/// only: compared with the hint recorded at the last caught-up sync, never
+/// turned into a cursor.
+public struct RemoteTranscriptHint: Codable, Sendable, Equatable, Hashable {
+    /// The identity of the session's current conversation.
+    public let id: String
+    /// That conversation's size in bytes — it grows with every record the
+    /// agent writes.
+    public let size: Int
+    public init(id: String, size: Int) { self.id = id; self.size = size }
+}
+
 /// The contract's Session object. Timestamps stay ISO-8601 strings — TBD
 /// displays them and compares equality; it never does date math on them.
 public struct RemoteSessionPayload: Codable, Sendable, Equatable {
@@ -154,9 +167,22 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     /// `isArchived` for display, which supplies the contract's
     /// absent-reads-as-false semantics.
     public let archived: Bool?
+    /// The contract's optional `pending_question` — WHAT a `waiting_input`
+    /// session is blocked on. Liveness axis, not filing: a snapshot that has
+    /// gone stale can no longer assert it (see `projectedForStaleSnapshot`).
+    public let pendingQuestion: RemotePendingQuestion?
+    /// The contract's optional `pending_prompt` — the answerable form of
+    /// `pending_question`. Liveness axis, like `pendingQuestion`.
+    public let pendingPrompt: RemotePendingPrompt?
+    /// The provider's transcript hint, or `nil` when it sent none — or sent
+    /// one this build cannot read, which degrades the same way. Never stored
+    /// in the mirror: see `withoutTranscriptHint`.
+    public let transcript: RemoteTranscriptHint?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, state, meta, archived
+        case id, title, state, meta, archived, transcript
+        case pendingQuestion = "pending_question"
+        case pendingPrompt = "pending_prompt"
         case createdAt = "created_at"
         case exitCode = "exit_code"
         case agentState = "agent_state"
@@ -168,11 +194,30 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
                 state: RemoteProcessState, exitCode: Int? = nil,
                 agentState: RemoteAgentState = .unknown,
                 agentStateReason: String? = nil, agentStateAt: String? = nil,
-                meta: [String: String]? = nil, archived: Bool? = nil) {
+                meta: [String: String]? = nil, archived: Bool? = nil,
+                pendingQuestion: RemotePendingQuestion? = nil,
+                pendingPrompt: RemotePendingPrompt? = nil,
+                transcript: RemoteTranscriptHint? = nil) {
         self.id = id; self.title = title; self.createdAt = createdAt
         self.state = state; self.exitCode = exitCode
         self.agentState = agentState; self.agentStateReason = agentStateReason
         self.agentStateAt = agentStateAt; self.meta = meta; self.archived = archived
+        self.pendingQuestion = pendingQuestion
+        self.pendingPrompt = pendingPrompt
+        self.transcript = transcript
+    }
+
+    /// This payload as the mirror stores it. The hint's `size` grows with every
+    /// record the agent writes, so storing it would turn each sighting into a
+    /// changed row and a `.remoteSessionsChanged` broadcast; background sync
+    /// reads the hint from the live sighting instead.
+    public var withoutTranscriptHint: RemoteSessionPayload {
+        RemoteSessionPayload(id: id, title: title, createdAt: createdAt, state: state,
+                             exitCode: exitCode, agentState: agentState,
+                             agentStateReason: agentStateReason, agentStateAt: agentStateAt,
+                             meta: meta, archived: archived,
+                             pendingQuestion: pendingQuestion, pendingPrompt: pendingPrompt,
+                             transcript: nil)
     }
 
     /// Decoded leniently, field by field, and fatal on exactly one thing.
@@ -210,6 +255,16 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         agentStateReason = lenient(String.self, .agentStateReason)
         agentStateAt = lenient(String.self, .agentStateAt)
         archived = lenient(Bool.self, .archived)
+        // Absent whenever it is anything other than a question block TBD can
+        // read: the contract forbids inferring blockage from this field, so
+        // its loss costs an explanation and never a state.
+        pendingQuestion = lenient(RemotePendingQuestion.self, .pendingQuestion)
+        // Same terms: an unreadable prompt costs the explanation only.
+        pendingPrompt = lenient(RemotePendingPrompt.self, .pendingPrompt)
+        // A malformed hint (wrong type, or missing `id` or `size`) reads as
+        // absent, like any other wrong-typed optional field: the session
+        // survives and background sync simply has no signal for it.
+        transcript = lenient(RemoteTranscriptHint.self, .transcript)
         let provider = decoder.userInfo[.remoteProviderName] as? String
         meta = Self.decodeMeta(from: c, sessionID: id, provider: provider)
         if !dropped.isEmpty {
@@ -254,9 +309,9 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
     private static func decodeMeta(
         from c: KeyedDecodingContainer<CodingKeys>, sessionID: String, provider: String?
     ) -> [String: String]? {
-        let raw: [String: MetaValue]?
+        let raw: [String: LenientDisplayScalar]?
         do {
-            raw = try c.decodeIfPresent([String: MetaValue].self, forKey: .meta)
+            raw = try c.decodeIfPresent([String: LenientDisplayScalar].self, forKey: .meta)
         } catch {
             // `meta` present but not an object — the one case that costs the
             // WHOLE map rather than a key, including `repo`, which is what
@@ -297,26 +352,6 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
         return kept
     }
 
-    /// One `meta` value, decoded down to the string a display map can show.
-    /// `literal` is nil for anything with no unambiguous literal form — an
-    /// object, an array, or an explicit null.
-    private struct MetaValue: Decodable {
-        let literal: String?
-
-        init(from decoder: any Decoder) throws {
-            guard let c = try? decoder.singleValueContainer(), !c.decodeNil() else {
-                literal = nil
-                return
-            }
-            if let s = try? c.decode(String.self) { literal = s; return }
-            if let b = try? c.decode(Bool.self) { literal = b ? "true" : "false"; return }
-            // Int before Double so a whole number reads as `42`, not `42.0`.
-            if let i = try? c.decode(Int.self) { literal = String(i); return }
-            if let d = try? c.decode(Double.self) { literal = String(d); return }
-            literal = nil
-        }
-    }
-
     /// The contract's absent-reads-as-`false` display semantics. The sync
     /// path must NOT use this — it needs to distinguish "no claim" (nil) from
     /// an explicit `false`, so it reads `archived` directly.
@@ -346,7 +381,16 @@ public struct RemoteSessionPayload: Codable, Sendable, Equatable {
             id: id, title: title, createdAt: createdAt,
             state: .unknown, exitCode: exitCode, agentState: .unknown,
             agentStateReason: nil, agentStateAt: agentStateAt, meta: meta,
-            archived: archived)
+            archived: archived,
+            // Liveness axis: "blocked on this question" is a claim about
+            // right now, and a provider that has stopped answering leaves
+            // TBD no standing to make it.
+            pendingQuestion: nil,
+            // Liveness axis, like `pendingQuestion`: a provider that stopped
+            // answering leaves TBD no standing to say the dialog is still
+            // open, and `remote.answer` refuses a stale snapshot anyway.
+            pendingPrompt: nil,
+            transcript: transcript)
     }
 }
 
@@ -449,9 +493,19 @@ public struct ProviderDescribe: Codable, Sendable {
     public let providerVersion: String?
     public let capabilities: [String]
     public let createParams: [ProviderCreateParamField]
+    /// Which BACKEND this registry entry is pointed at, as non-secret display
+    /// pairs (`docs/remote-provider-contract.md` § `describe`). Nil from any
+    /// provider that doesn't send it, which is every provider written before
+    /// the field existed — TBD then shows only the identity it can derive
+    /// locally (the registry key and the command it runs).
+    ///
+    /// Note what `name` is and is not: it identifies the provider's KIND, so
+    /// two registry entries running the same binary against different control
+    /// planes report the same one. It is never sufficient identity on its own.
+    public let identity: ProviderIdentity?
 
     enum CodingKeys: String, CodingKey {
-        case name, capabilities
+        case name, capabilities, identity
         case contractVersions = "contract_versions"
         case providerVersion = "provider_version"
         case createParams = "create_params"
@@ -462,12 +516,14 @@ public struct ProviderDescribe: Codable, Sendable {
     /// memberwise init, so without this the only way to build one was a
     /// round-trip through `JSONDecoder`.
     public init(contractVersions: [Int] = [1], name: String, providerVersion: String? = nil,
-                capabilities: [String] = [], createParams: [ProviderCreateParamField] = []) {
+                capabilities: [String] = [], createParams: [ProviderCreateParamField] = [],
+                identity: ProviderIdentity? = nil) {
         self.contractVersions = contractVersions
         self.name = name
         self.providerVersion = providerVersion
         self.capabilities = capabilities
         self.createParams = createParams
+        self.identity = identity
     }
 
     public init(from decoder: Decoder) throws {
@@ -477,6 +533,9 @@ public struct ProviderDescribe: Codable, Sendable {
         providerVersion = try c.decodeIfPresent(String.self, forKey: .providerVersion)
         capabilities = try c.decodeIfPresent([String].self, forKey: .capabilities) ?? []
         createParams = try c.decodeIfPresent([ProviderCreateParamField].self, forKey: .createParams) ?? []
+        // Never fatal: an identity block TBD can't read costs the identity
+        // rows, never the provider's registration.
+        identity = (try? c.decodeIfPresent(ProviderIdentity.self, forKey: .identity)).flatMap { $0 }
     }
 }
 
@@ -525,6 +584,11 @@ public struct ProviderErrorEnvelope: Codable, Sendable {
 }
 
 public struct ProviderErrorObject: Codable, Sendable {
+    /// The `code` a `--before` read answers with when the cursor it was given
+    /// no longer names a position the provider can page from
+    /// (`docs/remote-provider-contract.md` § Error model).
+    public static let cursorExpiredCode = "cursor_expired"
+
     public let code: String
     public let message: String
     public let retryable: Bool?

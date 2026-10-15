@@ -353,6 +353,12 @@ extension WorktreeLifecycle {
             try await tmux.withWorktreeServerLock(
                 db: db, worktreeID: wt.id, allowedStatuses: [wt.status]
             ) { current in
+                // Dev servers TBD started in its tabs stop first, as in
+                // `beginArchiveWorktree`, while those tabs' processes are
+                // alive to be signalled. Tab process groups only: a server
+                // known only through a running file is left running. A
+                // failure is logged and the reconcile continues.
+                await stopDevServersForArchive(worktree: current)
                 let terminals = try await db.terminals.list(worktreeID: current.id)
                 var recordedEveryKill = true
                 for terminal in terminals {
@@ -371,7 +377,8 @@ extension WorktreeLifecycle {
                     // before the disposal releases the reader it is read from.
                     if terminal.transport == .holder {
                         await Self.recordHolderClosedTerminal(
-                            terminal, registry: holderRegistry, history: db.terminalHistory)
+                            terminal, registry: holderRegistry,
+                            resolver: holderScreenResolver, history: db.terminalHistory)
                         if let failure = await disposeHolder(for: terminal) {
                             logger.warning(
                                 "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")
@@ -393,14 +400,17 @@ extension WorktreeLifecycle {
                     return
                 }
                 try await db.terminals.deleteForWorktree(worktreeID: current.id)
+                await sessionTitles.forget(worktreeID: current.id)
                 try await db.tabs.deleteForWorktree(worktreeID: current.id)
                 for terminal in terminals {
                     await pendingQuestions.clear(terminalID: terminal.id)
-                    await subscriptions?.broadcastPendingQuestions(
+                    await subscriptions?.broadcastPendingPrompts(
                         terminalID: terminal.id, from: pendingQuestions)
                     ClaudeHookOverlay.removePerSessionOverlay(
                         sessionKey: terminal.id.uuidString)
                 }
+                // After the rows are gone, as in `beginArchiveWorktree`.
+                await detachDevServerOutputsForArchive(worktreeID: current.id)
                 try await db.worktrees.archive(id: current.id)
             }
         }
@@ -751,6 +761,18 @@ extension WorktreeLifecycle {
             // is expected, and the row is already exactly what this pass would
             // produce.
             for terminal in terminals where !terminal.isParked {
+                // A nonparked Codex row with a pending incarnation is the
+                // durable handoff for Continue-in-Claude rollback. Startup
+                // recovery cannot launch Codex until the hook socket is live,
+                // so this earlier ownership sweep must preserve the row even
+                // when its recorded window is missing or reassigned. The
+                // continuation reconciler rotates the token and establishes
+                // process ownership after bind.
+                if terminal.kind == .codex,
+                   terminal.pendingSessionIncarnationID != nil {
+                    logger.info("reconcile: preserving pending Codex recovery terminal \(terminal.id, privacy: .public) for post-bind continuation recovery")
+                    continue
+                }
                 // **Two transports, one fork.** Each arm establishes the
                 // same fact in its own vocabulary — nothing can reach this
                 // session any more — and then hands it to the shared
@@ -910,10 +932,11 @@ extension WorktreeLifecycle {
                     logger.info("reconcile: parked terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), session \(sessionID, privacy: .public) preserved, wakeable via the unified resume path")
                 } else {
                     try? await db.deleteTerminalAndTab(id: terminal.id)
+                    await sessionTitles.forget(terminalID: terminal.id)
                     logger.info("reconcile: deleted terminal \(terminal.id, privacy: .public) — \(disposal, privacy: .public), no session to preserve")
                 }
                 await pendingQuestions.clear(terminalID: terminal.id)
-                await subscriptions?.broadcastPendingQuestions(
+                await subscriptions?.broadcastPendingPrompts(
                     terminalID: terminal.id, from: pendingQuestions)
             }
         }

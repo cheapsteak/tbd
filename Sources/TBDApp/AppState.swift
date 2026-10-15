@@ -243,6 +243,12 @@ final class AppState {
     /// so a pushed SessionStart can fence an older list response even in the
     /// brief interval before its activity delta arrives.
     @ObservationIgnored var terminalSessionOrderObservedAt: [UUID: Date] = [:]
+    /// Monotonic app-local generation for provider-replacement observations.
+    /// Each terminal records the generation of its latest `terminalReplaced`
+    /// adoption so an already-running terminal.list response cannot put the
+    /// superseded provider back after the pushed replacement commits.
+    @ObservationIgnored var terminalReplacementObservationGeneration: UInt64 = 0
+    @ObservationIgnored var terminalReplacementObservedGeneration: [UUID: UInt64] = [:]
     /// Polled note METADATA — never content. `note.list` touches no file (see
     /// `NoteStore`); a pane that needs content reads it off disk with
     /// `noteContent(noteID:worktreeID:)`.
@@ -473,7 +479,8 @@ final class AppState {
 
     /// Back/forward state. Mutated only by the helpers in `AppState+Navigation.swift` —
     /// any change to `navigationIndex` or `navigationEntries` must be followed by
-    /// `updateNavigationFlags()` to keep the published toolbar flags in sync.
+    /// `navigationHistoryDidChange()`, which refreshes the published toolbar flags
+    /// and saves the history to UserDefaults (`navigationHistoryKey`).
 
     /// Published flags driving the toolbar back/forward buttons.
     private(set) var canGoBack: Bool = false
@@ -553,7 +560,14 @@ final class AppState {
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = [] {
-        didSet { sidebarRemoteSnapshotCache = nil }
+        didSet {
+            sidebarRemoteSnapshotCache = nil
+            // A sighting that moves only `lastSeen`, `gone` or row state keeps
+            // the match memo: its indices still name the same sessions.
+            if !remoteSessions.elementsEqual(oldValue, by: RepoSectionView.sameMatchInputs) {
+                sidebarMatchedSessionsCache.removeAll()
+            }
+        }
     }
     /// Every retain/import receipt the daemon holds, fetched by
     /// `refreshRemote()`.
@@ -621,6 +635,12 @@ final class AppState {
     /// An explicit re-selection must reveal a manually collapsed group too.
     var sidebarSelectionGeneration: UInt64 = 0
     @ObservationIgnored var sidebarRemoteSnapshotCache: SidebarRemoteGroups.Snapshot?
+    /// Per-repo memo of the filtered, sorted indices into `remoteSessions`;
+    /// see `sidebarMatchedRemoteSessions(repoID:)` in `AppState+SidebarGroups.swift`.
+    @ObservationIgnored var sidebarMatchedSessionsCache: [UUID: SidebarMatchedSessionsMemo] = [:]
+    /// Test seam: counts every recompute of a repo's matched-session sort, so a
+    /// test can assert that a sighting which changes no match input re-sorts nothing.
+    @ObservationIgnored var sidebarMatchedSessionsSortCount = 0
     @ObservationIgnored var sidebarHibernationCache: [SidebarGroupID.Owner: SidebarHibernationPartition] = [:]
 
     /// Test seam: when set, replaces the daemon roundtrip for archived
@@ -883,6 +903,16 @@ final class AppState {
     /// live, and consulted by the sidecar's injection handler
     /// (`installInjectionHandler`).
     @ObservationIgnored let terminalInjections = TerminalInjectionRouter()
+    /// Where a daemon screen request for a holder-backed session goes: the
+    /// panel whose terminal is that session's live store. Registered by
+    /// `TerminalPanelView.Coordinator` for as long as its holder attach is
+    /// live, and consulted by the sidecar's screen-request handler
+    /// (`installScreenRequestHandler`).
+    ///
+    /// A sibling of `terminalInjections` rather than a second closure on it:
+    /// answering a screen needs no write descriptor, so a panel that runs
+    /// read-only can still serve reads. `TerminalScreenRouter`'s doc argues it.
+    @ObservationIgnored let terminalScreens = TerminalScreenRouter()
     /// The holder handbacks in flight, keyed by terminal ID. A panel that is
     /// replacing another panel for the same holder-backed terminal waits here
     /// for its predecessor's `pane.detach` before attaching, because the
@@ -959,6 +989,45 @@ final class AppState {
     /// worst-of summary the daemon writes to `Worktree.prStatus`; this is the
     /// full set, and the two are refreshed together.
     var prBindings: [UUID: [PRBinding]] = [:]
+    /// Each worktree's dev servers as shown: the newest `server.list` result
+    /// with the last-known `status` command answers laid over it. Fetched for
+    /// the selected worktree on selection and on `devServersChanged` (without
+    /// `status` commands), and after every Start/Stop/Restart and "Refresh
+    /// status" (with them). See `AppState+DevServers.swift`.
+    var devServerLists: [UUID: DevServerListResult] = [:]
+    /// The newest `server.list` result per worktree, as the daemon sent it —
+    /// what `devServerLists` is rebuilt from when a `status` answer lands.
+    @ObservationIgnored var devServerFetchedLists: [UUID: DevServerListResult] = [:]
+    /// Per worktree, the servers whose state the last `status`-command run
+    /// decided (`statusCommandStates`), with the ended TBD tab each had then.
+    /// Replaced by each such run; refreshes without `status` commands keep
+    /// it, minus servers that are gone or no longer declare a `status`
+    /// command. Dropped when the worktree leaves app state: archived, gone
+    /// from the daemon's worktree list, or removed with its repo
+    /// (`forgetDevServerState`).
+    @ObservationIgnored var devServerLastStatus: [UUID: [String: DevServerRememberedStatus]] = [:]
+    /// The newest `status`-command refresh started per worktree.
+    @ObservationIgnored var devServerStatusGenerations: [UUID: UInt64] = [:]
+    /// The newest `status`-command refresh that answered per worktree, so an
+    /// older run's answers never replace a newer run's, while a newer run
+    /// that failed does not discard an older one's.
+    @ObservationIgnored var devServerLandedStatusGenerations: [UUID: UInt64] = [:]
+    /// The newest `server.list` started per worktree. Refreshes are not
+    /// awaited by their triggers and can overlap; a result whose generation
+    /// is no longer the newest is discarded, so an older read never lands
+    /// over a newer one. This and the two `status` generations outlive a
+    /// forgotten worktree, so a refresh still in flight for it cannot land.
+    @ObservationIgnored var devServerListGenerations: [UUID: UInt64] = [:]
+    /// The newest `server.summary` started. The periodic refresh and the
+    /// action-triggered ones overlap the same way list refreshes do; only the
+    /// newest started summary's answer is published.
+    @ObservationIgnored var devServerSummaryGeneration: UInt64 = 0
+    /// Worktrees with a dev server running by a live running file or a live
+    /// TBD server tab (`server.summary`) — the sidebar's green dot.
+    var devServerRunningWorktreeIDs: Set<UUID> = []
+    /// Failures from the last Start/Stop/Restart per worktree, shown at the
+    /// bottom of the Servers menu.
+    var devServerActionMessages: [UUID: [String]] = [:]
     /// How many of each worktree's bindings are tombstoned, for the worktrees
     /// that have any (a worktree with none is absent, not zero). Refreshed in
     /// the same call as `prBindings` and kept separately because it outlives
@@ -1714,7 +1783,7 @@ final class AppState {
     /// nothing until a pane registers, and it stats no file until then.
     let transcriptSource = TranscriptSource()
     /// In-flight `AskUserQuestion` captures by terminal, mirrored from the
-    /// daemon's `PendingQuestionStore` over `.terminalPendingQuestionsChanged`.
+    /// daemon's `PendingPromptStore` over `.terminalPendingQuestionsChanged`.
     /// Merged into that terminal's session transcript so a question renders
     /// before its `tool_use` line reaches the JSONL — the job the daemon's
     /// `terminal.transcript` handler did before the app read transcripts
@@ -1744,6 +1813,48 @@ final class AppState {
     /// the mirror without a daemon.
     @ObservationIgnored lazy var programStatusListFetcher: @MainActor () async throws -> [ProgramStatusSnapshot] =
         { [daemonClient] in try await daemonClient.terminalProgramStatusList() }
+    /// Open Claude Code dialogs (`AskUserQuestion` pickers and tool permission
+    /// prompts) by terminal, mirrored from the daemon's store over
+    /// `.terminalPendingPromptsChanged`. Mirrored, never derived: the daemon
+    /// is the only writer. Unrelated to `PendingPromptCoordinator`'s queued
+    /// first messages.
+    var pendingPrompts: [UUID: [PendingPromptPayload]] = [:]
+    /// Last `TerminalPendingPromptsDelta.revision` applied per terminal, for
+    /// the same out-of-order reason as `pendingQuestionRevisions`.
+    @ObservationIgnored var pendingPromptRevisions: [UUID: UInt64] = [:]
+    /// Prompt cards held on screen after their dialog closed, until the tool
+    /// result reaches the transcript or a bounded timeout passes. Shared by
+    /// the local and remote transcript panes; itself `@Observable`.
+    @ObservationIgnored let promptCardRetention = PromptCardRetention()
+    /// Sends prompt-card answers and keeps each card's draft and delivery
+    /// state by prompt id. Itself `@Observable`. Lazy because its senders
+    /// capture `self`; settable so tests install fake senders.
+    ///
+    /// Built by `makePromptAnswerController()` rather than inline: Swift
+    /// checks a lazy property's initializer expression like a default
+    /// argument, and one expression mixing `@MainActor` callbacks with
+    /// closures that call the `DaemonClient` actor is refused as "both main
+    /// actor-isolated and actor-isolated". A method body has one isolation.
+    @ObservationIgnored lazy var promptAnswers: PromptAnswerController = makePromptAnswerController()
+
+    private func makePromptAnswerController() -> PromptAnswerController {
+        let daemonClient = self.daemonClient
+        return PromptAnswerController(
+            local: { terminalID, promptID, answer in
+                try await daemonClient.promptAnswer(
+                    terminalID: terminalID, promptID: promptID, answer: answer)
+            },
+            remote: { provider, sessionID, promptID, answer in
+                try await daemonClient.remoteAnswer(
+                    provider: provider, sessionID: sessionID, promptID: promptID, answer: answer)
+            },
+            onDelivered: { [weak self] prompt, summary in
+                self?.promptCardRetention.markAnswered(prompt, summary: summary)
+            },
+            onRemoteDelivered: { [weak self] selection in
+                self?.requestRemoteTranscriptSync(selection)
+            })
+    }
     /// Reports app-observed satisfied captures back to the daemon, which owns
     /// the store. The app is the party that parses the JSONL, so it is the one
     /// that sees a capture become satisfied and must say so. Lazy so an app
@@ -1775,6 +1886,12 @@ final class AppState {
     /// moment late.
     var transcriptStreamingEnabled: Bool {
         daemonCapabilities?.transcriptStreamingEnabled ?? false
+    }
+    /// Whether question and permission prompts can be answered from the
+    /// transcript, as the daemon reports it. False until capabilities have
+    /// been fetched, so a card never offers an answer the daemon would refuse.
+    var transcriptPromptAnswerEnabled: Bool {
+        daemonCapabilities?.transcriptPromptAnswerEnabled ?? false
     }
     /// How `loadModelProfiles()` fetches its config-bearing response.
     /// Injectable because `DaemonClient` is concrete, matching the other
@@ -1869,6 +1986,22 @@ final class AppState {
                 terminalID: terminalID, newProfileID: newProfileID,
                 mode: mode, cols: cols, rows: rows)
         }
+    /// How the transport-migration actions reach the daemon — injectable for the
+    /// same reason as `terminalProfileSwapper`: the veil's lifetime and the
+    /// result's presentation are testable without a running daemon.
+    ///
+    /// One session per call, never the daemon's `--all`: the app's fleet run is
+    /// composed from this, so a long run cannot outrun the receive deadline and
+    /// every row gets its own veil (`migrateAllTerminalsToHolder`).
+    @ObservationIgnored
+    lazy var terminalTransportMigrator:
+        @MainActor (UUID) async throws -> TerminalMigrateTransportResult =
+        { [daemonClient] terminalID in
+            try await daemonClient.migrateTerminalTransport(terminalID: terminalID)
+        }
+    /// Clock for the bounded wait that holds a transport-move veil until the
+    /// migrated row is adopted (see `awaitTransportMoveAdoption`).
+    @ObservationIgnored var transportMoveClock: any Clock<Duration> = ContinuousClock()
     /// How the composer's wake reaches the daemon — the result-returning sibling
     /// of `terminalWakeSender`, injectable for the same reason, so the wake's
     /// three replies are statable in a test without a running daemon.
@@ -1896,6 +2029,15 @@ final class AppState {
         @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptSyncResult =
         { [daemonClient] selection in
             try await daemonClient.remoteTranscriptSync(
+                provider: selection.provider, sessionID: selection.sessionID)
+        }
+    /// How a remote transcript pane runs `remote.transcriptLoadEarlier` —
+    /// injectable for the same reason as `remoteTranscriptSyncer`.
+    @ObservationIgnored
+    lazy var remoteTranscriptEarlierLoader:
+        @MainActor (RemoteSessionSelection) async throws -> RemoteTranscriptLoadEarlierResult =
+        { [daemonClient] selection in
+            try await daemonClient.remoteTranscriptLoadEarlier(
                 provider: selection.provider, sessionID: selection.sessionID)
         }
     /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
@@ -1941,6 +2083,15 @@ final class AppState {
                 terminalID: params.terminalID, incarnationID: params.incarnationID,
                 payload: params.payload, observedAt: params.observedAt)
         })
+    /// How `setTranscriptPromptAnswerEnabled` persists the transcript
+    /// prompt-answer gate — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var transcriptPromptAnswerFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setTranscriptPromptAnswer(enabled: enabled) }
+    /// How `setRemoteTranscriptLiveSyncEnabled` persists the live remote
+    /// transcript sync gate — injectable for the same reason as
+    /// `controlModeSetter`.
+    @ObservationIgnored lazy var remoteTranscriptLiveSyncFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setRemoteTranscriptLiveSync(enabled: enabled) }
     /// How `setClaudeCloudEnabled` persists the Claude cloud gate — injectable
     /// for the same reason as `controlModeSetter`, so the Settings toggle's
     /// success and failure branches are testable without a real daemon.
@@ -2098,6 +2249,26 @@ final class AppState {
     /// without a daemon.
     @ObservationIgnored lazy var prBindingsFetcher: @MainActor () async throws -> PRBindingsAllResult =
         { [daemonClient] in try await daemonClient.listAllPRBindings() }
+    @ObservationIgnored lazy var devServerListFetcher: @MainActor (UUID, Bool) async throws -> DevServerListResult =
+        { [daemonClient] id, runStatus in
+            try await daemonClient.listDevServers(worktreeID: id, runStatusCommands: runStatus) }
+    @ObservationIgnored lazy var devServerSummaryFetcher: @MainActor () async throws -> DevServerSummaryResult =
+        { [daemonClient] in try await daemonClient.devServerSummary() }
+    @ObservationIgnored lazy var devServerActionSender: @MainActor (DevServerAction, UUID, [String]) async throws -> DevServerActionResult =
+        { [daemonClient] action, id, names in
+            switch action {
+            case .start: return try await daemonClient.startDevServers(worktreeID: id, names: names)
+            case .stop: return try await daemonClient.stopDevServers(worktreeID: id, names: names)
+            }
+        }
+    /// "Show last output" routes through these two, so tests can see which
+    /// one a server's state chose without a daemon or a window.
+    @ObservationIgnored lazy var devServerLastOutputOpener: @MainActor (UUID, UUID) async -> Void =
+        { [weak self] worktreeID, entryID in
+            await self?.openClosedTerminalEntry(worktreeID: worktreeID, entryID: entryID) }
+    @ObservationIgnored lazy var devServerTabFocuser: @MainActor (UUID, UUID) -> Void =
+        { [weak self] worktreeID, terminalID in
+            self?.focusDevServerTab(worktreeID: worktreeID, terminalID: terminalID) }
     /// How `detachPR` untracks one PR — injectable for the same reason as
     /// `prBindingsFetcher`, so the status bar's untrack gesture and each of its
     /// outcomes can be driven without a daemon.
@@ -2130,6 +2301,13 @@ final class AppState {
     /// prunes no remembered sidebar group.
     @ObservationIgnored lazy var reposFetcher: @MainActor () async throws -> [Repo] =
         { [daemonClient] in try await daemonClient.listRepos() }
+    /// How `refreshWorktrees(repoID:)` fetches the non-archived worktree
+    /// list — injectable for the same reason as `reposFetcher`, so tests can
+    /// drive the list merge without a real daemon.
+    @ObservationIgnored lazy var worktreesFetcher: @MainActor (UUID?) async throws -> [Worktree] =
+        { [daemonClient] repoID in
+            try await daemonClient.listWorktrees(repoID: repoID, excludeArchived: true)
+        }
     /// How `refreshRemote()` fetches the provider roster — injectable for the
     /// same reason as `daemonCapabilitiesFetcher` (`DaemonClient` is concrete,
     /// no protocol), so tests can exercise the disabled-refusal and
@@ -2245,6 +2423,7 @@ final class AppState {
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let paneHistoriesKey = "com.tbd.app.paneHistories"
+    static let navigationHistoryKey = "com.tbd.app.navigationHistory"
     private static let dockRatioKey = "com.tbd.app.dockRatio"
     private static let selectionOrderKey = "com.tbd.app.selectionOrder"
     private static let skipAccountPickerKey = "com.tbd.app.accountPicker.useDefaultWithoutAsking"
@@ -2279,6 +2458,7 @@ final class AppState {
         self.savedTmuxExecutablePath = tmuxExecutableResolver.savedPath
         restoreLayouts()
         restorePaneHistories()
+        restoreNavigationHistory()
         restoreRemoteSessionDisplayNames()
         if let saved = userDefaults.object(forKey: Self.dockRatioKey) as? Double {
             dockRatio = max(0.1, min(0.6, CGFloat(saved)))
@@ -2289,10 +2469,16 @@ final class AppState {
         startMemoryPressureMonitor()
         registerFocusObservers()
         installInjectionHandler()
+        installScreenRequestHandler()
         // Give the notification manager a back-reference so banner clicks
         // can call navigateToWorktree. All stored properties are now
         // initialized, so `self` is fully usable here.
         macNotificationManager.configure(appState: self)
+        // A card retired on its timeout is never reported settled, so its
+        // drafts and delivery state are dropped here instead.
+        promptCardRetention.onRetire = { [weak self] promptID in
+            self?.promptAnswers.forget([promptID])
+        }
         themeStore.reloadFromDisk()
         themeStore.startWatching()
         // Under `swift test`, the per-test `AppState()` instances would each
@@ -2776,11 +2962,7 @@ final class AppState {
     /// Start listening for real-time state deltas from the daemon.
     func startSubscription() {
         subscriptionTask?.cancel()
-        // A new subscription is a new ordering domain. The daemon's
-        // `PendingQuestionStore` is memory-only, so a restarted daemon counts
-        // from zero again; keeping the old high-water marks would make the app
-        // drop every delta it then sends.
-        pendingQuestionRevisions.removeAll()
+        resetDeltaOrdering()
         // Same reason for program status: the daemon's `ProgramStatusStore` is
         // memory-only and counts revisions from zero after a restart. Re-seed
         // from the list; deltas from the new subscription keep it current.
@@ -2797,6 +2979,15 @@ final class AppState {
             // Subscription disconnected — nil out so poll loop restarts it
             await MainActor.run { self.subscriptionTask = nil }
         }
+    }
+
+    /// Forgets the revision high-water marks, because a new subscription is a
+    /// new ordering domain. The daemon's `PendingPromptStore` is memory-only,
+    /// so a restarted daemon counts from zero again; keeping the old marks
+    /// would make the app drop every delta it then sends.
+    func resetDeltaOrdering() {
+        pendingQuestionRevisions.removeAll()
+        pendingPromptRevisions.removeAll()
     }
 
     func stopSubscription() {
@@ -2831,6 +3022,8 @@ final class AppState {
             applyTerminalSessionDelta(d)
         case .terminalCreated(let d):
             applyTerminalCreatedDelta(d)
+        case .terminalReplaced(let terminal):
+            applyTerminalReplacedDelta(terminal)
         case .terminalRemoved(let d):
             applyTerminalRemovedDelta(d)
         case .terminalActivityUpdated(let d):
@@ -2838,9 +3031,13 @@ final class AppState {
         case .terminalAwaitingInputChanged(let d):
             applyTerminalAwaitingInputDelta(d)
         case .terminalPendingQuestionsChanged(let d):
+            // An older daemon still sends this; a current one sends
+            // `.terminalPendingPromptsChanged` instead.
             applyPendingQuestionsDelta(d)
         case .terminalProgramStatusChanged(let snapshot):
             applyProgramStatusSnapshot(snapshot)
+        case .terminalPendingPromptsChanged(let d):
+            applyPendingPromptsDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
         case .watchDeskRolesChanged(let d):
@@ -2882,6 +3079,8 @@ final class AppState {
                 suggestedProfileID: d.suggestedProfileID,
                 receivedAt: Date()
             )
+        case .devServersChanged:
+            Task { [weak self] in await self?.refreshDevServersAfterChange() }
         default:
             break
         }
@@ -3234,6 +3433,35 @@ final class AppState {
         }
     }
 
+    /// Mirror one terminal's pending prompts and legacy question captures,
+    /// newest revision wins (see `applyPendingQuestionsDelta` for why order
+    /// matters). The revision is checked once for both sets, since the daemon
+    /// reads both from one store at one revision. An empty array removes its
+    /// key.
+    func applyPendingPromptsDelta(_ delta: TerminalPendingPromptsDelta) {
+        if let revision = delta.revision {
+            if let applied = pendingPromptRevisions[delta.terminalID], revision < applied {
+                return
+            }
+            pendingPromptRevisions[delta.terminalID] = revision
+        }
+        if delta.captures.isEmpty {
+            pendingQuestions.removeValue(forKey: delta.terminalID)
+        } else {
+            pendingQuestions[delta.terminalID] = delta.captures.map {
+                PendingAskUserQuestion(
+                    toolUseID: $0.toolUseID,
+                    inputJSON: $0.inputJSON,
+                    timestamp: $0.timestamp)
+            }
+        }
+        if delta.prompts.isEmpty {
+            pendingPrompts.removeValue(forKey: delta.terminalID)
+        } else {
+            pendingPrompts[delta.terminalID] = delta.prompts
+        }
+    }
+
     /// Seamless in-place "Switch account": the terminal row is unchanged except
     /// its `profileID`, so update it in place and the account chip re-renders.
     private func applyTerminalProfileDelta(_ delta: TerminalProfileDelta) {
@@ -3278,8 +3506,11 @@ final class AppState {
         // real un-park counts — a wake delta for a row the cache already holds
         // awake is not the swap's, and rebuilding on it would tear down a live
         // attach for nothing.
+        // A transport move does not bump here: this wake lands while the cached
+        // row still reads tmux, so a bump would rebuild against the window the
+        // migration retires. The replaced row's new window id is its rebuild.
         if !delta.hibernated,
-           switchingAccountTerminals[delta.terminalID] != nil,
+           let veil = switchingAccountTerminals[delta.terminalID], !veil.isTransportMove,
            terminals[delta.worktreeID]?[idx].isParked == true {
             terminalAttachEpochs[delta.terminalID, default: 0] += 1
         }
@@ -3511,6 +3742,7 @@ final class AppState {
                     self.pollCycle += 1
                     if self.pollCycle % 15 == 0 {
                         await self.refreshPRStatuses()
+                        await self.refreshDevServerSummary()
                     }
                     // ~every 150 executed cycles (~5 minutes at the ~2s tick).
                     // The daemon's checker runs hourly, so polling it faster
@@ -3557,6 +3789,7 @@ final class AppState {
             await refreshRemote()
             startSubscription()
             await refreshPRStatuses()
+            await refreshDevServerSummary()
             pushClaudeSpawnPreferences()
             pushForegroundState()
         } else {
@@ -3724,6 +3957,7 @@ final class AppState {
             let fetchedRepos = try await reposFetcher()
             if fetchedRepos != repos {
                 repos = fetchedRepos
+                updateNavigationFlags()
             }
             pruneExpandedSidebarGroups(repoIDs: Set(fetchedRepos.map(\.id)))
         } catch {
@@ -3740,7 +3974,7 @@ final class AppState {
             // Single RPC — fetch non-archived worktrees only.
             // Absent rows satisfy reconcileTombstones identically to status==.archived
             // (both confirm the tombstone), so tombstone reconciliation is unaffected.
-            let allWts = try await daemonClient.listWorktrees(repoID: repoID, excludeArchived: true)
+            let allWts = try await worktreesFetcher(repoID)
             // Drop tombstones the daemon has confirmed (or that outlived the TTL) so a
             // stale poll predating an archive cannot resurrect the row.
             // Reconcile only on the unscoped path: a scoped allWts omits other repos'
@@ -3780,12 +4014,16 @@ final class AppState {
             // periodic refresh is where that flip is observed.
             promoteRevivedWorktrees(observing: allWts)
 
+            var listsChanged = false
             if let repoID {
                 // Preserve optimistic placeholders the daemon doesn't know about yet
                 let placeholders = (worktrees[repoID] ?? []).filter { pendingWorktreeIDs.contains($0.id) }
                 let merged = fetched + placeholders
                 if merged != worktrees[repoID] ?? [] {
+                    let previous = (worktrees[repoID] ?? []).map(\.id)
                     worktrees[repoID] = merged
+                    listsChanged = true
+                    forgetDevServerState(droppedFrom: previous, keeping: Set(merged.map(\.id)))
                 }
             } else {
                 var grouped: [UUID: [Worktree]] = [:]
@@ -3805,23 +4043,36 @@ final class AppState {
                         grouped[rid, default: []].append(wt)
                     }
                 }
+                let previousIDs = worktrees.values.joined().map(\.id) + scratchWorktrees.map(\.id)
                 if grouped != worktrees {
                     worktrees = grouped
+                    listsChanged = true
                 }
                 let sortedScratch = scratch.sorted { $0.sortOrder < $1.sortOrder }
                 if sortedScratch != scratchWorktrees {
                     scratchWorktrees = sortedScratch
+                    listsChanged = true
                 }
+                forgetDevServerState(
+                    droppedFrom: previousIDs,
+                    keeping: Set(grouped.values.joined().map(\.id) + sortedScratch.map(\.id)))
+            }
+            // Restored history is computed against these lists; recompute the
+            // arrows now that they have loaded (no save — nothing changed).
+            if listsChanged {
+                updateNavigationFlags()
             }
 
             // Single RPC — fetch all terminals, group client-side
+            let terminalSnapshotGeneration = terminalReplacementObservationGeneration
             let allTerminals = try await daemonClient.listTerminals()
             let terminalsByWorktree = Dictionary(grouping: allTerminals, by: { $0.worktreeID })
             let visibleWorktreeIDs = Set(fetched.map(\.id))
             for wtID in visibleWorktreeIDs {
                 adoptTerminalSnapshot(
                     terminalsByWorktree[wtID] ?? [],
-                    worktreeID: wtID
+                    worktreeID: wtID,
+                    startedAtReplacementGeneration: terminalSnapshotGeneration
                 )
             }
 
@@ -3861,8 +4112,12 @@ final class AppState {
     /// Refresh terminals for a specific worktree. Only updates if data changed.
     func refreshTerminals(worktreeID: UUID) async {
         do {
+            let snapshotGeneration = terminalReplacementObservationGeneration
             let fetched = try await daemonClient.listTerminals(worktreeID: worktreeID)
-            adoptTerminalSnapshot(fetched, worktreeID: worktreeID)
+            adoptTerminalSnapshot(
+                fetched,
+                worktreeID: worktreeID,
+                startedAtReplacementGeneration: snapshotGeneration)
         } catch {
             logger.error("Failed to list terminals for worktree \(worktreeID): \(error)")
             handleConnectionError(error)

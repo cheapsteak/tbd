@@ -176,6 +176,40 @@ public enum TBDConstants {
         hookPath(repoID: repoID, eventName: eventName, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// Environment variable naming the shared dev-server running-file
+    /// directory (docs/specs/2026-10-11-dev-servers-design.md, "The running
+    /// file"). Deliberately not TBD-branded: any tool may read or write it.
+    public static let devServersDirEnvironmentKey = "DEV_SERVERS_DIR"
+
+    /// The running-file directory: `DEV_SERVERS_DIR` when set and non-empty,
+    /// else `~/.local/state/dev-servers`. Lives outside every worktree on
+    /// purpose — a file inside one vanishes with it while the server it
+    /// describes can keep running.
+    public static func devServersDir(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        if let override = environment[devServersDirEnvironmentKey], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local", isDirectory: true)
+            .appendingPathComponent("state", isDirectory: true)
+            .appendingPathComponent("dev-servers", isDirectory: true)
+    }
+
+    /// A repo's personal dev-server declarations:
+    /// `~/tbd/repos/<repoID>/servers.toml`. Honors TBD_HOME.
+    public static func serversConfigPath(repoID: UUID, environment: [String: String]) -> String {
+        reposDir(environment: environment)
+            .appendingPathComponent(repoID.uuidString)
+            .appendingPathComponent("servers.toml")
+            .path
+    }
+
+    public static func serversConfigPath(repoID: UUID) -> String {
+        serversConfigPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
+    }
+
     /// Base directory holding per-worktree config (e.g. scratch-worktree
     /// notepads): `~/tbd/worktrees`. Honors TBD_HOME.
     public static func worktreesDir(environment: [String: String]) -> URL {

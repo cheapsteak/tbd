@@ -80,6 +80,23 @@ test_the_session_prompt_states_each_tests_claude_rule() {
   done
 }
 
+test_the_session_prompt_keeps_the_test_testing_what_it_tests() {
+  local text needle
+  text="$(cat "$PROMPT")"
+  for needle in "A test of test infrastructure tests that infrastructure" "Never swap the thing under test" \
+      "A coverage claim names its test" "Tests on the flaky list" "A name says what the test checks" \
+      'RENAMED: <old test ID> -> <new test ID>' 'RETIRED: <old test ID> — <reason>' "flakefix-needs-human" \
+      "never restore an old name"; do
+    assert_contains "states: $needle" "$text" "$needle"
+  done
+  # The format the prompt teaches is the one the verifier reads.
+  assert_eq "its RENAMED line parses" "renamed" "$(python3 -c '
+import re, sys; sys.path.insert(0, sys.argv[1])
+import importlib.util as u
+s = u.spec_from_file_location("v", sys.argv[1] + "/flake-verify.py"); v = u.module_from_spec(s); sys.modules["v"] = v; s.loader.exec_module(v)
+print("renamed" if v.RENAMED_LINE.match("RENAMED: A.B/c() -> A.B/d()") and v.RETIRED_LINE.match("RETIRED: A.B/c() — gone") else "no")' "$HERE")"
+}
+
 test_the_session_prompt_has_its_placeholders() {
   local text p
   text="$(cat "$PROMPT")"
@@ -322,6 +339,75 @@ test_a_strong_candidate_gets_none_of_the_weak_markers() {
   assert_contains "the numbers sit under the evidence" "$log" "Numbers: scope test, baseline 1 of 20, p = 0.05, N = 59, cap 82, false-pass probability 4.9%"
 }
 
+# A candidate that renamed or retired its target (§6.4, §7): a draft, labelled
+# for a human, with the note leading the body, and never a success status.
+NEWHOLDER='TBDSharedTests.HolderLockTests/lockIsFreedOnRelease()'
+changed_verdict() { # KIND VERDICT -> the verdict JSON
+  jq -c --arg k "$1" --arg v "$2" --arg f "$HOLDER" --arg t "$NEWHOLDER" '. + {verdict: $v, reasons: (if $v == "fail" then .reasons else [] end),
+      target_change: {kind: $k, from: $f, to: (if $k == "renamed" then $t else null end), reason: (if $k == "retired" then "the lock it tested is gone @someone" else null end),
+        stressed: (if $k == "renamed" then $t else null end), declared: "x", rejected: null}}
+    + (if $k == "retired" then {iterations: 0, n: 0, false_pass: null, weak: false, bound: null} else {} end)' <<< "$FAILED"
+}
+
+test_a_renamed_target_opens_a_draft_for_a_human() {
+  local d log body mutant; d="$(world "$(changed_verdict renamed ineligible)")"; routes "$d"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  log="$(logged "$d")"
+  assert_contains "a draft" "$log" "--draft"
+  assert_contains "never success: a human must judge the rename" "$log" "-f state=failure -f context=flakefix/stress -f description=not eligible for ready, a human must judge: target test renamed; no failure observed in 59 runs under its new ID"
+  assert_contains "the needs-human label is created" "$log" '"name": "flakefix-needs-human"'
+  assert_contains "and added to the PR" "$log" '"labels": ["flakefix-needs-human"]'
+  assert_eq "the label goes on before the status" "1" "$(awk '/issues\/77\/labels/{l=NR} /statuses\//{s=NR} END{print (l && s && l < s) ? 1 : 0}' "$d/log")"
+  body="$(awk '/pr create/{on=1; next} on && /^  STDIN /{sub(/^  STDIN /, ""); print; next} on{exit}' "$d/log")"
+  assert_contains "the body leads with the note" "$(head -1 <<< "$body")" "The target test was renamed; a human must judge whether coverage is preserved."
+  assert_contains "naming the new ID" "$body" "is now \`$NEWHOLDER\`"
+  assert_eq "recorded the rename beside a stress pass" "pr-opened pass renamed $NEWHOLDER" "$(recorded "$d" | jq -r '"\(.outcome) \(.verdict) \(.target_change) \(.renamed_to)"')"
+  mutant="$(mutant_of 's/^  if \[\[ "\$change" == renamed \|\| "\$change" == retired \]\]; then$/  if false; then/' "$PR_SH")"
+  d="$(world "$(changed_verdict renamed ineligible)")"; routes "$d"; publish "$d" "$mutant" > /dev/null
+  assert_lacks "mutation: without the check no label is added" "$(logged "$d")" "flakefix-needs-human\"]"
+}
+
+test_a_retired_target_opens_a_draft_claiming_no_stress_verdict() {
+  local d log body; d="$(world "$(changed_verdict retired ineligible)")"; routes "$d"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  log="$(logged "$d")"
+  assert_contains "failure, saying nothing ran" "$log" "description=not eligible for ready, a human must judge: target test retired; nothing was stress-run"
+  assert_contains "labelled for a human" "$log" '"labels": ["flakefix-needs-human"]'
+  body="$(awk '/pr create/{on=1; next} on && /^  STDIN /{sub(/^  STDIN /, ""); print; next} on{exit}' "$d/log")"
+  assert_contains "the body says it was retired" "$(head -1 <<< "$body")" "The target test was retired; a human must judge whether coverage is preserved."
+  assert_contains "with the session's reason, defused" "$body" 'the lock it tested is gone @​someone'
+  assert_lacks "and no numbers line" "$body" "Numbers:"
+  assert_eq "recorded with no stress verdict" "pr-opened null retired null" "$(recorded "$d" | jq -r '"\(.outcome) \(.verdict) \(.target_change) \(.renamed_to)"')"
+}
+
+test_the_target_change_fields_are_written_only_when_set() {
+  local d out mutant; d="$(world)"; routes "$d"; publish "$d" > /dev/null
+  assert_eq "a plain entry carries neither key, so an older reader still parses it" "false false" \
+    "$(recorded "$d" | jq -r '"\(has("target_change")) \(has("renamed_to"))"')"
+  # And a reader drops a key it does not know rather than refusing the comment.
+  out="$(python3 - "$HERE" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+import flake_lib as fl
+a = fl.Attempt(run_id=1, started_at="2026-10-01T00:00:00Z", main_sha="b" * 40, episode=0, outcome="no-diff")
+body = fl.render_attempts([a], "cheapsteak/tbd").replace('"outcome":"no-diff"', '"outcome":"no-diff","from_a_later_writer":1')
+assert "from_a_later_writer" in body
+print(len(fl.parse_attempts(body, fl.BOT_LOGIN, "Bot") or []))
+PY
+)"
+  assert_eq "an unknown key is dropped" "1" "$out"
+  d="$(world "$(changed_verdict renamed ineligible | jq -c '.weak = true')")"; routes "$d"; publish "$d" > /dev/null
+  assert_contains "a weak rename says so in its status" "$(logged "$d")" "under its new ID; weak evidence"
+}
+
+test_a_rename_whose_stress_failed_is_still_labelled_and_a_plain_fail_is_not() {
+  local d; d="$(world "$(changed_verdict renamed fail)")"; routes "$d"
+  publish "$d" > /dev/null
+  assert_contains "labelled" "$(logged "$d")" '"labels": ["flakefix-needs-human"]'
+  assert_eq "recorded as a failed rename" "fail renamed" "$(recorded "$d" | jq -r '"\(.verdict) \(.target_change)"')"
+  d="$(world "$FAILED")"; routes "$d"; publish "$d" > /dev/null
+  assert_lacks "a plain fail is not" "$(logged "$d")" "flakefix-needs-human"
+}
+
 test_the_pr_body_carries_every_required_field() {
   local d body; d="$(world "$WEAK")"; routes "$d"
   printf '**Stress scope:** pass (the baseline did not reproduce the failure with the test alone).\n\n**Result:** pass. Machine: 3 cores, 3 induced spinners, load1m 4 as observed.\n\n**Other tests that failed in the same iterations**\n\n- `TBDSharedTests.OtherTests/flaps()`\n\nA clean run is one sample from a gentler regime than the one many flakes appear in, not proof of a fix.\n' > "$d/attempt/verify/verdict.md"
@@ -390,6 +476,79 @@ PY
   assert_eq "one entry for run 4242, now pr-opened" "4242 pr-opened" "$(recorded "$d" all | jq -r '"\(.run_id) \(.outcome)"')"
 }
 
+# unreadable_attempts D newer|corrupt|second -> a comments file holding one
+# bot attempt comment, 555, in a newer schema or corrupt; with `second`, a
+# readable 555 and a newer 556 after it.
+unreadable_attempts() {
+  local d="$1" f="$1/comments.jsonl"
+  python3 - "$HERE" "$2" > "$f" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import flake_lib as fl
+old = fl.Attempt(run_id=1111, started_at="2026-10-01T06:00:00Z", main_sha="a" * 40, episode=0, outcome="no-diff")
+body = fl.render_attempts([old], "cheapsteak/tbd")
+newer = body.replace(" v1 -->", " v2 -->", 1).replace('"schema":1', '"schema":2')
+assert newer.startswith("<!-- flakefix-attempts v2 -->") and '"schema":2' in newer
+bot = {"login": fl.BOT_LOGIN, "type": "Bot"}
+if sys.argv[2] == "newer":
+    print(json.dumps({"id": 555, "body": newer, "user": bot}))
+elif sys.argv[2] == "second":
+    print(json.dumps({"id": 555, "body": body, "user": bot}))
+    print(json.dumps({"id": 556, "body": newer, "user": bot}))
+else:
+    corrupt = body.split("<!-- flakefix-attempts-state")[0] + "<!-- flakefix-attempts-state\n{edited by hand\nflakefix-attempts-state -->"
+    print(json.dumps({"id": 555, "body": corrupt, "user": bot}))
+PY
+  printf '%s' "$f"
+}
+
+test_an_attempt_record_in_a_newer_schema_refuses_to_publish() {
+  local d mutant
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
+  assert_eq "exit 2" "2" "$(publish "$d")"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_lacks "no PR" "$(logged "$d")" "pr create"
+  assert_eq "nothing written" "" "$(grep -E -- '-X (POST|PATCH)' "$d/log")"
+  assert_contains "naming the comment, its version and the version read" "$(cat "$d/out")" \
+    "#10 comment 555: the bot's attempt comment declares schema version 2, newer than the versions this code reads (1)"
+  assert_contains "and that it refused" "$(cat "$d/out")" "refusing to publish"
+  # A no-diff outcome posts its notes before recording: refused before that too.
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
+  echo no-diff > "$d/attempt/outcome"; rm -f "$d/attempt/candidate.bundle"
+  assert_eq "no-diff: exit 2" "2" "$(publish "$d")"
+  assert_eq "no-diff: nothing written" "" "$(grep -E -- '-X (POST|PATCH)' "$d/log")"
+  # A corrupt one at the current version is refused the same way, up front.
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" corrupt)"
+  assert_eq "corrupt: exit 2" "2" "$(publish "$d")"
+  assert_eq "corrupt: nothing pushed" "none" "$(remote_head "$d")"
+  assert_contains "corrupt: said so" "$(cat "$d/out")" "the bot's own attempt comment 555 does not parse"
+  # A newer comment after a readable one: every bot comment is read.
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" second)"
+  assert_eq "second: exit 2" "2" "$(publish "$d")"
+  assert_eq "second: nothing pushed" "none" "$(remote_head "$d")"
+  assert_contains "second: naming the later comment" "$(cat "$d/out")" "#10 comment 556: the bot's attempt comment declares schema version 2"
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" second)"
+  mutant="$(mutant_of 's/^    for c in sorted\(comments, key=lambda c: c\["id"\]\):$/    for c in sorted(comments, key=lambda c: c["id"])[:1]:/' "$PR_PY")"
+  publish "$d" "$mutant" > /dev/null
+  assert_lacks "mutation: stopping at the first comment pushes past the newer one" "$(remote_head "$d")" "none"
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
+  mutant="$(mutant_of 's/^  py check-attempts --repo "\$REPO" --issue "\$ISSUE" \|\| crc=\$\?$/  true/' "$PR_SH")"
+  publish "$d" "$mutant" > /dev/null
+  assert_lacks "mutation: without the up-front read the candidate is pushed first" "$(remote_head "$d")" "none"
+  # A failed read is not an unreadable record: it dies the usual way, trying
+  # to record the abort, rather than refusing.
+  d="$(world)"; routes "$d"
+  jq '[{match: "issues/10/comments\\?per_page", exit: 1, err: "HTTP 502"}] + .' "$d/routes.json" > "$d/r" && mv "$d/r" "$d/routes.json"
+  assert_eq "a failed read: exit 2" "2" "$(publish "$d")"
+  assert_contains "a failed read: said so" "$(cat "$d/out")" "cannot read #10's attempt record"
+  assert_lacks "a failed read: not a refusal" "$(cat "$d/out")" "refusing to publish"
+  assert_contains "a failed read: it tried to record the abort" "$(cat "$d/out")" "cannot record the aborted attempt"
+  d="$(world)"; routes "$d" "$(unreadable_attempts "$d" newer)"
+  mutant="$(mutant_of 's/startswith\(fl.ATTEMPTS_SENTINEL_PREFIX\)/startswith(fl.ATTEMPTS_SENTINEL)/' "$PR_PY")"
+  assert_eq "mutation: matching only the v1 sentinel publishes" "0" "$(publish "$d" "$mutant")"
+  assert_contains "mutation: and records in a second comment beside the newer one" "$(logged "$d")" "-X POST repos/$REPO/issues/10/comments"
+}
+
 test_an_attempt_comment_by_another_author_is_not_edited() {
   local d; d="$(world)"; routes "$d" "$(existing_attempts "$d" mallory User)"
   publish "$d" > /dev/null
@@ -454,6 +613,239 @@ test_a_workflow_candidate_refused_for_another_reason_goes_red() {
   d="$(CANDIDATE_PATH=.github/workflows/test.yml world)"; routes "$d"
   reject_pushes "$d" 'pre-receive hook declined: stale info'
   assert_eq "mutation: classifying on the diff turns it green" "0" "$(publish "$d" "$mutant")"
+}
+
+# ----------------------------------------------------------------------------
+# replay at publish (spec §7, §8): `main` moving during the run
+# ----------------------------------------------------------------------------
+
+WF_REFUSAL='refusing to allow a GitHub App to create or update workflow `.github/workflows/test.yml` without `workflows` permission'
+
+# main_moves D PATH CONTENT: a commit on the remote's main, as a PR merging
+# while `fix` ran (run 37879620449: #952 changed .github/workflows/).
+main_moves() {
+  local d="$1" path="$2" content="$3"
+  git -C "$d/seed" fetch -q origin 2>/dev/null && git -C "$d/seed" reset -q --hard origin/main
+  mkdir -p "$d/seed/$(dirname "$path")"; printf '%s\n' "$content" > "$d/seed/$path"
+  git -C "$d/seed" add -A && git -C "$d/seed" commit -q -m "main moves: $path" && git -C "$d/seed" push -q origin HEAD:main 2>/dev/null
+}
+
+# github_gate D [ONCE [RESET]]: a pre-receive hook refusing, as GitHub refuses
+# an App without the `workflows` permission, a branch whose .github/workflows/
+# files differ from main's – whoever's commits made the difference. With ONCE,
+# only the first push is refused, as when main moved between the fetch and
+# the push; with RESET, that refusal also moves main to the commit RESET.
+github_gate() {
+  local d="$1" once="${2:-}" reset="${3:-}"
+  printf '%s\n' "$WF_REFUSAL" > "$d/reject-message"
+  : > "$d/pushes"
+  cat > "$d/origin.git/hooks/pre-receive" <<EOF
+#!/usr/bin/env bash
+while read -r old new ref; do
+  [[ "\$ref" == refs/heads/main ]] && continue
+  echo push >> "$d/pushes"
+  if [[ -n "$once" && "\$(wc -l < "$d/pushes")" -eq 1 ]] \\
+      || [[ -z "$once" && -n "\$(git diff --name-only refs/heads/main "\$new" -- .github/workflows/)" ]]; then
+    cat "$d/reject-message" >&2
+    if [[ -n "$reset" ]]; then
+      env -u GIT_QUARANTINE_PATH -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES \\
+        git update-ref refs/heads/main "$reset"
+    fi
+    exit 1
+  fi
+done
+EOF
+  chmod +x "$d/origin.git/hooks/pre-receive"
+}
+
+# always_refuse_as_workflow D: every branch push gets the workflow refusal,
+# as when main keeps moving.
+always_refuse_as_workflow() {
+  local d="$1"
+  github_gate "$d"
+  sed -i.bak 's/^  if \[\[ -n "" .*$/  if true \\/' "$d/origin.git/hooks/pre-receive"
+}
+
+status_sha() { sed -n 's|.*repos/cheapsteak/tbd/statuses/\([0-9a-f]*\) .*|\1|p' "$1/log" | head -1; }
+status_desc() { grep 'statuses/' "$1/log" | sed -n 's/.*-f description=\(.*\) -f target_url=.*/\1/p' | head -1; }
+
+test_main_moving_without_workflow_changes_pushes_the_candidate_as_is() {
+  local d mutant head; d="$(world)"; routes "$d"
+  main_moves "$d" README.md "unrelated"
+  github_gate "$d"
+  head="$(cat "$d/attempt/head_sha")"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  assert_eq "the candidate itself is on the branch" "$head" "$(remote_head "$d")"
+  assert_eq "the status is on it" "$head" "$(status_sha "$d")"
+  assert_lacks "with no replay note" "$(status_desc "$d")" "replayed"
+  mutant="$(mutant_of 's/^  \[\[ "\$rc" -eq 1 \]\]$/  true/' "$PR_SH")"
+  d="$(world)"; routes "$d"; main_moves "$d" README.md "unrelated"; github_gate "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: replaying whenever main moved changes the pushed commit" "different" \
+    "$([[ "$(remote_head "$d")" == "$(cat "$d/attempt/head_sha")" ]] && echo same || echo different)"
+}
+
+test_main_workflows_moving_replays_a_clean_candidate_onto_main() {
+  local d mutant head base new pushed log; d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push # #952"
+  github_gate "$d"
+  head="$(cat "$d/attempt/head_sha")"; base="$(cat "$d/pick/base_sha")"
+  new="$(git -C "$d/origin.git" rev-parse refs/heads/main)"
+  assert_eq "exit 0" "0" "$(publish "$d")"
+  pushed="$(remote_head "$d")"
+  assert_eq "the replay sits on main as it is now" "$new" "$(git -C "$d/origin.git" rev-parse "$pushed~1")"
+  assert_eq "it carries the candidate's change" "fixed" "$(git -C "$d/origin.git" show "$pushed:Tests/TBDSharedTests/HolderLockTests.swift")"
+  assert_eq "keeping its author and subject" "t Fix the lock race" "$(git -C "$d/origin.git" log -1 --format='%an %s' "$pushed")"
+  assert_contains "and naming the original commit" "$(git -C "$d/origin.git" log -1 --format=%B "$pushed")" "(cherry picked from commit $head)"
+  assert_eq "the first push was accepted: no refusal, no retry" "1" "$(wc -l < "$d/pushes" | tr -d ' ')"
+  assert_eq "the status is on the pushed commit" "$pushed" "$(status_sha "$d")"
+  assert_contains "saying where it was stress-checked and where it was replayed" "$(status_desc "$d")" \
+    "no failure observed in 59 runs; stress-checked on ${base:0:7}; replayed onto main ${new:0:7} because main's workflow files changed during the run"
+  log="$(logged "$d")"
+  assert_contains "so does the PR body" "$log" "stress-checked on ${base:0:7}; replayed onto main ${new:0:7} because main's workflow files changed during the run"
+  assert_eq "recorded pr-opened, noting the replay" "pr-opened 77 true" \
+    "$(recorded "$d" | jq -r '"\(.outcome) \(.pr) \(.notes | contains("replayed onto main"))"')"
+  mutant="$(mutant_of 's#statuses/\$PUSHED"#statuses/$head"#' "$PR_SH")"
+  d="$(world)"; routes "$d"; main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: a status on the candidate misses the PR's head" "$(cat "$d/attempt/head_sha")" "$(status_sha "$d")"
+  mutant="$(mutant_of 's/^  if workflows_moved; then$/  if false; then/' "$PR_SH")"
+  d="$(world)"; routes "$d"; main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without the check the first push is refused" "2" "$(wc -l < "$d/pushes" | tr -d ' ')"
+}
+
+test_a_replay_that_conflicts_is_a_retryable_abort_and_pushes_nothing() {
+  local d mutant rc; d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  main_moves "$d" Tests/TBDSharedTests/HolderLockTests.swift "main's own change"
+  github_gate "$d"
+  rc="$(publish "$d")"
+  assert_eq "recorded, exit 0" "0" "$rc"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_lacks "no PR" "$(logged "$d")" "pr create"
+  assert_eq "recorded aborted, marked publish_raced, saying why" "aborted true null true" \
+    "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced) \(.session_failed) \(.notes | contains("the replay did not apply"))"')"
+  mutant="$(mutant_of 's/^  record aborted --publish-raced --reason "\$1"$/  record aborted --reason "$1"/' "$PR_SH")"
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"; main_moves "$d" Tests/TBDSharedTests/HolderLockTests.swift "x"
+  github_gate "$d"; publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: an unmarked abort is the lock-out" "aborted null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+  # main cannot be read: a publishing failure, not news about the test.
+  d="$(world)"; routes "$d"
+  git -C "$d/origin.git" update-ref -d refs/heads/main
+  assert_eq "a failed fetch of main exits 2" "2" "$(publish "$d")"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_eq "recorded aborted, marked publish_raced" "aborted true" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+  mutant="$(mutant_of 's/^  RACED_DIE=1$/  true/' "$PR_SH")"
+  d="$(world)"; routes "$d"; git -C "$d/origin.git" update-ref -d refs/heads/main
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: unmarked, a transient fetch failure is the lock-out" "aborted null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+}
+
+test_a_workflow_refusal_of_a_clean_candidate_is_retried_then_aborted() {
+  local d mutant rc log; d="$(world)"; routes "$d"
+  always_refuse_as_workflow "$d"
+  rc="$(publish "$d")"
+  log="$(logged "$d")"
+  assert_eq "the run goes red" "1" "$rc"
+  assert_eq "after one retry" "2" "$(wc -l < "$d/pushes" | tr -d ' ')"
+  assert_eq "nothing pushed" "none" "$(remote_head "$d")"
+  assert_lacks "no PR" "$log" "pr create"
+  assert_lacks "it never says the fix needs a workflow change" "$log" "appears to need a workflow change"
+  assert_eq "recorded aborted, marked publish_raced, with GitHub's message" "aborted true true" \
+    "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced) \(.notes | contains("without `workflows` permission"))"')"
+  mutant="$(mutant_of 's/^    if \[\[ "\$rc" -ne 0 \&\& -z "\$touches_workflows" \]\] \&\& grep/    if false \&\& grep/' "$PR_SH")"
+  d="$(world)"; routes "$d"; always_refuse_as_workflow "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without the retry it is the push-refused lock-out" "push-refused" "$(recorded "$d" | jq -r .outcome)"
+  # main moved between the check and the push: the retry's replay goes through.
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d" once
+  assert_eq "a refusal the retry clears: exit 0" "0" "$(publish "$d")"
+  assert_eq "pushed twice" "2" "$(wc -l < "$d/pushes" | tr -d ' ')"
+  assert_eq "the replay is on the branch" "$(git -C "$d/origin.git" rev-parse refs/heads/main)" \
+    "$(git -C "$d/origin.git" rev-parse "$(remote_head "$d")~1")"
+  assert_eq "and has the status" "$(remote_head "$d")" "$(status_sha "$d")"
+  assert_eq "recorded pr-opened" "pr-opened" "$(recorded "$d" | jq -r .outcome)"
+  # main's workflow files did not move: the retry pushes the candidate as it is,
+  # and nothing claims a replay.
+  d="$(world)"; routes "$d"
+  github_gate "$d" once
+  assert_eq "a refusal with main's workflows unmoved: exit 0" "0" "$(publish "$d")"
+  assert_eq "the candidate itself is on the branch" "$(cat "$d/attempt/head_sha")" "$(remote_head "$d")"
+  assert_lacks "with no replay note" "$(status_desc "$d")" "replayed"
+  mutant="$(mutant_of 's/checking main again"$/checking main again"; workflows_moved() { true; }/' "$PR_SH")"
+  d="$(world)"; routes "$d"; github_gate "$d" once
+  publish "$d" "$mutant" > /dev/null
+  assert_contains "mutation: replaying regardless claims a workflow change that never happened" "$(status_desc "$d")" "replayed"
+  # main's workflow change was reverted between the replay and the push: the
+  # retry pushes the candidate itself, not the stale replay.
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d" once "$(cat "$d/pick/base_sha")"
+  assert_eq "main reverted under the push: exit 0" "0" "$(publish "$d")"
+  assert_eq "the candidate itself is on the branch" "$(cat "$d/attempt/head_sha")" "$(remote_head "$d")"
+  assert_lacks "with no replay note" "$(status_desc "$d")" "replayed"
+  mutant="$(mutant_of 's/^    PUSHED="\$head" NEW_BASE=""$/    true/' "$PR_SH")"
+  d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d" once "$(cat "$d/pick/base_sha")"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: without the reset it re-pushes the stale replay" "different" \
+    "$([[ "$(remote_head "$d")" == "$(cat "$d/attempt/head_sha")" ]] && echo same || echo different)"
+}
+
+test_a_candidate_touching_workflows_is_never_replayed() {
+  local d mutant rc; d="$(CANDIDATE_PATH=.github/workflows/test.yml world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d"
+  rc="$(publish "$d")"
+  assert_eq "recorded, exit 0" "0" "$rc"
+  assert_eq "pushed once, as it is" "1" "$(wc -l < "$d/pushes" | tr -d ' ')"
+  assert_contains "the issue is told it needs a workflow change" "$(logged "$d")" "appears to need a workflow change"
+  assert_eq "recorded push-refused" "push-refused null" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+  mutant="$(mutant_of 's/^  \[\[ "\$wrc" -eq 1 \]\] \&\& touches_workflows=1$/  true/' "$PR_SH")"
+  d="$(CANDIDATE_PATH=.github/workflows/test.yml world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"; github_gate "$d"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: treated as clean it is replayed instead" "aborted true" "$(recorded "$d" | jq -r '"\(.outcome) \(.publish_raced)"')"
+}
+
+test_a_rerun_reuses_the_open_pr_on_its_replay() {
+  local d mutant pushed; d="$(world)"; routes "$d"
+  main_moves "$d" .github/workflows/test.yml "on: push"
+  github_gate "$d"
+  publish "$d" > /dev/null
+  pushed="$(remote_head "$d")"
+  : > "$d/log"
+  routes "$d" "" "[{\"number\": 77, \"headRefOid\": \"$pushed\"}]"
+  assert_eq "a re-run: exit 0" "0" "$(publish "$d")"
+  assert_lacks "it opens no second PR" "$(logged "$d")" "pr create"
+  assert_eq "the status goes on the replay again" "$pushed" "$(status_sha "$d")"
+  assert_contains "with the note" "$(status_desc "$d")" "replayed onto main"
+  assert_eq "and records the open PR" "pr-opened 77" "$(recorded "$d" | jq -r '"\(.outcome) \(.pr)"')"
+  mutant="$(mutant_of 's/^  local sha="\$1" tip onto$/  return 1/' "$PR_SH")"
+  : > "$d/log"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: an unrecognised replay is someone else's PR" "aborted" "$(recorded "$d" | jq -r .outcome)"
+  # A human amends the replay, keeping its message: not the bot's replay any more.
+  git -C "$d/session" fetch -q "$d/origin.git" "refs/heads/flakefix/issue-10" 2>/dev/null
+  git -C "$d/session" checkout -q FETCH_HEAD 2>/dev/null
+  echo "a human's change" > "$d/session/Tests/TBDSharedTests/HolderLockTests.swift"
+  git -C "$d/session" commit -q -a --amend --no-edit
+  git -C "$d/session" push -q -f "$d/origin.git" "HEAD:refs/heads/flakefix/issue-10" 2>/dev/null
+  pushed="$(remote_head "$d")"
+  routes "$d" "" "[{\"number\": 77, \"headRefOid\": \"$pushed\"}]"
+  : > "$d/log"
+  publish "$d" > /dev/null
+  assert_eq "an amended replay is someone else's PR" "aborted" "$(recorded "$d" | jq -r .outcome)"
+  assert_lacks "and gets no status" "$(logged "$d")" "statuses/"
+  mutant="$(mutant_of 's/if replay_onto "\$onto" \&\& \[\[ "\$PUSHED" == "\$sha" \]\]; then/if replay_onto "$onto"; then PUSHED="$sha"/' "$PR_SH")"
+  : > "$d/log"
+  publish "$d" "$mutant" > /dev/null
+  assert_eq "mutation: trusting the message alone stamps the amended head" "pr-opened" "$(recorded "$d" | jq -r .outcome)"
 }
 
 test_a_stale_branch_is_replaced_deliberately() {
@@ -642,6 +1034,85 @@ session_token() {
 }
 test_the_session_gets_the_read_only_token_explicitly() { check "both sessions get github_token explicitly" session_token 'github_token: ${{ github.token }}' 'show_full_output: false'; }
 
+# The model is named once, as a step output taken before any session, and both
+# sessions use it; never through `env`, which a session can rewrite.
+session_model() {
+  local s
+  step "$1" fix "Lay out the attempt" | grep -qF 'echo "model=claude-opus-5-5" >> "$GITHUB_OUTPUT"' || return 1
+  [[ "$(grep -c -- '--model' "$1")" == 2 ]] || return 1
+  for s in "Fixer session 1" "Fixer session 2"; do
+    step "$1" fix "$s" | grep -qF -- '--model ${{ steps.layout.outputs.model }}' || return 1
+  done
+}
+test_both_sessions_run_on_the_one_named_model() {
+  check "both sessions run on the model the layout names" session_model 'echo "model=claude-opus-5-5"' 'echo "model=claude-sonnet-5-5"'
+  check "session 2 takes it from the layout too" session_model \
+    $'show_full_output: true\n          claude_args: |\n            --model ${{ steps.layout.outputs.model }}\n            --max-turns 300' \
+    $'show_full_output: true\n          claude_args: |\n            --model ${{ env.MODEL }}\n            --max-turns 300'
+}
+
+# Each session's reasoning reaches the log, and its transcript an artifact:
+# kept after the session, from the action's own file, by the checked copy.
+session_transcripts() {
+  local s i block job
+  for s in "Fixer session 1" "Fixer session 2"; do
+    step "$1" fix "$s" | grep -q '^          show_full_output: true$' || return 1
+  done
+  job="$(job_block "$1" fix)"
+  for i in 1 2; do
+    block="$(step "$1" fix "Keep session $i's transcript")"
+    grep -qF "if: always() && (steps.s$i.outcome == 'success' || steps.s$i.outcome == 'failure') && steps.c$i.outcome == 'success'" <<< "$block" &&
+      grep -qF "EXECUTION_FILE: \${{ steps.s$i.outputs.execution_file }}" <<< "$block" &&
+      grep -qF '[ "$(fingerprint "$VS")" != "$VS_SUM" ]' <<< "$block" &&
+      grep -qF 'bash "$VS/scripts/flake-verify.sh" keep-transcript --from "$EXECUTION_FILE"' <<< "$block" &&
+      grep -qF "flakefix-transcripts/session-$i.json" <<< "$block" &&
+      grep -q '^        continue-on-error: true$' <<< "$block" || return 1
+    awk -v e="name: End session $i" -v k="name: Keep session $i's transcript" \
+      'index($0, e){a=NR} index($0, k){b=NR} END{exit !(a && b && a < b)}' <<< "$job" || return 1
+  done
+  block="$(step "$1" fix "Upload the session transcripts")"
+  grep -qF 'name: flakefix-transcripts' <<< "$block" && grep -qF 'retention-days: 14' <<< "$block" &&
+    grep -qF 'path: ${{ runner.temp }}/flakefix-transcripts/' <<< "$block" &&
+    grep -qF "always() && steps.pick.outputs.attempted == 'true' && steps.keep1.outcome == 'success' &&" <<< "$block" &&
+    grep -qF "(steps.s2.outcome == 'skipped' || steps.keep2.outcome == 'success')" <<< "$block" &&
+    grep -qF 'include-hidden-files: false' <<< "$block"
+}
+test_each_sessions_transcript_is_logged_and_kept() {
+  check "both sessions show their full output" session_transcripts 'show_full_output: true' 'show_full_output: false'
+  check "each transcript is kept only from the checked copy" session_transcripts \
+    '[ "$(fingerprint "$VS")" != "$VS_SUM" ]' '[ "$VS" = "" ]'
+  check "and uploaded for 14 days" session_transcripts 'retention-days: 14' 'retention-days: 90'
+  check "and uploaded only after the last session's directory was cleaned" session_transcripts \
+    "(steps.s2.outcome == 'skipped' || steps.keep2.outcome == 'success')" "(steps.s2.outcome == 'skipped' || true)"
+  check "only once the session's processes are ended" session_transcripts \
+    "steps.s1.outcome == 'failure') && steps.c1.outcome == 'success'" "steps.s1.outcome == 'failure')"
+}
+
+# The stress steps stress what target-change names, and the judges read it.
+target_change_wired() {
+  local i block
+  for i in 1 2; do
+    block="$(step "$1" fix "Stress try $i")"
+    awk '/flake-verify.sh" target-change --test "\$TEST_ID" --base "\$base" --notes "\$FLAKEFIX_NOTES"/{c=NR}
+         /flake-verify.sh" quarantined --test "\$stressed"/{q=NR}
+         /flake-verify.sh" stress .*--test "\$run_as"/{s=NR}
+         END{exit !(c && q && s && c < q && q < s)}' <<< "$block" || return 1
+    grep -qF 'stressed="$(jq -r '"'"'.stressed // empty'"'"' "$T/verify/target-change.json")"' <<< "$block" || return 1
+    grep -qF 'scope="$(cat "$T/baseline/scope")"; run_as="$stressed"' <<< "$block" || return 1
+    grep -qF '[ "$scope" = pass ] && run_as="$TEST_ID"' <<< "$block" || return 1
+    step "$1" fix "Judge try $i" | grep -qF -- '--target-change "$T/verify/target-change.json"' || return 1
+  done
+}
+test_a_renamed_target_is_stressed_under_the_id_target_change_names() {
+  check "the stress steps stress the ID target-change names" target_change_wired \
+    'flake-verify.sh" stress --scope "$scope" --test "$run_as"' \
+    'flake-verify.sh" stress --scope "$scope" --test "$TEST_ID"'
+  check "except at pass scope, where the old ID chooses the pass N was sized for" target_change_wired \
+    '[ "$scope" = pass ] && run_as="$TEST_ID"' '[ "$scope" = pass ] && run_as="$stressed"'
+  check "and the judges read it" target_change_wired \
+    '            --target-change "$T/verify/target-change.json" || rc=$?' '            || rc=$?' all
+}
+
 tools_clean() {
   local tools
   tools="$(job_block "$1" fix | grep -- '--allowedTools')"
@@ -754,7 +1225,7 @@ test_the_verifier_fingerprint_sees_edits_new_files_and_symlinks() {
   local fn vs a b c d
   fn="$(fingerprint_fn "$WORKFLOW")"
   assert_contains "the fingerprint is written in the workflow" "$fn" 'fingerprint() {'
-  assert_eq "every step that fingerprints uses the same function" "3" "$(grep -cF -- "$fn" "$WORKFLOW")"
+  assert_eq "every step that fingerprints uses the same function" "5" "$(grep -cF -- "$fn" "$WORKFLOW")"
   assert_eq "and none takes it from the environment" "0" "$(grep -c 'VS_FINGERPRINT' "$WORKFLOW")"
   vs="$(mktmpd)"; mkdir -p "$vs/scripts"; echo one > "$vs/scripts/flake-verify.sh"
   a="$(bash -c "$fn"'; fingerprint "$1"' _ "$vs")"
@@ -813,6 +1284,29 @@ failed_session_two_ends_red() {
   package_run "$1" "$rt" C1=success C2=success TRY2=true S1=success S1_CONCLUSION=success S2=success S2_CONCLUSION=failure > /dev/null
   [[ "$(cat "$rt/flakefix/outcome")" == candidate && ! -e "$rt/flakefix/abort_kind" ]] && grep -q '^session_failed=true$' "$rt/out"
 }
+# A step before session 1 failed (run 37845177223: the environment record), so
+# session 1 was skipped: aborted on that step, and no session counts as failed.
+skipped_session_is_no_failure() {
+  local rt; rt="$(mktmpd)"; mkdir -p "$rt/flakefix"; echo '{"n": 45}' > "$rt/flakefix/plan.json"
+  package_run "$1" "$rt" C1=skipped S1=skipped S1_CONCLUSION= > /dev/null
+  [[ "$(cat "$rt/flakefix/outcome")" == aborted && ! -e "$rt/flakefix/abort_kind" ]] &&
+    grep -q "before a session's commits were collected" "$rt/flakefix/abort_reason" &&
+    ! grep -q '^session_failed=true$' "$rt/out" && ! grep -q 'Fixer session' "$rt/summary"
+}
+# The same for session 2: a step that prepares try 2 failed, so it was skipped.
+skipped_session_two_is_no_failure() {
+  local rt; rt="$(mktmpd)"; mkdir -p "$rt/flakefix"; echo '{"n": 45}' > "$rt/flakefix/plan.json"
+  package_run "$1" "$rt" C1=success TRY2=true C2=skipped S1=success S1_CONCLUSION=success S2=skipped S2_CONCLUSION= > /dev/null
+  [[ "$(cat "$rt/flakefix/outcome")" == aborted && ! -e "$rt/flakefix/abort_kind" ]] &&
+    ! grep -q '^session_failed=true$' "$rt/out" && ! grep -q 'Fixer session' "$rt/summary"
+}
+test_a_session_that_never_ran_is_not_a_failed_session() {
+  check "a skipped session is no failed session" skipped_session_is_no_failure \
+    'if [ "$S1" != skipped ] && { [ "$S1" != success ]' 'if { [ "$S1" != success ]'
+  check "nor a skipped session 2" skipped_session_two_is_no_failure \
+    '[ "$TRY2" = true ] && [ "$S2" != skipped ] && {' '[ "$TRY2" = true ] && {'
+}
+
 test_a_failed_session_with_no_commit_is_aborted_not_no_diff() {
   check "a failed or never-finished session with no commit is aborted, kind session" session_failure_is_aborted \
     'elif [ -n "$failed_session" ]; then' 'elif false; then'
@@ -918,14 +1412,16 @@ end_run() {
 }
 
 # record_env FILE RT: run FILE's "Record the verifier's environment" step as
-# the job would before session 1, and print the record it outputs.
+# the job would before session 1, and print the record it outputs. Under
+# /bin/bash, not the first bash on PATH: the macOS runner's is 3.2, which a
+# Homebrew bash 5 ahead of it on a developer's PATH would hide.
 record_env() {
   local wf="$1" rt="$2" t="$2/flakefix"
   step_script "$wf" "Record the verifier" > "$rt/record.sh"
   : > "$rt/record-out"
   env -i PATH="$PATH" HOME="$HOME" TMPDIR="$rt/tmp" T="$t" VS="$rt/flakefix-verifier-scripts" VT="$rt/flakefix-verify" \
     FLAKEFIX_NOTES="$t/flakefix-notes.md" FLAKE_VERIFY_PS="$rt/bin/ps-stub" GIT_CEILING_DIRECTORIES="$SCRATCH" \
-    GITHUB_OUTPUT="$rt/record-out" bash -e "$rt/record.sh" > /dev/null 2>&1 || return 1
+    GITHUB_OUTPUT="$rt/record-out" /bin/bash -e "$rt/record.sh" > /dev/null 2>&1 || return 1
   sed -n 's/^env=//p' "$rt/record-out"
 }
 
@@ -1329,6 +1825,15 @@ test_a_weak_evidence_clean_pr_still_promotes() {
   mutant="$(mutant_of 's/if WEAK_CLAUSE in/if False and WEAK_CLAUSE in/' "$PR_PY")"
   d="$(pworld . "$weak")"; promote "$d" "$mutant" > /dev/null
   assert_lacks "mutation: without the weak check no label is added" "$(logged "$d")" "issues/77/labels"
+}
+
+test_a_needs_human_pr_is_never_promoted() {
+  # Even with every other condition met, a success status among them.
+  skips "a renamed or retired target" 's/^        if NEEDS_HUMAN_LABEL in pr\["labels"\]:$/        if False:/' '.labels = [{name: "flakefix-needs-human"}]'
+  local d; d="$(PMODE=status pworld '.labels = [{name: "flakefix-needs-human"}]')"
+  PMODE=status promote "$d" > /dev/null
+  assert_eq "under the status trigger too" "no" "$(promoted "$d")"
+  assert_contains "naming the label" "$(cat "$d/out")" "labelled flakefix-needs-human"
 }
 
 test_promote_writes_no_ledger_or_attempt_state() {

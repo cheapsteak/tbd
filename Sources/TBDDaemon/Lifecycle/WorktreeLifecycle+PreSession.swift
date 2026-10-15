@@ -673,7 +673,8 @@ extension WorktreeLifecycle {
             // source for the pids while it can be read.
             if let terminal {
                 await Self.recordHolderClosedTerminal(
-                    terminal, registry: holderRegistry, history: db.terminalHistory)
+                    terminal, registry: holderRegistry, resolver: holderScreenResolver,
+                    history: db.terminalHistory)
                 await abandonHookHolder(
                     terminalID: terminal.id,
                     holderPID: terminal.holderPID,
@@ -722,6 +723,7 @@ extension WorktreeLifecycle {
         }
         do {
             try await db.terminals.delete(id: terminalID)
+            await sessionTitles.forget(terminalID: terminalID)
             try await db.tabs.delete(tabID: terminalID)
             var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
             if order.contains(terminalID) {

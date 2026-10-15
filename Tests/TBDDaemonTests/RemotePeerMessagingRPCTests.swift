@@ -1,20 +1,17 @@
 import Foundation
-import GRDB
 import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
 import TestSupport
 
-/// `config.setRemotePeerMessagingEnabled` — the write half of the remote
-/// peer-messaging gate (`docs/specs/2026-08-29-remote-peer-messaging-design.md`,
-/// "Flag and rollout").
+/// `peer.status`'s report of each repository's peer-messaging switch — the read
+/// half `tbd peer list` prints (`docs/specs/2026-08-29-remote-peer-messaging-design.md`,
+/// "The per-repository switch").
 ///
-/// The column's three states, and the store setter behind this method, are
-/// guarded by `RemotePeerMessagingFlagSchemaTests`. What is asserted here is the
-/// part that made the flag unusable without it: that a gesture arriving over the
-/// socket reaches that setter at all, and that the read half every user consults
-/// — `config.get` and `peer.status` — reports the value the gesture wrote.
+/// The switch lives in each repository's committed `tbd.toml`, so these tests
+/// write real files into a temp checkout and assert the daemon reads them fresh
+/// on every call. Tier 2: a real filesystem under a temp dir, never `~/tbd`.
 @Suite("Remote peer messaging RPC")
 struct RemotePeerMessagingRPCTests {
 
@@ -35,87 +32,102 @@ struct RemotePeerMessagingRPCTests {
         return (router, db)
     }
 
-    private func setMessaging(_ router: RPCRouter, enabled: Bool) async throws {
-        let request = try RPCRequest(
-            method: RPCMethod.configSetRemotePeerMessagingEnabled,
-            params: ConfigSetPeerMessagingEnabledParams(enabled: enabled))
-        let response = await router.handle(request)
-        #expect(response.success)
+    private func makeCheckout() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("peer-rpc-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }
 
-    // MARK: - The gesture reaches the store
+    private func status(_ router: RPCRouter) async throws -> PeerBridgeStatus {
+        try await router.handle(RPCRequest(method: RPCMethod.peerStatus))
+            .decodeResult(PeerBridgeStatus.self)
+    }
 
-    @Test("config.setRemotePeerMessagingEnabled persists the flag to true")
-    func setEnabledPersists() async throws {
+    /// Each repository is reported with the state its own `tbd.toml` gives it,
+    /// and the file is re-read on every call: editing it changes the very next
+    /// answer, with no restart.
+    @Test("peer.status reports each repository's switch, read fresh")
+    func reportsEachRepositorysSwitchFresh() async throws {
         let (router, db) = try makeRouterAndDB()
-        try await setMessaging(router, enabled: true)
-        #expect(try await db.config.get().remotePeerMessagingEnabled == true)
+        let onCheckout = try makeCheckout()
+        let offCheckout = try makeCheckout()
+        defer {
+            try? FileManager.default.removeItem(at: onCheckout)
+            try? FileManager.default.removeItem(at: offCheckout)
+        }
+        let toml = onCheckout.appendingPathComponent("tbd.toml")
+        try "[remote_sessions]\npeer_messaging = true\n"
+            .write(to: toml, atomically: true, encoding: .utf8)
+        _ = try await db.repos.create(
+            path: onCheckout.path, displayName: "acme-on", defaultBranch: "main")
+        _ = try await db.repos.create(
+            path: offCheckout.path, displayName: "acme-off", defaultBranch: "main")
+
+        var repos = try #require(try await status(router).repos)
+        #expect(repos.map(\.repoName) == ["acme-off", "acme-on"])
+        #expect(repos.map(\.enabled) == [false, true])
+        #expect(repos.allSatisfy { $0.problems.isEmpty })
+        #expect(repos[1].tomlPath == toml.path)
+
+        try "[remote_sessions]\npeer_messaging = false\n"
+            .write(to: toml, atomically: true, encoding: .utf8)
+        repos = try #require(try await status(router).repos)
+        #expect(repos.map(\.enabled) == [false, false])
     }
 
-    /// The off direction is not the same code path by construction — a handler
-    /// that ignored its params would pass the test above and fail this one.
-    @Test("config.setRemotePeerMessagingEnabled persists the flag to false")
-    func setDisabledPersists() async throws {
+    /// A value TBD cannot understand is off, and the problem travels to the
+    /// listing with the file's path.
+    @Test("peer.status carries a tbd.toml problem with its path")
+    func carriesProblems() async throws {
         let (router, db) = try makeRouterAndDB()
-        try await setMessaging(router, enabled: true)
-        try await setMessaging(router, enabled: false)
-        #expect(try await db.config.get().remotePeerMessagingEnabled == false)
+        let checkout = try makeCheckout()
+        defer { try? FileManager.default.removeItem(at: checkout) }
+        try "[remote_sessions]\npeer_messaging = \"yes\"\n"
+            .write(to: checkout.appendingPathComponent("tbd.toml"),
+                   atomically: true, encoding: .utf8)
+        _ = try await db.repos.create(
+            path: checkout.path, displayName: "acme", defaultBranch: "main")
+
+        let repo = try #require(try await status(router).repos?.first)
+        #expect(repo.enabled == false)
+        #expect(repo.problems.count == 1)
+        #expect(repo.tomlPath.hasSuffix("/tbd.toml"))
     }
 
-    /// Writing `false` over a never-chosen row is still an explicit gesture: it
-    /// must leave `0` behind, not NULL, so the opt-out survives graduation of
-    /// `Config.remotePeerMessagingDefault`.
-    @Test("setting it off from the unchosen state records an explicit opt-out")
-    func settingOffFromUnchosenRecordsAnExplicitChoice() async throws {
+    /// An older `tbd` CLI decodes `peer.status` with `messagingEnabled`
+    /// required, and the installed CLI often lags the daemon. The daemon keeps
+    /// emitting it — true when any repository is on — so that CLI still reads
+    /// the answer instead of failing to decode it.
+    @Test("peer.status still emits messagingEnabled for older CLIs")
+    func emitsTheCompatField() async throws {
+        struct OlderCLIStatus: Decodable { let messagingEnabled: Bool }
         let (router, db) = try makeRouterAndDB()
-        try await setMessaging(router, enabled: false)
-        let record = try #require(try await db.writerForTests.read { conn in
-            try ConfigRecord.fetchOne(conn, key: ConfigStore.singletonID)
-        })
-        #expect(record.remote_peer_messaging_enabled == false)
-        #expect(
-            record.toModel(remotePeerMessagingDefault: true)
-                .remotePeerMessagingEnabled == false,
-            "an opt-out made over RPC must outlive a change to the shipped default")
+        let checkout = try makeCheckout()
+        defer { try? FileManager.default.removeItem(at: checkout) }
+        _ = try await db.repos.create(
+            path: checkout.path, displayName: "acme", defaultBranch: "main")
+
+        var older = try await router.handle(RPCRequest(method: RPCMethod.peerStatus))
+            .decodeResult(OlderCLIStatus.self)
+        #expect(older.messagingEnabled == false)
+
+        try "[remote_sessions]\npeer_messaging = true\n"
+            .write(to: checkout.appendingPathComponent("tbd.toml"),
+                   atomically: true, encoding: .utf8)
+        older = try await router.handle(RPCRequest(method: RPCMethod.peerStatus))
+            .decodeResult(OlderCLIStatus.self)
+        #expect(older.messagingEnabled == true)
     }
 
-    // MARK: - What the read half reports afterwards
-
-    /// `tbd peer list` reads the gate from `config.get`, and `peer.status`
-    /// resolves it fresh per call. Both must report the value just written —
-    /// this is the loop that told a user nothing had changed while the write
-    /// path did not exist at all.
-    @Test("config.get and peer.status report the value the gesture wrote")
-    func readHalfFollowsTheGesture() async throws {
+    /// The machine-wide switch is gone, and so is the method that moved it: a
+    /// caller that still sends it is told the method does not exist rather
+    /// than having it silently succeed.
+    @Test("the machine-wide setter no longer exists")
+    func machineWideSetterIsGone() async throws {
         let (router, _) = try makeRouterAndDB()
-
-        var status = try await router.handle(RPCRequest(method: RPCMethod.peerStatus))
-            .decodeResult(PeerBridgeStatus.self)
-        #expect(status.messagingEnabled == Config.remotePeerMessagingDefault)
-
-        try await setMessaging(router, enabled: true)
-        var config = try await router.handle(RPCRequest(method: RPCMethod.configGet))
-            .decodeResult(Config.self)
-        status = try await router.handle(RPCRequest(method: RPCMethod.peerStatus))
-            .decodeResult(PeerBridgeStatus.self)
-        #expect(config.remotePeerMessagingEnabled == true)
-        #expect(status.messagingEnabled == true)
-
-        try await setMessaging(router, enabled: false)
-        config = try await router.handle(RPCRequest(method: RPCMethod.configGet))
-            .decodeResult(Config.self)
-        status = try await router.handle(RPCRequest(method: RPCMethod.peerStatus))
-            .decodeResult(PeerBridgeStatus.self)
-        #expect(config.remotePeerMessagingEnabled == false)
-        #expect(status.messagingEnabled == false)
-    }
-
-    /// The method name is the wire contract the CLI types: a rename that misses
-    /// one side leaves the flag unreachable again, silently.
-    @Test("the method name is the one the CLI calls")
-    func methodNameIsPinned() {
-        #expect(
-            RPCMethod.configSetRemotePeerMessagingEnabled
-                == "config.setRemotePeerMessagingEnabled")
+        let response = await router.handle(
+            RPCRequest(method: "config.setRemotePeerMessagingEnabled"))
+        #expect(response.success == false)
     }
 }

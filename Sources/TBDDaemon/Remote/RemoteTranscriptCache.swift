@@ -16,12 +16,51 @@ private let cacheLogger = Logger(subsystem: "com.tbd.daemon", category: "remote-
 /// - `generation` — incremented whenever the file's content is replaced rather
 ///   than extended, so a reader holding records from an earlier generation
 ///   discards them and rereads from the start.
+/// - `before` — the provider's cursor for the history above the file's first
+///   record, from a `--tail` reset or the last `--before` page; nil once the
+///   cache reaches the conversation's beginning, and always nil for a cache
+///   built by forward reads alone.
+/// - `head` — a counter bumped on every prepend, so a reader knows records
+///   arrived at the top of the file under the same generation.
+/// - `hint` — the session's transcript hint recorded at the last caught-up
+///   sync, the baseline the next sync compares the current hint with. A reset
+///   that changes the file clears it; the sync records it again once caught up.
+/// - `pendingPrepend` — set while a prepend is between its first and last
+///   write. A load that finds it set resets the cache (see `prepend`).
+///
+/// A `state.json` written before the last four fields existed decodes with
+/// them empty: nil, 0, nil, false.
 struct RemoteTranscriptCacheState: Codable, Equatable, Sendable {
     var cursor: String?
     var length: Int
     var generation: Int
+    var before: String?
+    var head: Int = 0
+    var hint: RemoteTranscriptHint?
+    var pendingPrepend: Bool = false
 
     static let empty = RemoteTranscriptCacheState(cursor: nil, length: 0, generation: 0)
+
+    enum CodingKeys: String, CodingKey {
+        case cursor, length, generation, before, head, hint, pendingPrepend
+    }
+}
+
+extension RemoteTranscriptCacheState {
+    /// Declared in an extension so the memberwise initializer survives. Every
+    /// field added after the first three is `decodeIfPresent`, so an older
+    /// daemon's `state.json` still loads without a repair.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            cursor: try c.decodeIfPresent(String.self, forKey: .cursor),
+            length: try c.decode(Int.self, forKey: .length),
+            generation: try c.decode(Int.self, forKey: .generation),
+            before: try c.decodeIfPresent(String.self, forKey: .before),
+            head: try c.decodeIfPresent(Int.self, forKey: .head) ?? 0,
+            hint: try c.decodeIfPresent(RemoteTranscriptHint.self, forKey: .hint),
+            pendingPrepend: try c.decodeIfPresent(Bool.self, forKey: .pendingPrepend) ?? false)
+    }
 }
 
 /// One remote session's transcript cache on disk:
@@ -40,6 +79,14 @@ struct RemoteTranscriptCacheState: Codable, Equatable, Sendable {
 ///   commits the new cursor and length. A crash anywhere in that sequence
 ///   leaves a state of length 0 with no cursor, which `load()` repairs to an
 ///   empty file, and the next fetch reads the conversation from the beginning.
+/// - **Prepend** puts a page of earlier history at the front of the one file:
+///   it commits a `pendingPrepend` marker, renames a temporary file holding the
+///   page followed by the current file over `transcript.jsonl`, then commits
+///   the new length, `before` and `head` with the marker cleared. A load that
+///   finds the marker resets the cache, at the cost of one tail refetch:
+///   without it, a crash between the rename and the last write would leave a
+///   file longer than `length`, and truncating it would cut the prepended file
+///   in the wrong place.
 ///
 /// Only the daemon writes here, and only from `RemoteTranscriptSync`'s
 /// per-session lane, so there is never a second writer to coordinate with. The
@@ -71,10 +118,10 @@ struct RemoteTranscriptCache: Sendable {
         directory.appendingPathComponent(TBDConstants.remoteTranscriptStateFileName)
     }
 
-    /// Prefix of the temporary file a reset writes before renaming it over
-    /// `transcript.jsonl`. Dot-prefixed so a directory listing does not show
-    /// it beside the real file; swept by `load()` when a crash stranded one.
-    private static let resetTempPrefix = ".\(TBDConstants.remoteTranscriptFileName)."
+    /// Prefix of the temporary file a reset or a prepend writes before renaming
+    /// it over `transcript.jsonl`. Dot-prefixed so a directory listing does not
+    /// show it beside the real file; swept by `load()` when a crash stranded one.
+    private static let tempPrefix = ".\(TBDConstants.remoteTranscriptFileName)."
 
     // MARK: - Load (crash repair)
 
@@ -90,19 +137,25 @@ struct RemoteTranscriptCache: Sendable {
     ///   next generation — and the next fetch reads from the beginning.
     /// - An unreadable `state.json` with a non-empty file: the same start-over,
     ///   since nothing says how much of the file was committed.
+    /// - A `pendingPrepend` marker: a prepend died somewhere between its first
+    ///   and last write, so `length` may describe either file. The same
+    ///   start-over, checked before any length comparison.
+    ///
+    /// Every start-over also clears `before` and `hint`: neither describes an
+    /// empty file.
     ///
     /// A pair that already agrees is returned unchanged, with nothing written.
     func load() throws -> RemoteTranscriptCacheState {
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        sweepStrandedResetFiles()
+        sweepStrandedTempFiles()
 
         let fileSize = try currentFileSize()
         var state: RemoteTranscriptCacheState
         var stateUnreadable = false
         if let data = try? Data(contentsOf: stateURL) {
             if let decoded = try? JSONDecoder().decode(RemoteTranscriptCacheState.self, from: data),
-               decoded.length >= 0, decoded.generation >= 0 {
+               decoded.length >= 0, decoded.generation >= 0, decoded.head >= 0 {
                 state = decoded
             } else {
                 cacheLogger.error(
@@ -112,6 +165,20 @@ struct RemoteTranscriptCache: Sendable {
             }
         } else {
             state = .empty
+        }
+
+        if state.pendingPrepend {
+            try truncateTranscript(to: 0)
+            state = RemoteTranscriptCacheState(
+                cursor: nil, length: 0, generation: state.generation + 1, before: nil,
+                head: state.head, hint: nil, pendingPrepend: false)
+            cacheLogger.error(
+                """
+                remote transcript cache \(directory.path, privacy: .public): a prepend did not finish; \
+                cleared, generation \(state.generation, privacy: .public)
+                """)
+            try writeState(state)
+            return state
         }
 
         if fileSize == state.length, !(stateUnreadable && fileSize > 0) {
@@ -133,7 +200,8 @@ struct RemoteTranscriptCache: Sendable {
 
         // Shorter than committed, or no trustworthy state for a non-empty file.
         try truncateTranscript(to: 0)
-        state = RemoteTranscriptCacheState(cursor: nil, length: 0, generation: state.generation + 1)
+        state = RemoteTranscriptCacheState(
+            cursor: nil, length: 0, generation: state.generation + 1, head: state.head)
         cacheLogger.error(
             """
             remote transcript cache \(directory.path, privacy: .public): file (\(fileSize, privacy: .public) bytes) \
@@ -141,6 +209,15 @@ struct RemoteTranscriptCache: Sendable {
             """)
         try writeState(state)
         return state
+    }
+
+    /// The committed state as `state.json` records it, without repairing
+    /// anything, creating the directory, or writing a byte. Nil when the file
+    /// is missing or unreadable. For a reader outside the session's lane, which
+    /// must never race the lane's writes with a repair of its own.
+    func peekState() -> RemoteTranscriptCacheState? {
+        guard let data = try? Data(contentsOf: stateURL) else { return nil }
+        return try? JSONDecoder().decode(RemoteTranscriptCacheState.self, from: data)
     }
 
     // MARK: - Append
@@ -168,28 +245,34 @@ struct RemoteTranscriptCache: Sendable {
             // rather than leaving it for the next load to find.
             try handle.truncate(atOffset: UInt64(state.length + body.count))
         }
-        let next = RemoteTranscriptCacheState(
-            cursor: cursor, length: state.length + body.count, generation: state.generation)
+        var next = state
+        next.cursor = cursor
+        next.length = state.length + body.count
         try writeState(next)
         return next
     }
 
     // MARK: - Reset
 
-    /// Replaces the conversation with `page` and commits `cursor`, under the
-    /// next generation.
+    /// Replaces the conversation with `page` and commits `cursor`, and for a
+    /// tail reset the envelope's `before`, under the next generation. A forward
+    /// reset passes no `before`, which clears any the cache held: the file then
+    /// starts at the conversation's beginning.
     ///
     /// A page byte-identical to what is committed keeps its generation: a
     /// provider with no incremental support answers every call with the whole
     /// conversation, and bumping the generation each time would make the app
-    /// discard and re-render an unchanged transcript on every sync.
+    /// discard and re-render an unchanged transcript on every sync. A reset
+    /// that changes the file clears `hint`, which the sync records again once
+    /// caught up.
     func reset(
-        to page: Data, cursor: String?, from state: RemoteTranscriptCacheState
+        to page: Data, cursor: String?, before: String? = nil, from state: RemoteTranscriptCacheState
     ) throws -> RemoteTranscriptCacheState {
         let body = Self.lineTerminated(page)
         if body.count == state.length, let current = try? Data(contentsOf: transcriptURL), current == body {
-            let next = RemoteTranscriptCacheState(
-                cursor: cursor, length: state.length, generation: state.generation)
+            var next = state
+            next.cursor = cursor
+            next.before = before
             if next != state { try writeState(next) }
             return next
         }
@@ -198,23 +281,66 @@ struct RemoteTranscriptCache: Sendable {
         // Commit "empty, from the beginning" first: from here until the final
         // state write, a crash leaves length 0 and no cursor, which `load()`
         // repairs to an empty file rather than a mix of two conversations.
-        try writeState(RemoteTranscriptCacheState(cursor: nil, length: 0, generation: generation))
+        try writeState(RemoteTranscriptCacheState(
+            cursor: nil, length: 0, generation: generation, head: state.head))
 
-        let temp = directory.appendingPathComponent("\(Self.resetTempPrefix)\(UUID().uuidString).tmp")
-        do {
-            try body.write(to: temp)
-            guard rename(temp.path, transcriptURL.path) == 0 else {
-                throw CocoaError(.fileWriteUnknown, userInfo: [
-                    NSFilePathErrorKey: transcriptURL.path,
-                    NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO),
-                ])
-            }
-        } catch {
-            try? FileManager.default.removeItem(at: temp)
-            throw error
-        }
+        try replaceTranscript(with: body)
 
-        let next = RemoteTranscriptCacheState(cursor: cursor, length: body.count, generation: generation)
+        let next = RemoteTranscriptCacheState(
+            cursor: cursor, length: body.count, generation: generation, before: before, head: state.head)
+        try writeState(next)
+        return next
+    }
+
+    // MARK: - Prepend
+
+    /// Puts one page of earlier history at the front of the one file, in the
+    /// four steps § Cache "Prepend" fixes: marker, temporary file (the page
+    /// followed by the committed file), rename, final state. A crash anywhere
+    /// after the marker leaves `pendingPrepend` set, and `load()` resets the
+    /// cache rather than truncating a prepended file at an offset that
+    /// described the old one.
+    ///
+    /// `before` is the cursor for the history above this page, nil once the
+    /// page reaches the conversation's beginning. The forward `cursor` and the
+    /// generation are untouched: the bottom of the file has not moved.
+    func prepend(
+        _ page: Data, before: String?, to state: RemoteTranscriptCacheState
+    ) throws -> RemoteTranscriptCacheState {
+        var marked = state
+        marked.pendingPrepend = true
+        try writeState(marked)
+
+        let body = Self.lineTerminated(page)
+        let current = (try? Data(contentsOf: transcriptURL)) ?? Data()
+        try replaceTranscript(with: body + current.prefix(state.length))
+
+        var next = state
+        next.length = body.count + state.length
+        next.before = before
+        next.head = state.head + 1
+        next.pendingPrepend = false
+        try writeState(next)
+        return next
+    }
+
+    // MARK: - Single-field commits
+
+    /// Records the hint a caught-up sync saw. Writes `state.json` only.
+    func commitHint(
+        _ hint: RemoteTranscriptHint, to state: RemoteTranscriptCacheState
+    ) throws -> RemoteTranscriptCacheState {
+        var next = state
+        next.hint = hint
+        try writeState(next)
+        return next
+    }
+
+    /// Marks the cache as reaching the conversation's beginning, or as holding
+    /// history above it that can no longer be fetched. Writes `state.json` only.
+    func clearBefore(in state: RemoteTranscriptCacheState) throws -> RemoteTranscriptCacheState {
+        var next = state
+        next.before = nil
         try writeState(next)
         return next
     }
@@ -245,17 +371,36 @@ struct RemoteTranscriptCache: Sendable {
         try handle.truncate(atOffset: UInt64(length))
     }
 
+    /// Writes `body` to a temporary file and renames it over
+    /// `transcript.jsonl`, so a reader never sees a half-written file.
+    private func replaceTranscript(with body: Data) throws {
+        let temp = directory.appendingPathComponent("\(Self.tempPrefix)\(UUID().uuidString).tmp")
+        do {
+            try body.write(to: temp)
+            guard rename(temp.path, transcriptURL.path) == 0 else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [
+                    NSFilePathErrorKey: transcriptURL.path,
+                    NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO),
+                ])
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: temp)
+            throw error
+        }
+    }
+
     private func writeState(_ state: RemoteTranscriptCacheState) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         try encoder.encode(state).write(to: stateURL, options: .atomic)
     }
 
-    /// Removes reset temp files a crash stranded between write and rename.
-    private func sweepStrandedResetFiles() {
+    /// Removes reset and prepend temp files a crash stranded between write
+    /// and rename.
+    private func sweepStrandedTempFiles() {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: directory.path) else { return }
-        for name in names where name.hasPrefix(Self.resetTempPrefix) {
+        for name in names where name.hasPrefix(Self.tempPrefix) {
             try? fm.removeItem(at: directory.appendingPathComponent(name))
         }
     }

@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import TestSupport
@@ -170,13 +169,13 @@ struct HolderAttachRPCTests {
     /// for much longer than that.
     ///
     /// The timeout is driven on the injected clock, not waited for.
-    /// `advanceWhenSuspended` also proves the timer task actually armed.
+    /// `requireAdvanceWhenArmed` also proves the timer task actually armed.
     /// `.clockDriven` is on this test alone rather than the suite: it is the
     /// only one that drives a clock, and a four-minute limit over the other
     /// eleven would let a genuine hang in any of them take four times as long
     /// to surface — this family already hits time limits under load.
     @Test(.clockDriven) func anAttachThatTimedOutVendsNoSecondDescriptor() async throws {
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let readyTimeout: Duration = .seconds(5)
         let harness = try await RPCHarness.start(
             command: Self.echoJob, readyTimeout: readyTimeout, clock: clock)
@@ -186,7 +185,7 @@ struct HolderAttachRPCTests {
         defer { Darwin.close(first.fd) }
 
         // No acknowledgement is ever sent.
-        await clock.advanceWhenSuspended(by: readyTimeout)
+        try await clock.requireAdvanceWhenArmed(by: readyTimeout)
         #expect(await pollUntil("the ready timeout to take the attach back") {
             await harness.registry.viewerAttachment(for: harness.terminalID) == first.generation
         })

@@ -99,6 +99,153 @@ struct TranscriptPresentationTests {
         #expect(appended.nodes.first?.id == "t1#activity-group")
     }
 
+    // MARK: Identity across a prepend
+    //
+    // A pane that loads earlier history (the remote transcript) prepends it
+    // ABOVE the rows already on screen. When the loaded window starts inside a
+    // run of activity, the prepended page can extend that run at its FRONT, so
+    // first-member keying would rename the group on every prepend: an expanded
+    // group would collapse and the table's prepend anchor would lose its row.
+
+    @Test("a group the loaded window starts inside keeps its id when a prepend extends its front")
+    func groupIDSurvivesPrependOntoItsFront() {
+        let window: [TranscriptItem] = [
+            tool("t3", "Read", #"{"file_path":"C.swift"}"#),
+            tool("t4", "Bash", #"{"command":"make"}"#),
+            .assistantText(id: "a2", text: "Done.", timestamp: nil),
+        ]
+        let page: [TranscriptItem] = [
+            .assistantText(id: "a1", text: "Starting.", timestamp: nil),
+            tool("t1", "Read", #"{"file_path":"A.swift"}"#),
+            tool("t2", "Grep", #"{"pattern":"x"}"#),
+        ]
+
+        let before = TranscriptPresentation.build(items: window, windowStartIDs: ["t3"])
+        let after = TranscriptPresentation.build(items: page + window, windowStartIDs: ["t3", "a1"])
+
+        #expect(before.nodes.map(\.id) == ["t3#activity-group", "a2"])
+        #expect(after.nodes.map(\.id) == ["a1", "t3#activity-group", "a2"])
+        guard case .activityGroupSummary(let summary) = after.nodes[1].kind else {
+            Issue.record("expected the merged run to stay one group")
+            return
+        }
+        #expect(summary.itemCount == 4)
+    }
+
+    @Test("a group keeps its id across successive prepends of pure activity")
+    func groupIDSurvivesAllActivityPrepends() {
+        let window: [TranscriptItem] = [
+            tool("t5", "Read", #"{"file_path":"E.swift"}"#),
+            tool("t6", "Bash", #"{"command":"make"}"#),
+            .assistantText(id: "a9", text: "Done.", timestamp: nil),
+        ]
+        let page1 = [tool("t3", "Read", #"{"file_path":"C.swift"}"#), tool("t4", "Grep", #"{"pattern":"y"}"#)]
+        let page2 = [tool("t1", "Read", #"{"file_path":"A.swift"}"#), tool("t2", "Grep", #"{"pattern":"x"}"#)]
+
+        let once = TranscriptPresentation.build(items: page1 + window, windowStartIDs: ["t5", "t3"])
+        let twice = TranscriptPresentation.build(
+            items: page2 + page1 + window, windowStartIDs: ["t5", "t3", "t1"])
+
+        #expect(once.nodes.map(\.id) == ["t5#activity-group", "a9"])
+        #expect(twice.nodes.map(\.id) == ["t5#activity-group", "a9"])
+    }
+
+    @Test("a prepend ending in a message leaves the old top group's id alone")
+    func groupIDSurvivesPrependEndingInMessage() {
+        let window: [TranscriptItem] = [
+            tool("t3", "Read", #"{"file_path":"C.swift"}"#),
+            tool("t4", "Bash", #"{"command":"make"}"#),
+            .assistantText(id: "a2", text: "Done.", timestamp: nil),
+        ]
+        let page: [TranscriptItem] = [
+            tool("t1", "Read", #"{"file_path":"A.swift"}"#),
+            tool("t2", "Grep", #"{"pattern":"x"}"#),
+            .assistantText(id: "a1", text: "Looked.", timestamp: nil),
+        ]
+
+        let after = TranscriptPresentation.build(items: page + window, windowStartIDs: ["t3", "t1"])
+
+        #expect(after.nodes.map(\.id) == ["t1#activity-group", "a1", "t3#activity-group", "a2"])
+    }
+
+    @Test("an expanded group stays expanded when a prepend extends its front")
+    func expansionSurvivesPrepend() {
+        let window: [TranscriptItem] = [
+            tool("t3", "Read", #"{"file_path":"C.swift"}"#),
+            tool("t4", "Bash", #"{"command":"make"}"#),
+            .assistantText(id: "a2", text: "Done.", timestamp: nil),
+        ]
+        let page: [TranscriptItem] = [
+            .assistantText(id: "a1", text: "Starting.", timestamp: nil),
+            tool("t1", "Read", #"{"file_path":"A.swift"}"#),
+            tool("t2", "Grep", #"{"pattern":"x"}"#),
+        ]
+        let before = TranscriptPresentation.build(items: window, windowStartIDs: ["t3"])
+        // The pane stores the toggle under the id the row carried when clicked.
+        let overrides = [before.nodes[0].id: true]
+
+        let after = TranscriptPresentation.build(
+            items: page + window, expansionOverrides: overrides, windowStartIDs: ["t3", "a1"])
+
+        #expect(after.nodes.map(\.id) == ["a1", "t3#activity-group", "t1", "t2", "t3", "t4", "a2"])
+    }
+
+    @Test("appending to the bottom group keeps its id, with or without window starts")
+    func appendKeepsBottomGroupIDInEveryMode() {
+        let base: [TranscriptItem] = [
+            .assistantText(id: "a1", text: "Starting.", timestamp: nil),
+            tool("t1", "Read", #"{"file_path":"A.swift"}"#),
+            tool("t2", "Bash", #"{"command":"make"}"#),
+        ]
+        let appended = base + [tool("t3", "Grep", #"{"pattern":"x"}"#)]
+        let closed = appended + [.assistantText(id: "a2", text: "Done.", timestamp: nil)]
+
+        for starts: Set<String> in [[], ["a1"]] {
+            let ids = [base, appended, closed].map {
+                TranscriptPresentation.build(items: $0, windowStartIDs: starts).nodes.map(\.id)
+            }
+            #expect(ids[0] == ["a1", "t1#activity-group"])
+            #expect(ids[1] == ["a1", "t1#activity-group"])
+            #expect(ids[2] == ["a1", "t1#activity-group", "a2"])
+        }
+    }
+
+    @Test("an all-activity window keeps its group id as activity is appended")
+    func appendKeepsWindowStartGroupID() {
+        let base = [tool("t1", "Read", #"{"file_path":"A.swift"}"#), tool("t2", "Bash", #"{"command":"make"}"#)]
+        let appended = base + [tool("t3", "Grep", #"{"pattern":"x"}"#)]
+
+        let ids = [base, appended].map {
+            TranscriptPresentation.build(items: $0, windowStartIDs: ["t1"]).nodes.map(\.id)
+        }
+
+        #expect(ids == [["t1#activity-group"], ["t1#activity-group"]])
+    }
+
+    @Test("without window starts a group is keyed by its first member, as in a pane that never prepends")
+    func noWindowStartsKeepsFirstMemberKeying() {
+        let items: [TranscriptItem] = [
+            tool("t1", "Read", #"{"file_path":"A.swift"}"#),
+            tool("t2", "Grep", #"{"pattern":"x"}"#),
+            tool("t3", "Read", #"{"file_path":"C.swift"}"#),
+            tool("t4", "Bash", #"{"command":"make"}"#),
+            .assistantText(id: "a2", text: "Done.", timestamp: nil),
+        ]
+
+        #expect(TranscriptPresentation.build(items: items).nodes.map(\.id) == ["t1#activity-group", "a2"])
+    }
+
+    @Test("a window start is the first item the pane renders, skipping hidden ones")
+    func windowStartSkipsHiddenItems() {
+        let items: [TranscriptItem] = [
+            .thinking(id: "th#0", text: "hmm", timestamp: nil),
+            tool("t1", "Read", #"{"file_path":"A.swift"}"#),
+        ]
+
+        #expect(TranscriptPresentation.windowStartID(of: items) == "t1")
+        #expect(TranscriptPresentation.windowStartID(of: []) == nil)
+    }
+
     @Test("errors and questions start expanded and surface status")
     func attentionGroupsStartExpanded() {
         let failure = TranscriptItem.toolCall(
@@ -437,6 +584,127 @@ struct TranscriptPresentationTests {
         let native = try #require(ActivityRowFormatter.presentation(for: node))
         #expect(native.titleSegments.map(\.text) == [summary.activityPhrase])
         #expect(summary.activityPhrase == "Read 1 file, ran 2 shell commands")
+    }
+
+    // MARK: - Prompt cards lift out of activity groups
+
+    private func card(on toolUseID: String) -> [String: PendingPromptPresentation] {
+        let payload = PendingPromptPayload(
+            id: "p-\(toolUseID)", kind: .permission, toolUseID: toolUseID, toolName: "Bash",
+            toolInputJSON: "{}", suggestionsJSON: nil, createdAt: Date(timeIntervalSince1970: 0))
+        return [toolUseID: .local(payload, terminalID: UUID(), flagOn: true)]
+    }
+
+    private var liftRun: [TranscriptItem] {
+        [
+            .assistantText(id: "a1", text: "Looking.", timestamp: nil),
+            succeededTool("r1", "Read", #"{"file_path":"A.swift"}"#),
+            succeededTool("r2", "Read", #"{"file_path":"B.swift"}"#),
+            tool("r3", "Bash", #"{"command":"touch x"}"#)
+        ]
+    }
+
+    @Test("a pending card lifts out of its group without renaming the group")
+    func liftingKeepsTheGroupID() {
+        let memo = TranscriptPresentationMemo()
+        let folded = TranscriptPresentation.build(items: liftRun, memo: memo)
+        #expect(folded.nodes.map(\.id) == ["a1", "r1#activity-group"])
+        guard case .activityGroupSummary(let whole) = folded.nodes[1].kind else {
+            Issue.record("expected a group summary")
+            return
+        }
+        #expect(whole.itemCount == 3)
+
+        // Prompt on the last member: the group keeps its id and two members;
+        // the card follows it, standalone.
+        let liftedLast = TranscriptPresentation.build(
+            items: liftRun, pendingPrompts: card(on: "r3"), memo: memo)
+        #expect(liftedLast.nodes.map(\.id) == ["a1", "r1#activity-group", "r3"])
+        guard case .activityGroupSummary(let rest) = liftedLast.nodes[1].kind else {
+            Issue.record("expected a group summary")
+            return
+        }
+        #expect(rest.itemCount == 2)
+        #expect(liftedLast.nodes[2].pendingPrompt != nil)
+
+        // Prompt on the FIRST member: the id is still keyed on the whole run.
+        let liftedFirst = TranscriptPresentation.build(
+            items: liftRun, pendingPrompts: card(on: "r1"), memo: memo)
+        #expect(liftedFirst.nodes.map(\.id) == ["a1", "r1#activity-group", "r1"])
+
+        // Resolved: the original three-member group returns under the same id.
+        let foldedBack = TranscriptPresentation.build(items: liftRun, memo: memo)
+        #expect(foldedBack.nodes.map(\.id) == folded.nodes.map(\.id))
+        guard case .activityGroupSummary(let back) = foldedBack.nodes[1].kind else {
+            Issue.record("expected a group summary")
+            return
+        }
+        #expect(back.itemCount == 3)
+    }
+
+    @Test("a group's disclosure state survives a lift and fold-back")
+    func liftingKeepsTheExpansionOverride() {
+        let overrides = ["r1#activity-group": true]
+        let lifted = TranscriptPresentation.build(
+            items: liftRun, expansionOverrides: overrides, pendingPrompts: card(on: "r2"),
+            memo: TranscriptPresentationMemo())
+        #expect(lifted.nodes.map(\.id) == ["a1", "r1#activity-group", "r1", "r3", "r2"])
+        let back = TranscriptPresentation.build(
+            items: liftRun, expansionOverrides: overrides, memo: TranscriptPresentationMemo())
+        #expect(back.nodes.map(\.id) == ["a1", "r1#activity-group", "r1", "r2", "r3"])
+    }
+
+    @Test("with two tool calls on disk, only the one with the open dialog is lifted")
+    func onlyTheOpenDialogIsLifted() {
+        let items = [
+            tool("b1", "Bash", #"{"command":"touch x"}"#),
+            tool("b2", "Bash", #"{"command":"touch y"}"#)
+        ]
+        let presentation = TranscriptPresentation.build(
+            items: items, pendingPrompts: card(on: "b1"), memo: TranscriptPresentationMemo())
+        // b2 alone is no longer worth a wrapper, so it renders bare; b1 is the card.
+        #expect(presentation.nodes.map(\.id) == ["b2", "b1"])
+        #expect(presentation.nodes.first { $0.id == "b1" }?.pendingPrompt != nil)
+        #expect(presentation.nodes.first { $0.id == "b2" }?.pendingPrompt == nil)
+    }
+
+    /// A lifted `AskUserQuestion` still counts toward needs-response, so the
+    /// group stays expanded exactly as it is without the card; it leaves the
+    /// pending tally, since the card itself shows it.
+    @Test("a lifted question keeps its group expanded but leaves the pending tally")
+    func liftedQuestionKeepsTheGroupExpanded() {
+        let items = [
+            succeededTool("r1", "Read", #"{"file_path":"A.swift"}"#),
+            succeededTool("r2", "Read", #"{"file_path":"B.swift"}"#),
+            tool("q1", "AskUserQuestion", #"{"questions":[]}"#)
+        ]
+        let plain = TranscriptPresentation.build(items: items, memo: TranscriptPresentationMemo())
+        guard case .activityGroupSummary(let plainSummary) = plain.nodes.first?.kind else {
+            Issue.record("expected a group summary")
+            return
+        }
+        #expect(plainSummary.requiresResponse)
+        #expect(plainSummary.isExpanded)
+
+        let presentation = TranscriptPresentation.build(
+            items: items, pendingPrompts: card(on: "q1"), memo: TranscriptPresentationMemo())
+        guard case .activityGroupSummary(let summary) = presentation.nodes.first?.kind else {
+            Issue.record("expected a group summary")
+            return
+        }
+        #expect(summary.requiresResponse)
+        #expect(summary.isExpanded, "the group must not collapse while its question is lifted")
+        #expect(summary.pendingCount == 0)
+        #expect(presentation.nodes.map(\.id) == ["r1#activity-group", "r1", "r2", "q1"])
+    }
+
+    @Test("the memo treats a change of pending prompts as a new input")
+    func memoKeysOnPendingPrompts() {
+        let memo = TranscriptPresentationMemo()
+        let plain = TranscriptPresentation.build(items: liftRun, memo: memo)
+        let carded = TranscriptPresentation.build(items: liftRun, pendingPrompts: card(on: "r3"), memo: memo)
+        #expect(plain.nodes.map(\.id) != carded.nodes.map(\.id))
+        #expect(memo.statistics.misses == 2)
     }
 
     /// The rendered phrase for a run of activity, via the real grouping path.

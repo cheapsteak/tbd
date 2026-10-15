@@ -335,6 +335,7 @@ extension StateDelta {
         case .repoHiddenChanged: return "repoHiddenChanged"
         case .repoExpandedChanged: return "repoExpandedChanged"
         case .terminalCreated: return "terminalCreated"
+        case .terminalReplaced: return "terminalReplaced"
         case .terminalRemoved: return "terminalRemoved"
         case .worktreeConflictsChanged: return "worktreeConflictsChanged"
         case .terminalPinChanged: return "terminalPinChanged"
@@ -357,6 +358,8 @@ extension StateDelta {
         case .remoteSessionReconnectRequested: return "remoteSessionReconnectRequested"
         case .terminalLimitHit: return "terminalLimitHit"
         case .terminalProgramStatusChanged: return "terminalProgramStatusChanged"
+        case .terminalPendingPromptsChanged: return "terminalPendingPromptsChanged"
+        case .devServersChanged: return "devServersChanged"
         }
     }
 }

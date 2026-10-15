@@ -41,26 +41,57 @@ by construction; nothing in `DeskSessionManager` changes.
 ## The rule
 
 A watch mode (`nightwatchMode` other than `.off`) and the pty-holder transport
-are never both on. "On" for the holder means the flag's **effective** value,
-`config.ptyHolderEnabled` resolved through `Config.ptyHolderDefault`, so the
-rule reaches installs that never touched the toggle when Phase 3 graduates the
-default.
+are never both on.
+
+**What gets refused is the hazard, not the flag**, and the hazard has two terms.
+The first is the flag's **effective** value, `config.ptyHolderEnabled` resolved
+through `Config.ptyHolderDefault`, so the rule reaches installs that never
+touched the toggle — which, with the default graduated, is the ordinary case
+rather than the edge one. The second is whether this daemon can start a holder
+at all: `HolderRegistry.canSpawn`, the `TBDHolder` helper beside the daemon
+binary, the same question the spawn gate asks. Without the helper every spawn
+falls back to tmux, so no holder-backed session can come into existence and
+there is nothing to refuse. A gate that fired there would take Nightwatch away
+from an install that can still run it, and name as the remedy a transport
+change that would have no effect — and with the flag on by default, that is the
+state any install whose helper went missing in an upgrade would land in.
+
+`NightwatchHolderGate.watchModesBlocked(holderEnabled:holderSupported:)`
+composes the two terms once, and every decider reads it, so no surface can ask
+only half the question. Each surface supplies the pair from what it holds: the
+daemon from its own registry, the app from `daemon.capabilities`.
+
+One deliberate asymmetry: the refusal on `config.setPtyHolderEnabled` carries
+no `holderSupported` term. It guards a gesture that would *persist* the
+forbidden pair, and the written `1` outlives this daemon's inability to find
+the helper — an upgrade or reinstall restores it, and the pair would then be
+live. Turning the holder off is never refused either way.
 
 ### The refusal text
 
 One shared constant in `TBDShared` carries the sentence every surface uses, so
 the app, the CLI, the RPC error, and the log say the same thing. It names the
 holder flag, states that Nightwatch is deprecated and replaced by fleet
-supervision, and says which switch to flip first. A second constant carries the
-mirror sentence for the holder switch ("turn Nightwatch off first"). Both are
-plain prose without org, host, or person names.
+supervision, and says what has to change.
+
+**It names both terms of the hazard, not just the switch.** Turning the
+transport off is the first step and often not the last, because a watch mode
+stays refused while any holder-backed session is still alive — a parked one
+included, since it wakes back onto a holder. A refusal that named only the flag
+would read as a broken promise to the user who flipped it and got the identical
+message back, and would send them to a switch they had already thrown.
+
+A second constant carries the mirror sentence for the holder switch ("turn
+Nightwatch off first"). Both are plain prose without org, host, or person
+names.
 
 ### Enforcement point 1: `nightwatch.setMode`
 
 `RPCRouter.handleSetNightwatchMode` reads the config before writing. If the
-requested mode is not `.off` and the effective holder flag is on, it returns an
-RPC error carrying the refusal text and writes nothing. Requests for `.off` are
-never refused.
+requested mode is not `.off` and the hazard is live — the effective flag on and
+this daemon's registry able to spawn — it returns an RPC error carrying the
+refusal text and writes nothing. Requests for `.off` are never refused, and
+neither is any mode on a daemon that cannot start a holder.
 
 ### Enforcement point 2: `config.setPtyHolderEnabled`
 
@@ -72,8 +103,11 @@ holder **off** is never refused.
 ### Enforcement point 3: boot reconcile
 
 `Daemon.swift`'s boot step that re-applies the persisted watch mode to the
-`DaywatchRunner` gains a check before `runner.apply`. If the effective holder
-flag is on and the persisted mode is not `.off`, the daemon:
+`DaywatchRunner` gains a check before `runner.apply`. `holderSupported` is
+passed in from the same registry the spawn gate consults, and is not optional:
+a daemon that cannot start a holder must leave a persisted watch mode running
+rather than take it away. If the hazard is live and the persisted mode is not
+`.off`, the daemon:
 
 1. writes `nightwatchMode = .off` through the config store,
 2. logs at notice level with the refusal text,
@@ -82,9 +116,12 @@ flag is on and the persisted mode is not `.off`, the daemon:
 4. broadcasts the config-change delta the app already reloads on, and
 5. does not start the runner.
 
-This state can only be reached by an install that combined the two on a daemon
-older than this change; the two refusals mean it can never be entered again,
-so the reconcile runs once per such install and is otherwise a no-op.
+Two kinds of install reach this state: one that combined the two on a daemon
+older than this change, and one that left a watch mode on and never touched the
+holder toggle, whose effective flag reads on through the shipped default. The
+two refusals mean the pair can never be deliberately *entered* again, and
+step 1's write means every later boot reads `.off` — so the reconcile fires at
+most once per install and is otherwise a no-op.
 
 ## App surfaces
 

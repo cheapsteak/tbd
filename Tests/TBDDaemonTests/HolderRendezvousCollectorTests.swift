@@ -74,8 +74,9 @@ struct HolderRendezvousCollectorTests: ~Copyable {
     @Test func candidatesAreSocketsNamedForASession() {
         let live = UUID()
         makeDeadHolder(live)
-        // A lock and a log with no socket: a holder that may still be being
-        // born. Not a candidate — the socket is what this reconciler decides on.
+        // A lock and a log with no socket is not a *socket* candidate — the
+        // socket is what this arm decides on. It is the socket-less arm's
+        // business, under `orphanPairCandidates()` below.
         let lonely = UUID()
         fm.createFile(atPath: path(lonely, "lock"), contents: Data())
         fm.createFile(atPath: path(lonely, "log"), contents: Data())
@@ -228,5 +229,207 @@ struct HolderRendezvousCollectorTests: ~Copyable {
                 createdAt: .distantPast)).isEmpty,
             "a name that is not <sessionID>.sock must be refused even inside the base")
         #expect(fm.fileExists(atPath: path(id, "sock")), "the refusal must not unlink by UUID alone")
+    }
+
+    // MARK: - The socket-less arm
+
+    /// The residue of a holder whose socket is already gone: a lock and a log
+    /// with nothing to anchor them. This is the shape that accumulated 557
+    /// pairs against 53 live sockets before the second arm existed.
+    @discardableResult
+    private func makeOrphanPair(_ id: UUID, log: Bool = true, lock: Bool = true) -> [String] {
+        var paths: [String] = []
+        if lock {
+            fm.createFile(atPath: path(id, "lock"), contents: Data())
+            paths.append(path(id, "lock"))
+        }
+        if log {
+            fm.createFile(atPath: path(id, "log"), contents: Data("holder: killed\n".utf8))
+            paths.append(path(id, "log"))
+        }
+        return paths
+    }
+
+    /// A pair for `id` with its age forced, built the way
+    /// `orphanPairCandidates()` builds one.
+    private func pair(_ id: UUID, createdAt: Date?) -> HolderRendezvousOrphanPair {
+        HolderRendezvousOrphanPair(
+            sessionID: id, lockPath: path(id, "lock"), createdAt: createdAt)
+    }
+
+    @Test func orphanPairCandidatesAreTheSocketlessSessions() {
+        let orphan = UUID()
+        makeOrphanPair(orphan)
+        // A session whose socket is still on disk belongs to the socket arm,
+        // whatever its lock and log look like.
+        let withSocket = UUID()
+        makeDeadHolder(withSocket)
+        // A log with no lock is still residue nothing else reclaims.
+        let logOnly = UUID()
+        makeOrphanPair(logOnly, lock: false)
+        // Names that do not parse as a session, and a directory wearing one.
+        fm.createFile(atPath: base.appendingPathComponent("notes.lock").path, contents: Data())
+        try? fm.createDirectory(
+            at: base.appendingPathComponent("\(UUID().uuidString.lowercased()).log"),
+            withIntermediateDirectories: true)
+
+        let found = makeCollector().orphanPairCandidates()
+        #expect(Set(found.map(\.sessionID)) == Set([orphan, logOnly]))
+        #expect(found.allSatisfy { $0.createdAt != nil },
+                "files the collector just made must have an age")
+    }
+
+    @Test func missingBaseYieldsNoOrphanPairs() {
+        let fixed = clock
+        let collector = HolderRendezvousCollector(
+            base: base.appendingPathComponent("nope", isDirectory: true),
+            now: { fixed }, isListening: { _ in false })
+        #expect(collector.orphanPairCandidates().isEmpty)
+    }
+
+    /// The newest file in the pair decides its age, so a week-old lock beside a
+    /// log written a second ago is kept — the keep-biased reading of "has
+    /// anything recent happened under this UUID".
+    @Test func anOrphanPairIsAsYoungAsItsNewestFile() throws {
+        let id = UUID()
+        makeOrphanPair(id)
+        try fm.setAttributes([.creationDate: clock.addingTimeInterval(-604_800)],
+                             ofItemAtPath: path(id, "lock"))
+        try fm.setAttributes([.creationDate: clock.addingTimeInterval(-1)],
+                             ofItemAtPath: path(id, "log"))
+
+        let found = try #require(makeCollector().orphanPairCandidates().first)
+        let created = try #require(found.createdAt)
+        #expect(clock.timeIntervalSince(created) < 60,
+                "the newest file must decide the pair's age, not the oldest")
+        #expect(makeCollector().decideOrphanPair(
+            found, graceSeconds: grace, claimedSessionIDs: []) == .keep(reason: "grace"))
+    }
+
+    /// The grace gate, with its discriminating half: the same pair past the
+    /// window is reaped, so the keep is the age deciding and not another gate.
+    @Test func aYoungOrphanPairIsKept() {
+        let id = UUID()
+        let paths = makeOrphanPair(id)
+        let collector = makeCollector()
+
+        #expect(collector.decideOrphanPair(
+            pair(id, createdAt: clock.addingTimeInterval(-1)),
+            graceSeconds: grace, claimedSessionIDs: []) == .keep(reason: "grace"))
+        #expect(collector.decideOrphanPair(
+            pair(id, createdAt: clock.addingTimeInterval(-Double(grace) - 1)),
+            graceSeconds: grace, claimedSessionIDs: []) == .reap)
+        #expect(paths.allSatisfy { fm.fileExists(atPath: $0) }, "decide must not touch anything")
+    }
+
+    @Test func anUnreadableOrphanPairAgeKeeps() {
+        let id = UUID()
+        makeOrphanPair(id)
+        #expect(makeCollector().decideOrphanPair(
+            pair(id, createdAt: nil), graceSeconds: grace, claimedSessionIDs: [])
+            == .keep(reason: "unknown-age"))
+    }
+
+    /// The row gate — the one that makes this arm safe rather than merely
+    /// cautious. Creation commits the session row before the holder becomes
+    /// discoverable, so a pair whose session still has a row may belong to a
+    /// spawn in flight; one with no row names a UUID no spawner will take that
+    /// lock for again.
+    @Test func anOrphanPairWhoseSessionHasARowIsKept() {
+        let id = UUID()
+        makeOrphanPair(id)
+        let collector = makeCollector()
+        let target = pair(id, createdAt: .distantPast)
+
+        #expect(collector.decideOrphanPair(
+            target, graceSeconds: grace, claimedSessionIDs: [id]) == .keep(reason: "has-row"))
+        #expect(collector.decideOrphanPair(
+            target, graceSeconds: grace, claimedSessionIDs: [UUID()]) == .reap,
+            "some other session's row must not keep this pair")
+    }
+
+    /// A held `flock` is a live holder or a spawner mid-flight. Unlinking the
+    /// lock there is the hazard `HolderLock` documents: a racing spawner would
+    /// create and lock a *different* file at the same path.
+    @Test func aHeldLockKeepsTheOrphanPair() throws {
+        let id = UUID()
+        makeOrphanPair(id)
+        let collector = makeCollector()
+        let target = pair(id, createdAt: .distantPast)
+        do {
+            let lock = try HolderLock.acquire(path: path(id, "lock"))
+            defer { lock.release() }
+            #expect(collector.decideOrphanPair(
+                target, graceSeconds: grace, claimedSessionIDs: []) == .keep(reason: "lock-held"))
+        }
+        #expect(collector.decideOrphanPair(
+            target, graceSeconds: grace, claimedSessionIDs: []) == .reap,
+            "the same pair with the lock released is reaped")
+    }
+
+    /// **The in-flight spawn case, with the grace window configured away.** A
+    /// new session's holder is spawned before its row is written, so mid-spawn
+    /// a UUID has a lock, a log and no row — and `gcGraceSeconds` has no floor,
+    /// so the age gate cannot be what saves it. The creation lock is: the
+    /// spawner holds it from before the log exists until the holder dies.
+    @Test func aRowlessSpawnInFlightIsKeptWithNoGraceWindow() throws {
+        let id = UUID()
+        makeOrphanPair(id)
+        let collector = makeCollector()
+        let target = pair(id, createdAt: clock)
+        do {
+            let lock = try HolderLock.acquire(path: path(id, "lock"))
+            defer { lock.release() }
+            #expect(collector.decideOrphanPair(
+                target, graceSeconds: 0, claimedSessionIDs: []) == .keep(reason: "lock-held"))
+        }
+        #expect(collector.decideOrphanPair(
+            target, graceSeconds: 0, claimedSessionIDs: []) == .reap,
+            "with the lock released and no grace window the same pair is reaped, so the keep above is the lock deciding")
+    }
+
+    @Test func reapOrphanPairUnlinksTheLockAndTheLog() {
+        let id = UUID()
+        let paths = makeOrphanPair(id)
+        let removed = makeCollector().reapOrphanPair(pair(id, createdAt: .distantPast))
+        #expect(Set(removed) == Set(paths))
+        #expect(paths.allSatisfy { fm.fileExists(atPath: $0) == false })
+    }
+
+    /// The late gate. The gates ran against one listing; a spawner that bound a
+    /// socket since then owns this UUID, and its lock is not ours to unlink —
+    /// nor is the socket this arm has no verdict on.
+    @Test func reapOrphanPairRefusesOnceASocketExists() {
+        let id = UUID()
+        let paths = makeOrphanPair(id)
+        #expect(HolderRendezvousFixture.bindAndAbandon(at: path(id, "sock")))
+
+        #expect(makeCollector().reapOrphanPair(pair(id, createdAt: .distantPast)).isEmpty)
+        #expect(paths.allSatisfy { fm.fileExists(atPath: $0) })
+        #expect(fm.fileExists(atPath: path(id, "sock")),
+                "this arm must never unlink a socket")
+    }
+
+    /// The anchor guard, as on the socket arm: `HolderRendezvousOrphanPair` is
+    /// a public value type anyone can construct.
+    @Test func reapOrphanPairRefusesAnUnanchoredPair() {
+        let id = UUID()
+        let outside = base.appendingPathComponent("nested", isDirectory: true)
+        try? fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        let victim = outside.appendingPathComponent("\(id.uuidString.lowercased()).lock").path
+        fm.createFile(atPath: victim, contents: Data())
+        let paths = makeOrphanPair(id)
+
+        let collector = makeCollector()
+        #expect(collector.reapOrphanPair(HolderRendezvousOrphanPair(
+            sessionID: id, lockPath: victim, createdAt: .distantPast)).isEmpty)
+        #expect(fm.fileExists(atPath: victim), "an unanchored path must be left alone")
+        #expect(collector.reapOrphanPair(HolderRendezvousOrphanPair(
+            sessionID: id,
+            lockPath: base.appendingPathComponent("elsewhere.lock").path,
+            createdAt: .distantPast)).isEmpty,
+            "a name that is not <sessionID>.lock must be refused even inside the base")
+        #expect(paths.allSatisfy { fm.fileExists(atPath: $0) },
+                "the refusal must not unlink by UUID alone")
     }
 }

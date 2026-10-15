@@ -143,6 +143,32 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("pr-poll-schedule: on"))
     }
 
+    // MARK: - transcript-prompt-answer: the soak switch for answering prompts from the transcript
+
+    @Test func transcriptPromptAnswerDescribesBothStates() {
+        let on = ConfigSet.confirmation(key: "transcript-prompt-answer", value: .on)
+        let off = ConfigSet.confirmation(key: "transcript-prompt-answer", value: .off)
+        #expect(on.hasPrefix("Set transcript-prompt-answer to on."))
+        #expect(off.hasPrefix("Set transcript-prompt-answer to off."))
+        #expect(on != off)
+    }
+
+    @Test func transcriptPromptAnswerIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("transcript-prompt-answer"))
+        #expect(try ConfigSet.parseOnOff("on", key: "transcript-prompt-answer") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "transcript-prompt-answer") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "transcript-prompt-answer")
+        }
+    }
+
+    @Test func configGetPrintsTranscriptPromptAnswerInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("transcript-prompt-answer: off"))
+        config.transcriptPromptAnswerEnabled = true
+        #expect(ConfigGet.render(config).contains("transcript-prompt-answer: on"))
+    }
+
     // MARK: - No transport-shaped switch
 
     /// Hibernation takes one switch — `auto_hibernate_enabled` — for every

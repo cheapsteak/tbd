@@ -57,6 +57,8 @@ struct GeneralSettingsTab: View {
     @AppStorage("errorNotificationSoundName") private var errorSoundName: String = "Sosumi"
     @AppStorage("errorNotificationSoundCustomPath") private var errorCustomPath: String = ""
 
+    @State private var migrating = false
+    @State private var migrationResult: TerminalMigrateTransportResult?
     /// In-progress amount text for the hibernate-idle-threshold field. Kept
     /// separate from the committed `hibernateIdleDuration` so a keystroke
     /// never fires an RPC — only `.onSubmit` / focus-loss / a unit-picker
@@ -244,6 +246,7 @@ struct GeneralSettingsTab: View {
             Section("Remote Sessions") {
                 remoteBackendsToggle
                 claudeCloudToggle
+                remoteTranscriptLiveSyncToggle
                 remoteProvidersRegistryRow
                 RemoteCreateDefaultsEditor(
                     scope: .global,
@@ -276,6 +279,7 @@ struct GeneralSettingsTab: View {
                 ptyHolderToggle
                 modelProxyToggle
                 transcriptStreamingToggle
+                transcriptPromptAnswerToggle
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
@@ -315,30 +319,83 @@ struct GeneralSettingsTab: View {
 
     /// Pty-holder transport opt-in. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPtyHolderEnabled`.
-    /// Disabled with an explanation when the daemon could not locate the
-    /// `TBDHolder` helper — the same second half the spawn gate asks, without
-    /// which the flag would be honored by falling back to tmux every time.
+    /// Interactive whenever either direction would do something, which
+    /// `AppState.ptyHolderToggleIsInteractive` decides and documents; the
+    /// caption explaining a missing `TBDHolder` helper shows independently of
+    /// that, because it is a fact about the daemon rather than about the
+    /// control.
     @ViewBuilder
     private var ptyHolderToggle: some View {
         let capabilities = appState.daemonCapabilities
         let supported = capabilities?.ptyHolderSupported ?? false
+        let enabled = capabilities?.ptyHolderEnabled ?? false
         Toggle("Run new sessions without tmux", isOn: Binding(
-            get: { capabilities?.ptyHolderEnabled ?? false },
+            get: { enabled },
             set: { newValue in Task { await appState.setPtyHolderEnabled(newValue) } }
         ))
         .help(AppState.ptyHolderHelp)
-        .disabled(!supported)
+        .disabled(!AppState.ptyHolderToggleIsInteractive(supported: supported, flagOn: enabled))
         if !supported {
             Text(AppState.ptyHolderUnsupportedCaption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
-        if supported && !(capabilities?.ptyHolderEnabled ?? false) && appState.nightwatchMode != .off {
+        // Hidden while a watch mode forbids the move, which the daemon refuses
+        // outright: the caption below is what explains it, and it renders in
+        // exactly that state.
+        if supported, !TransportMigrationMenu.isBlockedByWatchMode(appState.nightwatchMode) {
+            transportMigrationRow
+        }
+        if supported && !enabled && appState.nightwatchMode != .off {
             Text(nightwatchExperimental
                 ? NightwatchHolderGate.holderRefusal
                 : NightwatchHolderGate.holderRefusal + " (Settings \u{2192} Fleet Automation)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    /// Moves the sessions that already exist onto the holder. Sits beside the
+    /// toggle because that is where someone who just turned it on looks for what
+    /// to do about them. The report keeps skips and refusals apart: a skip names
+    /// a state to change before retrying, a refusal waits on a fact.
+    @ViewBuilder
+    private var transportMigrationRow: some View {
+        HStack {
+            Button("Move existing sessions to the holder") {
+                Task {
+                    migrating = true
+                    migrationResult = await appState.migrateAllTerminalsToHolder()
+                    migrating = false
+                }
+            }
+            .disabled(migrating)
+            if migrating { ProgressView().controlSize(.small) }
+        }
+        .help("Moves running tmux sessions onto the holder in place. Sessions that are busy are skipped and can be retried.")
+        if let result = migrationResult {
+            let report = TransportMigrationMenu.report(
+                result, label: { appState.transportMigrationLabel(for: $0) })
+            Text(report.headline)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            transportMigrationLines(report.movedNotResumedHeading, report.movedNotResumed)
+            transportMigrationLines(report.skippedHeading, report.skipped)
+            transportMigrationLines(report.refusedHeading, report.refused)
+        }
+    }
+
+    @ViewBuilder
+    private func transportMigrationLines(
+        _ heading: String, _ lines: [TransportMigrationMenu.Line]
+    ) -> some View {
+        if !lines.isEmpty {
+            Text(heading).font(.caption).fontWeight(.medium)
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text("\(line.label) — \(line.reason)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -463,6 +520,23 @@ struct GeneralSettingsTab: View {
             ? collector.caption
             : "\(collector.caption) Requires automatic cleanup to be on."
     }
+
+    /// Answer Claude's question and permission dialogs from the transcript.
+    /// Reads `daemon.capabilities`, writes `config.setTranscriptPromptAnswerEnabled`.
+    /// Off by default (soaking). New sessions pick up the hooks.
+    @ViewBuilder
+    private var transcriptPromptAnswerToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Answer Claude's prompts from the transcript", isOn: Binding(
+            get: { capabilities?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault },
+            set: { newValue in Task { await appState.setTranscriptPromptAnswerEnabled(newValue) } }
+        ))
+        .help(Self.transcriptPromptAnswerHelp)
+    }
+
+    static let transcriptPromptAnswerHelp = "Shows question and permission dialogs as cards you can answer in the "
+        + "transcript. The terminal dialog stays live, and whichever answers first wins. Applies to sessions "
+        + "started after you turn it on."
 
     /// Schedule-based PR polling. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,
@@ -722,6 +796,27 @@ struct GeneralSettingsTab: View {
             .font(.caption)
             .foregroundStyle(.secondary)
     }
+
+    /// Live remote transcript sync (`remote_transcript_live_sync_enabled`).
+    /// Reads `daemon.capabilities`, writes
+    /// `config.setRemoteTranscriptLiveSyncEnabled`. Off by default (soaking).
+    @ViewBuilder
+    private var remoteTranscriptLiveSyncToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Keep remote transcripts up to date in the background", isOn: Binding(
+            get: {
+                capabilities?.remoteTranscriptLiveSyncEnabled
+                    ?? Config.remoteTranscriptLiveSyncEnabledDefault
+            },
+            set: { newValue in Task { await appState.setRemoteTranscriptLiveSyncEnabled(newValue) } }
+        ))
+        .help(Self.remoteTranscriptLiveSyncHelp)
+    }
+
+    static let remoteTranscriptLiveSyncHelp =
+        "Opens remote transcripts at their latest messages and loads earlier ones as you scroll up. "
+        + "Background sync fetches only from providers that report a transcript hint. "
+        + "Off by default (soaking)."
 
     /// The registry file row — tilde-abbreviated path + copy-path button,
     /// copying the exact row implementation style `RepoHooksSettingsView`

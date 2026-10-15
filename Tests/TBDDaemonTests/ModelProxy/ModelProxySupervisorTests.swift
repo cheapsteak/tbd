@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Dispatch
 import Foundation
@@ -25,11 +24,10 @@ import Testing
 ///     one, or forget one between polls, which is what a proxy dying looks
 ///     like from the supervisor's side;
 ///   - **the clock** is virtual, so the watch interval and the respawn backoff
-///     are advanced rather than waited out. Most cases take an
+///     are advanced rather than waited out. Every case runs on an
 ///     `EventDrivenTestClock`, whose arming handshake is a signal rather than
-///     a poll; the three that advance a fixed number of times and then assert
-///     that nothing further happened keep the fixture's `TestClock`.
-///     `SupervisorFixture.supervisor(clock:)` has the split and the reason.
+///     a poll; `SupervisorFixture.supervisor(clock:)` says why that matters
+///     for a fire-then-re-arm loop.
 ///
 /// The rendezvous is not stubbed: `FakeProxyProcess` writes a real
 /// `<home>/proxy/proxy.pid` the way the real binary does, and the adoption
@@ -380,8 +378,7 @@ struct ModelProxySupervisorTests {
     ///
     /// On `EventDrivenTestClock` for the reason ``respawnsAfterDeath`` spells
     /// out: the watch is a fire-then-re-arm loop, so a wait that observes the
-    /// re-arm by polling `checkSuspension()` competes with the very task it is
-    /// waiting for.
+    /// re-arm by polling competes with the very task it is waiting for.
     @Test("a proxy that dies while draining is still respawned")
     func drainingStillRespawnsAProxyThatDies() async throws {
         let fixture = try SupervisorFixture.make()
@@ -1585,10 +1582,15 @@ struct ModelProxySupervisorTests {
         #expect(await supervisor.current == nil)
 
         // Several watch intervals. A supervisor that treated this as transient
-        // would take the second stubbed answer.
+        // would take the second stubbed answer. Each advance waits for the
+        // watch to arm, and the watch re-arms only after `tick` returns, so the
+        // closing wait for the re-arm is what proves the last tick ran to the
+        // end before `stop()` — without it that tick's spawn could still be on
+        // its way when the calls are read.
         for _ in 0..<3 {
-            await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+            try await fixture.clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
         }
+        try await fixture.clock.requireSleeperArmed()
         await supervisor.stop()
 
         #expect(
@@ -1609,9 +1611,12 @@ struct ModelProxySupervisorTests {
 
         let supervisor = fixture.supervisor()
         await supervisor.start()
+        // As in `doesNotRespawnOnHomeUnusable`: the closing re-arm proves the
+        // last tick finished before the calls are read.
         for _ in 0..<2 {
-            await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+            try await fixture.clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
         }
+        try await fixture.clock.requireSleeperArmed()
         await supervisor.stop()
 
         #expect(await fixture.spawner.calls() == [0])
@@ -1729,14 +1734,13 @@ struct ModelProxySupervisorTests {
     /// the second attempt to land. That is what makes the backoff part of the
     /// assertion rather than an unexercised parameter.
     ///
-    /// **It is also the suite's only two-hop test, and that is why it runs on
-    /// `EventDrivenTestClock` while its siblings stay on `TestClock`.** The
-    /// second sleep is armed *inside* `respawn`, after a spawn attempt that has
-    /// already failed — a fire-then-re-arm, which `Tests/CLAUDE.md`
-    /// ("Re-arming") names as the sharp edge of every clock handshake. On
-    /// `TestClock` the re-arm can only be observed by polling
-    /// `checkSuspension()`, whose `megaYield` is 20 serially-awaited
-    /// background-QoS tasks; under the fast parallel pass that probe competes
+    /// **It is also the suite's only two-hop test, and that is where the
+    /// event-driven handshake matters most.** The second sleep is armed
+    /// *inside* `respawn`, after a spawn attempt that has already failed — a
+    /// fire-then-re-arm, which `Tests/CLAUDE.md` ("Re-arming") names as the
+    /// sharp edge of every clock handshake. On the polling test clock the
+    /// re-arm can only be observed by its suspension probe, whose `megaYield`
+    /// is 20 serially-awaited background-QoS tasks; under the fast parallel pass that probe competes
     /// with the very task it is waiting for, and this test reddened three
     /// consecutive CI dispatches of one SHA having observed exactly **one**
     /// clock advance in 170 s — the first hop landed and the second never found
@@ -1810,12 +1814,12 @@ struct ModelProxySupervisorTests {
     /// in both, and only the process table tells them apart.
     ///
     /// **On `EventDrivenTestClock`, and for the same mechanism as its sibling.**
-    /// Three ticks is three re-arms, and on `TestClock` each one can only be
-    /// observed by polling `checkSuspension()`, whose `megaYield` is 20
+    /// Three ticks is three re-arms, and on the polling test clock each one can
+    /// only be observed by its suspension probe, whose `megaYield` is 20
     /// serially-awaited background-QoS tasks — under the saturated fast pass
     /// that probe floods the cooperative pool with exactly the low-priority
-    /// work the watch task needs a turn from. `advanceWhenSuspended` is also
-    /// the *soft* wait: a missed re-arm records an issue and advances anyway,
+    /// work the watch task needs a turn from. That clock's advance helper is
+    /// also a *soft* wait: a missed re-arm records an issue and advances anyway,
     /// which moves `now` past a deadline that is not in the ledger yet and
     /// desyncs the clock for every step after it. The strict ladder below
     /// throws before anything advances instead.
@@ -1917,8 +1921,8 @@ struct ModelProxySupervisorTests {
     /// then does `watch` arm the next `clock.sleep(for: watchInterval)` — so
     /// every advance in this ladder past the first is a re-arm, the shape
     /// `Tests/CLAUDE.md` ("Re-arming") names as the sharp edge of every clock
-    /// handshake. On `TestClock` the only way to observe a re-arm is
-    /// `checkSuspension()`, whose `megaYield` is 20 serially-awaited
+    /// handshake. On the polling test clock the only way to observe a re-arm
+    /// is its suspension probe, whose `megaYield` is 20 serially-awaited
     /// background-QoS tasks; the `advanceUntil` loop this test used ran that
     /// probe every 25 ms, so under the saturated fast pass it flooded the
     /// cooperative pool with exactly the low-priority work the watch task
@@ -2398,9 +2402,12 @@ struct ModelProxySupervisorTests {
         })
         await supervisor.start()
 
+        // The watch re-arms only after `tick` returns, so the closing wait for
+        // the re-arm proves the tenth poll finished before the counts are read.
         for _ in 0..<10 {
-            await fixture.clock.advanceWhenSuspended(by: fixture.watchInterval)
+            try await fixture.clock.requireAdvanceWhenArmed(by: fixture.watchInterval)
         }
+        try await fixture.clock.requireSleeperArmed()
         await supervisor.stop()
 
         #expect(await supervisor.current?.pid == 4040, "ten quiet polls change nothing")
@@ -2632,7 +2639,7 @@ private struct SupervisorFixture {
     let identity: StubIdentity
     let signaller: StubSignaller
     let portProbe: StubPortProbe
-    let clock: TestClock<Duration>
+    let clock: EventDrivenTestClock
     let ownVersion = "12345-1700000000"
     let watchInterval: Duration = .seconds(15)
     /// The first step of the respawn backoff, named rather than repeated so a
@@ -2655,7 +2662,7 @@ private struct SupervisorFixture {
             identity: StubIdentity(),
             signaller: StubSignaller(),
             portProbe: StubPortProbe(),
-            clock: TestClock())
+            clock: EventDrivenTestClock())
     }
 
     /// The control client is the **real** one, on whatever port the supervisor
@@ -2663,14 +2670,14 @@ private struct SupervisorFixture {
     /// names it, so nothing has to be redirected for the client to reach it —
     /// and a probe of a port with no listener fails for the real reason.
     ///
-    /// `clock` defaults to this fixture's `TestClock`, which now serves only
-    /// the three cases that advance a fixed number of times and then assert
-    /// that **nothing further happened**. Every case that waits for the watch to *do*
-    /// something passes an `EventDrivenTestClock` instead: the watch is a
-    /// fire-then-re-arm loop, and on `TestClock` a re-arm can only be observed
-    /// by polling `checkSuspension()`, whose `megaYield` is 20 serially-awaited
-    /// background-QoS tasks — the probe starves the very task it waits for
-    /// under the saturated fast pass. See `respawnsAfterDeath` for the field
+    /// `clock` defaults to this fixture's `EventDrivenTestClock`, which the
+    /// cases that advance a fixed number of times and then assert that
+    /// **nothing further happened** drive directly; most other cases pass a
+    /// clock of their own. The watch is a fire-then-re-arm loop, so every
+    /// advance after the first must wait for the re-arm, and on a polling test
+    /// clock a re-arm can only be observed by a suspension probe whose
+    /// `megaYield` is 20 serially-awaited background-QoS tasks — the probe
+    /// starves the very task it waits for under the saturated fast pass. See `respawnsAfterDeath` for the field
     /// evidence and `hungProxyEscalatesToSignalsThenRespawns` for the ladder.
     /// `routedSessionsAlive` answers "no session is routed" unless a case says
     /// otherwise, which is the answer that makes a flag-off boot run nothing —

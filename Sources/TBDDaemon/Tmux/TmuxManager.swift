@@ -620,7 +620,7 @@ public struct TmuxManager: Sendable {
         return [userShell] + shellFlags(forShell: userShell) + [fullCommand]
     }
 
-    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, environment: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
+    public static func newWindowCommand(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, remainOnExit: Bool = false, environment: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
         // Spawn `shell <flags> <cmd>` (via shellInvocation) so commands with
         // arguments work (e.g. "claude --dangerously-skip-permissions").
         // -i keeps it interactive, -l makes it a login shell, -c runs the
@@ -662,7 +662,17 @@ public struct TmuxManager: Sendable {
             + eFlags
             + ["-PF", "#{window_id} #{pane_id}"]
             + shellInvocation(fullCommand, environment: environment)
+            + (remainOnExit ? remainOnExitChain : [])
     }
+
+    /// `remainOnExit`'s tail: a second command in the same tmux invocation.
+    /// A lone `;` argument separates tmux commands, and the server runs one
+    /// invocation's commands back to back, so the option is on before the
+    /// event loop can reap a command that exits at once — a separate
+    /// `set-option` call races it, and loses the window. With no `-t`,
+    /// `set-option -w` targets the window `new-window` just made current
+    /// (it is not `-d`), never another session's current window.
+    static let remainOnExitChain = [";", "set-option", "-w", "remain-on-exit", "on"]
 
     /// Respawn (replace the running program of) an existing window's pane
     /// IN PLACE, keeping the same window id and pane id. Shares
@@ -1032,6 +1042,51 @@ public struct TmuxManager: Sendable {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_pid}"]
     }
 
+    /// Whether a pane's process is alive, and its exit status once dead. A
+    /// dead pane exists only under `remain-on-exit`, which dev-server tabs set
+    /// at spawn. `|`-separated because `pane_dead_status` is empty while the
+    /// pane lives, and a space separator would collapse that field.
+    public static func paneExitStateQuery(server: String, paneID: String) -> [String] {
+        ["-L", server, "list-panes", "-t", paneID, "-F",
+         "#{pane_id}|#{pane_dead}|#{pane_dead_status}|#{pane_pid}"]
+    }
+
+    public enum PaneExitState: Sendable, Equatable {
+        case running(pid: Int32)
+        /// `status` is nil when tmux reported none (e.g. the pane died to a signal).
+        /// `pid` is the process the dead pane ran: tmux keeps `pane_pid`
+        /// after the exit, and a respawn gives the pane a new one.
+        case dead(status: Int32?, pid: Int32? = nil)
+        case gone
+        /// The query got no usable answer — a timeout, a failed spawn, or a
+        /// failure tmux did not word as the pane or its server being absent.
+        /// Ignorance, never evidence that the pane is gone.
+        case unknown(reason: String)
+    }
+
+    /// A failed `paneExitStateQuery`: `.gone` only when tmux itself answered
+    /// that the pane, its window or its server is not there
+    /// (`TmuxPresenceClassifier`); anything else is `.unknown`.
+    static func paneExitState(forFailure error: Error) -> PaneExitState {
+        if TmuxPresenceClassifier.windowPresence(for: error) == .absent { return .gone }
+        return .unknown(reason: String(describing: error))
+    }
+
+    /// Selects the line for `paneID` — `list-panes -t <pane>` lists every
+    /// pane in that pane's window (see `paneSendTargetQuery`).
+    static func parsePaneExitState(_ output: String, paneID: String) -> PaneExitState {
+        for line in output.split(separator: "\n") {
+            let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            guard fields.count == 4, fields[0] == paneID else { continue }
+            if fields[1] == "1" {
+                return .dead(status: Int32(fields[2]), pid: Int32(fields[3]).flatMap { $0 > 0 ? $0 : nil })
+            }
+            guard let pid = Int32(fields[3]), pid > 0 else { return .gone }
+            return .running(pid: pid)
+        }
+        return .gone
+    }
+
     public static func paneCurrentPathQuery(server: String, paneID: String) -> [String] {
         ["-L", server, "list-panes", "-t", paneID, "-F", "#{pane_current_path}"]
     }
@@ -1159,16 +1214,18 @@ public struct TmuxManager: Sendable {
         try await runTmux(["-L", server, "kill-server"])
     }
 
-    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil) async throws -> (windowID: String, paneID: String) {
+    /// `remainOnExit` keeps the pane, dead, when its command exits — set in
+    /// the same tmux invocation as the window (`newWindowCommand`).
+    public func createWindow(server: String, session: String, cwd: String, shellCommand: String, env: [String: String] = [:], sensitiveEnv: [String: String] = [:], cols: Int? = nil, rows: Int? = nil, remainOnExit: Bool = false) async throws -> (windowID: String, paneID: String) {
         let result: (windowID: String, paneID: String)
         if dryRun {
-            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
+            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows, remainOnExit: remainOnExit)
             dryRunRecorder?(args)
             if let error = dryRunCreateWindowError?(server) { throw error }
             let n = counter.next()
             result = (windowID: "@mock-\(n)", paneID: "%mock-\(n)")
         } else {
-            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows)
+            let args = Self.newWindowCommand(server: server, session: session, cwd: cwd, shellCommand: shellCommand, env: env, sensitiveEnv: sensitiveEnv, cols: cols, rows: rows, remainOnExit: remainOnExit)
             let output = try await runTmux(args)
             let parts = output.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
             guard parts.count == 2 else {
@@ -1598,6 +1655,18 @@ public struct TmuxManager: Sendable {
         return try await runTmux(args).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// `.gone` when tmux answers that the pane or its server no longer
+    /// exists, and in dry-run; `.unknown` when it could not be asked.
+    public func paneExitState(server: String, paneID: String) async -> PaneExitState {
+        if dryRun { return .gone }
+        do {
+            let output = try await runTmux(Self.paneExitStateQuery(server: server, paneID: paneID))
+            return Self.parsePaneExitState(output, paneID: paneID)
+        } catch {
+            return Self.paneExitState(forFailure: error)
+        }
+    }
+
     /// The pane's current working directory (`#{pane_current_path}`). Used by
     /// the hibernation wake path to assert the cwd matches the worktree before
     /// a cwd-scoped `claude --resume`.
@@ -1750,6 +1819,17 @@ public struct TmuxManager: Sendable {
             environment: environment,
             configurationURL: configurationURL
         ).resolve()?.path
+    }
+
+    /// Whether this manager could run a tmux command at all: dry-run always
+    /// can, real mode needs a tmux binary that resolves against the same PATH
+    /// `runTmux` uses. Lets a caller refuse a tmux-only action up front with a
+    /// sentence a person can act on, instead of surfacing status 127 from the
+    /// middle of it.
+    var canServeTmux: Bool {
+        dryRun || Self.tmuxPath(
+            path: tmuxPathOverride ?? ProcessInfo.processInfo.environment["PATH"]
+        ) != nil
     }
 
     /// The argv a one-shot tmux client actually runs with: the caller's

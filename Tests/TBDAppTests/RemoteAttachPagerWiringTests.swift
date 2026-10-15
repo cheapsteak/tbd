@@ -23,11 +23,13 @@ import TBDShared
 /// child — or, for the unmount, reports nothing and leaves a start time
 /// outliving the child it dates.
 ///
-/// **Why it calls the two statics rather than `updateNSViewController`.** That
+/// **Why it calls the statics rather than `updateNSViewController`.** That
 /// method takes a SwiftUI `Context`, which has no public initializer, so no
-/// test can call it. `makeTerminalView` and `reconcile` are the whole of its
-/// body, extracted for exactly this reason; what stays untested is the
-/// three-line call that joins them plus the `NSHostingController` wrap.
+/// test can call it. `makeTerminalView`, `reconcile` and `update` (which joins
+/// them with the preflight policy) are the whole of its body, extracted for
+/// exactly this reason. This suite stays on the first two and is deliberately
+/// unaware of `RemoteAttachPreflight`; `RemoteAttachPagerDiagnosisTests` drives
+/// `update` and owns the diagnosis-tab lifecycle.
 ///
 /// **Why the tab items are bare.** `reconcile`'s contract is the mount-set
 /// diff and the identifier each item carries, and it takes `makeItem` as a

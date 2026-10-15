@@ -1,4 +1,3 @@
-import Clocks
 import Darwin
 import Foundation
 import TestSupport
@@ -6,10 +5,9 @@ import Testing
 @testable import TBDDaemonLib
 import TBDShared
 
-/// `.clockDriven` bounds the classic virtual-time hang (a `TestClock` sleep
-/// nobody advances); `.serialized` keeps the four retry-window tests from
-/// starving each other on the arming handshake, which is the house pattern for
-/// clock-driven suites here. The remaining tests are bounded-wait, so
+/// `.clockDriven` bounds the classic virtual-time hang (a test-clock sleep
+/// nobody advances); `.serialized` keeps the retry-window tests out of each
+/// other's way, which is the house pattern for clock-driven suites here. The remaining tests are bounded-wait, so
 /// serializing costs the suite almost nothing.
 @Suite("FDVendingServer", .clockDriven, .serialized)
 struct FDVendingServerTests {
@@ -20,6 +18,18 @@ struct FDVendingServerTests {
     /// `Tests/CLAUDE.md` — "exhaustion" below means exhausting the injected
     /// budget, and each test's name says what it actually crosses.
     private static let interval: Duration = .milliseconds(50)
+
+    /// Waits until a `send` is either parked on its next retry wait or has
+    /// finished, for the "still retrying" reads below. `advance` resumes a due
+    /// sleeper without running it, so reading the finished flag straight after
+    /// an advance would pass whether or not that wake was the last one; this
+    /// waits for the outcome to show, and the caller's read then discriminates.
+    private func parkedOrFinished(_ clock: EventDrivenTestClock,
+                                  _ finished: SidecarInputCollector) async -> Bool {
+        await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            clock.hasSleeper || finished.count > 0
+        } == .satisfied
+    }
 
     private func makeSocketPair() throws -> (Int32, Int32) {
         var pair: [Int32] = [-1, -1]
@@ -70,16 +80,16 @@ struct FDVendingServerTests {
     }
 
     @Test("send without an adopted connection throws once its retry window is exhausted")
-    func sendBeforeAdoptFails() async {
+    func sendBeforeAdoptFails() async throws {
         // Tier 1: virtual time. 3 attempts → 2 waits; crossing both exhausts
         // the window, which is the same claim the 10/50 ms production pair
         // makes over 450 ms of real time.
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let server = FDVendingServer(retryAttempts: 3, retryInterval: Self.interval, clock: clock)
 
         let send = Task { try await server.send(fd: 0, header: Data()) }
-        await clock.advanceWhenSuspended(by: Self.interval)
-        await clock.advanceWhenSuspended(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
 
         await #expect(throws: FDVendingServerError.notConnected) { try await send.value }
     }
@@ -92,7 +102,7 @@ struct FDVendingServerTests {
         let (serverSideFD, clientSideFD) = try makeSocketPair()
         defer { Darwin.close(clientSideFD) }
 
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let server = FDVendingServer(retryAttempts: 5, retryInterval: Self.interval, clock: clock)
 
         let (readFD, writeFD) = try makePipe()
@@ -103,14 +113,16 @@ struct FDVendingServerTests {
         let send = Task { try await server.send(fd: readFD, header: header) }
 
         // Two intervals with nobody connected: still retrying, not yet failed.
-        await clock.advanceWhenSuspended(by: Self.interval)
-        await clock.advanceWhenSuspended(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
 
-        // The app finally connects, mid-window. `send` is parked inside the
-        // actor's sleep, so this adoption is free to run and the next
-        // iteration re-reads `clientFD`.
+        // The app finally connects, mid-window. Waiting for the re-arm first
+        // is what puts `send` inside the actor's sleep — `advance` resumes the
+        // sleeper without running it — so this adoption lands while it is
+        // parked and the next iteration re-reads `clientFD`.
+        try await clock.requireSleeperArmed()
         await server.adoptConnection(fd: serverSideFD)
-        await clock.advanceWhenSuspended(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
 
         try await send.value   // must NOT throw
         Darwin.close(readFD)
@@ -123,11 +135,11 @@ struct FDVendingServerTests {
     }
 
     @Test("send gives up on its last retry interval, not before")
-    func sendGivesUpOnlyOnItsLastInterval() async {
+    func sendGivesUpOnlyOnItsLastInterval() async throws {
         // Pins the attempt count itself: with N attempts there are N-1 waits,
         // so at N-2 crossings it must still be retrying and the N-1st crossing
         // is what makes it throw. Nothing pinned this boundary before.
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let attempts = 4
         let server = FDVendingServer(retryAttempts: attempts, retryInterval: Self.interval, clock: clock)
 
@@ -137,27 +149,27 @@ struct FDVendingServerTests {
             try await server.send(fd: 0, header: Data())
         }
 
-        await clock.advanceWhenSuspended(by: Self.interval)
-        await clock.advanceWhenSuspended(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
 
-        // Re-armed for wait 3 of 3: it is parked, so it demonstrably has not
-        // run its `defer` yet. `waitForSuspension` is the happens-before that
-        // makes the count check below non-vacuous.
-        await clock.waitForSuspension()
+        // Either re-armed for wait 3 of 3 or finished: waiting for one of the
+        // two is the happens-before that makes the count check non-vacuous,
+        // since `advance` resumes the second wait without running what follows.
+        #expect(await parkedOrFinished(clock, finished))
         #expect(finished.count == 0,
                 "must still be retrying after \(attempts - 2) of its \(attempts - 1) waits")
 
-        await clock.advance(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
         await #expect(throws: FDVendingServerError.notConnected) { try await send.value }
     }
 
     @Test("the default retry interval is 50 ms")
-    func defaultRetryIntervalIsFiftyMilliseconds() async {
+    func defaultRetryIntervalIsFiftyMilliseconds() async throws {
         // The injected-pacing tests above deliberately say nothing about the
         // production numbers. This one pins the default interval exactly, in
         // two advances: 2 attempts → exactly 1 wait, so 49 ms must not fire it
         // and the 50th millisecond must.
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let server = FDVendingServer(retryAttempts: 2, clock: clock)   // default interval
 
         let finished = SidecarInputCollector()
@@ -166,11 +178,11 @@ struct FDVendingServerTests {
             try await server.send(fd: 0, header: Data())
         }
 
-        await clock.advanceWhenSuspended(by: .milliseconds(49))
-        await clock.waitForSuspension()   // still parked → the wait is > 49 ms
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(49))
+        #expect(await parkedOrFinished(clock, finished))   // still parked → the wait is > 49 ms
         #expect(finished.count == 0, "a 50 ms interval must not elapse at 49 ms")
 
-        await clock.advance(by: .milliseconds(1))
+        try await clock.requireAdvanceWhenArmed(by: .milliseconds(1))
         await #expect(throws: FDVendingServerError.notConnected) { try await send.value }
     }
 
@@ -356,7 +368,7 @@ struct FDVendingServerTests {
         // Deterministic teardown: the exit hook now fires AFTER the actor clears
         // clientFD, so once it fires the stale fd is already gone.
         let exited = SidecarInputCollector()
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let server = FDVendingServer(retryAttempts: 3, retryInterval: Self.interval, clock: clock)
         await server.setOnReceiveLoopExit {
             exited.record(SidecarInputHeader(worktreeID: UUID(), paneID: ""), Data())
@@ -375,8 +387,8 @@ struct FDVendingServerTests {
         defer { Darwin.close(readFD); Darwin.close(writeFD) }
         let header = try JSONEncoder().encode(FDVendHeader(worktreeID: UUID(), paneID: "%stale", attachID: UUID()))
         let send = Task { try await server.send(fd: readFD, header: header) }
-        await clock.advanceWhenSuspended(by: Self.interval)
-        await clock.advanceWhenSuspended(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
         await #expect(throws: FDVendingServerError.notConnected) { try await send.value }
 
         await server.stop()

@@ -10,10 +10,20 @@ import TestSupport
 /// refuses turning the holder on while a watch mode is active. Both switches
 /// have to refuse, because either one alone leaves a path to the combination
 /// `NightwatchHolderGate` exists to make unreachable.
+///
+/// **A watch mode is refused by the hazard, not by the flag.** The daemon asks
+/// its own registry whether it can start a holder at all, so these fixtures say
+/// which daemon they mean: `makeRouterAndDB(holderSupported:)` wires a
+/// spawn-capable registry when the refusal is the subject, and leaves the
+/// registry nil when the subject is a daemon that cannot spawn one. Nothing is
+/// launched either way — `canSpawn` is decided in `init` from the spawner's
+/// mere presence.
 @Suite("Nightwatch/holder gate RPC")
 struct NightwatchHolderGateRPCTests {
 
-    private func makeRouterAndDB() throws -> (RPCRouter, TBDDatabase) {
+    private func makeRouterAndDB(
+        holderSupported: Bool = true
+    ) throws -> (RPCRouter, TBDDatabase) {
         let db = try TBDDatabase(inMemory: true)
         let router = RPCRouter(
             db: db,
@@ -27,7 +37,29 @@ struct NightwatchHolderGateRPCTests {
             startTime: Date(),
             actuationLog: makeTestActuationLog()
         )
+        if holderSupported {
+            router.holderRegistry = HolderRegistry(
+                owner: HolderOwnerToken(rawValue: "acme-installation"),
+                environment: ["TBD_HOME": "/tmp/tbd-nhg-\(UUID().uuidString.prefix(8))"],
+                listTerminals: { [] },
+                spawner: HolderSpawner(
+                    executableURL: URL(fileURLWithPath: "/nonexistent/TBDHolder")))
+        }
         return (router, db)
+    }
+
+    /// Seeds one live holder-transport session row — the hazard a daemon can
+    /// be carrying even when it cannot spawn another.
+    @discardableResult
+    private func seedLiveHolderSession(_ db: TBDDatabase) async throws -> Terminal {
+        let repo = try await db.repos.create(
+            path: "/tmp/nhg-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/nhg-wt-\(UUID().uuidString)", tmuxServer: "tbd-nhg")
+        return try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder, holderPID: 9101, childPID: 0)
     }
 
     private func setMode(_ router: RPCRouter, _ mode: NightwatchMode) async throws -> RPCResponse {
@@ -68,6 +100,54 @@ struct NightwatchHolderGateRPCTests {
         #expect(!response.success)
         #expect(response.error == NightwatchHolderGate.modeRefusal)
         #expect(try await db.config.get().nightwatchMode == .off)
+    }
+
+    /// The flag on, but this daemon cannot start a holder **and** is holding
+    /// none — the state the graduated default makes ordinary, since the flag
+    /// reads on without anybody choosing it. No holder-backed session can exist
+    /// here, so the watch mode is accepted and written. A gate that asked only
+    /// the flag would refuse Nightwatch on every such install.
+    @Test(arguments: [NightwatchMode.daywatch, .nightwatch])
+    func anUnsupportedDaemonAcceptsAWatchModeWithTheFlagOn(mode: NightwatchMode) async throws {
+        let (router, db) = try makeRouterAndDB(holderSupported: false)
+        try await db.config.setPtyHolderEnabled(true)
+        #expect(try await db.config.get().ptyHolderEnabled == true)
+        #expect(try await db.terminals.hasLiveHolderSession() == false,
+                "the fixture must not already carry the hazard it is testing the absence of")
+        let response = try await setMode(router, mode)
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        #expect(try await db.config.get().nightwatchMode == mode)
+    }
+
+    /// **The same daemon, now holding one adopted holder session.** `canSpawn`
+    /// false does not mean holder-free: the registry is still built without its
+    /// binary so adoption keeps working across an upgrade that moved it. The
+    /// watch mode is refused again, and the flag is irrelevant — an explicit
+    /// opt-out does not retire the sessions already on a holder.
+    @Test(arguments: [NightwatchMode.daywatch, .nightwatch])
+    func aLiveHolderSessionRefusesAWatchModeOnAnUnsupportedDaemon(
+        mode: NightwatchMode
+    ) async throws {
+        let (router, db) = try makeRouterAndDB(holderSupported: false)
+        try await db.config.setPtyHolderEnabled(false)
+        try await seedLiveHolderSession(db)
+        #expect(try await db.terminals.hasLiveHolderSession() == true,
+                "the fixture never armed the hazard")
+
+        let response = try await setMode(router, mode)
+
+        #expect(!response.success)
+        #expect(response.error == NightwatchHolderGate.modeRefusal)
+        #expect(try await db.config.get().nightwatchMode == .off)
+    }
+
+    /// `.off` is still accepted with the hazard live, so the refusal cannot
+    /// strand an install that wants to stop watching.
+    @Test func aLiveHolderSessionStillAcceptsOff() async throws {
+        let (router, db) = try makeRouterAndDB(holderSupported: false)
+        try await seedLiveHolderSession(db)
+        let response = try await setMode(router, .off)
+        #expect(response.success, "error: \(response.error ?? "nil")")
     }
 
     // MARK: - config.setPtyHolderEnabled

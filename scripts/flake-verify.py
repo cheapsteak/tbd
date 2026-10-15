@@ -15,9 +15,18 @@ here is a pure function of files on disk.
         writes the iteration plan (N, p, the cap, the bound, the false-pass
         probability) as JSON.
     judge --scope test|pass --test ID --dir D --iterations N --quarantined yes|no
-          [--protected-touched FILE] [--plan F]
+          [--protected-touched FILE] [--plan F] [--target-change F]
         writes D/verdict.json, D/verdict.md and D/failing-lines.txt. Exit 0
-        pass, 1 fail, 3 ineligible, 2 malformed input.
+        pass, 1 fail, 3 ineligible, 2 malformed input. With a target change
+        (below) the stress run is judged under the new ID, or, for a retired
+        target, not at all, and a candidate that would pass is ineligible.
+    target-change --test ID --notes F --diff F --base-decls F --head-decls F
+        prints, as JSON, whether the candidate renamed, moved or retired the
+        target: honored only when the session declared it in its notes
+        (`RENAMED: <old> -> <new>` or `RETIRED: <old> — <reason>`) and the
+        diff (`git diff -U0` of the candidate, under Tests/) bears it out
+        (`target_change` says how). The decls files are `git grep` listings
+        of the base's and the candidate's type declarations under Tests/.
     quarantined --test ID --inventory F --root DIR
         prints yes, no, or ambiguous (exit 2), from the quarantine audit's
         inventory.
@@ -235,6 +244,157 @@ def plan(scope: str, f: int, v: int, min_n: int, test_cap: int, pass_cap: int) -
     }
 
 
+# --- a renamed or retired target (spec §6.4) ------------------------------------------
+
+# The session's declarations, one per line of its notes. A bullet and
+# backticks around an ID are allowed; the separator before a retirement's
+# reason may be an em dash, an en dash, or one or two hyphens.
+RENAMED_LINE = re.compile(r"^\s*(?:[-*]\s+)?RENAMED:\s*`?(?P<old>[^`\s]+)`?\s*->\s*`?(?P<new>[^`\s]+)`?\s*$")
+RETIRED_LINE = re.compile(r"^\s*(?:[-*]\s+)?RETIRED:\s*`?(?P<old>[^`\s]+)`?\s+(?:—|–|--?)\s+(?P<reason>\S.*?)\s*$")
+TEST_ID_FORM = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*/[A-Za-z_]\w*(?:\([A-Za-z0-9_:]*\))?")
+NOTES_READ_MAX = 1 << 20
+REASON_MAX = 500
+# Said once in the failing lines when the target is missing and no change was
+# honored, so a second try that renamed on purpose knows how to say so.
+DECLARE_HINT = ("If the candidate renamed, moved or retired the target on purpose, declare it in the notes "
+                "with a `RENAMED: <old ID> -> <new ID>` or `RETIRED: <old ID> — <reason>` line; it counts only "
+                "when the diff takes the old test's function out of its suite's file (or renames the suite).")
+
+
+def read_notes(path: Path) -> str:
+    """The session's notes, or "" when there are none. A symlink or anything
+    but a regular file reads as none: the session wrote the path."""
+    try:
+        # O_NONBLOCK: a FIFO there must not hang the open before it is refused.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return ""
+        return os.read(fd, NOTES_READ_MAX).decode("utf-8", errors="replace")
+    finally:
+        os.close(fd)
+
+
+def diff_lines(diff: str) -> list[tuple[str, str, str]]:
+    """(sign, path, text) for every removed and added line of a `git diff -U0`:
+    a removed line under its old path, an added one under its new path."""
+    out, old, new, in_hunk = [], "", "", False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            old, new, in_hunk = "", "", False
+        elif not in_hunk and line.startswith("--- "):
+            old = line[6:] if line.startswith("--- a/") else ""
+        elif not in_hunk and line.startswith("+++ "):
+            new = line[6:] if line.startswith("+++ b/") else ""
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and line[:1] == "-":
+            out.append(("-", old, line[1:]))
+        elif in_hunk and line[:1] == "+":
+            out.append(("+", new, line[1:]))
+    return out
+
+
+def parse_id(test: str) -> tuple[str, str | None, str]:
+    """(module, innermost suite or None, function name) of a test ID."""
+    classname, _, _ = test.rpartition("/")
+    module, *suites = classname.split(".")
+    return module, (suites[-1] if suites else None), fl.function_name(test)
+
+
+def is_comment(text: str) -> bool:
+    return text.lstrip().startswith(("//", "/*", "*"))
+
+
+def func_decl(name: str) -> re.Pattern:
+    return re.compile(rf"\bfunc\s+{re.escape(name)}\s*[(<]")
+
+
+def suite_decl(name: str) -> re.Pattern:
+    # A nested suite may be declared through its parent: `extension Outer.Inner`.
+    return re.compile(rf"\b(?:struct|class|enum|actor|extension)\s+(?:\w+\.)*{re.escape(name)}\b")
+
+
+def suite_files(listing: str, module: str, suite: str) -> set[str]:
+    """The files under Tests/<module>/ that declare SUITE, from a `git grep`
+    of one revision's type declarations (`<rev>:<path>:<text>` lines)."""
+    prefix, pattern, out = f"Tests/{module}/", suite_decl(suite), set()
+    for line in listing.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[1].startswith(prefix) and not is_comment(parts[2]) and pattern.search(parts[2]):
+            out.add(parts[1])
+    return out
+
+
+def func_net(lines: list[tuple[str, str, str]], module: str, files: set[str] | None, name: str) -> int:
+    """Declarations of function NAME the diff removes, less those it adds, in
+    FILES, or anywhere under Tests/<module>/ when FILES is None (a test outside
+    any suite). Commented-out lines do not count."""
+    prefix, pattern, n = f"Tests/{module}/", func_decl(name), 0
+    for sign, path, text in lines:
+        inside = path in files if files is not None else path.startswith(prefix)
+        if inside and not is_comment(text) and pattern.search(text):
+            n += 1 if sign == "-" else -1
+    return n
+
+
+def target_change(test: str, notes: str, diff: str, base_decls: str = "", head_decls: str = "") -> dict:
+    """Whether the candidate renamed, moved or retired the target, as the
+    verifier treats it. `stressed` is the ID the stress run is judged on, or
+    None when nothing is stressed. A declaration the diff does not bear out is
+    kept, with why, in `rejected`, and changes nothing: the target's own ID is
+    stressed, and its absence fails the verdict as it always does.
+
+    The diff bears a change out when it takes the target's function out of a
+    file that declared the target's suite on the base – not a same-named
+    function in another suite's file, nor a commented-out line – or, for a
+    rename that keeps the function's name, when the old suite is declared
+    nowhere in its module afterwards (a renamed suite). A rename's new side is
+    its function put into a file that declares the new suite afterwards, or
+    the renamed suite declared in a file that held the old one. BASE_DECLS
+    and HEAD_DECLS are `git grep` listings of the two revisions' type
+    declarations under Tests/."""
+    none = {"kind": "none", "from": test, "to": None, "reason": None, "stressed": test, "declared": None, "rejected": None}
+    # The last declaration for the target counts: both tries write one notes
+    # file, and a second try's own declaration follows the first's.
+    last = None
+    for line in notes.splitlines():
+        if (m := RENAMED_LINE.match(line)) and m.group("old") == test:
+            last = (("renamed", m.group("new"), None), line.strip())
+        elif (m := RETIRED_LINE.match(line)) and m.group("old") == test:
+            last = (("retired", None, m.group("reason")[:REASON_MAX]), line.strip())
+    if last is None:
+        return none
+    (kind, new, reason), declared = last
+    none["declared"] = declared
+    if kind == "renamed" and (not TEST_ID_FORM.fullmatch(new) or new == test):
+        return {**none, "rejected": f"`{new}` is not a test ID in the xunit form, or is the target's own"}
+    lines = diff_lines(diff)
+    module, suite, func = parse_id(test)
+    old_files = suite_files(base_decls, module, suite) if suite else None
+    removed = func_net(lines, module, old_files, func) > 0
+    where = f"a file of Tests/{module}/ that declared {suite}" if suite else f"Tests/{module}/"
+    if kind == "retired":
+        # A retired test's function is gone. A suite declaration alone could
+        # be one of several extensions, with the test still in another.
+        if not removed:
+            return {**none, "rejected": f"the diff does not take the target's function out of {where}"}
+        return {**none, "kind": "retired", "reason": reason, "stressed": None}
+    new_module, new_suite, new_func = parse_id(new)
+    suite_gone = (suite is not None and new_suite is not None and suite != new_suite and new_func == func
+                  and new_module == module and not suite_files(head_decls, module, suite))
+    if not (removed or suite_gone):
+        return {**none, "rejected": f"the diff neither takes the target's function out of {where} nor renames its suite"}
+    new_files = suite_files(head_decls, new_module, new_suite) if new_suite else None
+    added = func_net(lines, new_module, new_files, new_func) < 0
+    renamed_in_place = suite_gone and bool((new_files or set()) & (old_files or set()))
+    if not (added or renamed_in_place):
+        return {**none, "rejected": f"the diff puts `{new}`'s function into no file that declares its suite"}
+    return {**none, "kind": "renamed", "to": new, "stressed": new}
+
+
 # --- the verdict (spec §6.4) -------------------------------------------------------------
 
 
@@ -256,7 +416,7 @@ def failing_lines(log: Path) -> list[str]:
     return keep[:FAILING_LINES_PER_ITERATION]
 
 
-def judge(directory: Path, scope: str, test: str, n: int, quarantined: bool) -> Verdict:
+def judge(directory: Path, scope: str, test: str, n: int, quarantined: bool, change: dict | None = None) -> Verdict:
     verdict = Verdict()
     # `candidate-refused` and `build-failed` are the candidate's own failures,
     # so a second try may follow; `harness-error` says nothing about it.
@@ -268,6 +428,13 @@ def judge(directory: Path, scope: str, test: str, n: int, quarantined: bool) -> 
             verdict.reasons.append(reason)
             verdict.lines += [f"{reason}:"] + path.read_text(errors="replace").splitlines()[-60:]
             return verdict
+    kind = (change or {}).get("kind", "none")
+    if kind == "retired":
+        # Nothing was stressed: there is no test left to run, and no claim
+        # about one is made. A human judges the retirement.
+        return verdict
+    if kind == "renamed":
+        test = change["to"]
     rows = read_rows(directory)
     names = {r.target for r in rows}
     if len(names) != 1 or sorted(r.iteration for r in rows) != list(range(1, n + 1)):
@@ -310,6 +477,9 @@ def judge(directory: Path, scope: str, test: str, n: int, quarantined: bool) -> 
             verdict.lines += [f"    {ln}" for ln in failing_lines(directory / "logs" / f"{name}-{i}.log")]
             verdict.lines += [f"    {c.test_id}: {c.message.splitlines()[0] if c.message else ''}" for c in mine if c.outcome == "failed"]
     verdict.other = list(others)
+    if kind == "none" and any(r.endswith("the target is absent from the xunit output") for r in verdict.reasons):
+        rejected = (change or {}).get("rejected")
+        verdict.lines.insert(0, f"The notes' declaration was not honored: {rejected}." if rejected else DECLARE_HINT)
     verdict.lines = verdict.lines[:FAILING_LINES_TOTAL]
     return verdict
 
@@ -318,8 +488,30 @@ def _pct(x: float) -> str:
     return f"{x * 100:.1f}%"
 
 
+def render_change(change: dict) -> str:
+    if change["kind"] == "renamed":
+        return (f"**The target test was renamed.** The candidate renamed or moved `{change['from']}` to "
+                f"`{change['to']}` and declared it in its notes; the diff bears it out, so the stress run below "
+                "is judged under the new ID. A human must judge whether coverage is preserved, so this candidate "
+                "is not eligible for ready.")
+    return (f"**The target test was retired.** The candidate removed `{change['from']}` and declared it in its "
+            "notes; the diff bears it out. Nothing was stress-run and no stress verdict is claimed. A human must "
+            "judge whether coverage is preserved, so this candidate is not eligible for ready.")
+
+
 def render_verdict(result: dict, baseline_md: str) -> str:
     lines = []
+    change = result.get("target_change") or {}
+    if change.get("kind") in ("renamed", "retired"):
+        lines.append(render_change(change))
+    elif change.get("rejected"):
+        lines.append(f"**A declared change to the target was not honored:** {change['rejected']}. "
+                     "The target's own ID was stress-run.")
+    if change.get("kind") == "retired" and not result["reasons"]:
+        if result["protected"]:
+            lines.append("**Protected files touched**, so a human must judge this change:\n\n"
+                         + "\n".join(f"- `{p}`" for p in result["protected"]))
+        return "\n\n".join(lines) + "\n"
     if result["scope"] == "test":
         why = "the baseline reproduced the failure with the test alone"
     else:
@@ -368,10 +560,22 @@ def run_judge(args) -> int:
     protected = []
     if args.protected_touched and args.protected_touched.exists():
         protected = [ln.strip() for ln in args.protected_touched.read_text().splitlines() if ln.strip()]
-    v = judge(directory, args.scope, args.test, args.iterations, quarantined)
+    change = None
+    # Empty or missing: target-change never ran, or failed and left a
+    # harness-error marker, which the judge reports.
+    text = args.target_change.read_text() if args.target_change and args.target_change.exists() else ""
+    if text.strip():
+        change = json.loads(text)
+        if not isinstance(change, dict) or change.get("kind") not in ("none", "renamed", "retired") \
+                or change.get("from") != args.test or (change["kind"] == "renamed" and not change.get("to")):
+            raise ValueError(f"{args.target_change}: not a target change for {args.test}")
+    changed = (change or {}).get("kind") in ("renamed", "retired")
+    v = judge(directory, args.scope, args.test, args.iterations, quarantined, change)
     rows = read_rows(directory)
     loads = sorted({r.load1m for r in rows if r.load1m}, key=lambda s: float(s) if re.fullmatch(r"[0-9.]+", s) else 0)
-    verdict = "fail" if v.reasons else ("ineligible" if protected else "pass")
+    # A renamed or retired target is never eligible for ready: a human must
+    # judge whether coverage is preserved, whatever the stress run showed.
+    verdict = "fail" if v.reasons else ("ineligible" if protected or changed else "pass")
     result = {
         "verdict": verdict, "scope": args.scope, "iterations": args.iterations, "completed": v.completed,
         "target_failures": v.target_failures, "reasons": v.reasons, "other_failures": v.other,
@@ -381,6 +585,11 @@ def run_judge(args) -> int:
     }
     for key in ("n", "p", "cap", "bound", "false_pass", "weak", "scale"):
         result[key] = planned.get(key)
+    if change is not None:
+        result["target_change"] = change
+    if change and change["kind"] == "retired" and not v.reasons:
+        # Nothing ran, so there is no evidence to describe, weak or strong.
+        result.update({"iterations": 0, "n": 0, "false_pass": None, "weak": False, "bound": None, "scale": None})
     baseline = args.baseline_md.read_text() if args.baseline_md and args.baseline_md.exists() else ""
     (directory / "verdict.json").write_text(json.dumps(result, indent=1) + "\n")
     (directory / "verdict.md").write_text(render_verdict(result, baseline))
@@ -504,6 +713,13 @@ def main(argv: list[str]) -> int:
     p.add_argument("--protected-touched", type=Path)
     p.add_argument("--plan", type=Path)
     p.add_argument("--baseline-md", type=Path)
+    p.add_argument("--target-change", type=Path)
+    p = sub.add_parser("target-change")
+    p.add_argument("--test", required=True)
+    p.add_argument("--notes", type=Path, required=True)
+    p.add_argument("--diff", type=Path, required=True)
+    p.add_argument("--base-decls", type=Path, required=True)
+    p.add_argument("--head-decls", type=Path, required=True)
     p = sub.add_parser("quarantined")
     p.add_argument("--test", required=True)
     p.add_argument("--inventory", type=Path, required=True)
@@ -529,6 +745,11 @@ def main(argv: list[str]) -> int:
             return 0
         if args.command == "judge":
             return run_judge(args)
+        if args.command == "target-change":
+            print(json.dumps(target_change(args.test, read_notes(args.notes), args.diff.read_text(errors="replace"),
+                                           args.base_decls.read_text(errors="replace"),
+                                           args.head_decls.read_text(errors="replace"))))
+            return 0
         if args.command == "tree-digest":
             if not args.dir.is_dir() or args.dir.is_symlink():
                 print(f"flake-verify: {args.dir} is not a directory", file=sys.stderr)

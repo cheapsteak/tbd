@@ -46,6 +46,7 @@ import TestSupport
         HibernationCoordinator(
             db: try TBDDatabase(inMemory: true), tmux: TmuxManager(dryRun: true),
             configDirManager: makeIsolatedConfigDirManager(tag: "program-status-liveness"),
+            sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog(), programStatus: programStatus)
     }
 

@@ -312,7 +312,7 @@ pass_table_from_workflow() {
     args="${args//\'/}"
     read -r -a parts <<< "$args"
     kept=(); skip_next=0
-    for tok in "${parts[@]}"; do
+    for tok in ${parts[@]+"${parts[@]}"}; do
       if [[ "$skip_next" -eq 1 ]]; then skip_next=0; continue; fi
       case "$tok" in
         --fingerprint|--experimental-xunit-message-failure) ;;
@@ -320,7 +320,7 @@ pass_table_from_workflow() {
         *) kept+=("$tok") ;;
       esac
     done
-    printf '%s|%s|%s\n' "$name" "$floor" "${kept[*]}"
+    printf '%s|%s|%s\n' "$name" "$floor" "${kept[*]:-}"
   done < <(awk '
     /^[ \t]*scripts\/ci\/watched-test-pass\.sh/ { acc = ""; on = 1 }
     on {
@@ -352,7 +352,8 @@ check_pass_table() {
 filter_args_of() {
   local -a parts
   read -r -a parts <<< "$1"
-  printf '%s\n' "${parts[@]}"
+  # Guarded: an empty filter leaves no parts, which bash 3.2 calls unbound.
+  printf '%s\n' ${parts[@]+"${parts[@]}"}
 }
 
 # The extra `swift test` args for iteration $2 of target $1, one per line.
@@ -385,7 +386,7 @@ start_spinners() {
     yes > /dev/null 2>&1 &
     SPINNER_PIDS+=("$!")          # captured at spawn — the only reliable handle
   done
-  echo "load: started ${#SPINNER_PIDS[@]} spinner(s) [pids: ${SPINNER_PIDS[*]}]"
+  echo "load: started ${#SPINNER_PIDS[@]} spinner(s) [pids: ${SPINNER_PIDS[*]:-}]"
 }
 
 stop_spinners() {
@@ -618,7 +619,7 @@ run_target() {
   echo "    $description"
 
   local failures=0 pass_counts=() signatures=() i verdict log load_before t0 line deadline
-  local -a args
+  local -a args  # non-empty: set to (--no-fingerprint ...) before every use
   for ((i = 1; i <= iterations; i++)); do
     log="${LOG_DIR:-$work_dir}/$name-$i.log"
     # Built as an array, never from an unquoted `$filter`: see filter_args_of.
@@ -671,7 +672,7 @@ run_target() {
     echo "Signatures:"
     echo
     local s
-    for s in "${signatures[@]}"; do echo "$s"; done
+    for s in "${signatures[@]}"; do echo "$s"; done  # non-empty: every failing iteration adds one
     echo
     echo "> This is one night's sample from CI's regime (a few idle cores), not the"
     echo "> regime this flake was characterised in (loadavg ~150 on 12 shared cores)."

@@ -97,7 +97,7 @@ struct RemoteCreateDefaultsEditor: View {
     private func providerSection(_ provider: RemoteProviderStatus) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             if editableProviders.count > 1 {
-                Text(provider.describe?.name ?? provider.config.name)
+                Text(RemoteProviderIdentityPresentation.headline(provider))
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundStyle(.secondary)

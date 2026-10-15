@@ -27,7 +27,9 @@ extension RPCRouter {
 
         let config = try? await db.config.get()
         let enabled = config?.autoResumeOnLimitReset ?? false
-        let suggestion = await limitSuggestion(for: terminal, defaultProfileID: config?.defaultProfileID)
+        let suggestion = await limitSuggestion(
+            for: terminal, defaultProfileID: config?.defaultProfileID,
+            policy: config?.profileBalancingPolicy ?? .standard)
         let limitedProfileName: String?
         if let profileID = terminal.profileID {
             limitedProfileName = (try? await db.modelProfiles.get(id: profileID))?.name
@@ -87,7 +89,7 @@ extension RPCRouter {
     /// no profile, so nothing is excluded. A suggestion only — it places
     /// nothing, so it takes no spawn reservation.
     private func limitSuggestion(
-        for terminal: Terminal, defaultProfileID: UUID?
+        for terminal: Terminal, defaultProfileID: UUID?, policy: ProfilePoolPolicy
     ) async -> (profileID: UUID, profileName: String?, usageSummary: String?)? {
         guard let source = profilePoolCandidateSource else { return nil }
         do {
@@ -97,8 +99,11 @@ extension RPCRouter {
                 excluded.insert(key)
             }
             let candidates = try await source.candidates(defaultProfileID: defaultProfileID)
+            // `chosen` only: the fallback is a spawn's last resort, never an
+            // account to recommend as having room.
             let decision = ProfilePoolPicker.pick(
-                candidates: candidates, excludingAccountKeys: excluded, now: Date())
+                candidates: candidates, excludingAccountKeys: excluded, now: Date(),
+                policy: policy)
             guard let chosen = decision.chosen else { return nil }
             // The winning candidate carries the very snapshot the picker
             // judged; re-reading the store here could race a poller write.

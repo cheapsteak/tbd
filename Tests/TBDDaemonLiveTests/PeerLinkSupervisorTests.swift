@@ -1,43 +1,40 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 3: every test spawns real children and races a deadline to drive them,
-/// which is the tier-3 definition in `Tests/CLAUDE.md`. `ProviderEventsSupervisorTests`
-/// — the supervisor this one is modelled on, sharing its generation-guarded
-/// teardown, its backoff and its process-group kill — sits in this target for
-/// the same reason.
+/// Tier 3: every test spawns real children and waits on their exits and their
+/// pipe traffic in real time, which is the tier-3 definition in
+/// `Tests/CLAUDE.md`. `ProviderEventsSupervisorTests` — the supervisor this one
+/// is modelled on, sharing its generation-guarded teardown, its backoff and its
+/// process-group kill — sits in this target for the same reason.
 ///
 /// The stubs are real `bash` children: a duplex NDJSON stream over two real
 /// pipes is the thing under test, and a fake would test the fake. Everything
-/// that *waits* is on the injected `TestClock` — backoff, the keepalive cadence,
-/// the silence watchdog and the SIGTERM→SIGKILL grace — so no test here waits
-/// out a production interval in real time.
+/// that *waits* is on the injected `EventDrivenTestClock` — backoff, the
+/// keepalive cadence, the silence watchdog, the drain and SIGTERM→SIGKILL
+/// graces, and the write refill — so no test here waits out a production
+/// interval in real time.
 ///
-/// **Advancing that clock is what makes the suite tier 3, not the waiting.**
-/// `advanceVirtualTime` cannot bind to an event, because `TestClock` publishes
-/// no "a sleeper armed" notification: each step has to *poll* `checkSuspension()`,
-/// and each poll pays a `megaYield` that re-enqueues the caller behind every
-/// runnable task in the process (`Tests/CLAUDE.md`, "Population is the
-/// scheduler"; `Tests/TestSupport/ClockTestSupport.swift` measured the same
-/// construct not converging under a large target). Driving one reconnect —
-/// drain grace, kill grace, backoff — takes roughly eight such steps, all
-/// inside a single wall-clock budget. So this suite's runtime is set by how
-/// many other tests are in flight, which it does not control.
+/// **Driving that clock is event-driven, and the time-driving helpers at the
+/// bottom of this file say how.** The clock signals arming from inside the
+/// critical section that registers a sleeper, so no step polls for it. Two
+/// properties of this supervisor shape the helpers, and both are worth knowing
+/// before reading a test:
 ///
-/// Measured, and the contrast is the whole argument. Run alone the suite is
-/// 16 tests in 11.1 s, and `helloIsWrittenOnConnectAndOnEveryReconnect` — the
-/// heaviest, since it drives a full reconnect — takes **0.450 s**. Run inside
-/// the 4,600-test fast parallel pass, the same test takes **107.7 s** locally
-/// and took **81.1 s** on the one CI run it survived before timing out at
-/// **227.4 s** on the runs after. Its fifteen siblings in this same
-/// `.serialized` suite stay at 0.03–5.1 s in every one of those configurations,
-/// because a serialized suite runs its first test at peak population and the
-/// rest in the drained tail. Which side of that a run lands on is a coin flip,
-/// not a margin, and raising the budget only moves the coin.
+/// - **A live connection always has two sleepers armed** — the silence
+///   watchdog and the keepalive, each re-arming after every tick. So "a sleeper
+///   is armed" is true for the whole time a test waits on a child in real time,
+///   and stepping the clock whenever one is armed would spend virtual time as
+///   fast as the scheduler allows. `advanceVirtualTime` therefore settles a
+///   short real interval between steps and is bounded by a real-time budget
+///   rather than by a step count: a step cap would be a virtual-time upper bound
+///   on a spawn or an EOF, which measures the runner.
+/// - **The keepalive decides by reading the date after its sleep**, so a test
+///   that measures its cadence must not step past a tick that has not finished.
+///   `advanceLockstep` waits for both sleepers to be registered again before
+///   every step, which is the event that says the previous step's ticks ran.
 ///
 /// The time limit is a hang catcher pinned here rather than inherited from
 /// `.clockDriven`, whose 240 s is sized for the fast parallel pass (the tier-3
@@ -45,10 +42,8 @@ import Testing
 /// in one test — a 45 s `advanceVirtualTime` budget, a 90 s `waitFor`, and
 /// `stopDriven`'s own 45 s, so ~180 s — with room for the run to report.
 ///
-/// `.serialized` because each test spawns children and drives a clock; running
-/// them against each other floods the pool with exactly the low-priority work
-/// each `checkSuspension` is waiting on (`Tests/CLAUDE.md`, "Clock and date
-/// seams").
+/// `.serialized` because each test spawns children and drives a clock, and the
+/// real-time waits here are sized for a quiet pass.
 ///
 /// Contract under test: `docs/remote-provider-contract.md` § `messages`, and
 /// `docs/specs/2026-08-29-remote-peer-messaging-design.md`.
@@ -80,7 +75,7 @@ struct PeerLinkSupervisorTests {
             exit 0
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -91,18 +86,17 @@ struct PeerLinkSupervisorTests {
         _ = try await waitFor(
             "the first messages child to spawn",
             observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 1 }
-        // No advance yet: the child is already gone, so a supervisor that
-        // reconnected without waiting on its clock would be at 2 by now.
-        #expect(stub.spawnCount() == 1, "the reconnect must wait on the injected clock, not spin")
+        let spun = try await respawnedWithoutTheClock(stub)
+        #expect(!spun, "the reconnect must wait on the injected clock, not spin; spawns=\(stub.spawnCount())")
 
-        _ = await advanceVirtualTime(
+        try await advanceVirtualTime(
             clock, until: "the second connection",
             observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 2 }
         _ = try await waitFor(
             "both connections to record their opening line",
             observed: { "lines=\(stub.stdinLines())" }) { stub.stdinLines().count >= 2 }
 
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         let lines = stub.stdinLines()
         #expect(lines.count >= 2, "observed \(lines)")
@@ -149,12 +143,16 @@ struct PeerLinkSupervisorTests {
     /// probe is race-free by construction. The seam records the virtual instant
     /// at which the delay was computed, and the sleep that follows can only
     /// register at that instant or later — nothing but this test moves the
-    /// clock — so the sleep's deadline is at least `computed + delay`. Advancing
-    /// to ten milliseconds short of that and finding the child *not* respawned
-    /// therefore proves the supervisor is still parked, whatever the scheduler
-    /// did in between. A backoff that went flat fails it twice over: the third
-    /// reconnect would come back after one virtual second where the probe
-    /// advances 3.99, and the requested delays would read `[1, 1, 1]`.
+    /// clock — so the sleep's deadline is at least `computed + delay`. The probe
+    /// waits for that sleep to register, advances to ten milliseconds short of
+    /// its floor, and then reads the clock's ledger: `advance` removes every
+    /// sleeper it resumes before it returns, so a sleeper still registered at
+    /// that moment is one that has not fired. That proves the supervisor is
+    /// still parked, whatever the scheduler did in between, without waiting on
+    /// a spawn that a fired sleep would only produce later. A backoff that went
+    /// flat fails it twice over: the third reconnect's sleep would come due
+    /// after one virtual second where the probe advances 3.99, and the
+    /// requested delays would read `[1, 1, 1]`.
     ///
     /// `healthyResetUptime` is 3600 against a frozen date source, so the attempt
     /// counter cannot reset mid-test and turn the growth back into a flat line —
@@ -162,7 +160,7 @@ struct PeerLinkSupervisorTests {
     @Test func reconnectBackoffGrowsAcrossRepeatedChildExit() async throws {
         let stub = try Stub("backoff", body: "exit 0")
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let backoff = BackoffRequests(clock: clock)
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -174,9 +172,8 @@ struct PeerLinkSupervisorTests {
         _ = try await waitFor(
             "the first messages child to spawn",
             observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 1 }
-        // No advance yet: the child is already gone, so a supervisor that
-        // reconnected without waiting on its clock would be at 2 by now.
-        #expect(stub.spawnCount() == 1, "the reconnect must wait on the injected clock, not spin")
+        let spun = try await respawnedWithoutTheClock(stub)
+        #expect(!spun, "the reconnect must wait on the injected clock, not spin; spawns=\(stub.spawnCount())")
 
         // `2^(attempt - 1)`, which is the whole of what the exponential may
         // produce for the first three reconnects.
@@ -186,34 +183,37 @@ struct PeerLinkSupervisorTests {
         let hair = Duration.milliseconds(10)
         for (index, wait) in expected.enumerated() {
             let attempt = index + 1
-            let computed = await advanceVirtualTime(
+            try await advanceVirtualTime(
                 clock, until: "the backoff before connection \(attempt + 1) to be computed",
                 observed: { "requested=\(backoff.bases) spawns=\(stub.spawnCount())" }
             ) { backoff.count >= attempt }
-            if computed == nil { break }
-            guard let request = backoff.request(index) else { break }
+            let request = try #require(backoff.request(index))
+            // The seam runs just before the backoff sleep is reached, and the
+            // connection it follows has already cancelled its own sleepers, so
+            // the one sleeper that registers now is the backoff.
+            try await clock.requireSleeperArmed()
 
             let floor = request.at.advanced(by: Duration.seconds(wait) - hair)
             let room = clock.now.duration(to: floor)
             // The advance the probe still has to make. Positive by a wide
-            // margin — `advanceVirtualTime` checks its condition after every
+            // margin — `advanceVirtualTime` reads its condition before every
             // advance, so it can overshoot the instant the delay was computed
             // by at most one step, against the 0.99 s the shortest probe needs.
             #expect(room > .zero, "the probe needs virtual room short of the deadline; had \(room)")
             if room > .zero { await clock.advance(by: room) }
             #expect(
-                stub.spawnCount() == attempt,
+                clock.hasSleeper,
                 """
-                connection \(attempt + 1) opened before its backoff was up: the delay was \
+                the backoff before connection \(attempt + 1) came due early: the delay was \
                 computed as \(request.base)s and the clock is still short of it, so the \
-                supervisor must still be parked; spawns=\(stub.spawnCount())
+                supervisor must still be parked on it; spawns=\(stub.spawnCount())
                 """)
+            #expect(stub.spawnCount() == attempt, "connection \(attempt + 1) opened before its backoff was up")
 
-            let opened = await advanceVirtualTime(
+            try await advanceVirtualTime(
                 clock, until: "connection \(attempt + 1)",
                 observed: { "spawns=\(stub.spawnCount())" }
             ) { stub.spawnCount() >= attempt + 1 }
-            if opened == nil { break }
         }
 
         // Captured before the stop, as `linkGoesUpOnHelloExchangeAndDownOnChildExit`
@@ -221,7 +221,7 @@ struct PeerLinkSupervisorTests {
         // connections open and further backoffs be computed.
         let requested = backoff.bases
         let spawns = stub.spawnCount()
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         #expect(
             Array(requested.prefix(expected.count)) == expected,
@@ -257,7 +257,7 @@ struct PeerLinkSupervisorTests {
             wait "$child"
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let date = TestDateSource()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -274,7 +274,7 @@ struct PeerLinkSupervisorTests {
 
         // Past the 3 s silence limit on the seam the watchdog compares against.
         date.advance(by: 4)
-        _ = await advanceVirtualTime(
+        try await advanceVirtualTime(
             clock, until: "the watchdog to replace the silent child", step: 0.5,
             observed: { let seen = await supervisor.state; return "spawns=\(stub.spawnCount()) state=\(seen)" }
         ) { stub.spawnCount() >= 2 }
@@ -285,7 +285,7 @@ struct PeerLinkSupervisorTests {
         ) { kill(-firstPID, 0) != 0 }
 
         let transitions = await recorder.transitions
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
         #expect(stub.spawnCount() >= 2, "the silent child was killed but never replaced")
         #expect(
             Array(transitions.prefix(2)) == [.up, .down],
@@ -308,12 +308,15 @@ struct PeerLinkSupervisorTests {
     /// the stream was carrying a line at that moment.
     ///
     /// **Silence is unmet by construction, not by luck.** Every round advances
-    /// both seams and then waits for a *new* inbound ping before the next one,
-    /// capped at four simulated seconds, so the stream is never quiet for longer
-    /// than four seconds against a six-second `silenceLimit` — and each round
-    /// starts from a ping that has just landed, so the gap never accumulates
-    /// across rounds. The connection's age, meanwhile, only grows. It is the
-    /// one condition left that can kill this child.
+    /// both seams only until this side's keepalive sends its next ping — one
+    /// keepalive interval, a tick the lockstep wait makes deterministic — and
+    /// then stops the clock and waits in real time for the provider's echo
+    /// before the next round. So no virtual time passes while a line is crossing
+    /// the pipe, the stream is never quiet for much more than one second against
+    /// a six-second `silenceLimit`, and each round starts from a ping that has
+    /// just landed, so the gap never accumulates across rounds. The connection's
+    /// age, meanwhile, only grows. It is the one condition left that can kill
+    /// this child.
     @Test func aHandshakeThatNeverCompletesIsKilledWhileTheStreamStaysBusy() async throws {
         let stub = try Stub("handshake-stall", body: """
             trap 'printf "%s\\n" terminated >> "$STDIN_LOG"; exit 143' TERM INT
@@ -323,7 +326,7 @@ struct PeerLinkSupervisorTests {
             done
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let date = TestDateSource()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
@@ -337,34 +340,44 @@ struct PeerLinkSupervisorTests {
             observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 1 }
         let firstPID = try #require(stub.pids().first)
 
+        // The kill, seen any of three ways — the stub's own TERM marker, its
+        // process group going, or the replacement child the supervisor spawns
+        // after it.
+        @Sendable func killed() -> Bool {
+            stub.stdinLines().contains("terminated") || stub.spawnCount() > 1 || kill(-firstPID, 0) != 0
+        }
+
         // Rounds, not one long advance: the cap on how long the stream may be
         // quiet is the whole point, and only a wait that re-anchors on each
-        // fresh ping enforces it. The loop ends on the kill — by the stub's own
-        // TERM marker, by its process group going, or by the replacement child
-        // the supervisor spawns after it.
+        // fresh ping enforces it. The loop ends on the kill.
         var rounds = 0
-        while rounds < 24 {
-            let terminated = stub.stdinLines().contains("terminated")
-            let replaced = stub.spawnCount() > 1
-            if terminated || replaced || kill(-firstPID, 0) != 0 { break }
-            let before = await supervisor.counters.linesBeforeHandshake
-            let progressed = await advanceLockstep(
-                clock, date, until: "the provider's next ping, or the watchdog's kill",
-                limit: 4,
+        while rounds < 24, !killed() {
+            let sent = await supervisor.counters.framesSent
+            let echoed = await supervisor.counters.linesBeforeHandshake
+            try await advanceLockstep(
+                clock, date, until: "this side's next keepalive ping, or the watchdog's kill",
+                limit: 2,
+                observed: {
+                    let seen = await supervisor.counters.framesSent
+                    return "sent=\(seen) spawns=\(stub.spawnCount()) lines=\(stub.stdinLines().count)"
+                }
+            ) { await supervisor.counters.framesSent > sent || killed() }
+            // The clock stands still here, so the time the echo takes to cross
+            // the pipe is real time only and adds nothing to the silence the
+            // watchdog measures.
+            let answered = try await waitFor(
+                "the provider to echo that ping, or the watchdog's kill",
                 observed: {
                     let seen = await supervisor.counters.linesBeforeHandshake
                     return "pings=\(seen) spawns=\(stub.spawnCount()) lines=\(stub.stdinLines().count)"
                 }
-            ) {
-                let pings = await supervisor.counters.linesBeforeHandshake
-                return pings > before
-                    || stub.stdinLines().contains("terminated")
-                    || stub.spawnCount() > 1
-                    || kill(-firstPID, 0) != 0
-            }
-            if progressed == nil { break }
+            ) { await supervisor.counters.linesBeforeHandshake > echoed || killed() }
+            guard answered else { break }
             rounds += 1
         }
+        try #require(
+            killed(),
+            "a provider that kept the stream busy without answering hello was never killed; \(rounds) rounds")
 
         _ = try await waitFor(
             "the stalled child's process group to die",
@@ -373,13 +386,13 @@ struct PeerLinkSupervisorTests {
         // Clock only, so the date stays where the rounds left it: a replacement
         // spawned under an advancing date could be killed by the silence branch
         // and muddy what this test is measuring.
-        _ = await advanceVirtualTime(
+        try await advanceVirtualTime(
             clock, until: "the watchdog to replace the stalled child", step: 0.5,
             observed: { "spawns=\(stub.spawnCount())" }) { stub.spawnCount() >= 2 }
 
         let pings = await supervisor.counters.linesBeforeHandshake
         let transitions = await recorder.transitions
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         #expect(
             transitions.isEmpty,
@@ -403,7 +416,7 @@ struct PeerLinkSupervisorTests {
         defer { stub.remove() }
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
-            handler: LinkRecorder(), clock: TestClock<Duration>())
+            handler: LinkRecorder(), clock: EventDrivenTestClock())
         #expect(await supervisor.silenceLimit == PeerBridgeFrameCodec.silenceLimit)
         #expect(await supervisor.keepaliveInterval == PeerBridgeFrameCodec.keepaliveInterval)
         // The whole point of the constant: a third of what `events` runs at.
@@ -443,7 +456,7 @@ struct PeerLinkSupervisorTests {
             while IFS= read -r line; do printf '%s\\n' "$line" >> "$STDIN_LOG"; done
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let date = TestDateSource()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -460,28 +473,25 @@ struct PeerLinkSupervisorTests {
         // that pings stamps the link's last outbound write at that instant, so
         // the interval this test places a frame inside starts exactly there —
         // no arithmetic about when the supervisor first armed its wait.
-        let toFirstPing = await advanceLockstep(
+        // A miss throws with what was sent so far, which ends the test: there
+        // is no interval to place a frame inside without this ping.
+        try await advanceLockstep(
             clock, date, until: "the first keepalive ping on an idle link",
             limit: 30,
             observed: { "sent=\(await supervisor.counters.framesSent) lines=\(stub.stdinLines())" }
         ) { await supervisor.counters.framesSent >= 2 }
-        // Recorded rather than required: `advanceLockstep` has already reported
-        // the miss, and throwing here would skip the `stop()` that takes the
-        // stub child down with it.
-        #expect(
-            toFirstPing != nil,
-            "an idle link never pinged, so there is no interval to place a frame inside")
 
         // Four seconds into the interval that ping opened, an ordinary outbound
         // frame — the mid-interval traffic the old cadence swallowed a whole
         // interval for.
-        await advanceLockstep(clock, date, by: 4)
+        try await advanceLockstep(clock, date, by: 4)
         try await supervisor.send(.peer(PeerBridgePeer(
             handle: "h-mid", name: "acme-laptop:mid-interval %1", status: "working",
             peerProtocol: PeerBridgeFrameCodec.peerProtocol)))
         let sentBeforeNextPing = await supervisor.counters.framesSent
 
-        let gap = await advanceLockstep(
+        // Throws if no ping follows within 18 virtual seconds.
+        let measured = try await advanceLockstep(
             clock, date, until: "the keepalive ping that follows the mid-interval frame",
             limit: 18,
             observed: { "sent=\(await supervisor.counters.framesSent) lines=\(stub.stdinLines())" }
@@ -489,23 +499,16 @@ struct PeerLinkSupervisorTests {
 
         // The positive control, on real time rather than virtual: without it a
         // supervisor that counted a frame it never wrote — or wrote something
-        // other than a ping — would satisfy every measurement above. Skipped
-        // when the measurement itself came back empty, where waiting out a full
-        // real-time deadline would only rediscover the failure `#require`
-        // already reports below.
-        if gap != nil {
-            _ = try await waitFor(
-                "both keepalive pings to reach the child's stdin",
-                observed: { "lines=\(stub.stdinLines())" }
-            ) { stub.stdinLines().filter { $0.contains("\"kind\":\"ping\"") }.count >= 2 }
-        }
+        // other than a ping — would satisfy every measurement above.
+        _ = try await waitFor(
+            "both keepalive pings to reach the child's stdin",
+            observed: { "lines=\(stub.stdinLines())" }
+        ) { stub.stdinLines().filter { $0.contains("\"kind\":\"ping\"") }.count >= 2 }
         let lines = stub.stdinLines()
         let pings = lines.filter { $0.contains("\"kind\":\"ping\"") }.count
 
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
-        let measured = try #require(
-            gap, "no ping followed the mid-interval frame within 18 virtual seconds")
         #expect(
             measured < 13,
             """
@@ -530,7 +533,7 @@ struct PeerLinkSupervisorTests {
             exit 0
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -550,7 +553,7 @@ struct PeerLinkSupervisorTests {
         // second connection open and append its own transitions.
         let transitions = await recorder.transitions
         let frames = await recorder.frames
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         #expect(transitions == [.up, .down])
         #expect(
@@ -569,7 +572,7 @@ struct PeerLinkSupervisorTests {
             exit 0
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -587,7 +590,7 @@ struct PeerLinkSupervisorTests {
         // would take the count to 2.
         let frames = await recorder.frames
         let prematureDrops = await supervisor.counters.linesBeforeHandshake
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         #expect(
             !frames.contains(where: { $0.kind == .peer }),
@@ -612,7 +615,7 @@ struct PeerLinkSupervisorTests {
             exit 0
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -629,7 +632,7 @@ struct PeerLinkSupervisorTests {
         // clock can open a second connection, whose own premature ping would
         // take both counts up by one.
         let counters = await supervisor.counters
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         #expect(
             counters.linesBeforeHandshake == 1,
@@ -652,7 +655,7 @@ struct PeerLinkSupervisorTests {
             while IFS= read -r line; do printf '%s\\n' "$line" >> "$STDIN_LOG"; done
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
             handler: LinkRecorder(), healthyResetUptime: 3600, clock: clock,
@@ -680,7 +683,7 @@ struct PeerLinkSupervisorTests {
             observed: { "lines=\(stub.stdinLines())" }
         ) { stub.stdinLines().contains(where: { $0.contains("h-delivered") }) }
 
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         let lines = stub.stdinLines()
         #expect(
@@ -697,7 +700,7 @@ struct PeerLinkSupervisorTests {
             while IFS= read -r line; do printf '%s\\n' "$line" >> "$STDIN_LOG"; done
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
             handler: LinkRecorder(), healthyResetUptime: 3600, clock: clock,
@@ -710,8 +713,23 @@ struct PeerLinkSupervisorTests {
         await #expect(throws: PeerLinkSendFailure.notOutbound(.peerInventory)) {
             try await supervisor.send(.peerInventory(handles: ["h-1"]))
         }
-        await stopDriven(supervisor, clock)
-        #expect(!stub.stdinLines().contains(where: { $0.contains("peer-inventory") }))
+        // The positive control: a frame sent after the refused one, waited for
+        // until it reaches the child. Frames cross the pipe in order, so once
+        // this one is in the log anything written before it is too — without
+        // it, the absence below would also pass against a child that had not
+        // got round to logging what it was sent.
+        try await supervisor.send(.peer(PeerBridgePeer(
+            handle: "h-after", name: "acme-laptop:after %1", status: "working",
+            peerProtocol: PeerBridgeFrameCodec.peerProtocol)))
+        _ = try await waitFor(
+            "the frame sent after the refused one to reach the child's stdin",
+            observed: { "lines=\(stub.stdinLines())" }
+        ) { stub.stdinLines().contains(where: { $0.contains("h-after") }) }
+        try await stopDriven(supervisor, clock)
+        let lines = stub.stdinLines()
+        #expect(
+            !lines.contains(where: { $0.contains("peer-inventory") }),
+            "a refused peer-inventory must never reach the wire; got \(lines)")
     }
 
     /// **A frame bigger than the pipe buffer is the ordinary case, not a
@@ -735,7 +753,7 @@ struct PeerLinkSupervisorTests {
             cat >> "$STDIN_LOG"
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -767,7 +785,7 @@ struct PeerLinkSupervisorTests {
                 await outcome.record(error)
             }
         }
-        _ = await advanceVirtualTime(
+        try await advanceVirtualTime(
             clock, until: "the large frame to finish crossing the pipe",
             observed: {
                 let finished = await outcome.finished
@@ -787,7 +805,7 @@ struct PeerLinkSupervisorTests {
         let dropped = await supervisor.counters.sendsDropped
         let spawns = stub.spawnCount()
         let landed = stub.stdinLines().first { $0.contains("m-big") }
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         #expect(
             failure == nil,
@@ -830,7 +848,7 @@ struct PeerLinkSupervisorTests {
             wait "$child"
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -870,7 +888,7 @@ struct PeerLinkSupervisorTests {
             }
             await outcome.record(nil)
         }
-        _ = await advanceVirtualTime(
+        try await advanceVirtualTime(
             clock, until: "a send to be refused by the full pipe",
             observed: {
                 let sent = await supervisor.counters.framesSent
@@ -886,7 +904,7 @@ struct PeerLinkSupervisorTests {
         let dropped = await supervisor.counters.sendsDropped
         let spawns = stub.spawnCount()
         let alive = kill(-pid, 0) == 0
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         let refusal = try #require(
             failure as? PeerLinkSendFailure,
@@ -943,7 +961,7 @@ struct PeerLinkSupervisorTests {
             cat >> "$STDIN_LOG"
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -1030,14 +1048,14 @@ struct PeerLinkSupervisorTests {
         //
         // The child needs real time to notice the gate (it polls for the file
         // every 0.02 s) and then exec `cat`. `advanceVirtualTime` spends
-        // virtual time as fast as the scheduler allows: it advances the clock
-        // one `step` per loop iteration for as long as any sleeper is armed,
-        // with essentially no wall-clock time in between. The stalled write's
-        // refill loop is BOUNDED — it sleeps `writeRetryInterval` on the
-        // injected clock between attempts and gives up after
-        // `writeStallLimit / writeRetryInterval` of them — so advancing the
-        // clock before the child is reading burns that entire budget in a few
-        // milliseconds and the write abandons the frame half-written. That is
+        // virtual time with only `stepSettle` of real time between steps: it
+        // advances the clock one `step` per loop iteration for as long as any
+        // sleeper is armed. The stalled write's refill loop is BOUNDED — it
+        // sleeps `writeRetryInterval` on the injected clock between attempts
+        // and gives up after `writeStallLimit / writeRetryInterval` of them —
+        // so advancing the clock before the child is reading burns that entire
+        // budget in about a second and the write abandons the frame half-written,
+        // with no guarantee the child was ever scheduled to read. That is
         // exactly what CI observed: `truncated(wrote: 65483, of: 131146)`, a
         // pipe filled to 64 KB that never moved another byte, against a child
         // log holding nothing at all.
@@ -1055,7 +1073,7 @@ struct PeerLinkSupervisorTests {
         ) { stub.stdinByteCount() > 0 }
 
         // Draining is underway; this is the first virtual time anything here spends.
-        _ = await advanceVirtualTime(
+        try await advanceVirtualTime(
             clock, until: "the stalled frame to finish crossing the pipe",
             observed: {
                 let a = await alphaOutcome.finished
@@ -1084,7 +1102,7 @@ struct PeerLinkSupervisorTests {
         let dropped = await supervisor.counters.sendsDropped
         let transitions = await recorder.transitions
         let spawns = stub.spawnCount()
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         #expect(
             survivorFailure == nil,
@@ -1172,7 +1190,7 @@ struct PeerLinkSupervisorTests {
             wait "$child"
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let recorder = LinkRecorder()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
@@ -1219,7 +1237,7 @@ struct PeerLinkSupervisorTests {
             finishedBeforeAnyAdvance == false,
             "the frame must still be parked mid-transfer: nothing has advanced the clock it sleeps on")
 
-        _ = await advanceVirtualTime(
+        try await advanceVirtualTime(
             clock, until: "the stalled frame to notice its connection is gone",
             observed: { let finished = await outcome.finished; return "finished=\(finished)" }
         ) { await outcome.finished }
@@ -1228,7 +1246,7 @@ struct PeerLinkSupervisorTests {
         // Captured before the stop, which advances the clock and can reconnect.
         let failure = await outcome.failure
         let dropped = await supervisor.counters.sendsDropped
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
 
         let refusal = failure as? PeerLinkSendFailure
         #expect(
@@ -1243,9 +1261,11 @@ struct PeerLinkSupervisorTests {
     // MARK: - Teardown
 
     /// `stop()` is deterministic: when it returns the child tree is dead, the
-    /// supervision task has finished, and **no respawn can follow** — proven by
-    /// advancing far more virtual time than any backoff would need and finding
-    /// the connection count unchanged.
+    /// supervision task has finished, and **no respawn can follow** — proven
+    /// twice. Every way back to a spawn goes through the backoff sleep, so the
+    /// clock's ledger must stay empty once `stop()` returns; and advancing far
+    /// more virtual time than any backoff would need must leave the connection
+    /// count unchanged.
     @Test func stopIsDeterministicAndNothingRespawnsAfterIt() async throws {
         let stub = try Stub("stop", body: """
             printf '%s\\n' '{"kind":"hello","origin":"acme-remote","protocol":1}'
@@ -1255,7 +1275,7 @@ struct PeerLinkSupervisorTests {
             wait "$child"
             """)
         defer { stub.remove() }
-        let clock = TestClock<Duration>()
+        let clock = EventDrivenTestClock()
         let supervisor = PeerLinkSupervisor(
             config: stub.config, contractVersion: 2, origin: "acme-laptop",
             handler: LinkRecorder(), healthyResetUptime: 3600, clock: clock,
@@ -1266,15 +1286,26 @@ struct PeerLinkSupervisorTests {
             observed: { let seen = await supervisor.state; return "state=\(seen)" }) { await supervisor.state == .up }
         let pid = try #require(stub.pids().first)
 
-        await stopDriven(supervisor, clock)
+        try await stopDriven(supervisor, clock)
         let spawnsAtStop = stub.spawnCount()
 
-        // Far past `backoffCap`, on a clock nobody is supposed to be sleeping on
-        // any more.
-        await clock.advance(by: .seconds(600))
-        await clock.advance(by: .seconds(600))
+        // Watched rather than read once, so a task that parks on the clock a
+        // little after `stop()` returns is still seen.
+        let armedAfterStop = await watchForSleeper(on: clock)
         #expect(
-            stub.spawnCount() == spawnsAtStop,
+            !armedAfterStop,
+            "stop() returned with a task still parked on the clock, and anything parked there can wake and respawn")
+
+        // Far past `backoffCap`, on a clock nobody is supposed to be sleeping on
+        // any more. `advance` resumes what it fires and returns at once, so the
+        // pid log is then watched for a second rather than read straight away.
+        await clock.advance(by: .seconds(600))
+        await clock.advance(by: .seconds(600))
+        let respawned = await pollUntilTrue(timeout: .seconds(1), pollInterval: .milliseconds(10)) {
+            stub.spawnCount() > spawnsAtStop
+        }
+        #expect(
+            respawned != .satisfied,
             "stop() must leave nothing that can respawn; spawns went \(spawnsAtStop) -> \(stub.spawnCount())")
 
         // Bounded poll because an orphaned grandchild is reaped by launchd, not
@@ -1323,17 +1354,18 @@ private actor SendOutcome {
 ///
 /// **The recorded instant is a floor on the backoff sleep's deadline**, and
 /// that is what the type is really for. The seam is called between `runOnce`
-/// returning and `clock.sleep` being reached, and nothing but the test moves a
-/// `TestClock` — so the sleep, whenever it registers, registers at this instant
-/// or later, and its deadline can only be at or beyond `at + base`. A probe
-/// that advances short of that and finds nothing respawned is therefore sound
-/// no matter how the two tasks were scheduled against each other.
+/// returning and `clock.sleep` being reached, and nothing but the test moves an
+/// `EventDrivenTestClock` — so the sleep, whenever it registers, registers at
+/// this instant or later, and its deadline can only be at or beyond
+/// `at + base`. A probe that advances short of that and finds the sleep still
+/// registered is therefore sound no matter how the two tasks were scheduled
+/// against each other.
 private final class BackoffRequests: @unchecked Sendable {
     private let lock = NSLock()
-    private let clock: TestClock<Duration>
-    private var entries: [(base: TimeInterval, at: TestClock<Duration>.Instant)] = []
+    private let clock: EventDrivenTestClock
+    private var entries: [(base: TimeInterval, at: EventDrivenTestClock.Instant)] = []
 
-    init(clock: TestClock<Duration>) {
+    init(clock: EventDrivenTestClock) {
         self.clock = clock
     }
 
@@ -1356,7 +1388,7 @@ private final class BackoffRequests: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return entries.map { $0.base }
     }
 
-    func request(_ index: Int) -> (base: TimeInterval, at: TestClock<Duration>.Instant)? {
+    func request(_ index: Int) -> (base: TimeInterval, at: EventDrivenTestClock.Instant)? {
         lock.lock(); defer { lock.unlock() }
         return index < entries.count ? entries[index] : nil
     }
@@ -1416,73 +1448,193 @@ private struct Stub {
     }
 }
 
-/// A clock-driven wait that never saw its effect, on the **primary** failure
-/// line (`Tests/CLAUDE.md` assertion-hygiene rule 4 — only
-/// `Issue.record(_: some Error)` survives into a CI summary).
+/// Whether a second connection opened while the clock stood still, for a stub
+/// whose first child exits on its own.
+///
+/// Waits for that child's process group to be gone, then watches the pid log
+/// for a second spawn for one second of real time with nothing moving the
+/// clock. Every wait between one connection ending and the next opening — the
+/// drain grace, the backoff — is on the injected clock, so a supervisor that
+/// honours it cannot respawn here, and one that reconnected on its own would.
+/// Watched rather than read once: a single read straight after the first spawn
+/// sees one connection whether or not a second is on its way.
+///
+/// One-sided, like every absence check: a reconnect slower than the window
+/// passes it. The window is the assertion and is not lengthened.
+private func respawnedWithoutTheClock(
+    _ stub: Stub, sourceLocation: SourceLocation = #_sourceLocation
+) async throws -> Bool {
+    let firstPID = try #require(stub.pids().first, sourceLocation: sourceLocation)
+    _ = try await waitFor(
+        "the first child to exit on its own",
+        observed: { "group \(firstPID) alive=\(kill(-firstPID, 0) == 0)" },
+        sourceLocation: sourceLocation) { kill(-firstPID, 0) != 0 }
+    let respawn = await pollUntilTrue(timeout: .seconds(1), pollInterval: .milliseconds(10)) {
+        stub.spawnCount() >= 2
+    }
+    return respawn == .satisfied
+}
+
+/// A clock-driven wait that never saw its effect.
+///
+/// Thrown rather than recorded, so the message carries the call site: a thrown
+/// error is attributed to the test function, and in a test with several of
+/// these waits only the text can say which one gave up. Reports what was
+/// *observed* when the wait gave up, on the primary failure line
+/// (`Tests/CLAUDE.md` assertion-hygiene rule 4).
 private struct PeerLinkAdvanceTimeout: Error, CustomStringConvertible {
     let what: String
-    let advances: Int
     let virtualSeconds: Double
+    let budget: String
     let observed: String
+    let sourceLocation: SourceLocation
 
     var description: String {
         """
-        timed out waiting for \(what) — spent \(virtualSeconds)s of virtual time over \
-        \(advances) advance(s); observed \(observed)
+        timed out waiting for \(what) — spent \(virtualSeconds)s of virtual time within \
+        \(budget); observed \(observed)
+        The wait that gave up: \(sourceLocation.fileID):\(sourceLocation.line).
         """
     }
 }
 
-/// Advances virtual time in `step`s for as long as the code under test keeps
-/// **re-arming** a sleep, until `condition` holds, and returns the virtual
-/// seconds it spent getting there (`nil` on timeout).
+/// A virtual `Duration` as the seconds the supervisor's own arithmetic uses.
+private func virtualSeconds(of duration: Swift.Duration) -> Double {
+    let (whole, fraction) = duration.components
+    return Double(whole) + Double(fraction) / 1e18
+}
+
+/// Real time `advanceVirtualTime` settles for between two steps.
 ///
-/// The returned total is why this exists rather than `TestClock.advanceUntil`:
-/// "how much virtual time did the supervisor insist on before reconnecting" is
-/// the backoff assertion, and it has to be measured rather than tolerated.
+/// Not a deadline and not a guess at how long anything takes: it is what keeps
+/// a step from following the last one before the work that step woke has had a
+/// thread. The supervisor keeps the watchdog and the keepalive armed for the
+/// whole life of a connection, so while a test waits on a child — its exit, its
+/// next line, a pipe draining — there is always a sleeper to step, and an
+/// unsettled loop would spend virtual time as fast as the scheduler allows. Most
+/// of that is harmless against a frozen date source, but one budget here is
+/// spent per step: a stalled write's refill waits (`writeStallLimit` over a 5 ms
+/// retry), which a fast enough loop burns before `cat` has read anything. Five
+/// milliseconds per refill wait is far longer than draining a 64 KB pipe takes.
+private let stepSettle: Swift.Duration = .milliseconds(5)
+
+/// Steps virtual time in `step`s, one armed sleeper at a time, until
+/// `condition` holds, and returns the virtual seconds it spent getting there.
 ///
-/// Each step is gated on something actually being armed, so no advance is spent
-/// on an empty clock and virtual time never runs ahead of a sleeper that has not
-/// arrived yet — the desync that turns a missed advance into a permanent hang.
+/// Built on `EventDrivenTestClock.advanceUntil`, so every step waits for a
+/// registered sleeper rather than advancing an empty ledger, and the condition
+/// is watched while a step waits — the last tick of something that stops (a
+/// `stop()` returning, a send giving up) does not re-arm, and its effect lands
+/// with nothing left to step.
+///
+/// Two departures from `advanceUntil`'s defaults, both for the reason
+/// ``stepSettle`` gives — a live connection always has a sleeper to step:
+///
+/// - **Each step settles** for ``stepSettle`` before the next.
+/// - **The bound is `budget` of real time, not a step count.** The steps a test
+///   spends while waiting for a child to exit or a line to cross the pipe are
+///   set by how fast the machine delivers that event, so a cap on them would be
+///   a virtual-time upper bound on a spawn or an EOF — a measurement of the
+///   runner. The budget is the one this helper has always had; it ends the
+///   call through the condition, and the verdict is then read again so a
+///   condition that came true at the last moment passes.
+///
+/// - Throws: `PeerLinkAdvanceTimeout` when the budget runs out with the
+///   condition still false, and `advanceUntil`'s `NoSleeperArmed` when nothing
+///   registers on the clock for the whole budget.
 @discardableResult
 private func advanceVirtualTime(
-    _ clock: TestClock<Duration>,
+    _ clock: EventDrivenTestClock,
     until what: String,
     step: Double = 0.25,
-    timeout: Swift.Duration = .seconds(45),
-    pollInterval: Swift.Duration = .milliseconds(25),
+    budget: Swift.Duration = .seconds(45),
     observed: @Sendable () async -> String = { "nothing" },
     sourceLocation: SourceLocation = #_sourceLocation,
-    _ condition: @Sendable () async -> Bool
-) async -> Double? {
-    let deadline = ContinuousClock.now.advanced(by: timeout)
-    var advances = 0
-    var virtual = 0.0
-    repeat {
-        if await condition() { return virtual }
-        if await isArmed(clock) {
-            await clock.advance(by: .seconds(step))
-            advances += 1
-            virtual += step
-        } else {
-            try? await Task.sleep(for: pollInterval)
-        }
-    } while ContinuousClock.now < deadline
-    if await condition() { return virtual }
+    _ condition: @escaping @Sendable () async -> Bool
+) async throws -> Double {
+    let start = clock.now
+    let deadline = ContinuousClock.now.advanced(by: budget)
+    try await clock.advanceUntil(
+        what, by: .seconds(step), timeout: budget, maxSteps: .max, sourceLocation: sourceLocation
+    ) {
+        if await condition() { return true }
+        // Ends the call once the budget is spent; the verdict is read below.
+        if ContinuousClock.now >= deadline { return true }
+        try? await Task.sleep(for: stepSettle)
+        return await condition()
+    }
+    let spent = virtualSeconds(of: start.duration(to: clock.now))
+    if await condition() { return spent }
+    try Task.checkCancellation()
+    // Capture before deciding to fail, then re-check, so the report cannot
+    // contradict the verdict (the order `waitFor` documents).
     let seen = await observed()
-    if await condition() { return virtual }
-    Issue.record(
-        PeerLinkAdvanceTimeout(
-            what: what, advances: advances, virtualSeconds: virtual, observed: seen),
-        sourceLocation: sourceLocation)
-    return nil
+    if await condition() { return spent }
+    throw PeerLinkAdvanceTimeout(
+        what: what, virtualSeconds: spent, budget: "\(budget) of real time",
+        observed: seen, sourceLocation: sourceLocation)
+}
+
+/// How a wait for several armed sleepers ended.
+private enum ArmedOrHeld: Sendable {
+    case armed
+    case held
+}
+
+/// Waits until at least `count` sleepers are registered on `clock`, or until
+/// `condition` holds — whichever comes first.
+///
+/// `requireSleepersArmed(count:)` raced against a watch on the condition, for
+/// the same reason `advanceUntil` watches its own: the connection a lockstep
+/// test is driving can end under it, and once it has, its two sleepers never
+/// register again — the condition saying so is the only way the wait ends
+/// without a spurious hang.
+private func sleepersArmed(
+    _ clock: EventDrivenTestClock,
+    count: Int,
+    orUntil condition: @escaping @Sendable () async -> Bool,
+    timeout: Swift.Duration,
+    sourceLocation: SourceLocation
+) async throws -> ArmedOrHeld {
+    if await condition() { return .held }
+    do {
+        let outcome = try await withThrowingTaskGroup(
+            of: ArmedOrHeld?.self, returning: ArmedOrHeld.self
+        ) { group in
+            group.addTask {
+                try await clock.requireSleepersArmed(
+                    count: count, timeout: timeout, sourceLocation: sourceLocation)
+                return .armed
+            }
+            group.addTask {
+                while !Task.isCancelled {
+                    if await condition() { return .held }
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+                return nil
+            }
+            defer { group.cancelAll() }
+            // The watch returns nil only once cancelled, so the first non-nil
+            // result is the verdict.
+            while let raced = try await group.next() {
+                if let raced { return raced }
+            }
+            return .armed
+        }
+        try Task.checkCancellation()
+        return outcome
+    } catch {
+        // The guard and the watch race; a condition that came true at the last
+        // moment is not a missed arming.
+        if await condition() { return .held }
+        throw error
+    }
 }
 
 /// `advanceVirtualTime`'s two-seam sibling, for the keepalive — the one
 /// subsystem here that sleeps on the clock and then makes a decision by reading
 /// the date. Advances both together in `step`s until `condition` holds, and
-/// returns the virtual seconds it took (`nil` if `limit` virtual seconds or the
-/// real-time `timeout` ran out first).
+/// returns the virtual seconds it took.
 ///
 /// Three properties, each load-bearing.
 ///
@@ -1493,80 +1645,75 @@ private func advanceVirtualTime(
 /// **The date moves first** within a step, so an interval that has just fully
 /// elapsed on the clock is never read as an idle gap one step short of it.
 ///
-/// **Each step settles in real time before the next.** A woken sleeper re-arms
-/// at whatever `clock.now` says when it calls `sleep` again, so advancing
-/// before it gets there silently pushes its next deadline out and moves the
-/// beat this test computes its expectations from. The settle is what keeps the
-/// cadence deterministic rather than a race against the scheduler.
+/// **No step follows one whose ticks have not finished.** Before every step,
+/// and before the condition is read, it waits for `armed` sleepers to be
+/// registered — on a live connection the watchdog and the keepalive, which
+/// re-register only once the tick a step woke has run. So the condition always
+/// sees that tick's effect, and a woken sleeper always re-arms at the instant it
+/// woke rather than at one a later step pushed it to, which keeps the beat this
+/// test computes its expectations from exact rather than a race against the
+/// scheduler.
+///
+/// `limit` bounds virtual time, and that is sound here because what it bounds
+/// is the keepalive's own ticks, which the wait above makes deterministic.
+/// Anything that has to cross the pipe goes in `condition` only as another way
+/// to end the wait, never as the thing `limit` bounds.
+///
+/// - Throws: `PeerLinkAdvanceTimeout` once `limit` is spent with the condition
+///   still false, and `TooFewSleepersArmed` when the sleepers stop registering
+///   without the condition coming true.
 @discardableResult
 private func advanceLockstep(
-    _ clock: TestClock<Duration>,
+    _ clock: EventDrivenTestClock,
     _ date: TestDateSource,
     until what: String,
     step: Double = 0.5,
     limit: Double,
-    settle: Swift.Duration = .milliseconds(25),
+    armed: Int = 2,
     timeout: Swift.Duration = .seconds(45),
     observed: @Sendable () async -> String = { "nothing" },
     sourceLocation: SourceLocation = #_sourceLocation,
-    _ condition: @Sendable () async -> Bool
-) async -> Double? {
-    let deadline = ContinuousClock.now.advanced(by: timeout)
-    var advances = 0
+    _ condition: @escaping @Sendable () async -> Bool
+) async throws -> Double {
     var virtual = 0.0
-    while virtual < limit, ContinuousClock.now < deadline {
+    while true {
+        let wait = try await sleepersArmed(
+            clock, count: armed, orUntil: condition, timeout: timeout, sourceLocation: sourceLocation)
+        if wait == .held { return virtual }
         if await condition() { return virtual }
-        guard await isArmed(clock) else {
-            try? await Task.sleep(for: settle)
-            continue
-        }
+        guard virtual < limit else { break }
         date.advance(by: step)
         await clock.advance(by: .seconds(step))
-        advances += 1
         virtual += step
-        try? await Task.sleep(for: settle)
     }
-    if await condition() { return virtual }
     let seen = await observed()
     if await condition() { return virtual }
-    Issue.record(
-        PeerLinkAdvanceTimeout(
-            what: what, advances: advances, virtualSeconds: virtual, observed: seen),
-        sourceLocation: sourceLocation)
-    return nil
+    throw PeerLinkAdvanceTimeout(
+        what: what, virtualSeconds: virtual, budget: "\(limit)s of virtual time",
+        observed: seen, sourceLocation: sourceLocation)
 }
 
-/// Moves both seams forward by a fixed amount, settling between steps for the
-/// reason above. Placement rather than a wait, so it asserts nothing: the
-/// caller is putting an event at a chosen offset inside an interval, not
-/// waiting for one.
+/// Moves both seams forward by a fixed amount, waiting for `armed` sleepers
+/// before every step and after the last, for the reason above. Placement rather
+/// than a wait, so it asserts nothing: the caller is putting an event at a
+/// chosen offset inside an interval, not waiting for one.
 private func advanceLockstep(
-    _ clock: TestClock<Duration>,
+    _ clock: EventDrivenTestClock,
     _ date: TestDateSource,
-    by seconds: Double,
+    by total: Double,
     step: Double = 0.5,
-    settle: Swift.Duration = .milliseconds(25)
-) async {
+    armed: Int = 2,
+    sourceLocation: SourceLocation = #_sourceLocation
+) async throws {
     var moved = 0.0
-    while moved < seconds {
-        let next = min(step, seconds - moved)
+    while moved < total {
+        try await clock.requireSleepersArmed(count: armed, sourceLocation: sourceLocation)
+        let next = min(step, total - moved)
         date.advance(by: next)
         await clock.advance(by: .seconds(next))
         moved += next
-        try? await Task.sleep(for: settle)
     }
-}
-
-/// Whether a task is suspended on this clock right now. Detection is inverted
-/// from how it reads: `checkSuspension()` **throws** when a sleeper *is*
-/// registered.
-private func isArmed(_ clock: TestClock<Duration>) async -> Bool {
-    do {
-        try await clock.checkSuspension()
-        return false
-    } catch {
-        return true
-    }
+    try await clock.requireSleepersArmed(count: armed, sourceLocation: sourceLocation)
 }
 
 /// `stop()` while driving the clock it may park on.
@@ -1574,17 +1721,22 @@ private func isArmed(_ clock: TestClock<Duration>) async -> Bool {
 /// `stop()` escalates SIGTERM→SIGKILL with a grace period, and that grace is on
 /// the injected clock — so calling it straight from a test whose clock nobody
 /// advances would hang for the suite's whole time limit. Running it in a task
-/// and advancing while it is armed is the whole trick; when it needs no sleep at
-/// all (an already-exited child), the first condition check returns immediately.
-private func stopDriven(_ supervisor: PeerLinkSupervisor, _ clock: TestClock<Duration>) async {
+/// and stepping the clock while anything is armed is the whole trick; when it
+/// needs no sleep at all (an already-exited child), the condition is already
+/// true by the first read.
+private func stopDriven(
+    _ supervisor: PeerLinkSupervisor,
+    _ clock: EventDrivenTestClock,
+    sourceLocation: SourceLocation = #_sourceLocation
+) async throws {
     let finished = Latch()
     let task = Task {
         await supervisor.stop()
         finished.signal()
     }
-    _ = await advanceVirtualTime(
+    try await advanceVirtualTime(
         clock, until: "stop() to return",
-        observed: { "stop() still running" }) { finished.isSet }
+        observed: { "stop() still running" }, sourceLocation: sourceLocation) { finished.isSet }
     await task.value
 }
 
@@ -1595,3 +1747,4 @@ private final class Latch: @unchecked Sendable {
     func signal() { lock.lock(); value = true; lock.unlock() }
     var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
+

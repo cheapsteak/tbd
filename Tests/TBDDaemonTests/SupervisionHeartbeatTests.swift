@@ -1,4 +1,3 @@
-import Clocks
 import Foundation
 import TestSupport
 import Testing
@@ -140,18 +139,19 @@ struct SupervisionHeartbeatTests {
     func writesImmediatelyThenOnCadence() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released))
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
         await heartbeat.applyBrake(released: true, sequence: 1)
-        // The first advance proves the loop reached its sleep, which it can
-        // only do after the immediate tick. The second waits for the sleep that
-        // follows the *second* tick — so its returning is the evidence that a
-        // tick happened per elapsed interval, not merely once at start.
-        await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
-        await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
+        // The first advance waits for the loop's sleep, which it can only reach
+        // after the immediate tick. The second waits for the sleep that follows
+        // the *second* tick — the loop re-arms only after `tick()` returns — so
+        // its returning is the evidence that a tick happened per elapsed
+        // interval, not merely once at start.
+        try await clock.requireAdvanceWhenArmed(by: SupervisionHeartbeat.defaultInterval)
+        try await clock.requireAdvanceWhenArmed(by: SupervisionHeartbeat.defaultInterval)
         await heartbeat.stop()
 
         #expect(snapshots.calls >= 2, "one immediate write plus one per interval elapsed")
@@ -162,7 +162,7 @@ struct SupervisionHeartbeatTests {
     func firstTickPrecedesTheFirstInterval() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released))
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
@@ -171,7 +171,7 @@ struct SupervisionHeartbeatTests {
         // Parking on the clock is the loop's first act after its immediate
         // write, so a registered sleeper with no file on disk would mean the
         // daemon published nothing for a whole interval after boot.
-        await clock.waitForSuspension()
+        try await clock.requireSleeperArmed()
         #expect(FileManager.default.fileExists(atPath: path))
         await heartbeat.stop()
     }
@@ -180,19 +180,27 @@ struct SupervisionHeartbeatTests {
     func stopEndsTheCadence() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released))
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
         await heartbeat.applyBrake(released: true, sequence: 1)
-        await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
+        try await clock.requireAdvanceWhenArmed(by: SupervisionHeartbeat.defaultInterval)
         // `stop()` returns only once the loop has unwound, so what follows is
         // an assertion about a settled state rather than a race.
         await heartbeat.stop()
         let afterStop = snapshots.calls
 
+        // A stopped loop arms nothing. The watch gives a loop that outlived
+        // `stop()` the time to re-register its sleep before absence is claimed;
+        // an advance alone could not show it, because a sleep that registers
+        // after the advance is measured from the new `now` and never fires.
+        // `settle()` then lets any tick the advance released land before the
+        // count is read.
+        #expect(await watchForSleeper(on: clock) == false, "no timer is armed after stop")
         await clock.advance(by: SupervisionHeartbeat.defaultInterval * 5)
+        await settle()
         #expect(snapshots.calls == afterStop)
         #expect(try read(path) != nil, "the last tick's file is left exactly as it was")
     }
@@ -201,7 +209,7 @@ struct SupervisionHeartbeatTests {
     func engagedBrakePublishesOnceAndArmsNoTimer() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .engaged))
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
@@ -210,11 +218,14 @@ struct SupervisionHeartbeatTests {
         #expect(snapshots.calls == 1, "the edge is published even while braked")
         #expect(try read(path)?.brake == .engaged)
 
-        // Nothing is registered on the clock, so this advance moves virtual
-        // time past five intervals and releases nobody. A braked daemon runs no
-        // background loop at all — the brake is the switch.
+        // A braked daemon runs no background loop at all — the brake is the
+        // switch. The watch gives a wrongly armed loop the time to register its
+        // sleep before absence is claimed; an advance alone could not show it,
+        // because a sleep that registers after the advance is measured from the
+        // new `now` and never fires.
+        #expect(await watchForSleeper(on: clock) == false, "no timer is armed under the brake")
         await clock.advance(by: SupervisionHeartbeat.defaultInterval * 5)
-        for _ in 0..<20 { await Task.yield() }
+        await settle()
         #expect(snapshots.calls == 1)
         await heartbeat.stop()
     }
@@ -223,16 +234,18 @@ struct SupervisionHeartbeatTests {
     func brakeEdgesArmAndDisarmTheTimer() async throws {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released))
-        let clock = TestClock()
+        let clock = EventDrivenTestClock()
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
             interval: SupervisionHeartbeat.defaultInterval, clock: clock)
 
         await heartbeat.applyBrake(released: true, sequence: 1)
         // Each advance waits for a registered sleeper first, so returning at
-        // all is the evidence the timer is armed and re-arming.
-        await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
-        await clock.advanceWhenSuspended(by: SupervisionHeartbeat.defaultInterval)
+        // all is the evidence the timer is armed and re-arming. The loop re-arms
+        // only after its tick returns, so the second advance returning also
+        // means the first fired tick has been counted.
+        try await clock.requireAdvanceWhenArmed(by: SupervisionHeartbeat.defaultInterval)
+        try await clock.requireAdvanceWhenArmed(by: SupervisionHeartbeat.defaultInterval)
         #expect(snapshots.calls >= 2, "the timer runs while the brake is released")
 
         snapshots.set(Self.statusFile(brake: .engaged))
@@ -240,10 +253,14 @@ struct SupervisionHeartbeatTests {
         #expect(try read(path)?.brake == .engaged, "the engaging edge is published")
 
         // `applyBrake` awaits the loop's unwind before returning, so no tick
-        // can still be in flight and this count is settled.
+        // can still be in flight and this count is settled. The watch gives a
+        // timer that survived the edge the time to re-register before absence
+        // is claimed, and `settle()` lets any tick the advance released land
+        // before the count is read.
         let afterEngaging = snapshots.calls
+        #expect(await watchForSleeper(on: clock) == false, "the engaging edge leaves no timer armed")
         await clock.advance(by: SupervisionHeartbeat.defaultInterval * 5)
-        for _ in 0..<20 { await Task.yield() }
+        await settle()
         #expect(snapshots.calls == afterEngaging, "and the timer is disarmed behind it")
     }
 
@@ -253,7 +270,7 @@ struct SupervisionHeartbeatTests {
         let snapshots = ParkingSnapshots(Self.statusFile(brake: .released))
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
-            interval: SupervisionHeartbeat.defaultInterval, clock: TestClock())
+            interval: SupervisionHeartbeat.defaultInterval, clock: EventDrivenTestClock())
 
         // The releasing edge parks inside its own write, which releases the
         // actor — exactly the window in which a second edge can run start to
@@ -291,7 +308,7 @@ struct SupervisionHeartbeatTests {
         let snapshots = Snapshots(Self.statusFile(brake: .engaged))
         let heartbeat = SupervisionHeartbeat(
             path: path, snapshot: snapshots.provider,
-            interval: SupervisionHeartbeat.defaultInterval, clock: TestClock())
+            interval: SupervisionHeartbeat.defaultInterval, clock: EventDrivenTestClock())
 
         // The store's gate committed `engaged` second, so it holds the higher
         // token. The notifications reach the heartbeat in the other order —
@@ -320,7 +337,7 @@ struct SupervisionHeartbeatTests {
             projects: [SupervisionStatusFileProject(
                 name: "acme-web", on: true, mode: "autonomous", lastSweepContactAt: nil)]))
         let heartbeat = SupervisionHeartbeat(
-            path: path, snapshot: snapshots.provider, clock: TestClock())
+            path: path, snapshot: snapshots.provider, clock: EventDrivenTestClock())
 
         await heartbeat.tick()
 
@@ -338,7 +355,7 @@ struct SupervisionHeartbeatTests {
             projects: [SupervisionStatusFileProject(
                 name: "acme-web", on: true, mode: "attended", lastSweepContactAt: nil)]))
         let heartbeat = SupervisionHeartbeat(
-            path: path, snapshot: snapshots.provider, clock: TestClock())
+            path: path, snapshot: snapshots.provider, clock: EventDrivenTestClock())
 
         await heartbeat.tick()
 
@@ -354,7 +371,7 @@ struct SupervisionHeartbeatTests {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released, at: 1_700_000_000))
         let heartbeat = SupervisionHeartbeat(
-            path: path, snapshot: snapshots.provider, clock: TestClock())
+            path: path, snapshot: snapshots.provider, clock: EventDrivenTestClock())
 
         await heartbeat.tick()
         // `#require` is the right form here and must stay: a tick with a
@@ -377,7 +394,7 @@ struct SupervisionHeartbeatTests {
         let path = try Self.path()
         let snapshots = Snapshots(Self.statusFile(brake: .released, at: 1_700_000_000))
         let heartbeat = SupervisionHeartbeat(
-            path: path, snapshot: snapshots.provider, clock: TestClock())
+            path: path, snapshot: snapshots.provider, clock: EventDrivenTestClock())
 
         await heartbeat.tick()
         let first = try #require(try read(path))

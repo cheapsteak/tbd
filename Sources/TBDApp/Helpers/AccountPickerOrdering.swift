@@ -17,7 +17,8 @@ enum AccountPickerOrdering {
         balancingOn: Bool,
         liveCount: (UUID) -> Int,
         defaultProfileID: UUID?,
-        now: Date
+        now: Date,
+        policy: ProfilePoolPolicy = .standard
     ) -> Result {
         guard balancingOn else {
             // Balancing off: return display order, no balanced pick
@@ -36,7 +37,8 @@ enum AccountPickerOrdering {
         let ranked = ProfilePoolPicker.ranked(
             candidates: candidates,
             excludingAccountKeys: [],
-            now: now
+            now: now,
+            policy: policy
         )
 
         // Build eligible-rows-first order

@@ -30,6 +30,26 @@ public enum TokenUsageHeaderParser {
         ].compactMap { $0 }
     }
 
+    /// The buckets a 429 carries when it is the account's usage limit
+    /// refusing the probe, or nil when the response does not say so.
+    ///
+    /// A refused window — `-status` neither `allowed` nor `allowed_warning`,
+    /// so severity `critical` — is read as full whatever its utilization says:
+    /// it is refusing requests, and the picker must not see headroom there.
+    /// A full window reads exactly 100%, never the 102% a utilization past 1
+    /// would render. Nil unless at least one window is full, because a 429
+    /// that names no full window is not a usage reading anyone should route
+    /// on; the caller keeps it a `.rateLimited` failure instead.
+    public static func limitReachedBuckets(from headers: [String: String]) -> [ClaudeUsageLimitBucket]? {
+        let read = buckets(from: headers).map { bucket -> ClaudeUsageLimitBucket in
+            guard bucket.severity == "critical" || bucket.percent >= 100 else { return bucket }
+            var full = bucket
+            full.percent = 100
+            return full
+        }
+        return read.contains { $0.percent >= 100 } ? read : nil
+    }
+
     private static func bucket(from headers: [String: String],
                                window: String,
                                kind: String,
@@ -90,13 +110,22 @@ public enum TokenUsageHeaderParser {
 /// output tokens, and carries utilization in its response headers.
 ///
 /// This costs a real (if tiny) billed request, which is why
-/// `OAuthProfileUsagePoller` gates it on session activity rather than sweeping
-/// it on the 90-second cadence.
+/// `OAuthProfileUsagePoller` probes a token profile at most once per
+/// `tokenProfileFloor` rather than on every 90-second tick.
 public struct TokenProfileUsageFetcher: ProfileUsageFetching {
     /// The cheapest model to address the probe at. It is never asked to
     /// generate anything (`max_tokens: 0`), so the choice only has to be a
     /// model the account may call.
-    public static let probeModel = "claude-haiku-4-5-20251001"
+    public static let probeModel = "claude-haiku-5-5"
+
+    /// The system prompt the probe sends.
+    ///
+    /// It is **required** for a Claude Code OAuth token on current models: a
+    /// `/v1/messages` request that lacks it is answered `HTTP 429
+    /// rate_limit_error` with none of the `anthropic-ratelimit-unified-*`
+    /// headers, whatever the account's actual usage. With it the same request
+    /// returns 200 with the full set of headers the probe exists to read.
+    public static let probeSystemPrompt = "You are Claude Code, Anthropic's official CLI for Claude."
 
     /// The Anthropic API version the probe pins, sent as `anthropic-version`.
     ///
@@ -160,6 +189,31 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
         compose(summary, detail: bodyDetail(body, redacting: token))
     }
 
+    /// The response's header fields as strings, for `TokenUsageHeaderParser`.
+    static func headerFields(of response: HTTPURLResponse) -> [String: String] {
+        var headers: [String: String] = [:]
+        for (key, value) in response.allHeaderFields {
+            if let key = key as? String, let value = value as? String {
+                headers[key] = value
+            }
+        }
+        return headers
+    }
+
+    /// Whether the response carries any `anthropic-ratelimit-unified-*`
+    /// header — that is, whether the account's usage windows answered at all.
+    static func hasUnifiedRateLimitHeaders(_ headers: [String: String]) -> Bool {
+        headers.keys.contains { $0.lowercased().hasPrefix("anthropic-ratelimit-unified-") }
+    }
+
+    /// `anthropic-organization-id`, or nil when absent or empty.
+    static func organizationID(in headers: [String: String]) -> String? {
+        headers
+            .first { $0.key.lowercased() == "anthropic-organization-id" }
+            .map(\.value)
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
     private let session: URLSession
     private let endpoint: URL
 
@@ -188,6 +242,7 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "model": Self.probeModel,
             "max_tokens": 0,
+            "system": Self.probeSystemPrompt,
             "messages": [["role": "user", "content": "."]],
         ])
 
@@ -207,16 +262,8 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
 
         switch http.statusCode {
         case 200:
-            var headers: [String: String] = [:]
-            for (key, value) in http.allHeaderFields {
-                if let key = key as? String, let value = value as? String {
-                    headers[key] = value
-                }
-            }
-            let organizationID = headers
-                .first { $0.key.lowercased() == "anthropic-organization-id" }
-                .map(\.value)
-                .flatMap { $0.isEmpty ? nil : $0 }
+            let headers = Self.headerFields(of: http)
+            let organizationID = Self.organizationID(in: headers)
             let buckets = TokenUsageHeaderParser.buckets(from: headers)
             tokenProbeLogger.debug(
                 "token usage probe ok: \(buckets.count, privacy: .public) buckets, org \(organizationID ?? "none", privacy: .public)")
@@ -231,13 +278,50 @@ public struct TokenProfileUsageFetcher: ProfileUsageFetching {
             return .needsLogin(Self.compose("token rejected (HTTP \(http.statusCode))",
                                             body: body, token: token))
         case 429:
-            // No body slice here, and deliberately: `.rateLimited` already
-            // carries the structured answer (`Retry-After`, or its absence),
-            // which is the whole of what a caller can act on. Nothing the body
-            // adds would change the wait.
+            // A 429 means one of two different things, and the
+            // `anthropic-ratelimit-unified-*` headers tell them apart.
+            //
+            // With those headers, the account answered. A setup token draws on
+            // its account's subscription windows, so a 429 is most often the
+            // account at its limit — and then the response carries the same
+            // utilization headers a 200 does. That is a reading, not a failed
+            // one: recorded as such, the account shows as full, freshly read,
+            // instead of keeping the pre-limit numbers it had before it filled
+            // up and going stale while it is full. Headers that name no full
+            // window stay `.rateLimited`: the account is speaking, but not
+            // with a reading anyone should route on, and waiting is the right
+            // response.
+            //
+            // Without them, the API refused the request itself, not the
+            // account. A Claude Code OAuth token whose request lacks the Claude
+            // Code system prompt (`probeSystemPrompt`) gets exactly this: a
+            // `rate_limit_error` 429 with no unified headers, on every
+            // request, however long the caller waits. Calling that
+            // `.rateLimited` would back the profile off forever on stale
+            // numbers while reading as transient, so it is `.httpError`, with
+            // the body slice that names the refusal.
+            //
+            // No body slice on the account branches, and deliberately: the
+            // structured answer (`Retry-After`, or its absence) is the whole
+            // of what a caller can act on. Nothing the body adds would change
+            // the wait.
+            let headers = Self.headerFields(of: http)
+            guard Self.hasUnifiedRateLimitHeaders(headers) else {
+                let detail = Self.bodyDetail(body, redacting: token)
+                tokenProbeLogger.error(
+                    "token usage probe request rejected: HTTP 429 with no anthropic-ratelimit-unified-* headers — the API refused the probe request itself, not the account; retrying cannot fix it: \(detail ?? "(no body)", privacy: .public)")
+                return .httpError(http.statusCode, detail: detail)
+            }
             let retryAfter = http
                 .value(forHTTPHeaderField: "Retry-After")
                 .flatMap(TimeInterval.init)
+            if let buckets = TokenUsageHeaderParser.limitReachedBuckets(from: headers) {
+                tokenProbeLogger.debug(
+                    "token usage probe refused at the usage limit: \(buckets.count, privacy: .public) buckets")
+                return .limitReached(
+                    buckets, organizationID: Self.organizationID(in: headers),
+                    retryAfter: retryAfter)
+            }
             return .rateLimited(retryAfter: retryAfter)
         default:
             // A 4xx outside `retryableClientErrorCodes` is a defect in the

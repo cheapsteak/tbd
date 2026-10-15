@@ -73,6 +73,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `Terminal.transcriptStreamPath`.
     var transcript_stream_path: String?
 
+    /// The declared dev server this tab runs — see `Terminal.serverName`.
+    var server_name: String?
+
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
         self.worktreeID = terminal.worktreeID.uuidString
@@ -107,6 +110,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.child_pid = terminal.childPID
         self.holder_child_started_at = terminal.holderChildStartedAt
         self.transcript_stream_path = terminal.transcriptStreamPath
+        self.server_name = terminal.serverName
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -121,7 +125,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             decodeLogger.warning("Skipping terminal row \(id, privacy: .public): malformed worktreeID \(worktreeID, privacy: .public)")
             return nil
         }
-        return Terminal(
+        var model = Terminal(
             id: uuid,
             worktreeID: wtID,
             tmuxWindowID: tmuxWindowID,
@@ -160,6 +164,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             holderChildStartedAt: holder_child_started_at,
             transcriptStreamPath: transcript_stream_path
         )
+        model.serverName = server_name
+        return model
     }
 }
 
@@ -353,6 +359,52 @@ struct TerminalReplacementSnapshot: Sendable {
             && terminal.profileID == profileID
             && terminal.suspendedAt == suspendedAt
             && terminal.hibernatedAt == hibernatedAt
+    }
+}
+
+/// The complete durable fact set that authorizes a Codex-to-Claude provider
+/// replacement. General replacement snapshots deliberately ignore activity;
+/// Continue may interrupt only a positively idle Codex turn, so its CAS must
+/// include the value, provenance, and both observation watermarks.
+struct TerminalContinueInClaudeSnapshot: Sendable {
+    let replacement: TerminalReplacementSnapshot
+    let activityState: TerminalActivityState
+    let activityStateSource: FactSource?
+    let activityStateObservedAt: Date?
+    let activityStateOrderObservedAt: Date?
+    let awaitingInputReason: AwaitingInputReason?
+    let awaitingInputObservedAt: Date?
+
+    init(terminal: Terminal) {
+        replacement = TerminalReplacementSnapshot(terminal: terminal)
+        activityState = terminal.activityState
+        activityStateSource = terminal.activityStateSource
+        activityStateObservedAt = terminal.activityStateObservedAt
+        activityStateOrderObservedAt = terminal.activityStateOrderObservedAt
+        awaitingInputReason = terminal.awaitingInputReason
+        awaitingInputObservedAt = terminal.awaitingInputObservedAt
+    }
+
+    fileprivate func matches(_ record: TerminalRecord) -> Bool {
+        replacement.matches(record)
+            && record.activityState == activityState.rawValue
+            && FactColumnJSON.matches(
+                activityStateSource, encoded: record.activityStateSource)
+            && record.activityStateObservedAt == activityStateObservedAt
+            && record.activityStateOrderObservedAt == activityStateOrderObservedAt
+            && FactColumnJSON.matches(
+                awaitingInputReason, encoded: record.awaitingInputReason)
+            && record.awaitingInputObservedAt == awaitingInputObservedAt
+    }
+
+    func matches(_ terminal: Terminal) -> Bool {
+        replacement.matches(terminal)
+            && terminal.activityState == activityState
+            && terminal.activityStateSource == activityStateSource
+            && terminal.activityStateObservedAt == activityStateObservedAt
+            && terminal.activityStateOrderObservedAt == activityStateOrderObservedAt
+            && terminal.awaitingInputReason == awaitingInputReason
+            && terminal.awaitingInputObservedAt == awaitingInputObservedAt
     }
 }
 
@@ -615,9 +667,10 @@ public struct TerminalStore: Sendable {
 
     /// `working -> idle` transitions reported by an OBSERVER of the session.
     ///
-    /// Its one consumer today is the token-profile usage probe, which is a
-    /// billed request and therefore fires on completed turns instead of a
-    /// timer (`docs/specs/2026-09-01-token-based-claude-profiles-design.md`).
+    /// Its one consumer today is the token-profile usage probe, a billed
+    /// request that runs on completed turns and, while account balancing is
+    /// on, on a five-minute timer too
+    /// (`docs/specs/2026-09-01-token-based-claude-profiles-design.md`).
     /// That consumer defines what the edge means: *a turn finished, so this
     /// profile's utilization moved*. It is not "the `activity_state` column
     /// changed value".
@@ -642,15 +695,15 @@ public struct TerminalStore: Sendable {
     ///   session, not evidence from the session that it stopped working. Most
     ///   parks are of sessions that were already idle, and the sweep that
     ///   issues them is a background timer — wiring a billed probe to it would
-    ///   put token profiles back on exactly the blind cadence the design
-    ///   removed.
+    ///   add a second, unbounded timer beside the poller's own.
     ///
     /// The one case that genuinely loses information is a session parked
     /// **mid-turn**: utilization moved and no probe fires. It is accepted.
     /// Those numbers are not lost, only late — the next turn on that profile
-    /// probes, the profile row renders its staleness note meanwhile, and the
-    /// profile's `⋯` menu offers a manual refresh. Paying a billed request per
-    /// park to shave that latency is the wrong trade.
+    /// probes, or the poller's five-minute probe while balancing is on, the
+    /// profile row renders its staleness note meanwhile, and the profile's
+    /// `⋯` menu offers a manual refresh. Paying a billed request per park to
+    /// shave that latency is the wrong trade.
     public let activityTransitions = TerminalActivityTransitionNotifier()
 
     init(writer: any DatabaseWriter) {
@@ -710,7 +763,8 @@ public struct TerminalStore: Sendable {
         // for even one `await` without it can be snapshotted by a concurrent
         // caller, and the stamp that arrives afterwards then makes every
         // replacement that snapshot authorized reject.
-        transcriptStreamPath: String? = nil
+        transcriptStreamPath: String? = nil,
+        serverName: String? = nil
     ) async throws -> Terminal {
         var terminal = Terminal(
             id: id,
@@ -730,6 +784,7 @@ public struct TerminalStore: Sendable {
         // Assigned rather than passed: `Terminal`'s memberwise initializer is
         // already at the Swift type-checker's expression budget here.
         terminal.transcriptStreamPath = transcriptStreamPath
+        terminal.serverName = serverName
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
@@ -779,6 +834,30 @@ public struct TerminalStore: Sendable {
         try await writer.read { db in
             try TerminalRecord
                 .filter(Column("transcript_stream_path") != nil)
+                .fetchAll(db)
+                .compactMap { $0.toModel() }
+                .contains { !$0.isExitStamped }
+        }
+    }
+
+    /// Whether any session on the pty-holder transport is still alive.
+    ///
+    /// The second term of `NightwatchHolderGate.watchModesBlocked`, and the one
+    /// the flag and the registry cannot answer between them: a daemon whose
+    /// `TBDHolder` helper went missing cannot spawn a holder but may well have
+    /// adopted several, so "no holder can be started" is not "no holder is
+    /// running".
+    ///
+    /// Same shape as `hasLiveRoutedSession` above, for the same reasons.
+    /// Filtered in SQL on the one unambiguous column — every install that never
+    /// ran a holder answers with an empty set — and judged in Swift by
+    /// `Terminal.isExitStamped`, so liveness cannot drift from the spelling
+    /// every other reader uses. A parked holder row counts as alive: it is woken
+    /// by a gesture and wakes back onto a holder.
+    public func hasLiveHolderSession() async throws -> Bool {
+        try await writer.read { db in
+            try TerminalRecord
+                .filter(Column("transport") == TerminalTransport.holder.rawValue)
                 .fetchAll(db)
                 .compactMap { $0.toModel() }
                 .contains { !$0.isExitStamped }
@@ -1071,6 +1150,11 @@ public struct TerminalStore: Sendable {
             guard expectedIncarnation.matches(record) else { return nil }
             record.tmuxWindowID = windowID
             record.tmuxPaneID = paneID
+            // The rebuilt window runs a plain login shell, not the dev
+            // server's command, so the tab stops being that server's: left
+            // in place, the name would make the server read Running off the
+            // shell and make stop or archive signal the shell's group.
+            record.server_name = nil
             let incarnationID = resetRecreatedShellLifecycle(record: &record, at: date)
             try record.update(db)
             return incarnationID
@@ -1144,6 +1228,198 @@ public struct TerminalStore: Sendable {
         }
     }
 
+    /// Fence a positively-idle Codex row for Continue-in-Claude without
+    /// changing any provider, session, rollout, profile, or active-process
+    /// identity. The pending token makes every old-process hook stale while
+    /// leaving the source identity durable for rollback and restart recovery.
+    func beginContinueInClaude(
+        id: UUID,
+        expectedState: TerminalContinueInClaudeSnapshot,
+        pendingIncarnationID: UUID
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record),
+                  record.kind == TerminalKind.codex.rawValue,
+                  record.hibernatedAt == nil,
+                  record.suspendedAt == nil,
+                  record.pendingSessionIncarnationID == nil else {
+                return nil
+            }
+            record.pendingSessionIncarnationID = pendingIncarnationID.uuidString
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Retract a staged Continue fence before its first destructive tmux act.
+    /// Exact-token matching means a stale refusal cannot clear another
+    /// transaction's recovery intent.
+    func abortContinueInClaudeBeforeLaunch(
+        id: UUID,
+        pendingIncarnationID: UUID
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.pendingSessionIncarnationID == pendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.pendingSessionIncarnationID = nil
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Rotate the failed Claude destination token to a fresh Codex recovery
+    /// token. The row remains entirely Codex; delayed hooks from both dead
+    /// processes become stale in the same write.
+    func rotateContinueInClaudeToCodexRecovery(
+        id: UUID,
+        expectedPendingIncarnationID: UUID,
+        recoveryIncarnationID: UUID
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.hibernatedAt == nil,
+                  record.suspendedAt == nil,
+                  record.pendingSessionIncarnationID
+                    == expectedPendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.pendingSessionIncarnationID = recoveryIncarnationID.uuidString
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Persist a recreated inert window under an existing recovery token
+    /// before Codex is launched into it. No session/provider fact changes.
+    func movePendingCodexRecovery(
+        id: UUID,
+        expectedPendingIncarnationID: UUID,
+        windowID: String,
+        paneID: String
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.pendingSessionIncarnationID
+                    == expectedPendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.tmuxWindowID = windowID
+            record.tmuxPaneID = paneID
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Atomically publish the Claude destination only after its exact pending
+    /// token produced SessionStart readiness.
+    func finalizeContinueInClaude(
+        id: UUID,
+        expectedPendingIncarnationID: UUID,
+        profileID: UUID?,
+        sessionID: String,
+        transcriptPath: String?,
+        observedAt: Date
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.pendingSessionIncarnationID
+                    == expectedPendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.kind = TerminalKind.claude.rawValue
+            record.label = TerminalLabel.claudeCode
+            record.profile_id = profileID?.uuidString
+            record.claudeSessionID = sessionID
+            record.transcriptPath = transcriptPath
+            record.sessionOrderObservedAt = observedAt
+            record.codexTranscriptBoundaryOffset = nil
+            record.sessionIncarnationID = expectedPendingIncarnationID.uuidString
+            record.pendingSessionIncarnationID = nil
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(
+                FactSource.hookEvent("SessionStart"))
+            record.activityStateObservedAt = observedAt
+            record.activityStateOrderObservedAt = observedAt
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            record.pendingResumeAt = nil
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Promote a ready Codex rollback/recovery process while retaining the
+    /// immutable source thread and rollout identity captured before Continue.
+    func finalizePendingCodexRecovery(
+        id: UUID,
+        expectedPendingIncarnationID: UUID,
+        sourceThreadID: String,
+        sourceRolloutPath: String,
+        observedAt: Date
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                return nil
+            }
+            guard record.kind == TerminalKind.codex.rawValue,
+                  record.pendingSessionIncarnationID
+                    == expectedPendingIncarnationID.uuidString else {
+                return nil
+            }
+            record.label = TerminalLabel.codex
+            record.profile_id = nil
+            record.claudeSessionID = sourceThreadID
+            record.transcriptPath = sourceRolloutPath
+            record.sessionOrderObservedAt = observedAt
+            record.codexTranscriptBoundaryOffset = nil
+            record.sessionIncarnationID = expectedPendingIncarnationID.uuidString
+            record.pendingSessionIncarnationID = nil
+            record.activityState = TerminalActivityState.idle.rawValue
+            record.activityStateSource = FactColumnJSON.encode(
+                FactSource.hookEvent("SessionStart"))
+            record.activityStateObservedAt = observedAt
+            record.activityStateOrderObservedAt = observedAt
+            record.awaitingInputReason = nil
+            record.awaitingInputObservedAt = nil
+            record.pendingResumeAt = nil
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Durable recovery candidates: awake Codex rows whose replacement fence
+    /// survived a crash or a failed rollback. Parked pending rows belong to the
+    /// hibernation reconciler and are intentionally excluded.
+    func listPendingCodexContinuations() async throws -> [Terminal] {
+        try await writer.read { db in
+            try TerminalRecord
+                .filter(Column("kind") == TerminalKind.codex.rawValue)
+                .filter(Column("pendingSessionIncarnationID") != nil)
+                .filter(Column("hibernatedAt") == nil)
+                .filter(Column("suspendedAt") == nil)
+                .order(Column("createdAt").asc, Column("id").asc)
+                .fetchAll(db)
+                .compactMap { $0.toModel() }
+        }
+    }
+
     /// Set or clear the model profile ID for a terminal.
     public func setProfileID(id: UUID, profileID: UUID?) async throws {
         try await writer.write { db in
@@ -1201,6 +1477,114 @@ public struct TerminalStore: Sendable {
                     record.transcriptPath = transcriptPath
                 }
             }
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Move a parked session to another transport only while the complete
+    /// state observed by the caller is still current; nil means the snapshot
+    /// was stale and nothing was written.
+    ///
+    /// The tmux coordinates are blanked in the SAME statement as the transport.
+    /// Two writes that could land separately might leave a holder row still
+    /// naming a pane, the stale-coordinate hazard that let daemon keystrokes
+    /// reach the wrong session.
+    func setParkedTransport(
+        id: UUID,
+        expectedState: TerminalReplacementSnapshot,
+        transport: TerminalTransport
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record),
+                  record.hibernatedAt != nil || record.suspendedAt != nil else {
+                return nil
+            }
+            record.transport = transport.rawValue
+            record.tmuxWindowID = ""
+            record.tmuxPaneID = ""
+            try record.update(db)
+            return record.toModel()
+        }
+    }
+
+    /// Move a RUNNING session that has no conversation to resume onto the pty
+    /// holder, in one guarded write: the transport, the blanked tmux
+    /// coordinates, the holder's processes and the dead process's session and
+    /// activity facts all land in the same statement. nil means the snapshot
+    /// was stale and nothing was written.
+    ///
+    /// **Why one write rather than a prepare-then-record pair.** The caller
+    /// mints the incarnation, so the replacement program is already carrying it
+    /// before any column moves. This write is therefore the single moment at
+    /// which the row stops describing a dead tmux pane and starts describing a
+    /// live holder, and a caller that fails anywhere before it leaves the row
+    /// untouched — still `tmux`, still awake, naming a window that is now dead,
+    /// which is the ordinary window-died state `terminal.recreateWindow`
+    /// repairs.
+    ///
+    /// **The guard is the complement of `setParkedTransport`'s.** That one
+    /// requires the row to read parked; this one requires it to read awake and
+    /// not already holder-backed, so neither can be used for the other's case
+    /// by mistake. Between the caller's kill and this write the app may notice
+    /// the dead window and recreate it, which rotates the row's incarnation:
+    /// the snapshot then fails to match, nothing is written, and the caller
+    /// abandons the holder it started.
+    ///
+    /// The session and activity columns are cleared through the same helper
+    /// `replaceRecreatedShellWindow` uses, because this is the same event — a
+    /// dead process's facts must not make the replacement's first hook look
+    /// like a resume. The incarnation that helper mints is overwritten with the
+    /// caller's, which is the one the live job actually carries.
+    ///
+    /// **One of that helper's columns is put back: the label.** It is not a
+    /// display detail — `WorktreeLifecycle+Recovery` and the app's
+    /// `PrimaryTerminal` both FIND a tab by its label — and a session that
+    /// moves transport is meant to come back as the same tab, so a hook tab
+    /// renamed `shell` by this gesture would be found by nothing. The `kind`
+    /// is deliberately NOT put back: the helper's `shell` is the truth about
+    /// what is now running, and preserving an agent kind here would mint a row
+    /// shape that has never existed — holder-backed, agent-kinded, with no
+    /// session — for which the daemon would keep paying transcript and
+    /// statusline work on behalf of a bare login shell.
+    ///
+    /// `startedAt` doubles as the activity observation's timestamp: it is the
+    /// moment the replacement job started, which is when this row's `unknown`
+    /// activity was observed.
+    func moveRunningShellToHolder(
+        id: UUID,
+        expectedState: TerminalReplacementSnapshot,
+        incarnationID: UUID,
+        holderPID: Int32,
+        childPID: Int32,
+        startedAt: Date
+    ) async throws -> Terminal? {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
+                throw DatabaseError(message: "Terminal not found")
+            }
+            guard expectedState.matches(record),
+                  record.transport != TerminalTransport.holder.rawValue,
+                  record.hibernatedAt == nil, record.suspendedAt == nil else {
+                return nil
+            }
+            let label = record.label
+            _ = resetRecreatedShellLifecycle(record: &record, at: startedAt)
+            record.label = label
+            // The holder job is a plain login shell, not a dev server's
+            // command — the same reason `replaceRecreatedShellWindow` drops
+            // the name.
+            record.server_name = nil
+            record.sessionIncarnationID = incarnationID.uuidString
+            record.transport = TerminalTransport.holder.rawValue
+            record.tmuxWindowID = ""
+            record.tmuxPaneID = ""
+            record.holder_pid = holderPID
+            record.child_pid = childPID
+            record.holder_child_started_at = startedAt
             try record.update(db)
             return record.toModel()
         }

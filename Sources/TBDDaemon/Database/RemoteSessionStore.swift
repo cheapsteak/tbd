@@ -205,7 +205,13 @@ public struct RemoteSessionStore: Sendable {
             agentState: stored.agentState,
             agentStateReason: stored.agentStateReason,
             agentStateAt: stored.agentStateAt,
-            meta: incoming.meta, archived: incoming.archived)
+            meta: incoming.meta, archived: incoming.archived,
+            // Agent axis: the question is what a mirrored `waiting_input`
+            // is blocked on, so it is kept or replaced together with it.
+            pendingQuestion: stored.pendingQuestion,
+            // Same axis, same reason: the prompt moves with `waiting_input`.
+            pendingPrompt: stored.pendingPrompt,
+            transcript: incoming.transcript)
     }
 
     /// The `agent_state_at` inside a mirrored payload string.
