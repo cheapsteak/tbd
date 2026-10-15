@@ -314,6 +314,104 @@ struct CheckoutTemplateStoreTests {
         #expect(FileManager.default.fileExists(atPath: tree.appendingPathComponent("dir/new.txt").path))
     }
 
+    // MARK: - Conversion outside the blob
+
+    /// `reset --hard` leaves a file alone when its blob is unchanged, so a
+    /// base whose new `.gitattributes` changes how that blob is written would
+    /// keep the template's bytes behind a clean status. The create must write
+    /// what a plain `git worktree add` writes.
+    @Test(arguments: [
+        ("*.txt text eol=crlf", "edit.txt"),
+        ("*.txt ident", "ident.txt"),
+    ])
+    func baseWithNewAttributesWritesWhatAPlainAddWrites(rule: String, file: String) async throws {
+        let f = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        guard volumeCanClone(f.root) else { return }
+        let before = try commit(["ident.txt": "$Id$\n"], in: f.repo)
+        let after = try commit([".gitattributes": rule + "\n"], in: f.repo)
+        let store = CheckoutTemplateStore(reposDir: f.reposDir)
+        await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: before)
+
+        let path = f.worktreePath("cloned")
+        let outcome = try await store.addWorktree(
+            git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
+            worktreePath: path, branch: "tbd/cloned", baseBranch: after)
+        #expect(outcome == .materialized(
+            reason: CheckoutTemplateStore.CloneError.conversionChanged(.attributes).description))
+
+        let plain = f.worktreePath("plain")
+        try await GitManager().worktreeAdd(
+            repoPath: f.repo.path, worktreePath: plain, branch: "tbd/plain", baseBranch: after)
+        let plainBytes = try bytes(plain, file)
+        let templateBytes = try bytes(store.paths(repoID: f.repoID).tree.path, file)
+        // The rule changes the checkout of this blob, or the case proves nothing.
+        #expect(plainBytes != templateBytes)
+        #expect(try bytes(path, file) == plainBytes)
+        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
+    }
+
+    /// The refresh's fast path is the same two-way move, so it would carry
+    /// the old bytes into the template itself and every later clone. Across
+    /// an attributes change it must rewrite the template in full.
+    @Test func refreshAcrossAnAttributesChangeRewritesTheTemplate() async throws {
+        let f = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        guard volumeCanClone(f.root) else { return }
+        let after = try commit([".gitattributes": "*.txt text eol=crlf\n"], in: f.repo)
+        let store = CheckoutTemplateStore(reposDir: f.reposDir)
+        await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.newer)
+        await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: after)
+
+        let tree = store.paths(repoID: f.repoID).tree.path
+        #expect(try bytes(tree, "edit.txt") == Data("second\r\n".utf8))
+        let path = f.worktreePath("cloned")
+        let outcome = try await store.addWorktree(
+            git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
+            worktreePath: path, branch: "tbd/cloned", baseBranch: after)
+        #expect(outcome == .cloned(templateCommit: after))
+        #expect(try bytes(path, "edit.txt") == Data("second\r\n".utf8))
+        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
+    }
+
+    /// A setting outside the tree that changes how blobs are written makes
+    /// the template wrong for every base: the create writes in full, the
+    /// template is dropped, and the next refresh rebuilds it under the new
+    /// setting so clones resume.
+    @Test(arguments: ["core.autocrlf", "info/attributes"])
+    func changedConversionSettingRebuildsTheTemplate(setting: String) async throws {
+        let f = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        guard volumeCanClone(f.root) else { return }
+        let store = CheckoutTemplateStore(reposDir: f.reposDir)
+        let paths = store.paths(repoID: f.repoID)
+        await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.newer)
+        if setting == "core.autocrlf" {
+            try git(["config", "core.autocrlf", "true"], at: f.repo)
+        } else {
+            try write("*.txt text eol=crlf\n", to: f.repo.appendingPathComponent(".git/info/attributes"))
+        }
+
+        let first = f.worktreePath("first")
+        let outcome = try await store.addWorktree(
+            git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
+            worktreePath: first, branch: "tbd/first", baseBranch: f.newer)
+        #expect(outcome == .materialized(
+            reason: CheckoutTemplateStore.CloneError.conversionChanged(.settings).description))
+        #expect(try bytes(first, "edit.txt") == Data("second\r\n".utf8))
+        #expect(CheckoutTemplateStore.readCommit(paths.commitFile) == nil)
+
+        await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.newer)
+        #expect(try bytes(paths.tree.path, "edit.txt") == Data("second\r\n".utf8))
+        let second = f.worktreePath("second")
+        let again = try await store.addWorktree(
+            git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
+            worktreePath: second, branch: "tbd/second", baseBranch: f.newer)
+        #expect(again == .cloned(templateCommit: f.newer))
+        #expect(try bytes(second, "edit.txt") == Data("second\r\n".utf8))
+        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: second)).isEmpty)
+    }
+
     // MARK: - Hooks
 
     @Test func postCheckoutRunsOnceWithWorktreeAddArguments() async throws {
@@ -398,6 +496,20 @@ struct CheckoutTemplateStoreTests {
 
     private func write(_ text: String, to url: URL) throws {
         try Data(text.utf8).write(to: url)
+    }
+
+    /// Commits `files` on top of the repo's HEAD and returns the new SHA.
+    private func commit(_ files: [String: String], in repo: URL) throws -> String {
+        for (name, text) in files {
+            try write(text, to: repo.appendingPathComponent(name))
+        }
+        try git(["add", "-A"], at: repo)
+        try git(["commit", "-m", "update \(files.keys.sorted().joined(separator: ", "))"], at: repo)
+        return try git(["rev-parse", "HEAD"], at: repo)
+    }
+
+    private func bytes(_ directory: String, _ file: String) throws -> Data {
+        try Data(contentsOf: URL(fileURLWithPath: directory).appendingPathComponent(file))
     }
 
     private func inode(_ path: String) throws -> UInt64 {

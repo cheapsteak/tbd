@@ -623,6 +623,78 @@ public struct GitManager: Sendable {
         ).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Whether any `.gitattributes` file differs between two commits. `repoPath`
+    /// is any worktree of the repository. Plumbing, so no diff configuration
+    /// applies.
+    ///
+    /// A checkout that moves between commits rewrites only paths whose blob
+    /// changed, so a file whose blob is the same in both keeps the bytes the
+    /// old attributes produced (line endings, `ident`, filters) even where a
+    /// fresh checkout under the new attributes would write different ones.
+    public func attributesFilesDiffer(repoPath: String, from: String, to: String) async throws -> Bool {
+        let output = try await run(
+            arguments: [
+                "diff-tree", "-r", "--no-commit-id", "--name-only", from, to,
+                "--", ".gitattributes", "*/.gitattributes",
+            ],
+            at: repoPath)
+        return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// The settings outside the tree that decide which bytes a checkout writes
+    /// for a blob: the line-ending and filter configuration, the common git
+    /// directory's `info/attributes`, and the global attributes file
+    /// (`core.attributesFile`, else `$XDG_CONFIG_HOME/git/attributes`). Two
+    /// checkouts of one commit with equal fingerprints write the same bytes,
+    /// except where a filter program's own output changed. Not covered: the
+    /// system attributes file.
+    ///
+    /// `gitDir` nil reads the configuration a checkout in `directory` sees,
+    /// which for a new worktree is the configuration `git worktree add` would
+    /// use. A path reads it through `--git-dir`, as `checkoutTemplate` does.
+    public func checkoutConversionFingerprint(at directory: String, gitDir: String? = nil) async throws -> String {
+        let prefix = gitDir.map { ["--git-dir=\($0)"] } ?? []
+        let common = try await run(
+            arguments: prefix + ["rev-parse", "--path-format=absolute", "--git-common-dir"], at: directory
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let settings = try await configValues(
+            prefix + ["config", "--get-regexp", Self.checkoutConversionKeys], at: directory)
+        var attributesFile = try await configValues(
+            prefix + ["config", "--path", "--get", "core.attributesfile"], at: directory
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        if attributesFile.isEmpty {
+            let environment = Self.gitEnvironment()
+            let xdg = environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 }
+                ?? ((environment["HOME"] ?? NSHomeDirectory()) as NSString).appendingPathComponent(".config")
+            attributesFile = (xdg as NSString).appendingPathComponent("git/attributes")
+        }
+        let infoAttributes = (common as NSString).appendingPathComponent("info/attributes")
+        func contents(_ path: String) -> String {
+            (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        }
+        return """
+        config:
+        \(settings)
+        info/attributes:
+        \(contents(infoAttributes))
+        \(attributesFile):
+        \(contents(attributesFile))
+        """
+    }
+
+    /// The configuration keys `checkoutConversionFingerprint` records.
+    static let checkoutConversionKeys =
+        #"^(core\.(autocrlf|eol|safecrlf|checkroundtripencoding|attributesfile|symlinks)|filter\..*)$"#
+
+    /// A `git config` read, where exit 1 (no such key) is an empty answer.
+    private func configValues(_ arguments: [String], at directory: String) async throws -> String {
+        do {
+            return try await run(arguments: arguments, at: directory)
+        } catch let error as GitError where error.exitCode == 1 {
+            return ""
+        }
+    }
+
     /// Ceiling for writing a template from scratch: a full checkout of the
     /// repository, which for a large tree with smudge filters can outlast the
     /// two minutes that bound every other git call.

@@ -24,11 +24,20 @@ the arguments `git worktree add` gives it.
 
 It ships behind `clone_checkout_enabled`, default off.
 
-**Status: proposal.** This design did not go through `/tbd-brainstorming`. Its
-open choices are proposals for review, not settled decisions: the scope limited
-to fresh creates, a template refresh triggered by creates rather than a timer,
-GC reclaiming every template while the flag is off, and the clean-status give-up
-limit of three.
+**Status: design choices accepted.** This design did not go through
+`/tbd-brainstorming`, so its open choices went to a human as six questions, each
+with a recommended answer. On 2026-10-15 the PR's author (@zionts) accepted the
+recommended answer to all six:
+
+1. The scope is fresh creates only, until a soak.
+2. Creates trigger the template refresh. There is no timer.
+3. GC reclaims every template while the flag is off.
+4. After three unusable clones of a repo in a row, the store gives up on it
+   until the daemon restarts.
+5. `ENOTSUP` or `EXDEV` from `clonefile` gives up on the repo the same way.
+6. The full re-hash stays for now (see "Costs and risks").
+
+The agent that wrote the PR recorded those answers here.
 
 ## Goals
 
@@ -79,42 +88,61 @@ checkout; hooks do not.
    arguments as today plus `--no-checkout`, so a refusal (branch taken, base
    unresolvable) produces the same stderr and the existing failure
    classification and cleanup apply unchanged.
-2. **Clone.** `clonefile(2)` each top-level entry of `tree/` into the worktree,
+2. **Check conversion.** The template's bytes must be the ones a checkout of
+   the base would write. Step 5 rewrites only paths whose blob changed, so a
+   file whose blob is the same at the template's commit and the base keeps the
+   template's bytes. If the base changed how that blob is written (an `eol`,
+   `text` or `ident` rule, a filter, or `core.autocrlf`), the worktree would
+   hold bytes a fresh checkout would not write, and its status would still be
+   clean. So the create writes in full when either of these holds:
+   - A `.gitattributes` file differs between the template's commit and the base
+     (`git diff-tree`). The template is still right for its own commit.
+   - The conversion fingerprint, read in the new worktree, differs from the one
+     the template was written under. The template is then wrong for every base:
+     it is invalidated, and the mismatch counts toward the give-up below. The
+     fingerprint is the `core.autocrlf`, `core.eol`, `core.safecrlf`,
+     `core.checkRoundtripEncoding`, `core.attributesFile`, `core.symlinks` and
+     `filter.*` configuration, plus the contents of `info/attributes` and of the
+     global attributes file.
+3. **Clone.** `clonefile(2)` each top-level entry of `tree/` into the worktree,
    with `CLONE_NOFOLLOW` so a tracked symlink is cloned as the link. A
    directory clones as a whole hierarchy in one call.
-3. **Index the clone.** `git read-tree <template commit>`, then
+4. **Index the clone.** `git read-tree <template commit>`, then
    `git update-index -q --refresh`. The refresh reads and hashes the cloned
    files once and records their stat data; it writes no files.
-4. **Move to the base.** `git reset --hard` to HEAD. With the index refreshed,
+5. **Move to the base.** `git reset --hard` to HEAD. With the index refreshed,
    this is a two-way merge from the template's commit to the base: git rewrites,
    creates and deletes only the paths that differ, and leaves every other file
    — and its shared blocks — alone.
-5. **Verify.** `git status --porcelain --ignored` must be empty. Nothing has
+6. **Verify.** `git status --porcelain --ignored` must be empty. Nothing has
    run in the worktree yet, so any entry at all — an ignored `.DS_Store`
    included — came from the template. A template that fails this check is
    invalidated, and the next refresh rebuilds it from scratch.
-6. **`post-checkout`.** `git hook run --ignore-missing post-checkout -- <null
+7. **`post-checkout`.** `git hook run --ignore-missing post-checkout -- <null
    SHA> <HEAD> 1`, the invocation `git worktree add` makes. A failing hook fails
    the create, as it does today.
 
-If any of steps 2–5 fails, the worktree is emptied (keeping `.git`), its index
+If any of steps 2–6 fails, the worktree is emptied (keeping `.git`), its index
 is reset to HEAD, and `git reset --hard` writes every file: an ordinary
-checkout. Step 6 still runs once. So a missing, stale or torn template, a
+checkout. Step 7 still runs once. So a missing, stale or torn template, a
 volume that cannot clone, or a template on another volume costs the time of a
 normal checkout and never a failed create. `clonefile` failing with `ENOTSUP`
 or `EXDEV` marks the repo unsupported until the daemon restarts and deletes its
 template, so neither clones nor template refreshes are attempted for it again.
 A template is never built on a volume that reports it cannot clone.
 
-The same give-up applies after three clones of a repo in a row fail the status
-check in step 5. A single failure is a torn template: it is invalidated, and the
-next refresh rebuilds it from scratch. The same failure after every rebuild
-means the repo's own checkout never reads clean (line endings, a filter that
-does not round-trip), and without a limit each create would pay a full
-template write and a full worktree write.
+The same give-up applies after three creates of a repo in a row find the
+template unusable: the clone fails the status check in step 6, or the
+fingerprint check in step 2 fails. A single status failure is a torn template,
+and a single fingerprint failure is a stale one. Either way the template is
+invalidated, and the next refresh rebuilds it from scratch. The same failure
+after every rebuild means the repo's own checkout never reads clean (a filter
+that does not round-trip), or its worktrees see different settings from the
+template (an `includeIf` that matches one and not the other). Without a limit,
+each create would pay a full template write and a full worktree write.
 
 A cancelled create rethrows instead of falling back, since the cancellation
-would cut the full write short too. A git timeout inside steps 2–5 falls back
+would cut the full write short too. A git timeout inside steps 2–6 falls back
 like any other failure; the full write has its own bound.
 
 ### Keeping the template current
@@ -123,9 +151,14 @@ After each flagged create, the template is moved to that worktree's HEAD in the
 background: `update-index --refresh` against its own index, then
 `read-tree -m -u <new commit>`, which writes only the paths that changed. A
 template that has drifted from its index makes the merge refuse, and the
-template is rebuilt from scratch with `read-tree --reset -u`. The first flagged
-create for a repo finds no template, writes in full, and builds the template
-afterwards.
+template is rebuilt from scratch with `read-tree --reset -u`. The fast path is
+the same move as step 5, with the same blind spot, so it runs only when the
+template was written under the current conversion fingerprint and no
+`.gitattributes` file differs between its commit and the new one. Otherwise the
+template is rewritten in full. Checking only at clone time would miss this: once
+the template has moved to the base, its commit and the base are the same. The
+first flagged create for a repo finds no template, writes in full, and builds
+the template afterwards.
 
 Because creates in a fleet start overwhelmingly from the tip of the default
 branch, the template trails that tip by at most the commits between two
@@ -134,7 +167,7 @@ creates, and the per-create diff stays small.
 Clones and refreshes of one repo exclude each other without waiting. A create
 that finds a refresh running writes in full. A refresh that finds a clone
 running is skipped, and the next create triggers another. The exclusion lives
-in one process-wide actor; the status check in step 5 is the backstop for
+in one process-wide actor; the status check in step 6 is the backstop for
 anything outside it.
 
 ### Orphans
@@ -163,13 +196,15 @@ that a create is using costs that create a full checkout.
 
 ## Costs and risks
 
-- **Create time.** The refresh in step 3 reads and hashes the whole checkout
+- **Create time.** The refresh in step 4 reads and hashes the whole checkout
   once, because `read-tree` leaves no stat data to trust. Measured on the
   22,362-file field repository, a clone-backed create took 1.2× (template at
   the base) to 2× (template 20 commits behind) as long as a plain one: 10.3 s
   against 8.6 s, and 7.1 s against 3.6 s. The `clonefile` calls themselves take
-  about 2 s for the whole tree. The trade is a few seconds per create for about
-  450 MB per worktree.
+  about 2 s for the whole tree. On kubernetes/kubernetes (31,421 tracked files),
+  a reviewer measured 8.5 s against 3.1 s for a plain add, about 3×, and the
+  refresh took 6.6 to 6.9 s of it. The trade is a few seconds per create for
+  about 450 MB per worktree.
 - **Rejected: trusting the template's stat data to skip the hash.** Seeding the
   worktree's index from the template's own index and refreshing with
   `core.checkStat=minimal` would match on mtime and size alone and hash nothing.
@@ -178,10 +213,31 @@ that a create is using costs that create a full checkout.
   hash the whole tree there instead, on the person's time rather than the
   daemon's. It would also weaken the check that makes a torn template harmless,
   from content to mtime and size.
+- **Deferred: a scratch index built from the template's.** A reviewer
+  prototyped the variant the `git-sprout` crate uses. Each entry takes its oid
+  and mode from the template's index and its stat data from a fresh `lstat` of
+  the cloned file, so inode and ctime are the worktree's own. Racily clean
+  entries get no stat data. On kubernetes/kubernetes it created a worktree in
+  2.0 s, against 8.5 s for this design and 3.1 s for a plain add. Block sharing
+  and the first `git status` time were the same as this design's, and all 84
+  measured worktrees read clean and matched a plain add. It trusts the
+  template's stat data exactly as far as `git status` on the template would. One
+  edit kept the file's size and mtime and also matched its ctime. The scratch
+  index then produced a wrong file with a clean status, while this design's hash
+  produced the right one. The soak keeps the hash: a few seconds per create buy
+  protection beyond what git itself gives. The scratch index is the first
+  candidate if the soak shows that create time matters. It would also need the
+  template refreshed after a delay, so the template has no racily clean entries.
+  Filters, LFS, SHA-256 repositories and split or v4 indexes would keep this
+  path.
+- **Conversion outside the fingerprint.** Step 2 does not see the system
+  attributes file, or a filter program whose output changes while its
+  configuration does not. A change to either can still leave a clone with the
+  template's bytes behind a clean status.
 - **One template per repo.** It costs one checkout of disk, once. It is shared
   by every worktree cloned from it, and blocks it drops in a refresh stay owned
   by the worktrees still holding them.
-- **Uses git 2.36** for `git hook run` in step 6. The store reads
+- **Uses git 2.36** for `git hook run` in step 7. The store reads
   `git --version` once per daemon. On an older git, or one whose version it
   cannot read, a flagged create is the plain `git worktree add` (which runs the
   hook itself) and no template is built. macOS's bundled git has been newer
@@ -193,7 +249,7 @@ that a create is using costs that create a full checkout.
 
 ## Evidence
 
-- A shell prototype of steps 1–6, run against a 26,435-file repository with
+- A shell prototype of steps 1 and 3–7, run against a 26,435-file repository with
   the template 300 commits behind the base, rewrote exactly the 4,133 paths
   that differ between the two commits (added, modified or type-changed) and no
   others. The file count on disk matched `git ls-files`, so files deleted
@@ -206,3 +262,11 @@ that a create is using costs that create a full checkout.
   properties on a small repository, including that an unchanged file's first
   physical block (`F_LOG2PHYS`) is the template's on a volume that can clone,
   and that a stray file in the template triggers the full-checkout fallback.
+- A reviewer reproduced the gap step 2 closes with the git commands the store
+  runs. In it, a base adds `*.txt text eol=crlf`, a base adds `*.c ident`,
+  `core.autocrlf` is turned on after the template is built, or the template's
+  fast refresh crosses an attributes change. Each time the clone's bytes differ
+  from a plain `git worktree add` of the same base, and the status is clean.
+  The suite now pins each case: the create writes what a plain add writes, and
+  the template is rewritten under the new attributes or settings so clones
+  resume.

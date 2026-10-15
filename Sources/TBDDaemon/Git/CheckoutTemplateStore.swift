@@ -13,27 +13,36 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "cloneCheckou
 /// shared with nothing — a large repository pays its full checkout size per
 /// worktree. This store keeps one template per repo (the tracked files of one
 /// commit, under `~/tbd/repos/<repoID>/checkout-template/`) and builds a
-/// worktree in five steps:
+/// worktree in six steps:
 ///
 /// 1. `git worktree add --no-checkout` — branch, HEAD and `.git` file, no files.
-/// 2. `clonefile(2)` each top-level entry of the template into the worktree.
-/// 3. `read-tree <template commit>` then `update-index --refresh`, which hashes
+/// 2. Check that the template's bytes are the ones a checkout of the base
+///    would write: no `.gitattributes` differs between the template's commit
+///    and the base, and the conversion settings
+///    (`GitManager.checkoutConversionFingerprint`) are the ones the template
+///    was written under. `reset --hard` leaves a file alone when its blob is
+///    unchanged, so a changed line-ending rule, `ident` or filter would
+///    otherwise leave the template's old bytes behind a clean status.
+/// 3. `clonefile(2)` each top-level entry of the template into the worktree.
+/// 4. `read-tree <template commit>` then `update-index --refresh`, which hashes
 ///    the cloned files (reads only) and records their stat data.
-/// 4. `reset --hard` to HEAD: git rewrites, creates and deletes only the paths
+/// 5. `reset --hard` to HEAD: git rewrites, creates and deletes only the paths
 ///    that differ between the template's commit and the new base.
-/// 5. `post-checkout`, with the arguments `git worktree add` would have used.
+/// 6. `post-checkout`, with the arguments `git worktree add` would have used.
 ///
 /// Every step after the first falls back to an ordinary checkout of the same
 /// worktree: the directory is emptied (keeping `.git`) and `reset --hard`
 /// writes every file. A clone that does not leave `git status` empty takes the
 /// same fallback, so a torn or stale template costs time, never correctness.
 /// The fallback is the only thing a non-APFS volume ever sees. A git older
-/// than 2.36 has no `git hook run` for step 5, so there the create is the
+/// than 2.36 has no `git hook run` for step 6, so there the create is the
 /// plain `git worktree add` and no template is built.
 ///
 /// The template follows the bases worktrees are created from: after each
 /// create, `refresh(…)` moves it to the new worktree's HEAD, writing only what
-/// changed. Clones and refreshes of one repo exclude each other without
+/// changed — or rewriting it in full when a `.gitattributes` file or the
+/// conversion settings changed, for the reason in step 2. Clones and
+/// refreshes of one repo exclude each other without
 /// waiting — a create that finds a refresh running materializes normally, and
 /// a refresh that finds a clone running is skipped until the next create.
 ///
@@ -56,11 +65,32 @@ public actor CheckoutTemplateStore {
         let root: URL
         let tree: URL
         let index: URL
+        /// The conversion fingerprint the tree was written under.
+        let conversionFile: URL
         let commitFile: URL
+    }
+
+    /// Why the template cannot stand in for a checkout of the base.
+    enum ConversionChange: Equatable, Sendable, CustomStringConvertible {
+        /// A `.gitattributes` file differs between the template's commit and
+        /// the base. The template is right for its own commit, and the refresh
+        /// after this create rewrites it in full.
+        case attributes
+        /// The conversion settings differ from the ones the template was
+        /// written under, so the template is wrong for every base.
+        case settings
+
+        var description: String {
+            switch self {
+            case .attributes: return ".gitattributes differs between the template and the base"
+            case .settings: return "line-ending or filter settings changed since the template was written"
+            }
+        }
     }
 
     enum CloneError: Error, LocalizedError, CustomStringConvertible {
         case cloneFailed(entry: String, code: Int32)
+        case conversionChanged(ConversionChange)
         case notClean
 
         var errorDescription: String? { description }
@@ -69,6 +99,8 @@ public actor CheckoutTemplateStore {
             switch self {
             case let .cloneFailed(entry, code):
                 return "clonefile failed for \(entry): \(String(cString: strerror(code)))"
+            case let .conversionChanged(change):
+                return "the template cannot be cloned: \(change)"
             case .notClean:
                 return "git status was not empty after the clone"
             }
@@ -85,22 +117,27 @@ public actor CheckoutTemplateStore {
     private var refreshing: Set<UUID> = []
     /// Repos the store has given up on until the daemon restarts: `clonefile`
     /// reported the volume cannot clone (`ENOTSUP`), the template and worktree
-    /// are on different volumes (`EXDEV`), or `notCleanLimit` clones in a row
-    /// failed the clean-status check. Neither clones nor refreshes are
+    /// are on different volumes (`EXDEV`), or `notCleanLimit` creates in a row
+    /// found the template unusable. Neither clones nor refreshes are
     /// attempted for them.
     private var unsupported: Set<UUID> = []
-    /// Clones in a row, per repo, that did not leave `git status` empty.
+    /// Creates in a row, per repo, whose clone did not leave `git status`
+    /// empty or whose conversion settings did not match the template's.
     /// Reset by a clean clone; at `notCleanLimit` the repo joins `unsupported`.
     private var notCleanStreak: [UUID: Int] = [:]
     /// Whether this machine's git has `git hook run`. Probed on first use.
     private var hookRunSupported: Bool?
 
-    /// How many clones in a row may fail the clean-status check before the
-    /// store stops building a template for the repo. One stray file is a torn
-    /// template, which the rebuild after it fixes. The same failure on every
-    /// rebuild is a repo whose own checkout never reads clean (line endings,
-    /// a filter that does not round-trip), and each further attempt would
-    /// cost a full template write plus a full worktree write.
+    /// How many creates in a row may find the template unusable — a clone
+    /// that fails the clean-status check, or conversion settings that differ
+    /// from the template's — before the store stops building a template for
+    /// the repo. One stray file is a torn template, and one settings change is
+    /// a stale one; the rebuild after either fixes it. The same failure on
+    /// every rebuild is a repo whose own checkout never reads clean (a filter
+    /// that does not round-trip), or whose worktrees see other settings than
+    /// the template does (an `includeIf` that matches one and not the other),
+    /// and each further attempt would cost a full template write plus a full
+    /// worktree write.
     static let notCleanLimit = 3
 
     /// The daemon's instance. Resolves `~/tbd/repos` per use, so it honors
@@ -128,6 +165,7 @@ public actor CheckoutTemplateStore {
             root: root,
             tree: root.appendingPathComponent("tree", isDirectory: true),
             index: root.appendingPathComponent("index"),
+            conversionFile: root.appendingPathComponent("conversion"),
             commitFile: root.appendingPathComponent("commit"))
     }
 
@@ -185,6 +223,22 @@ public actor CheckoutTemplateStore {
         guard let template = await beginClone(repoID: repoID) else {
             return try await materializeWithoutTemplate(git: git, worktreePath: worktreePath)
         }
+        let change: ConversionChange?
+        do {
+            change = try await Self.conversionChange(git: git, worktreePath: worktreePath, template: template)
+        } catch {
+            await endClone(repoID: repoID, unsupported: false)
+            throw error
+        }
+        if let change {
+            await endClone(repoID: repoID, unsupported: false)
+            // A template written under other settings is wrong for every
+            // base, so it goes, as a torn one does. One whose commit has
+            // other attributes is right for that commit; the refresh after
+            // this create rewrites it.
+            if change == .settings { await recordNotClean(repoID: repoID) }
+            throw CloneError.conversionChanged(change)
+        }
         do {
             try Self.cloneTree(from: template.tree, into: worktreePath)
         } catch CloneError.cloneFailed(let entry, let code) where code == ENOTSUP || code == EXDEV {
@@ -220,14 +274,42 @@ public actor CheckoutTemplateStore {
         return .materialized(reason: "no template")
     }
 
-    private func beginClone(repoID: UUID) -> (tree: String, commit: String)? {
-        guard !refreshing.contains(repoID), !unsupported.contains(repoID) else { return nil }
-        let paths = self.paths(repoID: repoID)
-        guard let commit = Self.readCommit(paths.commitFile),
+    /// Step 2: whether the template's bytes can stand in for a checkout of
+    /// the worktree's base. Both reads are cheap next to the clone, so they
+    /// run before it.
+    private static func conversionChange(
+        git: GitManager, worktreePath: String, template: Template
+    ) async throws -> ConversionChange? {
+        let settings = try await git.checkoutConversionFingerprint(at: worktreePath)
+        guard settings == template.conversion else { return .settings }
+        let differ = try await git.attributesFilesDiffer(
+            repoPath: worktreePath, from: template.commit, to: "HEAD")
+        return differ ? .attributes : nil
+    }
+
+    /// A complete template: its tree, the commit it holds and the conversion
+    /// fingerprint it was written under.
+    struct Template: Sendable {
+        let tree: String
+        let commit: String
+        let conversion: String
+    }
+
+    /// The template, when both its marker files are present. `commit` is
+    /// written last, so a template is never read before it is complete.
+    static func readTemplate(_ paths: TemplatePaths) -> Template? {
+        guard let commit = readCommit(paths.commitFile),
+              let conversion = try? String(contentsOf: paths.conversionFile, encoding: .utf8),
               FileManager.default.fileExists(atPath: paths.tree.path)
         else { return nil }
+        return Template(tree: paths.tree.path, commit: commit, conversion: conversion)
+    }
+
+    private func beginClone(repoID: UUID) -> Template? {
+        guard !refreshing.contains(repoID), !unsupported.contains(repoID) else { return nil }
+        guard let template = Self.readTemplate(paths(repoID: repoID)) else { return nil }
         activeClones[repoID, default: 0] += 1
-        return (paths.tree.path, commit)
+        return template
     }
 
     private func endClone(repoID: UUID, unsupported isUnsupported: Bool) {
@@ -280,7 +362,7 @@ public actor CheckoutTemplateStore {
     // MARK: - Template refresh
 
     /// Moves the repo's template to `commit`, building it if absent. A no-op
-    /// when the template is already there, when a clone or another refresh of
+    /// when the template is already at `commit`, when a clone or another refresh of
     /// the repo is in flight, or when the repo's volume cannot clone. Never
     /// throws: a failed refresh leaves no template, and creates materialize
     /// normally until a later refresh succeeds.
@@ -292,7 +374,7 @@ public actor CheckoutTemplateStore {
               (activeClones[repoID] ?? 0) == 0
         else { return }
         let paths = self.paths(repoID: repoID)
-        guard Self.readCommit(paths.commitFile) != commit else { return }
+        guard Self.readTemplate(paths)?.commit != commit else { return }
         refreshing.insert(repoID)
         do {
             try await Self.writeTemplate(git: git, paths: paths, repoPath: repoPath, commit: commit)
@@ -325,14 +407,27 @@ public actor CheckoutTemplateStore {
             try? fm.removeItem(at: paths.root)
             throw CloneError.cloneFailed(entry: paths.root.path, code: ENOTSUP)
         }
-        let previous = readCommit(paths.commitFile)
+        let previous = readTemplate(paths)
         // Removed first, so a crash mid-write leaves a template that reads as
         // absent and is rebuilt, never one that names the wrong commit.
         try? fm.removeItem(at: paths.commitFile)
         let common = try await git.commonGitDir(repoPath: repoPath)
+        // Read before the write, so a change during it reads as a mismatch
+        // at the next clone rather than as a match.
+        let conversion = try await git.checkoutConversionFingerprint(at: repoPath, gitDir: common)
 
+        // The fast path rewrites only paths whose blob changed. A file whose
+        // blob did not change keeps the bytes the previous attributes and
+        // settings produced, so either changing forces the full write.
+        // A diff that cannot be read (the old commit is gone) counts as a change.
+        var canAdvance = false
+        if let previous, previous.conversion == conversion,
+           fm.fileExists(atPath: paths.index.path) {
+            canAdvance = (try? await git.attributesFilesDiffer(
+                repoPath: repoPath, from: previous.commit, to: commit)) == false
+        }
         var advanced = false
-        if previous != nil, fm.fileExists(atPath: paths.tree.path), fm.fileExists(atPath: paths.index.path) {
+        if canAdvance {
             do {
                 try await git.checkoutTemplate(
                     commonGitDir: common, treePath: paths.tree.path, indexPath: paths.index.path,
@@ -350,6 +445,7 @@ public actor CheckoutTemplateStore {
                 commonGitDir: common, treePath: paths.tree.path, indexPath: paths.index.path,
                 commit: commit, fromScratch: true)
         }
+        try Data(conversion.utf8).write(to: paths.conversionFile, options: .atomic)
         try Data((commit + "\n").utf8).write(to: paths.commitFile, options: .atomic)
     }
 
