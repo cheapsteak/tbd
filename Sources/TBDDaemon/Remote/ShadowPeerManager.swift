@@ -166,8 +166,9 @@ public enum ShadowPeerSiteResolution: Sendable, Equatable {
     case unsited
     /// TBD has a row for the session but cannot confirm its repository's
     /// `tbd.toml` switches peer messaging on — the switch is off, or the
-    /// repository, its checkout or the read is missing. Fails closed: it is
-    /// the one outcome that withdraws a shadow already published.
+    /// repository, its checkout or the read is missing. Fails closed: a new
+    /// peer is held back, and a published shadow is withdrawn and held back so
+    /// switching the repository on again republishes it.
     case switchedOff
 }
 
@@ -384,6 +385,13 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// choice, and kept so the switch turning back on can publish them on the
     /// next recheck without waiting for the far side to write another line.
     private var switchedOff: [String: PeerBridgePeer] = [:]
+    /// `peer-gone`s received per handle on this link. `applyPeer` reads it
+    /// before it suspends and re-checks it after every suspension, so a line
+    /// whose handle was retired meanwhile neither holds that peer back nor
+    /// publishes a shadow for it — either would let a session the far side
+    /// retired come back. Cleared with the rest of the handle table on link
+    /// down, since handles mean nothing across connections.
+    private var retirements: [String: Int] = [:]
     /// Bumped every time the link goes down.
     ///
     /// **The guard against resurrecting a shadow the teardown already
@@ -479,7 +487,9 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         case .peer(let peer):
             await applyPeer(peer)
         case .peerGone(let handle):
-            // A retired peer is never held back for a later switch-on.
+            // A retired peer is never held back for a later switch-on, and an
+            // `applyPeer` for it that is still suspended must not act.
+            retirements[handle, default: 0] += 1
             switchedOff.removeValue(forKey: handle)
             await withdrawShadow(handle: handle, because: "the far side withdrew it")
         case .message(let message):
@@ -501,6 +511,12 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// something that no longer exists.
     private func applyPeer(_ peer: PeerBridgePeer) async {
         let generation = linkGeneration
+        let retirement = retirements[peer.handle, default: 0]
+        /// Whether this line is still the live statement about its handle:
+        /// the link has not dropped and the handle has not been retired.
+        func stillCurrent() -> Bool {
+            generation == linkGeneration && retirements[peer.handle, default: 0] == retirement
+        }
         if let existing = shadows[peer.handle] {
             // The process this update is addressed to. Both awaits below let
             // the table move on underneath it, and every decision after them is
@@ -510,7 +526,7 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             if resolution == .switchedOff {
                 // The repository turned peer messaging off since this shadow
                 // was published. Withdraw it rather than keep it addressable.
-                guard generation == linkGeneration,
+                guard stillCurrent(),
                       currentShadow(handle: peer.handle, pid: helperPID) != nil
                 else { return }
                 // Recorded BEFORE the withdrawal suspends, so a `peer-gone` or
@@ -566,9 +582,13 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
         let site: ShadowPeerSite
         switch await resolveSite(for: peer) {
         case .sited(let resolved):
+            // Checked before spawning, so a handle retired while it was being
+            // sited never costs a helper at all; the guard after the spawn
+            // covers a retirement that lands during the spawn itself.
+            guard stillCurrent() else { return }
             site = resolved
         case .switchedOff:
-            guard generation == linkGeneration else { return }
+            guard stillCurrent() else { return }
             unmirrored.remove(peer.handle)
             switchedOff[peer.handle] = peer
             shadowPeerLogger.info("""
@@ -578,6 +598,7 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
                 """)
             return
         case .unsited:
+            guard stillCurrent() else { return }
             switchedOff.removeValue(forKey: peer.handle)
             unmirrored.insert(peer.handle)
             shadowPeerLogger.error("""
@@ -624,14 +645,16 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             sessionID: sessionID, socketPath: helper.socketPath,
             recordPath: helper.recordPath)
 
-        // Two races land here, and both end the same way: the process this
+        // Three races land here, and all end the same way: the process this
         // call just started is reclaimed rather than installed. A second `peer`
         // line for the same handle means somebody else already owns the table
         // entry; a bumped generation means the link went down mid-spawn and the
-        // teardown has already swept a table this helper was never in. Either
-        // way, overwriting or inserting would leak a listener nothing else
-        // would ever close.
-        guard generation == linkGeneration, shadows[peer.handle] == nil else {
+        // teardown has already swept a table this helper was never in; a bumped
+        // retirement means the far side sent `peer-gone` for this handle while
+        // it was being sited or spawned, so publishing would resurrect a
+        // retired session. Overwriting or inserting would leak a listener
+        // nothing else would ever close, or publish one nobody may address.
+        guard stillCurrent(), shadows[peer.handle] == nil else {
             let termination = await helper.terminate()
             await retireRow(handle: peer.handle, pid: helper.pid, after: termination)
             return
@@ -713,10 +736,13 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
     /// repository's `tbd.toml` reaches existing shadows within one tick in
     /// either direction, with no restart and no new line from the far side.
     ///
-    /// Only `.switchedOff` withdraws anything, and the resolver answers it for
-    /// any case where the switch cannot be confirmed on — a failed read
-    /// included — so unconfirmed consent never keeps a shadow published.
-    /// `.unsited` (no row for the session) leaves a published shadow alone.
+    /// **Fails closed: anything short of a confirmed `.sited` withdraws.**
+    /// `.switchedOff` — the switch is off, or TBD could not confirm it is on —
+    /// withdraws the shadow and holds its line back, so switching the
+    /// repository on again republishes it. `.unsited` — TBD no longer has a
+    /// row for the session, or the row has no repository — withdraws it
+    /// outright: there is nothing left to hold it against, and the far side's
+    /// next line for it sites it afresh if a row comes back.
     public func recheckPeerMessagingSwitches() async {
         let generation = linkGeneration
         for handle in shadows.keys.sorted() {
@@ -724,19 +750,25 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
                   let sessionID = shadow.remoteSessionID
             else { continue }
             let pid = shadow.helper.pid
-            guard await siteResolver.resolution(forProviderSessionID: sessionID)
-                    == .switchedOff,
-                  generation == linkGeneration,
+            let resolution = await siteResolver.resolution(forProviderSessionID: sessionID)
+            if case .sited = resolution { continue }
+            guard generation == linkGeneration,
                   let current = currentShadow(handle: handle, pid: pid)
             else { continue }
-            // Recorded BEFORE the withdrawal suspends, for the reason the same
-            // step in `applyPeer` gives: a `peer-gone` arriving during it must
-            // win, or a later switch-on would resurrect a retired session.
-            switchedOff[handle] = PeerBridgePeer(
-                handle: handle, name: current.name, status: current.status,
-                peerProtocol: current.peerProtocol, sessionID: sessionID)
-            await withdrawShadow(
-                handle: handle, because: "its repository has peer messaging switched off")
+            if resolution == .switchedOff {
+                // Recorded BEFORE the withdrawal suspends, for the reason the
+                // same step in `applyPeer` gives: a `peer-gone` arriving during
+                // it must win, or a later switch-on would resurrect a retired
+                // session.
+                switchedOff[handle] = PeerBridgePeer(
+                    handle: handle, name: current.name, status: current.status,
+                    peerProtocol: current.peerProtocol, sessionID: sessionID)
+                await withdrawShadow(
+                    handle: handle, because: "its repository has peer messaging switched off")
+            } else {
+                await withdrawShadow(
+                    handle: handle, because: "TBD no longer has a worktree row for its session")
+            }
             guard generation == linkGeneration else { return }
         }
         for handle in switchedOff.keys.sorted() {
@@ -1069,6 +1101,7 @@ public actor ShadowPeerManager: PeerLinkHandler, LocalPeerHandleRegistry {
             localHandlesByAddress.removeAll()
             unmirrored.removeAll()
             switchedOff.removeAll()
+            retirements.removeAll()
             inventorySurplus = []
             inventoryMissing = []
             remoteOrigin = nil

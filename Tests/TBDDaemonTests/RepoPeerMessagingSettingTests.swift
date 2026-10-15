@@ -129,6 +129,39 @@ struct RepoPeerMessagingSettingTests {
         #expect(RepoTOML.fileName == "tbd.toml")
     }
 
+    // MARK: - Logging problems
+
+    /// A malformed file is read on every poll, scope tick and resolver call,
+    /// so its problems are logged when they change and once when they clear —
+    /// never on every read.
+    @Test func problemsAreLoggedOnlyWhenTheyChange() {
+        let log = PeerMessagingProblemLog()
+        let broken = PeerMessagingSetting(path: Self.path, enabled: false, problems: ["bad"])
+        let worse = PeerMessagingSetting(path: Self.path, enabled: false, problems: ["worse"])
+        let clean = PeerMessagingSetting(path: Self.path, enabled: true, problems: [])
+
+        #expect(log.report(clean) == false, "a clean file is never logged")
+        #expect(log.report(broken))
+        #expect(log.report(broken) == false, "the same problem is not logged again")
+        #expect(log.report(worse), "a changed problem is logged")
+        #expect(log.report(clean), "clearing is logged once")
+        #expect(log.report(clean) == false)
+        #expect(log.report(PeerMessagingSetting(
+            path: "/opt/peertest/other/tbd.toml", enabled: false, problems: ["bad"])),
+            "each file is tracked on its own")
+    }
+
+    /// Deduplicating the log never hides a problem from the reader: every read
+    /// still returns it, which is what `tbd peer list` prints.
+    @Test func everyReadStillReturnsTheProblems() {
+        let switches = RepoPeerMessagingSwitches(
+            repo: { _ in nil },
+            read: { PeerMessagingSetting(path: $0, enabled: false, problems: ["bad"]) })
+
+        #expect(switches.setting(checkoutPath: "/opt/peertest/acme").problems == ["bad"])
+        #expect(switches.setting(checkoutPath: "/opt/peertest/acme").problems == ["bad"])
+    }
+
     // MARK: - Which checkout counts
 
     /// The switch is read from the repository's registered main checkout — the

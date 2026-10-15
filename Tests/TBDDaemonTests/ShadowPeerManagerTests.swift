@@ -1418,6 +1418,32 @@ private final class SwitchableSiteResolver: ShadowPeerSiteResolving, @unchecked 
     }
 }
 
+/// A site resolver that parks every call until a test opens it, so a frame can
+/// be delivered while `applyPeer` is suspended in `resolveSite`.
+private final class GatedSiteResolver: ShadowPeerSiteResolving, @unchecked Sendable {
+    private let answer: ShadowPeerSiteResolution
+    private let gate = SendGate()
+    private let entered = OSAllocatedUnfairLock(initialState: 0)
+
+    init(answer: ShadowPeerSiteResolution) { self.answer = answer }
+
+    var calls: Int { entered.withLock { $0 } }
+
+    func open() async { await gate.open() }
+
+    func site(forProviderSessionID sessionID: String) async -> ShadowPeerSite? {
+        guard case .sited(let site) = await resolution(forProviderSessionID: sessionID)
+        else { return nil }
+        return site
+    }
+
+    func resolution(forProviderSessionID sessionID: String) async -> ShadowPeerSiteResolution {
+        entered.withLock { $0 += 1 }
+        await gate.park()
+        return answer
+    }
+}
+
 /// The inward half of the per-repository peer-messaging switch: a remote
 /// session whose repository has `[remote_sessions] peer_messaging` off gets no
 /// shadow, and a change to the switch reaches shadows already published on the
@@ -1429,7 +1455,7 @@ private final class SwitchableSiteResolver: ShadowPeerSiteResolving, @unchecked 
 struct ShadowPeerManagerSwitchTests {
 
     private static func makeManager(
-        resolver: SwitchableSiteResolver
+        resolver: any ShadowPeerSiteResolving
     ) -> (ShadowPeerManager, FakeShadowPeerSpawner) {
         let spawner = FakeShadowPeerSpawner()
         let manager = ShadowPeerManager(
@@ -1560,6 +1586,58 @@ struct ShadowPeerManagerSwitchTests {
         resolver.set(on: true)
         await manager.recheckPeerMessagingSwitches()
         #expect(await spawner.spawnCount == 1, "a retired session is never republished")
+    }
+
+    /// **A `peer-gone` landing while a new line is being sited retires it.**
+    /// The line resolves to switched off only after the far side retired its
+    /// handle; holding it back then would let a later switch-on resurrect a
+    /// session that is gone.
+    @Test func aPeerGoneDuringSitingIsNotHeldBack() async throws {
+        let resolver = GatedSiteResolver(answer: .switchedOff)
+        let (manager, _) = Self.makeManager(resolver: resolver)
+        let applying = Task { await manager.handle(.peer(Self.peer)) }
+        try await waitFor("the line is parked in resolveSite") { resolver.calls == 1 }
+
+        await manager.handle(.peerGone(handle: "remote-1"))
+        await resolver.open()
+        await applying.value
+
+        #expect(await manager.snapshot().switchedOffHandles.isEmpty)
+    }
+
+    /// The publish branch of the same race: a line that sites after its handle
+    /// was retired publishes nothing and spawns no helper.
+    @Test func aPeerGoneDuringSitingPublishesNothing() async throws {
+        let resolver = GatedSiteResolver(answer: .sited(ShadowPeerSite(
+            worktreeDisplayName: "fix-ci", path: "/tmp/tbd-test-worktree")))
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+        let applying = Task { await manager.handle(.peer(Self.peer)) }
+        try await waitFor("the line is parked in resolveSite") { resolver.calls == 1 }
+
+        await manager.handle(.peerGone(handle: "remote-1"))
+        await resolver.open()
+        await applying.value
+
+        #expect(await manager.snapshot().shadows.isEmpty, "a retired handle is never published")
+        #expect(await spawner.spawnCount == 0)
+    }
+
+    /// **The recheck fails closed.** A published shadow whose worktree row is
+    /// gone resolves `.unsited`, and is withdrawn rather than left addressable;
+    /// with no row to hold it against it is not held back either.
+    @Test func recheckWithdrawsAShadowThatNoLongerSites() async throws {
+        let resolver = SwitchableSiteResolver(on: true)
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+        await manager.handle(.peer(Self.peer))
+        let helper = try #require(await spawner.helper(for: "remote-1"))
+
+        resolver.setUnsited()
+        await manager.recheckPeerMessagingSwitches()
+
+        #expect(helper.terminations == 1)
+        let snapshot = await manager.snapshot()
+        #expect(snapshot.shadows.isEmpty)
+        #expect(snapshot.switchedOffHandles.isEmpty)
     }
 
     /// A held-back peer whose next line no longer sites at all is unmirrored,

@@ -37,9 +37,10 @@ import TBDShared
 /// shadow**, and says so as `.switchedOff` rather than as an unsited nil — and
 /// so does every case where TBD cannot confirm the switch is on: a failed
 /// read, a repo row that is gone, a checkout that is gone. The difference
-/// matters to the manager: `.unsited` never withdraws a shadow already
-/// published, while `.switchedOff` withdraws one, and consent to share that
-/// cannot be confirmed is treated as absent.
+/// matters to the manager: both withdraw a published shadow on its recheck,
+/// but only `.switchedOff` holds the peer back to republish when the switch
+/// turns on again; consent to share that cannot be confirmed is treated as
+/// absent.
 ///
 /// Design: `docs/specs/2026-08-29-remote-peer-messaging-design.md`
 /// §§ "Addressing and naming", "The per-repository switch".

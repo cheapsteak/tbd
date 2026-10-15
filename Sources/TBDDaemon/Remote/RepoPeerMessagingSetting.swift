@@ -124,21 +124,63 @@ struct PeerMessagingSetting: Sendable, Equatable {
 /// - **Remote lanes have no local checkout of their own.** A remote session's
 ///   worktree row carries a synthetic `remote://` path with no files behind it,
 ///   so the repository's own directory is the only local `tbd.toml` there is.
+/// Remembers the problems last logged for each `tbd.toml`, so a malformed file
+/// is logged when its problems change — and once when they clear — rather than
+/// on every poll, scope tick and resolver call that reads it. Shared across
+/// copies of the struct that owns it, and lock-guarded because those reads
+/// come from several actors.
+final class PeerMessagingProblemLog: Sendable {
+    private let lastLogged = OSAllocatedUnfairLock<[String: [String]]>(initialState: [:])
+
+    /// Log `setting`'s problems if they differ from what was last logged for
+    /// its path. Returns whether anything was logged, for tests.
+    @discardableResult
+    func report(_ setting: PeerMessagingSetting) -> Bool {
+        let previous = lastLogged.withLock { logged -> [String]? in
+            let previous = logged[setting.path]
+            if setting.problems.isEmpty {
+                logged.removeValue(forKey: setting.path)
+            } else {
+                logged[setting.path] = setting.problems
+            }
+            return previous
+        }
+        if setting.problems.isEmpty {
+            guard previous != nil else { return false }
+            switchLogger.notice("""
+                \(setting.path, privacy: .public): peer-messaging switch reads cleanly again
+                """)
+            return true
+        }
+        guard previous != setting.problems else { return false }
+        for problem in setting.problems {
+            switchLogger.error("""
+                \(setting.path, privacy: .public): \(problem, privacy: .public)
+                """)
+        }
+        return true
+    }
+}
+
 struct RepoPeerMessagingSwitches: Sendable {
     /// Looks a repository row up. Throws when the database read fails, which
     /// callers treat as "unknown" rather than "off" — see `ProviderRepoScope`.
     let repo: @Sendable (UUID) async throws -> Repo?
     /// Reads the switch from a checkout. Injected so tests need no files.
     let read: @Sendable (String) -> PeerMessagingSetting
+    /// Where problems are logged, at most once per change per file.
+    let problemLog: PeerMessagingProblemLog
 
     init(
         repo: @escaping @Sendable (UUID) async throws -> Repo?,
         read: @escaping @Sendable (String) -> PeerMessagingSetting = {
             PeerMessagingSetting.read(checkoutPath: $0)
-        }
+        },
+        problemLog: PeerMessagingProblemLog = PeerMessagingProblemLog()
     ) {
         self.repo = repo
         self.read = read
+        self.problemLog = problemLog
     }
 
     /// The setting for one repository row, logging any problem the file has.
@@ -146,14 +188,12 @@ struct RepoPeerMessagingSwitches: Sendable {
         setting(checkoutPath: repo.path)
     }
 
-    /// The setting in one checkout, logging any problem the file has.
+    /// The setting in one checkout. Problems are logged only when they change
+    /// for that file; every read still returns them, so `tbd peer list` names
+    /// them every time.
     func setting(checkoutPath: String) -> PeerMessagingSetting {
         let setting = read(checkoutPath)
-        for problem in setting.problems {
-            switchLogger.error("""
-                \(setting.path, privacy: .public): \(problem, privacy: .public)
-                """)
-        }
+        problemLog.report(setting)
         return setting
     }
 
