@@ -2363,6 +2363,12 @@ public struct PeerBridgeStatus: Codable, Sendable, Equatable {
     /// `tbd.toml` states it, with any problem the file has. Nil from a daemon
     /// that predates the per-repository switch.
     public let repos: [PeerMessagingRepoStatus]?
+    /// **Compatibility only — read `repos` instead.** True when any registered
+    /// repository has peer messaging switched on. Emitted so an older `tbd`
+    /// CLI, which decodes this field as required, keeps decoding `peer.status`
+    /// from a newer daemon (the installed CLI often lags the daemon). Nothing in
+    /// the current CLI reads it; remove it once old CLIs are gone.
+    public let messagingEnabled: Bool?
     /// True when the daemon has a remote-provider manager at all. False means
     /// `remote_backends_enabled` was off at boot, so no provider is described
     /// and `providers` is empty for that reason rather than for want of one.
@@ -2386,6 +2392,7 @@ public struct PeerBridgeStatus: Codable, Sendable, Equatable {
         lastSweep: PeerShadowSweep?
     ) {
         self.repos = repos
+        self.messagingEnabled = repos?.contains(where: \.enabled) ?? false
         self.remoteBackendsLive = remoteBackendsLive
         self.providers = providers
         self.shadows = shadows

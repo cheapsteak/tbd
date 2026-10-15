@@ -34,10 +34,12 @@ import TBDShared
 /// path that already exists there.
 ///
 /// **A repository whose `tbd.toml` does not switch peer messaging on gets no
-/// shadow**, and says so as `.switchedOff` rather than as an unsited nil. The
-/// difference matters to the manager: an unsited answer can be a failed read
-/// and never withdraws a shadow already published, while `.switchedOff` is the
-/// repository's own definite choice and withdraws one.
+/// shadow**, and says so as `.switchedOff` rather than as an unsited nil — and
+/// so does every case where TBD cannot confirm the switch is on: a failed
+/// read, a repo row that is gone, a checkout that is gone. The difference
+/// matters to the manager: `.unsited` never withdraws a shadow already
+/// published, while `.switchedOff` withdraws one, and consent to share that
+/// cannot be confirmed is treated as absent.
 ///
 /// Design: `docs/specs/2026-08-29-remote-peer-messaging-design.md`
 /// §§ "Addressing and naming", "The per-repository switch".
@@ -84,14 +86,30 @@ public struct WorktreeShadowPeerSiteResolver: ShadowPeerSiteResolving {
     public func resolution(
         forProviderSessionID sessionID: String
     ) async -> ShadowPeerSiteResolution {
-        guard let worktree = try? await worktrees.findRemote(
-            provider: provider, sessionID: sessionID)
-        else { return .unsited }
-        guard let repoID = worktree.repoID,
-              let repo = try? await repos.get(id: repoID),
-              directoryExists(repo.path)
-        else { return .unsited }
-        guard peerMessagingOn(repo) else { return .switchedOff }
+        // The switch fails closed. Once TBD cannot rule out that the session
+        // sits in a switched-off repository — the row read failed, the repo row
+        // is gone, its checkout is gone so its `tbd.toml` cannot be read — the
+        // answer is `.switchedOff`, which holds a new peer back and withdraws a
+        // published one. Only "TBD adopted no row for this session" and "the
+        // row belongs to no repository" are `.unsited`: neither can be a shadow
+        // anyone consented to.
+        let found: Worktree?
+        do {
+            found = try await worktrees.findRemote(provider: provider, sessionID: sessionID)
+        } catch {
+            return .switchedOff
+        }
+        guard let worktree = found else { return .unsited }
+        guard let repoID = worktree.repoID else { return .unsited }
+        let repo: Repo?
+        do {
+            repo = try await repos.get(id: repoID)
+        } catch {
+            return .switchedOff
+        }
+        guard let repo, directoryExists(repo.path), peerMessagingOn(repo) else {
+            return .switchedOff
+        }
         return .sited(ShadowPeerSite(worktreeDisplayName: worktree.displayName, path: repo.path))
     }
 }

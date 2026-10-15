@@ -113,11 +113,19 @@ actor ProviderRepoScope {
     /// test without a database that can be made to fail.
     private let listWorktrees: @Sendable () async throws -> [Worktree]
 
-    /// Whether a repository's peer-messaging switch is on. Throws only when the
-    /// repository row could not be read, which counts as a failed read of the
-    /// whole scope — the switch being off is an answer, an unreadable row is
-    /// not one.
-    private let repoIsOn: @Sendable (UUID) async throws -> Bool
+    /// The repository's registered main checkout, or nil when TBD has no row
+    /// for it. Throws when the row could not be read, which counts as a failed
+    /// read of the whole scope.
+    private let checkoutPath: @Sendable (UUID) async throws -> String?
+
+    /// Whether the `tbd.toml` in a checkout switches peer messaging on. A file
+    /// read, never a database read, so it can still be asked when the database
+    /// cannot.
+    private let switchIsOn: @Sendable (String) -> Bool
+
+    /// Repository → main checkout, from the last read that succeeded. What lets
+    /// a failed read still re-read every replayed repository's switch.
+    private var checkoutPaths: [UUID: String] = [:]
 
     /// The scope the last successful read produced; `nil` until one has
     /// succeeded. The optionality *is* the fix — it is what keeps "no scope
@@ -135,24 +143,37 @@ actor ProviderRepoScope {
     init(
         provider: String,
         listWorktrees: @escaping @Sendable () async throws -> [Worktree],
-        repoIsOn: @escaping @Sendable (UUID) async throws -> Bool
+        checkoutPath: @escaping @Sendable (UUID) async throws -> String?,
+        switchIsOn: @escaping @Sendable (String) -> Bool
     ) {
         self.provider = provider
         self.listWorktrees = listWorktrees
-        self.repoIsOn = repoIsOn
+        self.checkoutPath = checkoutPath
+        self.switchIsOn = switchIsOn
     }
 
     /// The repositories this provider currently hosts sessions in that have
-    /// peer messaging on, the last known good set if this read failed, or
-    /// `nil` if no read has ever succeeded.
+    /// peer messaging on; if this read failed, the last known good set
+    /// narrowed to the repositories whose switch is still on; or `nil` if no
+    /// read has ever succeeded.
+    ///
+    /// **A failed read may keep a repository out, never a switched-off one
+    /// in.** The replay re-reads each repository's `tbd.toml` from the
+    /// checkout the last good read recorded, so a repository switched off
+    /// while the database is failing leaves the scope on the very next tick.
+    /// The asymmetry is deliberate: the switch is consent to share, and stale
+    /// consent is not consent.
     func resolve() async -> Set<UUID>? {
         do {
             let rows = try await listWorktrees()
             var scope: Set<UUID> = []
-            for repoID in PeerMessagingStreamGate.repos(hostedBy: provider, in: rows)
-            where try await repoIsOn(repoID) {
-                scope.insert(repoID)
+            var paths: [UUID: String] = [:]
+            for repoID in PeerMessagingStreamGate.repos(hostedBy: provider, in: rows) {
+                guard let path = try await checkoutPath(repoID) else { continue }
+                paths[repoID] = path
+                if switchIsOn(path) { scope.insert(repoID) }
             }
+            checkoutPaths = paths
             if consecutiveFailures > 0 {
                 peerScopeLogger.notice("""
                     repo scope for provider \(self.provider, privacy: .public) is fresh again \
@@ -183,7 +204,9 @@ actor ProviderRepoScope {
                     \(String(describing: error), privacy: .public)
                     """)
             }
-            return lastKnownGood
+            return lastKnownGood.map { known in
+                known.filter { repoID in checkoutPaths[repoID].map(switchIsOn) ?? false }
+            }
         }
     }
 }
@@ -681,9 +704,7 @@ public final class Daemon: Sendable {
         sessionsDirectory: URL,
         origin: String = PeerLinkOrigin.local()
     ) -> PeerBridgeWiring {
-        let switches = RepoPeerMessagingSwitches(repo: { id in
-            try await database.repos.get(id: id)
-        })
+        let switches = makePeerMessagingSwitches(database: database)
         return PeerBridgeWiring(
             isEnabled: { config in
                 do {
@@ -706,21 +727,14 @@ public final class Daemon: Sendable {
                 // bridge does. Last-known-good is per-provider state and the
                 // provider is fixed the moment the bridge is built, so this is
                 // the narrowest scope that can hold it.
-                let scope = ProviderRepoScope(
-                    provider: config.name,
-                    listWorktrees: {
-                        try await database.worktrees.list(excludeArchived: true)
-                    },
-                    repoIsOn: { try await switches.isOn(repoID: $0) })
+                let scope = makeRepoScope(
+                    provider: config.name, database: database, switches: switches)
                 let bridge = PeerBridge.make(
                     config: config,
                     contractVersion: contractVersion,
                     origin: origin,
-                    siteResolver: WorktreeShadowPeerSiteResolver(
-                        provider: config.name,
-                        worktrees: database.worktrees,
-                        repos: database.repos,
-                        peerMessagingOn: { switches.setting(for: $0).enabled }),
+                    siteResolver: makeShadowSiteResolver(
+                        provider: config.name, database: database, switches: switches),
                     // The real ledger, never `UnrecordedShadowPeerArtifacts`: a
                     // shadow published through that recorder is one nothing can
                     // recognise afterwards, so its helper, socket and record
@@ -741,6 +755,36 @@ public final class Daemon: Sendable {
                     })
                 return bridge
             })
+    }
+
+    /// The per-repository switches, read from each repo row's main checkout.
+    /// One of the three pieces `makePeerBridging` composes, split out so a test
+    /// can drive exactly what production builds.
+    static func makePeerMessagingSwitches(database: TBDDatabase) -> RepoPeerMessagingSwitches {
+        RepoPeerMessagingSwitches(repo: { id in try await database.repos.get(id: id) })
+    }
+
+    /// The outward scope for one provider: its hosted repositories that have
+    /// the switch on.
+    static func makeRepoScope(
+        provider: String, database: TBDDatabase, switches: RepoPeerMessagingSwitches
+    ) -> ProviderRepoScope {
+        ProviderRepoScope(
+            provider: provider,
+            listWorktrees: { try await database.worktrees.list(excludeArchived: true) },
+            checkoutPath: { try await database.repos.get(id: $0)?.path },
+            switchIsOn: { switches.setting(checkoutPath: $0).enabled })
+    }
+
+    /// The inward site resolver for one provider, applying the same switch.
+    static func makeShadowSiteResolver(
+        provider: String, database: TBDDatabase, switches: RepoPeerMessagingSwitches
+    ) -> WorktreeShadowPeerSiteResolver {
+        WorktreeShadowPeerSiteResolver(
+            provider: provider,
+            worktrees: database.worktrees,
+            repos: database.repos,
+            peerMessagingOn: { switches.setting(for: $0).enabled })
     }
 
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.

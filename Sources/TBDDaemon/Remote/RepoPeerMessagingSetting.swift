@@ -109,13 +109,15 @@ struct PeerMessagingSetting: Sendable, Equatable {
 /// Answers "is peer messaging on for this repository?" for the daemon.
 ///
 /// **The repository's registered main checkout is the one whose `tbd.toml`
-/// counts** — the path on the repo row — and no worktree's copy. Three reasons:
+/// counts** — the path on the repo row — and no linked worktree's copy. What is
+/// read is whatever that checkout's working tree holds right now: if the main
+/// checkout is itself on a feature branch or carries an uncommitted edit, that
+/// is what counts. The guarantee is narrower than "only the default branch
+/// decides", and it is this:
 ///
-/// - **A branch must not be able to widen sharing for the whole repository.**
-///   Any worktree can carry an uncommitted or unmerged edit to `tbd.toml`; if
-///   its copy counted, one experimental branch could turn on cross-machine
-///   messaging for every session in the project. The main checkout is the copy
-///   that tracks what the repository has actually agreed to.
+/// - **A linked worktree cannot change the answer.** A branch checked out in a
+///   TBD worktree can edit its own `tbd.toml` freely without switching
+///   cross-machine messaging on or off for the repository's other sessions.
 /// - **One answer per repository.** The switch scopes whole repositories in
 ///   both directions (outward announcement and inward shadow peers), so it
 ///   needs one value per repository, not one per worktree that could disagree.
@@ -141,7 +143,12 @@ struct RepoPeerMessagingSwitches: Sendable {
 
     /// The setting for one repository row, logging any problem the file has.
     func setting(for repo: Repo) -> PeerMessagingSetting {
-        let setting = read(repo.path)
+        setting(checkoutPath: repo.path)
+    }
+
+    /// The setting in one checkout, logging any problem the file has.
+    func setting(checkoutPath: String) -> PeerMessagingSetting {
+        let setting = read(checkoutPath)
         for problem in setting.problems {
             switchLogger.error("""
                 \(setting.path, privacy: .public): \(problem, privacy: .public)

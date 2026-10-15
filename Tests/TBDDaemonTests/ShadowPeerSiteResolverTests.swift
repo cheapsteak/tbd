@@ -185,4 +185,21 @@ struct ShadowPeerSiteResolverTests {
         let resolver = Self.resolver(fixture, directoriesThatExist: [])
         #expect(await resolver.site(forProviderSessionID: "sess-42") == nil)
     }
+
+    /// The switch fails closed: with the checkout gone its `tbd.toml` cannot
+    /// be read, so TBD cannot confirm consent and answers `.switchedOff` —
+    /// the outcome that withdraws a published shadow — even though the switch
+    /// itself would say on. `.unsited` here would leave such a shadow up.
+    @Test func aRepositoryDirectoryThatIsGoneFailsClosed() async throws {
+        let fixture = try await Self.makeFixture()
+        _ = try await fixture.db.worktrees.createRemote(
+            repoID: fixture.repo.id, name: "api-lane", displayName: "api-lane",
+            branch: "tbd/api-lane", provider: "acme-cloud", sessionID: "sess-42")
+
+        let resolution = await Self.resolver(
+            fixture, directoriesThatExist: [], peerMessagingOn: true)
+            .resolution(forProviderSessionID: "sess-42")
+
+        #expect(resolution == .switchedOff)
+    }
 }

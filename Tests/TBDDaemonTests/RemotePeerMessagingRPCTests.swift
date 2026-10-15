@@ -95,6 +95,31 @@ struct RemotePeerMessagingRPCTests {
         #expect(repo.tomlPath.hasSuffix("/tbd.toml"))
     }
 
+    /// An older `tbd` CLI decodes `peer.status` with `messagingEnabled`
+    /// required, and the installed CLI often lags the daemon. The daemon keeps
+    /// emitting it — true when any repository is on — so that CLI still reads
+    /// the answer instead of failing to decode it.
+    @Test("peer.status still emits messagingEnabled for older CLIs")
+    func emitsTheCompatField() async throws {
+        struct OlderCLIStatus: Decodable { let messagingEnabled: Bool }
+        let (router, db) = try makeRouterAndDB()
+        let checkout = try makeCheckout()
+        defer { try? FileManager.default.removeItem(at: checkout) }
+        _ = try await db.repos.create(
+            path: checkout.path, displayName: "acme", defaultBranch: "main")
+
+        var older = try await router.handle(RPCRequest(method: RPCMethod.peerStatus))
+            .decodeResult(OlderCLIStatus.self)
+        #expect(older.messagingEnabled == false)
+
+        try "[remote_sessions]\npeer_messaging = true\n"
+            .write(to: checkout.appendingPathComponent("tbd.toml"),
+                   atomically: true, encoding: .utf8)
+        older = try await router.handle(RPCRequest(method: RPCMethod.peerStatus))
+            .decodeResult(OlderCLIStatus.self)
+        #expect(older.messagingEnabled == true)
+    }
+
     /// The machine-wide switch is gone, and so is the method that moved it: a
     /// caller that still sends it is told the method does not exist rather
     /// than having it silently succeed.

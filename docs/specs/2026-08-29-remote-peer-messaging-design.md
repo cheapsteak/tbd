@@ -608,14 +608,18 @@ sessions across machines must never happen by accident, so a file TBD cannot
 understand fails closed and visibly.
 
 **The repository's registered main checkout is the one whose `tbd.toml`
-counts** — the path on the repo row, never a worktree's copy. A branch must not
-be able to widen sharing for the whole repository: any worktree can carry an
-unmerged edit to the file, and if its copy counted, one experimental branch
-could switch on cross-machine messaging for every session in the project. The
-switch also scopes whole repositories, so it needs one answer per repository
-rather than one per worktree. And a remote lane has no local checkout of its
-own — its row carries a synthetic `remote://` path — so the repository's own
-directory is the only local `tbd.toml` there is.
+counts** — the path on the repo row, never a linked worktree's copy. What is
+read is whatever that checkout's working tree holds: if the main checkout is on
+a feature branch or carries an uncommitted edit, that is the answer. The
+guarantee is therefore not "only the default branch decides". It is that there
+is one answer per repository, and that a branch checked out in a linked
+worktree cannot change it — any worktree can carry an unmerged edit to the
+file, and if its copy counted, one experimental branch could switch on
+cross-machine messaging for every session in the project. The switch scopes
+whole repositories, which is why it needs one answer rather than one per
+worktree. And a remote lane has no local checkout of its own — its row carries
+a synthetic `remote://` path — so the repository's own directory is the only
+local `tbd.toml` there is.
 
 The switch applies in both directions, per repository:
 
@@ -642,9 +646,13 @@ its outward announcements (`peer-gone` for each, as any scope change does) and
 withdraws its shadows on the next tick, and turning it back on announces the
 roster afresh and publishes the held-back shadows. The stream itself stays open
 once opened, with nothing announced on it, until the daemon next restarts. A
-failed database read is not "off": the scope keeps its last known good value,
-under the same rule as any other failed read of it, and a shadow is withdrawn
-only on a definite answer that its repository is switched off.
+failed database read can keep a repository out but never keeps a switched-off
+one in. The outward scope replays its last known good value narrowed by
+re-reading each repository's `tbd.toml` from the checkout that read recorded,
+so a repository switched off while the database is failing still leaves the
+scope. Inward, a shadow is withdrawn whenever TBD cannot confirm its
+repository's switch is on — the switch is off, or the repository row, its
+checkout or the read itself is missing — and is republished once it can.
 
 **`tbd peer list` reports each repository's state** — on or off, the `tbd.toml`
 it was read from, and any problem with that file — along with any provider that
@@ -795,8 +803,9 @@ diagnostics rather than showing nothing.
   different machines checking out the same repository. A fallback value would
   also make an absent key mean "whatever this machine says" instead of off.
 - **A per-worktree switch, or reading the worktree's own `tbd.toml`.** It would
-  let one branch widen sharing for a whole repository, and give one repository
-  several answers at once. The main checkout's copy is the one answer.
+  let a branch in a linked worktree widen sharing for a whole repository, and
+  give one repository several answers at once. The main checkout's copy is the
+  one answer.
 - **Treating a value TBD cannot read as on, or a string `"true"` as true.** The
   lenient reading is the one that shares sessions nobody agreed to share.
 - **A wake handler in the daemon.** Unnecessary — the wall-clock watchdog already

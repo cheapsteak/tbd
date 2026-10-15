@@ -829,12 +829,17 @@ struct ProviderRepoScopeTests {
             location: location)
     }
 
+    /// Each repository's checkout path is its id's string, so a test's switch
+    /// can name a repository by id.
     private static func resolver(
         _ reads: StubWorktreeReads, provider: String = "cloud",
-        repoIsOn: @escaping @Sendable (UUID) async throws -> Bool = { _ in true }
+        checkoutPath: @escaping @Sendable (UUID) async throws -> String? = { $0.uuidString },
+        repoIsOn: @escaping @Sendable (UUID) -> Bool = { _ in true }
     ) -> ProviderRepoScope {
         ProviderRepoScope(
-            provider: provider, listWorktrees: { try reads.read() }, repoIsOn: repoIsOn)
+            provider: provider, listWorktrees: { try reads.read() },
+            checkoutPath: checkoutPath,
+            switchIsOn: { path in UUID(uuidString: path).map(repoIsOn) ?? false })
     }
 
     // MARK: The per-repository switch, outward
@@ -879,9 +884,9 @@ struct ProviderRepoScopeTests {
         let repo = UUID()
         let reads = StubWorktreeReads(.success([Self.lane(repoID: repo, provider: "cloud")]))
         let failing = StreamSwitch(false)
-        let scope = Self.resolver(reads, repoIsOn: { _ in
+        let scope = Self.resolver(reads, checkoutPath: { id in
             if failing.value { throw StubWorktreeReads.ReadFailure() }
-            return true
+            return id.uuidString
         })
         let expected: Set<UUID> = [repo]
         #expect(await scope.resolve() == expected)
@@ -889,6 +894,45 @@ struct ProviderRepoScopeTests {
         failing.value = true
         #expect(await scope.resolve() == expected)
         #expect(await scope.failedReads == 1)
+    }
+
+    /// **A failed read may keep a repository out, never a switched-off one
+    /// in.** The replay re-reads each repository's switch from the checkout
+    /// the last good read recorded, so a repository switched off while the
+    /// database is failing leaves the scope on that very tick.
+    @Test func aFailedReadStillDropsARepositorySwitchedOffSinceTheLastGoodOne() async {
+        let kept = UUID()
+        let switchedOff = UUID()
+        let reads = StubWorktreeReads(.success([
+            Self.lane(repoID: kept, provider: "cloud"),
+            Self.lane(repoID: switchedOff, provider: "cloud", name: "brisk-otter"),
+        ]))
+        let offNow = StreamSwitch(false)
+        let scope = Self.resolver(reads, repoIsOn: { id in
+            !(id == switchedOff && offNow.value)
+        })
+        let both: Set<UUID> = [kept, switchedOff]
+        #expect(await scope.resolve() == both)
+
+        reads.fail()
+        offNow.value = true
+        let narrowed: Set<UUID> = [kept]
+        #expect(await scope.resolve() == narrowed)
+        #expect(await scope.failedReads == 1)
+    }
+
+    /// The same replay may not widen: a repository off at the last good read
+    /// stays out while the database is failing, even if it is switched on.
+    @Test func aFailedReadNeverAddsARepositoryTheLastGoodReadLeftOut() async {
+        let repo = UUID()
+        let reads = StubWorktreeReads(.success([Self.lane(repoID: repo, provider: "cloud")]))
+        let on = StreamSwitch(false)
+        let scope = Self.resolver(reads, repoIsOn: { _ in on.value })
+        #expect(await scope.resolve() == Set<UUID>())
+
+        reads.fail()
+        on.value = true
+        #expect(await scope.resolve() == Set<UUID>())
     }
 
     // MARK: A read that works

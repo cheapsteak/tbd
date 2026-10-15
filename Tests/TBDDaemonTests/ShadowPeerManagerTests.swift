@@ -1395,20 +1395,26 @@ struct ShadowPeerManagerTests {
 /// A site resolver whose repository switch a test can flip between two calls,
 /// standing in for an edit to the repository's `tbd.toml`.
 private final class SwitchableSiteResolver: ShadowPeerSiteResolving, @unchecked Sendable {
-    private let on: OSAllocatedUnfairLock<Bool>
-    private let site = ShadowPeerSite(
+    private static let site = ShadowPeerSite(
         worktreeDisplayName: "fix-ci", path: "/tmp/tbd-test-worktree")
+    private let answer: OSAllocatedUnfairLock<ShadowPeerSiteResolution>
 
-    init(on: Bool) { self.on = OSAllocatedUnfairLock(initialState: on) }
+    init(on: Bool) {
+        answer = OSAllocatedUnfairLock(initialState: on ? .sited(Self.site) : .switchedOff)
+    }
 
-    func set(on value: Bool) { on.withLock { $0 = value } }
+    func set(on value: Bool) { answer.withLock { $0 = value ? .sited(Self.site) : .switchedOff } }
+
+    /// TBD no longer has a row for the session at all.
+    func setUnsited() { answer.withLock { $0 = .unsited } }
 
     func site(forProviderSessionID sessionID: String) async -> ShadowPeerSite? {
-        on.withLock { $0 } ? site : nil
+        guard case .sited(let site) = answer.withLock({ $0 }) else { return nil }
+        return site
     }
 
     func resolution(forProviderSessionID sessionID: String) async -> ShadowPeerSiteResolution {
-        on.withLock { $0 } ? .sited(site) : .switchedOff
+        answer.withLock { $0 }
     }
 }
 
@@ -1524,5 +1530,55 @@ struct ShadowPeerManagerSwitchTests {
 
         #expect(await spawner.spawnCount == 0)
         #expect(await manager.snapshot().switchedOffHandles.isEmpty)
+    }
+
+    /// **A `peer-gone` landing while a switched-off shadow is being withdrawn
+    /// wins.** The withdrawal suspends on its write to the helper; the
+    /// held-back entry is recorded before that suspension, so the `peer-gone`
+    /// removes it, and switching the repository back on cannot resurrect a
+    /// session the far side retired.
+    @Test func aPeerGoneDuringTheWithdrawalIsNotOverwritten() async throws {
+        let resolver = SwitchableSiteResolver(on: true)
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+        await manager.handle(.peer(Self.peer))
+        let helper = try #require(await spawner.helper(for: "remote-1"))
+        let sendsBefore = helper.sendsEntered
+
+        resolver.set(on: false)
+        helper.gateNextSend()
+        let withdrawing = Task { await manager.recheckPeerMessagingSwitches() }
+        try await waitFor("the withdrawal is parked on its write to the helper") {
+            helper.sendsEntered == sendsBefore + 1
+        }
+
+        await manager.handle(.peerGone(handle: "remote-1"))
+        await helper.releaseSends()
+        await withdrawing.value
+
+        #expect(await manager.snapshot().switchedOffHandles.isEmpty,
+                "the retired peer must not be held back")
+        resolver.set(on: true)
+        await manager.recheckPeerMessagingSwitches()
+        #expect(await spawner.spawnCount == 1, "a retired session is never republished")
+    }
+
+    /// A held-back peer whose next line no longer sites at all is unmirrored,
+    /// not also held back — counted once, and never republished from the
+    /// stale line.
+    @Test func anUnsitedLineClearsTheHeldBackEntry() async {
+        let resolver = SwitchableSiteResolver(on: false)
+        let (manager, spawner) = Self.makeManager(resolver: resolver)
+        await manager.handle(.peer(Self.peer))
+        #expect(await manager.snapshot().switchedOffHandles == ["remote-1"])
+
+        resolver.setUnsited()
+        await manager.handle(.peer(Self.peer))
+
+        let snapshot = await manager.snapshot()
+        #expect(snapshot.switchedOffHandles.isEmpty)
+        #expect(snapshot.unmirroredHandles == ["remote-1"])
+        resolver.set(on: true)
+        await manager.recheckPeerMessagingSwitches()
+        #expect(await spawner.spawnCount == 0)
     }
 }
