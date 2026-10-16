@@ -5,7 +5,7 @@
 # system tools (codesign/security, open, pkill/pgrep) get stubs on a temp PATH
 # that record their arguments, so nothing here signs, launches, or kills
 # anything real. macOS-only: the assembly reads `plutil` and the install uses
-# `cp -cR`.
+# `/bin/cp -cR`.
 # shellcheck disable=SC2329 # test_* helpers are dispatched dynamically below
 set -uo pipefail
 
@@ -438,6 +438,41 @@ test_install_rejects_missing_arguments() {
     assert_fail "install_app_bundle needs both arguments" install_app_bundle "" ""
 }
 
+# A dev shell (nix, direnv, Homebrew's gnubin) can put GNU coreutils first on
+# PATH. GNU cp has no -c, so an install that resolved `cp` through PATH failed
+# and the update rolled back. The stub stands in for that cp: it rejects -c the
+# way GNU cp does and copies otherwise.
+test_install_ignores_a_gnu_cp_first_on_path() {
+    local repo build bundle target gnubin
+    repo="$(mkrepo)"
+    build="$repo/.build/release"
+    mkbuild "$build"
+    assemble_app_bundle "$repo" "$build" "/usr/bin:/bin" >/dev/null 2>&1
+    bundle="$(bundle_dir_for_build "$build")"
+
+    gnubin="$TEST_TMP/gnubin"
+    mkdir -p "$gnubin"
+    cat > "$gnubin/cp" << 'EOF'
+#!/bin/sh
+for arg in "$@"; do
+    case "$arg" in
+        --*) ;;
+        -*c*) echo "cp: invalid option -- 'c'" >&2; exit 1 ;;
+    esac
+done
+exec /bin/cp "$@"
+EOF
+    chmod +x "$gnubin/cp"
+
+    target="$TEST_TMP/Applications-gnu/TBD.app"
+    mkdir -p "$(dirname "$target")"
+    assert_ok "install_app_bundle succeeds with a GNU cp first on PATH" \
+        env PATH="$gnubin:$PATH" bash -c 'source "$1"; install_app_bundle "$2" "$3"' \
+        _ "$HELPER" "$bundle" "$target"
+    assert_file "the bundle installed under a GNU cp has the binary" \
+        "$target/Contents/MacOS/TBDApp"
+}
+
 # MARK: - App process control
 
 test_exec_pattern_escaping() {
@@ -646,6 +681,7 @@ test_sign_prefers_the_stable_identity
 test_sign_rejects_a_missing_bundle_argument
 test_install_replaces_the_previous_bundle
 test_install_rejects_missing_arguments
+test_install_ignores_a_gnu_cp_first_on_path
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
 test_runtime_products_are_executable_targets

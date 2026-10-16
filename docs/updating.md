@@ -239,6 +239,11 @@ those.
 `TBD_KEEP_BUILD_ENV=1` turns the clearing off entirely. `PATH` is not edited,
 so a dev shell that puts a different compiler first on it still wins.
 
+The same shells often put GNU coreutils first on `PATH`. The install copies
+the app bundle with `/bin/cp -cR` by absolute path, because `-c` (an APFS
+clone) is BSD-only and GNU `cp` rejects it. The rollback command below spells
+`/bin/cp` for the same reason.
+
 ## Going back to the previous build
 
 There is no automated rollback, by design. Three routes back exist instead, in
@@ -247,7 +252,7 @@ the order you would reach for them.
 - **From the kept bundle**, the fastest, because it needs no build. Every
   update moves the app bundle it is replacing to
   `~/tbd/updates/previous/TBD.app` and leaves it there. Put it back with
-  `rm -rf /Applications/TBD.app && cp -cR ~/tbd/updates/previous/TBD.app
+  `rm -rf /Applications/TBD.app && /bin/cp -cR ~/tbd/updates/previous/TBD.app
   /Applications/TBD.app`, then relaunch. That bundle's
   `Contents/SourceWorktreePath.txt` names the tree the previous daemon came
   from, so `scripts/restart.sh --release` run from inside that tree completes
