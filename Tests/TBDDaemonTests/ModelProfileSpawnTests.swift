@@ -707,6 +707,57 @@ struct ModelProfileSpawnTests {
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
     }
 
+    @Test("terminal.create passes validated disabled features to Codex, de-duplicated in order")
+    func terminalCreatePassesDisabledFeatures() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .codex,
+                codexDisabledFeatures: ["computer_use", "apps", "computer_use"])))
+
+        #expect(response.success)
+        #expect(recorder.shellBodies.contains(
+            "tbd --disable 'computer_use' --disable 'apps' --dangerously-bypass-approvals-and-sandbox"))
+    }
+
+    @Test("terminal.create refuses disabled features for non-Codex terminals",
+          arguments: [TerminalCreateType?.none, .claude, .shell])
+    func terminalCreateRefusesDisabledFeaturesForNonCodex(type: TerminalCreateType?) async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: type, codexDisabledFeatures: ["computer_use"])))
+
+        #expect(!response.success)
+        #expect(response.error == TerminalCreateParams.codexDisableRequiresCodexMessage)
+        #expect(recorder.calls.isEmpty)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+    }
+
+    @Test("terminal.create refuses a malformed disabled feature name")
+    func terminalCreateRefusesMalformedDisabledFeature() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .codex, codexDisabledFeatures: ["x; rm -rf ~"])))
+
+        #expect(!response.success)
+        #expect(recorder.calls.isEmpty)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+    }
+
     // MARK: - Spawn: Claude free-form env overrides (branch-test rule)
 
     /// Claude's primary spawn carries the merged free-form env overrides from

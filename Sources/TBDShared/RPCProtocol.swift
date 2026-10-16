@@ -2787,18 +2787,54 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// persisted, so a later recreate falls back to the profile's model.
     /// Optional/defaulted for backward compatibility.
     public let model: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil) {
+    /// Codex feature keys (for example `computer_use`) to turn off for this
+    /// fresh Codex terminal only, each passed to Codex as `--disable <key>`.
+    /// Honored only for `type == .codex`; not persisted. Validate with
+    /// `normalizedCodexDisabledFeatures(_:)`. Optional/defaulted for backward
+    /// compatibility (old clients omit it; nil = none).
+    public let codexDisabledFeatures: [String]?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, codexDisabledFeatures: [String]? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.model = model
+        self.codexDisabledFeatures = codexDisabledFeatures
     }
 
     /// Shared by the CLI's argument validation and the daemon's refusal so a
     /// caller sees the same explanation whichever layer stops it.
     public static let modelRequiresCodexMessage =
         "--model requires --type codex: Claude models come from TBD model profiles, and shell terminals have no model."
+
+    public static let codexDisableRequiresCodexMessage =
+        "--codex-disable requires --type codex: it turns off a Codex feature, and only Codex terminals run Codex."
+
+    /// Validates and de-duplicates (first occurrence wins) Codex feature keys.
+    /// A key is lowercase letters, digits and underscores, like
+    /// `computer_use`; anything else, surrounding whitespace included, is
+    /// refused rather than repaired or passed on to Codex.
+    public static func normalizedCodexDisabledFeatures(_ features: [String]) throws -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for feature in features {
+            let isValid = !feature.isEmpty && feature.utf8.allSatisfy {
+                ($0 >= 0x61 && $0 <= 0x7A) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x5F
+            }
+            guard isValid else {
+                throw CodexDisabledFeatureError(feature: feature)
+            }
+            if seen.insert(feature).inserted { result.append(feature) }
+        }
+        return result
+    }
+}
+
+public struct CodexDisabledFeatureError: Error, LocalizedError, Equatable, Sendable {
+    public let feature: String
+    public var errorDescription: String? {
+        "Invalid Codex feature name \"\(feature)\": use lowercase letters, digits and underscores, for example computer_use."
+    }
 }
 
 public struct TerminalContinueInCodexParams: Codable, Sendable {

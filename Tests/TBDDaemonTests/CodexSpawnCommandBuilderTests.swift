@@ -391,6 +391,48 @@ struct CodexSpawnCommandBuilderTests {
         #expect(CodexSpawnCommandBuilder.modelOverrideArgument(nil) == nil)
     }
 
+    @Test("no disabled features is byte-identical to the existing launch command")
+    func emptyDisabledFeaturesIsByteIdentical() {
+        let help = "  -p, --profile <CONFIG_PROFILE_V2>"
+        let expected = "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --dangerously-bypass-approvals-and-sandbox 'ship it'"
+        #expect(CodexSpawnCommandBuilder.build(
+            initialPrompt: "ship it", codexHelpOutput: help,
+            executablePath: "/opt/bin/codex", disabledFeatures: []) == expected)
+    }
+
+    @Test("each disabled feature is its own --disable argument, before the bypass flag and the prompt")
+    func disabledFeaturePlacement() {
+        let help = "  -p, --profile <CONFIG_PROFILE_V2>"
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: "ship it", codexHelpOutput: help,
+                executablePath: "/opt/bin/codex",
+                disabledFeatures: ["computer_use", "browser_use"])
+                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd --disable 'computer_use' --disable 'browser_use' --dangerously-bypass-approvals-and-sandbox 'ship it'"
+        )
+        // With a model: the model override comes first, then the features.
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: nil, codexHelpOutput: help,
+                executablePath: "/opt/bin/codex", model: "acme-model",
+                disabledFeatures: ["apps"])
+                == #"unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile tbd -c 'model="acme-model"' --disable 'apps' --dangerously-bypass-approvals-and-sandbox"#
+        )
+    }
+
+    @Test("disabled features precede the resume subcommand")
+    func disabledFeaturesPrecedeResume() {
+        #expect(
+            CodexSpawnCommandBuilder.build(
+                initialPrompt: nil,
+                codexHelpOutput: "      --profile-v2 <CONFIG_PROFILE_V2>",
+                resumeThreadID: "thread-123",
+                executablePath: "/opt/bin/codex",
+                disabledFeatures: ["computer_use"])
+                == "unset CODEX_CI CODEX_THREAD_ID; '/opt/bin/codex' --profile-v2 tbd --disable 'computer_use' --dangerously-bypass-approvals-and-sandbox resume 'thread-123'"
+        )
+    }
+
     @Test("command output helper returns stdout and stderr")
     func commandOutputCapturesStdoutAndStderr() {
         let output = CodexSpawnCommandBuilder.commandOutput(

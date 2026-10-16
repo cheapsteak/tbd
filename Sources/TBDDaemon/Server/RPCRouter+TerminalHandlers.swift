@@ -150,6 +150,24 @@ extension RPCRouter {
             return RPCResponse(error: TerminalCreateParams.modelRequiresCodexMessage)
         }
 
+        // Disabled features are likewise a Codex launch argument. Refuse them
+        // elsewhere, and refuse a malformed key rather than hand it to Codex.
+        // A `let`, not a `var`: the Codex spawn below reads it inside a
+        // concurrently-executing closure, which may not capture a var.
+        let codexDisabledFeatures: [String]
+        if let requested = params.codexDisabledFeatures, !requested.isEmpty {
+            guard params.type == .codex else {
+                return RPCResponse(error: TerminalCreateParams.codexDisableRequiresCodexMessage)
+            }
+            do {
+                codexDisabledFeatures = try TerminalCreateParams.normalizedCodexDisabledFeatures(requested)
+            } catch {
+                return RPCResponse(error: error.localizedDescription)
+            }
+        } else {
+            codexDisabledFeatures = []
+        }
+
         // Look up the worktree to get tmux server and path
         guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
@@ -309,7 +327,8 @@ extension RPCRouter {
                         command: CodexSpawnCommandBuilder.build(
                             initialPrompt: params.prompt,
                             executablePath: codexPreparation.executablePath,
-                            model: params.model),
+                            model: params.model,
+                            disabledFeatures: codexDisabledFeatures),
                         env: codexSpawnEnv,
                         sensitiveEnv: codexEnvOverrides,
                         cols: resolvedCols,
