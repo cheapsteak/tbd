@@ -802,10 +802,9 @@ struct TranscriptEstimatorAccuracyTests {
         repeating: "check the wrapped line count here please ", count: 15)
         .trimmingCharacters(in: .whitespaces)
 
-    /// A terminal paste in a user prompt renders as its own block — a "pasted"
-    /// caption line, the caption's spacing, then the pasted lines in the code
-    /// face — rather than as prose carrying the `<pasted_content>` tags. The
-    /// pasted lines are short enough not to wrap at either user body width.
+    /// A terminal paste in a user prompt renders as ordinary typed prose with
+    /// its `<pasted_content>` tags removed, so the estimator must unwrap the span
+    /// the same way rather than charging the tags as prose lines.
     private static let pastedUserText = "why is this path here?\n\n"
         + "<pasted_content id=\"62f5\">\n"
         + "/Users/acme/tbd/worktrees/acme-app/20260921-stiff-seahorse\n"
@@ -814,7 +813,7 @@ struct TranscriptEstimatorAccuracyTests {
         + " and where does it come from?"
 
     /// The same span in an ASSISTANT message is prose, not a paste: the
-    /// estimator's paste split is user-only, so the tags and the path are charged
+    /// estimator's paste unwrapping is user-only, so the tags and the path are charged
     /// as ordinary soft-broken paragraph lines, exactly as the renderer draws
     /// them. (`pasted_content` is not a valid HTML tag name — the underscore —
     /// so neither side treats the tag line as raw HTML.)
