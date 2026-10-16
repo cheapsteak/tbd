@@ -896,7 +896,7 @@ extension WorktreeLifecycle {
                 // worth having if something can wake it, and every transport
                 // has a wake path: tmux respawns the window, holder spawns a
                 // fresh holder running `claude --resume`.
-                if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
+                if let sessionID = terminal.claudeResumeDecision.resumableSessionID {
                     // This park bypasses `HibernationCoordinator`, so the
                     // reconcile rail records its own independent actuation.
                     // Fail closed if that authoritative record cannot be made.

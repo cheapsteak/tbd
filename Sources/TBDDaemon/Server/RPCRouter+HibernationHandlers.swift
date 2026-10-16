@@ -104,7 +104,7 @@ extension RPCRouter {
             // terminal is live; pasting into it now could hit a human session),
             // and no incarnation, because no spawn happened to name.
             return TerminalWakeResult(woken: false)
-        case .sessionGone, .paneUnreadable, .notFound, .noSessionID, .respawnFailed,
+        case .sessionGone, .paneUnreadable, .notFound, .noSessionID, .notAClaudeTab, .respawnFailed,
             .worktreeMissing, .profileMissing, .paneBusy:
             // RPC errors, not results — the caller-facing switch in
             // handleTerminalWake maps each to its own RPCResponse(error:).
@@ -154,6 +154,8 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal not found")
         case .noSessionID:
             return RPCResponse(error: "No session ID to resume")
+        case .notAClaudeTab(let kind):
+            return RPCResponse(error: ClaudeResumeDecision.notAClaudeTabReason(kind))
         case .respawnFailed(let reason):
             // The terminal row exists — the tmux respawn/recreate failed.
             // Surface the real failure, never "Terminal not found".

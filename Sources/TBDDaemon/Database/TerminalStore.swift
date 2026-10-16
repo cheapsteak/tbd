@@ -2257,6 +2257,17 @@ public struct TerminalStore: Sendable {
     /// would leave a park nothing can wake and no reconciler reclaims, so the
     /// row stays unstamped and the holder path answers for its own liveness.
     ///
+    /// The stamp is Claude-tab-only (`Terminal.isClaudeTab`) for the same
+    /// reason. `SessionStart` records an id onto a shell row whose
+    /// hand-started Claude carries TBD's hook, so that Claude's `SessionEnd`
+    /// reaches the row too. The wake that would lift the stamp refuses a tab
+    /// that is not Claude's (`Terminal.claudeResumeDecision`), and a parked
+    /// pane shows a frozen snapshot, so a stamp there would cost the person
+    /// their shell until they closed the tab. Unstamped, the row stays the
+    /// live shell it is, and a send to it is a shell send like any other. A
+    /// stamp an earlier build left on such a tab is lifted at startup
+    /// (`HibernationCoordinator.reconcileOnStartup`).
+    ///
     /// `date` follows the one-shot stamp seam (CLAUDE.md, "Duration is behavior,
     /// Date is data").
     @discardableResult
@@ -2268,6 +2279,7 @@ public struct TerminalStore: Sendable {
                 return false
             }
             guard record.transport != TerminalTransport.holder.rawValue else { return false }
+            guard record.toModel()?.isClaudeTab == true else { return false }
             guard record.hibernatedAt == nil else { return false }
             guard record.sessionIncarnationID == reportedIncarnationID?.uuidString else {
                 return false

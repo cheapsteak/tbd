@@ -212,15 +212,19 @@ actor TerminalTransportMigrator {
         // session moves plainly instead — its program is stopped and a fresh
         // login shell starts on the holder in the same working directory.
         //
-        // The test is the row's own `claudeSessionID`, not `isClaudeResumable`,
-        // because `performHibernate`'s refusal reads exactly this column: this
-        // branch therefore takes precisely the rows the park would turn away.
+        // The test is `Terminal.claudeResumeDecision`, because
+        // `performHibernate`'s refusal reads exactly that decision: this
+        // branch therefore takes precisely the rows the park would turn away —
+        // a row with no session id, and a shell tab whose row carries one
+        // (what `SessionStart` leaves for a Claude started by hand inside it),
+        // which is still a shell and moves as one.
         // What keeps it to SHELLS is `TransportMigrationEligibility`, above:
         // the four kinds of row that name no conversation and must not become
         // a bare login shell — a Codex tab, a Claude tab whose session has not
         // begun, and a hook tab of either kind — are each skipped there with
-        // their own reason, so by here "no conversation" means "a shell". A running
-        // Claude session with a conversation still goes park, rewrite, wake.
+        // their own reason, so by here "nothing to resume" means "a shell". A
+        // running Claude session with a conversation still goes park, rewrite,
+        // wake.
         //
         // The `isParked` half is belt-and-braces rather than a case that
         // arises: every park writes the session id it parks (`setHibernated`,
@@ -228,7 +232,10 @@ actor TerminalTransportMigrator {
         // parked, so a parked row always names a conversation. It is kept so
         // this branch states on its own that it takes a RUNNING row, rather
         // than depending on the branch below it to have claimed the others.
-        if !terminal.isParked, terminal.claudeSessionID == nil {
+        if !terminal.isParked, terminal.claudeResumeDecision.resumableSessionID == nil {
+            if case .notAClaudeTab(let kind) = terminal.claudeResumeDecision {
+                logger.debug("transport migration: \(terminalID, privacy: .public) is a \(kind.rawValue, privacy: .public) tab carrying a session id; it moves as a shell and the id is not resumed")
+            }
             switch await operations.moveRunningShell(terminal) {
             case .moved:
                 logger.info("transport migration: running terminal \(terminalID, privacy: .public) was restarted as a shell on the pty holder")
@@ -413,6 +420,8 @@ actor TerminalTransportMigrator {
             return "this session moved to the pty holder, but its row could not be read back, so nothing was resumed"
         case .noSessionID:
             return "this session moved to the pty holder, but it names no conversation to resume; focus the tab to start a session there"
+        case .notAClaudeTab(let kind):
+            return "this session moved to the pty holder, but its tab is a \(kind.rawValue) tab, not a Claude tab, so nothing was resumed"
         case .worktreeMissing(let path):
             return "this session moved to the pty holder, but its worktree directory is missing (\(path)), so nothing was resumed"
         case .profileMissing(let profileID):

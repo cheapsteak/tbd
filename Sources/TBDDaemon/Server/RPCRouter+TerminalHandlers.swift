@@ -1502,7 +1502,7 @@ extension RPCRouter {
         // state and offers Resume. Resume rebuilds a fresh window from the session
         // ID on demand, so this is non-destructive even if the window were somehow
         // still alive.
-        if terminal.isClaudeResumable, let sessionID = terminal.claudeSessionID {
+        if let sessionID = terminal.claudeResumeDecision.resumableSessionID {
             // Record the request before waiting on the shared server lock. The
             // row is not mutated until the post-lock snapshot check below.
             let reparkID = try await beginActuation(
@@ -1516,8 +1516,8 @@ extension RPCRouter {
                     guard let currentTerminal = try await self.db.terminals.get(
                         id: terminal.id),
                           expectedReplacementState.matches(currentTerminal),
-                          currentTerminal.isClaudeResumable,
-                          currentTerminal.claudeSessionID == sessionID else {
+                          currentTerminal.claudeResumeDecision
+                            == .resume(sessionID: sessionID) else {
                         throw StaleTerminalReplacementError()
                     }
 
@@ -2392,8 +2392,20 @@ extension RPCRouter {
         guard let oldTerminal = try await db.terminals.get(id: params.terminalID) else {
             return RPCResponse(error: "Terminal not found: \(params.terminalID)")
         }
-        guard let sessionID = oldTerminal.claudeSessionID else {
+        // Every arm below ends in a `claude --resume` of this id — now (in
+        // place, fork) or at the next wake (the cold re-home) — so the tab's
+        // kind is asked once, here, before any of them is chosen. A shell tab
+        // whose row carries a session id is refused like any other non-Claude
+        // tab: no spawn, no new row, no profile change.
+        let sessionID: String
+        switch oldTerminal.claudeResumeDecision {
+        case .resume(let resumable):
+            sessionID = resumable
+        case .noSession:
             return RPCResponse(error: "Terminal \(params.terminalID) is not a Claude terminal")
+        case .notAClaudeTab(let kind):
+            logger.notice("swapProfile: terminal \(params.terminalID, privacy: .public) is a \(kind.rawValue, privacy: .public) tab carrying a session id; refusing the swap")
+            return RPCResponse(error: "Terminal \(params.terminalID): \(ClaudeResumeDecision.notAClaudeTabReason(kind)), and will not swap its account")
         }
         guard let worktree = try await db.worktrees.getLocal(id: oldTerminal.worktreeID) else {
             return RPCResponse(error: "Worktree not found for terminal: \(params.terminalID)")
@@ -3312,6 +3324,8 @@ extension RPCRouter {
             return "this session moved to the new account, but its row could not be read back, so nothing was resumed"
         case .noSessionID:
             return "this session moved to the new account, but it names no conversation to resume"
+        case .notAClaudeTab(let kind):
+            return "this session moved to the new account, but its tab is a \(kind.rawValue) tab, not a Claude tab, so nothing was resumed"
         case .worktreeMissing(let path):
             return "this session moved to the new account, but its worktree directory is missing (\(path)), so nothing was resumed"
         case .profileMissing(let profileID):
@@ -6045,6 +6059,18 @@ extension RPCRouter {
             sessionEnded: terminal=\(params.terminalID.uuidString, privacy: .public) \
             reason=\(params.reason ?? "none", privacy: .public) stamped=\(stamped, privacy: .public)
             """)
+        // One refusal cause is named apart: a session carrying TBD's hooks
+        // ended inside a tab that is not Claude's, which the stamp leaves
+        // alone because no wake would resume Claude there. The others
+        // (holder row, already parked, stale incarnation) are routine.
+        if !stamped, let row = try? await db.terminals.get(id: params.terminalID),
+           !row.isClaudeTab {
+            logger.debug("""
+                sessionEnded: terminal=\(params.terminalID.uuidString, privacy: .public) \
+                is not a Claude tab (kind=\(row.kind?.rawValue ?? "none", privacy: .public)); \
+                left unstamped
+                """)
+        }
         return .ok()
     }
 
