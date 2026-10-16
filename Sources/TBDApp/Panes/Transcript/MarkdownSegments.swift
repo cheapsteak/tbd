@@ -11,28 +11,18 @@ enum MarkdownSegments {
         case prose(String)
         case code(language: String?, content: String)
         case image(TranscriptImageAttachment)
-        /// A terminal paste from a user prompt (`TranscriptPastedContent`),
-        /// drawn verbatim — never as markdown.
-        case pasted(id: String, text: String)
     }
 
-    /// Splits at terminal pastes first when `recognizePastes` is set (user
-    /// prompts only), then at attached-image markers (they are not markdown),
-    /// then splits each remaining text run at code fences. Mirrors the native
-    /// path's `MarkdownAttributedRenderer.renderBlocks`, which does the same
-    /// staged split — the two renderers must not diverge.
+    /// Removes terminal-paste wrappers first when `recognizePastes` is set (user
+    /// prompts only; `TranscriptPastedContent`), then splits at attached-image
+    /// markers (they are not markdown), then splits each remaining text run at
+    /// code fences. Mirrors the native path's
+    /// `MarkdownAttributedRenderer.renderBlocks`, which does the same staged
+    /// split — the two renderers must not diverge.
     static func split(_ text: String, recognizePastes: Bool = false) -> [Segment] {
         let signpostState = TranscriptSignposts.signposter.beginInterval("transcript.markdown.segment")
         defer { TranscriptSignposts.signposter.endInterval("transcript.markdown.segment", signpostState) }
-        guard recognizePastes else { return splitTyped(text) }
-        var segments: [Segment] = []
-        for segment in TranscriptPastedContent.split(text) {
-            switch segment {
-            case .pasted(let id, let pasted): segments.append(.pasted(id: id, text: pasted))
-            case .typed(let typed): segments.append(contentsOf: splitTyped(typed))
-            }
-        }
-        return segments
+        return splitTyped(recognizePastes ? TranscriptPastedContent.unwrap(text) : text)
     }
 
     private static func splitTyped(_ text: String) -> [Segment] {
@@ -114,8 +104,6 @@ extension MarkdownSegments.Segment: Identifiable {
             return "c:\(language ?? ""):\(content.hashValue)"
         case .image(let attachment):
             return "i:\(attachment.path)"
-        case .pasted(let pasteID, let text):
-            return "v:\(pasteID):\(text.hashValue)"
         }
     }
 }

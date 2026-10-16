@@ -74,11 +74,11 @@ enum MarkdownAttributedRenderer {
     /// lists, blockquotes, paragraphs, and headings all stay inside prose with
     /// unchanged inline rendering. (#129)
     ///
-    /// `recognizePastes` is for USER prompts only: it pulls Claude Code's
-    /// `<pasted_content id="…">` spans out first (`TranscriptPastedContent`) and
-    /// renders each as its own `.prose` block via `TranscriptPastedBlock`, never
-    /// as markdown. Off by default, because an assistant message that quotes the
-    /// tags is prose and must render verbatim.
+    /// `recognizePastes` is for USER prompts only: it removes Claude Code's
+    /// `<pasted_content id="…">` wrappers first (`TranscriptPastedContent`), so
+    /// the span's text renders exactly like typed text. Off by default, because
+    /// an assistant message that quotes the tags is prose and must render
+    /// verbatim.
     static func renderBlocks(
         _ markdown: String,
         theme: TranscriptTextTheme = .chatBubble,
@@ -160,24 +160,9 @@ enum MarkdownAttributedRenderer {
             }
         }
 
-        // Pastes are split out before either of those: pasted text is neither
-        // markdown nor a place an image marker could mean anything.
-        guard recognizePastes else {
-            appendTyped(markdown)
-            flushProse()
-            return blocks
-        }
-        for segment in TranscriptPastedContent.split(markdown) {
-            switch segment {
-            case .typed(let typed):
-                appendTyped(typed)
-            case .pasted(_, let text):
-                flushProse()
-                blocks.append(.prose(finalizedProse(
-                    TranscriptPastedBlock.attributed(text, theme: theme),
-                    theme: theme, linkResolver: linkResolver)))
-            }
-        }
+        // Paste wrappers are removed before either of those, so a span's text
+        // is typed text in every respect.
+        appendTyped(recognizePastes ? TranscriptPastedContent.unwrap(markdown) : markdown)
         flushProse()
         return blocks
     }

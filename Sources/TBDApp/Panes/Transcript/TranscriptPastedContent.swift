@@ -1,12 +1,12 @@
 import Foundation
 
-/// Splits a user prompt at Claude Code's terminal-paste wrappers.
+/// Removes Claude Code's terminal-paste wrappers from a user prompt.
 ///
 /// ## The format
 ///
-/// Claude Code stores what the user pasted into the terminal INSIDE the prompt
-/// text, wrapped in a tag pair whose closing tag repeats the opening tag's id
-/// (so it is not well-formed XML):
+/// Claude Code stores what arrived as a bracketed paste INSIDE the prompt text,
+/// wrapped in a tag pair whose closing tag repeats the opening tag's id (so it
+/// is not well-formed XML):
 ///
 ///     look at this:
 ///
@@ -18,16 +18,20 @@ import Foundation
 ///
 /// The id is four lowercase hex digits. A newline follows the opening tag and
 /// precedes the closing one; those two newlines are wrapper, not paste, and are
-/// removed. The transcript renders the pasted text as its own monospaced block
-/// under a small "pasted" caption instead of showing the raw tags.
+/// removed along with the tags.
 ///
-/// Only USER prompts are split — an assistant message quoting the syntax is
+/// The transcript composer delivers every message as a bracketed paste, so a
+/// wrapped span is usually the user's own typed message. The transcript
+/// therefore renders the span's text exactly like typed text — markdown, still
+/// subject to image-marker splitting — and only the tags are dropped.
+///
+/// Only USER prompts are unwrapped — an assistant message quoting the syntax is
 /// prose, and callers gate on the role.
 ///
 /// ## What stays verbatim
 ///
-/// Anything that is not a complete, unambiguous span is left as typed text,
-/// tags included, so nothing the user wrote is ever dropped:
+/// Anything that is not a complete, unambiguous span is left as it is, tags
+/// included, so nothing the user wrote is ever dropped:
 ///
 /// * an opening tag with no closing tag carrying the SAME id;
 /// * an opening tag whose id is not exactly four lowercase hex digits;
@@ -37,49 +41,33 @@ import Foundation
 ///
 /// A closing tag with a DIFFERENT id is not a close for this span: the search
 /// looks only for the matching id, so a mismatched close is simply part of the
-/// pasted text (or of the typed text, outside any span), and a later close with
-/// the right id still ends the span.
+/// span's text (or of the text outside any span), and a later close with the
+/// right id still ends the span.
 ///
-/// ## Whitespace around a span
+/// ## Whitespace
 ///
-/// The newlines separating a span from the typed text around it are separators:
-/// a typed run is trimmed of newlines on the side that touches a paste, and a
-/// run left with nothing but whitespace is dropped. Text with no recognised span
-/// comes back as ONE `.typed` segment holding the input verbatim.
+/// When at least one span is recognised, the result loses its leading blank
+/// lines and its trailing whitespace, so a message the composer sent reads as
+/// the user wrote it rather than opening on the wrapper's line breaks. Text with
+/// no recognised span comes back verbatim.
 enum TranscriptPastedContent {
-    enum Segment: Equatable {
-        /// Text the user typed. Still markdown, still subject to image-marker
-        /// splitting.
-        case typed(String)
-        /// Text the user pasted, wrapper newlines removed. Never markdown.
-        case pasted(id: String, text: String)
-    }
-
     private static let openPrefix = "<pasted_content id=\""
     private static let tagSuffix = "\">"
     private static let idLength = 4
     private static let hexDigits: Set<Character> = Set("0123456789abcdef")
 
-    /// Splits `text` into ordered typed / pasted segments. See the type's doc
+    /// `text` with every recognised span's wrapper removed. See the type's doc
     /// comment for the rules.
     ///
-    /// Fast path: text without the opening-tag prefix returns `[.typed(text)]`
-    /// after one substring search, so the common prompt pays nothing more.
-    static func split(_ text: String) -> [Segment] {
-        guard text.contains(openPrefix) else { return [.typed(text)] }
+    /// Fast path: text without the opening-tag prefix is returned as-is after
+    /// one substring search, so the common prompt pays nothing more.
+    static func unwrap(_ text: String) -> String {
+        guard text.contains(openPrefix) else { return text }
 
-        var segments: [Segment] = []
+        var out = ""
         var typedStart = text.startIndex
         var searchFrom = text.startIndex
         var sawPaste = false
-
-        func appendTyped(_ run: Substring, beforePaste: Bool) {
-            var run = run
-            if sawPaste { while let first = run.first, first.isNewline { run = run.dropFirst() } }
-            if beforePaste { while let last = run.last, last.isNewline { run = run.dropLast() } }
-            guard !run.allSatisfy(\.isWhitespace) else { return }
-            segments.append(.typed(String(run)))
-        }
 
         while let open = openingTag(in: text, from: searchFrom, before: text.endIndex) {
             let closeTag = "</pasted_content id=\"\(open.id)\">"
@@ -94,18 +82,16 @@ enum TranscriptPastedContent {
                 searchFrom = open.range.upperBound
                 continue
             }
-            appendTyped(text[typedStart..<open.range.lowerBound], beforePaste: true)
-            segments.append(.pasted(
-                id: open.id,
-                text: strippingWrapperNewlines(text[open.range.upperBound..<close.lowerBound])))
+            out += text[typedStart..<open.range.lowerBound]
+            out += strippingWrapperNewlines(text[open.range.upperBound..<close.lowerBound])
             sawPaste = true
             typedStart = close.upperBound
             searchFrom = close.upperBound
         }
 
-        guard sawPaste else { return [.typed(text)] }
-        appendTyped(text[typedStart...], beforePaste: false)
-        return segments
+        guard sawPaste else { return text }
+        out += text[typedStart...]
+        return trimmingOuterBlankSpace(out)
     }
 
     /// The first valid opening tag starting at or after `from` and ending at or
@@ -131,11 +117,26 @@ enum TranscriptPastedContent {
 
     /// Removes exactly one newline after the opening tag and one before the
     /// closing tag — the wrapper's own line breaks. Anything beyond that is the
-    /// user's paste and is kept.
-    private static func strippingWrapperNewlines(_ body: Substring) -> String {
+    /// user's text and is kept.
+    private static func strippingWrapperNewlines(_ body: Substring) -> Substring {
         var body = body
         if let first = body.first, first == "\n" || first == "\r\n" { body = body.dropFirst() }
         if let last = body.last, last == "\n" || last == "\r\n" { body = body.dropLast() }
-        return String(body)
+        return body
+    }
+
+    /// Drops whole leading lines that hold only whitespace, and all trailing
+    /// whitespace. Indentation on the first non-blank line is kept, since
+    /// markdown gives it meaning.
+    private static func trimmingOuterBlankSpace(_ text: String) -> String {
+        var start = text.startIndex
+        var cursor = text.startIndex
+        while cursor < text.endIndex, text[cursor].isWhitespace {
+            if text[cursor].isNewline { start = text.index(after: cursor) }
+            cursor = text.index(after: cursor)
+        }
+        var end = text.endIndex
+        while end > start, text[text.index(before: end)].isWhitespace { end = text.index(before: end) }
+        return String(text[start..<end])
     }
 }
