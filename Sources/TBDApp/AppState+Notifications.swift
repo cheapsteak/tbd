@@ -62,7 +62,9 @@ extension AppState {
         let message = DaemonBuildSkew.warningMessage(
             daemonExecutablePath: status.executablePath,
             appSiblingDaemonPath: siblingDaemonPath,
-            sourceWorktreePath: sourceWorktreePath
+            sourceWorktreePath: sourceWorktreePath,
+            appIdentity: StatusBarView.buildIdentity,
+            daemonIdentity: status.buildIdentity
         )
         // Same response, second reading: what commit the daemon was built from
         // and what it last saw on the remote. Carried on `daemon.status` rather
