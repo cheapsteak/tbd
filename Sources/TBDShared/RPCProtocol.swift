@@ -2805,19 +2805,19 @@ public struct TerminalCreateParams: Codable, Sendable {
     public static let codexDisableRequiresCodexMessage =
         "--codex-disable requires --type codex: it turns off a Codex feature, and only Codex terminals run Codex."
 
-    /// Trims, validates and de-duplicates (first occurrence wins) Codex feature
-    /// keys. A key is lowercase letters, digits and underscores, like
-    /// `computer_use`; anything else is refused rather than passed on to Codex.
+    /// Validates and de-duplicates (first occurrence wins) Codex feature keys.
+    /// A key is lowercase letters, digits and underscores, like
+    /// `computer_use`; anything else, surrounding whitespace included, is
+    /// refused rather than repaired or passed on to Codex.
     public static func normalizedCodexDisabledFeatures(_ features: [String]) throws -> [String] {
         var seen = Set<String>()
         var result: [String] = []
-        for raw in features {
-            let feature = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        for feature in features {
             let isValid = !feature.isEmpty && feature.utf8.allSatisfy {
                 ($0 >= 0x61 && $0 <= 0x7A) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x5F
             }
             guard isValid else {
-                throw CodexDisabledFeatureError(feature: raw)
+                throw CodexDisabledFeatureError(feature: feature)
             }
             if seen.insert(feature).inserted { result.append(feature) }
         }

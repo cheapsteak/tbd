@@ -86,4 +86,13 @@ struct CodexModelOptionParsingTests {
         #expect(try TerminalCreateParams.normalizedCodexDisabledFeatures(
             ["apps", "computer_use", "apps"]) == ["apps", "computer_use"])
     }
+
+    @Test func disabledFeatureWithSurroundingWhitespaceIsRefusedNotTrimmed() {
+        #expect(throws: (any Error).self) {
+            try TerminalCreateParams.normalizedCodexDisabledFeatures([" computer_use "])
+        }
+        #expect(throws: (any Error).self) {
+            try TerminalCreateParams.normalizedCodexDisabledFeatures(["apps\n"])
+        }
+    }
 }
