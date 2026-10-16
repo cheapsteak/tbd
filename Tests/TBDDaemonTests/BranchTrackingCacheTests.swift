@@ -223,4 +223,93 @@ struct BranchTrackingCacheTests {
         }
         #expect(await counter.count == 3)
     }
+
+    // MARK: - Repository snapshots
+
+    private static let snapshot = BranchTrackingSnapshot.parse(
+        config: "branch.feat.merge\nrefs/heads/main\0",
+        refListing: "refs/heads/feat\0refs/remotes/origin/feat\nrefs/remotes/origin/feat\0\n")
+
+    @Test func snapshotIsReadOncePerRepoPerTTL() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 0))
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
+        let counter = FetchCounter()
+        let load: @Sendable () async -> BranchTrackingSnapshot? = {
+            _ = await counter.increment(); return Self.snapshot
+        }
+
+        #expect(await cache.snapshot(repoPath: "/repo", load: load) == Self.snapshot)
+        clock.advance(by: 59)
+        #expect(await cache.snapshot(repoPath: "/repo", load: load) == Self.snapshot)
+        #expect(await counter.count == 1)
+
+        // Another repo is its own read.
+        _ = await cache.snapshot(repoPath: "/other", load: load)
+        #expect(await counter.count == 2)
+
+        clock.advance(by: 2)
+        _ = await cache.snapshot(repoPath: "/repo", load: load)
+        #expect(await counter.count == 3)
+    }
+
+    @Test func aFailedSnapshotIsCachedForTheTTL() async {
+        // Each row of a pass asks for the snapshot; a failing repo must cost one
+        // attempt per window, not one per row.
+        let clock = MutableClock(Date(timeIntervalSince1970: 0))
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
+        let counter = FetchCounter()
+        let failing: @Sendable () async -> BranchTrackingSnapshot? = {
+            _ = await counter.increment(); return nil
+        }
+
+        for _ in 0..<5 {
+            #expect(await cache.snapshot(repoPath: "/repo", load: failing) == nil)
+        }
+        #expect(await counter.count == 1)
+
+        clock.advance(by: 61)
+        let recovered = await cache.snapshot(repoPath: "/repo") {
+            _ = await counter.increment(); return Self.snapshot
+        }
+        #expect(recovered == Self.snapshot)
+        #expect(await counter.count == 2)
+    }
+
+    @Test func retainDropsOnlyExpiredSnapshots() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 0))
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
+        let counter = FetchCounter()
+        let load: @Sendable () async -> BranchTrackingSnapshot? = {
+            _ = await counter.increment(); return Self.snapshot
+        }
+        _ = await cache.snapshot(repoPath: "/old", load: load)
+        clock.advance(by: 30)
+        _ = await cache.snapshot(repoPath: "/fresh", load: load)
+        clock.advance(by: 31)
+
+        // A snapshot is keyed by repo, not by row, so `retain` keeps a fresh
+        // one whatever rows it is handed, and drops one past its TTL.
+        await cache.retain(active: [])
+        _ = await cache.snapshot(repoPath: "/fresh", load: load)
+        #expect(await counter.count == 2)
+        _ = await cache.snapshot(repoPath: "/old", load: load)
+        #expect(await counter.count == 3)
+    }
+
+    @Test func invalidateDropsSnapshots() async {
+        let clock = MutableClock(Date(timeIntervalSince1970: 0))
+        let cache = BranchTrackingCache(ttl: 60, now: { clock.now() })
+        let counter = FetchCounter()
+        let load: @Sendable () async -> BranchTrackingSnapshot? = {
+            _ = await counter.increment(); return Self.snapshot
+        }
+        _ = await cache.snapshot(repoPath: "/repo", load: load)
+        await cache.invalidate(worktreePath: "/repo")
+        _ = await cache.snapshot(repoPath: "/repo", load: load)
+        #expect(await counter.count == 2)
+
+        await cache.invalidateAll()
+        _ = await cache.snapshot(repoPath: "/repo", load: load)
+        #expect(await counter.count == 3)
+    }
 }

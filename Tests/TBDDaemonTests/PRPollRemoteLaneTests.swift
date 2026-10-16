@@ -258,6 +258,154 @@ struct PRPollRemoteLaneTests {
         #expect(!entries.contains { $0.worktreePath.hasPrefix("remote://") })
     }
 
+    /// Branch facts are repo facts, so the pass reads them once per repo: the
+    /// local row and both lanes are answered from one snapshot of the repo's
+    /// checkout, and nothing is read branch by branch.
+    @Test("every row of one repo reads its branch facts from one snapshot of the repo")
+    func rowsOfOneRepoShareOneSnapshot() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let localDir = tempDir.appendingPathComponent("wt-local")
+        try await shell("git worktree add \(localDir.path) -b tbd/local-lane", at: repoDir)
+        try await shell("git config branch.tbd/local-lane.merge refs/heads/main", at: repoDir)
+        try await shell("git config branch.tbd/remote-a.merge refs/heads/renamed-a", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local", branch: "tbd/local-lane",
+            path: localDir.path, tmuxServer: "tbd-local")
+        let laneA = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane-a", branch: "main", provider: "agentbox", sessionID: "s-a")
+        let laneB = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane-b", branch: "main", provider: "agentbox", sessionID: "s-b")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
+        try await Self.seedMirror(db, sessionID: "s-b", meta: ["branch": "tbd/remote-b"])
+
+        let router = Self.makeRouter(db: db, gh: nil)
+        let plan = await router.pollEntries(
+            RPCRouter.pollableWorktrees(try await db.worktrees.list(status: .active)),
+            repos: try await db.repos.list(),
+            mirrorMeta: RPCRouter.mirrorMetaByOrigin(try await db.remoteSessions.list()))
+        let byID = Dictionary(uniqueKeysWithValues: plan.matched.map { ($0.id, $0) })
+
+        #expect(byID[local.id]?.upstreamBranch == "main")
+        #expect(byID[laneA.id]?.upstreamBranch == "renamed-a")
+        #expect(byID[laneB.id]?.upstreamBranch == nil)
+        // The local row still polls in its own checkout; only its facts moved.
+        #expect(byID[local.id]?.worktreePath == localDir.path)
+
+        let cache = router.branchTrackingCache
+        let cached = await cache.snapshot(repoPath: repoDir.path) {
+            Issue.record("the pass left no snapshot of the repo to serve from")
+            return nil
+        }
+        #expect(cached != nil)
+        // A miss on the per-branch entry: the pass never read this branch alone.
+        let perBranch = await cache.upstreamBranchName(
+            worktreePath: localDir.path, branch: "tbd/local-lane") { "read-per-branch" }
+        #expect(perBranch == "read-per-branch")
+    }
+
+    /// A repo whose snapshot cannot be read — its stored path is gone — must not
+    /// read as "no upstream" for every row. Each row falls back to reading its
+    /// own branch in its own checkout, as the poll did before snapshots.
+    @Test("an unreadable repo falls back to reading each branch in the row's checkout")
+    func unreadableRepoFallsBackPerBranch() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let localDir = tempDir.appendingPathComponent("wt-local")
+        try await shell("git worktree add \(localDir.path) -b tbd/local-lane", at: repoDir)
+        try await shell("git config branch.tbd/local-lane.merge refs/heads/main", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        var repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local", branch: "tbd/local-lane",
+            path: localDir.path, tmuxServer: "tbd-local")
+        repo.path = tempDir.appendingPathComponent("moved-away").path
+
+        let router = Self.makeRouter(db: db, gh: nil)
+        let plan = await router.pollEntries(
+            RPCRouter.pollableWorktrees(try await db.worktrees.list(status: .active)),
+            repos: [repo], mirrorMeta: [:])
+
+        #expect(plan.matched.first { $0.id == local.id }?.upstreamBranch == "main")
+    }
+
+    /// A linked worktree can set its own tracking config (`config.worktree`,
+    /// under `extensions.worktreeConfig`), which a snapshot read in the repo's
+    /// checkout cannot see. That row reads its facts in its own checkout; the
+    /// lanes, which poll in the repo's checkout, still share the snapshot.
+    @Test("a worktree's own tracking config is read in that worktree, and the lanes keep the snapshot")
+    func worktreeOwnConfigIsReadInTheWorktree() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let localDir = try await Self.makeWorktreeWithOwnUpstream(tempDir: tempDir, repoDir: repoDir)
+        try await shell("git config branch.tbd/remote-a.merge refs/heads/renamed-a", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local", branch: "tbd/local-lane",
+            path: localDir.path, tmuxServer: "tbd-local")
+        let laneA = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane-a", branch: "main", provider: "agentbox", sessionID: "s-a")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
+
+        let router = Self.makeRouter(db: db, gh: nil)
+        let plan = await router.pollEntries(
+            RPCRouter.pollableWorktrees(try await db.worktrees.list(status: .active)),
+            repos: try await db.repos.list(),
+            mirrorMeta: RPCRouter.mirrorMetaByOrigin(try await db.remoteSessions.list()))
+        let byID = Dictionary(uniqueKeysWithValues: plan.matched.map { ($0.id, $0) })
+
+        #expect(byID[local.id]?.upstreamBranch == "renamed-here")
+        #expect(byID[laneA.id]?.upstreamBranch == "renamed-a")
+        // A hit on the per-branch entry: the pass read this branch on its own.
+        let perBranch = await router.branchTrackingCache.upstreamBranchName(
+            worktreePath: localDir.path, branch: "tbd/local-lane") { "never-read" }
+        #expect(perBranch == "renamed-here")
+    }
+
+    @Test("pr.refresh on a worktree with its own tracking config queries that worktree's upstream")
+    func refreshReadsWorktreeOwnConfig() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let localDir = try await Self.makeWorktreeWithOwnUpstream(tempDir: tempDir, repoDir: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local", branch: "tbd/local-lane",
+            path: localDir.path, tmuxServer: "tbd-local")
+        let gh = RecordingGH(prsByBranch: ["renamed-here": 303, "renamed-common": 404])
+        let router = Self.makeRouter(db: db, gh: gh)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.prRefresh, params: PRRefreshParams(worktreeID: local.id)))
+        #expect(response.success)
+        let result = try response.decodeResult(PRRefreshResult.self)
+
+        #expect(result.status?.number == 303)
+        let queried = await gh.recordedBranches
+        #expect(queried.contains("renamed-here"))
+        #expect(!queried.contains("renamed-common"))
+    }
+
+    /// A linked worktree on `tbd/local-lane` whose upstream the repo's common
+    /// config names `renamed-common` and the worktree's own config overrides
+    /// to `renamed-here`.
+    private static func makeWorktreeWithOwnUpstream(tempDir: URL, repoDir: URL) async throws -> URL {
+        let localDir = tempDir.appendingPathComponent("wt-local")
+        try await shell("git worktree add \(localDir.path) -b tbd/local-lane", at: repoDir)
+        try await shell("git config branch.tbd/local-lane.merge refs/heads/renamed-common", at: repoDir)
+        try await shell("git config extensions.worktreeConfig true"
+                        + " && git config --worktree branch.tbd/local-lane.merge refs/heads/renamed-here",
+                        at: localDir)
+        return localDir
+    }
+
     /// The composed input reads each row's default branch from its repo record:
     /// a lane reporting it is bindings-only, a lane on a feature branch is
     /// matched, and a local row on the default branch is matched as before.

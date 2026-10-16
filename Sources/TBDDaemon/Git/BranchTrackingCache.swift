@@ -15,6 +15,12 @@ import Foundation
 ///
 /// `nil` results (a branch with no upstream) are cached too; the TTL bounds how
 /// long a freshly-pushed branch waits before its upstream is observed.
+///
+/// The poll reads these facts a repository at a time (`snapshot`): one
+/// `BranchTrackingSnapshot` answers every branch of a repo, so a fleet costs
+/// two subprocesses per repo per TTL window instead of two per row. The
+/// per-branch entries remain the fallback for a repo whose snapshot read
+/// failed, and for a checkout that may read tracking config of its own.
 actor BranchTrackingCache {
     private struct Entry {
         let value: String?
@@ -26,10 +32,18 @@ actor BranchTrackingCache {
         let fetchedAt: Date
     }
 
+    private struct SnapshotEntry {
+        /// `nil` when the read failed.
+        let value: BranchTrackingSnapshot?
+        let fetchedAt: Date
+    }
+
     private let ttl: TimeInterval
     private let now: @Sendable () -> Date
     private var entries: [String: Entry] = [:]
     private var pushEntries: [String: PushEntry] = [:]
+    private var snapshots: [String: SnapshotEntry] = [:]
+    private var inFlightSnapshots: [String: Task<BranchTrackingSnapshot?, Never>] = [:]
 
     /// - Parameters:
     ///   - ttl: How long a cached value stays fresh, in seconds.
@@ -81,7 +95,34 @@ actor BranchTrackingCache {
         return value
     }
 
-    /// Drop all cached entries for a worktree path (any branch).
+    /// The repository-wide snapshot for `repoPath` if fresh, otherwise the
+    /// result of `load`, stored with its time.
+    ///
+    /// Concurrent callers for one repo share a single in-flight `load`, so the
+    /// on-select refresh landing mid-pass does not read the repo twice. A
+    /// failed read (`nil`) is cached for the same TTL as a good one: its callers
+    /// fall back to the per-branch lookups, and retrying the snapshot once per
+    /// row would cost more than the reads it exists to save.
+    func snapshot(
+        repoPath: String,
+        load: @escaping @Sendable () async -> BranchTrackingSnapshot?
+    ) async -> BranchTrackingSnapshot? {
+        if let entry = snapshots[repoPath], now().timeIntervalSince(entry.fetchedAt) < ttl {
+            return entry.value
+        }
+        if let inFlight = inFlightSnapshots[repoPath] {
+            return await inFlight.value
+        }
+        let task = Task { await load() }
+        inFlightSnapshots[repoPath] = task
+        let value = await task.value
+        inFlightSnapshots.removeValue(forKey: repoPath)
+        snapshots[repoPath] = SnapshotEntry(value: value, fetchedAt: now())
+        return value
+    }
+
+    /// Drop all cached entries for a worktree path (any branch), and the
+    /// snapshot read there.
     func invalidate(worktreePath: String) {
         let prefix = "\(worktreePath)\u{0}"
         for k in entries.keys where k.hasPrefix(prefix) {
@@ -90,20 +131,28 @@ actor BranchTrackingCache {
         for k in pushEntries.keys where k.hasPrefix(prefix) {
             pushEntries.removeValue(forKey: k)
         }
+        snapshots.removeValue(forKey: worktreePath)
     }
 
     /// Drop every cached entry.
     func invalidateAll() {
         entries.removeAll()
         pushEntries.removeAll()
+        snapshots.removeAll()
     }
 
     /// Drop cached entries whose (worktreePath, branch) is not in `active`,
     /// bounding the cache to currently-active worktree branches so entries for
     /// archived/removed worktrees don't leak across a long-lived daemon.
+    ///
+    /// Snapshots are keyed by repository rather than by row, so they are
+    /// bounded by age instead: one past its TTL would be re-read before any use,
+    /// and dropping it here keeps a removed repo's snapshot from outliving it.
     func retain(active: [(worktreePath: String, branch: String)]) {
         let keep = Set(active.map { key(worktreePath: $0.worktreePath, branch: $0.branch) })
         entries = entries.filter { keep.contains($0.key) }
         pushEntries = pushEntries.filter { keep.contains($0.key) }
+        let current = now()
+        snapshots = snapshots.filter { current.timeIntervalSince($0.value.fetchedAt) < ttl }
     }
 }

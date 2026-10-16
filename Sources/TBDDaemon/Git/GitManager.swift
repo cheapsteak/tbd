@@ -150,7 +150,13 @@ public struct GitManager: Sendable {
         ) else {
             return nil
         }
+        return Self.upstreamBranchName(fromMergeRef: mergeRef)
+    }
 
+    /// The branch name a raw `branch.<b>.merge` value names: `refs/heads/main`
+    /// → `main`. Shared with `BranchTrackingSnapshot` so the per-branch and
+    /// repo-wide reads cannot parse the same value differently.
+    static func upstreamBranchName(fromMergeRef mergeRef: String) -> String? {
         let trimmed = mergeRef.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefix = "refs/heads/"
         if trimmed.hasPrefix(prefix) {
@@ -159,6 +165,36 @@ public struct GitManager: Sendable {
         }
 
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Every local branch's upstream and `@{push}` for one repository, in two
+    /// subprocesses however many branches it has — see `BranchTrackingSnapshot`
+    /// for why one read can stand in for both per-branch calls.
+    ///
+    /// Throws when either read fails, rather than returning an empty snapshot:
+    /// an empty one would answer "no upstream, no destination" for every branch
+    /// at once, which callers read as evidence. A caller falls back to the
+    /// per-branch calls instead.
+    func branchTrackingSnapshot(repoPath: String) async throws -> BranchTrackingSnapshot {
+        let config: String
+        do {
+            // The `includeIf` keys ride along so the snapshot can tell whether
+            // another checkout might read different tracking config.
+            config = try await run(
+                arguments: ["config", "-z", "--get-regexp", #"^(branch\..*\.merge|includeif\..*)$"#],
+                at: repoPath)
+        } catch let error as GitError where error.exitCode == 1 {
+            // `git config` exits 1 when no key matches: no branch tracks anything.
+            config = ""
+        }
+        // Every ref, not just heads and remotes: a `%(push)` destination counts
+        // only if it exists, and `rev-parse` would accept one in any namespace.
+        let refListing = try await run(
+            arguments: ["for-each-ref", "--format=%(refname)%00%(push)"], at: repoPath)
+        return BranchTrackingSnapshot.parse(
+            config: config, refListing: refListing,
+            readingCheckoutHasOwnTrackingConfig:
+                BranchTrackingSnapshot.checkoutMayHaveOwnTrackingConfig(worktreePath: repoPath))
     }
 
     /// Where a branch would push to, as resolved by git itself (`@{push}`).
