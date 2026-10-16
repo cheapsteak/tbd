@@ -1894,15 +1894,16 @@ public final class RPCRouter: Sendable {
     /// `repoPath` answers every row of that repo, local and remote alike, in
     /// two subprocesses per TTL window. Read per row instead, a fleet of N rows
     /// spawned 2N, and on a large fleet of remote lanes that was most of the
-    /// daemon's child-process CPU. `repoPath` is nil for a row whose repo is
-    /// unknown, and a repo whose snapshot read failed answers nil too; both
-    /// fall back to reading this branch alone in `worktreePath`.
+    /// daemon's child-process CPU. Three cases fall back to reading this branch
+    /// alone in `worktreePath`: a row whose repo is unknown (`repoPath` is nil),
+    /// a repo whose snapshot read failed, and a checkout that may read tracking
+    /// config of its own (see `BranchTrackingSnapshot.answers`).
     private func branchFacts(
         worktreePath: String, branch: String, repoPath: String?
     ) async -> (upstream: String?, push: GitManager.PushBranchResolution) {
         if let repoPath, let snapshot = await branchTrackingCache.snapshot(
             repoPath: repoPath, load: { [git] in try? await git.branchTrackingSnapshot(repoPath: repoPath) }
-        ) {
+        ), snapshot.answers(checkoutAt: worktreePath, readIn: repoPath) {
             return (snapshot.upstreamBranchName(branch: branch), snapshot.pushBranch(branch: branch))
         }
         let upstream = await branchTrackingCache.upstreamBranchName(

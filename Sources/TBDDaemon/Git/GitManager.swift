@@ -176,20 +176,25 @@ public struct GitManager: Sendable {
     /// at once, which callers read as evidence. A caller falls back to the
     /// per-branch calls instead.
     func branchTrackingSnapshot(repoPath: String) async throws -> BranchTrackingSnapshot {
-        let mergeConfig: String
+        let config: String
         do {
-            mergeConfig = try await run(
-                arguments: ["config", "-z", "--get-regexp", #"^branch\..*\.merge$"#],
+            // The `includeIf` keys ride along so the snapshot can tell whether
+            // another checkout might read different tracking config.
+            config = try await run(
+                arguments: ["config", "-z", "--get-regexp", #"^(branch\..*\.merge|includeif\..*)$"#],
                 at: repoPath)
         } catch let error as GitError where error.exitCode == 1 {
             // `git config` exits 1 when no key matches: no branch tracks anything.
-            mergeConfig = ""
+            config = ""
         }
         // Every ref, not just heads and remotes: a `%(push)` destination counts
         // only if it exists, and `rev-parse` would accept one in any namespace.
         let refListing = try await run(
             arguments: ["for-each-ref", "--format=%(refname)%00%(push)"], at: repoPath)
-        return BranchTrackingSnapshot.parse(mergeConfig: mergeConfig, refListing: refListing)
+        return BranchTrackingSnapshot.parse(
+            config: config, refListing: refListing,
+            readingCheckoutHasOwnTrackingConfig:
+                BranchTrackingSnapshot.checkoutMayHaveOwnTrackingConfig(worktreePath: repoPath))
     }
 
     /// Where a branch would push to, as resolved by git itself (`@{push}`).

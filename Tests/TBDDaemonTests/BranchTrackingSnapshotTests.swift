@@ -7,7 +7,9 @@ import TestSupport
 /// contract is "answer what they answer". The parse tests pin the shapes git's
 /// output can take; the live-git test holds the snapshot equal to the
 /// per-branch calls over every branch shape the PR matcher tells apart, under
-/// each `push.default` that changes `@{push}`, and from a linked worktree.
+/// each `push.default` that changes `@{push}`, and from a linked worktree. The
+/// checkout tests pin where that equality stops: config that one checkout reads
+/// and another does not, where the snapshot must decline to answer.
 @Suite("Branch tracking snapshot")
 struct BranchTrackingSnapshotTests {
 
@@ -23,7 +25,7 @@ struct BranchTrackingSnapshotTests {
             "branch.novalue.merge",
             "",
         ].joined(separator: "\0")
-        let snapshot = BranchTrackingSnapshot.parse(mergeConfig: config, refListing: "")
+        let snapshot = BranchTrackingSnapshot.parse(config: config, refListing: "")
         #expect(snapshot.upstreamBranchName(branch: "main") == "main")
         #expect(snapshot.upstreamBranchName(branch: "feat.v2/x") == "feat.v2/x")
         #expect(snapshot.upstreamBranchName(branch: "twice") == "second")
@@ -42,7 +44,7 @@ struct BranchTrackingSnapshotTests {
             "refs/tags/v1\0",
             "",
         ].joined(separator: "\n")
-        let snapshot = BranchTrackingSnapshot.parse(mergeConfig: "", refListing: listing)
+        let snapshot = BranchTrackingSnapshot.parse(config: "", refListing: listing)
         #expect(snapshot.pushBranch(branch: "pushed") == .resolved("pushed"))
         // `rev-parse` refuses a destination that was never fetched.
         #expect(snapshot.pushBranch(branch: "unfetched") == .noPushDestination)
@@ -51,6 +53,90 @@ struct BranchTrackingSnapshotTests {
         // An existing ref that names no branch: git answered, but not with a
         // destination the matcher can use — the per-branch call's `.lookupFailed`.
         #expect(snapshot.pushBranch(branch: "odd") == .lookupFailed)
+    }
+
+    @Test("an includeIf key, or the reading checkout's own tracking config, keeps a snapshot to its checkout")
+    func otherCheckoutsNeedSharedConfig() {
+        let merge = "branch.main.merge\nrefs/heads/main\0"
+        #expect(BranchTrackingSnapshot.parse(config: merge, refListing: "").holdsForOtherCheckouts)
+
+        let conditional = BranchTrackingSnapshot.parse(
+            config: merge + "includeif.onbranch:feat/**.path\n/x/feat.inc\0", refListing: "")
+        #expect(!conditional.holdsForOtherCheckouts)
+        #expect(conditional.mergeRefs == ["main": "refs/heads/main"])
+
+        let ownConfig = BranchTrackingSnapshot.parse(
+            config: merge, refListing: "", readingCheckoutHasOwnTrackingConfig: true)
+        #expect(!ownConfig.holdsForOtherCheckouts)
+        #expect(ownConfig.answers(checkoutAt: "/r", readIn: "/r"))
+        #expect(!ownConfig.answers(checkoutAt: "/r/wt", readIn: "/r"))
+    }
+
+    // MARK: - A checkout's own config
+
+    /// Every shape a checkout's git directory can take, built by hand so each
+    /// one is pinned without depending on which git wrote it.
+    @Test("a checkout's config.worktree counts only when it may set tracking config")
+    func checkoutOwnTrackingConfig() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func directory(_ path: String) throws -> URL {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url
+        }
+        func write(_ text: String, to url: URL) throws {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        }
+        func mayHaveOwn(_ checkout: URL) -> Bool {
+            BranchTrackingSnapshot.checkoutMayHaveOwnTrackingConfig(worktreePath: checkout.path)
+        }
+
+        // A main checkout, whose `.git` is its git directory.
+        let main = try directory("repo")
+        let mainConfig = try directory("repo/.git").appendingPathComponent("config.worktree")
+        #expect(!mayHaveOwn(main), "no config.worktree")
+        try write("[core]\n\tsparseCheckout = true\n\tsparseCheckoutCone = true\n[index]\n\tsparse = true\n",
+                  to: mainConfig)
+        #expect(!mayHaveOwn(main), "what sparse checkout writes there")
+        try write("[Branch \"feat\"]\n\tmerge = refs/heads/elsewhere\n", to: mainConfig)
+        #expect(mayHaveOwn(main), "branch config, its section name in any case")
+
+        // A linked worktree whose `.git` file names its git directory.
+        let linked = try directory("linked")
+        let linkedConfig = try directory("repo/.git/worktrees/linked").appendingPathComponent("config.worktree")
+        try write("gitdir: \(linkedConfig.deletingLastPathComponent().path)\n",
+                  to: linked.appendingPathComponent(".git"))
+        #expect(!mayHaveOwn(linked), "no config.worktree")
+        for section in [
+            "[push]\n\tdefault = current\n",
+            "[remote \"origin\"]\n\tpush = refs/heads/*:refs/heads/acme/*\n",
+            "[include]\n\tpath = more.inc\n",
+            "[includeIf \"onbranch:feat/**\"]\n\tpath = more.inc\n",
+        ] {
+            try write(section, to: linkedConfig)
+            #expect(mayHaveOwn(linked), "\(section)")
+        }
+
+        // A relative `gitdir:`, as `worktree.useRelativePaths` writes it. A path
+        // that failed to resolve would read as yes, so the "no" here proves it
+        // resolved.
+        let relative = try directory("relative")
+        let relativeConfig = try directory("repo/.git/worktrees/relative").appendingPathComponent("config.worktree")
+        try write("gitdir: ../repo/.git/worktrees/relative\n", to: relative.appendingPathComponent(".git"))
+        #expect(!mayHaveOwn(relative), "relative gitdir, no config.worktree")
+        try write("[branch \"feat\"]\n\tmerge = refs/heads/elsewhere\n", to: relativeConfig)
+        #expect(mayHaveOwn(relative), "relative gitdir, branch config")
+
+        // Nothing to read counts as yes.
+        let noGit = try directory("no-git")
+        #expect(mayHaveOwn(noGit), "no .git")
+        let dangling = try directory("dangling")
+        try write("gitdir: \(root.path)/gone\n", to: dangling.appendingPathComponent(".git"))
+        #expect(mayHaveOwn(dangling), "gitdir names nothing")
+        let malformed = try directory("malformed")
+        try write("not a gitdir line\n", to: malformed.appendingPathComponent(".git"))
+        #expect(mayHaveOwn(malformed), "unreadable .git file")
     }
 
     // MARK: - Against real git
@@ -123,6 +209,81 @@ struct BranchTrackingSnapshotTests {
         #expect(snapshot.pushBranch(branch: "plain") == .resolved("plain"))
         #expect(snapshot.upstreamBranchName(branch: "local-x") == "renamed-on-remote")
         #expect(snapshot.pushBranch(branch: "configured-only") == .noPushDestination)
+    }
+
+    @Test("a linked worktree's own tracking config is not answered from the repo's snapshot",
+          .fastPassBounded)
+    func worktreeOwnConfigIsNotAnswered() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let fixture = try await Self.makeFixture(in: tempDir)
+        let (repo, worktree) = (fixture.repo.path, fixture.worktree.path)
+        let git = GitManager()
+
+        // Sparse checkout turns on per-worktree config and writes only its own
+        // keys there, so the snapshot still answers.
+        try await shell("git config extensions.worktreeConfig true && git sparse-checkout set src",
+                        at: fixture.worktree)
+        let gitDir = try #require(BranchTrackingSnapshot.gitDirectory(ofCheckoutAt: worktree))
+        #expect(FileManager.default.fileExists(atPath: gitDir.appendingPathComponent("config.worktree").path))
+        let sparseOnly = try await git.branchTrackingSnapshot(repoPath: repo)
+        #expect(sparseOnly.answers(checkoutAt: worktree, readIn: repo))
+
+        // One branch's upstream set in the worktree's own config: git now
+        // answers differently there, and the snapshot must not answer for it.
+        try await shell("git config --worktree branch.plain.merge refs/heads/elsewhere", at: fixture.worktree)
+        #expect(await git.upstreamBranchName(worktreePath: worktree, branch: "plain") == "elsewhere")
+        let snapshot = try await git.branchTrackingSnapshot(repoPath: repo)
+        #expect(snapshot.upstreamBranchName(branch: "plain") == "plain")
+        #expect(snapshot.holdsForOtherCheckouts)
+        #expect(!snapshot.answers(checkoutAt: worktree, readIn: repo))
+        #expect(snapshot.answers(checkoutAt: repo, readIn: repo))
+    }
+
+    @Test("tracking config in the repo checkout's own config answers only that checkout",
+          .fastPassBounded)
+    func readingCheckoutOwnConfigIsNotShared() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let fixture = try await Self.makeFixture(in: tempDir)
+        let (repo, worktree) = (fixture.repo.path, fixture.worktree.path)
+        let git = GitManager()
+
+        try await shell("git config extensions.worktreeConfig true && git config --worktree push.default upstream",
+                        at: fixture.repo)
+        // The two checkouts now disagree on where `local-x` pushes.
+        #expect(await git.pushBranchName(worktreePath: repo, branch: "local-x") == .resolved("renamed-on-remote"))
+        #expect(await git.pushBranchName(worktreePath: worktree, branch: "local-x") == .noPushDestination)
+
+        let snapshot = try await git.branchTrackingSnapshot(repoPath: repo)
+        #expect(snapshot.pushBranch(branch: "local-x") == .resolved("renamed-on-remote"))
+        #expect(!snapshot.holdsForOtherCheckouts)
+        #expect(snapshot.answers(checkoutAt: repo, readIn: repo))
+        #expect(!snapshot.answers(checkoutAt: worktree, readIn: repo))
+    }
+
+    @Test("a conditional include answers only the checkout the snapshot was read in",
+          .fastPassBounded)
+    func conditionalIncludeIsNotShared() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let fixture = try await Self.makeFixture(in: tempDir)
+        let (repo, worktree) = (fixture.repo.path, fixture.worktree.path)
+        let git = GitManager()
+
+        // Included only where `tbd/in-worktree` is checked out: the worktree.
+        let include = tempDir.appendingPathComponent("in-worktree.inc")
+        try "[branch \"plain\"]\n\tmerge = refs/heads/elsewhere\n"
+            .write(to: include, atomically: true, encoding: .utf8)
+        try await shell("git config includeIf.onbranch:tbd/in-worktree.path '\(include.path)'", at: fixture.repo)
+        #expect(await git.upstreamBranchName(worktreePath: worktree, branch: "plain") == "elsewhere")
+        #expect(await git.upstreamBranchName(worktreePath: repo, branch: "plain") == "plain")
+
+        let snapshot = try await git.branchTrackingSnapshot(repoPath: repo)
+        #expect(snapshot.upstreamBranchName(branch: "plain") == "plain")
+        #expect(!snapshot.holdsForOtherCheckouts)
+        #expect(snapshot.answers(checkoutAt: repo, readIn: repo))
+        #expect(!snapshot.answers(checkoutAt: worktree, readIn: repo))
     }
 
     @Test("a repo with no tracking branches reads as an empty snapshot, not a failure",

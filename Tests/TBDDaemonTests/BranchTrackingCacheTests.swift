@@ -227,7 +227,7 @@ struct BranchTrackingCacheTests {
     // MARK: - Repository snapshots
 
     private static let snapshot = BranchTrackingSnapshot.parse(
-        mergeConfig: "branch.feat.merge\nrefs/heads/main\0",
+        config: "branch.feat.merge\nrefs/heads/main\0",
         refListing: "refs/heads/feat\0refs/remotes/origin/feat\nrefs/remotes/origin/feat\0\n")
 
     @Test func snapshotIsReadOncePerRepoPerTTL() async {

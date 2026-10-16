@@ -20,7 +20,7 @@ import Foundation
 /// `BranchTrackingSnapshot` answers every branch of a repo, so a fleet costs
 /// two subprocesses per repo per TTL window instead of two per row. The
 /// per-branch entries remain the fallback for a repo whose snapshot read
-/// failed.
+/// failed, and for a checkout that may read tracking config of its own.
 actor BranchTrackingCache {
     private struct Entry {
         let value: String?
