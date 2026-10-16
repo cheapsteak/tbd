@@ -152,7 +152,9 @@ extension RPCRouter {
 
         // Disabled features are likewise a Codex launch argument. Refuse them
         // elsewhere, and refuse a malformed key rather than hand it to Codex.
-        var codexDisabledFeatures: [String] = []
+        // A `let`, not a `var`: the Codex spawn below reads it inside a
+        // concurrently-executing closure, which may not capture a var.
+        let codexDisabledFeatures: [String]
         if let requested = params.codexDisabledFeatures, !requested.isEmpty {
             guard params.type == .codex else {
                 return RPCResponse(error: TerminalCreateParams.codexDisableRequiresCodexMessage)
@@ -162,6 +164,8 @@ extension RPCRouter {
             } catch {
                 return RPCResponse(error: error.localizedDescription)
             }
+        } else {
+            codexDisabledFeatures = []
         }
 
         // Look up the worktree to get tmux server and path

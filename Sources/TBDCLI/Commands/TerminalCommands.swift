@@ -73,8 +73,8 @@ struct TerminalCreate: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
 
-        let disabledFeatures: [String]? = codexDisable.isEmpty
-            ? nil : try TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+        let disabledFeatures: [String]? = try codexDisable.isEmpty
+            ? nil : TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
 
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
