@@ -258,6 +258,81 @@ struct PRPollRemoteLaneTests {
         #expect(!entries.contains { $0.worktreePath.hasPrefix("remote://") })
     }
 
+    /// Branch facts are repo facts, so the pass reads them once per repo: the
+    /// local row and both lanes are answered from one snapshot of the repo's
+    /// checkout, and nothing is read branch by branch.
+    @Test("every row of one repo reads its branch facts from one snapshot of the repo")
+    func rowsOfOneRepoShareOneSnapshot() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let localDir = tempDir.appendingPathComponent("wt-local")
+        try await shell("git worktree add \(localDir.path) -b tbd/local-lane", at: repoDir)
+        try await shell("git config branch.tbd/local-lane.merge refs/heads/main", at: repoDir)
+        try await shell("git config branch.tbd/remote-a.merge refs/heads/renamed-a", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local", branch: "tbd/local-lane",
+            path: localDir.path, tmuxServer: "tbd-local")
+        let laneA = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane-a", branch: "main", provider: "agentbox", sessionID: "s-a")
+        let laneB = try await db.worktrees.createRemote(
+            repoID: repo.id, name: "lane-b", branch: "main", provider: "agentbox", sessionID: "s-b")
+        try await Self.seedMirror(db, sessionID: "s-a", meta: ["branch": "tbd/remote-a"])
+        try await Self.seedMirror(db, sessionID: "s-b", meta: ["branch": "tbd/remote-b"])
+
+        let router = Self.makeRouter(db: db, gh: nil)
+        let plan = await router.pollEntries(
+            RPCRouter.pollableWorktrees(try await db.worktrees.list(status: .active)),
+            repos: try await db.repos.list(),
+            mirrorMeta: RPCRouter.mirrorMetaByOrigin(try await db.remoteSessions.list()))
+        let byID = Dictionary(uniqueKeysWithValues: plan.matched.map { ($0.id, $0) })
+
+        #expect(byID[local.id]?.upstreamBranch == "main")
+        #expect(byID[laneA.id]?.upstreamBranch == "renamed-a")
+        #expect(byID[laneB.id]?.upstreamBranch == nil)
+        // The local row still polls in its own checkout; only its facts moved.
+        #expect(byID[local.id]?.worktreePath == localDir.path)
+
+        let cache = router.branchTrackingCache
+        let cached = await cache.snapshot(repoPath: repoDir.path) {
+            Issue.record("the pass left no snapshot of the repo to serve from")
+            return nil
+        }
+        #expect(cached != nil)
+        // A miss on the per-branch entry: the pass never read this branch alone.
+        let perBranch = await cache.upstreamBranchName(
+            worktreePath: localDir.path, branch: "tbd/local-lane") { "read-per-branch" }
+        #expect(perBranch == "read-per-branch")
+    }
+
+    /// A repo whose snapshot cannot be read — its stored path is gone — must not
+    /// read as "no upstream" for every row. Each row falls back to reading its
+    /// own branch in its own checkout, as the poll did before snapshots.
+    @Test("an unreadable repo falls back to reading each branch in the row's checkout")
+    func unreadableRepoFallsBackPerBranch() async throws {
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let localDir = tempDir.appendingPathComponent("wt-local")
+        try await shell("git worktree add \(localDir.path) -b tbd/local-lane", at: repoDir)
+        try await shell("git config branch.tbd/local-lane.merge refs/heads/main", at: repoDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        var repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let local = try await db.worktrees.create(
+            repoID: repo.id, name: "local", branch: "tbd/local-lane",
+            path: localDir.path, tmuxServer: "tbd-local")
+        repo.path = tempDir.appendingPathComponent("moved-away").path
+
+        let router = Self.makeRouter(db: db, gh: nil)
+        let plan = await router.pollEntries(
+            RPCRouter.pollableWorktrees(try await db.worktrees.list(status: .active)),
+            repos: [repo], mirrorMeta: [:])
+
+        #expect(plan.matched.first { $0.id == local.id }?.upstreamBranch == "main")
+    }
+
     /// The composed input reads each row's default branch from its repo record:
     /// a lane reporting it is bindings-only, a lane on a feature branch is
     /// matched, and a local row on the default branch is matched as before.

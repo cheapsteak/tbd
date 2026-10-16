@@ -1887,12 +1887,24 @@ public final class RPCRouter: Sendable {
 
     /// The per-branch git facts PR matching needs: the branch this one tracks,
     /// and where git says it would push (`@{push}`). Both go through the TTL
-    /// cache so a poll storm doesn't spawn two subprocesses per worktree per
-    /// poll, and so every consumer — poll and on-select refresh alike — sees the
+    /// cache, so every consumer — poll and on-select refresh alike — sees the
     /// same answer within a TTL window.
+    ///
+    /// They are read a repository at a time: one `BranchTrackingSnapshot` of
+    /// `repoPath` answers every row of that repo, local and remote alike, in
+    /// two subprocesses per TTL window. Read per row instead, a fleet of N rows
+    /// spawned 2N, and on a large fleet of remote lanes that was most of the
+    /// daemon's child-process CPU. `repoPath` is nil for a row whose repo is
+    /// unknown, and a repo whose snapshot read failed answers nil too; both
+    /// fall back to reading this branch alone in `worktreePath`.
     private func branchFacts(
-        worktreePath: String, branch: String
+        worktreePath: String, branch: String, repoPath: String?
     ) async -> (upstream: String?, push: GitManager.PushBranchResolution) {
+        if let repoPath, let snapshot = await branchTrackingCache.snapshot(
+            repoPath: repoPath, load: { [git] in try? await git.branchTrackingSnapshot(repoPath: repoPath) }
+        ) {
+            return (snapshot.upstreamBranchName(branch: branch), snapshot.pushBranch(branch: branch))
+        }
         let upstream = await branchTrackingCache.upstreamBranchName(
             worktreePath: worktreePath, branch: branch
         ) { [git] in
@@ -2031,7 +2043,8 @@ public final class RPCRouter: Sendable {
                 plan.bindingsOnly.append((id: wt.id, worktreePath: workingDirectory))
             case .match(let branch):
                 let (upstreamBranch, pushBranch) = await branchFacts(
-                    worktreePath: workingDirectory, branch: branch)
+                    worktreePath: workingDirectory, branch: branch,
+                    repoPath: wt.repoID.flatMap { pathByRepo[$0] })
                 plan.matched.append((
                     id: wt.id,
                     branch: branch,
@@ -2202,7 +2215,7 @@ public final class RPCRouter: Sendable {
         // next poll — still inside the cache's TTL, still holding the older
         // facts — judges by a different candidate list and clears again.
         let (upstreamBranch, pushBranch) = await branchFacts(
-            worktreePath: workingDirectory, branch: branch)
+            worktreePath: workingDirectory, branch: branch, repoPath: repo?.path)
 
         let status = await prManager.refresh(
             worktreeID: wt.id,
