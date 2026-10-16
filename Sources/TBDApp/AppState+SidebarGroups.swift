@@ -19,7 +19,12 @@ extension SidebarGroupID {
     /// A stable string for persisting an expanded group across launches:
     /// `<kind>|<owner type>|<owner value>`. The provider name comes last and
     /// is split off with a bounded split, so a `|` inside it round-trips.
-    var persistenceKey: String {
+    ///
+    /// Nil for a group a worktree owns: those stay expanded for the session
+    /// only. The remembered set is bounded by pruning on authoritative
+    /// repository and provider fetches, and nothing would bound one keyed by
+    /// worktree the same way.
+    var persistenceKey: String? {
         let kindName: String
         switch kind {
         case .remote: kindName = "remote"
@@ -30,6 +35,7 @@ extension SidebarGroupID {
         case .repository(let id): return "\(kindName)|repository|\(id.uuidString)"
         case .provider(let name): return "\(kindName)|provider|\(name)"
         case .scratch: return "\(kindName)|scratch|"
+        case .parent: return nil
         }
     }
 
@@ -120,7 +126,7 @@ extension AppState {
     /// which goes through the observed setter — never writes, and an absent
     /// key is not created for an empty set.
     func persistExpandedSidebarGroups() {
-        let keys = expandedSidebarGroups.map(\.persistenceKey).sorted()
+        let keys = expandedSidebarGroups.compactMap(\.persistenceKey).sorted()
         guard keys != (userDefaults.stringArray(forKey: Self.sidebarExpandedGroupsKey) ?? []) else { return }
         userDefaults.set(keys, forKey: Self.sidebarExpandedGroupsKey)
     }

@@ -221,6 +221,24 @@ struct SidebarWorkflowGroupsToggleTests {
         }
     }
 
+    /// A group owned by a worktree is expanded for the session only: it is
+    /// never written, so a fresh `AppState` restores just the others.
+    @Test func parentOwnedGroupsAreNotRemembered() {
+        withDefaults { defaults, _ in
+            let repoGroup = SidebarGroupID(owner: .repository(UUID()), kind: .remote)
+            let parentGroup = SidebarGroupID(owner: .parent(UUID()), kind: .remote)
+            let state = AppState(userDefaults: defaults)
+            state.toggleSidebarGroup(parentGroup)
+            #expect(state.expandedSidebarGroups == [parentGroup])
+            #expect(defaults.object(forKey: AppState.sidebarExpandedGroupsKey) == nil)
+
+            state.toggleSidebarGroup(repoGroup)
+            let stored = defaults.stringArray(forKey: AppState.sidebarExpandedGroupsKey)
+            #expect(stored == repoGroup.persistenceKey.map { [$0] })
+            #expect(AppState(userDefaults: defaults).expandedSidebarGroups == [repoGroup])
+        }
+    }
+
     @Test func constructingAppStateWritesNoExpansionState() {
         withDefaults { defaults, _ in
             _ = AppState(userDefaults: defaults)

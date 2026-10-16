@@ -68,7 +68,10 @@ With grouping on, the groups a user expands stay expanded across restarts.
   last and is split off with a bounded split, so a separator inside a name
   round-trips. The expanded set is stored as a sorted string array under
   `com.tbd.app.sidebarExpandedGroups`, the prefix AppState's other remembered
-  state uses.
+  state uses. The Remote and Exited groups beneath a parent worktree have no
+  key and stay expanded for the session only: the bound below holds because
+  repository and provider fetches are authoritative, and nothing bounds a set
+  keyed by worktree the same way.
 - **Write** – every change to the expanded set rewrites the array. That
   includes the expansions selection reveal makes, so a group opened to show a
   selected row is still open after a restart, just as a group opened by hand
