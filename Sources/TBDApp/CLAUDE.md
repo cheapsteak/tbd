@@ -31,6 +31,13 @@ A toolbar `Menu` label renders **template** images monochrome (AppKit tints them
 3. Re-bake on light/dark changes by reading `@Environment(\.colorScheme)` in the view body. **Re-baking alone is not enough**: AppKit materializes the toolbar item's label ONCE (see "Split-button label flattening & stale menu state" below), so the fresh image only reaches AppKit when the toolbar item is recreated — appearance must also be part of the item's `.id(...)` key (as the PR split button's `PRButtonLabel.prSplitButtonID` does).
 4. Use `.tint(.primary)` on the `Menu` to keep adjacent label text neutral (the split button otherwise accent-tints it); `.renderingMode(.original)` images ignore the tint, so the baked color survives.
 
+### macOS 27: toolbar menus default to icon-only
+
+Verified on macOS 27.0.1 with a standalone toolbar harness: a toolbar `Menu` **without** `primaryAction:` (and a `.menu`-style `Picker`) draws only its label's image — the title is dropped, and a text-only label becomes an empty capsule. Split buttons (`Menu` with `primaryAction:`) still draw both. Two rules follow:
+
+- **Apply `.labelStyle(.titleAndIcon)` to the `Menu` / `Picker` itself** — on the label view inside the closure it has no effect — and build the label as a `Label { Text } icon: { Image }`, not an `HStack`.
+- **Never make a baked label image `.resizable()`.** AppKit flattens the label to the `NSImage` and ignores the SwiftUI `.frame`, so a resizable image is stretched to fill the toolbar's icon slot. Give the `NSImage` its exact point size when baking and render it unmodified.
+
 ### Split-button label flattening & stale menu state
 
 Two more empirically verified constraints (verified live in this app, July 2026, macOS 26):
