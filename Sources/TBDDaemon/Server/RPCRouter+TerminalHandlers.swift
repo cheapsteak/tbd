@@ -307,6 +307,10 @@ extension RPCRouter {
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
             let codexSpawnEnv = codexEnv
+            // The same model and features the command below is built from,
+            // recorded on the row so a relaunch of Codex in this tab keeps them.
+            let codexLaunchOptions = CodexLaunchOptions.recorded(
+                model: params.model, disabledFeatures: codexDisabledFeatures)
             let terminal = try await actuating(actuationID) {
                 try await tmux.withWorktreeServerLock(
                     db: db, worktreeID: params.worktreeID,
@@ -339,7 +343,8 @@ extension RPCRouter {
                         kind: .codex,
                         transport: decidedTransport,
                         attachment: nil,
-                        modelProxySupervisor: modelProxySupervisor)
+                        modelProxySupervisor: modelProxySupervisor,
+                        codexLaunchOptions: codexLaunchOptions)
                 }
             }
 
@@ -1766,8 +1771,12 @@ extension RPCRouter {
                             server: currentWorktree.tmuxServer,
                             windowID: window.windowID,
                             cwd: currentWorktree.path,
+                            // Relaunch with the model and disabled features
+                            // the tab was started with, read from the row
+                            // re-fetched under this lock.
                             shellCommand: CodexSpawnCommandBuilder.command(
-                                executablePath: codexPreparation.executablePath),
+                                executablePath: codexPreparation.executablePath,
+                                launchOptions: currentTerminal.codexLaunchOptions),
                             env: replacementEnv,
                             sensitiveEnv: codexEnvOverrides,
                             cols: resolvedCols,

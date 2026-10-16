@@ -374,6 +374,109 @@ struct ContinueInClaudeTransactionTests {
             worktreeID: fixture.terminal.worktreeID).count == 1)
     }
 
+    private static let launchOptions = CodexLaunchOptions(
+        model: "acme-model", disabledFeatures: ["computer_use"])
+    private static let relaunchWithOptions =
+        #"tbd -c 'model="acme-model"' --disable 'computer_use' --dangerously-bypass-approvals-and-sandbox resume 'codex-thread'"#
+
+    /// The Codex a recovery restores runs in the same tab, so it keeps the
+    /// model and disabled features the tab was started with.
+    @Test("durable pending recovery restores Codex with its launch options")
+    func startupRecoveryReappliesLaunchOptions() async throws {
+        let fixture = try await makeRPCFixture(
+            ownsPane: true, codexLaunchOptions: Self.launchOptions)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let crashedDestinationToken = UUID()
+        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
+            id: fixture.terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
+            pendingIncarnationID: crashedDestinationToken))
+
+        let recoveryTask = Task {
+            await fixture.router.reconcilePendingContinueInClaude()
+        }
+        let recoveryToken = try await waitForPending(
+            terminalID: fixture.terminal.id,
+            differentFrom: crashedDestinationToken,
+            in: fixture.db)
+        #expect((await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: fixture.terminal.id,
+                sessionID: "codex-thread",
+                transcriptPath: fixture.rollout.path,
+                source: "startup",
+                cwd: fixture.root.path,
+                sessionIncarnationID: recoveryToken)))).success)
+        await recoveryTask.value
+
+        let relaunch = try #require(
+            fixture.recorder.commands.last { $0.contains("respawn-window") }?.last)
+        #expect(relaunch.contains(Self.relaunchWithOptions))
+        let restored = try #require(
+            try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(restored.kind == .codex)
+        #expect(restored.codexLaunchOptions == Self.launchOptions)
+    }
+
+    @Test("destination launch failure restores Codex with its launch options")
+    func destinationLaunchFailureReappliesLaunchOptions() async throws {
+        let fixture = try await makeRPCFixture(
+            ownsPane: true, respawnFailures: 1, codexLaunchOptions: Self.launchOptions)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let responseTask = Task { await continueRequest(fixture) }
+        try await waitForRespawnCount(2, in: fixture.recorder)
+        let recoveryToken = try await waitForPending(
+            terminalID: fixture.terminal.id,
+            in: fixture.db)
+        #expect((await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: fixture.terminal.id,
+                sessionID: "codex-thread",
+                transcriptPath: fixture.rollout.path,
+                source: "startup",
+                cwd: fixture.root.path,
+                sessionIncarnationID: recoveryToken)))).success)
+        #expect(!(await responseTask.value).success)
+
+        let relaunch = try #require(
+            fixture.recorder.commands.last { $0.contains("respawn-window") }?.last)
+        #expect(relaunch.contains(Self.relaunchWithOptions))
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id)?
+            .codexLaunchOptions == Self.launchOptions)
+    }
+
+    /// Once the tab runs Claude, the Codex options no longer describe it.
+    @Test("RPC success clears the Codex launch options")
+    func rpcSuccessClearsLaunchOptions() async throws {
+        let fixture = try await makeRPCFixture(
+            ownsPane: true, codexLaunchOptions: Self.launchOptions)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let responseTask = Task { await continueRequest(fixture) }
+        let pending = try await waitForPending(
+            terminalID: fixture.terminal.id, in: fixture.db)
+        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
+            in: fixture.recorder))
+        #expect((await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: fixture.terminal.id,
+                sessionID: freshSessionID,
+                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
+                source: "startup",
+                cwd: fixture.root.path,
+                sessionIncarnationID: pending)))).success)
+
+        let response = await responseTask.value
+        #expect(response.success)
+        let updated = try response.decodeResult(Terminal.self)
+        #expect(updated.kind == .claude)
+        #expect(updated.codexLaunchOptions == nil)
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id)?
+            .codexLaunchOptions == nil)
+    }
+
     @Test("recovery leaves a live owned pane alone while its rollout shows a turn in flight")
     func recoveryLeavesBusyLivePaneAlone() async throws {
         // A daemon that died before the respawn leaves the original Codex
@@ -745,7 +848,8 @@ struct ContinueInClaudeTransactionTests {
         paneProbeThrows: Bool = false,
         sourceWindowID: String = "@source",
         paneTargetOverride: PaneSendTarget? = nil,
-        userMessage: String = "Continue the task."
+        userMessage: String = "Continue the task.",
+        codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> RPCFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
@@ -816,7 +920,8 @@ struct ContinueInClaudeTransactionTests {
             tmuxWindowID: sourceWindowID,
             tmuxPaneID: "%source",
             label: TerminalLabel.codex,
-            kind: .codex)
+            kind: .codex,
+            codexLaunchOptions: codexLaunchOptions)
         _ = try #require(try await db.terminals.applySessionStart(
             id: created.id,
             expectedIncarnation: TerminalSessionIncarnation(terminal: created),

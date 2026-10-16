@@ -96,6 +96,10 @@ extension WorktreeLifecycle {
     ///     `transport` for the same reason.
     ///   - serverName: the declared dev server this tab runs (`server.start`),
     ///     nil for every other spawn.
+    ///   - codexLaunchOptions: the options a Codex spawn's command was built
+    ///     with, nil for every other spawn and for a Codex spawn with none.
+    ///     Written in the same insert, so every later relaunch of Codex in this
+    ///     tab can reapply them.
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
@@ -114,7 +118,8 @@ extension WorktreeLifecycle {
         transport: TerminalSpawnTransport,
         attachment: ModelProxyRouteAttachment.Outcome?,
         modelProxySupervisor: (any ModelProxyRouting)?,
-        serverName: String? = nil
+        serverName: String? = nil,
+        codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below.
@@ -208,7 +213,8 @@ extension WorktreeLifecycle {
                 // snapshotted by a concurrent caller, and a late stamp would
                 // make every replacement that snapshot authorized reject.
                 transcriptStreamPath: attachment?.streamPath,
-                serverName: serverName
+                serverName: serverName,
+                codexLaunchOptions: codexLaunchOptions
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource

@@ -496,11 +496,19 @@ enum CodexSpawnCommandBuilder {
         build(initialPrompt: initialPrompt, profileFlag: detectedProfileFlag)
     }
 
-    static func command(executablePath: String) -> String {
+    /// The bare Codex command, with the options a tab was launched with (see
+    /// `Terminal.codexLaunchOptions`) reapplied when there are any.
+    static func command(
+        executablePath: String, launchOptions: CodexLaunchOptions? = nil
+    ) -> String {
         let profileFlag = detectProfileFlag(executablePath: executablePath) { arguments in
             commandOutput(arguments: arguments, timeout: 3)
         }
-        return baseCommand(executablePath: executablePath, profileFlag: profileFlag)
+        return baseCommand(
+            executablePath: executablePath,
+            profileFlag: profileFlag,
+            model: launchOptions?.model,
+            disabledFeatures: launchOptions?.disabledFeatures ?? [])
     }
 
     static func build(

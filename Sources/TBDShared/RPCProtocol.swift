@@ -1638,8 +1638,9 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// Codex model for the new worktree's primary terminal when that primary
     /// resolves to Codex, passed as `-c model=<id>`. Ignored for Claude and
     /// shell primaries; it never selects the agent kind. Distinct from the
-    /// Claude-only `model`. Not persisted. Optional/defaulted for backward
-    /// compatibility.
+    /// Claude-only `model`. Recorded on the primary's row
+    /// (`Terminal.codexLaunchOptions`) so a relaunch of Codex in that tab keeps
+    /// it. Optional/defaulted for backward compatibility.
     public let codexModel: String?
     public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
@@ -2778,13 +2779,14 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let claudeSettingsOverlay: String?
     /// Codex model for this fresh Codex terminal, passed to Codex as
     /// `-c model=<id>`. An opaque identifier: Codex owns the vocabulary and
-    /// reports unsupported values. Honored only for `type == .codex`; not
-    /// persisted, so a later recreate falls back to the profile's model.
-    /// Optional/defaulted for backward compatibility.
+    /// reports unsupported values. Honored only for `type == .codex`, and
+    /// recorded on the row (`Terminal.codexLaunchOptions`) so a relaunch of
+    /// Codex in this tab keeps it. Optional/defaulted for backward compatibility.
     public let model: String?
     /// Codex feature keys (for example `computer_use`) to turn off for this
     /// fresh Codex terminal only, each passed to Codex as `--disable <key>`.
-    /// Honored only for `type == .codex`; not persisted. Validate with
+    /// Honored only for `type == .codex`, and recorded on the row with `model`
+    /// (`Terminal.codexLaunchOptions`). Validate with
     /// `normalizedCodexDisabledFeatures(_:)`. Optional/defaulted for backward
     /// compatibility (old clients omit it; nil = none).
     public let codexDisabledFeatures: [String]?
