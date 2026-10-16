@@ -24,20 +24,30 @@ the arguments `git worktree add` gives it.
 
 It ships behind `clone_checkout_enabled`, default off.
 
-**Status: design choices accepted.** This design did not go through
-`/tbd-brainstorming`, so its open choices went to a human as six questions, each
-with a recommended answer. On 2026-10-15 the PR's author (@zionts) accepted the
-recommended answer to all six:
+**Status: decided.** This design did not go through `/tbd-brainstorming`, so
+its open choices went to a human, the PR's author, as questions with a
+recommended answer each. All six recommended answers were accepted
+(2026-10-15):
 
-1. The scope is fresh creates only, until a soak.
-2. Creates trigger the template refresh. There is no timer.
-3. GC reclaims every template while the flag is off.
-4. After three unusable clones of a repo in a row, the store gives up on it
-   until the daemon restarts.
-5. `ENOTSUP` or `EXDEV` from `clonefile` gives up on the repo the same way.
-6. The full re-hash stays for now (see "Costs and risks").
-
-The agent that wrote the PR recorded those answers here.
+1. **Fresh creates only, until a soak.** The fresh create from the default
+   branch is the path a fleet exercises. The other checkout kinds follow once
+   it has soaked.
+2. **Creates trigger the template refresh; there is no timer.** Fleet creates
+   start from the default branch's tip, so the template trails it by at most
+   the commits between two creates, and nothing runs while no worktrees are
+   made.
+3. **GC reclaims every template while the flag is off.** Turning the feature
+   off then returns about 460 MB per repo within one sweep.
+4. **Three unusable clones of a repo in a row give up on it until the daemon
+   restarts.** One failure is a torn or stale template, which a rebuild fixes.
+   The same failure after every rebuild would cost a full template write and a
+   full worktree write on each create.
+5. **`ENOTSUP` or `EXDEV` from `clonefile` gives up on the repo the same way.**
+   Such a volume, or such a pair of volumes, can never share blocks, so each
+   further attempt would be pure cost.
+6. **The full re-hash stays.** It compares content rather than stat data, and
+   that comparison is what makes a torn template harmless. The faster
+   scratch-index variant is deferred (see "Costs and risks").
 
 ## Goals
 

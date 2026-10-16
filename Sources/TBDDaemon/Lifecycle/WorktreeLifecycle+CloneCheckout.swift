@@ -55,9 +55,16 @@ extension WorktreeLifecycle {
         guard let head = try? await git.headSHA(worktreePath: worktreePath) else { return outcome }
         let store = checkoutTemplates
         let gitManager = self.git
+        let database = db
         let repoID = repo.id
         let repoPath = repo.path
         Task.detached(priority: .utility) {
+            // The flag may have gone off since this create read it, and a
+            // template written now would sit at full size until the next GC
+            // sweep.
+            let stillEnabled = (try? await database.config.get().cloneCheckoutEnabled)
+                ?? Config.cloneCheckoutDefault
+            guard stillEnabled else { return }
             await store.refresh(git: gitManager, repoID: repoID, repoPath: repoPath, toCommit: head)
         }
         return outcome
