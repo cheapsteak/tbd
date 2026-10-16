@@ -152,7 +152,7 @@ public struct LiveHolderSession: Sendable, Equatable {
     public init(_ terminal: Terminal) {
         self.init(
             terminalID: terminal.id, holderPID: terminal.holderPID, childPID: terminal.childPID,
-            childStartedAt: terminal.holderChildStartedAt ?? terminal.createdAt)
+            childStartedAt: HolderChildIdentity.anchor(of: terminal))
     }
 }
 

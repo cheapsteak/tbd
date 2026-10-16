@@ -81,7 +81,7 @@ extension HolderChildDisposition {
         let verdict = ProcessIdentityCheck.verify(
             pid: childPID,
             startedWithin: AgentReaper.defaultHolderIdentityWindow,
-            of: terminal.holderChildStartedAt ?? terminal.createdAt,
+            of: HolderChildIdentity.anchor(of: terminal),
             executableIsAcceptable: AgentReaper.isHolderChildExecutable,
             signaller: signaller)
         switch verdict {
@@ -993,7 +993,7 @@ extension HibernationCoordinator {
         let verdict = ProcessIdentityCheck.verify(
             pid: childPID,
             startedWithin: AgentReaper.defaultHolderIdentityWindow,
-            of: terminal.holderChildStartedAt ?? terminal.createdAt,
+            of: HolderChildIdentity.anchor(of: terminal),
             executableIsAcceptable: AgentReaper.isHolderChildExecutable,
             signaller: signaller)
         switch verdict {
@@ -1046,7 +1046,7 @@ extension HibernationCoordinator {
         let verdict = ProcessIdentityCheck.verify(
             pid: childPID,
             startedWithin: AgentReaper.defaultHolderIdentityWindow,
-            of: terminal.holderChildStartedAt ?? terminal.createdAt,
+            of: HolderChildIdentity.anchor(of: terminal),
             executableIsAcceptable: AgentReaper.isHolderChildExecutable,
             signaller: signaller)
         guard verdict == .notRunning else { return .notHibernated }
@@ -1429,7 +1429,7 @@ extension HibernationCoordinator {
                   ProcessIdentityCheck.verify(
                     pid: childPID,
                     startedWithin: AgentReaper.defaultHolderIdentityWindow,
-                    of: terminal.holderChildStartedAt ?? terminal.createdAt,
+                    of: HolderChildIdentity.anchor(of: terminal),
                     executableIsAcceptable: AgentReaper.isHolderChildExecutable,
                     signaller: signaller) == .same {
             evidence = "its recorded child \(childPID) is identity-verified alive"

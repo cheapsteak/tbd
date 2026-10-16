@@ -1,5 +1,6 @@
 import Foundation
 import os
+import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "reaper")
 
@@ -95,17 +96,11 @@ public struct AgentReaper: Sendable {
         self.holderIdentityWindow = holderIdentityWindow
     }
 
-    /// Five minutes, and the number is doing real work.
-    ///
-    /// A holder's job is forked within milliseconds of its session row being
-    /// written — today the holder is spawned just *before* the row, and the
-    /// design's creation ordering puts it just after, so the window is
-    /// symmetric around `createdAt` to cover both. Five minutes is therefore
-    /// enormously generous for the true child and still excludes pid reuse:
-    /// wrapping macOS's pid space inside the window would take on the order of
-    /// hundreds of process spawns per second sustained, which is orders of
-    /// magnitude past what this machine does with ~1000 agent processes live.
-    public static let defaultHolderIdentityWindow: TimeInterval = 300
+    /// `HolderChildIdentity.startWindow`, which says why it is five minutes.
+    /// The number lives in `TBDShared` because `tbd peer list`, which cannot
+    /// link the daemon, matches holder rows' jobs against the process table
+    /// with the same window.
+    public static let defaultHolderIdentityWindow: TimeInterval = HolderChildIdentity.startWindow
 
     /// Children of the server process that are not any live pane's pane_pid.
     /// Structural: no pane references them, so the UI cannot reach them.

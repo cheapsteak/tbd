@@ -138,14 +138,17 @@ struct PeerListTests {
     }
 
     /// Compose against a fleet, with every pid alive and every advertised
-    /// socket present unless the test says otherwise.
+    /// socket present unless the test says otherwise. The process table is
+    /// readable and empty unless a test hands one over, so no record is placed
+    /// by descent and no warning about the table is raised.
     private static func compose(
         scan: PeerRegistryScan,
         fleet: PeerListFleet,
         socketFilesOnDisk: [String] = [],
         deadPIDs: Set<pid_t> = [],
         procStartOverrides: [pid_t: String] = [:],
-        missingSockets: Set<String> = []
+        missingSockets: Set<String> = [],
+        processes: ProcessTableSnapshot? = ProcessTableSnapshot(entries: [:])
     ) -> PeerListResult {
         composePeerListing(
             registryPath: registryPath,
@@ -156,6 +159,7 @@ struct PeerListTests {
                 if deadPIDs.contains(pid) { return nil }
                 return procStartOverrides[pid] ?? liveProcStart
             },
+            processes: processes,
             socketExists: { !missingSockets.contains($0) })
     }
 
@@ -224,11 +228,11 @@ struct PeerListTests {
         #expect(peerBehindColumn(row) == "lane-a · terminal 5A1B2C3D")
     }
 
-    /// A holder-backed session joins its terminal only through the captured
-    /// session id: its record carries no `tmux`, so there is no pane to fall
-    /// back on. Until the `SessionStart` hook records the id, the row lists as
-    /// `external` — what the help text promises — and is never attached to
-    /// whichever holder terminal happens to share its worktree.
+    /// A holder-backed session's record carries no `tmux`, so there is no pane
+    /// to fall back on. With no captured session id and no process tree placing
+    /// it in a tab — the table here is empty — the row lists as `external`, and
+    /// is never attached to whichever holder terminal happens to share its
+    /// worktree: sharing a directory is not descent.
     @Test func holderSessionWithNoCapturedSessionIDListsAsExternal() throws {
         let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
         let terminal = Self.terminal(
@@ -475,7 +479,7 @@ struct PeerListTests {
 
         let row = try #require(result.peers.first)
         #expect(row.kind == .external)
-        #expect(peerBehindColumn(row).contains("not spawned by TBD"))
+        #expect(peerBehindColumn(row).contains("not joined to a TBD tab"))
         // "Every peer TBD can see" is the command's whole claim: a session it
         // did not spawn is still addressable by every session it did.
         #expect(renderPeerListing(result).contains("my-own-claude"))
@@ -806,6 +810,396 @@ struct PeerListTests {
         // The absent ref is absent from the machine surface too, so nothing
         // reads an always-null field as "this peer has no ref".
         #expect(!json.contains("\"ref\""))
+    }
+
+    // MARK: - Holder descent
+
+    /// The moment every holder fixture below says its job was born.
+    private static let jobBorn = Date(timeIntervalSince1970: 1_800_000_000)
+
+    /// A holder-backed terminal: `holderPID` forked `childPID`, the tab's job.
+    /// A shell by default, because the sessions this join exists for are the
+    /// ones TBD did not spawn — a launcher run in a tab, a `claude` typed at a
+    /// shell prompt.
+    private static func holderTerminal(
+        id: UUID = UUID(),
+        worktreeID: UUID,
+        kind: TerminalKind = .shell,
+        holderPID: Int32,
+        childPID: Int32,
+        claudeSessionID: String? = nil,
+        parked: Bool = false
+    ) -> Terminal {
+        Terminal(
+            id: id,
+            worktreeID: worktreeID,
+            tmuxWindowID: "",
+            tmuxPaneID: "",
+            createdAt: jobBorn,
+            claudeSessionID: claudeSessionID,
+            kind: kind,
+            hibernatedAt: parked ? jobBorn : nil,
+            transport: .holder,
+            holderPID: holderPID,
+            childPID: childPID)
+    }
+
+    /// A process table from `pid: parent` pairs, every process born when the
+    /// holder fixtures' jobs were unless `startedAt` says otherwise.
+    private static func table(
+        _ parents: [pid_t: pid_t], startedAt: [pid_t: Date] = [:]
+    ) -> ProcessTableSnapshot {
+        ProcessTableSnapshot(entries: parents.reduce(into: [:]) { table, pair in
+            table[pair.key] = ProcessTableSnapshot.Entry(
+                parent: pair.value, startedAt: startedAt[pair.key] ?? jobBorn)
+        })
+    }
+
+    /// A live record at `pid` whose session id no terminal captured, with no
+    /// pane, in a directory that is not the lane's — so nothing but descent
+    /// could place it.
+    private static func uncapturedEntry(pid: pid_t) throws -> PeerRegistryEntry {
+        PeerRegistryEntry(pid: pid, record: try record(liveSessionFields(
+            sessionID: "S-uncaptured-\(pid)", cwd: "/opt/peertest/elsewhere", name: "by-hand",
+            pane: nil, socket: "/opt/peertest/socks/\(pid).sock")))
+    }
+
+    /// The case this join exists for: a Claude started inside a holder-backed
+    /// shell tab — under the tab's shell, under a launcher — joins that tab,
+    /// with nothing but the process tree to go on. Its working directory is
+    /// deliberately not the lane's, so the join cannot be leaning on it.
+    @Test func aSessionDescendedFromAHolderTabsJobJoinsThatTab() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(worktreeID: worktree.id, holderPID: 9000, childPID: 9001)
+        let processes = Self.table([9000: 1, 9001: 9000, 9002: 9001, 9003: 9002])
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [try Self.uncapturedEntry(pid: 9003)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: processes)
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .local)
+        #expect(row.terminalID == tab.id)
+        #expect(row.worktreeID == worktree.id)
+        #expect(row.joinedBy == .holderDescent)
+        #expect(row.unjoinedReason == nil)
+        #expect(row.tmuxPane == nil)
+        #expect(peerBehindColumn(row).contains("found by process descent"))
+        #expect(!result.warnings.contains { $0.contains("process table") })
+    }
+
+    /// The job itself counts as inside its tab: a Claude-kind holder tab whose
+    /// `SessionStart` has not reported yet runs Claude as the job.
+    @Test func theTabsJobItselfJoinsItsTab() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(
+            worktreeID: worktree.id, kind: .claude, holderPID: 9000, childPID: 9001)
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [try Self.uncapturedEntry(pid: 9001)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: Self.table([9000: 1, 9001: 9000]))
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .local)
+        #expect(row.terminalID == tab.id)
+        #expect(row.joinedBy == .holderDescent)
+    }
+
+    @Test func aSessionNoHolderTabsJobIsAnAncestorOfStaysExternal() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(worktreeID: worktree.id, holderPID: 9000, childPID: 9001)
+        // A plain-terminal `claude`: under a shell no TBD tab started.
+        let processes = Self.table([9000: 1, 9001: 9000, 9500: 1, 9501: 9500])
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [try Self.uncapturedEntry(pid: 9501)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: processes)
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .external)
+        #expect(row.terminalID == nil)
+        #expect(row.joinedBy == nil)
+        #expect(row.unjoinedReason == .noTerminal)
+        #expect(peerBehindColumn(row).contains("not joined to a TBD tab"))
+    }
+
+    /// The captured session id is the join TBD wrote both sides of, so it wins
+    /// even when the process tree points somewhere else.
+    @Test func aCapturedSessionIDBeatsDescent() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let named = Self.holderTerminal(
+            worktreeID: worktree.id, kind: .claude, holderPID: 9100, childPID: 9101,
+            claudeSessionID: "S-named")
+        let around = Self.holderTerminal(worktreeID: worktree.id, holderPID: 9000, childPID: 9001)
+        let processes = Self.table([9000: 1, 9001: 9000, 9100: 1, 9101: 9100, 9002: 9001])
+        let entry = PeerRegistryEntry(pid: 9002, record: try Self.record(Self.liveSessionFields(
+            sessionID: "S-named", cwd: Self.laneAPath, name: "lane-a",
+            pane: nil, socket: "/opt/peertest/socks/9002.sock")))
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [entry]),
+            fleet: PeerListFleet(
+                reachable: true, worktrees: [worktree], terminals: [named, around]),
+            processes: processes)
+
+        let row = try #require(result.peers.first)
+        #expect(row.terminalID == named.id)
+        #expect(row.joinedBy == .sessionID)
+        // Kept, but not silently: the tree says the session runs elsewhere.
+        #expect(result.warnings.contains {
+            $0.contains("joined to terminal \(shortPeerID(named.id))")
+                && $0.contains("inside terminal \(shortPeerID(around.id))")
+        }, "got: \(result.warnings)")
+    }
+
+    /// The ordinary case draws no such warning: a session joined by its id
+    /// that also descends from that same tab's job agrees with itself.
+    @Test func aCapturedJoinTheTreeAgreesWithDrawsNoWarning() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(
+            worktreeID: worktree.id, kind: .claude, holderPID: 9000, childPID: 9001,
+            claudeSessionID: "S-tab")
+        let entry = PeerRegistryEntry(pid: 9001, record: try Self.record(Self.liveSessionFields(
+            sessionID: "S-tab", cwd: Self.laneAPath, name: "lane-a",
+            pane: nil, socket: "/opt/peertest/socks/9001.sock")))
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [entry]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: Self.table([9000: 1, 9001: 9000]))
+
+        #expect(result.peers.first?.joinedBy == .sessionID)
+        #expect(!result.warnings.contains { $0.contains("its process runs inside") })
+    }
+
+    /// A tab whose own session is joined by its captured id is not handed to a
+    /// second session by descent: the second one sits inside the tab, but the
+    /// tab already has its answer.
+    @Test func aSessionInsideATabJoinedBySessionIDStaysExternal() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(
+            worktreeID: worktree.id, kind: .claude, holderPID: 9000, childPID: 9001,
+            claudeSessionID: "S-tab")
+        let processes = Self.table([9000: 1, 9001: 9000, 9002: 9001, 9003: 9002])
+        let own = PeerRegistryEntry(pid: 9001, record: try Self.record(Self.liveSessionFields(
+            sessionID: "S-tab", cwd: Self.laneAPath, name: "lane-a",
+            pane: nil, socket: "/opt/peertest/socks/9001.sock")))
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [own, try Self.uncapturedEntry(pid: 9003)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: processes)
+
+        let joined = try #require(result.peers.first { $0.pid == 9001 })
+        #expect(joined.terminalID == tab.id)
+        #expect(joined.joinedBy == .sessionID)
+        let nested = try #require(result.peers.first { $0.pid == 9003 })
+        #expect(nested.kind == .external)
+        #expect(nested.terminalID == nil)
+        #expect(nested.unjoinedReason == .terminalJoinedBySessionID)
+    }
+
+    /// A Claude tab's identity is the session TBD captured for it. While the
+    /// tab's own record is not listed — starting up, or between a `/clear`
+    /// and its new record — a session its Claude started underneath (a
+    /// `claude -p`) is the only one descent can see, and it must not become
+    /// the tab's identity for want of the real one.
+    @Test func aClaudeTabsCapturedSessionIsItsIdentityEvenWhenUnlisted() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(
+            worktreeID: worktree.id, kind: .claude, holderPID: 9000, childPID: 9001,
+            claudeSessionID: "S-tab")
+        let processes = Self.table([9000: 1, 9001: 9000, 9002: 9001, 9003: 9002])
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [try Self.uncapturedEntry(pid: 9003)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: processes)
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .external)
+        #expect(row.terminalID == nil)
+        #expect(row.unjoinedReason == .terminalCapturedAnotherSession)
+    }
+
+    /// The same shape in a SHELL tab that carries a session id still joins:
+    /// a shell tab has no captured identity, whatever id its row carries, so
+    /// descent is the only answer there is for it.
+    @Test func aShellTabCarryingASessionIDStillJoinsByDescent() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(
+            worktreeID: worktree.id, holderPID: 9000, childPID: 9001,
+            claudeSessionID: "S-stale")
+        let processes = Self.table([9000: 1, 9001: 9000, 9002: 9001, 9003: 9002])
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [try Self.uncapturedEntry(pid: 9003)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: processes)
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .local)
+        #expect(row.terminalID == tab.id)
+        #expect(row.joinedBy == .holderDescent)
+    }
+
+    /// Each way a row stops vouching for its recorded job, and so stops
+    /// anchoring the walk: parked, its holder gone, its job no longer the
+    /// holder's child, or its job born outside the identity window — the last
+    /// two are what a reused pid looks like.
+    @Test(arguments: ["parked", "holder dead", "job reparented", "job too young"])
+    func aRowThatNoLongerVouchesForItsJobNeverJoins(state: String) throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(
+            worktreeID: worktree.id, holderPID: 9000, childPID: 9001,
+            parked: state == "parked")
+        var parents: [pid_t: pid_t] = [9000: 1, 9001: 9000, 9002: 9001]
+        var startedAt: [pid_t: Date] = [:]
+        switch state {
+        case "holder dead":
+            parents[9000] = nil
+            parents[9001] = 1
+        case "job reparented":
+            parents[9001] = 1
+        case "job too young":
+            startedAt[9001] = Self.jobBorn.addingTimeInterval(
+                HolderChildIdentity.startWindow + 60)
+        default:
+            break
+        }
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [try Self.uncapturedEntry(pid: 9002)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: Self.table(parents, startedAt: startedAt))
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .external, "a \(state) row joined a session")
+        #expect(row.terminalID == nil)
+        #expect(row.unjoinedReason == .noTerminal)
+    }
+
+    /// Two sessions inside one tab: the one nearer the tab's job answers for
+    /// the tab — here the outer session, with the second started under it —
+    /// and the other stays `external`, saying why.
+    @Test func ofTwoSessionsInOneTabTheNearerJoins() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(worktreeID: worktree.id, holderPID: 9000, childPID: 9001)
+        let processes = Self.table([9000: 1, 9001: 9000, 9002: 9001, 9003: 9002, 9004: 9003])
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [
+                try Self.uncapturedEntry(pid: 9002), try Self.uncapturedEntry(pid: 9004),
+            ]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: processes)
+
+        let outer = try #require(result.peers.first { $0.pid == 9002 })
+        #expect(outer.kind == .local)
+        #expect(outer.terminalID == tab.id)
+        let inner = try #require(result.peers.first { $0.pid == 9004 })
+        #expect(inner.kind == .external)
+        #expect(inner.terminalID == nil)
+        #expect(inner.unjoinedReason == .nearerSessionInTerminal)
+        #expect(peerBehindColumn(inner).contains("below a nearer session"))
+        // The lead names the missing join, not where the session came from: a
+        // session inside a TBD tab cannot also read as one TBD never touched.
+        #expect(peerBehindColumn(inner).hasPrefix("not joined to a TBD tab · inside a TBD tab"))
+    }
+
+    /// Two sessions equally near one tab's job — siblings under its shell —
+    /// cannot be told apart from the process tree, so neither is named the
+    /// tab's.
+    @Test func twoSessionsEquallyNearOneTabsJobNeitherJoins() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(worktreeID: worktree.id, holderPID: 9000, childPID: 9001)
+        let processes = Self.table([9000: 1, 9001: 9000, 9002: 9001, 9003: 9001])
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [
+                try Self.uncapturedEntry(pid: 9002), try Self.uncapturedEntry(pid: 9003),
+            ]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: processes)
+
+        #expect(result.peers.count == 2)
+        for row in result.peers {
+            #expect(row.kind == .external)
+            #expect(row.terminalID == nil)
+            #expect(row.unjoinedReason == .tiedInTerminal)
+        }
+    }
+
+    /// The tmux transport's joins are untouched by a process table in hand: a
+    /// pane still joins its tmux terminal, by pane.
+    @Test func aTmuxSessionStillJoinsByPaneWithAProcessTableInHand() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let terminal = Self.terminal(worktreeID: worktree.id, pane: "%77")
+        let entry = PeerRegistryEntry(pid: 4002, record: try Self.record(Self.liveSessionFields(
+            cwd: Self.laneAPath, name: "lane-a", pane: "%77",
+            socket: "/opt/peertest/socks/4002.sock")))
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [entry]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [terminal]),
+            processes: Self.table([4001: 1, 4002: 4001]))
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .local)
+        #expect(row.terminalID == terminal.id)
+        #expect(row.joinedBy == .tmuxPane)
+        #expect(row.tmuxPane == "%77")
+    }
+
+    /// No process table, no descent — and the listing says so, rather than
+    /// letting a holder session's `external` read as a fact about it.
+    @Test func anUnreadableProcessTableLeavesHolderSessionsExternalAndSaysWhy() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(worktreeID: worktree.id, holderPID: 9000, childPID: 9001)
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [try Self.uncapturedEntry(pid: 9002)]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: nil)
+
+        let row = try #require(result.peers.first)
+        #expect(row.kind == .external)
+        #expect(row.unjoinedReason == .processTableUnreadable)
+        #expect(result.warnings.contains { $0.contains("process table could not be read") })
+    }
+
+    /// The two new fields are additive: present when they say something,
+    /// absent otherwise, and every field a program already reads is unchanged.
+    @Test func jsonCarriesHowARowWasJoinedAndWhyOneWasNot() throws {
+        let worktree = Self.worktree(displayName: "lane-a", path: Self.laneAPath)
+        let tab = Self.holderTerminal(worktreeID: worktree.id, holderPID: 9000, childPID: 9001)
+        let processes = Self.table([9000: 1, 9001: 9000, 9002: 9001, 9500: 1])
+
+        let result = Self.compose(
+            scan: PeerRegistryScan(entries: [
+                try Self.uncapturedEntry(pid: 9002), try Self.uncapturedEntry(pid: 9500),
+            ]),
+            fleet: PeerListFleet(reachable: true, worktrees: [worktree], terminals: [tab]),
+            processes: processes)
+
+        let json = try #require(jsonString(result))
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let peers = try #require(object["peers"] as? [[String: Any]])
+        let joined = try #require(peers.first { ($0["pid"] as? Int) == 9002 })
+        #expect(joined["kind"] as? String == "local")
+        #expect(joined["terminalID"] as? String == tab.id.uuidString)
+        #expect(joined["worktreeID"] as? String == worktree.id.uuidString)
+        #expect(joined["joinedBy"] as? String == "holderDescent")
+        #expect(joined["unjoinedReason"] == nil)
+        let outside = try #require(peers.first { ($0["pid"] as? Int) == 9500 })
+        #expect(outside["kind"] as? String == "external")
+        #expect(outside["terminalID"] == nil)
+        #expect(outside["joinedBy"] == nil)
+        #expect(outside["unjoinedReason"] as? String == "noTerminal")
     }
 
     // MARK: - Registry I/O

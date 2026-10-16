@@ -1776,7 +1776,7 @@ public final class Daemon: Sendable {
                         // to reclaim would survive every sweep. NULL means the
                         // row has never been parked, and there the two are the
                         // same instant.
-                        createdAt: terminal.holderChildStartedAt ?? terminal.createdAt)
+                        createdAt: HolderChildIdentity.anchor(of: terminal))
                 }
             }
             let reaper = AgentReaper(

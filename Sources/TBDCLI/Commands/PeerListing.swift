@@ -201,14 +201,17 @@ struct PeerListFleet: Equatable, Sendable {
 /// as `external` would state a fact ("TBD did not spawn this") that nothing
 /// checked.
 enum PeerRowKind: String, Encodable, Sendable {
-    /// A session TBD spawned, joined to the worktree and terminal behind it.
+    /// A session joined to the TBD worktree and terminal behind it: one TBD
+    /// spawned, or one started inside a TBD tab. `PeerRow.joinedBy` says which
+    /// join answered.
     case local
     /// A shadow peer standing in for a session on another machine.
     case shadow
-    /// A peer on this machine TBD did not spawn: a plain-terminal `claude`, a
-    /// session on a profile TBD does not manage, or any other user of this
-    /// shared directory. Listed, because the command lists every peer TBD can
-    /// see and these are peers every local session can address.
+    /// A peer on this machine no join placed in a TBD terminal: a
+    /// plain-terminal `claude`, a session on a profile TBD does not manage, or
+    /// any other user of this shared directory. Listed, because the command
+    /// lists every peer TBD can see and these are peers every local session can
+    /// address. `PeerRow.unjoinedReason` says why nothing joined it.
     case external
     /// The daemon did not answer, so this row was joined against nothing.
     case unattributed
@@ -224,6 +227,54 @@ enum PeerRowKind: String, Encodable, Sendable {
         case .unattributed: return 3
         }
     }
+}
+
+/// Which join placed a row, so a program can tell a session TBD captured from
+/// one this listing found by descent. Additive to the JSON contract.
+enum PeerJoinMethod: String, Encodable, Sendable {
+    /// The Claude session id TBD captured at `SessionStart` names the
+    /// terminal. The strongest join, because TBD wrote both sides of it.
+    case sessionID
+    /// The pane in the record's `tmux` field, paired with its working
+    /// directory, names a tmux-transport terminal.
+    case tmuxPane
+    /// The process descends from a live holder-backed terminal's job — the
+    /// shell, launcher or agent that terminal's holder started
+    /// (`HolderDescentIndex`).
+    case holderDescent
+    /// TBD's own shadow-peer ledger files a live shadow under the record's
+    /// pid.
+    case shadowLedger
+}
+
+/// Why an `external` row joined no terminal. Additive to the JSON contract.
+///
+/// Every value names something an operator can check, because "external" on
+/// its own cannot say whether a session is outside TBD or inside a TBD tab
+/// that another session already answers for.
+enum PeerUnjoinedReason: String, Encodable, Sendable {
+    /// No captured session id names it, no tmux pane matches it, and it
+    /// descends from no live holder-backed terminal's job.
+    case noTerminal
+    /// The process table could not be read, so descent was not checked.
+    case processTableUnreadable
+    /// It runs inside a holder-backed terminal whose session is already
+    /// joined by its captured session id.
+    case terminalJoinedBySessionID
+    /// It runs inside a Claude tab whose captured session is a different one.
+    /// Usually a session the tab's Claude started (a `claude -p`), listed
+    /// while the tab's own session is not. It is also the tab's own Claude
+    /// when TBD's record of that session is stale, until the next
+    /// `SessionStart` records the current one.
+    case terminalCapturedAnotherSession
+    /// It runs inside a holder-backed terminal where another session sits
+    /// nearer the terminal's job. That one answers for the terminal unless it
+    /// is itself tied, in which case nothing does.
+    case nearerSessionInTerminal
+    /// It runs inside a holder-backed terminal alongside another session
+    /// exactly as near the terminal's job, so neither can be called the
+    /// terminal's.
+    case tiedInTerminal
 }
 
 /// One peer row.
@@ -274,6 +325,12 @@ struct PeerRow: Encodable, Equatable, Sendable {
     /// claims, which may belong to a tmux server TBD does not run, so a
     /// non-nil value is not evidence of a TBD terminal.
     let tmuxPane: String?
+    /// Which join placed a `local` or `shadow` row. Nil on every other row.
+    let joinedBy: PeerJoinMethod?
+    /// Why an `external` row joined nothing. Nil on every other row: an
+    /// `unattributed` row's reason is the warning that the daemon did not
+    /// answer.
+    let unjoinedReason: PeerUnjoinedReason?
 
     // Shadow rows: the provider session behind the shadow, and the link state.
     let provider: String?
@@ -384,6 +441,9 @@ struct PeerListResult: Encodable, Equatable, Sendable {
 ///   - procStartForPID: liveness. Returns the kernel's start time for a live
 ///     pid and nil for a dead one, which is both halves of the recycled-pid
 ///     check in one call.
+///   - processes: one read of the process table, which the holder-descent
+///     join walks; nil when it could not be read, which leaves that join out
+///     and says so.
 ///   - socketExists: whether the path a record advertises is on disk.
 func composePeerListing(
     registryPath: String,
@@ -391,6 +451,7 @@ func composePeerListing(
     fleet: PeerListFleet,
     socketFilesOnDisk: [String] = [],
     procStartForPID: (pid_t) -> String?,
+    processes: ProcessTableSnapshot?,
     socketExists: (String) -> Bool
 ) -> PeerListResult {
     var peers: [PeerRow] = []
@@ -403,8 +464,9 @@ func composePeerListing(
             detail: "the record did not read or decode"))
     }
 
-    let index = PeerFleetIndex(fleet: fleet)
+    let index = PeerFleetIndex(fleet: fleet, processes: processes)
 
+    var live: [PeerRegistryEntry] = []
     for entry in scan.entries.sorted(by: { $0.pid < $1.pid }) {
         guard let liveProcStart = procStartForPID(entry.pid) else {
             orphans.append(PeerOrphan(
@@ -423,7 +485,17 @@ func composePeerListing(
                     """))
             continue
         }
-        peers.append(index.row(for: entry, socketExists: socketExists))
+        live.append(entry)
+    }
+
+    // Joined across the whole listing rather than one record at a time: which
+    // of two sessions inside one holder-backed terminal answers for it is a
+    // question about both of them.
+    let joins = index.joins(for: live)
+    for entry in live {
+        peers.append(index.row(
+            for: entry, join: joins.answers[entry.pid] ?? .unattributed,
+            socketExists: socketExists))
     }
 
     // Both sides go through the same lexical normalisation. A directory
@@ -454,7 +526,8 @@ func composePeerListing(
         registryPath: registryPath,
         peers: peers,
         orphans: orphans,
-        warnings: peerListingWarnings(scan: scan, fleet: fleet),
+        warnings: peerListingWarnings(scan: scan, fleet: fleet, processes: processes)
+            + joins.disagreements.map(\.warning),
         peerMessagingRepos: fleet.bridge?.repos,
         lastSweep: fleet.bridge?.lastSweep)
 }
@@ -492,6 +565,51 @@ private struct PeerFleetIndex {
     /// session into. An identity join on the key TBD itself stored, never a
     /// join on a composed name.
     private let remoteWorktreesByProviderSession: [ProviderSessionKey: Worktree]
+    private let terminalsByID: [UUID: Terminal]
+    /// The holder-descent join, or nil when the process table could not be
+    /// read. Built once per listing from one snapshot: `tbd peer list` runs on
+    /// a loop for some callers, and a kernel read per record would make the
+    /// listing's cost grow with the fleet.
+    private let descent: HolderDescentIndex?
+
+    /// What one record turned out to be, before it is rendered as a row.
+    enum Join: Equatable {
+        case unattributed
+        case shadow(PeerShadowArtifactRow)
+        case local(Terminal, PeerJoinMethod)
+        case external(PeerUnjoinedReason)
+    }
+
+    /// A join TBD recorded that the process tree contradicts: the record's
+    /// captured id (or pane) names one terminal, while its process runs
+    /// inside another holder tab's job.
+    ///
+    /// The recorded join is kept — that precedence is the design, because
+    /// TBD wrote both sides of it — but a consumer that takes this join as a
+    /// tab's identity is owed the disagreement out loud. A stale session id
+    /// left on one tab's row while the conversation runs on in another is
+    /// the shape that produces it.
+    struct Disagreement: Equatable {
+        let pid: pid_t
+        let joinedTerminalID: UUID
+        let method: PeerJoinMethod
+        let insideTerminalID: UUID
+
+        var warning: String {
+            let how = method == .sessionID ? "its captured session id" : "its tmux pane"
+            return """
+                peer pid \(pid) is joined to terminal \(shortPeerID(joinedTerminalID)) by \
+                \(how), but its process runs inside terminal \(shortPeerID(insideTerminalID)). \
+                The recorded join is kept; one of the two rows names a session it is not running.
+                """
+        }
+    }
+
+    /// Every live record's join, and the recorded joins descent contradicts.
+    struct Joins {
+        var answers: [pid_t: Join] = [:]
+        var disagreements: [Disagreement] = []
+    }
 
     private struct PaneKey: Hashable {
         let worktreeID: UUID
@@ -503,8 +621,13 @@ private struct PeerFleetIndex {
         let sessionID: String
     }
 
-    init(fleet: PeerListFleet) {
+    init(fleet: PeerListFleet, processes: ProcessTableSnapshot?) {
         self.reachable = fleet.reachable
+        self.terminalsByID = Dictionary(
+            fleet.terminals.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        self.descent = processes.map {
+            HolderDescentIndex(terminals: fleet.terminals, processes: $0)
+        }
 
         var bySessionID: [String: Terminal] = [:]
         var byWorktreeAndPane: [PaneKey: Terminal] = [:]
@@ -550,7 +673,101 @@ private struct PeerFleetIndex {
         self.linkStateByProvider = linkStates
     }
 
-    func row(for entry: PeerRegistryEntry, socketExists: (String) -> Bool) -> PeerRow {
+    /// Every live record's join, decided over the whole listing.
+    ///
+    /// **The order is the precedence, and it is fixed:**
+    ///   1. The shadow ledger — the only thing that can recognise a shadow,
+    ///      whose record is indistinguishable from any other session's by
+    ///      construction (TBD may put no marker inside one). Only rows a live
+    ///      link still publishes are in that index, so a pid matched here is
+    ///      one the daemon vouches for right now; a record at a not-live row's
+    ///      pid falls through and lists as whatever it actually is.
+    ///   2. The joins TBD recorded itself — the captured session id, then the
+    ///      tmux pane paired with the working directory (`capturedJoin`).
+    ///   3. Descent from a live holder-backed terminal's job, for what is
+    ///      left. A session the first two placed is never moved by this one,
+    ///      a terminal one of them already answers for is never handed to a
+    ///      second session by descent, and neither is a Claude tab whose
+    ///      session TBD has captured — that capture is its identity.
+    ///
+    /// Within one terminal, descent picks the session nearest the terminal's
+    /// job and leaves the rest `external`. A tie names no one: two sessions
+    /// equally near a tab's job — siblings under its shell — cannot be told
+    /// apart from the process tree, and a consumer that takes this join as the
+    /// tab's identity must not be handed a coin flip.
+    func joins(for entries: [PeerRegistryEntry]) -> Joins {
+        var answers: [pid_t: Join] = [:]
+        var disagreements: [Disagreement] = []
+        guard reachable else {
+            for entry in entries { answers[entry.pid] = .unattributed }
+            return Joins(answers: answers)
+        }
+
+        var heldBySessionID: Set<UUID> = []
+        var candidates: [(pid: pid_t, descent: HolderDescentIndex.Descent)] = []
+        for entry in entries {
+            if let row = shadowRowsByPID[entry.pid] {
+                answers[entry.pid] = .shadow(row)
+            } else if let (terminal, method) = capturedJoin(for: entry.record) {
+                answers[entry.pid] = .local(terminal, method)
+                if method == .sessionID { heldBySessionID.insert(terminal.id) }
+                if let inside = descent?.descent(of: entry.pid),
+                   inside.terminalID != terminal.id {
+                    disagreements.append(Disagreement(
+                        pid: entry.pid, joinedTerminalID: terminal.id, method: method,
+                        insideTerminalID: inside.terminalID))
+                }
+            } else if let descent {
+                if let found = descent.descent(of: entry.pid) {
+                    candidates.append((entry.pid, found))
+                } else {
+                    answers[entry.pid] = .external(.noTerminal)
+                }
+            } else {
+                answers[entry.pid] = .external(.processTableUnreadable)
+            }
+        }
+
+        for (terminalID, inTerminal) in Dictionary(grouping: candidates, by: \.descent.terminalID) {
+            // The second half is unreachable — the descent index is built from
+            // these same rows — and fails closed if that ever stops being so.
+            guard !heldBySessionID.contains(terminalID),
+                  let terminal = terminalsByID[terminalID] else {
+                let reason: PeerUnjoinedReason = heldBySessionID.contains(terminalID)
+                    ? .terminalJoinedBySessionID : .noTerminal
+                for candidate in inTerminal { answers[candidate.pid] = .external(reason) }
+                continue
+            }
+            // A Claude tab's identity is the session TBD captured for it, so
+            // descent stands in only until that capture. Past it, a session
+            // under the tab that is not the captured one — a `claude -p` the
+            // tab's Claude started, listed while the tab's own record is not —
+            // is not the tab's. A shell tab has no such identity, whatever id
+            // its row carries, so descent still answers for it.
+            if terminal.claudeResumeDecision.resumableSessionID != nil {
+                for candidate in inTerminal {
+                    answers[candidate.pid] = .external(.terminalCapturedAnotherSession)
+                }
+                continue
+            }
+            let nearest = inTerminal.map(\.descent.depth).min() ?? 0
+            let tied = inTerminal.filter { $0.descent.depth == nearest }.count > 1
+            for candidate in inTerminal {
+                if candidate.descent.depth > nearest {
+                    answers[candidate.pid] = .external(.nearerSessionInTerminal)
+                } else if tied {
+                    answers[candidate.pid] = .external(.tiedInTerminal)
+                } else {
+                    answers[candidate.pid] = .local(terminal, .holderDescent)
+                }
+            }
+        }
+        return Joins(answers: answers, disagreements: disagreements)
+    }
+
+    func row(
+        for entry: PeerRegistryEntry, join: Join, socketExists: (String) -> Bool
+    ) -> PeerRow {
         let record = entry.record
         let socketPath = nonEmptyPeerField(record.messagingSocketPath)
 
@@ -560,34 +777,30 @@ private struct PeerFleetIndex {
         var provider: String?
         var providerSessionID: String?
         var linkState: String?
+        var joinedBy: PeerJoinMethod?
+        var unjoinedReason: PeerUnjoinedReason?
 
-        if reachable {
-            // **The ledger is asked first**, and it is the only thing that can
-            // answer. A shadow's record is indistinguishable from any other
-            // session's by construction — TBD may put no marker inside one —
-            // so recognition comes from TBD's own durable bookkeeping, keyed on
-            // the pid the record's filename already names.
-            //
-            // Only rows a live link still publishes are in that index, so a pid
-            // matched here is one the daemon vouches for right now. A record
-            // sitting at a not-live row's pid falls through to the local join
-            // below and lists as whatever it actually is.
-            if let row = shadowRowsByPID[entry.pid] {
-                kind = .shadow
-                provider = row.provider
-                providerSessionID = row.remoteSessionID
-                linkState = linkStateByProvider[row.provider] ?? PeerRow.unknownLinkState
-                if let sessionID = row.remoteSessionID {
-                    worktree = remoteWorktreesByProviderSession[ProviderSessionKey(
-                        provider: row.provider, sessionID: sessionID)]
-                }
-            } else if let joined = localTerminal(for: record) {
-                kind = .local
-                terminal = joined
-                worktree = worktreesByID[joined.worktreeID]
-            } else {
-                kind = .external
+        switch join {
+        case .unattributed:
+            break
+        case .shadow(let row):
+            kind = .shadow
+            joinedBy = .shadowLedger
+            provider = row.provider
+            providerSessionID = row.remoteSessionID
+            linkState = linkStateByProvider[row.provider] ?? PeerRow.unknownLinkState
+            if let sessionID = row.remoteSessionID {
+                worktree = remoteWorktreesByProviderSession[ProviderSessionKey(
+                    provider: row.provider, sessionID: sessionID)]
             }
+        case .local(let joined, let method):
+            kind = .local
+            joinedBy = method
+            terminal = joined
+            worktree = worktreesByID[joined.worktreeID]
+        case .external(let reason):
+            kind = .external
+            unjoinedReason = reason
         }
 
         // Set for a shadow as well as for a local row: a shadow was sited into
@@ -631,35 +844,48 @@ private struct PeerFleetIndex {
             worktreeDisplayName: worktreeDisplayName,
             terminalID: terminal?.id,
             tmuxPane: pane,
+            joinedBy: joinedBy,
+            unjoinedReason: unjoinedReason,
             provider: provider,
             providerSessionID: providerSessionID,
             linkState: linkState)
     }
 
-    /// The local join, in the same two steps and the same order the roster
-    /// admits on: the session id TBD captured through its `SessionStart` hook,
-    /// then the worktree directory paired with the terminal's pane.
+    /// The joins TBD recorded itself, in the same two steps and the same order
+    /// the roster admits on: the session id TBD captured through its
+    /// `SessionStart` hook, then the worktree directory paired with the
+    /// terminal's pane.
     ///
-    /// Both fail closed. A TBD session whose hook never fired and whose
-    /// worktree row has moved on lists as `external`, which understates what
-    /// TBD knows rather than inventing a terminal for it.
-    private func localTerminal(for record: PeerRegistryRecord) -> Terminal? {
+    /// Both fail closed. What neither places falls to the holder-descent join,
+    /// which reaches only holder-backed terminals; a tmux session whose hook
+    /// never fired and whose worktree row has moved on still lists as
+    /// `external`, which understates what TBD knows rather than inventing a
+    /// terminal for it.
+    private func capturedJoin(for record: PeerRegistryRecord) -> (Terminal, PeerJoinMethod)? {
         if let sessionID = nonEmptyPeerField(record.sessionID),
            let terminal = terminalsBySessionID[sessionID] {
-            return terminal
+            return (terminal, .sessionID)
         }
         guard let cwd = nonEmptyPeerField(record.cwd), let pane = record.tmuxPaneID,
-              let worktree = worktreesByPath[PeerJoinKeys.normalizedPath(cwd)]
+              let worktree = worktreesByPath[PeerJoinKeys.normalizedPath(cwd)],
+              let terminal = terminalsByWorktreeAndPane[PaneKey(worktreeID: worktree.id, pane: pane)]
         else { return nil }
-        return terminalsByWorktreeAndPane[PaneKey(worktreeID: worktree.id, pane: pane)]
+        return (terminal, .tmuxPane)
     }
 }
 
 /// Everything the listing could not establish, said out loud.
 private func peerListingWarnings(
-    scan: PeerRegistryScan, fleet: PeerListFleet
+    scan: PeerRegistryScan, fleet: PeerListFleet, processes: ProcessTableSnapshot?
 ) -> [String] {
     var warnings: [String] = []
+    if fleet.reachable, processes == nil {
+        warnings.append("""
+            the process table could not be read, so no session was joined to a \
+            holder-backed terminal by descent. A session in such a tab whose session \
+            id TBD has not captured lists as external.
+            """)
+    }
     if scan.directoryUnreadable {
         warnings.append("""
             the peer registry directory could not be read, so no peer is listed. \
@@ -862,11 +1088,15 @@ func peerBehindColumn(_ peer: PeerRow) -> String {
             parts.append("terminal \(shortPeerID(terminalID))")
         }
         if let pane = peer.tmuxPane { parts.append("tmux \(pane)") }
+        // Named only for the join TBD did not record itself, so a person
+        // reading the table can tell a found session from a captured one.
+        if peer.joinedBy == .holderDescent { parts.append("found by process descent") }
     case .shadow:
         parts.append("\(peer.provider ?? "remote") session \(peer.providerSessionID ?? "(unknown)")")
         parts.append("link \(peer.linkState ?? PeerRow.unknownLinkState)")
     case .external:
-        parts.append("not spawned by TBD")
+        parts.append("not joined to a TBD tab")
+        if let detail = peerUnjoinedDetail(peer.unjoinedReason) { parts.append(detail) }
         if let cwd = peer.cwd { parts.append(abbreviatedPeerPath(cwd)) }
     case .unattributed:
         parts.append("not joined")
@@ -876,6 +1106,19 @@ func peerBehindColumn(_ peer: PeerRow) -> String {
         parts.append("socket missing")
     }
     return parts.joined(separator: " · ")
+}
+
+/// What an `external` row's BEHIND column adds about why nothing joined it, or
+/// nil when "not joined to a TBD tab" already says all there is.
+func peerUnjoinedDetail(_ reason: PeerUnjoinedReason?) -> String? {
+    switch reason {
+    case .noTerminal, nil: return nil
+    case .processTableUnreadable: return "descent not checked"
+    case .terminalJoinedBySessionID: return "inside a TBD tab whose own session is joined"
+    case .terminalCapturedAnotherSession: return "inside a Claude tab that TBD records under a different session"
+    case .nearerSessionInTerminal: return "inside a TBD tab, below a nearer session"
+    case .tiedInTerminal: return "inside a TBD tab, tied with another session"
+    }
 }
 
 /// The first eight characters of a terminal id — enough to name a row in a

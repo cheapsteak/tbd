@@ -1722,6 +1722,78 @@ struct ModelProfileSpawnTests {
         return try #require(try await db.terminals.get(id: created.id))
     }
 
+    // MARK: - A tab joined by descent is still the kind of tab it is
+
+    /// The holder-descent join (`HolderDescentIndex`, which `tbd peer list`
+    /// walks) places a Claude started inside a SHELL tab in that tab. That is a
+    /// view: it writes nothing onto the row, and the row stays a shell tab to
+    /// every path that decides whether to resume one. So the tab the join
+    /// names is still refused by a swap, and a wake of it resumes nothing —
+    /// including in the worst case, where something else has put a session id
+    /// on the row.
+    @Test("a shell tab joined by descent is still refused by swap and not resumed by wake")
+    func shellTabJoinedByDescentIsStillRefusedBySwapAndWake() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let target = try await seedOAuthProfile(db, name: "B")
+        let tab = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.shell, kind: .shell,
+            transport: .holder, holderPID: 9000, childPID: 9001)
+        // holder → the tab's shell → a launcher → the Claude it started.
+        let processes = ProcessTableSnapshot(entries: [
+            9000: .init(parent: 1, startedAt: tab.createdAt),
+            9001: .init(parent: 9000, startedAt: tab.createdAt),
+            9002: .init(parent: 9001, startedAt: tab.createdAt),
+            9003: .init(parent: 9002, startedAt: tab.createdAt),
+        ])
+        func joinedTab() async throws -> UUID? {
+            HolderDescentIndex(
+                terminals: try await db.terminals.list(), processes: processes
+            ).descent(of: 9003)?.terminalID
+        }
+
+        #expect(try await joinedTab() == tab.id, "the join did not place the Claude in its tab")
+        let afterJoin = try #require(try await db.terminals.get(id: tab.id))
+        #expect(afterJoin.claudeSessionID == nil, "the join wrote a session id onto the row")
+        #expect(afterJoin.kind == .shell)
+
+        let callsBefore = recorder.calls.count
+        let plainSwap = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: tab.id, newProfileID: target.id)))
+        #expect(!plainSwap.success, "a joined shell tab was swapped")
+
+        // The worst case: a session id on the shell row all the same.
+        try await db.terminals.updateSession(
+            id: tab.id, sessionID: "by-hand", transcriptPath: nil)
+        #expect(try await joinedTab() == tab.id)
+        let swap = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: tab.id, newProfileID: target.id)))
+        #expect(!swap.success, "a joined shell tab carrying a session id was swapped")
+        #expect(swap.error?.contains("shell") == true, "got: \(swap.error ?? "nil")")
+
+        try await db.terminals.setHibernated(id: tab.id, sessionID: "by-hand", reason: .exited)
+        let wake = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: tab.id)))
+        #expect(!wake.success, "a joined shell tab was woken as a Claude session")
+        #expect(wake.error?.contains("shell") == true, "got: \(wake.error ?? "nil")")
+
+        let after = try #require(try await db.terminals.get(id: tab.id))
+        #expect(after.isParked, "the refused wake un-parked the row")
+        #expect(after.profileID == nil, "a refused swap re-homed the row")
+        #expect(after.holderPID == nil || after.holderPID == 9000,
+                "the refused wake recorded a new holder")
+        #expect(after.pendingSessionIncarnationID == nil,
+                "the refused wake reserved a replacement launch")
+        #expect(!recorder.calls.dropFirst(callsBefore)
+            .map { $0.joined(separator: " ") }.joined().contains("claude"),
+                "something was spawned")
+    }
+
     // MARK: - Swap: unknown token id
 
     @Test("swap: unknown token id returns error")
