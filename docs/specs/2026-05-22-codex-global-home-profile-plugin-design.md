@@ -26,9 +26,11 @@ inside TBD sessions.
 - Use the user's real `~/.codex` as `CODEX_HOME` for TBD-launched Codex.
 - Preserve normal Codex behavior outside TBD.
 - Activate TBD-specific Codex integration only for TBD launches.
-- Avoid `--dangerously-bypass-hook-trust`, because it trusts all enabled
-  unmanaged hooks in the session.
-- Keep TBD's hook trust scoped to TBD's own plugin hooks.
+- Run every enabled hook in a TBD-launched session (TBD's plugin hooks, the
+  repository's project hooks, the user's own) with no interactive trust step,
+  so a session never waits on a review screen nobody is watching.
+- Persist no hook trust on TBD's behalf, so a plain `codex` launch keeps
+  Codex's normal trust behavior.
 - Leave room for users to keep their normal Codex config, plugins, auth, and
   profile choices.
 
@@ -36,7 +38,7 @@ inside TBD sessions.
 
 - Reimplement Codex plugin loading.
 - Write TBD-specific hooks into the user's base `~/.codex/config.toml`.
-- Trust all user/plugin hooks globally.
+- Have TBD mark any hook trusted in the user's Codex config, base or profile.
 - Continue maintaining per-repo isolated Codex homes as the primary launch mode.
 
 ## Upstream Codex facts
@@ -93,9 +95,15 @@ The profile overlay file is therefore the right activation point.
 unmanaged hooks runnable, including all plugin hooks. It is not scoped to one
 plugin.
 
+The bypass lasts for that one invocation and writes nothing. It skips only
+the trust check: a hook whose state is `enabled = false` stays off. The flag
+exists from Codex 0.131, and the TUI honors it at startup (no review screen)
+from 0.135.
+
 Codex hook state supports per-hook `trusted_hash` entries. Plugin hook keys
-include plugin/source identity, so Codex can persist trust for the TBD plugin
-without trusting unrelated user hooks or other plugins.
+include plugin/source identity, so Codex could persist trust for the TBD plugin
+alone, without trusting unrelated user hooks or other plugins. TBD does not rely
+on persisted trust (see Hook trust flow).
 
 ## Design
 
@@ -130,12 +138,10 @@ The minimal profile enables the TBD plugin:
 enabled = true
 ```
 
-It may also contain hook state entries for the TBD plugin hooks:
-
-```toml
-[hooks.state."<hook-key>"]
-trusted_hash = "sha256:..."
-```
+TBD writes no `[hooks.state]` entries. Codex writes them there itself when
+someone trusts a hook or switches one off inside a TBD session, because a
+`--profile tbd` session saves hook state to this file. An `enabled = false`
+saved that way holds for every later TBD launch.
 
 TBD may choose to make `~/.codex/tbd.config.toml` a symlink to a file under
 `~/tbd/agents/codex/tbd.config.toml`, but Codex must see it as the profile
@@ -172,54 +178,40 @@ The plugin contains:
 
 ### Hook trust flow
 
-Do not launch with `--dangerously-bypass-hook-trust`.
+TBD launches Codex with `--dangerously-bypass-hook-trust`, next to
+`--dangerously-bypass-approvals-and-sandbox`, and writes no hook trust entries.
 
-TBD does **not** write hook trust entries itself. The trust state is persisted
-by Codex into the `tbd` profile when the user trusts TBD's hooks once, through
-Codex's own hook-review UI.
+The two flags belong together. A TBD session already runs any command without
+approval and outside the sandbox, so a hook can do nothing the session's agent
+could not do on its own; per-hook trust adds no protection inside that session.
+What it does add is a stop. An untrusted hook (TBD's own on a new machine or
+after TBD changes a hook command, or any project hook in a repository's
+`.codex/hooks.json`, re-keyed whenever the repository edits it) gives a TBD
+session one of two outcomes:
 
-Why TBD cannot write trust into the profile programmatically:
-
-- `config/batchWrite` (the RPC Codex's TUI uses to persist `[hooks.state]`)
-  writes to whatever `LoaderOverrides.user_config_path` resolves to at
-  app-server startup. An explicit `file_path` argument is rejected unless it
-  equals that already-allowed path (`ConfigLayerReadonly` otherwise).
-- The in-process TUI sets that override to `<profile>.config.toml` when launched
-  with `--profile`, so trust written *inside* a `codex --profile tbd` session
-  lands in `tbd.config.toml`.
-- The standalone `codex app-server` binary exposes no `--profile` flag and the
-  app-server protocol carries no per-connection profile selection, so a
-  side-channel app-server TBD might spawn to pre-trust hooks would write to base
-  `~/.codex/config.toml` — which violates the non-goal of keeping TBD state out
-  of base config.
+- The session opens on Codex's startup hook-review screen and waits there.
+  TBD's initial prompt and any message typed into the terminal land on that
+  screen instead of reaching the agent, and a session nobody is watching
+  stays parked.
+- Someone continues without trusting, and the hook silently never runs. For a
+  repository whose project hook is a guardrail (a check before each tool
+  call), the session then runs without it.
 
 So the trust flow is:
 
 1. Ensure the TBD plugin is installed in the Codex plugin cache.
 2. Ensure `~/.codex/tbd.config.toml` enables `tbd@tbd`.
-3. On the first TBD-launched Codex session, Codex surfaces TBD's plugin hooks as
-   untrusted. The user trusts them once via Codex's hook-review UI.
-4. Codex persists `trusted_hash` entries under `[hooks.state]` in
-   `tbd.config.toml` (because the `--profile tbd` session's
-   `user_config_path` override points there).
+3. Launch with `--profile tbd` and both bypass flags. Every enabled hook runs
+   from the first session on, with no prompt and nothing persisted.
 
-This is **machine-global after trust**: plugin hook keys carry no `cwd`,
-session, tab, or worktree dimension, so a single trust applies to every
-TBD-launched Codex session on the machine while the hook identity and command
-hash are unchanged. It scopes trust to the TBD plugin — other user hooks and
-other plugin hooks remain subject to normal Codex trust behavior.
+A user who wants a hook off inside TBD switches it off (`enabled = false` in
+`tbd.config.toml`, or Codex's hooks browser in a TBD session), and the bypass
+leaves it off.
 
-The one re-prompt trigger: if TBD changes a plugin hook's command string, its
-`current_hash` changes, the stored `trusted_hash` no longer matches, and Codex
-flips the hook to `Modified` — prompting the user to re-trust once. TBD should
-therefore treat the Codex hook command strings as a stable interface, change
-them rarely, and document the expected one-time re-trust in any release that
-must change them.
+### Rejected: one-time interactive trust
 
-### Trust UX
-
-On the first TBD-launched Codex session, Codex's startup hook-review prompt
-offers three choices:
+Persisting trust once per machine was considered and rejected. On the first
+TBD-launched session, Codex's startup review offers:
 
 ```text
 1. Review hooks
@@ -227,32 +219,34 @@ offers three choices:
 3. Continue without trusting (hooks won't run)
 ```
 
-`Trust all` is broader than TBD: it trusts every untrusted unmanaged hook in
-the session, not only TBD's. Two facts make this acceptable:
+Trust persisted inside a `codex --profile tbd` session lands in
+`tbd.config.toml`, and plugin hook keys carry no `cwd`, session or worktree
+dimension, so one trust would cover TBD's plugin hooks machine-wide. It still
+fails TBD in three ways:
 
-- Under `--profile tbd`, the untrusted-hook set is the merge of base
-  `config.toml` and the `tbd` profile. For a user with no custom hooks of
-  their own — the common case — the only untrusted hooks present are TBD's, so
-  `Trust all` trusts only TBD. The over-trust risk materializes solely when the
-  user already has their own untrusted hooks in base config.
-- `Review hooks` opens the hooks browser, which supports **per-hook** trust:
-  drilling into an event and pressing `t` trusts only that one handler
-  (`trust_selected_hook`), versus `t` on the events page which trusts all
-  (`trust_all_hooks`). A user with custom hooks can therefore trust exactly
-  TBD's handlers and nothing else.
+- It needs a person at the review screen, the first time on each machine and
+  again whenever a trusted hook's command string changes (the stored
+  `trusted_hash` stops matching and Codex flips the hook to `Modified`).
+- Project hooks are keyed by their `hooks.json` path and hashed by command, so
+  every repository with Codex hooks, and every edit to them, brings the screen
+  back.
+- The review screen is a toggle list: keystrokes meant for the agent (a
+  queued prompt, an automated nudge) land in it and can switch hooks on or off.
 
-Guidance TBD should surface to users (e.g. in onboarding docs or a first-run
-note):
+Writing the trust entries programmatically instead is not possible today.
+`config/batchWrite` (the RPC Codex's TUI uses to persist `[hooks.state]`)
+writes to whatever `LoaderOverrides.user_config_path` resolves to at
+app-server startup, and rejects an explicit `file_path` that differs
+(`ConfigLayerReadonly`). The standalone `codex app-server` exposes no
+`--profile` flag and the protocol carries no per-connection profile selection,
+so a side-channel app-server would write trust into base `~/.codex/config.toml`,
+against the non-goal of keeping TBD state out of base config. Replicating
+Codex's hook hashing in Swift is fragile; the upstream key format is marked
+unstable.
 
-- No custom Codex hooks → `Trust all and continue` is correct; it trusts only
-  TBD.
-- Has custom Codex hooks → `Review hooks`, then per-hook `t` on TBD's handlers.
-
-TBD should also keep its own hook count minimal so the review surface is small
-(see Phase 1). Making TBD's hooks `managed` would skip the prompt entirely
+Making TBD's hooks `managed` would also skip the prompt
 (`HookTrustStatus::Managed` needs no trust), but managed hooks come only from
-system/MDM-level managed config, which requires admin-level global writes —
-exactly the invasive mutation this design avoids. Rejected.
+system/MDM-level managed config, which requires admin-level global writes.
 
 ### User config merging
 
@@ -268,7 +262,7 @@ This design intentionally lets TBD sessions inherit the user's Codex setup:
 
 The only TBD-specific additions are in the `tbd` profile and the `tbd@tbd`
 plugin. A normal `codex` launch that does not pass `--profile tbd` will not see
-the TBD plugin activation or TBD hook trust entries.
+the TBD plugin activation, or any hook state saved inside a TBD session.
 
 ## Implementation plan
 
@@ -283,12 +277,13 @@ Replace `CodexHomeManager`'s isolated-home setup with a new manager that:
 - preserves existing user config files.
 
 While porting the hook definitions into the plugin, **minimize the hook
-count** to keep the trust-review surface small (see Trust UX). The current
-overlay ships three handlers: one `SessionStart` and two `Stop`. Merge the two
-`Stop` handlers (`tbd notify ...` and `tbd hooks stop-rename-check`) into a
-single `Stop` command so the plugin presents two hooks instead of three. The
-merged command should run both steps and preserve their existing
-best-effort/non-blocking behavior (`... 2>/dev/null || true`).
+count**, so each event spawns as few processes as possible and the plugin
+adds few entries to Codex's hooks browser. The current overlay ships three
+handlers: one `SessionStart` and two `Stop`. Merge the two `Stop` handlers
+(`tbd notify ...` and `tbd hooks stop-rename-check`) into a single `Stop`
+command so the plugin presents two hooks instead of three. The merged command
+should run both steps and preserve their existing best-effort/non-blocking
+behavior (`... 2>/dev/null || true`).
 
 Candidate type names:
 
@@ -296,25 +291,15 @@ Candidate type names:
 - `CodexProfileManager`
 - `CodexPluginWriter`
 
-### Phase 2 — verify hook trust UX
+### Phase 2 — verify hooks run without a trust step
 
-TBD writes no hook trust entries. This phase verifies the interactive trust
-flow instead:
-
-- Confirm a first-run `codex --profile tbd` session surfaces the TBD plugin
-  hooks as untrusted in Codex's hook-review UI.
-- Confirm trusting them once persists `[hooks.state]` entries into
-  `tbd.config.toml` (not base `config.toml`).
-- Confirm subsequent TBD-launched Codex sessions — other tabs, other
-  worktrees — load the hooks without re-prompting.
-- Confirm that changing a plugin hook command string flips the hook to
-  `Modified` and triggers exactly one re-trust prompt.
-
-If TBD ever needs the `[hooks.state]` entries written into `tbd.config.toml`
-without an interactive prompt, that is a separate, currently-unsupported path
-— it would require either replicating Codex's hook hashing in Swift (fragile;
-the upstream key format is marked unstable) or an upstream change letting
-`codex app-server` select a profile. Out of scope here.
+- Confirm a first-run `codex --profile tbd` session, launched the way TBD
+  launches it, opens straight to the composer with no hook-review screen.
+- Confirm TBD's plugin hooks and a repository's project hooks both run in
+  that session.
+- Confirm a hook set to `enabled = false` stays off.
+- Confirm the session writes no `[hooks.state]` entries, and that a plain
+  `codex` launch in the same repository still asks for trust.
 
 ### Phase 3 — launch with global home and profile
 
@@ -327,11 +312,11 @@ unset CODEX_CI CODEX_THREAD_ID; codex --dangerously-bypass-approvals-and-sandbox
 to:
 
 ```sh
-unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox
+unset CODEX_CI CODEX_THREAD_ID; codex --profile tbd --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust
 ```
 
-Keep `--dangerously-bypass-approvals-and-sandbox` if TBD still wants that
-execution mode, but do not add `--dangerously-bypass-hook-trust`.
+The two bypass flags are one execution mode (see Hook trust flow): drop both or
+neither.
 
 Stop exporting isolated `CODEX_HOME` for Codex tabs. Either do not set
 `CODEX_HOME`, letting Codex default to `~/.codex`, or explicitly set it to the
@@ -353,11 +338,9 @@ the first migration unless users report needing history migration.
 
 ### Trust key stability
 
-This risk is now largely sidestepped: TBD does not compute hook keys or hashes
-(see Hook trust flow), so an upstream key-format change cannot break a TBD
-trust writer — there is none. Codex owns trust persistence end to end. The
-residual exposure is only the `Modified` re-prompt when TBD itself changes a
-hook command string, which is under TBD's control.
+TBD computes no hook keys or hashes and persists no trust (see Hook trust
+flow), so an upstream key-format change cannot break it, and changing a TBD
+hook command string prompts nobody.
 
 ### Profile file ownership
 
@@ -373,8 +356,10 @@ but the writer should be careful and only touch the `tbd/tbd` plugin path.
 ### Existing global hooks
 
 When running with `--profile tbd`, normal user hooks from base config still
-exist. This is intentional user-config merging. TBD must not bypass hook trust
-globally, so untrusted user hooks remain blocked until the user trusts them.
+exist. This is intentional user-config merging, and the hook-trust bypass runs
+them in TBD sessions whether or not the user has trusted them. That matches the
+session's execution mode, which already runs any command unprompted. A user
+hook that should not run inside TBD is switched off with `enabled = false`.
 
 ## Open questions
 
@@ -382,8 +367,7 @@ globally, so untrusted user hooks remain blocked until the user trusts them.
   Resolved: `hooks/list` returns live keys/hashes, and `config/batchWrite`
   persists trust — but only into the file selected by the writing process's
   `user_config_path` override, which the standalone `codex app-server` cannot
-  set. The design therefore uses interactive trust instead of programmatic
-  writes (see Hook trust flow, Phase 2).
+  set. The design therefore persists no trust at all (see Hook trust flow).
 - Should `~/.codex/tbd.config.toml` be a real file or a symlink into `~/tbd`?
   A real file is simpler and more native to Codex; a symlink centralizes TBD
   cleanup.
@@ -397,7 +381,8 @@ globally, so untrusted user hooks remain blocked until the user trusts them.
 - Updating Codex auth outside TBD is immediately reflected in TBD sessions.
 - Normal `codex` does not load TBD's plugin hooks.
 - `codex --profile tbd` loads the TBD plugin and its skill.
-- After a one-time interactive trust, TBD plugin hooks run in every TBD-launched
-  Codex session — across tabs and worktrees — without re-prompting and without
-  `--dangerously-bypass-hook-trust`.
-- Other untrusted hooks remain untrusted in TBD sessions.
+- Every enabled hook (TBD's plugin hooks and the repository's project hooks)
+  runs in every TBD-launched Codex session from the first one, with no
+  hook-review screen.
+- A hook switched off stays off, and TBD marks no hook trusted in the user's
+  Codex config.

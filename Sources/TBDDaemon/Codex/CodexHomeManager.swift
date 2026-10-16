@@ -564,8 +564,17 @@ enum CodexSpawnCommandBuilder {
         return "\(command) \(SystemPromptBuilder.shellEscape(initialPrompt))"
     }
 
+    /// The execution-mode flags every TBD-launched Codex carries. Hook trust is
+    /// bypassed alongside approvals and the sandbox: a session that can already
+    /// run any command gains nothing from gating the repo's own hooks, and an
+    /// untrusted hook either parks the session on Codex's startup review
+    /// screen, where no prompt reaches it, or is skipped outright. Codex still
+    /// honors a hook the user switched off (`enabled = false`).
+    private static let executionModeFlags =
+        "--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
+
     private static func baseCommand(profileFlag: String) -> String {
-        return "unset CODEX_CI CODEX_THREAD_ID; codex \(profileFlag) tbd --dangerously-bypass-approvals-and-sandbox"
+        return "unset CODEX_CI CODEX_THREAD_ID; codex \(profileFlag) tbd \(executionModeFlags)"
     }
 
     private static func baseCommand(
@@ -579,7 +588,7 @@ enum CodexSpawnCommandBuilder {
         // layers over the `tbd` profile for this process only. The whole
         // assignment is escaped as one argument so the identifier stays opaque.
         let modelOverride = modelOverrideArgument(model).map { " -c \($0)" } ?? ""
-        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd\(modelOverride) --dangerously-bypass-approvals-and-sandbox"
+        let base = "unset CODEX_CI CODEX_THREAD_ID; \(executable) \(profileFlag) tbd\(modelOverride) \(executionModeFlags)"
         guard let resumeThreadID, !resumeThreadID.isEmpty else { return base }
         return "\(base) resume \(SystemPromptBuilder.shellEscape(resumeThreadID))"
     }
