@@ -75,10 +75,11 @@ extension WorktreeLifecycle {
 
         // Collect Claude session IDs before archiving so they survive terminal deletion
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        // Each id is resumed when the worktree is revived, so the list is what
+        // `claudeResumeDecision` would let a wake resume — never a shell tab's.
         let claudeSessionIDs = terminals
             .sorted(by: { $0.createdAt < $1.createdAt })
-            .filter(\.isClaudeResumable)
-            .compactMap(\.claudeSessionID)
+            .compactMap(\.claudeResumeDecision.resumableSessionID)
 
         // Sync the branch in DB with what git reports for the worktree path,
         // so a rename done inside the worktree (e.g. `git branch -m`) is

@@ -1400,6 +1400,137 @@ struct HibernationCoordinatorTests {
                 "expected a respawn-window carrying claude --resume; got: \(joined)")
     }
 
+    // MARK: - Wake and park: a tab that is not Claude's
+
+    /// A parked SHELL tab whose row carries a Claude session id — the exit
+    /// stamp `SessionEnd` leaves when a Claude run by hand inside the tab
+    /// exits, or any other park — is still a shell tab. Waking it must not run
+    /// `claude --resume`: that would replace the tab's shell with a bare Claude
+    /// launched however TBD launches one, not however the person launched
+    /// theirs. It takes the shell answer instead: refused before anything is
+    /// touched, the row left as it was.
+    @Test(arguments: [HibernateReason.exited, .auto])
+    func wakeOfAParkedShellTabCarryingASessionIDResumesNothing(reason: HibernateReason) async throws {
+        let (db, _, terminalID) = try await setup(sessionID: "sess-1", kind: .shell)
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1", reason: reason)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: recorded.append,
+            dryRunPanePID: { _, _ in "4242" })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            paneProcessInspector: FakeInspector(claudePID: nil, foregroundPID: 4242),
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+
+        let result = await coord.wake(terminalID: terminalID)
+
+        #expect(result == .notAClaudeTab(kind: .shell),
+                "a shell tab was woken as a Claude session: \(result)")
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(!joined.contains { $0.contains("claude --resume") },
+                "the wake resumed a Claude session in a shell tab: \(joined)")
+        #expect(!joined.contains { $0.contains("respawn-window") || $0.contains("new-window") },
+                "the refused wake touched the pane: \(joined)")
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(after.isParked, "the refused wake un-parked the row")
+        #expect(after.pendingSessionIncarnationID == nil,
+                "the refused wake reserved a replacement launch")
+    }
+
+    /// The park is the first half of every resume: a row is parked so a later
+    /// wake can resume it. A shell tab carrying a session id must not be
+    /// parked by the profile swap's park either — its policy skips the live
+    /// rails, so nothing else on that path asks what kind of tab it is.
+    @Test func profileSwapParkRefusesAShellTabCarryingASessionID() async throws {
+        let (db, _, terminalID) = try await setup(sessionID: "sess-1", kind: .shell)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorded.append)
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+
+        let result = await coord.parkForProfileSwap(terminalID: terminalID)
+
+        #expect(result == .notEligible(reason: ClaudeResumeDecision.notAClaudeTabReason(.shell)),
+                "expected the park to refuse a shell tab, got \(result)")
+        #expect(try await db.terminals.get(id: terminalID)?.isParked == false)
+        #expect(recorded.snapshot().filter { $0.contains("respawn-window") }.isEmpty,
+                "the refused park replaced the pane")
+    }
+
+    /// An exit stamp an earlier build left on a tab that is not Claude's is
+    /// lifted at startup. Builds before the stamp asked the tab's kind stamped
+    /// a shell tab whose hand-started Claude exited. This build's wake refuses
+    /// that tab and the app never auto-wakes `.exited`, so nothing else would
+    /// lift the stamp: the tab would stay parked until it was closed. The
+    /// stamp stopped nothing — the pane's shell stays alive under it — so
+    /// lifting it leaves the row as this build would have: unstamped, a live
+    /// shell, its session id untouched.
+    @Test(arguments: [TerminalKind.shell, .codex])
+    func startupLiftsAnEarlierBuildsExitStampFromATabThatIsNotClaudes(kind: TerminalKind) async throws {
+        let (db, _, terminalID) = try await setup(sessionID: "sess-1", kind: kind)
+        // `stampSessionExited` refuses this tab now, so the earlier build's
+        // stamp is written the way any park is.
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1", reason: .exited)
+        let recorded = RecordedTmuxCommands()
+        let coord = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true, dryRunRecorder: recorded.append),
+            configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+
+        await coord.reconcileOnStartup()
+
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(!after.isParked, "a \(kind.rawValue) tab stayed behind an exit stamp no wake can lift")
+        #expect(after.hibernateReason == nil)
+        #expect(after.claudeSessionID == "sess-1")
+        let joined = recorded.snapshot().map { $0.joined(separator: " ") }
+        #expect(!joined.contains { $0.contains("respawn-window") || $0.contains("claude --resume") },
+                "lifting the stamp touched the pane: \(joined)")
+    }
+
+    /// The mirror: the repair is for that one stale stamp. A Claude tab's exit
+    /// stamp is what its wake resumes from, and a shell tab parked for any
+    /// other reason had its process replaced, so both stay parked.
+    @Test(arguments: [TerminalKind.claude, .shell])
+    func startupLeavesEveryOtherParkAlone(kind: TerminalKind) async throws {
+        let (db, _, terminalID) = try await setup(sessionID: "sess-1", kind: kind)
+        let reason: HibernateReason = kind == .claude ? .exited : .auto
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1", reason: reason)
+        let coord = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+
+        await coord.reconcileOnStartup()
+
+        let after = try #require(try await db.terminals.get(id: terminalID))
+        #expect(after.isParked, "startup un-parked a \(kind.rawValue) tab parked as \(reason.rawValue)")
+        #expect(after.hibernateReason == reason)
+    }
+
+    /// The lift is tmux-only. The stamp never reached a holder row, and a
+    /// parked holder row is answered by the arm that verifies its child
+    /// process — with no child recorded, that arm leaves it as it is.
+    @Test func startupLeavesAHolderShellRowToTheHolderArm() async throws {
+        let (db, worktreeID, _) = try await setup()
+        let holder = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            label: "shell", claudeSessionID: "sess-1", kind: .shell, transport: .holder)
+        try await db.terminals.setHibernated(id: holder.id, sessionID: "sess-1", reason: .exited)
+        let coord = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            configDirManager: isolatedConfigDirManager(),
+            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+
+        await coord.reconcileOnStartup()
+
+        let after = try #require(try await db.terminals.get(id: holder.id))
+        #expect(after.isParked, "the tmux-only lift un-parked a holder row")
+        #expect(after.hibernateReason == .exited)
+    }
+
     // MARK: - Wake: the exit-stamped pane-busy guard
     //
     // An exit stamp parks the row while the pane's SHELL stays alive and

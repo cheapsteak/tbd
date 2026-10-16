@@ -958,12 +958,43 @@ public extension Terminal {
         !isParked && awaitingInputReason?.classification == .promptOnScreen
     }
 
+    /// Whether the tab is Claude's by kind: a Claude-kind row, or a row
+    /// written before kinds were recorded, and never a Codex tab. The kind
+    /// half of `isClaudeResumable`, for a path that asks before it has a
+    /// session to resume: the exit stamp, which parks a row only so a later
+    /// wake can resume its Claude.
+    var isClaudeTab: Bool {
+        guard !isCodexTerminal else { return false }
+        return kind == .claude || kind == nil
+    }
+
     /// True only for Claude terminals whose session can be resumed through
     /// Claude-specific lifecycle flows like suspend/resume and dead-window
     /// preservation.
     var isClaudeResumable: Bool {
-        guard claudeSessionID != nil, !isCodexTerminal else { return false }
-        return kind == .claude || kind == nil
+        claudeSessionID != nil && isClaudeTab
+    }
+
+    /// Whether a path that would run `claude --resume` against this row may,
+    /// and with which id.
+    ///
+    /// **Every such path asks this, and reads the id it resumes from here.** A
+    /// session id on a row is not evidence that the tab is a Claude tab:
+    /// `SessionStart` records an id onto any non-Codex row whose Claude carries
+    /// TBD's hook, a shell tab included. Resuming that id would replace
+    /// whatever the tab runs with a bare `claude --resume` launched TBD's way —
+    /// dropping however the person launched theirs, a wrapper that set up its
+    /// own credentials or environment included. The tab's kind decides, through
+    /// `isClaudeResumable`; the session id only says what to resume once it
+    /// has.
+    var claudeResumeDecision: ClaudeResumeDecision {
+        guard let sessionID = claudeSessionID else { return .noSession }
+        guard isClaudeResumable else {
+            // With a session id present, only these two kinds fail
+            // `isClaudeResumable`: a Codex tab (by kind or by label) and a shell.
+            return .notAClaudeTab(isCodexTerminal ? .codex : (kind ?? .shell))
+        }
+        return .resume(sessionID: sessionID)
     }
 
     /// True when the terminal is currently hibernated (claude process killed,
@@ -1027,6 +1058,29 @@ public extension Terminal {
         case .idle, .unknown:
             return true
         }
+    }
+}
+
+/// What `Terminal.claudeResumeDecision` decided.
+public enum ClaudeResumeDecision: Equatable, Sendable {
+    /// A Claude tab with a captured session: resume this id.
+    case resume(sessionID: String)
+    /// The row names no session to resume.
+    case noSession
+    /// The row names a session, but its tab is a shell or Codex tab. Nothing
+    /// may resume a Claude session in it.
+    case notAClaudeTab(TerminalKind)
+
+    /// The id to resume, or nil when nothing may be resumed.
+    public var resumableSessionID: String? {
+        if case .resume(let sessionID) = self { return sessionID }
+        return nil
+    }
+
+    /// The one-line reason a `.notAClaudeTab` refusal gives, worded once so
+    /// the swap, the wake and the park say the same thing.
+    public static func notAClaudeTabReason(_ kind: TerminalKind) -> String {
+        "This is a \(kind.rawValue) tab, not a Claude tab, so TBD will not resume a Claude session in it"
     }
 }
 

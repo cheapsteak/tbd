@@ -672,6 +672,26 @@ struct TerminalTransportMigratorTests {
         #expect(after.id == row.id && after.label == row.label && after.kind == row.kind)
     }
 
+    /// A shell tab whose row carries a Claude session id is still a shell: what
+    /// it runs is the person's, and the park-and-wake path would bring it back
+    /// as a bare `claude --resume`. It moves the way every shell moves. The
+    /// branch asks the tab's kind, not whether a session id happens to be on
+    /// the row.
+    @Test("a running shell carrying a session id moves as a shell, with no park and no wake")
+    func aRunningShellCarryingASessionIDMovesAsAShell() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let row = try await Self.tmuxRow(
+            fixture, kind: .shell, label: TerminalLabel.shell, claudeSessionID: "by-hand")
+
+        let outcome = await fixture.recordingMigrator().migrate(terminalID: row.id)
+
+        #expect(outcome == .migrated)
+        #expect(await fixture.shellMoves == [row.id])
+        #expect(await fixture.parks.isEmpty, "a shell tab was parked for a resume")
+        #expect(await fixture.wakes.isEmpty, "a shell tab was woken")
+    }
+
     /// The move's lost compare-and-set is reported as the same race skip the
     /// parked path's is: nothing was written, and the row is consistent
     /// whichever way the race went.
@@ -730,9 +750,9 @@ struct TerminalTransportMigratorTests {
     }
 
     /// The regression guard the new branch most needs: a running Claude
-    /// session still goes park, rewrite, wake. The branch tests the row's own
-    /// `claudeSessionID`, which is the fact the park refuses on, so a session
-    /// that *can* be resumed must never be restarted as a bare shell.
+    /// session still goes park, rewrite, wake. The branch tests the row's
+    /// `claudeResumeDecision`, which is the decision the park refuses on, so a
+    /// session that *can* be resumed must never be restarted as a bare shell.
     @Test("a running Claude session still parks and wakes rather than restarting as a shell")
     func aRunningClaudeSessionStillParksAndWakes() async throws {
         let fixture = try await Self.makeFixture()

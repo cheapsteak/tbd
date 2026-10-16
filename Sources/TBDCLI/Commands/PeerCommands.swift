@@ -28,19 +28,29 @@ struct PeerList: AsyncParsableCommand {
 
             The KIND column says what a row turned out to be:
 
-              local          a session TBD spawned; BEHIND names its worktree and
+              local          a session in a TBD terminal — one TBD spawned, or one
+                             started inside a TBD tab; BEHIND names its worktree and
                              terminal, plus the tmux pane on a tmux-transport row.
               shadow         a shadow peer standing in for a session on another
                              machine; BEHIND names the provider session it mirrors.
-              external       a peer TBD did not spawn — a plain-terminal `claude`, or
-                             a session on a profile TBD does not manage. Still listed:
-                             every local session can address it.
+              external       a peer no join placed in a TBD terminal — a
+                             plain-terminal `claude`, or a session on a profile TBD
+                             does not manage. Still listed: every local session can
+                             address it.
               unattributed   the daemon did not answer, so nothing could be joined.
 
             A local row is joined to its terminal by the Claude session id TBD captured
             at `SessionStart`, falling back to its tmux pane when none was captured. A
-            holder-backed session has no pane, so until its session id is recorded it
-            lists as `external`. A shadow peer carries no `tmux` field by design — remote
+            holder-backed session has no pane; one whose session id TBD has not captured
+            — a launcher run in a tab, a `claude` typed at a shell prompt — is joined to
+            the tab whose live job it descends from, read from one snapshot of the
+            process table. Only descent counts, never a working directory or an
+            environment variable. A tab whose own session is joined by session id is not
+            handed to a second one, a Claude tab whose session TBD captured is joined only
+            by that session, and of two sessions in one tab only the one nearest
+            the tab's job is joined. Under --json, `joinedBy` says which join placed a
+            row, and `unjoinedReason` says why an external row was not placed. A shadow
+            peer carries no `tmux` field by design — remote
             coordinates would look joinable against local panes and would join to the
             wrong terminal — and it carries no marker of TBD's either, because one
             unknown key makes a record invisible to every listing. A shadow is
@@ -100,6 +110,9 @@ struct PeerList: AsyncParsableCommand {
             fleet: fleet,
             socketFilesOnDisk: peerSocketFiles(namedBy: scan.entries),
             procStartForPID: { ProcessStartTime.procStart(pid: $0) },
+            // One read for the whole listing: the descent join walks it for
+            // every record, and every pid it compares was seen at one instant.
+            processes: ProcessTableSnapshot.read(),
             socketExists: { FileManager.default.fileExists(atPath: $0) })
 
         if json {

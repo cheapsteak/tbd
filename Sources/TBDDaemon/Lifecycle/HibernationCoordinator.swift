@@ -106,6 +106,11 @@ public enum WakeResult: Equatable, Sendable {
     case paneUnreadable(paneID: String, server: String)
     case notFound        // terminal/worktree DB row missing — NOT tmux failures
     case noSessionID
+    /// The parked row names a session, but its tab is a shell or Codex tab
+    /// (`Terminal.claudeResumeDecision`). Refused before anything is touched,
+    /// exactly as a shell tab with no session id is: nothing is respawned and
+    /// the row stays as it was.
+    case notAClaudeTab(kind: TerminalKind)
     case inFlight        // a wake for this terminal is already respawning
     /// The respawn (or window recreate) failed in tmux. The row stays parked
     /// so a later retry can wake it; `reason` names the real failure instead
@@ -1033,8 +1038,28 @@ public actor HibernationCoordinator {
         return .moved
     }
 
+    /// The refusal a park owes a row no wake may resume, or nil when a wake
+    /// may resume it. Every park asks this before it touches a process — and
+    /// asks again after re-reading the row under its lock — so all of them
+    /// give a shell tab carrying a session id the same answer the wake does.
+    static func parkRefusal(for terminal: Terminal) -> HibernateResult? {
+        switch terminal.claudeResumeDecision {
+        case .resume:
+            return nil
+        case .noSession:
+            return .notEligible(reason: noSessionToParkReason)
+        case .notAClaudeTab(let kind):
+            return .notEligible(reason: ClaudeResumeDecision.notAClaudeTabReason(kind))
+        }
+    }
+
+    static let noSessionToParkReason = "No session id to resume later"
+
     /// The reason a manual hibernate was refused, for the RPC error string.
     private func manualBlockReason(_ terminal: Terminal) -> String {
+        if case .notAClaudeTab(let kind) = terminal.claudeResumeDecision {
+            return ClaudeResumeDecision.notAClaudeTabReason(kind)
+        }
         if !terminal.isClaudeResumable { return "Not a resumable Claude session" }
         if terminal.suspendedAt != nil { return "Terminal is suspended" }
         switch terminal.activityState {
@@ -1153,9 +1178,11 @@ public actor HibernationCoordinator {
         hibernatesInFlight.insert(terminal.id)
         defer { hibernatesInFlight.remove(terminal.id) }
 
-        guard terminal.claudeSessionID != nil else {
-            return .notEligible(reason: "No session id to resume later")
-        }
+        // A park exists to be resumed, so it takes only what a wake may
+        // resume. The policies that read live rails ask `isClaudeResumable`
+        // through their own gates; `.profileSwap` reads none, so this line is
+        // what keeps every policy to the same answer.
+        if let refusal = Self.parkRefusal(for: terminal) { return refusal }
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
         }
@@ -1245,8 +1272,11 @@ public actor HibernationCoordinator {
             pendingKillSince[terminal.id] = nil
             return .notEligible(reason: "Session activity changed before hibernation")
         }
-        guard let sessionID = currentTerminal.claudeSessionID else {
-            return .notEligible(reason: "No session id to resume later")
+        // Re-asked of the row read under the lock: the decision is what the
+        // park will hand a later wake.
+        guard let sessionID = currentTerminal.claudeResumeDecision.resumableSessionID else {
+            return Self.parkRefusal(for: currentTerminal)
+                ?? .notEligible(reason: Self.noSessionToParkReason)
         }
         if let refusal = hibernationRefusal(terminal: currentTerminal, policy: policy) {
             idleSince[terminal.id] = nil
@@ -1700,7 +1730,20 @@ public actor HibernationCoordinator {
             }
             return await classifyUnparkedHolderWake(terminal)
         }
-        guard let sessionID = terminal.claudeSessionID else { return .noSessionID }
+        // The tab's kind decides whether a Claude session may be resumed in
+        // it, not the session id on its row — see
+        // `Terminal.claudeResumeDecision`. Asked before the transport branch,
+        // so neither mechanic can be reached for a tab that is not Claude's.
+        let sessionID: String
+        switch terminal.claudeResumeDecision {
+        case .resume(let resumable):
+            sessionID = resumable
+        case .noSession:
+            return .noSessionID
+        case .notAClaudeTab(let kind):
+            logger.notice("wake: terminal \(terminal.id, privacy: .public) is a \(kind.rawValue, privacy: .public) tab carrying a session id; refusing to resume a Claude session in it")
+            return .notAClaudeTab(kind: kind)
+        }
         // The backstop for a tmux row whose leg cannot serve the wake. Refusing
         // here, before anything is touched, leaves the row parked with its
         // session id, so a wake after `tbd terminal migrate` succeeds on the
@@ -2450,6 +2493,12 @@ public actor HibernationCoordinator {
         guard let allTerminals = try? await db.terminals.list() else { return }
 
         for terminal in allTerminals where terminal.isParked {
+            // Asked before the tmux arm below, which would judge this row as a
+            // park to recover although no wake will ever resume it.
+            if terminal.transport != .holder, terminal.isExitStamped, !terminal.isClaudeTab {
+                await liftEarlierBuildsExitStamp(terminal)
+                continue
+            }
             if terminal.transport == .holder {
                 await reconcileParkedHolderRow(terminal)
                 continue
@@ -2525,6 +2574,38 @@ public actor HibernationCoordinator {
             } catch {
                 logger.warning("startup: failed to clear parked state for terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
+        }
+    }
+
+    /// Lift an exit stamp an earlier build left on a tab that is not Claude's.
+    ///
+    /// Builds before `stampSessionExited` asked the tab's kind stamped a shell
+    /// tab whose hand-started Claude exited: that Claude carries TBD's hook, so
+    /// its `SessionEnd` reaches the row. This build's wake refuses such a tab
+    /// (`Terminal.claudeResumeDecision`) and the app never auto-wakes
+    /// `.exited`, so nothing else would lift the stamp, and the tab would sit
+    /// behind its frozen snapshot until it was closed. The stamp stopped
+    /// nothing — the pane's shell stays alive under it — so lifting it leaves
+    /// the row as this build would have: unstamped, the live shell it is. No
+    /// process is touched. A row whose window is already gone is then an
+    /// unparked shell row over a dead window, which startup reconciliation
+    /// reclaims like any other — the tab goes, rather than staying parked
+    /// behind a snapshot nothing can wake.
+    ///
+    /// tmux rows only. `stampSessionExited` has never stamped a holder row,
+    /// and a parked holder row's arm (`reconcileParkedHolderRow`) is the one
+    /// that verifies its child process, so it keeps answering for those.
+    ///
+    /// It runs on every pass, like `reconcileParkedHolderRow`, and after the
+    /// first one it finds nothing: this build never writes the stamp it lifts.
+    private func liftEarlierBuildsExitStamp(_ terminal: Terminal) async {
+        let kind = terminal.kind?.rawValue ?? "unrecorded"
+        do {
+            if try await db.terminals.clearSessionExitStamp(id: terminal.id) {
+                logger.info("startup: lifted an earlier build's exit stamp from \(kind, privacy: .public) terminal \(terminal.id, privacy: .public) — no wake resumes Claude in it, and its shell was never stopped")
+            }
+        } catch {
+            logger.warning("startup: failed to lift the exit stamp from \(kind, privacy: .public) terminal \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
     }
 

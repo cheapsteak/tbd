@@ -683,7 +683,7 @@ extension WorktreeLifecycle {
                     // the reason the fallback is `createdAt`: a row written
                     // before the start-time column existed still has to be
                     // reclaimable.
-                    childStartedAt: terminal.holderChildStartedAt ?? terminal.createdAt)
+                    childStartedAt: HolderChildIdentity.anchor(of: terminal))
             } else {
                 // No row to read the pids back from, so the descriptor's own
                 // pids are all there is — the same reclaim phase 3 does when a

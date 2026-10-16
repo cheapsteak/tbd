@@ -153,6 +153,52 @@ struct TerminalExitStampStoreTests {
         #expect(row.hibernateReason == nil)
     }
 
+    /// A tab that is not Claude's is never stamped. `SessionStart` records an
+    /// id onto a shell row whose hand-started Claude carries TBD's hook, so
+    /// that Claude's `SessionEnd` reaches the row too. The stamp parks a row so
+    /// a later wake can resume its Claude, and that wake refuses a tab that is
+    /// not Claude's (`Terminal.claudeResumeDecision`): a stamp here would
+    /// freeze the pane behind a park nothing can lift. Unstamped, the row stays
+    /// the live shell it is.
+    @Test(arguments: [TerminalKind.shell, .codex])
+    func stampLeavesATabThatIsNotClaudesAlone(kind: TerminalKind) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let worktree = try await db.worktrees.createScratch(
+            name: "wt", displayName: "wt",
+            path: "/tmp/tbd-nonexistent-\(UUID().uuidString)", tmuxServer: "tbd-test")
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: kind.rawValue, claudeSessionID: "sess-1", kind: kind)
+
+        let changed = try await db.terminals.stampSessionExited(
+            id: terminal.id, reportedIncarnationID: nil, at: stamp)
+
+        #expect(!changed, "a \(kind.rawValue) tab was exit-stamped")
+        let row = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(row.hibernatedAt == nil)
+        #expect(row.hibernateReason == nil)
+        #expect(row.claudeSessionID == "sess-1")
+    }
+
+    /// The mirror: a row written before kinds were recorded reads as a Claude
+    /// tab, exactly as `isClaudeResumable` reads it, so it is still stamped.
+    @Test func stampStillParksARowWithNoRecordedKind() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let worktree = try await db.worktrees.createScratch(
+            name: "wt", displayName: "wt",
+            path: "/tmp/tbd-nonexistent-\(UUID().uuidString)", tmuxServer: "tbd-test")
+        let terminal = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: "claude", claudeSessionID: "sess-1", kind: nil)
+
+        let changed = try await db.terminals.stampSessionExited(
+            id: terminal.id, reportedIncarnationID: nil, at: stamp)
+
+        #expect(changed)
+        let row = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(row.hibernateReason == .exited)
+    }
+
     @Test func clearRetractsOnlyAnExitStamp() async throws {
         let db = try TBDDatabase(inMemory: true)
         let terminal = try await makeTerminal(db)

@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// Classification of the park/wake coordinator's results into the outcome
 /// vocabulary, spelled once so every hibernate and wake surface — the two
@@ -56,9 +57,10 @@ extension ActuationOutcome {
         // target, and `notFound` in particular would put "the terminal is gone"
         // on the permanent record on the strength of a failed read.
         case .paneUnreadable: return .transportFailed
-        // The row is there but cannot be woken as asked: nothing to resume, or
-        // the profile it was pinned to no longer exists.
-        case .noSessionID, .profileMissing: return .refused(.notEligible)
+        // The row is there but cannot be woken as asked: nothing to resume, a
+        // tab that is not Claude's, or the profile it was pinned to no longer
+        // exists.
+        case .noSessionID, .notAClaudeTab, .profileMissing: return .refused(.notEligible)
         // The row is exit-stamped and its pane is busy: a well-formed wake the
         // daemon declines, and nothing was respawned.
         case .paneBusy: return .refused(.notEligible)
@@ -72,6 +74,7 @@ extension ActuationOutcome {
         case .inFlight: return "a wake is already in flight"
         case .notFound: return "Terminal not found"
         case .noSessionID: return "No session ID to resume"
+        case .notAClaudeTab(let kind): return ClaudeResumeDecision.notAClaudeTabReason(kind)
         case .respawnFailed(let reason): return reason
         case .worktreeMissing(let path): return "Worktree directory missing on disk: \(path)"
         case .sessionGone(let paneID, let detail):

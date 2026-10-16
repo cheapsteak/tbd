@@ -81,7 +81,7 @@ extension HolderChildDisposition {
         let verdict = ProcessIdentityCheck.verify(
             pid: childPID,
             startedWithin: AgentReaper.defaultHolderIdentityWindow,
-            of: terminal.holderChildStartedAt ?? terminal.createdAt,
+            of: HolderChildIdentity.anchor(of: terminal),
             executableIsAcceptable: AgentReaper.isHolderChildExecutable,
             signaller: signaller)
         switch verdict {
@@ -427,8 +427,10 @@ extension HibernationCoordinator {
             pendingKillSince[terminal.id] = nil
             return .notEligible(reason: "Session activity changed before hibernation")
         }
-        guard let sessionID = currentTerminal.claudeSessionID else {
-            return .notEligible(reason: "No session id to resume later")
+        // Re-asked of the row read under the claim, as the tmux park does.
+        guard let sessionID = currentTerminal.claudeResumeDecision.resumableSessionID else {
+            return Self.parkRefusal(for: currentTerminal)
+                ?? .notEligible(reason: Self.noSessionToParkReason)
         }
         if let refusal = hibernationRefusal(terminal: currentTerminal, policy: policy) {
             idleSince[terminal.id] = nil
@@ -991,7 +993,7 @@ extension HibernationCoordinator {
         let verdict = ProcessIdentityCheck.verify(
             pid: childPID,
             startedWithin: AgentReaper.defaultHolderIdentityWindow,
-            of: terminal.holderChildStartedAt ?? terminal.createdAt,
+            of: HolderChildIdentity.anchor(of: terminal),
             executableIsAcceptable: AgentReaper.isHolderChildExecutable,
             signaller: signaller)
         switch verdict {
@@ -1044,7 +1046,7 @@ extension HibernationCoordinator {
         let verdict = ProcessIdentityCheck.verify(
             pid: childPID,
             startedWithin: AgentReaper.defaultHolderIdentityWindow,
-            of: terminal.holderChildStartedAt ?? terminal.createdAt,
+            of: HolderChildIdentity.anchor(of: terminal),
             executableIsAcceptable: AgentReaper.isHolderChildExecutable,
             signaller: signaller)
         guard verdict == .notRunning else { return .notHibernated }
@@ -1101,6 +1103,22 @@ extension HibernationCoordinator {
                 attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
             await sessionTitles.release(spawnTitle)
             return .inFlight
+        }
+        // The public `wake` asks this before its transport branch; this entry
+        // skips that branch, so it asks for itself. The caller composed the
+        // command — possibly a fresh session rather than a resume — but only a
+        // row a wake may resume may have its process replaced by one.
+        let refusal: WakeResult?
+        switch terminal.claudeResumeDecision {
+        case .resume: refusal = nil
+        case .noSession: refusal = .noSessionID
+        case .notAClaudeTab(let kind): refusal = .notAClaudeTab(kind: kind)
+        }
+        if let refusal {
+            await ModelProxyRouteAttachment.retire(
+                attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
+            await sessionTitles.release(spawnTitle)
+            return refusal
         }
         wakesInFlight.insert(terminal.id)
         defer { wakesInFlight.remove(terminal.id) }
@@ -1411,7 +1429,7 @@ extension HibernationCoordinator {
                   ProcessIdentityCheck.verify(
                     pid: childPID,
                     startedWithin: AgentReaper.defaultHolderIdentityWindow,
-                    of: terminal.holderChildStartedAt ?? terminal.createdAt,
+                    of: HolderChildIdentity.anchor(of: terminal),
                     executableIsAcceptable: AgentReaper.isHolderChildExecutable,
                     signaller: signaller) == .same {
             evidence = "its recorded child \(childPID) is identity-verified alive"

@@ -392,4 +392,48 @@ struct ReconcileTmuxPresenceTests {
                 "the post-reconcile un-park pass left a same-boot park in place")
         #expect(repaired.claudeSessionID == parked.claudeSessionID)
     }
+
+    /// The first half's other job, composed the same way: a shell tab an
+    /// earlier build exit-stamped, whose window is gone, leaves in one boot.
+    ///
+    /// Step 8d lifts the stamp (`HibernationCoordinator.reconcileOnStartup`,
+    /// `liftEarlierBuildsExitStamp`), and `performStartupReconciliation`, which
+    /// skips every parked row, then sees an unparked shell row over an absent
+    /// window and deletes it — there is no session it may preserve, whatever
+    /// id the row carries. Run in the other order, or without the lift, the
+    /// row stays parked behind a snapshot no wake will resume.
+    @Test("a shell tab an earlier build exit-stamped over a gone window is removed in one startup")
+    func liftedShellStampOverAGoneWindowIsRemovedInOneStartup() async throws {
+        let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunServerPresence: { _ in .alive },
+            dryRunWindowPresence: { _, _ in .absent })
+        let lifecycle = makeLifecycle(db: db, tmux: tmux)
+        let (repo, main) = try await seedRepo(db: db, at: repoDir.path)
+        let shell = try await db.terminals.create(
+            worktreeID: main.id, tmuxWindowID: "@2", tmuxPaneID: "%2",
+            claudeSessionID: "sess-hand-started", kind: .shell)
+        // This build's `stampSessionExited` refuses a shell tab, so the earlier
+        // build's stamp is written the way any park is.
+        try await db.terminals.setHibernated(
+            id: shell.id, sessionID: "sess-hand-started", reason: .exited)
+
+        let coordinator = HibernationCoordinator(
+            db: db, tmux: tmux,
+            configDirManager: makeIsolatedConfigDirManager(tag: "reconcile-lift"),
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+        await coordinator.reconcileOnStartup()
+        try await lifecycle.reconcile(
+            repoID: repo.id,
+            actuationLog: makeTestActuationLog(),
+            reapSharedScratchTmuxResources: true)
+
+        #expect(try await db.terminals.get(id: shell.id) == nil,
+                "a lifted shell tab over a gone window survived the startup that lifted it")
+    }
 }

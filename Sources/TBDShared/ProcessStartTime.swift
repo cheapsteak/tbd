@@ -31,6 +31,13 @@ public enum ProcessStartTime {
         guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else {
             return nil
         }
+        return startTime(of: info)
+    }
+
+    /// The start time one `kinfo_proc` records, or nil when it records none —
+    /// shared by the single-pid read above and `ProcessTableSnapshot.read()`,
+    /// which reads every process at once.
+    static func startTime(of info: kinfo_proc) -> Date? {
         // `p_starttime` is a `#define` onto an anonymous union member, so the C
         // spelling does not survive into Swift; `p_un.__p_starttime` is the
         // imported name of the same `struct timeval` (sys/proc.h,

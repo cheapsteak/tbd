@@ -1629,6 +1629,171 @@ struct ModelProfileSpawnTests {
         #expect(swapResp.error?.contains("not a Claude terminal") == true)
     }
 
+    /// A shell tab with a Claude session id on its row — what `SessionStart`
+    /// leaves when a Claude started by hand inside a shell tab carries TBD's
+    /// hook — is still a shell tab. A swap would replace whatever the tab runs
+    /// with a bare `claude --resume` under the new account, dropping however
+    /// that Claude was launched. So the swap refuses before it touches
+    /// anything: one line of reason, no spawn, no new row, no profile change.
+    ///
+    /// The transcript is non-blank on purpose: it is the shape that, without
+    /// the guard, plans a `claude --resume` of the session id.
+    @Test(
+        "swap: a shell tab carrying a session id is refused, and nothing is spawned",
+        arguments: [TerminalSwapMode.inPlace, .fork])
+    func swapRefusesShellTabCarryingSessionID(mode: TerminalSwapMode) async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let target = try await seedOAuthProfile(db, name: "B")
+        let shell = try await seedShellTerminalCarryingSessionID(router, db, worktreeID: wt.id)
+        let rowsBefore = try await db.terminals.list(worktreeID: wt.id).count
+        let callsBefore = recorder.calls.count
+
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(
+                terminalID: shell.id, newProfileID: target.id, mode: mode)
+        ))
+
+        #expect(!swapResp.success, "a shell tab was swapped as if it were a Claude tab")
+        let reason = try #require(swapResp.error)
+        #expect(!reason.contains("\n"), "the refusal must be one line; got: \(reason)")
+        #expect(reason.contains("shell"), "the refusal must name the tab's kind; got: \(reason)")
+        let postSwap = Array(recorder.calls.dropFirst(callsBefore))
+            .map { $0.joined(separator: " ") }.joined(separator: "\n")
+        #expect(!postSwap.contains("claude"), "the refused swap spawned something: \(postSwap)")
+        #expect(!postSwap.contains("respawn-window") && !postSwap.contains("new-window"),
+                "the refused swap touched tmux: \(postSwap)")
+        #expect(try await db.terminals.list(worktreeID: wt.id).count == rowsBefore,
+                "the refused swap created a row")
+        let after = try #require(try await db.terminals.get(id: shell.id))
+        #expect(after.profileID == shell.profileID, "the refused swap re-homed the row")
+        #expect(after.claudeSessionID == shell.claudeSessionID)
+    }
+
+    /// The cold path — a PARKED row is re-homed without a wake — is a swap
+    /// too: it rewrites the account the next wake resumes under. A parked
+    /// shell tab carrying a session id is refused the same way.
+    @Test("swap: a parked shell tab carrying a session id is refused, not re-homed")
+    func swapRefusesParkedShellTabCarryingSessionID() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let target = try await seedOAuthProfile(db, name: "B")
+        let shell = try await seedShellTerminalCarryingSessionID(router, db, worktreeID: wt.id)
+        let sessionID = try #require(shell.claudeSessionID)
+        try await db.terminals.setHibernated(id: shell.id, sessionID: sessionID, reason: .exited)
+        let callsBefore = recorder.calls.count
+
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: shell.id, newProfileID: target.id)
+        ))
+
+        #expect(!swapResp.success, "a parked shell tab was re-homed as if it were a Claude tab")
+        let after = try #require(try await db.terminals.get(id: shell.id))
+        #expect(after.profileID == nil, "the refused cold swap moved the row to another account")
+        #expect(after.isParked)
+        #expect(recorder.calls.count == callsBefore, "the refused cold swap touched tmux")
+    }
+
+    /// A shell terminal whose row carries a Claude session id and a non-blank
+    /// transcript, exactly as `SessionStart` would leave it for a Claude run by
+    /// hand inside the tab.
+    private func seedShellTerminalCarryingSessionID(
+        _ router: RPCRouter, _ db: TBDDatabase, worktreeID: UUID
+    ) async throws -> Terminal {
+        let createResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: "ls", type: .shell)
+        ))
+        let created = try createResp.decodeResult(Terminal.self)
+        #expect(created.kind == .shell)
+        let sessionID = UUID().uuidString.lowercased()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-swap-shell-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("\(sessionID).jsonl")
+        try #"{"type":"user","message":{"role":"user","content":"hello there"}}"#
+            .write(to: file, atomically: true, encoding: .utf8)
+        try await db.terminals.updateSession(
+            id: created.id, sessionID: sessionID, transcriptPath: file.path)
+        return try #require(try await db.terminals.get(id: created.id))
+    }
+
+    // MARK: - A tab joined by descent is still the kind of tab it is
+
+    /// The holder-descent join (`HolderDescentIndex`, which `tbd peer list`
+    /// walks) places a Claude started inside a SHELL tab in that tab. That is a
+    /// view: it writes nothing onto the row, and the row stays a shell tab to
+    /// every path that decides whether to resume one. So the tab the join
+    /// names is still refused by a swap, and a wake of it resumes nothing —
+    /// including in the worst case, where something else has put a session id
+    /// on the row.
+    @Test("a shell tab joined by descent is still refused by swap and not resumed by wake")
+    func shellTabJoinedByDescentIsStillRefusedBySwapAndWake() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let target = try await seedOAuthProfile(db, name: "B")
+        let tab = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "", tmuxPaneID: "",
+            label: TerminalLabel.shell, kind: .shell,
+            transport: .holder, holderPID: 9000, childPID: 9001)
+        // holder → the tab's shell → a launcher → the Claude it started.
+        let processes = ProcessTableSnapshot(entries: [
+            9000: .init(parent: 1, startedAt: tab.createdAt),
+            9001: .init(parent: 9000, startedAt: tab.createdAt),
+            9002: .init(parent: 9001, startedAt: tab.createdAt),
+            9003: .init(parent: 9002, startedAt: tab.createdAt),
+        ])
+        func joinedTab() async throws -> UUID? {
+            HolderDescentIndex(
+                terminals: try await db.terminals.list(), processes: processes
+            ).descent(of: 9003)?.terminalID
+        }
+
+        #expect(try await joinedTab() == tab.id, "the join did not place the Claude in its tab")
+        let afterJoin = try #require(try await db.terminals.get(id: tab.id))
+        #expect(afterJoin.claudeSessionID == nil, "the join wrote a session id onto the row")
+        #expect(afterJoin.kind == .shell)
+
+        let callsBefore = recorder.calls.count
+        let plainSwap = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: tab.id, newProfileID: target.id)))
+        #expect(!plainSwap.success, "a joined shell tab was swapped")
+
+        // The worst case: a session id on the shell row all the same.
+        try await db.terminals.updateSession(
+            id: tab.id, sessionID: "by-hand", transcriptPath: nil)
+        #expect(try await joinedTab() == tab.id)
+        let swap = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: tab.id, newProfileID: target.id)))
+        #expect(!swap.success, "a joined shell tab carrying a session id was swapped")
+        #expect(swap.error?.contains("shell") == true, "got: \(swap.error ?? "nil")")
+
+        try await db.terminals.setHibernated(id: tab.id, sessionID: "by-hand", reason: .exited)
+        let wake = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalWake,
+            params: TerminalWakeParams(terminalID: tab.id)))
+        #expect(!wake.success, "a joined shell tab was woken as a Claude session")
+        #expect(wake.error?.contains("shell") == true, "got: \(wake.error ?? "nil")")
+
+        let after = try #require(try await db.terminals.get(id: tab.id))
+        #expect(after.isParked, "the refused wake un-parked the row")
+        #expect(after.profileID == nil, "a refused swap re-homed the row")
+        #expect(after.holderPID == nil || after.holderPID == 9000,
+                "the refused wake recorded a new holder")
+        #expect(after.pendingSessionIncarnationID == nil,
+                "the refused wake reserved a replacement launch")
+        #expect(!recorder.calls.dropFirst(callsBefore)
+            .map { $0.joined(separator: " ") }.joined().contains("claude"),
+                "something was spawned")
+    }
+
     // MARK: - Swap: unknown token id
 
     @Test("swap: unknown token id returns error")
