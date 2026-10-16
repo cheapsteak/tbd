@@ -120,4 +120,53 @@ struct SidebarParentRemoteCacheObservationTests {
         }
         #expect(collapsed, "Remote must retain the worker row after its Exited subgroup disappears")
     }
+
+    /// With the sidebar-groups toggle off, a parent's remote worker renders
+    /// inline as a plain child row, as it did before parent groups existed:
+    /// no Remote or Exited header, and the grouped projection is never read.
+    @Test func groupsOffRendersRemoteChildrenInlineWithoutParentHeaders() async throws {
+        let fixture = ParentGroupCacheFixture(workflowGroups: false)
+        defer { fixture.cleanUp() }
+        let state = fixture.state
+        let geometry = ParentSubtreeGeometry()
+        let host = OffscreenHost(
+            root: VStack(alignment: .leading, spacing: 0) {
+                WorktreeSubtreeView(worktree: fixture.parent, depth: 0, sectionRepoID: fixture.parent.repoID!)
+            }
+            .frame(width: 320)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: ParentSubtreeHeightKey.self, value: proxy.size.height)
+            })
+            .onPreferenceChange(ParentSubtreeHeightKey.self) { height in
+                Task { @MainActor in geometry.height = height }
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+            .environment(state).defaultAppStorage(state.userDefaults),
+            size: NSSize(width: 320, height: 300))
+        defer { host.tearDown() }
+        let mounted = await host.settle { geometry.height > 0 }
+        try #require(mounted, "The inner subtree must lay out before measuring")
+        await host.pump(times: 5)
+        #expect(state.expandedSidebarGroups.isEmpty)
+        #expect(state.sidebarParentRemoteGroupsCache[fixture.parent.id] == nil,
+                "The ungrouped subtree must not read the parent group projection")
+        let inlineHeight = geometry.height
+
+        // The worker is a plain row: moving it to another parent removes
+        // exactly one row height, where a collapsed Remote group would have
+        // hidden it behind a header.
+        fixture.mutate(.worktrees)
+        let moved = await host.settle {
+            abs(inlineHeight - geometry.height - WorktreeRowView.rowHeight) < 0.5
+        }
+        #expect(moved, "The remote worker must render inline while groups are off")
+        #expect(state.sidebarParentRemoteGroupsCache[fixture.parent.id] == nil)
+
+        // Positive control: turning the toggle on reaches the grouped renderer
+        // through the same host, so the off-branch assertions above are live.
+        state.userDefaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
+        let grouped = await host.settle { state.sidebarParentRemoteGroupsCache[fixture.parent.id] != nil }
+        #expect(grouped, "Turning sidebar groups on must render the parent projection")
+    }
 }

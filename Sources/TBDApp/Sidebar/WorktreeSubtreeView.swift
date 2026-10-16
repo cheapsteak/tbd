@@ -25,6 +25,11 @@ struct WorktreeSubtreeView: View {
     /// See `SidebarHeaderMetrics.childRowLeadingInset`.
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
+    /// Whether remote and exited children file under per-parent group
+    /// headers. Off, every child renders inline beneath its parent. See
+    /// `AppState.sidebarWorkflowGroupsKey`.
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
 
     var body: some View {
         WorktreeRowView(
@@ -45,7 +50,11 @@ struct WorktreeSubtreeView: View {
         .tag(worktree.id)
 
         if depth < kMaxSubtreeDepth {
-            groupedChildren
+            if workflowGroups {
+                groupedChildren
+            } else {
+                childRows(appState.children(of: worktree.id), groupInset: 0)
+            }
         } else {
             // Cap hit. Almost certainly a cyclic parent chain in the DB.
             // Log once per cap-hit row so a future incident is debuggable.

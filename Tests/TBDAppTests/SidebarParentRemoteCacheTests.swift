@@ -16,10 +16,13 @@ struct ParentGroupCacheFixture {
     let worker: Worktree
     let other: Worktree
 
-    init() {
+    /// `workflowGroups` is the sidebar-groups toggle; the parent projection
+    /// renders only when it is on, so that is the fixture's default.
+    init(workflowGroups: Bool = true) {
         let suiteName = "SidebarParentRemoteCacheTests.\(UUID().uuidString)"
         suite = suiteName
         let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.set(workflowGroups, forKey: AppState.sidebarWorkflowGroupsKey)
         state = AppState(userDefaults: defaults)
         let repo = UUID()
         parent = SidebarGroupFixtures.row("director", repoID: repo)

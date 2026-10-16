@@ -15,6 +15,7 @@ private struct ScratchChildFixture {
     init(remoteParent: Bool) {
         let defaults = UserDefaults(suiteName: suite)!
         defaults.set(true, forKey: AppState.scratchSectionExpandedKey)
+        defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
         state = AppState(userDefaults: defaults)
         let repo = UUID()
         parent = SidebarGroupFixtures.row("parent", repoID: repo, remote: remoteParent ? "parent" : nil)
