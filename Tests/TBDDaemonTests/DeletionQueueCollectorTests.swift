@@ -200,6 +200,122 @@ struct DeletionQueueCollectorTests {
         ) == .keep(reason: "live-cwd"))
     }
 
+    @Test func keepsAWorktreeCreatedAfterItsRowWasArchived() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // The row was archived an hour before this directory existed: the
+        // old directory left with that archive, and someone recreated a
+        // worktree at the same path with `git worktree add`. It passes every
+        // other gate (linked, inside the pool, no live cwd, past grace), which
+        // is exactly how such a worktree, and the uncommitted work in it,
+        // used to be reaped as an "interrupted archive".
+        let created = try #require(DeletionQueueCollector.creationDate(of: f.worktree))
+        try "work in progress\n".write(
+            toFile: f.worktree + "/notes.txt", atomically: true, encoding: .utf8)
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false,
+            archivedAt: created.addingTimeInterval(-3600)
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0)
+                == .keep(reason: "recreated"))
+        #expect(FileManager.default.fileExists(atPath: f.worktree + "/notes.txt"))
+    }
+
+    @Test func keepsADirtyWorktreeWhoseBirthTimePredatesItsArchive() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // A worktree restored or moved into the archived path keeps an older
+        // creation date, so the "recreated" heuristic passes it. A modified
+        // tracked file must still stop the reap.
+        // The fixture repo has no tracked file of its own, so commit one
+        // here (the shell helper supplies the author identity).
+        let tracked = "tracked.txt"
+        try "committed\n".write(
+            toFile: f.worktree + "/" + tracked, atomically: true, encoding: .utf8)
+        let wtURL = URL(fileURLWithPath: f.worktree)
+        try await shell("git add \(tracked) && git commit -m 'add tracked file'", at: wtURL)
+        try "edited\n".write(
+            toFile: f.worktree + "/" + tracked, atomically: true, encoding: .utf8)
+        let created = try #require(DeletionQueueCollector.creationDate(of: f.worktree))
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false,
+            archivedAt: created.addingTimeInterval(60)
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0)
+                == .keep(reason: "dirty"))
+        #expect(try String(contentsOfFile: f.worktree + "/" + tracked, encoding: .utf8) == "edited\n")
+    }
+
+    @Test func keepsAWorktreeHoldingAnUntrackedFile() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        try "scratch\n".write(
+            toFile: f.worktree + "/untracked.txt", atomically: true, encoding: .utf8)
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0)
+                == .keep(reason: "dirty"))
+    }
+
+    @Test func stillReapsAWorktreeHoldingOnlyAnIgnoredFile() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // Ignore rules live in the shared info/exclude so the tree itself
+        // stays clean; build output is not work and must not block a reclaim.
+        let infoDir = f.repo + "/.git/info"
+        try FileManager.default.createDirectory(
+            atPath: infoDir, withIntermediateDirectories: true)
+        try "*.log\n".write(
+            toFile: infoDir + "/exclude", atomically: true, encoding: .utf8)
+        try "noise\n".write(
+            toFile: f.worktree + "/build.log", atomically: true, encoding: .utf8)
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0) == .reap)
+    }
+
+    @Test func keepsAWorktreeWhoseStatusCannotBeRead() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // No seam needed: break the worktree's admin dir so `git status`
+        // fails while the `.git` file still resolves under `.git/worktrees/`,
+        // which is all the linkage gate checks. Nothing proved the tree
+        // clean, so it stays.
+        try FileManager.default.removeItem(atPath: f.repo + "/.git/worktrees/wt/HEAD")
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0)
+                == .keep(reason: "status-unknown"))
+    }
+
+    @Test func stillReapsAWorktreeThatPredatesItsArchive() async throws {
+        let f = try await makeLinkedWorktree()
+        defer { try? FileManager.default.removeItem(at: f.tmp) }
+
+        // The genuine interrupted archive: the directory existed before the
+        // row was archived. The recreated gate must not hold this one.
+        let created = try #require(DeletionQueueCollector.creationDate(of: f.worktree))
+        let candidate = InterruptedArchive(
+            worktreeID: UUID(), path: f.worktree,
+            repoPath: f.repo, allowedPrefixes: [f.pool], locked: false,
+            archivedAt: created.addingTimeInterval(60)
+        )
+        #expect(await makeCollector().decide(candidate, liveCWDs: [], graceSeconds: 0) == .reap)
+    }
+
     // MARK: - Candidate enumeration
 
     @Test func interruptedArchivesSelectsOnlyArchivedRowsWhoseDirectoryExists() async throws {
