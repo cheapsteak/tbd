@@ -143,16 +143,19 @@ final class AppState {
             childrenIndexCache = nil
             allWorktreesCache = nil
             sidebarRemoteSnapshotCache = nil
+            sidebarParentRemoteGroupsCache.removeAll()
             sidebarHibernationCache.removeAll()
         }
     }
     /// Repo-less scratch spaces (`Worktree.isScratch`), surfaced separately
     /// in the sidebar's Scratch section rather than under any repo group.
     var scratchWorktrees: [Worktree] = [] {
-        // `childrenIndex()` is dict-only by design (see `children(of:)`),
-        // so its cache survives scratch churn. The shelf also reads Scratch.
+        // `childrenIndex()` is dict-only because scratch rows cannot be children.
+        // The shelf and ownership snapshot also read Scratch parents.
         didSet {
             allWorktreesCache = nil
+            sidebarRemoteSnapshotCache = nil
+            sidebarParentRemoteGroupsCache.removeAll()
             sidebarHibernationCache.removeAll()
         }
     }
@@ -259,14 +262,18 @@ final class AppState {
     /// severity dot. Worktrees the user is currently viewing are excluded
     /// from this dictionary because `refreshNotifications` auto-marks them
     /// read on every poll.
-    var unreadByWorktree: [UUID: UnreadSummary] = [:]
+    var unreadByWorktree: [UUID: UnreadSummary] = [:] {
+        didSet { sidebarParentRemoteGroupsCache.removeAll() }
+    }
     /// Unread notification summaries for remote sessions, keyed by
     /// `RemoteSessionSelection` (provider + provider-minted session id —
     /// remote sessions have no UUID). Mirrors `unreadByWorktree`: written by
     /// `handleRemoteSessionAttentionDelta` when an attention delta arrives,
     /// cleared by `selectRemoteSession`. App-local and in-memory only, same
     /// as `unreadByWorktree` — not persisted across restarts.
-    var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:]
+    var unreadByRemoteSession: [RemoteSessionSelection: UnreadSummary] = [:] {
+        didSet { sidebarParentRemoteGroupsCache.removeAll() }
+    }
     /// Terminal IDs that fired a `.responseComplete` notification while their
     /// tab was NOT the active tab of a focused worktree. Drives the bold tab
     /// label in `TabBar`, mirroring the worktree-row bold. App-local and
@@ -555,13 +562,17 @@ final class AppState {
     /// Every registered remote-agent provider's negotiated contract + health,
     /// fetched by `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteProviders: [RemoteProviderStatus] = [] {
-        didSet { sidebarRemoteSnapshotCache = nil }
+        didSet {
+            sidebarRemoteSnapshotCache = nil
+            sidebarParentRemoteGroupsCache.removeAll()
+        }
     }
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = [] {
         didSet {
             sidebarRemoteSnapshotCache = nil
+            sidebarParentRemoteGroupsCache.removeAll()
             // A sighting that moves only `lastSeen`, `gone` or row state keeps
             // the match memo: its indices still name the same sessions.
             if !remoteSessions.elementsEqual(oldValue, by: RepoSectionView.sameMatchInputs) {
@@ -641,6 +652,8 @@ final class AppState {
     /// Test seam: counts every recompute of a repo's matched-session sort, so a
     /// test can assert that a sighting which changes no match input re-sorts nothing.
     @ObservationIgnored var sidebarMatchedSessionsSortCount = 0
+    /// Parent partitions share the snapshot and survive unrelated row renders.
+    @ObservationIgnored var sidebarParentRemoteGroupsCache: [UUID: SidebarRemoteGroups] = [:]
     @ObservationIgnored var sidebarHibernationCache: [SidebarGroupID.Owner: SidebarHibernationPartition] = [:]
 
     /// Test seam: when set, replaces the daemon roundtrip for archived

@@ -25,6 +25,11 @@ struct WorktreeSubtreeView: View {
     /// See `SidebarHeaderMetrics.childRowLeadingInset`.
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
+    /// Whether remote and exited children file under per-parent group
+    /// headers. Off, every child renders inline beneath its parent. See
+    /// `AppState.sidebarWorkflowGroupsKey`.
+    @AppStorage(AppState.sidebarWorkflowGroupsKey)
+    private var workflowGroups: Bool = AppState.sidebarWorkflowGroupsDefault
 
     var body: some View {
         WorktreeRowView(
@@ -45,12 +50,10 @@ struct WorktreeSubtreeView: View {
         .tag(worktree.id)
 
         if depth < kMaxSubtreeDepth {
-            ForEach(appState.children(of: worktree.id)) { child in
-                WorktreeSubtreeView(
-                    worktree: child,
-                    depth: depth + 1,
-                    sectionRepoID: sectionRepoID
-                )
+            if workflowGroups {
+                groupedChildren
+            } else {
+                childRows(appState.children(of: worktree.id), groupInset: 0)
             }
         } else {
             // Cap hit. Almost certainly a cyclic parent chain in the DB.
@@ -62,4 +65,43 @@ struct WorktreeSubtreeView: View {
                 }
         }
     }
+
+    /// `depth` counts worktree ancestry only. Each disclosure adds visual
+    /// padding around its rows without consuming the structural recursion cap.
+    @ViewBuilder
+    private var groupedChildren: some View {
+        let groups = appState.sidebarRemoteGroups(parentID: worktree.id)
+        childRows(groups.localRoots, groupInset: 0)
+        if !groups.isEmpty {
+            let remoteID = SidebarGroupID(owner: .parent(worktree.id), kind: .remote)
+            let exitedID = SidebarGroupID(owner: .parent(worktree.id), kind: .exited)
+            groupHeader(remoteID, title: "Remote", summary: groups.summary, groupInset: 0)
+            if appState.expandedSidebarGroups.contains(remoteID) {
+                childRows(groups.remoteRoots, groupInset: 1)
+                if groups.hasExited {
+                    groupHeader(exitedID, title: "Exited", summary: groups.exitedSummary, groupInset: 1)
+                    if appState.expandedSidebarGroups.contains(exitedID) {
+                        childRows(groups.exitedRoots, groupInset: 2)
+                    }
+                }
+            }
+        }
+    }
+
+    private func childRows(_ rows: [Worktree], groupInset: Int) -> some View {
+        ForEach(rows) { child in
+            WorktreeSubtreeView(worktree: child, depth: depth + 1, sectionRepoID: sectionRepoID)
+                .padding(.leading, CGFloat(groupInset) * 16)
+        }
+    }
+
+    private func groupHeader(_ id: SidebarGroupID, title: String,
+                             summary: SidebarRemoteGroups.Summary, groupInset: Int) -> some View {
+        SidebarGroupHeader(id: id, title: title, summary: summary)
+            .padding(.leading, CGFloat(depth + 1 + groupInset) * 16)
+            .listRowInsets(EdgeInsets(
+                top: 0, leading: SidebarHeaderMetrics.childRowLeadingInset(
+                    chevronBeforeProjectName: chevronBeforeProjectName), bottom: 0, trailing: 0))
+    }
+
 }
