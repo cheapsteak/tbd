@@ -191,6 +191,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `Config.remoteTranscriptLiveSyncEnabledDefault`, never through
     /// `?? false`.
     var remote_transcript_live_sync_enabled: Bool?
+    /// Clone-backed worktree checkout gate. **Genuinely tri-state**: the
+    /// `20261009180000_config_clone_checkout` migration carries no SQL default,
+    /// so `nil` means "never chose". Resolve it through
+    /// `Config.cloneCheckoutDefault`, never through `?? false`.
+    var clone_checkout_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -269,6 +274,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   sync's soak gate.
     /// - Parameter programStatusDefault: same shape again, for
     ///   `program_status_enabled` — the Program Status Protocol's soak gate.
+    /// - Parameter cloneCheckoutDefault: same shape again, for
+    ///   `clone_checkout_enabled` — the clone-backed worktree checkout's soak
+    ///   gate.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -287,7 +295,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         prPollScheduleDefault: Bool = Config.prPollScheduleDefault,
         transcriptPromptAnswerDefault: Bool = Config.transcriptPromptAnswerDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
-        programStatusDefault: Bool = Config.programStatusEnabledDefault
+        programStatusDefault: Bool = Config.programStatusEnabledDefault,
+        cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -377,6 +386,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         )
         // And once more, for the model proxy's gate — NOT `?? false`.
         config.modelProxyEnabled = model_proxy_enabled ?? modelProxyDefault
+        // Clone-backed checkout gate — NOT `?? false`.
+        config.cloneCheckoutEnabled = clone_checkout_enabled ?? cloneCheckoutDefault
         // And its companion, for the provisional transcript row's gate — NOT
         // `?? false`. Resolved on its own here; the conjunction with the proxy
         // flag lives in `Config.transcriptStreamingEffective`, so a
@@ -901,6 +912,18 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET profile_balancing_max_reading_age_seconds = ? WHERE id = ?",
                 arguments: [seconds, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the clone-backed worktree checkout gate. Written on every call,
+    /// so either value is the explicit gesture that lifts the column out of
+    /// NULL. Read on every create, so it needs no live switch.
+    public func setCloneCheckoutEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET clone_checkout_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
             )
         }
     }

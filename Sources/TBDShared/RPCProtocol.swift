@@ -377,6 +377,11 @@ public enum RPCMethod {
     /// `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetRemoteTranscriptLiveSyncEnabled =
         "config.setRemoteTranscriptLiveSyncEnabled"
+    /// The clone-backed worktree checkout gate (`clone_checkout_enabled`).
+    /// Read on every worktree create, so it takes effect at the next one.
+    /// Reading needs no method of its own: `config.get` carries the resolved
+    /// value.
+    public static let configSetCloneCheckoutEnabled = "config.setCloneCheckoutEnabled"
     /// Per-profile opt-out from the balancing pool. Reading needs no method of
     /// its own: the opt-out is already carried in `model.profiles` as
     /// `ModelProfile.poolOptOut`.
@@ -3976,6 +3981,12 @@ public struct ConfigSetPromptAnswerParams: Codable, Sendable {
 /// sync of remote session transcripts (default OFF during soak). Design:
 /// `docs/specs/2026-09-25-remote-session-transcript-design.md` § Gating.
 public struct ConfigSetRemoteLiveSyncEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setCloneCheckoutEnabled`.
+public struct ConfigSetCloneCheckoutEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
