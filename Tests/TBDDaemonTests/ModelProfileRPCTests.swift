@@ -1821,14 +1821,22 @@ struct ModelProfileRPCTests {
         try ModelProfileKeychain.store(id: profile.id.uuidString, token: token)
 
         let portFilePath = "/tmp/tbd-http-socketonly-\(UUID().uuidString.prefix(8)).port"
-        defer { unlink(portFilePath) }
-        let server = HTTPServer(router: router, portFilePath: portFilePath)
+        let tokenFilePath = "/tmp/tbd-http-socketonly-\(UUID().uuidString.prefix(8)).token"
+        defer {
+            unlink(portFilePath)
+            unlink(tokenFilePath)
+        }
+        let server = HTTPServer(router: router, portFilePath: portFilePath, tokenFilePath: tokenFilePath)
         try await server.start()
+        // The port's own credential, so the request reaches the socket-only
+        // refusal rather than stopping at the transport's gate.
+        let httpToken = try String(contentsOfFile: tokenFilePath, encoding: .utf8)
         // An ephemeral session: no on-disk cache under the test fence's home.
         let session = URLSession(configuration: .ephemeral)
         func post(_ request: RPCRequest) async throws -> (body: String, response: RPCResponse) {
             var http = URLRequest(url: URL(string: "http://127.0.0.1:\(server.port)/rpc")!)
             http.httpMethod = "POST"
+            http.setValue(httpToken, forHTTPHeaderField: HTTPRequestGate.tokenHeader)
             http.httpBody = try JSONEncoder().encode(request)
             let (data, _) = try await session.data(for: http)
             return (String(decoding: data, as: UTF8.self), try JSONDecoder().decode(RPCResponse.self, from: data))
