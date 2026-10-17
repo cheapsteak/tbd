@@ -12,49 +12,82 @@ public enum HibernationSafetyChecks {
 
     // MARK: - Typed-but-unsent input
 
+    /// The glyphs Claude Code draws at the start of its composer's prompt line:
+    /// `>` in the bordered box of older releases, `❯` between the horizontal
+    /// rules of current ones, and `!` in shell mode. A release that draws a new
+    /// glyph is one entry here. A glyph this set does not know reads as no
+    /// composer at all, which is the unsafe direction, so keep it complete.
+    static let composerPromptGlyphs: Set<Character> = [">", "❯", "!"]
+
     /// Whether a `capture-pane` snapshot of a Claude TUI shows the user has
     /// typed text into the prompt box that hasn't been submitted yet.
     ///
-    /// Claude Code renders its input as a bordered box whose prompt line starts
-    /// with `>`; an empty prompt shows only the placeholder. We look at the
-    /// last non-empty lines for a `>` prompt marker followed by
-    /// non-placeholder, non-whitespace content. This is a heuristic — the
-    /// research flagged Chrome's "discarding lost my typed text" as the single
-    /// biggest backlash — so anything that looks like pending input blocks
-    /// hibernation.
+    /// The composer's prompt line starts with one of `composerPromptGlyphs`,
+    /// at column 0 or just inside a `│` box gutter, and a multi-line draft
+    /// continues on the lines under it down to the composer's bottom edge (a
+    /// line of box-drawing characters). We take the last prompt line on screen
+    /// as the composer and read it with its continuation lines: any content
+    /// that is not a known placeholder is pending input. This is a heuristic —
+    /// the research flagged Chrome's "discarding lost my typed text" as the
+    /// single biggest backlash — so anything that looks like pending input
+    /// blocks hibernation. A grayed prompt suggestion reads as typed text here:
+    /// escapes are stripped before the scan, and a holder screen carries none,
+    /// so dimness never separates the two.
     ///
     /// Returns `false` (no pending input → safe to hibernate) when the capture
     /// is empty or shows only an empty/placeholder prompt.
     public static func hasPendingInput(paneCapture: String) -> Bool {
         let lines = paneCapture
             .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { stripANSI(String($0)).trimmingCharacters(in: .whitespaces) }
+            .map { stripANSI(String($0)) }
 
-        // Scan from the bottom for the prompt line (`>` or the box-drawn
-        // variant). The first `>`-prefixed line from the bottom is the input.
-        for line in lines.reversed() {
-            guard let promptBody = promptBody(of: line) else { continue }
-            // Strip both the whitespace and any trailing box-drawing gutter
-            // (`… │`) so an empty prompt inside a box reads as empty.
-            let cleaned = promptBody
-                .trimmingCharacters(in: CharacterSet(charactersIn: "│|╭╮╰╯─ \t"))
-            if cleaned.isEmpty { return false }
+        // Scan from the bottom for the prompt line. The first prompt line from
+        // the bottom is the composer.
+        for index in lines.indices.reversed() {
+            guard let promptBody = promptBody(of: lines[index]) else { continue }
+            // A draft whose first line is blank still has its text on the
+            // continuation lines, so read down to the composer's bottom edge.
+            let continuation = lines[(index + 1)...].prefix { !isComposerEdge($0) }
+            let draft = ([promptBody] + continuation).map {
+                $0.trimmingCharacters(in: composerGutter)
+            }
+            guard draft.contains(where: { !$0.isEmpty }) else { return false }
             // Common empty-prompt placeholders Claude shows.
             let placeholders = ["Try \"", "Ask Claude", "Type a message"]
-            if placeholders.contains(where: { cleaned.hasPrefix($0) }) { return false }
+            let onlyPromptLine = draft.dropFirst().allSatisfy(\.isEmpty)
+            if onlyPromptLine, placeholders.contains(where: { draft[0].hasPrefix($0) }) {
+                return false
+            }
             return true
         }
         return false
     }
 
-    /// If `line` is a Claude prompt line (`>` possibly inside box-drawing
-    /// characters), return the text after the `>`; otherwise nil.
+    /// Whitespace (including the no-break space Claude Code draws after its
+    /// prompt glyph) and the box-drawing gutter around a composer line, so an
+    /// empty prompt inside a box reads as empty.
+    private static let composerGutter = CharacterSet.whitespaces
+        .union(CharacterSet(charactersIn: "│|╭╮╰╯─"))
+
+    /// If `line` is a Claude prompt line (a prompt glyph at column 0, or just
+    /// inside a `│` box gutter), return the text after the glyph; otherwise nil.
+    ///
+    /// Column 0 is load-bearing: the status lines under the composer are
+    /// indented, and shell mode's reads `  ! for shell mode`.
     private static func promptBody(of line: String) -> String? {
-        // Strip a leading box-drawing / vertical-bar gutter, then require `>`.
         var s = Substring(line)
-        while let first = s.first, "│|╭╮╰╯─ ".contains(first) { s = s.dropFirst() }
-        guard let gt = s.first, gt == ">" else { return nil }
+        if let first = s.first, "│|".contains(first) {
+            s = s.dropFirst().drop(while: { $0.isWhitespace })
+        }
+        guard let glyph = s.first, composerPromptGlyphs.contains(glyph) else { return nil }
         return String(s.dropFirst())
+    }
+
+    /// Whether `line` is the composer's bottom edge: a line drawn only in
+    /// box-drawing characters, either a bare rule or a box's `╰──╯`.
+    private static func isComposerEdge(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && trimmed.allSatisfy { "─╭╮╰╯".contains($0) }
     }
 
     private static func stripANSI(_ s: String) -> String {

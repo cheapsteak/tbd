@@ -173,8 +173,9 @@ them classify what they read, and both are named exceptions.
   stored as the parked pane's display snapshot (verbatim), *and* it is fed to
   `HibernationSafetyChecks.hasPendingInput` (`:379`) — **sanctioned scraper #1**,
   exempted at `.swiftlint.yml:334`, the rail that refuses to park a session with
-  unsent text in its composer. The `-e` is load-bearing: dimness is the only
-  thing distinguishing a ghost suggestion from typed input.
+  unsent text in its composer. The scraper strips the escapes before it scans,
+  so a dim ghost suggestion reads as typed input and refuses the park (the
+  safe direction); the `-e` serves the stored snapshot.
 - **`capture-pane -p -e -J -S -10000`** — `capturePaneScrollbackCommand`
   (`:541-546`). Path: **default**. Archival, verbatim, never parsed. Three
   callers, all snapshotting a pane into closed-terminal history immediately
