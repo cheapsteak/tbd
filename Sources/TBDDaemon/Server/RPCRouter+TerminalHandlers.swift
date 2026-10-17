@@ -430,8 +430,9 @@ extension RPCRouter {
         // Pre-accept Claude Code's folder-trust dialog: this worktree belongs to
         // a registered repo, so the trust answer is known by construction, and
         // the dialog blocks before SessionStart (a stall would be
-        // machine-invisible). The seeder still declines for `foreignHead` rows.
-        // Only the claude path can trigger it; best-effort (never throws), so
+        // machine-invisible). A `foreignHead` row seeds too; its launch flag is
+        // what keeps the fork's project config out. Only the claude path can
+        // trigger it; best-effort (never throws), so
         // seeding on fresh and resume is safe. `createConfig` is a `try?` read —
         // falling back to `true` keeps the shipped default rather than silently
         // reinstating the stall.
@@ -552,7 +553,8 @@ extension RPCRouter {
             settingsOverlayPath: overlayPath,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: spawnTitle?.name
+            sessionName: spawnTitle?.name,
+            foreignHead: worktree.foreignHead
         )
 
         // For Claude terminals, layer the builder's auth/routing env ON TOP of
@@ -1235,9 +1237,9 @@ extension RPCRouter {
             }
             let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
             // Reviving a closed terminal respawns claude in the same worktree,
-            // so the same trust argument applies — including the seeder's
-            // `foreignHead` refusal, which is why the flag lives on the row
-            // rather than in the create-time parameter list. `reviveConfig` is a
+            // so the same trust argument applies — and the same `foreignHead`
+            // launch flag below, which is why the flag lives on the row rather
+            // than in the create-time parameter list. `reviveConfig` is a
             // `try?` read; fall back to the shipped default.
             await ClaudeTrustSeeder.ensureTrusted(
                 worktree: worktree.worktree,
@@ -1276,7 +1278,8 @@ extension RPCRouter {
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: reviveSpawnTitle.name
+                sessionName: reviveSpawnTitle.name,
+                foreignHead: worktree.foreignHead
             )
             let env: [String: String] = [
                 "TBD_WORKTREE_ID": worktree.id.uuidString,
@@ -2731,6 +2734,7 @@ extension RPCRouter {
             watchDeskRole: swapDeskRole,
             worktreePath: worktree.path,
             profileConfigDir: profileConfigDir,
+            foreignHead: worktree.foreignHead,
             promptAnswerHooks: swapConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
         )
 
@@ -2992,7 +2996,8 @@ extension RPCRouter {
                 settingsOverlayPath: overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: sessionName
+                sessionName: sessionName,
+                foreignHead: worktree.foreignHead
             )
         case .fresh(let newSessionID):
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
@@ -3016,7 +3021,8 @@ extension RPCRouter {
                 settingsOverlayPath: overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: sessionName
+                sessionName: sessionName,
+                foreignHead: worktree.foreignHead
             )
         }
     }

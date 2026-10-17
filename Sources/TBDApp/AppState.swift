@@ -2174,7 +2174,8 @@ final class AppState {
                 model: request.model,
                 primaryAgentPreference: request.primaryAgentPreference,
                 prNumber: request.prNumber,
-                checkoutPRHead: request.checkoutPRHead
+                checkoutPRHead: request.checkoutPRHead,
+                prIsCrossRepository: request.prIsCrossRepository
             )
         }
     /// Where a first message that never reached its worktree is written —

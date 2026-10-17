@@ -504,6 +504,14 @@ public enum ClaudeHookOverlay {
     /// a desk on a model profile has its user-scope `settings.json` inside that
     /// directory, not in the host Claude store. Pass the same value handed to
     /// `ClaudeSpawnCommandBuilder.build`; nil means the ambient install.
+    ///
+    /// `foreignHead` — the worktree row's flag, the same value handed to
+    /// `ClaudeSpawnCommandBuilder.build` — keeps the tee from delegating to a
+    /// project-scope statusline at all. That session launches with
+    /// `--setting-sources user`, so the worktree's own statusline is the fork
+    /// author's command and one the session would never show. The tee runs its
+    /// delegate from this overlay, which the launch flag does not filter, so
+    /// leaving `worktreePath` in the search would run that command anyway.
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,
@@ -512,6 +520,7 @@ public enum ClaudeHookOverlay {
         watchDeskRole: WatchDeskRole? = nil,
         worktreePath: String? = nil,
         profileConfigDir: String? = nil,
+        foreignHead: Bool = false,
         promptAnswerHooks: Bool = false
     ) -> String {
         // A session that is not installing a tee must not be able to read one's
@@ -562,7 +571,7 @@ public enum ClaudeHookOverlay {
                 delegateCommand: OperatorStatuslineResolver.resolve(
                     perSpawnSettingsJSON: extraSettingsJSON,
                     repoSettingsJSON: repoSettingsJSON,
-                    worktreePath: worktreePath,
+                    worktreePath: foreignHead ? nil : worktreePath,
                     profileConfigDir: profileConfigDir
                 )
             )

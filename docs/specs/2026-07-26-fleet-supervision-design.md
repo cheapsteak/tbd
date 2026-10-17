@@ -365,14 +365,15 @@ argues it against itself rather than hiding it here.
 
 Alongside those asks, the residual dialog zoo still stalls agents: folder
 trust, `/login`, plan-mode approval, `AskUserQuestion`, and first-run dialogs.
-Folder trust is mostly pre-answered already: `ClaudeTrustSeeder` seeds
-scratch spaces unconditionally and non-scratch worktrees whenever
-`auto_trust_worktrees` is on (its default), excluding only `foreignHead`
-checkouts — contents TBD declines to vouch for. What prong 2 inherits here
-is the residue, not the feature: the `foreignHead` carve-out still renders
-the dialog, and an operator who turns the setting off has chosen the prompt
-deliberately. `ask`-rule prompts join the zoo as its one permission-shaped
-member — and they are the one member that is deliberate. Measured against the
+Folder trust is pre-answered already: `ClaudeTrustSeeder` seeds scratch
+spaces unconditionally and non-scratch worktrees whenever
+`auto_trust_worktrees` is on (its default), `foreignHead` checkouts included.
+A fork's PR head is gated where Claude is launched, with
+`--setting-sources user`, rather than by the dialog, which Claude answers per
+repository. What prong 2 inherits here is the residue, not the feature: an
+operator who turns the setting off has chosen the prompt deliberately.
+`ask`-rule prompts join the zoo as its one permission-shaped member — and they
+are the one member that is deliberate. Measured against the
 test, one other member of that zoo separates from the rest.
 
 **`AskUserQuestion` passes all three conditions today** — not as an aspiration,

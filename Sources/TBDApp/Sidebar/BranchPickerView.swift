@@ -127,11 +127,13 @@ struct BranchListView: View {
                 existingBranch: branch, prNumber: item.pr?.number)
         } else if let pr = item.pr {
             // PR-only row (fork PR, or a same-repo PR whose head is unfetched):
-            // fetch refs/pull/<n>/head into a fresh local branch.
+            // fetch refs/pull/<n>/head into a fresh local branch. Only a fork's
+            // head is stamped `foreignHead`, so the daemon needs to know which.
             let branch = BranchInfo(name: pr.headRefName, localName: pr.headRefName, isRemote: false)
             appState.createWorktree(
                 repoID: repoID, parentWorktreeID: parentWorktreeID,
                 existingBranch: branch, prNumber: pr.number, checkoutPRHead: true,
+                prIsCrossRepository: pr.isCrossRepository,
                 displayName: "#\(pr.number) \(pr.title)")
         }
     }

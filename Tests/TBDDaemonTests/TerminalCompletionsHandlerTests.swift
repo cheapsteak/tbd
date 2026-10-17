@@ -34,7 +34,7 @@ struct TerminalCompletionsHandlerTests {
         db: TBDDatabase,
         configDirManager: ClaudeProfileConfigDirManager
             = makeIsolatedConfigDirManager(tag: "completions-handler"),
-        probe: @escaping CompletionInventoryService.Prober = { _, _, _ in stubOutcome }
+        probe: @escaping CompletionInventoryService.Prober = { _, _, _, _ in stubOutcome }
     ) -> RPCRouter {
         let tmux = TmuxManager(dryRun: true)
         return RPCRouter(
@@ -77,6 +77,30 @@ struct TerminalCompletionsHandlerTests {
             TerminalCompletionsResult.self, from: Data((response.result ?? "{}").utf8))
         #expect(result.commands.map(\.name) == ["compact"])
         #expect(result.source == .probe)
+    }
+
+    /// The probe asks about the session this terminal runs, and a fork-head
+    /// worktree's session reads user settings only — so the handler passes the
+    /// worktree row's flag through rather than letting the probe default it.
+    @Test(arguments: [true, false])
+    func theProbeIsToldWhetherTheWorktreeIsAForeignHead(foreignHead: Bool) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await makeTerminal(db)
+        if foreignHead {
+            try await db.worktrees.markForeignHead(id: terminal.worktreeID)
+        }
+        let probedWith = FireRecorder<Bool>()
+        let router = makeRouter(db: db, probe: { _, _, _, probeForeignHead in
+            probedWith.record(probeForeignHead)
+            return Self.stubOutcome
+        })
+        let data = try JSONEncoder().encode(
+            TerminalCompletionsParams(terminalID: terminal.id))
+
+        let response = try await router.handleTerminalCompletions(data)
+
+        #expect(response.success)
+        #expect(probedWith.values == [foreignHead])
     }
 
     @Test func anUnknownTerminalIsAnError() async throws {
@@ -129,7 +153,7 @@ struct TerminalCompletionsHandlerTests {
         let recorder = EnvironmentRecorder()
         let router = makeRouter(
             db: db, configDirManager: manager,
-            probe: { _, _, environment in
+            probe: { _, _, environment, _ in
                 await recorder.record(environment)
                 return Self.stubOutcome
             })
@@ -180,7 +204,7 @@ struct TerminalCompletionsHandlerTests {
         let recorder = EnvironmentRecorder()
         let router = makeRouter(
             db: db, configDirManager: manager,
-            probe: { _, _, environment in
+            probe: { _, _, environment, _ in
                 await recorder.record(environment)
                 return Self.stubOutcome
             })

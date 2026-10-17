@@ -119,10 +119,14 @@ struct ClaudeTrustSeederTests {
         #expect(try String(contentsOf: file, encoding: .utf8) == sentinel)
     }
 
-    // MARK: - Foreign-head tier: contents TBD cannot vouch for
+    // MARK: - Foreign-head worktrees: gated at launch, seeded like any other
 
-    @Test("toggle ON: foreign-head worktree is NOT seeded")
-    func foreignHeadIsNotSeededWithToggleOn() async {
+    /// A fork's PR head is kept out by `--setting-sources user` at launch, not
+    /// by the dialog, which Claude stops asking once the repo's main checkout
+    /// is trusted. Leaving the worktree unseeded would only stall it, out of
+    /// TBD's sight, in a profile that has not trusted the repo yet.
+    @Test("toggle ON: foreign-head worktree IS seeded")
+    func foreignHeadIsSeededWithToggleOn() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-fork-pr-\(UUID().uuidString)"
@@ -131,14 +135,13 @@ struct ClaudeTrustSeederTests {
         await ClaudeTrustSeeder.ensureTrusted(
             worktree: wt, autoTrustNonScratch: true, profileConfigDir: configDir.path)
 
-        #expect(isTrusted(wtPath, in: configDir) == false,
-                "a fork contributor authored these contents — the dialog must render")
-        let file = configDir.appendingPathComponent(".claude.json")
-        #expect(FileManager.default.fileExists(atPath: file.path) == false)
+        #expect(isTrusted(wtPath, in: configDir))
     }
 
-    @Test("toggle OFF: foreign-head worktree is NOT seeded either")
-    func foreignHeadIsNotSeededWithToggleOff() async {
+    /// The operator's opt-out still governs a foreign head, exactly as it
+    /// governs every other non-scratch worktree.
+    @Test("toggle OFF: foreign-head worktree is NOT seeded")
+    func foreignHeadFollowsTheToggle() async {
         let configDir = tempConfigDir()
         defer { try? FileManager.default.removeItem(at: configDir) }
         let wtPath = "/private/tmp/tbd-fork-pr-\(UUID().uuidString)"
@@ -148,12 +151,13 @@ struct ClaudeTrustSeederTests {
             worktree: wt, autoTrustNonScratch: false, profileConfigDir: configDir.path)
 
         #expect(isTrusted(wtPath, in: configDir) == false)
+        let file = configDir.appendingPathComponent(".claude.json")
+        #expect(FileManager.default.fileExists(atPath: file.path) == false)
     }
 
-    /// Over-exclusion guard: a *decorated* same-repo PR row carries `prNumber`
-    /// for status tracking but checks out an ordinary local branch, so
-    /// `foreignHead` stays false and it must still seed. Gating on `prNumber`
-    /// instead of `foreignHead` would fail the originally reported bug.
+    /// A *decorated* same-repo PR row carries `prNumber` for status tracking
+    /// but checks out an ordinary local branch. Nothing about a PR number may
+    /// stop the seed.
     @Test("toggle ON: same-repo PR worktree (prNumber set, not foreign) IS seeded")
     func decoratedPRWorktreeIsStillSeeded() async {
         let configDir = tempConfigDir()

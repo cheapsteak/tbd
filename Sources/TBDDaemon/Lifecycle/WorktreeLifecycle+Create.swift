@@ -43,12 +43,12 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, prIsCrossRepository: Bool? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
         let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch, prNumber: prNumber)
         // Pass the original branch ref (may include `origin/` prefix) through
         // so phase 2 can dispatch to the correct git command.
         let existingBranchRef = useExistingBranch ? branch : nil
-        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
+        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, prIsCrossRepository: prIsCrossRepository, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
         // Legacy synchronous contract: the returned worktree is fully set up.
         // Await phase 3 inline when a preSession hook gated the primary spawn.
         if case .preSessionPending(let phase3) = completion {
@@ -235,7 +235,7 @@ extension WorktreeLifecycle {
     /// Set `retryGeneratedNameOnCollision` to false when callers have already
     /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true, rollBackOnFailure: Bool = true) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, prIsCrossRepository: Bool? = nil, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true, rollBackOnFailure: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -294,11 +294,11 @@ extension WorktreeLifecycle {
             // 2. git worktree add (fetch was run beforehand in the RPC handler)
             let worktreeAddStart = clock.now
             let resultPath: String
-            // Set by the PR-head branch below: this worktree's contents came
-            // from `refs/pull/<n>/head`, which a third-party fork may have
-            // authored. Persisted on the row so the five *later* trust-seeding
-            // call sites (wake, revive, terminal create, profile swap,
-            // extra-session restore) can see it too.
+            // Set by the PR-head branch below when the PR is cross-repository:
+            // this worktree's contents came from a fork's `refs/pull/<n>/head`.
+            // Persisted on the row so every *later* Claude launch (wake,
+            // revive, terminal create, profile swap, extra-session restore,
+            // continue-in-Claude) starts with `--setting-sources user` too.
             var checkedOutForeignHead = false
             if let ref = existingBranchRef {
                 // Existing-branch flow: check out the chosen ref. Local branches
@@ -462,10 +462,17 @@ extension WorktreeLifecycle {
                             id: worktreeID, branch: fetchedPullHeadBranch
                         )
                     }
-                    // TBD made this directory but not its contents: stamp
-                    // the row so folder-trust is never pre-answered for it.
-                    checkedOutForeignHead = true
-                    try await db.worktrees.markForeignHead(id: worktreeID)
+                    // A fork's head: TBD made this directory but the fork's
+                    // author wrote its contents, so stamp the row and every
+                    // Claude launch in it leaves the project config unloaded.
+                    // A same-repo head was pushed to the operator's own remote
+                    // by someone who can push there, so it is treated like
+                    // that branch fetched normally. A caller that cannot say
+                    // which (nil) gets the restricted launch, never the full one.
+                    if prIsCrossRepository ?? true {
+                        checkedOutForeignHead = true
+                        try await db.worktrees.markForeignHead(id: worktreeID)
+                    }
                 }
             } else {
                 let result = try await attemptWorktreeAdd(
@@ -489,8 +496,8 @@ extension WorktreeLifecycle {
 
             // The spawn paths below take this value rather than re-reading the
             // row, so carry the `foreignHead` stamp onto the in-memory copy —
-            // otherwise the very first Claude spawn would still seed trust for
-            // a tree it just fetched from a fork.
+            // otherwise the very first Claude spawn would load the project
+            // config of a tree it just fetched from a fork.
             var stamped = worktree.worktree
             stamped.foreignHead = stamped.foreignHead || checkedOutForeignHead
             let spawnWorktree = stamped
@@ -1593,9 +1600,9 @@ extension WorktreeLifecycle {
             // this worktree from a repo the operator registered, so the trust
             // answer is known by construction — and the dialog blocks before
             // SessionStart, so a stall here would be machine-invisible.
-            // Scratch always seeds; non-scratch honors the config flag and is
-            // skipped entirely when the row is `foreignHead` (PR-head checkout,
-            // possibly fork-authored contents). Best-effort, never throws.
+            // Scratch always seeds; non-scratch honors the config flag. A
+            // `foreignHead` row seeds too: its launch flag, not the dialog,
+            // keeps the fork's project config out. Best-effort, never throws.
             await ClaudeTrustSeeder.ensureTrusted(
                 worktree: worktree,
                 autoTrustNonScratch: config.autoTrustWorktrees,
@@ -1639,6 +1646,7 @@ extension WorktreeLifecycle {
                 // The same config dir this spawn runs with, so the tee
                 // delegates to the user-scope statusline THIS session reads.
                 profileConfigDir: profileConfigDir,
+                foreignHead: worktree.foreignHead,
                 promptAnswerHooks: config.transcriptPromptAnswerEnabled
             )
             // **The routing decision, and it happens BEFORE the command is
@@ -1706,7 +1714,8 @@ extension WorktreeLifecycle {
                 settingsOverlayPath: primaryOverlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: spawnTitle.name
+                sessionName: spawnTitle.name,
+                foreignHead: worktree.foreignHead
             )
             primaryCommand = spawn.command
             primaryEnv = [
@@ -1968,7 +1977,8 @@ extension WorktreeLifecycle {
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
                     envSettingOverrides: claudeEnvOverrides,
-                    sessionName: restoreSpawnTitle.name
+                    sessionName: restoreSpawnTitle.name,
+                    foreignHead: worktree.foreignHead
                 )
                 let perTermEnv: [String: String] = [
                     "TBD_WORKTREE_ID": worktreeID.uuidString,

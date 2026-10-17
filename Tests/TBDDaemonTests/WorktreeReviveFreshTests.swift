@@ -737,6 +737,12 @@ struct WorktreeReviveFreshTests {
         #expect(isPromptFreeForkResumeInvocation(base))
         #expect(!isPromptFreeForkResumeInvocation(base + " 'You have been moved.'"))
 
+        // A fork-head worktree's launch adds a bare flag pair, not a quoted
+        // value, so it must be accepted without opening a gap for a prompt.
+        let foreignHead = base + " --setting-sources user"
+        #expect(isPromptFreeForkResumeInvocation(foreignHead))
+        #expect(!isPromptFreeForkResumeInvocation(foreignHead + " 'You have been moved.'"))
+
         // `--name '<worktree display name>'` is a permitted flag, not a
         // positional — its quoted value must not smuggle a prompt past the
         // guard, so the trailing-argument rejection still has to hold with it
@@ -760,14 +766,14 @@ struct WorktreeReviveFreshTests {
 
     /// Whitelists the permitted invocation shape instead of blacklisting the
     /// removed prompt's wording: only the resume/fork/permission flags plus the
-    /// optional file-path flags may appear. Any trailing positional argument
+    /// optional file-path flags and `--setting-sources user` may appear. Any trailing positional argument
     /// fails, whatever it says.
     private func isPromptFreeForkResumeInvocation(_ command: String) -> Bool {
         guard let start = command.range(of: "claude --resume") else { return false }
         let invocation = String(command[start.lowerBound...])
         let permitted = "^claude --resume [-0-9A-Za-z]+ --fork-session"
             + " --dangerously-skip-permissions( --name \(Self.shellEscapedWordPattern))?"
-            + "( --settings '[^']*')?( --plugin-dir '[^']*')?$"
+            + "( --settings '[^']*')?( --plugin-dir '[^']*')?( --setting-sources user)?$"
         return invocation.range(of: permitted, options: .regularExpression) != nil
     }
 

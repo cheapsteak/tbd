@@ -21,13 +21,20 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-trust
 /// operator trust gesture, so that directory is "one you trust" even though it
 /// is not "one TBD made".
 ///
-/// It does **not** cover contents TBD merely *hosted*. A worktree flagged
-/// `foreignHead` was checked out from a pull-request head TBD fetched
-/// (`refs/pull/<n>/head`) rather than from a branch already present in the
-/// operator's repo. TBD created the directory, but the `.claude/settings.json`,
-/// hooks, MCP config and `CLAUDE.md` inside it came in with that fetched ref —
-/// which may be a third-party fork's. That is precisely what the dialog exists
-/// to gate, so these worktrees are never seeded and Claude asks as usual.
+/// **`foreignHead` worktrees are seeded like any other, because the dialog is
+/// not what protects them.** A worktree flagged `foreignHead` was checked out
+/// from a fork's pull-request head (`refs/pull/<n>/head`), so the
+/// `.claude/settings.json`, hooks, MCP config and `CLAUDE.md` inside it are the
+/// fork author's. The dialog cannot gate those. Claude Code decides trust per
+/// repository: once a profile trusts the repo's main checkout — after one "Yes"
+/// in any of its worktrees, or after this seeder's `.main` seed — every
+/// worktree of the repo opens without asking, and an explicit `false` on a
+/// worktree's own key does not override that. The gate is the launch instead:
+/// TBD starts Claude in such a worktree with `--setting-sources user`
+/// (`ClaudeSpawnCommandBuilder.foreignHeadSettingSourcesArguments`), so none
+/// of the fork's project configuration loads. With that in place the dialog has
+/// nothing left to protect, and leaving the worktree unseeded would only bring
+/// back the stall below in a profile that has not trusted the repo yet.
 ///
 /// **Why prevention is the only fix.** The trust dialog blocks *before*
 /// SessionStart, so no Claude Code hook ever fires while it is up. A session
@@ -36,33 +43,33 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-trust
 /// spawn. There is no detect-and-recover path; there is only never rendering
 /// the dialog.
 ///
-/// Claude Code persists the decision per-directory in
-/// `<CLAUDE_CONFIG_DIR>/.claude.json` under
-/// `projects["<absolute-cwd-path>"].hasTrustDialogAccepted = true`. A fresh
-/// worktree or scratch dir has never been seen at that path, so the key is
-/// absent and Claude prompts.
+/// Claude Code persists the decision in `<CLAUDE_CONFIG_DIR>/.claude.json`
+/// under `projects["<absolute-path>"].hasTrustDialogAccepted = true`, and
+/// answers it per repository: a worktree counts as trusted when the repo's
+/// main checkout is. A scratch dir, or a worktree of a repo this profile has
+/// never trusted, has no key that covers it, so Claude prompts.
 ///
 /// **Two-tier gate** (`ensureTrusted`):
 /// - **Scratch spaces seed unconditionally.** TBD created the directory, owns
 ///   it, and it is empty — there is nothing there a trust prompt could protect,
 ///   and the dir is new on every spawn so the prompt would otherwise be
-///   guaranteed. Not user-configurable, and not subject to the `foreignHead`
-///   exclusion: a scratch space has no git contents at all.
+///   guaranteed. Not user-configurable.
 /// - **Non-scratch worktrees seed only when `autoTrustWorktrees` is on**
-///   (`config.auto_trust_worktrees`, default ON) **and the worktree is not
-///   `foreignHead`.** These live in real repos with real contents, so an
-///   operator who wants Claude to ask anyway can turn the setting off. Turning
-///   it off never un-trusts an already seeded path; it only stops future
-///   seeding, including for worktrees that were never seeded before.
+///   (`config.auto_trust_worktrees`, default ON). These live in real repos with
+///   real contents, so an operator who wants Claude to ask anyway can turn the
+///   setting off. Turning it off never un-trusts an already seeded path; it
+///   only stops future seeding, including for worktrees that were never seeded
+///   before.
 ///
 /// This is a separate gate from `--dangerously-skip-permissions`, which does NOT
 /// suppress the trust dialog. There is no CLI flag or env var for it; pre-seeding
 /// the JSON key is the only mechanism.
 ///
 /// **Concurrency.** `.claude.json` is a single shared file that many worktrees
-/// target at once (the six seed call sites fire on create, extra-session
-/// restore, terminal create, revive, profile swap and hibernation wake, across
-/// unrelated repos and therefore unrelated `RepoSerializer` lanes). The
+/// target at once (the seven seed call sites fire on create, extra-session
+/// restore, terminal create, revive, profile swap, hibernation wake and
+/// continue-in-Claude, across unrelated repos and therefore unrelated
+/// `RepoSerializer` lanes). The
 /// read-merge-write is not atomic on its own, so it runs inside
 /// `ClaudeTrustSeeder.writer`, an actor whose critical section covers read →
 /// parse → merge → atomic rename. That makes TBD's own seeds safe against each
@@ -88,7 +95,7 @@ enum ClaudeTrustSeeder {
     ///
     /// - Parameter autoTrustNonScratch: the resolved
     ///   `config.autoTrustWorktrees` value (default ON). Governs non-scratch
-    ///   worktrees only — scratch spaces seed regardless. The four call sites
+    ///   worktrees only — scratch spaces seed regardless. The five call sites
     ///   that read config with `try?` pass `config?.autoTrustWorktrees ?? true`,
     ///   so a config-read failure keeps the shipped default rather than
     ///   silently reinstating the stall; the two create-path sites pass a
@@ -126,23 +133,12 @@ enum ClaudeTrustSeeder {
         // trust answer is equally known — but the operator can opt out of
         // seeding them via `config.auto_trust_worktrees`.
         //
-        // The `foreignHead` exclusion is the boundary of the whole argument:
-        // TBD vouches for the directory it created, NOT for contents fetched
-        // from a ref that was not already in the operator's repo. The flag means
-        // exactly that — the contents came from a pull-request head TBD fetched
-        // (`refs/pull/<n>/head`) rather than from a local branch. That covers a
-        // fork contributor's PR, and also a colleague's same-repo PR whose head
-        // branch has not been fetched locally (see `PickerItem` in
-        // BranchPickerMerge.swift: every PR-only row sets `checkoutPRHead`).
-        // Either way the ref brings its own `.claude/settings.json`, hooks, MCP
-        // config and `CLAUDE.md` into a directory TBD made, which is what the
-        // trust dialog exists to gate — so let it render. Erring toward asking
-        // on a same-repo PR head is the safe direction. Note this is deliberately
-        // NOT keyed on `prNumber`: a decorated same-repo PR row stamps a number
-        // while checking out an ordinary local branch, and must still seed.
-        // It applies to the non-scratch tier only — a scratch space has no git
-        // contents to be foreign, and its unconditional tier stays absolute.
-        guard worktree.isScratch || (autoTrustNonScratch && !worktree.foreignHead) else { return }
+        // `foreignHead` is deliberately not part of this gate. A fork's PR head
+        // is gated where Claude is launched (`--setting-sources user`), not by
+        // the dialog, which Claude answers per repository and so stops asking
+        // for that worktree once the repo's main checkout is trusted. See the
+        // type doc comment.
+        guard worktree.isScratch || autoTrustNonScratch else { return }
 
         // Resolve the effective config dir the same way Claude Code does:
         // an explicit profile config dir wins, then CLAUDE_CONFIG_DIR, then the
@@ -212,7 +208,7 @@ enum ClaudeTrustSeeder {
 
     /// Serializes the read → parse → merge → write critical section.
     ///
-    /// **What this covers:** TBD's own concurrent seeds. The six call sites fire
+    /// **What this covers:** TBD's own concurrent seeds. The seven call sites fire
     /// from unrelated `RepoSerializer` lanes (and wake / revive / terminal-create
     /// are not serialized against creates at all), so without this two seeds could
     /// read the same base and the loser's key would vanish under the winner's

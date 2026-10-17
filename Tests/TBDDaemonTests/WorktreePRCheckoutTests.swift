@@ -154,7 +154,8 @@ import Testing
 
         let wt = try await lifecycle.createWorktree(
             repoID: repo.id, branch: "feature-x", skipClaude: true,
-            useExistingBranch: true, prNumber: 7, checkoutPRHead: true
+            useExistingBranch: true, prNumber: 7, checkoutPRHead: true,
+            prIsCrossRepository: true
         )
 
         #expect(wt.status == .active)
@@ -166,10 +167,69 @@ import Testing
 
         let stored = try #require(try await db.worktrees.get(id: wt.id))
         #expect(stored.prNumber == 7)
-        // The contents came from refs/pull/7/head, which a fork may have
-        // authored — the row must say so, or every later spawn/wake/revive
-        // would pre-accept Claude's folder-trust dialog for it.
+        // The contents came from a fork's refs/pull/7/head — the row must say
+        // so, or every later spawn/wake/revive would load the fork's project
+        // config.
         #expect(stored.foreignHead == true)
+    }
+
+    /// A same-repo PR whose head branch was never fetched still goes through
+    /// the pull-ref fetch, but its head lives on the operator's own remote. It
+    /// is treated like that branch fetched normally, so its sessions keep the
+    /// repo's own `CLAUDE.md`, hooks and skills.
+    @Test func createFromSameRepoPRHeadDoesNotStampForeignHead() async throws {
+        let (tempDir, cloneRepoDir, prSHA) = try await makePRFixture(number: 8)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()
+        )
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: cloneRepoDir)
+
+        let wt = try await lifecycle.createWorktree(
+            repoID: repo.id, branch: "teammate-x", skipClaude: true,
+            useExistingBranch: true, prNumber: 8, checkoutPRHead: true,
+            prIsCrossRepository: false
+        )
+
+        // Fetched through the pull ref exactly as a fork's head is...
+        let head = try await GitManager().headSHA(worktreePath: wt.localPath)
+        #expect(head == prSHA)
+        // ...but not stamped.
+        let stored = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(stored.prNumber == 8)
+        #expect(stored.foreignHead == false)
+    }
+
+    /// The first Claude launch reads the in-memory row the create path just
+    /// stamped rather than re-reading it, so it is the launch most likely to
+    /// miss the stamp. A fork's head launches with user-scope settings only; a
+    /// same-repo head launches like any other worktree.
+    @Test(arguments: [true, false])
+    func firstClaudeLaunchInAPRHeadFollowsTheStamp(crossRepository: Bool) async throws {
+        let (tempDir, cloneRepoDir, _) = try await makePRFixture(number: 7)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let recorded = PreSessionRecordedCommands()
+        let db = try TBDDatabase(inMemory: true)
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(),
+            tmux: TmuxManager(dryRun: true, dryRunRecorder: recorded.append),
+            hooks: HookResolver()
+        )
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: cloneRepoDir)
+
+        _ = try await lifecycle.createWorktree(
+            repoID: repo.id, branch: "feature-x", skipClaude: false,
+            useExistingBranch: true, prNumber: 7, checkoutPRHead: true,
+            prIsCrossRepository: crossRepository
+        )
+
+        let claudeCommand = try #require(
+            recorded.snapshot().compactMap(\.last).first { $0.contains("claude --session-id") })
+        #expect(claudeCommand.contains(" --setting-sources user") == crossRepository,
+                "\(claudeCommand)")
     }
 
     @Test func createFromPRDoesNotClobberExistingLocalBranch() async throws {
@@ -203,6 +263,11 @@ import Testing
         // ...and the original branch is untouched by the fetch.
         let afterSHA = try await GitManager().headSHA(repoPath: cloneRepoDir.path, ref: "refs/heads/feature-x")
         #expect(afterSHA == originalSHA)
+
+        // No `prIsCrossRepository` was given: a caller that cannot say whether
+        // the head is a fork's gets it treated as one.
+        let stored = try #require(try await db.worktrees.get(id: wt.id))
+        #expect(stored.foreignHead == true)
     }
 
     /// Decorated same-repo row: `prNumber` is set for status tracking, but
