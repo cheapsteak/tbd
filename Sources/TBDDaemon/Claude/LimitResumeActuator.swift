@@ -129,17 +129,28 @@ public struct ProductionPaneProcessInspector: PaneProcessInspecting {
 }
 
 /// Runs one actuation attempt for a scheduled resume: eligibility checks, the
-/// send — tmux's Escape/continue/Enter key sequence, or the holder transport's
-/// two writes of the same three things — and post-send verification, which is
-/// the same for both because it reads hook-fed state and the transcript rather
-/// than anything the transport can see.
+/// send — tmux's Escape/text/Enter key sequence, or the holder transport's
+/// three writes (Escape, text, carriage return) — and post-send verification,
+/// which is the same for both because it reads hook-fed state and the
+/// transcript rather than anything the transport can see.
 public struct LimitResumeActuator: LimitResumeActuating {
 
     // MARK: - Timing constants (spec §Actuation 5-6)
 
     static let interKeyPause: Duration = .milliseconds(150)
-    /// The literal typed into the pane, recorded verbatim in the rail's row.
-    static let continueMessage = "continue"
+
+    /// The text typed into the pane, recorded verbatim in the rail's row.
+    ///
+    /// A bare "continue" is indistinguishable from a person typing it, and an
+    /// agent in the tab can mistake it for a person's answer to an open
+    /// question. The leading bracketed head says the text is automatic, so the
+    /// agent, and any tool reading prompts, can tell this rail's text from a
+    /// person's word. "continue" stays last, so the resume itself is
+    /// unchanged. The head shape `[Automatic: <sender> typed this, not <who>.`
+    /// is a convention for text no person typed; keep it exact.
+    static let continueMessage =
+        "[Automatic: TBD's auto-resume typed this, not a person. "
+        + "It answers no question and approves nothing.] continue"
 
     /// The refusal for a daemon that has no way to write to a holder's pty at
     /// all — mock mode, or a daemon whose registry (and so whose injection
@@ -153,44 +164,55 @@ public struct LimitResumeActuator: LimitResumeActuating {
     static let holderWriteRefused =
         "the resume could not be written to the holder-backed session"
 
-    /// The first of the holder arm's two writes: `ESC`, alone — one byte.
+    /// The first of the holder arm's three writes: `ESC`, alone — one byte.
     ///
-    /// The whole send is `ESC`, then `interKeyPause`, then
-    /// `holderContinuePayload`, which is the tmux arm's Escape/pause/text
-    /// timing expressed in raw bytes. There is no named-key table on this
-    /// transport (the child-as-contract-party design,
+    /// The whole send is `ESC`, `interKeyPause`, `holderContinueTextPayload`,
+    /// `interKeyPause`, `holderSubmitPayload` — the tmux arm's
+    /// Escape/pause/text/pause/Enter shape expressed in raw bytes. There is no
+    /// named-key table on this transport (the child-as-contract-party design,
     /// `docs/specs/2026-09-05-child-as-contract-party-design.md`, is where one
     /// comes from: choosing bytes for a named key needs the child's cursor-key
     /// mode), so the two keys this rail needs are written as the bytes a
     /// terminal delivers for them — `0x1B` for Escape, `0x0D` for Return.
     ///
     /// **Why `ESC` gets a write and a pause of its own.** An ink-style input
-    /// parser reads `ESC` immediately followed by a printable byte as a meta
-    /// key, so `ESC` and the text arriving in one read compose Alt-c and then
-    /// "ontinue" — deterministically, on every attempt, which is why the retry
-    /// in `actuate` could not recover it. The pause goes through the same
-    /// `waiter` seam as the tmux arm's, so tests advance it virtually and only
-    /// production sleeps.
+    /// parser reads `ESC` followed by a printable byte as a meta key, and `ESC`
+    /// followed by the text's leading `[` as a CSI introducer: `ESC` `[` `A`
+    /// in one read is CSI A (cursor up), which leaves the composer holding
+    /// `utomatic: …`. Either way the text is mangled deterministically on
+    /// every attempt, which is why the retry in `actuate` could not recover
+    /// it. The pause goes through the same `waiter` seam as the tmux arm's, so
+    /// tests advance it virtually and only production sleeps.
     static let holderEscapePayload = Data([0x1B])
 
-    /// The second of the holder arm's two writes: the literal and the carriage
-    /// return that submits it — 9 bytes, one write.
+    /// The second of the holder arm's three writes: the text, with no carriage
+    /// return.
     ///
-    /// **Text and carriage return together, unlike Escape.** Nothing composes
-    /// them into a different key, and a message split across two courier calls
-    /// can be split across a routing decision — `HolderInjectionCourier` picks
-    /// the viewer or the daemon per call, so two calls are two independent
-    /// routings. `performHolderSend` composes its own body and `\r` as one
-    /// write for exactly that reason.
+    /// **Why the carriage return is its own write.** Claude Code's stdin
+    /// tokenizer swallows the trailing `\r` of any single unwrapped write of
+    /// 64 bytes or more (measured on 2.1.261: 63 bytes submits, 64 does not).
+    /// This text is 110 bytes. Measured on Claude Code 2.1.301 in an isolated
+    /// tmux pane with this exact text: text and carriage return in one write
+    /// left the text unsent in the composer; `ESC`, 150 ms, text, 150 ms, a
+    /// lone carriage return submitted it. So the holder arm has exactly the
+    /// tmux arm's shape, expressed in bytes.
     ///
-    /// **And no bracketed-paste wrapper.** Claude Code's stdin tokenizer
-    /// swallows the trailing `\r` of any single *unwrapped* write of 64 bytes
-    /// or more (measured on 2.1.261: 63 bytes submits, 64 does not). The
-    /// wrappers are the fix, and they are correct only when the child has
-    /// bracketed-paste mode on, which the daemon's emulator does not yet
-    /// expose. At 9 bytes this write is far under that threshold, so it
-    /// submits as bare bytes and needs no wrapper.
-    static let holderContinuePayload = Data((continueMessage + "\r").utf8)
+    /// **Why not bracketed-paste wrapping**, which is what `terminal.send`'s
+    /// `HolderSendComposition` does: it is correct only when the child has
+    /// bracketed-paste mode on, and this rail has no oracle for that. The
+    /// split needs none.
+    ///
+    /// **Splitting across courier calls is safe.** `HolderInjectionCourier`
+    /// picks the viewer or the daemon per call, but each call awaits delivery
+    /// before the next starts, so order holds across routes. A carriage return
+    /// delivered twice by the courier's ack-deadline fallback is an Enter on an
+    /// empty composer, which does nothing.
+    static let holderContinueTextPayload = Data(continueMessage.utf8)
+
+    /// The third of the holder arm's three writes: the carriage return that
+    /// submits the text, alone. `holderContinueTextPayload` says why it is not
+    /// appended to the text.
+    static let holderSubmitPayload = Data([0x0D])
 
     static let verifyPollInterval: Duration = .seconds(1)
     static let verifyPolls = 20   // ~20s window
@@ -331,7 +353,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
             }
 
             // The rail's own request row, immediately before the keys go out.
-            // The Escape, the literal "continue" and the Enter are sub-steps of
+            // The Escape, the text and the Enter are sub-steps of
             // one send, so they share one row. Fail-closed: an unrecordable
             // send is not sent.
             var row = ActuationRow(
@@ -364,7 +386,7 @@ public struct LimitResumeActuator: LimitResumeActuating {
                 // courier has already exhausted its own routes by the time it
                 // answers no — viewer, then the daemon's own descriptor — so a
                 // second identical write would take the same route to the same
-                // answer, ~20s of verification later. Either write answering no
+                // answer, ~20s of verification later. Any write answering no
                 // ends the actuation the same way: half a send is not a send.
                 guard await sendHolderContinue(send: send, terminalID: context.terminalID) else {
                     await actuationLog.appendOutcome(
@@ -735,7 +757,10 @@ public struct LimitResumeActuator: LimitResumeActuating {
     /// `/rate-limit-options` menu whose highlighted default can be "Upgrade
     /// your plan"; a blind Enter can confirm a paid upgrade. Escape
     /// dismisses and can never select. 150ms pauses — Claude's TUI drops
-    /// keys during UI transitions ("ontinue"). Enter as a separate
+    /// keys during UI transitions ("ontinue"), and the pause after Escape also
+    /// keeps it from combining with the text's leading `[` into a CSI
+    /// sequence (`ESC` `[` `A` is cursor up), so Escape keeps its own
+    /// keystroke and pause. Enter as a separate
     /// named-key call — text+Enter in one send-keys is treated as a
     /// bracketed paste (literal newline, nothing submits).
     ///
@@ -752,24 +777,26 @@ public struct LimitResumeActuator: LimitResumeActuating {
     }
 
     /// The holder arm's counterpart to `sendContinueSequence`: the same
-    /// Escape/pause/text-and-submit shape, written as bytes.
+    /// Escape/pause/text/pause/submit shape, written as bytes.
     ///
-    /// Two writes with `interKeyPause` between them — `holderEscapePayload`
-    /// says why the pause is load-bearing rather than cosmetic here, and
-    /// `holderContinuePayload` says why the literal and its carriage return
-    /// stay together. The pause runs on the same injected `waiter` the tmux arm
-    /// uses, so a test advances it and only production sleeps.
+    /// Three writes with `interKeyPause` between each — `holderEscapePayload`
+    /// says why the first pause is load-bearing rather than cosmetic, and
+    /// `holderContinueTextPayload` says why the carriage return is its own
+    /// write. The pauses run on the same injected `waiter` the tmux arm uses,
+    /// so a test advances them and only production sleeps.
     ///
-    /// Answers whether the whole sequence was delivered. A `false` from the
-    /// first write skips the second: nothing is gained by typing "continue" at
-    /// a session that did not take the Escape, and the caller reports one named
-    /// failure either way.
+    /// Answers whether the whole sequence was delivered. A `false` from any
+    /// write stops the sequence with no further writes: nothing is gained by
+    /// typing at a session that did not take the Escape, and the caller reports
+    /// one named failure either way.
     private func sendHolderContinue(
         send: @Sendable (UUID, Data) async -> Bool, terminalID: UUID
     ) async -> Bool {
         guard await send(terminalID, Self.holderEscapePayload) else { return false }
         await waiter(Self.interKeyPause)
-        return await send(terminalID, Self.holderContinuePayload)
+        guard await send(terminalID, Self.holderContinueTextPayload) else { return false }
+        await waiter(Self.interKeyPause)
+        return await send(terminalID, Self.holderSubmitPayload)
     }
 
     /// Success signal within ~20s: the activity hook reports `working`, or

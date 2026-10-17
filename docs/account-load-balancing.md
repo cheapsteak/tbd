@@ -50,7 +50,7 @@ When a session hits a hard usage limit, you see a notification and a banner in t
 
 Clicking **Switch to** reopens your conversation on Personal in the same tab. The suggestion is always the best-scoring profile on a different account from the one that hit the limit; ambient sessions get a suggestion too. When no other account has room, the banner shows only the reset time.
 
-TBD never switches accounts on its own and never resumes the dead turn for you after a switch: the button is the only way a session changes account at a limit. Send a message after switching to carry on. The older "auto-resume when the limit resets" toggle still types `continue` at reset time on the original account, and is unaffected by the suggestion.
+TBD never switches accounts on its own and never resumes the dead turn for you after a switch: the button is the only way a session changes account at a limit. Send a message after switching to carry on. The older "auto-resume when the limit resets" toggle still types `continue` at reset time, behind a head saying it is automatic, on the original account, and is unaffected by the suggestion.
 
 ## Flags and configuration
 
