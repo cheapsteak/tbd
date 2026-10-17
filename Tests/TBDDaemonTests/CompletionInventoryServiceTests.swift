@@ -26,7 +26,7 @@ struct CompletionInventoryServiceTests {
         CompletionInventoryService.Request {
         CompletionInventoryService.Request(
             terminalID: terminalID, childPID: childPID, panePID: nil,
-            configDir: "/cfg", worktreePath: "/wt", environment: [:])
+            configDir: "/cfg", worktreePath: "/wt", environment: [:], foreignHead: false)
     }
 
     private func makeService(
@@ -38,7 +38,7 @@ struct CompletionInventoryServiceTests {
         }
     ) -> CompletionInventoryService {
         CompletionInventoryService(
-            probe: { _, _, _ in
+            probe: { _, _, _, _ in
                 await probeCalls.bump()
                 return try await probeResult()
             },
@@ -188,7 +188,7 @@ struct CompletionInventoryServiceTests {
         _ = await service.inventory(for: request())
         _ = await service.inventory(for: CompletionInventoryService.Request(
             terminalID: UUID(), childPID: 4242, panePID: nil,
-            configDir: "/other-cfg", worktreePath: "/wt", environment: [:]))
+            configDir: "/other-cfg", worktreePath: "/wt", environment: [:], foreignHead: false))
         #expect(await calls.value == 2)
     }
 
@@ -202,7 +202,7 @@ struct CompletionInventoryServiceTests {
         _ = await service.inventory(for: request())
         _ = await service.inventory(for: CompletionInventoryService.Request(
             terminalID: UUID(), childPID: 4242, panePID: nil,
-            configDir: "/cfg", worktreePath: "/other-wt", environment: [:]))
+            configDir: "/cfg", worktreePath: "/other-wt", environment: [:], foreignHead: false))
         #expect(await calls.value == 2)
     }
 
@@ -213,7 +213,7 @@ struct CompletionInventoryServiceTests {
     @Test func noResolvableExecutableScansWithoutProbing() async throws {
         let calls = Counter()
         let service = CompletionInventoryService(
-            probe: { _, _, _ in
+            probe: { _, _, _, _ in
                 await calls.bump()
                 return ClaudeCompletionProbe.Outcome(commands: [], agents: [])
             },
@@ -241,6 +241,35 @@ struct CompletionInventoryServiceTests {
         #expect(result.source == .scan)
         #expect(result.freshness == .fallback)
         #expect(result.commands.map(\.name) == ["scanned"])
+    }
+
+    /// A fork-head worktree's session reads user settings only, so both ways of
+    /// answering for it leave the project scope out: the probe is told to, and
+    /// the fallback scan is given no worktree.
+    @Test(arguments: [true, false])
+    func theProjectScopeFollowsTheWorktreesForeignHead(foreignHead: Bool) async throws {
+        let probedWith = FireRecorder<Bool>()
+        let scannedWith = FireRecorder<String?>()
+        let service = CompletionInventoryService(
+            probe: { _, _, _, probeForeignHead in
+                probedWith.record(probeForeignHead)
+                throw ClaudeCompletionProbe.ProbeError.timedOut
+            },
+            scan: { _, worktreePath in
+                scannedWith.record(worktreePath)
+                return ([], [])
+            },
+            resolveExecutable: { "/usr/local/bin/claude" },
+            executablePathForPID: { _ in "/versions/2.1.261/claude" },
+            fingerprint: { _, _ in "fp-1" })
+
+        _ = await service.inventory(for: CompletionInventoryService.Request(
+            terminalID: UUID(), childPID: 4242, panePID: nil,
+            configDir: "/cfg", worktreePath: "/wt", environment: [:],
+            foreignHead: foreignHead))
+
+        #expect(probedWith.values == [foreignHead])
+        #expect(scannedWith.values == [foreignHead ? nil : "/wt"])
     }
 
     @Test func aSuccessfulProbeReportsItself() async throws {
@@ -282,7 +311,7 @@ struct CompletionInventoryServiceTests {
         let serializer = ClaudeConfigDirSerializer()
         let trace = Trace()
         let service = CompletionInventoryService(
-            probe: { _, _, _ in
+            probe: { _, _, _, _ in
                 await trace.mark("probe")
                 return ClaudeCompletionProbe.Outcome(commands: [], agents: [])
             },

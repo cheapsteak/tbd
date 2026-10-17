@@ -63,6 +63,11 @@ import TBDShared
 ///
 /// `sensitiveEnv` is **not** populated when the resolved path is `cmd` or
 /// `shellFallback`, since those branches are for non-claude shells.
+///
+/// `foreignHead` adds ` --setting-sources user` to both claude branches (see
+/// `foreignHeadSettingSourcesArguments`). Callers pass the worktree row's
+/// `Worktree.foreignHead`, so every life of the session — create, resume,
+/// revive, hibernation wake, profile swap — launches the same way.
 enum ClaudeSpawnCommandBuilder {
     /// The permission flag both Claude branches carry, unconditionally.
     static let skipPermissionsFlag = "--dangerously-skip-permissions"
@@ -75,6 +80,26 @@ enum ClaudeSpawnCommandBuilder {
     /// requires before a bypass receiver delivers without a click. Kept beside
     /// the flag so making the flag conditional means revisiting this too.
     static let spawnedPermissionClass: ShadowPeerPermissionClass = .bypass
+
+    /// What a `foreignHead` worktree's Claude launches with: user-scope
+    /// settings only.
+    ///
+    /// Such a worktree was checked out from a fork's pull-request head, so its
+    /// `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json`,
+    /// `CLAUDE.md` and project skills were written by the fork's author. Claude
+    /// Code's folder-trust dialog does not stand between them and the session:
+    /// it decides trust per repository, so a profile that has trusted the repo's
+    /// main checkout once opens every worktree of it without asking, and loads
+    /// the project's hooks, statusLine command and MCP servers on open. Limiting
+    /// the sources is the gate instead. The operator's own user settings, TBD's
+    /// `--settings` overlay and `--plugin-dir` still load.
+    ///
+    /// The same words go on every `claude` TBD starts in such a worktree,
+    /// headless ones included: `ClaudeCompletionProbe` passes them as argv.
+    static let foreignHeadSettingSourcesArguments = ["--setting-sources", "user"]
+
+    /// `foreignHeadSettingSourcesArguments` as they appear in a spawn command.
+    static let foreignHeadSettingSourcesFlag = foreignHeadSettingSourcesArguments.joined(separator: " ")
 
     struct Result: Equatable {
         let command: String
@@ -105,6 +130,7 @@ enum ClaudeSpawnCommandBuilder {
         pluginDirPath: String? = nil,
         envSettingOverrides: [String: ClaudeEnvValue] = [:],
         sessionName: String? = nil,
+        foreignHead: Bool = false,
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Result {
         // Optional --settings flag merged into the claude invocation.
@@ -139,6 +165,8 @@ enum ClaudeSpawnCommandBuilder {
             nameFlag = ""
         }
 
+        let sourcesFlag = foreignHead ? " \(foreignHeadSettingSourcesFlag)" : ""
+
         // The trailing initial-prompt argument. Inline text is shell-escaped
         // into the command; a file path is read by the launching shell at
         // spawn, so the prompt never has to fit in the command string.
@@ -154,11 +182,11 @@ enum ClaudeSpawnCommandBuilder {
         let base: String
         if let resumeID {
             let forkFlag = forkSession ? " --fork-session" : ""
-            var b = "claude --resume \(resumeID)\(forkFlag) \(skipPermissionsFlag)\(nameFlag)\(settingsFlag)\(pluginFlag)"
+            var b = "claude --resume \(resumeID)\(forkFlag) \(skipPermissionsFlag)\(nameFlag)\(settingsFlag)\(pluginFlag)\(sourcesFlag)"
             b += promptArgument
             base = b
         } else if let sessionID = freshSessionID {
-            var b = "claude --session-id \(sessionID) \(skipPermissionsFlag)\(nameFlag)\(settingsFlag)\(pluginFlag)"
+            var b = "claude --session-id \(sessionID) \(skipPermissionsFlag)\(nameFlag)\(settingsFlag)\(pluginFlag)\(sourcesFlag)"
             if let prompt = appendSystemPrompt {
                 b += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
             }

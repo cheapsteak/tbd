@@ -1900,6 +1900,7 @@ public actor HibernationCoordinator {
             // The same config dir the resume below runs with, so the tee
             // delegates to the user-scope statusline THIS session reads.
             profileConfigDir: profileConfigDir,
+            foreignHead: worktree.foreignHead,
             promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
         )
         // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
@@ -1988,7 +1989,8 @@ public actor HibernationCoordinator {
             settingsOverlayPath: overlayPath,
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: spawnTitle.name
+            sessionName: spawnTitle.name,
+            foreignHead: worktree.foreignHead
         )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID so notifications and the
         // SessionStart hook attribute to this terminal after the resume rollover.

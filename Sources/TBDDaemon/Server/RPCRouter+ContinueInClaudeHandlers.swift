@@ -381,10 +381,12 @@ extension RPCRouter {
                 watchDeskRole: source.watchDeskRole,
                 worktreePath: worktree.path,
                 profileConfigDir: profileConfigDir,
+                foreignHead: worktree.foreignHead,
                 promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault),
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: config?.envSettingOverrides ?? [:],
-            sessionName: claudeSpawnTitle.name)
+            sessionName: claudeSpawnTitle.name,
+            foreignHead: worktree.foreignHead)
         let claudeSensitiveEnv = EnvOverrideResolver.merge(
             global: config?.envOverrides,
             repo: repo?.envOverrides,

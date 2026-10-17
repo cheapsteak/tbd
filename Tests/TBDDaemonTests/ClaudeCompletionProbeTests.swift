@@ -33,6 +33,14 @@ struct ClaudeCompletionProbeTests {
         ])
     }
 
+    /// A fork-head worktree's probe reads user settings only, like its session,
+    /// so the fork's project settings never load in the probe either.
+    @Test func aForeignHeadProbeLimitsTheSettingSources() {
+        let args = ClaudeCompletionProbe.arguments(mcpConfigPath: "/tmp/mcp.json", foreignHead: true)
+        #expect(args == ClaudeCompletionProbe.arguments(mcpConfigPath: "/tmp/mcp.json")
+            + ["--setting-sources", "user"])
+    }
+
     /// Each of these closes a measured side effect. Asserted by name so a
     /// refactor cannot drop one silently.
     @Test func everySideEffectSuppressorIsPresent() {
