@@ -117,7 +117,8 @@ extension RPCRouter {
                 panePID: panePID,
                 configDir: configDir,
                 worktreePath: worktree.path,
-                environment: environment))
+                environment: environment,
+                foreignHead: worktree.foreignHead))
 
         logger.debug("""
         completions: terminal=\(terminal.id.uuidString, privacy: .public) \

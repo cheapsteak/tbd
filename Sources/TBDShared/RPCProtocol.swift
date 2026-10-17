@@ -1574,6 +1574,14 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// `prNumber` alone can't disambiguate: a fork head name may coincide with
     /// an unrelated local branch. Optional/defaulted for backward compatibility.
     public let checkoutPRHead: Bool?
+    /// GitHub's `isCrossRepository` for the PR `checkoutPRHead` fetches: true
+    /// when its head lives in a fork. Read only alongside `checkoutPRHead`. A
+    /// fork's head is stamped `Worktree.foreignHead`, so its Claude sessions
+    /// never load its project configuration; a same-repo head was pushed to the
+    /// operator's own remote and is treated like that branch fetched normally.
+    /// nil — an older client, or a caller that does not know — counts as a
+    /// fork. Optional/defaulted for backward compatibility.
+    public let prIsCrossRepository: Bool?
     /// When true, the daemon arms this worktree's per-worktree
     /// auto-archive-on-merge override (sets the `autoArchiveOnMerge` column to
     /// true), so it self-archives when its PR merges regardless of the global
@@ -1596,7 +1604,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// absolute paths are kept with `claudeSettingsOverlay`. Ignored when the
     /// primary is Codex. Optional/defaulted for backward compatibility.
     public let pluginDirs: [String]?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil, pluginDirs: [String]? = nil) {
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, prIsCrossRepository: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil, pluginDirs: [String]? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -1610,6 +1618,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.prNumber = prNumber
         self.checkoutPRHead = checkoutPRHead
+        self.prIsCrossRepository = prIsCrossRepository
         self.autoArchiveOnMerge = autoArchiveOnMerge
         self.codexModel = codexModel
         self.pluginDirs = pluginDirs

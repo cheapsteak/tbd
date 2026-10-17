@@ -134,17 +134,21 @@ enum ClaudeCompletionScan {
     }
 
     /// Scan a profile config directory and a worktree for completable items.
+    /// A nil `worktreePath` leaves the project scope out, as a `foreignHead`
+    /// worktree's session does.
     static func scan(
-        configDir: String, worktreePath: String
+        configDir: String, worktreePath: String?
     ) -> (commands: [CompletionCommand], agents: [CompletionAgent]) {
         let config = URL(fileURLWithPath: configDir, isDirectory: true)
-        let project = URL(fileURLWithPath: worktreePath, isDirectory: true)
-            .appendingPathComponent(".claude", isDirectory: true)
+        let project = worktreePath.map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+                .appendingPathComponent(".claude", isDirectory: true)
+        }
 
         var commands: [CompletionCommand] = []
         var agents: [CompletionAgent] = []
 
-        for root in [config, project] {
+        for root in [config, project].compactMap({ $0 }) {
             commands += commandsInDirectory(root.appendingPathComponent("commands"), prefix: nil)
             commands += skillsInDirectory(root.appendingPathComponent("skills"), prefix: nil)
             agents += agentsInDirectory(root.appendingPathComponent("agents"), prefix: nil)

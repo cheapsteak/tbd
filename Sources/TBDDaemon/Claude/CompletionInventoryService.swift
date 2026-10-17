@@ -58,11 +58,20 @@ public actor CompletionInventoryService {
         let worktreePath: String
         /// The session's own spawn environment, unmodified.
         let environment: [String: String]
+        /// The worktree row's `Worktree.foreignHead`. Its session reads user
+        /// settings only, so the probe and the scan leave the project scope out
+        /// too: the answer has to describe that session, and the probe must not
+        /// load a fork's project settings any more than the session does.
+        let foreignHead: Bool
     }
 
-    typealias Prober = @Sendable (String, String, [String: String]) async throws
+    /// Executable, working directory, environment, and the worktree's
+    /// `foreignHead`.
+    typealias Prober = @Sendable (String, String, [String: String], Bool) async throws
         -> ClaudeCompletionProbe.Outcome
-    typealias Scanner = @Sendable (String, String)
+    /// Config directory, and the worktree whose `.claude` holds the project
+    /// scope — nil when that scope is left out.
+    typealias Scanner = @Sendable (String, String?)
         -> (commands: [CompletionCommand], agents: [CompletionAgent])
 
     private struct CacheKey: Hashable {
@@ -96,11 +105,12 @@ public actor CompletionInventoryService {
     private var cache: [CacheKey: CacheEntry] = [:]
 
     /// The live probe: start the session's own binary and ask it.
-    static let liveProbe: Prober = { executablePath, cwd, environment in
+    static let liveProbe: Prober = { executablePath, cwd, environment, foreignHead in
         try await ClaudeCompletionProbe.run(
             executablePath: executablePath,
             workingDirectory: cwd,
-            environment: environment)
+            environment: environment,
+            foreignHead: foreignHead)
     }
 
     /// The live degraded reader, used when the binary does not answer.
@@ -212,8 +222,9 @@ public actor CompletionInventoryService {
             let prober = probe
             let cwd = request.worktreePath
             let environment = request.environment
+            let foreignHead = request.foreignHead
             let outcome = try await serializer.run(configDir: request.configDir) {
-                try await prober(executablePath, cwd, environment)
+                try await prober(executablePath, cwd, environment, foreignHead)
             }
             let result = TerminalCompletionsResult(
                 commands: outcome.commands, agents: outcome.agents,
@@ -240,7 +251,7 @@ public actor CompletionInventoryService {
     }
 
     private func fallbackResult(_ request: Request) -> TerminalCompletionsResult {
-        let scanned = scan(request.configDir, request.worktreePath)
+        let scanned = scan(request.configDir, request.foreignHead ? nil : request.worktreePath)
         return TerminalCompletionsResult(
             commands: scanned.commands, agents: scanned.agents,
             freshness: .fallback, source: .scan)
