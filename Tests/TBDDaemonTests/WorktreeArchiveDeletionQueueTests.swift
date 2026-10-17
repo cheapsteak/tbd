@@ -250,8 +250,23 @@ private final class GitConfigReadBlock {
         // ENXIO here means no git is waiting, which is the expected case.
         let writer = open(fifoPath, O_WRONLY | O_NONBLOCK)
         guard writer >= 0 else { return }
-        _ = "[\n".withCString { write(writer, $0, 2) }
-        close(writer)
+        defer { close(writer) }
+        // A git that exits between the open and the write would otherwise
+        // raise SIGPIPE and end the whole test process. Set on this
+        // descriptor only, so the test runner's signal disposition is left
+        // alone, and the write reports EPIPE instead.
+        guard fcntl(writer, F_SETNOSIGPIPE, 1) == 0 else {
+            throw FIFOFailure(description: "F_SETNOSIGPIPE failed: \(String(cString: strerror(errno)))")
+        }
+        let written = "[\n".withCString { write(writer, $0, 2) }
+        let writeErrno = errno
+        // Two bytes is under PIPE_BUF, so the write is all or nothing. EPIPE
+        // means the waiting git went away after the open: no git is left
+        // waiting, which is what this call is for.
+        guard written == 2 || (written < 0 && writeErrno == EPIPE) else {
+            let reason = written < 0 ? String(cString: strerror(writeErrno)) : "short write"
+            throw FIFOFailure(description: "FIFO write returned \(written) of 2 bytes: \(reason)")
+        }
     }
 }
 
