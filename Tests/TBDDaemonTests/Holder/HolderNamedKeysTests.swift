@@ -148,9 +148,28 @@ import Testing
             """)
     }
 
+    // MARK: - One printable character (mode-independent)
+
+    /// A one-character name is that character's own byte, as `send-keys 4` is
+    /// in tmux — the digit that picks a numbered dialog option is the case that
+    /// needed it. Walks every printable ASCII byte, space through `~`, so a
+    /// range bound off by one (dropping `~`, or letting DEL in below) fails here,
+    /// and runs under DECCKM so the mode is seen to change nothing.
+    @Test(arguments: Array(UInt8(0x20)...UInt8(0x7e)))
+    func printableCharacterIsItsOwnByte(byte: UInt8) {
+        let name = String(UnicodeScalar(byte))
+        let actual = HolderNamedKeys.bytes(for: name, modes: Self.cursorOn)
+        #expect(actual == Data([byte]), """
+            \(name.debugDescription) → \(actual.map({ Array($0) }) as Any), expected [\(byte)]
+            """)
+    }
+
     // MARK: - Unknown names
 
-    @Test(arguments: ["Bogus", "", "C-", "C-ab", "up"])
+    /// `42` is two characters, so neither one key nor a name; DEL, a tab and a
+    /// newline are control characters with names of their own; `é` is past
+    /// ASCII. Each is refused rather than guessed at.
+    @Test(arguments: ["Bogus", "", "C-", "C-ab", "up", "42", "\u{7f}", "\t", "\n", "é"])
     func unknownOrMalformedNamesReturnNil(name: String) {
         let actual = HolderNamedKeys.bytes(for: name, modes: nil)
         #expect(actual == nil, "\(name) → \(actual.map({ Array($0) }) as Any), expected nil")

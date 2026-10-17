@@ -13,8 +13,10 @@ import TBDShared
 /// The names are tmux's own `send-keys` spellings, because that is the
 /// vocabulary every existing caller already types and the bytes below are the
 /// ones tmux would have sent for them — the holder is a new transport for the
-/// same key, not a new key. An unknown name returns `nil` so the caller can
-/// refuse the whole send by that name, having written nothing.
+/// same key, not a new key. A name that is one printable character (`4`, `y`,
+/// `?`) is that character's own key, as it is to tmux. An unknown name returns
+/// `nil` so the caller can refuse the whole send by that name, having written
+/// nothing.
 ///
 /// **Two families depend on the child's modes; the rest do not.** With DECCKM
 /// (`applicationCursor`) on, the arrows and Home/End take their SS3 forms
@@ -66,7 +68,7 @@ enum HolderNamedKeys {
         case "F10": return escaped("[21~")
         case "F11": return escaped("[23~")
         case "F12": return escaped("[24~")
-        default: return nil
+        default: return printableCharacter(name)
         }
     }
 
@@ -86,6 +88,23 @@ enum HolderNamedKeys {
         var bytes = Data([0x1b, applicationCursor ? 0x4f : 0x5b])
         bytes.append(contentsOf: String(final).utf8)
         return bytes
+    }
+
+    /// The byte for a name that is exactly one printable ASCII character, space
+    /// through `~`, or `nil` for any other name.
+    ///
+    /// tmux reads a one-character name as that character's key, so `send-keys 4`
+    /// presses 4. Here it is the same keypress: one byte, never wrapped in
+    /// bracketed paste. That difference is the point. A numbered option list
+    /// (Claude Code's dialogs, for one) acts on a typed digit and ignores a
+    /// pasted one, so `--text 4` chooses nothing and the Enter after it takes
+    /// whichever row is highlighted; `--keys 4` chooses option 4. Control
+    /// characters and DEL are left out (their names are `C-x` and `BSpace`), and
+    /// so is anything past ASCII, which reaches a child as text through `--text`.
+    private static func printableCharacter(_ name: String) -> Data? {
+        guard name.utf8.count == 1, let byte = name.utf8.first, (0x20...0x7e).contains(byte)
+        else { return nil }
+        return Data([byte])
     }
 
     /// The single control byte for a `C-x` combo, or `nil` when `name` is not a
