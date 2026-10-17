@@ -1919,7 +1919,12 @@ actor DaemonClient {
 
     /// Open a persistent socket that receives state deltas from the daemon.
     /// Runs in a loop until the socket disconnects or the task is cancelled.
-    nonisolated func subscribe(onDelta: @escaping DeltaHandler) async {
+    /// `onSubscribed` runs when the daemon acknowledges the subscription, which
+    /// it does only after registering it.
+    nonisolated func subscribe(
+        onSubscribed: (@Sendable () -> Void)? = nil,
+        onDelta: @escaping DeltaHandler
+    ) async {
         guard let fd = try? makeConnectedSocket() else { return }
 
         // Send subscribe request
@@ -1983,6 +1988,7 @@ actor DaemonClient {
                 if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
                    response.success && response.result == nil {
                     probe.record(start: started, kind: .delta, type: "(ack)", bytes: lineData.count)
+                    onSubscribed?()
                     continue
                 }
 
@@ -2455,6 +2461,14 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.appSetForegroundState,
             params: AppSetForegroundStateParams(isForeground: isForeground)
+        )
+    }
+
+    /// Report every terminal whose composer draft is unsent (the whole set).
+    func setComposerDrafts(terminalIDs: [UUID]) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.appSetComposerDrafts,
+            params: AppSetComposerDraftsParams(terminalIDs: terminalIDs)
         )
     }
 
