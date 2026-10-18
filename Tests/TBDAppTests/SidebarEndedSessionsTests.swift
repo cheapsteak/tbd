@@ -155,12 +155,13 @@ struct SidebarEndedSessionsTests {
 
     // MARK: Persistence
 
-    @Test func endedGroupKeyRoundTrips() {
+    @Test func endedGroupKeyRoundTrips() throws {
         let repo = UUID()
         for owner in [SidebarGroupID.Owner.repository(repo), .provider("acme|x")] {
             let id = SidebarGroupID(owner: owner, kind: .ended)
-            #expect(id.persistenceKey.hasPrefix("ended|"))
-            #expect(SidebarGroupID(persistenceKey: id.persistenceKey) == id)
+            let key = try #require(id.persistenceKey)
+            #expect(key.hasPrefix("ended|"))
+            #expect(SidebarGroupID(persistenceKey: key) == id)
         }
         #expect(SidebarGroupID(persistenceKey: "ended|scratch|") == nil)
     }
