@@ -5,6 +5,7 @@ import TBDShared
 struct SidebarGroupID: Hashable {
     enum Owner: Hashable {
         case repository(UUID)
+        case parent(UUID)
         case provider(String)
         case scratch
     }
@@ -17,6 +18,8 @@ struct SidebarGroupID: Hashable {
 struct SidebarRemoteGroups {
     struct Snapshot {
         let children: [UUID: [Worktree]]
+        let rowsByID: [UUID: Worktree]
+        let rowIDsBySession: [UUID: Set<UUID>]
         let mirror: [UUID: RemoteSessionInfo]
         let freshProviders: Set<String>
         let sessionsByRepo: [UUID: [RemoteSessionInfo]]
@@ -25,7 +28,15 @@ struct SidebarRemoteGroups {
         init(worktrees: [Worktree], sessions: [RemoteSessionInfo], providers: [RemoteProviderStatus]) {
             children = Dictionary(grouping: worktrees.filter {
                 $0.parentWorktreeID != nil && ($0.status == .active || $0.status == .creating)
-            }, by: { $0.parentWorktreeID! })
+            }, by: { $0.parentWorktreeID! }).mapValues { $0.sorted { $0.sortOrder < $1.sortOrder } }
+            rowsByID = Dictionary(worktrees.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            var bindings: [UUID: Set<UUID>] = [:]
+            for row in worktrees {
+                guard !row.location.isLocal, let binding = row.providerBinding else { continue }
+                let id = RemoteSessionIdentity.uuid(provider: binding.provider, sessionID: binding.sessionID)
+                bindings[id, default: []].insert(row.id)
+            }
+            rowIDsBySession = bindings
             mirror = Dictionary(sessions.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             freshProviders = Set(providers.filter {
                 $0.health == .ok && !$0.hasStaleSnapshot && !$0.freshnessUnreadable
