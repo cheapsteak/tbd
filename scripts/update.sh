@@ -994,7 +994,7 @@ wake_terminals() {
     local ids=("$@")
     local total=${#ids[@]}
     local index=0 batch=0 first_batch=true
-    local batch_ids id result_dir
+    local batch_ids batch_pids id result_dir
 
     WAKE_WOKEN=0
     WAKE_FAILED=0
@@ -1016,6 +1016,7 @@ wake_terminals() {
         first_batch=false
         log "waking batch $batch (${#batch_ids[@]} of $total): ${batch_ids[*]}"
 
+        batch_pids=()
         for id in "${batch_ids[@]}"; do
             (
                 if out="$(tbd terminal wake --terminal "$id" --json 2>&1)"; then
@@ -1025,8 +1026,13 @@ wake_terminals() {
                         > "$result_dir/$id"
                 fi
             ) &
+            batch_pids+=("$!")
         done
-        wait
+        # This batch's wakes only. A bare `wait` also waits for every other
+        # background child of this shell, and the handover starts the new
+        # daemon as one: it runs until the machine stops, so the run would
+        # never finish and would hold the update lock until then.
+        wait "${batch_pids[@]}"
         index=$((index + WAKE_CONCURRENCY))
     done
 
