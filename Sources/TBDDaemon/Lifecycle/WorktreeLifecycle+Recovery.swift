@@ -133,6 +133,7 @@ extension WorktreeLifecycle {
                     logger.warning("recovery: deleting terminal-less .creating worktree \(worktree.id, privacy: .public) — git does not list \(row.localPath, privacy: .public) as a worktree of its repo, so it is not a checkout TBD can vouch for; the directory is left alone")
                     do {
                         try await db.terminals.deleteForWorktree(worktreeID: worktree.id)
+                        await sessionTitles.forget(worktreeID: worktree.id)
                         try await db.tabs.deleteForWorktree(worktreeID: worktree.id)
                         // Hard delete: closed-terminal history (rows + files) goes too.
                         try await db.terminalHistory.deleteForWorktree(worktreeID: worktree.id)
