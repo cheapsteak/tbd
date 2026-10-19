@@ -370,6 +370,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // SIGTERM to any clone still running, so git can clean up its
+        // partial clone before the app is gone.
+        RepoCloner.terminateAll()
         // Reclaim this app's tmux view sessions before the process goes. Each
         // one holds a worktree window linked into it, and tmux destroys a
         // window only when its last session reference drops — so a view
