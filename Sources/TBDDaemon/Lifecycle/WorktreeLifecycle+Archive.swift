@@ -138,7 +138,7 @@ extension WorktreeLifecycle {
         // then kill its tmux window, reaping any wedged agent that survives
         // kill-window's SIGHUP. The archived worktree row and its history rows
         // survive, so the captured output stays readable later.
-        var endedSessions: [Terminal] = []
+        var sessions = SessionTeardownTally()
         for terminal in terminals {
             // A holder row takes the holder teardown instead. Its rows are
             // deleted below just as a tmux row's are, so refusing here would
@@ -163,16 +163,18 @@ extension WorktreeLifecycle {
                 stopped = await captureThenKillWindow(
                     terminal: terminal, server: worktree.tmuxServer)
             }
-            if Self.sessionHasEnded(terminal, teardownStoppedIt: stopped) {
-                endedSessions.append(terminal)
-            }
+            sessions.record(terminal, teardownStoppedIt: stopped)
         }
 
-        // Each ended session's directory goes, draft included. The teardown
+        // Each ended session's directory goes, draft included, unless another
+        // row naming the same session may still be running. The teardown
         // above waited for each pane's process to exit, escalating to SIGKILL,
-        // or SIGKILLed the holder's job, so the mod's final write on
-        // `session.end` cannot land after the removal.
-        removeSessionDirectories(for: endedSessions)
+        // or SIGKILLed the holder's job. When the login shell execs Claude, as
+        // zsh does for the spawn command's `-c`, that process is Claude and
+        // the mod's final write on `session.end` lands before the removal;
+        // otherwise a late write can recreate the directory, and `OrphanGC`'s
+        // session-directory arm reclaims it after `gcGraceSeconds`.
+        removeSessionDirectories(for: sessions)
 
         // Delete terminals from db
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)

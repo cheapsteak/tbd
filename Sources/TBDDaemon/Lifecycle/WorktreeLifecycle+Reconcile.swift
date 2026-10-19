@@ -361,7 +361,7 @@ extension WorktreeLifecycle {
                 await stopDevServersForArchive(worktree: current)
                 let terminals = try await db.terminals.list(worktreeID: current.id)
                 var recordedEveryKill = true
-                var endedSessions: [Terminal] = []
+                var sessions = SessionTeardownTally()
                 for terminal in terminals {
                     var row = ActuationRow(
                         actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
@@ -386,9 +386,7 @@ extension WorktreeLifecycle {
                                 "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")
                             await actuationLog.appendOutcome(
                                 confirms: actuationID, result: .transportFailed, error: failure)
-                            if Self.sessionHasEnded(terminal, teardownStoppedIt: false) {
-                                endedSessions.append(terminal)
-                            }
+                            sessions.record(terminal, teardownStoppedIt: false)
                             continue
                         }
                         stopped = true
@@ -396,9 +394,7 @@ extension WorktreeLifecycle {
                         stopped = await captureThenKillWindow(
                             terminal: terminal, server: current.tmuxServer)
                     }
-                    if Self.sessionHasEnded(terminal, teardownStoppedIt: stopped) {
-                        endedSessions.append(terminal)
-                    }
+                    sessions.record(terminal, teardownStoppedIt: stopped)
                     await actuationLog.appendOutcome(
                         confirms: actuationID, result: .dispatched)
                 }
@@ -409,9 +405,10 @@ extension WorktreeLifecycle {
                     return
                 }
                 // Only now, as in `beginArchiveWorktree`: every session counted
-                // here has exited, and an early return above leaves the
-                // directories with the rows for the next sweep.
-                removeSessionDirectories(for: endedSessions)
+                // as ended here has had its teardown, and an early return
+                // above leaves the directories with the rows for the next
+                // sweep.
+                removeSessionDirectories(for: sessions)
                 try await db.terminals.deleteForWorktree(worktreeID: current.id)
                 await sessionTitles.forget(worktreeID: current.id)
                 try await db.tabs.deleteForWorktree(worktreeID: current.id)

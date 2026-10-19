@@ -19,6 +19,8 @@ struct ArchiveRemovesSessionDirectoriesTests {
 
     // MARK: - Fixture
 
+    private struct TeardownFixtureError: Error {}
+
     private struct Fixture {
         let home: URL
         let sessionsDir: URL
@@ -183,7 +185,84 @@ struct ArchiveRemovesSessionDirectoriesTests {
         #expect(WorktreeLifecycle.sessionHasEnded(parking, teardownStoppedIt: true))
     }
 
+    /// Two rows can carry one session ID. Its directory may go only when
+    /// every row naming it has ended: one left running may still write there.
+    @Test func aSessionNamedByARowLeftRunningIsNotRemovable() {
+        func row(_ sessionID: String?) -> Terminal {
+            Terminal(
+                worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: .claude)
+        }
+        var tally = WorktreeLifecycle.SessionTeardownTally()
+        tally.record(row("sess-shared"), teardownStoppedIt: true)
+        tally.record(row("sess-shared"), teardownStoppedIt: false)
+        tally.record(row("sess-alone"), teardownStoppedIt: true)
+        tally.record(row("sess-running"), teardownStoppedIt: false)
+        tally.record(row(nil), teardownStoppedIt: true)
+
+        #expect(tally.removableSessionIDs == ["sess-alone"])
+    }
+
+    /// A failed kill of a pane whose process could not be read may have left
+    /// that process running, so the teardown reports it unstopped; a pane
+    /// whose process was read is reaped, and a kill that went through settles
+    /// it. A pid of 0 is what a tmux that cannot answer reports.
+    @Test func captureThenKillWindowReportsAPaneItMayHaveLeftRunning() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.tmuxClaude("sess-kill", pane: "%1")
+        // Neither pid reaches the kernel: the fake signaller answers for both.
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[4242] = .init(aliveInitially: false)
+        signaller.behaviors[0] = .init(aliveInitially: false)
+        let cases: [(killFails: Bool, panePID: String?, stopped: Bool)] = [
+            (killFails: true, panePID: nil, stopped: false),
+            (killFails: true, panePID: "0", stopped: false),
+            (killFails: true, panePID: "4242", stopped: true),
+            (killFails: false, panePID: nil, stopped: true),
+        ]
+        for (killFails, panePID, stopped) in cases {
+            let tmux = TmuxManager(
+                dryRun: true,
+                dryRunKillWindowError: { _, _ in killFails ? TeardownFixtureError() as Error : nil },
+                dryRunPaneSendTarget: { _, _ in .live(terminalID: terminal.id.uuidString) },
+                dryRunPanePID: { _, _ in
+                    guard let panePID else { throw TeardownFixtureError() }
+                    return panePID
+                })
+            let lifecycle = WorktreeLifecycle(
+                db: fixture.db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: makeIsolatedConfigDirManager(tag: "archkill"),
+                processSignaller: signaller,
+                reaperGraceAttempts: 1, reaperPollInterval: .milliseconds(1),
+                sessionsDir: fixture.sessionsDir)
+
+            let result = await lifecycle.captureThenKillWindow(
+                terminal: terminal, server: fixture.worktree.tmuxServer)
+
+            #expect(result == stopped,
+                    "kill fails: \(killFails), pane pid: \(panePID ?? "unreadable")")
+        }
+    }
+
     // MARK: - Explicit archive
+
+    /// Two rows naming one session, one of them in a window archive refuses
+    /// to touch: the session may still be running there, so its directory
+    /// stays although the other row's window was killed.
+    @Test func archiveKeepsADirectoryWhileAnyRowNamingItsSessionMayRun() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { fixture.tearDown() }
+        let tmux = TmuxManager(dryRun: true, dryRunPaneSendTarget: Self.strangerAt("%3"))
+        _ = try await fixture.tmuxClaude("sess-shared", pane: "%4")
+        _ = try await fixture.tmuxClaude("sess-shared", pane: "%3")
+        try fixture.seed("sess-shared")
+
+        _ = try await fixture.lifecycle(tmux: tmux).beginArchiveWorktree(worktreeID: fixture.worktree.id)
+
+        #expect(fixture.hasDraft("sess-shared"),
+                "a directory went while a row naming its session was left running")
+    }
 
     /// A parked session has no process, so its directory goes even when the
     /// teardown itself stopped nothing: a parked holder row names no job to

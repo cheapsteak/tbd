@@ -103,13 +103,15 @@ extension RPCRouter {
     /// Terminals history in place, and false for delete, which hard-deletes it
     /// right afterwards — an entry written there would be wiped unread.
     ///
-    /// Returns the terminals whose session has no process left
-    /// (`WorktreeLifecycle.sessionHasEnded`), which archive hands to
+    /// Returns the terminals sorted by whether their session has a process
+    /// left (`WorktreeLifecycle.sessionHasEnded`), which archive hands to
     /// `removeSessionDirectories`.
     @discardableResult
-    func closeScratchTerminals(_ wt: Worktree, keepsHistory: Bool) async throws -> [Terminal] {
+    func closeScratchTerminals(
+        _ wt: Worktree, keepsHistory: Bool
+    ) async throws -> WorktreeLifecycle.SessionTeardownTally {
         let terminals = try await db.terminals.list(worktreeID: wt.id)
-        var endedSessions: [Terminal] = []
+        var sessions = WorktreeLifecycle.SessionTeardownTally()
         for t in terminals {
             var stopped = false
             // The rows go away below either way, so a holder row must be
@@ -143,12 +145,18 @@ extension RPCRouter {
                     terminalID: t.id, server: wt.tmuxServer, paneID: t.tmuxPaneID)
                 if ownership.permitsTeardown {
                     // The lifecycle's kill waits for the pane's process to
-                    // exit and escalates a wedged one, so archive can remove
-                    // the session's directory knowing nothing writes to it
-                    // afterwards.
-                    await lifecycle.killWindowAndReap(
-                        server: wt.tmuxServer, windowID: t.tmuxWindowID, paneID: t.tmuxPaneID)
-                    stopped = true
+                    // exit and escalates a wedged one. When the login shell
+                    // execs Claude, as zsh does for the spawn command's `-c`,
+                    // that process is Claude and nothing writes to the
+                    // session's directory after archive removes it; otherwise
+                    // a late `session.end` write can recreate it, and
+                    // `OrphanGC`'s session-directory arm reclaims it after
+                    // `gcGraceSeconds`. A failed kill of a pane whose process
+                    // could not be read may have left it running, so that
+                    // session keeps its directory.
+                    stopped = await lifecycle.tearDownWindow(
+                        server: wt.tmuxServer, windowID: t.tmuxWindowID, paneID: t.tmuxPaneID
+                    ).stoppedPane
                 } else {
                     scratchLogger.warning("""
                         scratch teardown: leaving window \(t.tmuxWindowID, privacy: .public) \
@@ -157,9 +165,7 @@ extension RPCRouter {
                         """)
                 }
             }
-            if WorktreeLifecycle.sessionHasEnded(t, teardownStoppedIt: stopped) {
-                endedSessions.append(t)
-            }
+            sessions.record(t, teardownStoppedIt: stopped)
         }
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
         await lifecycle.sessionTitles.forget(worktreeID: wt.id)
@@ -169,7 +175,7 @@ extension RPCRouter {
             await broadcastPendingPrompts(terminalID: t.id)
             ClaudeHookOverlay.removePerSessionOverlay(sessionKey: t.id.uuidString)
         }
-        return endedSessions
+        return sessions
     }
 
     func handleScratchDelete(
@@ -327,13 +333,14 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             surface, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
-        let endedSessions = try await actuating(actuationID) {
+        let sessions = try await actuating(actuationID) {
             try await closeScratchTerminals(wt.worktree, keepsHistory: true)
         }
         await finishActuation(actuationID, .dispatched)
         // Each ended session's directory goes, draft included, once the
-        // teardown above has confirmed its process exited.
-        lifecycle.removeSessionDirectories(for: endedSessions)
+        // teardown above has run, unless another row naming the same session
+        // may still be running.
+        lifecycle.removeSessionDirectories(for: sessions)
         try await db.worktrees.archive(id: wt.id)
 
         // Same delta `scratch.delete` broadcasts — deliberate: from the
