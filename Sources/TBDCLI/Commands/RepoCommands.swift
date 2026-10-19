@@ -59,8 +59,15 @@ struct RepoAdd: AsyncParsableCommand {
             }
 
             writeStderr("Cloning \(url) into \(destination)…\n")
+            // Like system(3): ignore SIGINT/SIGQUIT in this process while git runs. git
+            // still gets Ctrl-C (default dispositions, same foreground group) and cleans
+            // up; the CLI must survive long enough for RepoCloner to remove the folder.
+            let previousInterrupt = signal(SIGINT, SIG_IGN)
+            let previousQuit = signal(SIGQUIT, SIG_IGN)
             let outcome = await RepoCloner(url: url, destination: destination, mode: .attachedToTerminal)
                 .run { _ in }
+            signal(SIGINT, previousInterrupt)
+            signal(SIGQUIT, previousQuit)
             switch outcome {
             case .succeeded:
                 break
@@ -76,8 +83,14 @@ struct RepoAdd: AsyncParsableCommand {
             do {
                 try addRepo(client: client, at: destination)
             } catch {
+                let reason: String
+                if case CLIError.rpcError(let message) = error {
+                    reason = message
+                } else {
+                    reason = "\(error)"
+                }
                 writeStderr(
-                    "Cloned into \(destination), but TBD could not add it: \(error). "
+                    "Cloned into \(destination), but TBD could not add it: \(reason). "
                         + "Run `tbd repo add \(destination)` to retry.\n")
                 throw ExitCode.failure
             }
