@@ -14,14 +14,15 @@ struct RepoAddUsageError: Error, Equatable, CustomStringConvertible {
 }
 
 /// Resolves `path` against `directory`: absolute paths are kept as they are,
-/// relative ones are joined to `directory` and standardized.
+/// relative ones are joined to `directory` and standardized. The directory is
+/// never looked up on disk.
 func resolvePath(_ path: String, relativeTo directory: String) -> String {
     if path.hasPrefix("/") {
         return path
     }
     return URL(
         fileURLWithPath: path,
-        relativeTo: URL(fileURLWithPath: directory)
+        relativeTo: URL(fileURLWithPath: directory, isDirectory: true)
     ).standardized.path
 }
 
