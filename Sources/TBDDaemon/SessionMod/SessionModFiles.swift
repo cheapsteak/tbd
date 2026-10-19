@@ -93,9 +93,17 @@ public enum SessionModFiles {
     /// Reads and decodes one JSON file. Unknown fields are ignored; a missing
     /// required field or bad JSON is `.unreadable`.
     public static func read<R: Decodable>(_ type: R.Type, at url: URL) -> ReadResult<R> {
-        guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
-        guard let data = try? Data(contentsOf: url),
-              let record = try? JSONDecoder().decode(R.self, from: data) else {
+        // Only ENOENT is "missing"; any other failure (permissions, ENOTDIR,
+        // I/O) is unreadable so callers fail closed rather than read legacy.
+        let fd = open(url.path, O_RDONLY)
+        if fd < 0 { return errno == ENOENT ? .missing : .unreadable }
+        let data: Data
+        do {
+            data = try FileHandle(fileDescriptor: fd, closeOnDealloc: true).readToEnd() ?? Data()
+        } catch {
+            return .unreadable
+        }
+        guard let record = try? JSONDecoder().decode(R.self, from: data) else {
             return .unreadable
         }
         return .record(record)

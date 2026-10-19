@@ -20,12 +20,15 @@ import Testing
               features: features, heartbeatAtMs: nowMs - ageMs)
     }
 
+    func eval(_ spawn: SessionModFiles.ReadResult<Spawn>, _ alive: SessionModFiles.ReadResult<Alive>) -> SessionModLiveness {
+        eval(spawn, alive, live: live)
+    }
+
     func eval(_ spawn: SessionModFiles.ReadResult<Spawn>, _ alive: SessionModFiles.ReadResult<Alive>,
-              live: UUID?? = .some(nil)) -> SessionModLiveness {
-        let incarnation: UUID? = live == .some(nil) ? self.live : (live ?? nil)
+              live: UUID?) -> SessionModLiveness {
         return SessionModLiveness.evaluate(
             feature: .composerDraft, spawn: spawn, alive: alive,
-            liveIncarnationID: incarnation, now: now)
+            liveIncarnationID: live, now: now)
     }
 
     @Test func noSpawnRecordIsLegacy() {
@@ -38,7 +41,7 @@ import Testing
 
     @Test func spawnFromAnotherIncarnationIsLegacy() {
         #expect(eval(.record(spawn(UUID().uuidString)), .record(alive())) == .legacy)
-        #expect(eval(.record(spawn()), .record(alive()), live: .some(.none)) == .legacy)
+        #expect(eval(.record(spawn()), .record(alive()), live: nil) == .legacy)
     }
 
     @Test func freshHeartbeatIsConfirmed() {

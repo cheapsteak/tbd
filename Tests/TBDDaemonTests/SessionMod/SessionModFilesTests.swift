@@ -82,6 +82,19 @@ func makeSessionsDir() throws -> URL {
         }
     }
 
+    @Test func nonENOENTFailureReadsUnreadable() throws {
+        let root = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("plain")
+        try Data("x".utf8).write(to: file)
+        // The parent is a regular file, so open fails with ENOTDIR, not ENOENT.
+        let url = file.appendingPathComponent("spawn.json")
+        guard case .unreadable = SessionModFiles.read(SessionModFiles.SpawnRecord.self, at: url) else {
+            Issue.record("expected unreadable")
+            return
+        }
+    }
+
     @Test func removeSessionDirectoryRemovesOnlyThatSession() throws {
         let root = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: root) }
