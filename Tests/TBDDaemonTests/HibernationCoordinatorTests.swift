@@ -1688,6 +1688,99 @@ struct HibernationCoordinatorTests {
                 "onServerCreated must fire once with the recreated server name")
     }
 
+    // MARK: - Session mod on wake
+
+    /// A draft the mod saved before the park, byte for byte as it wrote it.
+    private static let savedDraft = Data(
+        #"{"schemaVersion":1,"sessionId":"sess-1","hasDraft":true,"text":"unsent","cursor":6,"savedAtMs":1}"#.utf8)
+
+    /// Seeds `sess-1`'s directory as an earlier spawn and the mod left it: a
+    /// spawn record naming a previous incarnation, and a saved draft.
+    private func seedSessionFiles(_ sessionsDir: URL) throws -> URL {
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: "sess-1", incarnationId: UUID().uuidString,
+                  spawnedAtMs: 1, features: ["composer-draft"]),
+            sessionsDir: sessionsDir)
+        let directory = sessionsDir.appendingPathComponent("sess-1", isDirectory: true)
+        try Self.savedDraft.write(
+            to: directory.appendingPathComponent(SessionModFiles.composerDraftFileName))
+        return directory
+    }
+
+    /// With the flag on, a wake launches the replacement with the three mod
+    /// variables in its process environment and rewrites `spawn.json` to name
+    /// the incarnation the row now holds — on both of wake's launch sites, the
+    /// in-place respawn of a live window and the respawn into a recreated one.
+    /// The rest of the session's directory, the saved draft above all, is
+    /// untouched: the woken mod restores from it.
+    @Test(arguments: [false, true])
+    func wakeWithTheFlagOnExportsTheModAndRewritesSpawn(windowIsDead: Bool) async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        try await db.config.setComposerDraftEnabled(true)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let directory = try seedSessionFiles(sessionsDir)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorded.append($0) },
+            dryRunWindowIsDead: { windowIsDead && $0 == "@0" })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir, sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coord.wake(terminalID: terminalID).isOk)
+
+        let awake = try #require(try await db.terminals.get(id: terminalID))
+        let incarnation = try #require(awake.sessionIncarnationID)
+        let launch = try #require(recorded.snapshot().last { $0.contains("respawn-window") })
+        let launchEnv = tmuxEnvironmentFlags(launch)
+        #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
+        #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
+        #expect(launchEnv[SessionModSpawn.incarnationVariable] == incarnation.uuidString)
+        if windowIsDead {
+            // The inert staging pane is not a Claude spawn and carries no mod.
+            let staged = try #require(recorded.snapshot().first { $0.contains("new-window") })
+            #expect(tmuxEnvironmentFlags(staged)[SessionModSpawn.featuresVariable] == nil)
+        }
+
+        let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "sess-1"))
+        #expect(spawn.sessionId == "sess-1")
+        #expect(spawn.incarnationId == incarnation.uuidString)
+        #expect(spawn.features == ["composer-draft"])
+        #expect(try Data(contentsOf: directory.appendingPathComponent(
+            SessionModFiles.composerDraftFileName)) == Self.savedDraft)
+        #expect(try Set(FileManager.default.contentsOfDirectory(atPath: directory.path))
+            == [SessionModFiles.spawnFileName, SessionModFiles.composerDraftFileName])
+    }
+
+    /// With the flag off a wake is what it always was: no mod variable in the
+    /// launch's process environment and nothing written under the sessions
+    /// directory.
+    @Test func wakeWithTheFlagOffExportsNothing() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir, sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coord.wake(terminalID: terminalID).isOk)
+
+        let launch = try #require(recorded.snapshot().last { $0.contains("respawn-window") })
+        let launchEnv = tmuxEnvironmentFlags(launch)
+        #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
+        #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
+        #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
+    }
+
     /// A restarted tmux server may assign the replacement the same numeric id
     /// stored by the dead pre-reboot window. Cleanup must distinguish identity
     /// from that reused coordinate and leave the fresh replacement alive for

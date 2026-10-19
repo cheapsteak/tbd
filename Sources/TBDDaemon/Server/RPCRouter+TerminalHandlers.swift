@@ -3418,6 +3418,22 @@ extension RPCRouter {
         return try RPCResponse(result: updated)
     }
 
+    /// The session mod's environment for a replacement Claude about to launch
+    /// under `incarnationID` — the incarnation the row already persists —
+    /// after writing its `spawn.json`. Empty, with nothing written, when every
+    /// feature is off. Reads the config here so the flag is read at the moment
+    /// of the spawn it gates. The coordinator's wake has its own twin, over the
+    /// same `sessionsDir`.
+    func sessionModEnvironment(claudeSessionID: String, incarnationID: UUID) async -> [String: String] {
+        let features = (try? await db.config.get()).map(SessionModFeature.enabled(in:)) ?? []
+        return SessionModSpawn.prepare(
+            features: features,
+            claudeSessionID: claudeSessionID,
+            incarnationID: incarnationID,
+            sessionsDir: sessionsDir,
+            now: now())?.environment ?? [:]
+    }
+
     /// `.inPlace` swap (seamless "Switch account"): gracefully interrupt the
     /// pane's current Claude, respawn `claude` under the new profile IN THE SAME
     /// tmux window, and update the EXISTING terminal row (new profile id, same
@@ -3497,6 +3513,10 @@ extension RPCRouter {
         )))
         let replacementEnv = AgentProcessEnvironment.replacement(
             base: env, incarnationID: incarnationID)
+        // `storedSessionID` is the session `spawnCommand` runs, and the one
+        // `prepareProfileAgentRespawn` just committed to the row.
+        let modEnv = await sessionModEnvironment(
+            claudeSessionID: storedSessionID, incarnationID: incarnationID)
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.
@@ -3507,7 +3527,7 @@ extension RPCRouter {
                 cwd: worktree.localPath,
                 shellCommand: spawnCommand,
                 env: replacementEnv,
-                sensitiveEnv: sensitiveEnv,
+                sensitiveEnv: sensitiveEnv.merging(modEnv) { _, mod in mod },
                 cols: cols,
                 rows: rows
             )
@@ -5767,6 +5787,22 @@ extension RPCRouter {
             observedTranscriptBoundary: observedTranscriptBoundary,
             observedAt: observedAt
         ) else { return .ok() }
+
+        // `/clear` moves the live process to a new session ID, and the mod's
+        // writes follow it there. Carry the spawn record across so the new
+        // directory reads as this process's rather than legacy. The prior ID is
+        // the one read before `applySessionStart`; the live incarnation is the
+        // hook's own, which the store just accepted as equal to the row's.
+        if terminal.isClaudeTab,
+           let priorSessionID = terminal.claudeSessionID,
+           priorSessionID != sessionApplication.sessionID {
+            SessionModSpawn.carryForward(
+                fromSessionID: priorSessionID,
+                toSessionID: sessionApplication.sessionID,
+                liveIncarnationID: params.sessionIncarnationID,
+                sessionsDir: sessionsDir,
+                now: observedAt)
+        }
 
         // The session is back, so an exit stamp describing its predecessor is
         // stale. Scoped to `.exited` inside the store: SessionStart also fires on

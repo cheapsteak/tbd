@@ -96,7 +96,8 @@ struct ModelProfileSpawnTests {
     }
 
     private func makeFixture(
-        respawnWindowError: (@Sendable (String) -> Error?)? = nil
+        respawnWindowError: (@Sendable (String) -> Error?)? = nil,
+        sessionsDir: URL? = nil
     ) -> (RPCRouter, TBDDatabase, TmuxRecorder) {
         let recorder = TmuxRecorder()
         let tmux = TmuxManager(
@@ -114,6 +115,7 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir ?? TBDConstants.sessionsDir(),
             actuationLog: makeTestActuationLog()
         )
         return (router, db, recorder)
@@ -1326,6 +1328,55 @@ struct ModelProfileSpawnTests {
                 "in-place swap over a non-blank session must resume the source id; got: \(joined)")
         #expect(!joined.contains("--fork-session"),
                 "in-place swap must NOT fork the session; got: \(joined)")
+    }
+
+    /// The tmux in-place swap launches its replacement under the incarnation
+    /// `prepareProfileAgentRespawn` committed. With the flag on that launch
+    /// carries the session mod in its process environment and its spawn
+    /// record names that incarnation; with the flag off, neither.
+    @Test("in-place swap: the replacement carries the session mod only with the flag on",
+          arguments: [true, false])
+    func tmuxInPlaceSwapExportsTheMod(flagOn: Bool) async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let (router, db, recorder) = makeFixture(sessionsDir: sessionsDir)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+        // Set after the create, so the swap's launch is the only spawn the
+        // flag can reach.
+        try await db.config.setComposerDraftEnabled(flagOn)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success)
+
+        let swapped = try #require(try await db.terminals.get(id: oldTerm.id))
+        let incarnation = try #require(swapped.sessionIncarnationID)
+        let sessionID = try #require(swapped.claudeSessionID)
+        let launch = try #require(
+            Array(recorder.calls.dropFirst(beforeSwap)).last { $0.contains("respawn-window") })
+        let launchEnv = tmuxEnvironmentFlags(launch)
+        if flagOn {
+            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
+            #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
+            #expect(launchEnv[SessionModSpawn.incarnationVariable] == incarnation.uuidString)
+            let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID))
+            #expect(spawn.sessionId == sessionID)
+            #expect(spawn.incarnationId == incarnation.uuidString)
+            #expect(spawn.features == ["composer-draft"])
+        } else {
+            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
+            #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
+            #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
+        }
     }
 
     /// Give `term`'s session a BLANK transcript on disk: the file exists and

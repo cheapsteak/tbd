@@ -342,6 +342,11 @@ public actor HibernationCoordinator {
     /// "escalate after exactly N attempts" boundary is exact.
     let clock: any Clock<Duration>
 
+    /// Root of the per-session directories a wake writes `spawn.json` under
+    /// when a session-mod feature is on. Defaults to `TBDConstants.sessionsDir()`
+    /// (which follows `TBD_HOME`); tests inject a scratch directory.
+    let sessionsDir: URL
+
     /// The pty-holder registry, wired post-construction by Daemon.swift the way
     /// `inputActivity` is — the registry is built before the RPC router that
     /// owns this coordinator, and both must reach the SAME actor: the park path
@@ -440,6 +445,7 @@ public actor HibernationCoordinator {
         clock: any Clock<Duration> = ContinuousClock(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
+        sessionsDir: URL = TBDConstants.sessionsDir(),
         sessionTitles: ClaudeSessionTitleStore,
         actuationLog: ActuationLog,
         programStatus: ProgramStatusStore? = nil
@@ -458,6 +464,7 @@ public actor HibernationCoordinator {
         self.clock = clock
         self.signaller = signaller
         self.paneProcessInspector = paneProcessInspector
+        self.sessionsDir = sessionsDir
         self.sessionTitles = sessionTitles
         self.actuationLog = actuationLog
         self.programStatus = programStatus
@@ -476,6 +483,21 @@ public actor HibernationCoordinator {
         }
         return configDirManager.ambientConfigDirectory
             .appendingPathComponent("projects", isDirectory: true)
+    }
+
+    /// The session mod's environment for a replacement agent about to launch
+    /// under `incarnationID` — the incarnation the row already persists — after
+    /// writing its `spawn.json`. Empty, with nothing written, when every
+    /// feature is off. Reads the config here rather than taking it from the
+    /// caller, so the flag is read at the moment of the spawn it gates.
+    func sessionModEnvironment(claudeSessionID: String, incarnationID: UUID) async -> [String: String] {
+        let features = (try? await db.config.get()).map(SessionModFeature.enabled(in:)) ?? []
+        return SessionModSpawn.prepare(
+            features: features,
+            claudeSessionID: claudeSessionID,
+            incarnationID: incarnationID,
+            sessionsDir: sessionsDir,
+            now: now())?.environment ?? [:]
     }
 
     /// Wire the post-`ensureServer` hook (see `onServerCreated`). Set once by
@@ -2049,6 +2071,7 @@ public actor HibernationCoordinator {
                 }
                 return await self.wakeTmuxSection(
                     terminal: currentTerminal,
+                    claudeSessionID: sessionID,
                     worktree: currentWorktree.worktree,
                     server: currentWorktree.tmuxServer,
                     windowID: currentTerminal.tmuxWindowID,
@@ -2129,6 +2152,7 @@ public actor HibernationCoordinator {
     /// interleave across the awaits below and hijack each other's windows.
     private func wakeTmuxSection(
         terminal: Terminal,
+        claudeSessionID: String,
         worktree: Worktree,
         server: String,
         windowID: String,
@@ -2181,13 +2205,15 @@ public actor HibernationCoordinator {
                 }
                 let replacementEnv = AgentProcessEnvironment.replacement(
                     base: env, incarnationID: incarnationID)
+                let modEnv = await sessionModEnvironment(
+                    claudeSessionID: claudeSessionID, incarnationID: incarnationID)
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
                     cwd: worktree.localPath,
                     shellCommand: spawnCommand,
                     env: replacementEnv,
-                    sensitiveEnv: sensitiveEnv,
+                    sensitiveEnv: sensitiveEnv.merging(modEnv) { _, mod in mod },
                     cols: cols,
                     rows: rows
                 )
@@ -2294,6 +2320,10 @@ public actor HibernationCoordinator {
                 }
                 let replacementEnv = AgentProcessEnvironment.replacement(
                     base: env, incarnationID: incarnationID)
+                // Only the agent launch carries the mod; the inert staging
+                // pane above is not a Claude spawn.
+                let modEnv = await sessionModEnvironment(
+                    claudeSessionID: claudeSessionID, incarnationID: incarnationID)
                 do {
                     try await tmux.respawnWindow(
                         server: server,
@@ -2301,7 +2331,7 @@ public actor HibernationCoordinator {
                         cwd: worktree.localPath,
                         shellCommand: spawnCommand,
                         env: replacementEnv,
-                        sensitiveEnv: sensitiveEnv,
+                        sensitiveEnv: sensitiveEnv.merging(modEnv) { _, mod in mod },
                         cols: resolvedCols,
                         rows: resolvedRows)
                 } catch {

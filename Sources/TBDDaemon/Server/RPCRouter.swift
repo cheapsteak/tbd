@@ -458,6 +458,13 @@ public final class RPCRouter: Sendable {
     /// carries.
     let clock: any Clock<Duration>
 
+    /// Root of the per-session directories the session mod and the daemon
+    /// share (`<sessionsDir>/<claudeSessionID>/`). Defaults to
+    /// `TBDConstants.sessionsDir()`, which follows `TBD_HOME`; tests inject a
+    /// scratch directory. Handed to the hibernation coordinator so a wake and
+    /// a swap write under the same root.
+    let sessionsDir: URL
+
     public init(
         db: TBDDatabase,
         lifecycle: WorktreeLifecycle,
@@ -488,10 +495,12 @@ public final class RPCRouter: Sendable {
         completionInventory: CompletionInventoryService = CompletionInventoryService(),
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
         processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
+        sessionsDir: URL = TBDConstants.sessionsDir(),
         actuationLog: ActuationLog,
         remoteTranscriptEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
+        self.sessionsDir = sessionsDir
         self.recordedAppIdentity = recordedAppIdentity
         self.processSignaller = processSignaller
         self.clock = clock
@@ -574,6 +583,7 @@ public final class RPCRouter: Sendable {
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
+            sessionsDir: sessionsDir,
             sessionTitles: lifecycle.sessionTitles,
             actuationLog: actuationLog, programStatus: resolvedProgramStatus
         )

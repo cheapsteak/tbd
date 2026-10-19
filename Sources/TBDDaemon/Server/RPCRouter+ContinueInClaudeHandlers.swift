@@ -489,6 +489,11 @@ extension RPCRouter {
         let destinationEnv = AgentProcessEnvironment.replacement(
             base: prepared.claudeEnv,
             incarnationID: destinationToken)
+        // The pending token is the incarnation finalization promotes to the
+        // row, so it is the one the destination's spawn record names.
+        let modEnv = await sessionModEnvironment(
+            claudeSessionID: prepared.freshClaudeSessionID,
+            incarnationID: destinationToken)
         var destinationFailure: Error?
         do {
             // No graceful interrupt: this single tmux operation kills Codex
@@ -499,7 +504,7 @@ extension RPCRouter {
                 cwd: currentWorktree.path,
                 shellCommand: prepared.claudeCommand,
                 env: destinationEnv,
-                sensitiveEnv: prepared.claudeSensitiveEnv,
+                sensitiveEnv: prepared.claudeSensitiveEnv.merging(modEnv) { _, mod in mod },
                 cols: prepared.cols,
                 rows: prepared.rows)
             let ready = try await continueInClaudeReadiness.wait(

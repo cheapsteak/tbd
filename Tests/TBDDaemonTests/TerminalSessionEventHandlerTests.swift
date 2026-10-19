@@ -43,6 +43,22 @@ struct TerminalSessionEventHandlerTests {
         )
     }
 
+    private func makeRouter(sessionsDir: URL) -> RPCRouter {
+        RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db,
+                git: GitManager(),
+                tmux: TmuxManager(dryRun: true),
+                hooks: HookResolver()
+            ),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            sessionsDir: sessionsDir,
+            actuationLog: makeTestActuationLog()
+        )
+    }
+
     private func makeTerminal(
         initialSession: String? = nil,
         label: String = "claude",
@@ -176,6 +192,83 @@ struct TerminalSessionEventHandlerTests {
             return
         }
         #expect(session.sessionIncarnationID == incarnation)
+    }
+
+    // MARK: - Session mod: `/clear` carry-forward
+
+    /// A Claude row whose process carries a durable incarnation, plus a spawn
+    /// record for its current session naming that incarnation — the state a
+    /// spawn made with a session-mod feature on leaves behind.
+    private func makeModSpawnedTerminal(
+        sessionID: String, sessionsDir: URL
+    ) async throws -> (Terminal, UUID) {
+        let (terminal, _) = try await makeTerminal(initialSession: sessionID, kind: .claude)
+        // Rotating the tmux ids gives the row a durable incarnation token.
+        try await db.terminals.updateTmuxIDs(id: terminal.id, windowID: "@7", paneID: "%7")
+        let incarnation = try #require(
+            try await db.terminals.get(id: terminal.id)?.sessionIncarnationID)
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: sessionID, incarnationId: incarnation.uuidString,
+                  spawnedAtMs: 1, features: ["composer-draft"]),
+            sessionsDir: sessionsDir)
+        return (terminal, incarnation)
+    }
+
+    /// `/clear` keeps the process and moves it to a new session ID, and the
+    /// mod's writes follow it there. The new ID gets a spawn record naming
+    /// the same live incarnation, so the park reads the mod as confirmed
+    /// rather than falling back to legacy.
+    @Test("SessionStart with a new session ID carries the live spawn record forward")
+    func sessionStartWithANewIDCarriesSpawnRecordForward() async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let modRouter = makeRouter(sessionsDir: sessionsDir)
+        let (terminal, incarnation) = try await makeModSpawnedTerminal(
+            sessionID: "before-clear", sessionsDir: sessionsDir)
+
+        let response = await modRouter.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "after-clear",
+                transcriptPath: nil,
+                source: "clear",
+                sessionIncarnationID: incarnation)))
+        #expect(response.success)
+
+        #expect(try await db.terminals.get(id: terminal.id)?.claudeSessionID == "after-clear")
+        let carried = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "after-clear"))
+        #expect(carried.sessionId == "after-clear")
+        #expect(carried.incarnationId == incarnation.uuidString)
+        #expect(carried.features == ["composer-draft"])
+        #expect(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "before-clear")?.spawnedAtMs == 1,
+                "the carry rewrote the source session's record")
+    }
+
+    /// A SessionStart that keeps the session ID — a resume, `/compact`, or a
+    /// wake's own process reporting in — writes nothing: the record the spawn
+    /// wrote already names the right session.
+    @Test("SessionStart with the same session ID writes no spawn record")
+    func sessionStartWithTheSameIDWritesNothing() async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let modRouter = makeRouter(sessionsDir: sessionsDir)
+        let (terminal, incarnation) = try await makeModSpawnedTerminal(
+            sessionID: "same-id", sessionsDir: sessionsDir)
+
+        let response = await modRouter.handle(try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: terminal.id,
+                sessionID: "same-id",
+                transcriptPath: nil,
+                source: "compact",
+                sessionIncarnationID: incarnation)))
+        #expect(response.success)
+
+        #expect(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "same-id")?.spawnedAtMs == 1,
+                "a SessionStart that kept the session ID rewrote its spawn record")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path) == ["same-id"])
     }
 
     @Test("ignores non-absolute transcriptPath but still updates sessionID")

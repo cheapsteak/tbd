@@ -1252,6 +1252,11 @@ extension HibernationCoordinator {
         }
         let replacementEnv = AgentProcessEnvironment.replacement(
             base: env, incarnationID: incarnationID)
+        // `sessionID` is the session `spawnCommand` runs — the resume, or the
+        // fresh session an in-place swap planned — so it names the directory
+        // the replacement's mod writes under.
+        let modEnv = await sessionModEnvironment(
+            claudeSessionID: sessionID, incarnationID: incarnationID)
 
         let handle: HolderHandle
         do {
@@ -1276,7 +1281,10 @@ extension HibernationCoordinator {
                     // the trade: `ps -ww` is readable by exactly the processes
                     // that can already read `routes/`, and losing the rc-file
                     // defence would be a real failure where this is not one.
-                    sensitiveEnv: attachment.sensitiveEnv,
+                    //
+                    // The session mod's variables ride here too, empty when
+                    // every feature is off.
+                    sensitiveEnv: attachment.sensitiveEnv.merging(modEnv) { _, mod in mod },
                     workingDirectory: worktree.path,
                     cols: cols ?? TmuxManager.defaultCols,
                     rows: rows ?? TmuxManager.defaultRows,
