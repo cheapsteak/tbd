@@ -318,6 +318,37 @@ jobs:
       - name: Run review-script tests
         run: python3 -m pytest .github/workflows/claude-review-v2/tests/ -q
 
+  session-mod:
+    name: Session mod
+    runs-on: ubuntu-latest
+    # 10: one npm install of the pinned Claude Code, then a validate and a test
+    # run over a handful of TypeScript files. Nearly all of the bound is there
+    # to absorb a slow package registry rather than the checks themselves.
+    timeout-minutes: 10
+    # The session mod's TypeScript under SessionMod/ is the source; the daemon
+    # ships the copy embedded in Sources/TBDShared/SessionModContent.swift, so
+    # the first step fails when that copy is stale. Claude Code is pinned to the
+    # release whose plugin API the mod is written against
+    # (docs/specs/2026-10-19-tbd-session-mod-design.md).
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check the embedded copy is current
+        run: python3 scripts/gen-session-mod-content.py --check
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.303
+
+      - name: Validate the session mod
+        run: claude plugin validate --strict SessionMod
+
+      - name: Test the session mod
+        run: claude plugin test SessionMod
+
   test:
     runs-on: macos-26
     # 100, deliberately NOT sized to this job's 15.3-minute observed worst case
