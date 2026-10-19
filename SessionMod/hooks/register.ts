@@ -52,7 +52,7 @@ export async function promptEdit(
   return box
 }
 
-/** prompt.change: hands the box as it now stands to the features. Observe only. */
+/** prompt.change: hands the box as it now stands, and who changed it, to the features. Observe only. */
 export async function promptChange(
   $: EngineInterface,
   env: SessionEnv | null,
@@ -60,11 +60,14 @@ export async function promptChange(
   next: (e: Frozen<PromptChangeInput>) => Promise<PromptChangeResult>,
 ): Promise<PromptChangeResult> {
   if (env !== null && env.features.has(COMPOSER_DRAFT)) {
-    composerDraftPromptChanged($, { text: e.text, cursor: e.cursor })
+    composerDraftPromptChanged($, { text: e.text, cursor: e.cursor }, e.origin)
   }
   return next(e)
 }
 
+// Every hook carries a `.catch` that passes the event on: a hook that throws
+// or overruns leaves the event as it would be without the mod. The box goes
+// back to the editor whatever a feature does with it.
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const ctx = await resolveContext($)
@@ -75,7 +78,7 @@ export const register: Register = on => {
       }
     }
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   on('session.end', async ($, e, next) => {
     const ctx = await resolveContext($)
@@ -83,13 +86,13 @@ export const register: Register = on => {
       await composerDraftSessionEnd($, ctx)
     }
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
-  // The box goes back to the editor whatever a feature does with it.
   on('prompt.edit', async ($, e, next) => promptEdit($, await readSessionEnv($), e, next))
     .catch(($, e, next) => next(e))
 
   on('prompt.change', async ($, e, next) => promptChange($, await readSessionEnv($), e, next))
+    .catch(($, e, next) => next(e))
 
   // The band above the prompt yields to a survey. A feature that draws there
   // wraps what is drawn beneath it, and a second one would wrap the first.
@@ -99,5 +102,5 @@ export const register: Register = on => {
       return next(e)
     }
     return composerDraftAbovePrompt($, e, () => next(e))
-  })
+  }).catch(($, e, next) => next(e))
 }

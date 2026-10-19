@@ -7,6 +7,12 @@ declare module 'claude-code' {
       composerDraftRestoredIncarnation: string
       /** Whether the band above the prompt shows the restore notice. */
       composerDraftNoticeVisible: boolean
+      /**
+       * Whether the box's text holds all of the draft: false once a change the
+       * mod cannot read (a collapsed paste, an image) left the box non-empty,
+       * true again once the box empties.
+       */
+      composerDraftRestorable: boolean
     }
   }
 }
