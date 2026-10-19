@@ -20,10 +20,9 @@ func resolvePath(_ path: String, relativeTo directory: String) -> String {
     if path.hasPrefix("/") {
         return path
     }
-    return URL(
-        fileURLWithPath: path,
-        relativeTo: URL(fileURLWithPath: directory, isDirectory: true)
-    ).standardized.path
+    return URL(fileURLWithPath: directory, isDirectory: true)
+        .appendingPathComponent(path, isDirectory: false)
+        .standardized.path
 }
 
 /// Decides between registering a local folder and cloning. `pathExists` is
