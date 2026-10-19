@@ -1694,7 +1694,7 @@ struct HibernationCoordinatorTests {
 
     /// A draft the mod saved before the park, byte for byte as it wrote it.
     private static let savedDraft = Data(
-        #"{"schemaVersion":1,"sessionId":"sess-1","hasDraft":true,"text":"unsent","cursor":6,"savedAtMs":1}"#.utf8)
+        #"{"schemaVersion":1,"sessionId":"sess-1","hasDraft":true,"text":"unsent","cursor":6,"restorable":true,"savedAtMs":1}"#.utf8)
 
     /// Seeds `sess-1`'s directory as an earlier spawn and the mod left it: a
     /// spawn record naming a previous incarnation, and a saved draft.
@@ -3338,6 +3338,29 @@ struct HibernationCoordinatorTests {
             == .draftUnconfirmed(reason: "no-alive-file"))
         #expect(try await db.terminals.get(id: terminalID) == before)
         #expect(capture.count == 0, "the refusal came after the park reached the transport")
+    }
+
+    /// A live, confirmed mod whose saved draft holds content its text lacks
+    /// (a collapsed paste): a park would wake to part of the draft, so the
+    /// manual park asks, and the override parks it.
+    @Test func aDraftNotRestorableAsksBeforeAManualPark() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: true, restorable: false)
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: MutableHibernationCapture(), now: { now })
+
+        #expect(await coord.manualHibernate(terminalID: terminalID)
+            == .draftUnconfirmed(reason: "draft-not-restorable"))
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == false)
+        #expect(await coord.manualHibernate(
+            terminalID: terminalID, overrideUnconfirmedDraft: true) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
     }
 
     /// "Hibernate anyway": the override parks the same unknown session, and

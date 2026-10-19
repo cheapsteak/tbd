@@ -56,15 +56,21 @@ public enum SessionModFiles {
         public var hasDraft: Bool
         public var text: String?
         public var cursor: Int?
+        /// On a draft, whether `text` holds all of it. False once a change the
+        /// mod cannot read (a collapsed paste, an image) left the box
+        /// non-empty; nil on an empty box and on a draft written without it.
+        public var restorable: Bool?
         public var savedAtMs: Int64
 
         public init(schemaVersion: Int = 1, sessionId: String, hasDraft: Bool,
-                    text: String? = nil, cursor: Int? = nil, savedAtMs: Int64) {
+                    text: String? = nil, cursor: Int? = nil, restorable: Bool? = nil,
+                    savedAtMs: Int64) {
             self.schemaVersion = schemaVersion
             self.sessionId = sessionId
             self.hasDraft = hasDraft
             self.text = text
             self.cursor = cursor
+            self.restorable = restorable
             self.savedAtMs = savedAtMs
         }
     }
@@ -119,11 +125,28 @@ public enum SessionModFiles {
         }
     }
 
-    /// Atomically writes the session's `spawn.json`, creating its directory.
+    /// The mode of the sessions root. Drafts can hold pasted secrets, so only
+    /// the owner may enter it, and the per-session directories beneath it are
+    /// out of everyone else's reach whatever their own mode.
+    public static let sessionsRootPermissions: Int = 0o700
+
+    /// Creates the sessions root when it is missing, and holds it at
+    /// `sessionsRootPermissions` either way, so a root created with a wider
+    /// mode is narrowed too.
+    public static func ensureSessionsRoot(_ sessionsDir: URL) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: sessionsDir, withIntermediateDirectories: true)
+        try fileManager.setAttributes(
+            [.posixPermissions: sessionsRootPermissions], ofItemAtPath: sessionsDir.path)
+    }
+
+    /// Atomically writes the session's `spawn.json`, creating its directory
+    /// beneath a sessions root only its owner may enter.
     public static func writeSpawnRecord(_ record: SpawnRecord, sessionsDir: URL) throws {
         guard let dir = directory(sessionsDir: sessionsDir, claudeSessionID: record.sessionId) else {
             throw WriteError.unsafeSessionID(record.sessionId)
         }
+        try ensureSessionsRoot(sessionsDir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

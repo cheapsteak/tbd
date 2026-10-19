@@ -61,6 +61,12 @@ extension RPCRouter {
 
     /// `terminal.hibernate` — manually hibernate one Claude terminal (kill its
     /// process, keep the tmux window). Honors the running/permission rails.
+    ///
+    /// A session spawned with the composer-draft feature whose draft TBD
+    /// cannot confirm saved is refused with the coded error
+    /// `RPCErrorCode.composerDraftUnconfirmed`, which the app turns into
+    /// "Hibernate anyway?". Reissuing with `overrideUnconfirmedDraft` parks it
+    /// regardless.
     func handleTerminalHibernate(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {

@@ -32,10 +32,48 @@ import Testing
             sessionsDir: root, claudeSessionID: id, liveIncarnationID: live, now: now)
     }
 
-    @Test func confirmedWithADraft() throws {
-        let root = try fixture(draft: #"{"schemaVersion":1,"sessionId":"s","hasDraft":true,"text":"hi","cursor":2,"savedAtMs":1}"#)
+    @Test func confirmedWithARestorableDraft() throws {
+        let root = try fixture(draft: #"{"schemaVersion":1,"sessionId":"s","hasDraft":true,"text":"hi","cursor":2,"restorable":true,"savedAtMs":1}"#)
         defer { try? FileManager.default.removeItem(at: root) }
         #expect(read(root) == .confirmed(hasDraft: true))
+    }
+
+    /// A draft whose text lacks part of the box (a collapsed paste, an image)
+    /// would wake as part of itself.
+    @Test func aDraftMarkedNotRestorableIsUnknown() throws {
+        let root = try fixture(draft: #"{"schemaVersion":1,"sessionId":"s","hasDraft":true,"text":"x[Pasted text #2 +50 lines]","cursor":27,"restorable":false,"savedAtMs":1}"#)
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(read(root) == .unknown(.draftNotRestorable))
+    }
+
+    /// A draft written without the mark cannot vouch for itself either.
+    @Test func aDraftWithoutTheMarkIsUnknown() throws {
+        let root = try fixture(draft: #"{"schemaVersion":1,"sessionId":"s","hasDraft":true,"text":"hi","cursor":2,"savedAtMs":1}"#)
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(read(root) == .unknown(.draftNotRestorable))
+    }
+
+    /// An empty box has nothing to restore, so it needs no mark, and a mark it
+    /// carries anyway changes nothing.
+    @Test func anEmptyBoxIsConfirmedWhateverItsMark() throws {
+        for body in [
+            #"{"schemaVersion":1,"sessionId":"s","hasDraft":false,"savedAtMs":1}"#,
+            #"{"schemaVersion":1,"sessionId":"s","hasDraft":false,"restorable":false,"savedAtMs":1}"#,
+        ] {
+            let root = try fixture(draft: body)
+            defer { try? FileManager.default.removeItem(at: root) }
+            #expect(read(root) == .confirmed(hasDraft: false), "\(body)")
+        }
+    }
+
+    /// The mark is the draft's own: an unconfirmed liveness answer stands
+    /// whatever the draft says.
+    @Test func theMarkNeverOverridesLiveness() {
+        let draft = SessionModFiles.ComposerDraftRecord(
+            sessionId: "s", hasDraft: true, text: "hi", cursor: 2, restorable: true, savedAtMs: 1)
+        #expect(ComposerDraftStatus.evaluate(liveness: .unknown(.staleHeartbeat), draft: .record(draft))
+            == .unknown(.staleHeartbeat))
+        #expect(ComposerDraftStatus.evaluate(liveness: .legacy, draft: .record(draft)) == .legacy)
     }
 
     @Test func confirmedEmpty() throws {

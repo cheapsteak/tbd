@@ -185,7 +185,9 @@ enum TmuxSignalEnding {
     /// poll, `try?` on the sleep is not a cancellation check: a cancelled task
     /// burns the attempts at zero delay and reports `.stillRunning`, and the
     /// caller's respawn still ends the process. An outcome short of `.exited`
-    /// is logged at `.debug`, naming `terminalID`.
+    /// is logged, naming `terminalID`: `.noClaudeProcess` at `.notice`,
+    /// because no SIGTERM went out and the ending falls to the respawn alone,
+    /// and `.stillRunning` at `.debug`.
     @discardableResult
     static func end(
         tmux: TmuxManager,
@@ -204,7 +206,7 @@ enum TmuxSignalEnding {
               let panePID = Int32(panePIDString), panePID > 0,
               let claudePID = inspector.foregroundClaudePID(panePID: panePID),
               claudePID > 0 else {
-            logger.debug("composer-draft: found no claude process under \(terminalID.uuidString, privacy: .public)'s pane to signal — the respawn ends whatever is there")
+            logger.notice("composer-draft: found no claude process under \(terminalID.uuidString, privacy: .public)'s pane to signal, so no SIGTERM was sent — the respawn ends whatever is there")
             return .noClaudeProcess
         }
         signaller.terminateProcessOnly(claudePID)

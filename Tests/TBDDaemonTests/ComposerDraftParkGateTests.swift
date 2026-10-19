@@ -6,10 +6,12 @@ import Testing
 /// left them: the daemon's spawn record naming `incarnation`, then, when
 /// given, the mod's heartbeat at `heartbeatAt` and its saved draft. A spawn
 /// record alone reads unknown (`no-alive-file`); with a fresh heartbeat it
-/// reads confirmed. Shared by the coordinator and holder park tests.
+/// reads confirmed. A draft carries `restorable`, as the mod writes it; a
+/// draft written with `restorable: false` reads unknown
+/// (`draft-not-restorable`). Shared by the coordinator and holder park tests.
 func writeComposerDraftSession(
     sessionsDir: URL, sessionID: String, incarnation: UUID,
-    heartbeatAt: Date? = nil, hasDraft: Bool? = nil
+    heartbeatAt: Date? = nil, hasDraft: Bool? = nil, restorable: Bool = true
 ) throws {
     try SessionModFiles.writeSpawnRecord(
         .init(sessionId: sessionID, incarnationId: incarnation.uuidString,
@@ -27,7 +29,8 @@ func writeComposerDraftSession(
     if let hasDraft {
         let draft = SessionModFiles.ComposerDraftRecord(
             sessionId: sessionID, hasDraft: hasDraft,
-            text: hasDraft ? "unsent" : nil, cursor: hasDraft ? 6 : nil, savedAtMs: 1)
+            text: hasDraft ? "unsent" : nil, cursor: hasDraft ? 6 : nil,
+            restorable: hasDraft ? restorable : nil, savedAtMs: 1)
         try JSONEncoder().encode(draft)
             .write(to: directory.appendingPathComponent(SessionModFiles.composerDraftFileName))
     }
@@ -95,6 +98,26 @@ func writeComposerDraftSession(
                     enabled: true, inputVetoEnabled: false, idleTimeout: 60, idleSince: nil),
                 overrideUnconfirmed: override) == .skip(reason: "other-incarnation"))
         }
+    }
+
+    /// A draft holding content its text lacks reads unknown, so it takes the
+    /// unknown path unchanged: a manual park asks, the override parks, and
+    /// automatic parks skip.
+    @Test func aDraftNotRestorableAsksAtAManualParkAndSkipsAutomaticOnes() {
+        let status = ComposerDraftStatus.unknown(.draftNotRestorable)
+        #expect(ComposerDraftParkGate.decide(
+            status: status, policy: .manual, overrideUnconfirmed: false)
+            == .refuse(reason: "draft-not-restorable"))
+        #expect(ComposerDraftParkGate.decide(
+            status: status, policy: .manual, overrideUnconfirmed: true) == .proceed)
+        #expect(ComposerDraftParkGate.decide(
+            status: status, policy: .merge(inputVetoEnabled: false),
+            overrideUnconfirmed: false) == .skip(reason: "draft-not-restorable"))
+        #expect(ComposerDraftParkGate.decide(
+            status: status,
+            policy: .automatic(
+                enabled: true, inputVetoEnabled: false, idleTimeout: 60, idleSince: nil),
+            overrideUnconfirmed: false) == .skip(reason: "draft-not-restorable"))
     }
 
     @Test func unknownProfileSwapProceeds() {
@@ -187,6 +210,7 @@ func writeComposerDraftSession(
             .unknown(.staleHeartbeat),
             .unknown(.featureNotRunning),
             .unknown(.unreadableFile),
+            .unknown(.draftNotRestorable),
         ]
         for status in featureStatuses {
             #expect(ComposerDraftParkGate.endingStyle(for: status) == .signal,

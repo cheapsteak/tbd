@@ -41,6 +41,38 @@ func makeSessionsDir() throws -> URL {
         #expect(read == record)
     }
 
+    private func mode(of url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return try #require(attributes[.posixPermissions] as? Int) & 0o777
+    }
+
+    /// Drafts can hold pasted secrets: a spawn that creates the sessions root
+    /// creates it for its owner alone.
+    @Test func writingASpawnRecordCreatesAnOwnerOnlySessionsRoot() throws {
+        let parent = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let root = parent.appendingPathComponent("sessions", isDirectory: true)
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: "s1", incarnationId: UUID().uuidString,
+                  spawnedAtMs: 1, features: ["composer-draft"]),
+            sessionsDir: root)
+        #expect(try mode(of: root) == 0o700)
+    }
+
+    /// A root an earlier version created with the default mode is narrowed at
+    /// the next spawn.
+    @Test func writingASpawnRecordNarrowsAnExistingSessionsRoot() throws {
+        let root = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        #expect(try mode(of: root) == 0o755, "the fixture never widened the root")
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: "s1", incarnationId: UUID().uuidString,
+                  spawnedAtMs: 1, features: ["composer-draft"]),
+            sessionsDir: root)
+        #expect(try mode(of: root) == 0o700)
+    }
+
     @Test func writeSpawnRecordThrowsOnUnsafeID() throws {
         let root = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -49,6 +81,25 @@ func makeSessionsDir() throws -> URL {
         #expect(throws: (any Error).self) {
             try SessionModFiles.writeSpawnRecord(record, sessionsDir: root)
         }
+    }
+
+    @Test func aDraftsRestorableMarkReadsBackAndIsOptional() throws {
+        let root = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("draft.json")
+        try Data(#"{"schemaVersion":1,"sessionId":"s","hasDraft":true,"text":"hi","cursor":2,"restorable":false,"savedAtMs":5}"#.utf8)
+            .write(to: url)
+        guard case .record(let marked) = SessionModFiles.read(SessionModFiles.ComposerDraftRecord.self, at: url) else {
+            Issue.record("expected a record")
+            return
+        }
+        #expect(marked.restorable == false)
+        try Data(#"{"schemaVersion":1,"sessionId":"s","hasDraft":false,"savedAtMs":5}"#.utf8).write(to: url)
+        guard case .record(let empty) = SessionModFiles.read(SessionModFiles.ComposerDraftRecord.self, at: url) else {
+            Issue.record("expected a record")
+            return
+        }
+        #expect(empty.restorable == nil)
     }
 
     @Test func readIgnoresUnknownFields() throws {

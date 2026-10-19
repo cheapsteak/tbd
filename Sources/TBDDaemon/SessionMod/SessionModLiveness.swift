@@ -7,12 +7,20 @@ public enum SessionModLiveness: Equatable, Sendable {
     case confirmed
     case unknown(UnknownReason)
 
+    /// Why a session spawned with a feature is not confirmed. Every case but
+    /// `draftNotRestorable` is a liveness answer; that one is the
+    /// composer-draft feature's, read from a confirmed session's draft file
+    /// (`ComposerDraftStatus`), and shares the type so every consumer of an
+    /// unconfirmed park handles it the same way.
     public enum UnknownReason: String, Sendable {
         case noAliveFile = "no-alive-file"
         case otherIncarnation = "other-incarnation"
         case staleHeartbeat = "stale-heartbeat"
         case featureNotRunning = "feature-not-running"
         case unreadableFile = "unreadable-file"
+        /// The saved draft holds content its text does not carry, such as a
+        /// collapsed paste or an image, so a wake could restore only part of it.
+        case draftNotRestorable = "draft-not-restorable"
     }
 
     /// Seconds after which a heartbeat no longer counts.

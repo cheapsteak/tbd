@@ -501,7 +501,7 @@ struct HolderInPlaceSwapTests {
 
     /// A draft the mod saved before the park, byte for byte as it wrote it.
     private static let savedDraft = Data(
-        #"{"schemaVersion":1,"sessionId":"swap-holder-session","hasDraft":true,"text":"unsent","cursor":6,"savedAtMs":1}"#.utf8)
+        #"{"schemaVersion":1,"sessionId":"swap-holder-session","hasDraft":true,"text":"unsent","cursor":6,"restorable":true,"savedAtMs":1}"#.utf8)
 
     /// Seeds the session's saved draft, and returns its file.
     private static func seedDraft(_ fixture: Fixture) throws -> URL {
