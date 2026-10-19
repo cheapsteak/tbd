@@ -124,8 +124,10 @@ The app and the CLI run git in two different modes:
   person sees git's own progress and git can ask for a password in the normal
   way. While git runs, the CLI ignores SIGINT and SIGQUIT, as `system(3)`
   does. Ctrl-C still reaches git, which stops and cleans up; the CLI stays
-  alive long enough for `RepoCloner` to delete the claimed folder, then exits
-  non-zero.
+  alive long enough for `RepoCloner` to remove the claimed folder, then exits
+  non-zero. A Ctrl-C reaches git as a failure, not as a cancel, so the failure
+  rule applies: a repository git kept, because the Ctrl-C came during the
+  checkout, stays.
 
 ## The app
 
