@@ -15,9 +15,12 @@ public enum CloneMode: Sendable {
 
 public enum CloneOutcome: Equatable, Sendable {
     case succeeded
-    /// `lastErrorLines` holds the last five non-empty lines git wrote to stderr
-    /// (`.noPrompt` only; empty in `.attachedToTerminal`, where git wrote them
-    /// to the terminal itself).
+    /// When git ran, `lastErrorLines` holds the last five non-empty lines it
+    /// wrote to stderr in `.noPrompt`, and is empty in `.attachedToTerminal`,
+    /// where git wrote them to the terminal itself. When git never ran — the
+    /// destination could not be created, or git could not be started —
+    /// `exitCode` is 127 and `lastErrorLines` holds TBD's one-line reason, in
+    /// either mode.
     case failed(exitCode: Int32, lastErrorLines: [String])
     case cancelled
     case refusedDestinationExists
@@ -27,6 +30,9 @@ public enum CloneOutcome: Equatable, Sendable {
 /// fake that never spawns git.
 public protocol RepoCloning: AnyObject, Sendable {
     func run(onProgress: @escaping @Sendable (String) -> Void) async -> CloneOutcome
+    /// Stops the clone. `run` then reports `.cancelled` — unless git had
+    /// already finished, in which case the clone is complete and `run` still
+    /// reports `.succeeded`.
     func cancel()
 }
 
@@ -34,10 +40,14 @@ public protocol RepoCloning: AnyObject, Sendable {
 /// shallow and without submodules, because TBD's branch and PR features need
 /// the whole history.
 ///
-/// **The destination is checked before git starts, and the check is what
-/// licenses deleting it.** `run` refuses a destination that already exists, so
-/// a folder found there after a failed or cancelled clone can only be the one
-/// this run's git made, and it is removed. No other path ever deletes.
+/// **The destination is claimed before git starts, and the claim is what
+/// licenses deleting it.** `run` creates `destination` with `mkdir`, which
+/// fails with `EEXIST` if anything at all is already there; that is
+/// `.refusedDestinationExists`. A check followed by git's own `mkdir` would
+/// not do: whatever appeared between the two — another `tbd repo add` of the
+/// same repository — would be deleted as this run's failed clone. git clones
+/// into the empty folder this run owns, keeps it (emptied) when it fails or is
+/// signalled, and `run` then removes it. No other path ever deletes.
 ///
 /// One instance runs one clone; call `run` once.
 public final class RepoCloner: RepoCloning {
@@ -150,14 +160,19 @@ public final class RepoCloner: RepoCloning {
     // MARK: - Running
 
     public func run(onProgress: @escaping @Sendable (String) -> Void) async -> CloneOutcome {
-        if FileManager.default.fileExists(atPath: destination) {
-            return .refusedDestinationExists
-        }
-        // From here on, `destination` was absent when this run looked — the
-        // fact that lets `clone` remove whatever git leaves there.
         if state.withLock({ $0.cancelled }) {
             return .cancelled
         }
+        switch claimDestination() {
+        case .claimed:
+            break
+        case .exists:
+            return .refusedDestinationExists
+        case .failed(let reason):
+            return .failed(exitCode: 127, lastErrorLines: [reason])
+        }
+        // From here on, `destination` is the empty folder this run created —
+        // the fact that lets `clone` remove whatever git leaves there.
         return await withTaskCancellationHandler {
             await self.clone(onProgress: onProgress)
         } onCancel: {
@@ -167,8 +182,10 @@ public final class RepoCloner: RepoCloning {
 
     /// Sends SIGTERM: to the clone's whole process group in `.noPrompt` (git and
     /// the transport helpers it started), to git alone in
-    /// `.attachedToTerminal`, whose group is the terminal's. git deletes its own
-    /// partial folder on SIGTERM; `run` removes anything left.
+    /// `.attachedToTerminal`, whose group is the terminal's. git empties its
+    /// partial clone on SIGTERM, and `run` removes the folder and reports
+    /// `.cancelled`. A clone that had already finished is complete, is kept,
+    /// and still reports `.succeeded`.
     public func cancel() {
         let mode = self.mode
         state.withLock { run in
@@ -180,8 +197,9 @@ public final class RepoCloner: RepoCloning {
     }
 
     /// SIGTERM to every running clone, as `cancel()` would send it. For
-    /// `applicationWillTerminate`, so git can delete its partial folders before
-    /// the app is gone.
+    /// `applicationWillTerminate`, so git can empty its partial clones before
+    /// the app is gone. The emptied folders themselves are removed only by a
+    /// `run` that gets to return, which a quitting process may not reach.
     public static func terminateAll() {
         liveClones.withLock { clones in
             for (pid, mode) in clones {
@@ -200,13 +218,40 @@ public final class RepoCloner: RepoCloning {
         }
     }
 
-    /// Only reached once `run` has seen that `destination` does not exist.
+    private enum DestinationClaim {
+        case claimed
+        case exists
+        case failed(reason: String)
+    }
+
+    /// Creates `destination` (and any missing parents). `mkdir` is atomic and
+    /// fails with `EEXIST` for anything already there — a folder, a file, a
+    /// dangling symlink — so at most one run can claim a path.
+    private func claimDestination() -> DestinationClaim {
+        let parent = (destination as NSString).deletingLastPathComponent
+        if !parent.isEmpty {
+            // A failure here surfaces as mkdir's own error just below.
+            try? FileManager.default.createDirectory(atPath: parent, withIntermediateDirectories: true)
+        }
+        if mkdir(destination, 0o777) == 0 {
+            return .claimed
+        }
+        let code = errno
+        if code == EEXIST {
+            return .exists
+        }
+        return .failed(reason: "Could not create \(destination): \(String(cString: strerror(code)))")
+    }
+
+    /// Only reached once `run` has claimed `destination`.
     private func clone(onProgress: @escaping @Sendable (String) -> Void) async -> CloneOutcome {
         let child: SpawnedChild
         switch spawn() {
         case .success(let spawned):
             child = spawned
         case .failure(let failure):
+            // git never ran, so the folder is still the empty one `run` made.
+            _ = rmdir(destination)
             return .failed(exitCode: 127, lastErrorLines: [failure.message])
         }
         register(child.pid)
@@ -224,7 +269,9 @@ public final class RepoCloner: RepoCloning {
 
         let cancelled = state.withLock { $0.cancelled }
         let outcome = Self.outcome(waitStatus: waitStatus, cancelled: cancelled, lastLines: lastLines)
-        if outcome != .succeeded, FileManager.default.fileExists(atPath: destination) {
+        // An unknowable status (git reaped elsewhere) may hide a finished
+        // clone, so only a known failure deletes.
+        if outcome != .succeeded, waitStatus != nil, FileManager.default.fileExists(atPath: destination) {
             try? FileManager.default.removeItem(atPath: destination)
         }
         return outcome
@@ -468,7 +515,9 @@ public final class RepoCloner: RepoCloning {
         sigfillset(&everySignal)
         posix_spawnattr_setsigdefault(&attributes, &everySignal)
 
-        var flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF
+        // CLOEXEC_DEFAULT: git gets 0, 1 and 2 and nothing else of ours, in
+        // both modes — only descriptors named by a file action survive.
+        var flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_CLOEXEC_DEFAULT
         if let pipes {
             // The dup2 comes before the opens: should the pipe's write end
             // itself be 0 or 1, it reaches 2 before /dev/null replaces it.
@@ -477,8 +526,14 @@ public final class RepoCloner: RepoCloning {
             posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
             // SETSID: no controlling terminal, so nothing can prompt, and its
             // own process group, so a cancel reaches the transport helpers too.
-            // CLOEXEC_DEFAULT: git gets 0, 1 and 2 and nothing else of ours.
-            flags |= POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT
+            flags |= POSIX_SPAWN_SETSID
+        } else {
+            // Attached: git keeps the caller's terminal on 0, 1 and 2. One the
+            // caller has closed stays closed, because inheriting a closed
+            // descriptor fails the whole spawn with EBADF.
+            for descriptor: Int32 in 0...2 where fcntl(descriptor, F_GETFD) != -1 {
+                posix_spawn_file_actions_addinherit_np(&actions, descriptor)
+            }
         }
         posix_spawnattr_setflags(&attributes, Int16(flags))
 

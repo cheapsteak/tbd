@@ -160,50 +160,92 @@ struct RepoClonerTests {
         #expect(!FileManager.default.fileExists(atPath: dest.path))
     }
 
-    /// Discriminates `POSIX_SPAWN_SETSID`: without it the child inherits this
-    /// process's group, whose id is not the child's pid.
+    /// Discriminates `POSIX_SPAWN_SETSID` both from its absence and from a
+    /// bare `SETPGROUP`: the child must lead a session of its own, not only a
+    /// process group. Checked in-process with `getsid`/`getpgid` while the
+    /// child is alive.
     @Test func noPromptRunsInOwnSession() async throws {
         let root = try Self.makeScratch()
         defer { try? FileManager.default.removeItem(at: root) }
         let dest = root.appendingPathComponent("session")
+        let probe = OSAllocatedUnfairLock<SessionProbe?>(initialState: nil)
+
+        let cloner = RepoCloner(
+            command: ["sh", "-c", "echo $$ >&2; exec sleep 30"],
+            destination: dest.path, mode: .noPrompt)
+        let outcome = await cloner.run { line in
+            guard let pid = pid_t(line) else { return }
+            let sample = SessionProbe(pid: pid, sessionID: getsid(pid), groupID: getpgid(pid))
+            probe.withLock { $0 = sample }
+            cloner.cancel()
+        }
+
+        #expect(outcome == .cancelled)
+        let recorded = probe.withLock { $0 }
+        let observed = try #require(recorded)
+        #expect(observed.sessionID == observed.pid)
+        #expect(observed.groupID == observed.pid)
+    }
+
+    /// The spec's empty stdin for `.noPrompt`: a read sees end of file at once.
+    @Test func noPromptStdinIsEmpty() async throws {
+        let root = try Self.makeScratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dest = root.appendingPathComponent("stdin")
         let progress = ProgressLog()
 
         let cloner = RepoCloner(
-            command: ["sh", "-c", "echo \"$$ $(ps -o pgid= -p $$)\" >&2"],
+            command: ["sh", "-c", "if read x; then echo got >&2; else echo eof >&2; fi"],
             destination: dest.path, mode: .noPrompt)
         let outcome = await cloner.run { progress.append($0) }
 
         #expect(outcome == .succeeded)
-        let lines = progress.lines
-        #expect(lines.count == 1)
-        let numbers = (lines.first ?? "").split(whereSeparator: \.isWhitespace).map(String.init)
-        #expect(numbers.count == 2)
-        #expect(numbers.first == numbers.last)
+        #expect(progress.lines == ["eof"])
     }
 
-    /// The other mode: the child stays in the caller's process group (so a
-    /// terminal's Ctrl-C reaches it), its stderr is not captured, and its exit
-    /// code still comes back. The script reports through a file because its
-    /// stderr is the test runner's.
-    @Test func attachedModeStaysInCallersGroup() async throws {
+    /// The attached branch: git keeps the caller's stdout and stderr and
+    /// nothing else. `extra` is open in this process without close-on-exec, so
+    /// only `POSIX_SPAWN_CLOEXEC_DEFAULT` keeps it out of the child. The child
+    /// answers by exit code — 3 as expected, 4 leaked, 5 stdio missing —
+    /// because its stderr is the test runner's.
+    @Test func attachedModeInheritsOnlyStdio() async throws {
         let root = try Self.makeScratch()
         defer { try? FileManager.default.removeItem(at: root) }
         let dest = root.appendingPathComponent("attached")
-        let report = root.appendingPathComponent("report.txt")
+        let extra = open("/dev/null", O_RDONLY)
+        try #require(extra > 2)
+        defer { close(extra) }
         let progress = ProgressLog()
 
         let cloner = RepoCloner(
-            command: ["sh", "-c", "echo \"$$ $(ps -o pgid= -p $$)\" > \"$0\"; exit 3", report.path],
+            command: ["sh", "-c",
+                      "if [ -e \"/dev/fd/$0\" ]; then exit 4; fi; [ -e /dev/fd/1 ] && [ -e /dev/fd/2 ] && exit 3; exit 5",
+                      String(extra)],
             destination: dest.path, mode: .attachedToTerminal)
         let outcome = await cloner.run { progress.append($0) }
 
         #expect(outcome == .failed(exitCode: 3, lastErrorLines: []))
         #expect(progress.lines.isEmpty)
-        let numbers = try String(contentsOf: report, encoding: .utf8)
-            .split(whereSeparator: \.isWhitespace).map(String.init)
-        #expect(numbers.count == 2)
-        #expect(numbers.first != numbers.last)
-        #expect(numbers.last == String(getpgrp()))
+    }
+
+    /// Discriminates the atomic claim from a check followed by git's own
+    /// `mkdir`: the child must find `destination` already created, parents
+    /// included. The race the claim closes — another run creating the folder
+    /// between a check and git's `mkdir` — has no deterministic trigger, so
+    /// this pins the ordering that removes the window. The folder is this
+    /// run's, so the failure removes it.
+    @Test func claimsDestinationBeforeSpawning() async throws {
+        let root = try Self.makeScratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dest = root.appendingPathComponent("missing/parents/claimed")
+
+        let cloner = RepoCloner(
+            command: ["sh", "-c", "if [ -d \"$0\" ]; then echo claimed >&2; fi; exit 3", dest.path],
+            destination: dest.path, mode: .noPrompt)
+        let outcome = await cloner.run { _ in }
+
+        #expect(outcome == .failed(exitCode: 3, lastErrorLines: ["claimed"]))
+        #expect(!FileManager.default.fileExists(atPath: dest.path))
     }
 
     /// A child killed by a signal reports the shell's `128 + signal` code.
@@ -239,6 +281,12 @@ struct RepoClonerTests {
     }
 
     // MARK: - Helpers
+
+    private struct SessionProbe {
+        let pid: pid_t
+        let sessionID: pid_t
+        let groupID: pid_t
+    }
 
     /// Collects progress lines from the cloner's reader thread.
     private final class ProgressLog: Sendable {
