@@ -1,18 +1,18 @@
-# The tbd-session mod, and composer draft save-and-restore
+# The session mod, and composer draft save-and-restore
 
 TBD parks idle Claude sessions to free memory and revives them on demand. A
 park must never lose text the person typed into Claude Code's composer but did
 not send. Today a screen-scrape guards that, and the guard breaks silently
 whenever Claude Code redraws its composer.
 
-This design adds `tbd-session`, a Claude Code mod that TBD loads into the
-sessions it spawns, and gives it its first feature, `composer-draft`. The
-feature saves the draft as the person types and puts it back when the session
-revives, so a park can go ahead with a draft in the box and lose nothing. The
-mod is built as a home for later features: one plugin, one directory per
-session, one liveness check, and a per-spawn feature list. The composer feature
-ships behind a default-off flag, soaks with the scrape running in shadow, and
-ends by deleting the scrape and the keystroke veto.
+This design gives TBD's Claude Code plugin, `tbd`, a hooks module: the
+**session mod**. Its first feature, `composer-draft`, saves the draft as the
+person types and puts it back when the session revives, so a park can go ahead
+with a draft in the box and lose nothing. The mod is built as a home for later
+features: one module inside the existing plugin, one directory per session,
+one liveness check, and a per-spawn feature list. The composer feature ships
+behind a default-off flag, soaks with the scrape running in shadow, and ends
+by deleting the scrape and the keystroke veto.
 
 Related: [pending-input detection](../superpowers/specs/2026-07-09-pending-input-detection-design.md)
 (the keystroke veto this replaces), [named-reconciler doctrine](2026-08-15-named-reconciler-doctrine-design.md),
@@ -67,10 +67,21 @@ current tree. Only the newest Claude Code release is supported.
   - `session.start` and `session.end`. `session.end` fires with reason `other`
     when the process gets SIGINT, SIGTERM or SIGHUP.
   - `$.fs.write` to absolute paths, `$.env.get`, `$.session.id()`,
-    `$.clock.after` and `$.clock.every`, and a `ui.render` hook on the
-    `AbovePrompt` component, which draws a row above the prompt.
-- **One hooks module per plugin.** The loader refuses a plugin whose manifest
-  names two. A module may import other files.
+    `$.clock.after` and `$.clock.every`, `$.state` (session-scoped values), and
+    a `ui.render` hook on the `AbovePrompt` component, which draws a row above
+    the prompt.
+- **A module's hooks are fixed when it loads.** The module runs with no Node
+  environment, so `register` cannot read environment variables; hooks read
+  them through `$.env.get` when they run. One plugin names at most one hooks
+  module, which may import other files.
+- **Interactive sessions hot-reload `--plugin-dir` folders.** When files in such
+  a folder change, the session reloads the plugin: `register` runs again and
+  `session.start` fires again. Values in `$.state` survive a reload; the
+  module's own variables start over. Removing the module from the folder
+  unloads it. `claude -p` and SDK hosts do not hot-reload.
+- **A plugin's name is part of its identity.** It names the plugin's skills
+  (`tbd:tbd`, `tbd:nightwatch`), its error lines, `$.plugin.name`, and the keys
+  of its `$.state` and `$.store`.
 - **The hooks fire as documented.** A probe mod on a private tmux socket, in a
   live 2.1.303 session, wrote the box to a file on each event:
   - typing `half-written prompt` raised `prompt.edit` with 19 characters
@@ -87,10 +98,10 @@ current tree. Only the newest Claude Code release is supported.
   (`CLAUDE_BG_RENDEZVOUS_SOCK` with an auth token), but it settles the approach:
   persist the draft instead of detecting it.
 - **TBD already delivers a plugin.** Every Claude spawn path passes
-  `--plugin-dir` (`ClaudeSpawnCommandBuilder`), pointing at one shared
-  directory that `PluginDirWriter` writes at daemon start. The exceptions are
-  the `claude -p` completion probe, `claude --cloud`, and any `claude` a person
-  types by hand. None of those is ever parked.
+  `--plugin-dir` (`ClaudeSpawnCommandBuilder`) naming one shared directory,
+  the `tbd` plugin, which `PluginDirWriter` writes at daemon start. The
+  exceptions are the `claude -p` completion probe, `claude --cloud`, and any
+  `claude` a person types by hand. None of those is ever parked.
 - **Parking applies to Claude sessions only.** `isClaudeResumable` excludes
   Codex and shell terminals.
 - **A wake resumes the same session.** Every wake path runs
@@ -99,43 +110,64 @@ current tree. Only the newest Claude Code release is supported.
   message sent with a wake travels as a trailing argument to `claude --resume`,
   not as typed keys, and `terminal.send` to a parked session is refused.
 
-## The tbd-session mod
+## The session mod
 
 ### Shape
 
-`tbd-session` is a plugin of its own, separate from the shared `tbd` plugin
-that carries TBD's skills, in a sibling directory under the same
-application-support root. `PluginDirWriter` writes it at daemon start and
-replaces the directory wholesale, so a module from an older TBD never lingers.
-Its source ships inside the install, as the `tbd` plugin's skills do.
+The session mod is the hooks module of the existing `tbd` plugin, beside the
+skills that plugin already carries. The plugin keeps its name, because its
+skills are named after it. `hooks/hooks.json` names `hooks/register.ts`, a thin
+entry point. Each feature lives in a file of its own under `hooks/features/`
+that exports the hooks it needs, and `register.ts` imports every feature and
+wires its hooks. A later feature adds a file and a line in `register.ts`. The
+entry point also owns the parts every feature shares: the liveness heartbeat,
+the per-session directory, and the feature gate.
 
-Its hooks module, `register.ts`, is a thin entry point. Each feature lives in a
-file of its own that exports the hooks it needs, and `register.ts` imports
-every feature and wires its hooks. A later feature adds a file and a line in
-`register.ts`, never a plugin. The entry point also owns the parts every
-feature shares: the liveness heartbeat, the per-session directory, and the
-feature gate.
+### Presence
 
-### Loading and the feature list
+The module is present only while at least one feature's flag is on.
+`PluginDirWriter` owns the plugin's `hooks/` directory:
 
-Each feature has its own flag in the daemon's config. A spawn made while at
-least one feature's flag is on passes a second `--plugin-dir` naming
-`tbd-session`, plus three environment variables:
+- It writes `hooks/` whenever any feature flag is on, and removes it when every
+  feature flag is off. It acts at daemon start and whenever a feature flag
+  changes.
+- It writes a file only when its content differs from what is on disk. Every
+  write reloads the plugin in every running session, so an unchanged daemon
+  restart must write nothing. The same rule applies to the skill files it
+  already writes.
+- It leaves alone what others write in the directory: `.claude-plugin/types/`,
+  which the engine lays down at each load, and runtime folders under `skills/`.
+
+Hot reload carries each change to running sessions. Turning the first feature
+flag on loads the module everywhere; turning the last one off unloads it
+everywhere; an update that changes the module reloads it everywhere. With
+every feature off, no session loads a hooks module at all.
+
+### Feature list
+
+A spawn made while at least one feature's flag is on sets three environment
+variables:
 
 - **`TBD_SESSIONS_DIR`** – the root of the per-session directories, derived
   from `TBDConstants` so it follows `TBD_HOME`.
 - **`TBD_MOD_FEATURES`** – a comma-separated list of the features on for this
   spawn, such as `composer-draft`.
 - **`TBD_TERMINAL_INCARNATION_ID`** – already set on wake, swap and recreate;
-  every spawn that loads the mod sets it, fresh spawns included.
+  every spawn made with a feature on sets it, fresh spawns included.
 
-A spawn with every feature off passes none of these, and the mod never loads.
-A loaded mod puts hooks in the typing path, so all-off must mean absent, not
-loaded and idle.
+A spawn with every feature off sets none of them. Every feature's hooks check
+`TBD_MOD_FEATURES`, read once through `$.env.get` and cached, and a feature
+not on the list passes each event straight to `next(e)` and writes nothing. A
+session spawned before a flag turned on therefore loads the module through hot
+reload, but runs none of its features.
 
-Inside the mod, every feature's hooks check `TBD_MOD_FEATURES` (read once
-through `$.env.get` and cached). A feature not on the list passes each event
-straight to `next(e)` and writes nothing.
+### Reloads
+
+A reload re-runs `register` and fires `session.start` again in a process that
+has been running all along. The mod keeps per-process facts that must survive
+a reload in `$.state`, never in module variables. A feature's `session.start`
+work that must happen once per process checks `$.state` first. The heartbeat
+timer starts with each load.
 
 ### Per-session directory
 
@@ -148,17 +180,17 @@ moves the process to a new session ID moves its writes too.
 Shared files:
 
 - **`spawn.json`** – written only by the daemon, before the Claude process
-  starts, on every spawn that loads the mod: session ID, incarnation ID, spawn
-  time, and the feature list passed in `TBD_MOD_FEATURES`. A wake rewrites it
-  and touches nothing else in the directory.
+  starts, on every spawn made with a feature on: session ID, incarnation ID,
+  spawn time, and the feature list passed in `TBD_MOD_FEATURES`. A wake
+  rewrites it and touches nothing else in the directory.
 - **`alive.json`** – written only by the mod: session ID, incarnation ID, the
   mod's version, the features it ran, and a heartbeat time. The mod writes it
-  in `session.start` and every 30 seconds after, on a `$.clock.every` timer.
+  at each load and every 30 seconds after, on a `$.clock.every` timer.
 
 Each feature owns files named after itself, such as `composer-draft.json`.
 Every JSON file carries a `schemaVersion`. Readers ignore fields they do not
-know, so a session spawned under an older TBD keeps working after an update,
-and they read a file missing a required field as unknown.
+know and read a file missing a required field as unknown, so the daemon and a
+module from a neighboring TBD version keep working while an update reloads.
 
 The per-session directory leaves room for a later channel from the daemon to
 the mod, such as an inbox a feature reads. This design builds none.
@@ -177,8 +209,9 @@ a named feature, one of three states:
   seconds.
 - **Unknown** – the feature was spawned but the mod has not confirmed this
   process. The reason is one of: no `alive.json`; one from another incarnation
-  (the mod did not load this time); a heartbeat older than 90 seconds (a dead
-  worker, or writes failing on a full disk); an unreadable file.
+  (the module did not load this time); a heartbeat older than 90 seconds (a
+  dead worker, a module unloaded because every flag turned off, or writes
+  failing on a full disk); an unreadable file.
 
 Every daemon-side consumer of a feature starts from this answer. The 30-second
 heartbeat and the 90-second limit are named constants. They are liveness
@@ -194,8 +227,8 @@ it within `gcGraceSeconds`. A parked session's files therefore survive however
 long the park lasts. A feature that keeps files with a shorter life names its
 own rule inside the directory; later features add files, not reconcilers.
 
-The `tbd-session` plugin directory needs no reconciler: it is one directory,
-rewritten at every daemon start.
+The plugin directory needs no new reconciler: it is the existing one, and
+`PluginDirWriter` decides what `hooks/` holds.
 
 ## The composer-draft feature
 
@@ -211,7 +244,7 @@ parks skip the session, and a manual park asks the person.
 
 ### Hooks
 
-- **`session.start`** – restores the saved draft (below).
+- **`session.start`** – restores the saved draft, once per process (below).
 - **`prompt.edit`** – awaits `next(e)` and queues a write of the resulting box.
   It does not await the write, so typing never waits on disk.
 - **`prompt.change`** – queues a write of `e.text`. A `clear` empties the box,
@@ -249,11 +282,12 @@ file, decides:
 For a session spawned with the feature, TBD never types into the composer to
 end it: no `/exit`, and no Escape or Ctrl+C fallback either, because a
 daemon-sent Ctrl+C clears the box and the feature would record the draft as
-gone. It sends SIGTERM to the Claude process. `session.end` then makes the
-final save, and the existing escalation (`respawn-window -k` on tmux, abandon
-on the holder) still guarantees the process ends. The rule covers the tmux
-park, the holder park, and both in-place profile swaps; the tmux swap loses
-drafts today.
+gone. It sends SIGTERM to the Claude process. Claude Code's SIGTERM handler
+runs the same graceful shutdown as Ctrl+C and SIGHUP, so `session.end` makes
+the final save, and the existing escalation (`respawn-window -k` on tmux,
+abandon on the holder) still guarantees the process ends. The rule covers the
+tmux park, the holder park, and both in-place profile swaps; the tmux swap
+loses drafts today.
 
 While the flag exists, a park of a confirmed session still runs
 `hasPendingInput`, only to compare with the feature. Each disagreement goes to
@@ -264,19 +298,22 @@ answer. The scrape never decides a park of a session spawned with the feature.
 ### Waking
 
 A wake resumes the session as it does today. In the new process, the
-feature's `session.start` hook reads `composer-draft.json`. When a draft
-exists, the feature:
+feature's `session.start` hook checks `$.state` for a restore already done in
+this process, then reads `composer-draft.json`. When a draft exists and no
+restore has run, the feature:
 
 1. Waits until the box is mounted and empty, retrying `$.prompt.fill` every
    500 milliseconds while it answers `isFilled: false`.
-2. Fills the box with `mode: 'replace'`.
+2. Fills the box with `mode: 'replace'`, and records the restore in `$.state`.
 3. Shows "Restored your unsent draft" above the prompt for 3 seconds. A
    `$.clock.after` timer hides it, and the band redraws without it.
 
-The fill raises `prompt.change`, which saves the draft again, so a second park
-before any edit still keeps it. If the person's own text reaches the box
-before the fill lands, the feature leaves the box alone, writes the saved
-draft to `composer-draft.unrestored`, and logs it.
+The `$.state` record keeps a reload from restoring a second time into a box
+that already holds the draft. The fill raises `prompt.change`, which saves the
+draft again, so a second park before any edit still keeps it. If the person's
+own text reaches the box before the fill lands, the feature leaves the box
+alone, writes the saved draft to `composer-draft.unrestored`, records the
+restore as done, and logs it.
 
 A message delivered with the wake arrives as an argument to `claude --resume`.
 Implementation verifies, against the fake model API, that Claude submits that
@@ -298,11 +335,15 @@ stays with the original session.
 - an optional field on the shared `Config` model
 - a setter RPC, `tbd config` support, and a Settings toggle
 
-The flag decides whether a spawn lists `composer-draft` in its features, and
-so whether it loads the mod at all while this is the only feature. A park
-follows `spawn.json`, not the current flag, so flipping the flag never
-strands a running session: sessions spawned before the flip keep the behavior
-they were spawned with until they respawn.
+While it is the only feature, the flag decides whether the plugin carries the
+hooks module at all, and it decides whether a spawn lists `composer-draft` in
+its features. A park follows `spawn.json`, not the current flag:
+
+- **Turning it on** loads the module into running sessions, but sessions
+  spawned earlier stay legacy until they respawn.
+- **Turning it off** unloads the module everywhere. Sessions spawned with the
+  feature then read as unknown until they respawn: automatic parks skip them,
+  and a manual park asks. That fails safe.
 
 ### Soak and graduation
 
@@ -318,7 +359,8 @@ restores have been seen working on both tmux and holder. Graduation flips
 
 A later PR deletes, together:
 
-- the flag, which makes `composer-draft` a feature every spawn lists
+- the flag, which makes `composer-draft` a feature every spawn lists and keeps
+  the hooks module in the plugin for good
 - `hasPendingInput`, its three call sites, and its `.swiftlint.yml` exclusion
 - the typed `/exit` and the Escape and Ctrl+C park endings
 - the keystroke veto: `InputActivityTracker`, its gate rail, its RPC and its
@@ -327,12 +369,16 @@ A later PR deletes, together:
 
 The flag and the scrape go in one PR, so a person who opted out is never left
 without a guard. After it, a session whose feature is not confirmed never
-parks automatically. The mod itself stays, loaded on every spawn.
+parks automatically.
 
 ## Testing
 
 Each gating branch gets its own test.
 
+- **Plugin writer** – `hooks/` present when any feature flag is on and absent
+  when all are off; a flag change writes or removes it; an unchanged daemon
+  start writes nothing; `.claude-plugin/types/` and `skills/` runtime folders
+  survive every write.
 - **Liveness** – legacy (no `spawn.json`; a feature list without the feature),
   confirmed, and each unknown reason: no `alive.json`, another incarnation, a
   stale heartbeat, an unreadable file.
@@ -347,24 +393,30 @@ Each gating branch gets its own test.
   parks.
 - **Shadow log** – a disagreement produces the log line, asserted on its
   composed text.
-- **Spawn** – the flag on adds the second `--plugin-dir`, all three
-  environment variables, `composer-draft` in `TBD_MOD_FEATURES`, and
-  `spawn.json`; every feature off adds none of them.
+- **Spawn** – the flag on sets all three environment variables, lists
+  `composer-draft` in `TBD_MOD_FEATURES`, and writes `spawn.json`; every
+  feature off sets none of them and writes nothing.
 - **Flag states** – a pre-migration row reads NULL, and an explicit `false`
   survives a change to `Config.composerDraftDefault`.
 - **Reconciler** – a referenced session directory is kept, an unreferenced one
   inside the grace period is kept, an unreferenced one past it is removed, and
   `composer-draft.unrestored` goes at 30 days.
 - **Mod** (`claude plugin test`, mock clock):
-  - `alive.json` is written at start and its heartbeat ticks
+  - `alive.json` is written at load and its heartbeat ticks
   - a feature missing from `TBD_MOD_FEATURES` writes nothing and passes every
     event through
   - an edit saves; a clear records no draft
   - a restore fills an empty box; a non-empty box produces
     `composer-draft.unrestored`
+  - a second `session.start` in the same process, as after a reload, restores
+    nothing
   - the notice appears and disappears at 3 seconds
 - **Live checks during implementation**, at zero token cost with
   `scripts/claude-stub.py`:
+  - a change to the `--plugin-dir` folder reloads the module in a running
+    interactive session without asking the person anything, and removing
+    `hooks/` unloads it
+  - rewriting a skill file with unchanged content triggers no reload
   - a SIGTERM park leaves a valid transcript tail, and the wake restores the
     draft, on tmux and on the holder
   - a wake carrying a message does not mix it into the draft
@@ -372,10 +424,12 @@ Each gating branch gets its own test.
 
 ## Out of scope
 
-- Any second feature. Plausible ones: `terminal.send` delivering through
-  `$.prompt.submit` instead of typed paste and Enter; `terminal.send` refusing
-  when a session's box holds a draft; usage figures from `$.session.usage()`.
-  Each gets its own spec and flag.
+- Any second feature. Plausible ones: transcript streaming through
+  `turn.step` instead of the model proxy (#1206); answering permission prompts
+  and questions in-process (#1208); `terminal.send` delivering through
+  `$.prompt.submit` instead of typed paste and Enter (#1209); usage figures
+  from `$.session.usage()` in place of the status-line capture (#1207). Each
+  gets its own spec.
 - A channel from the daemon to the mod.
 - Turning the idle sweep back on by default. `v50` turned it off because of
   the scrape's failure direction; that follow-up can cite this design's soak.
@@ -401,16 +455,24 @@ Each gating branch gets its own test.
   submitted draft from a cleared one; the composer's own state can.
 - **Clear the box before typing `/exit`.** The mod cannot tell a daemon-sent
   clear from the person's own, so it would delete the draft it just saved.
+- **A separate plugin for the mod, passed by a second `--plugin-dir` only to
+  spawns with a feature on.** Its one advantage, keeping the module out of
+  sessions spawned with every feature off, is matched by writing `hooks/` only
+  while a feature is on, which hot reload carries to running sessions. A
+  separate plugin would also have to merge into `tbd` once the mod is always
+  on, renaming it, and a plugin's name keys its `$.state`, its `$.store` and
+  its error lines; it cannot take the `tbd` name itself, because the skills
+  are named after that plugin.
 - **A plugin per feature.** Claude Code loads one hooks module per plugin, so
   each feature would bring its own plugin directory, environment variables,
-  liveness check and reconciler. One plugin with feature files shares all
+  liveness check and reconciler. One module with feature files shares all
   four.
 - **A directory per feature instead of per session.** Each feature would need
   its own reclaim rule keyed on the same session references. Grouping by
   session lets one arm reclaim everything a session left behind.
-- **Ship the hooks module in the shared `tbd` plugin and toggle it.** The
-  shared directory is written only at daemon start, running sessions would
-  diverge from it, and an idle loaded module still sits in the typing path.
+- **Keep the module loaded and idle while every feature is off.** An idle
+  module still adds a hook dispatch to every edit and loads a worker into
+  every session, for users who never opted in.
 - **Two flags for composer-draft, one for save-and-restore and one for the park
   decision.** Four combinations to test, one of them meaningless: a park
   decision that depends on a feature that is not loaded.
