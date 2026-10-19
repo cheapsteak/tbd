@@ -361,6 +361,7 @@ extension WorktreeLifecycle {
                 await stopDevServersForArchive(worktree: current)
                 let terminals = try await db.terminals.list(worktreeID: current.id)
                 var recordedEveryKill = true
+                var endedSessions: [Terminal] = []
                 for terminal in terminals {
                     var row = ActuationRow(
                         actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
@@ -375,6 +376,7 @@ extension WorktreeLifecycle {
                     // nothing while the holder and its job outlive the rows
                     // deleted below. Its Closed Terminals entry is written
                     // before the disposal releases the reader it is read from.
+                    let stopped: Bool
                     if terminal.transport == .holder {
                         await Self.recordHolderClosedTerminal(
                             terminal, registry: holderRegistry,
@@ -384,11 +386,18 @@ extension WorktreeLifecycle {
                                 "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")
                             await actuationLog.appendOutcome(
                                 confirms: actuationID, result: .transportFailed, error: failure)
+                            if Self.sessionHasEnded(terminal, teardownStoppedIt: false) {
+                                endedSessions.append(terminal)
+                            }
                             continue
                         }
+                        stopped = true
                     } else {
-                        await captureThenKillWindow(
+                        stopped = await captureThenKillWindow(
                             terminal: terminal, server: current.tmuxServer)
+                    }
+                    if Self.sessionHasEnded(terminal, teardownStoppedIt: stopped) {
+                        endedSessions.append(terminal)
                     }
                     await actuationLog.appendOutcome(
                         confirms: actuationID, result: .dispatched)
@@ -399,6 +408,10 @@ extension WorktreeLifecycle {
                     logger.warning("reconcile: leaving \(current.id, privacy: .public) for the next sweep — the actuation record is unwritable, so its windows were not killed")
                     return
                 }
+                // Only now, as in `beginArchiveWorktree`: every session counted
+                // here has exited, and an early return above leaves the
+                // directories with the rows for the next sweep.
+                removeSessionDirectories(for: endedSessions)
                 try await db.terminals.deleteForWorktree(worktreeID: current.id)
                 await sessionTitles.forget(worktreeID: current.id)
                 try await db.tabs.deleteForWorktree(worktreeID: current.id)

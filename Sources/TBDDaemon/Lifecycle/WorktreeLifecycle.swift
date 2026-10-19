@@ -343,7 +343,11 @@ public struct WorktreeLifecycle: Sendable {
     /// happen before the window dies; mirrors `closeHookTerminal`'s
     /// never-throws capture (failures are logged inside `captureOnClose` and
     /// never block the teardown).
-    func captureThenKillWindow(terminal: Terminal, server: String) async {
+    ///
+    /// Returns false when it refused to touch the window, which leaves the
+    /// pane's process as it was, and true once the kill and the reap have run.
+    @discardableResult
+    func captureThenKillWindow(terminal: Terminal, server: String) async -> Bool {
         // Refuse to capture or kill a pane that belongs to a DIFFERENT
         // terminal — see `TmuxManager.paneOwnership`. Shared by both
         // callers of this function (explicit archive, and the vanished-
@@ -360,7 +364,7 @@ public struct WorktreeLifecycle: Sendable {
                 untouched for terminal \(terminal.id, privacy: .public) — \
                 \(ownership.refusalDetail ?? "", privacy: .public)
                 """)
-            return
+            return false
         }
         await db.terminalHistory.captureOnClose(terminal: terminal) {
             try await tmux.capturePaneScrollback(server: server, paneID: terminal.tmuxPaneID)
@@ -370,6 +374,34 @@ public struct WorktreeLifecycle: Sendable {
             windowID: terminal.tmuxWindowID,
             paneID: terminal.tmuxPaneID
         )
+        return true
+    }
+
+    /// Whether a terminal's session has no process left once a teardown of it
+    /// has run, so its session-mod directory may go. The mod writes the box
+    /// one last time when its process ends, and a removal ahead of that write
+    /// would be undone by it.
+    ///
+    /// A teardown that stopped the process settles it. Otherwise only a parked
+    /// row qualifies, because a park already ended the process — except while
+    /// the park is still in flight: `pendingSessionIncarnationID` is set from
+    /// the moment the park is recorded until the agent has been replaced, and
+    /// the agent may still be running in between. A session left running keeps
+    /// its directory, and `OrphanGC` reclaims it once nothing names it.
+    static func sessionHasEnded(_ terminal: Terminal, teardownStoppedIt: Bool) -> Bool {
+        if teardownStoppedIt { return true }
+        return terminal.isParked && terminal.pendingSessionIncarnationID == nil
+    }
+
+    /// Removes the session-mod directory of every Claude session among
+    /// `terminals`, draft included. Archive calls it only with terminals whose
+    /// process has ended (`sessionHasEnded`). A failed removal is logged inside
+    /// `SessionModFiles` and never fails the archive.
+    func removeSessionDirectories(for terminals: [Terminal]) {
+        for sessionID in Set(terminals.compactMap(\.claudeSessionID)) {
+            SessionModFiles.removeSessionDirectory(
+                sessionsDir: sessionsDir, claudeSessionID: sessionID)
+        }
     }
 
     /// The holder-transport counterpart of `killWindowAndReap`, for the

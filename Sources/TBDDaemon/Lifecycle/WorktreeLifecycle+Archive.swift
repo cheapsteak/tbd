@@ -138,6 +138,7 @@ extension WorktreeLifecycle {
         // then kill its tmux window, reaping any wedged agent that survives
         // kill-window's SIGHUP. The archived worktree row and its history rows
         // survive, so the captured output stays readable later.
+        var endedSessions: [Terminal] = []
         for terminal in terminals {
             // A holder row takes the holder teardown instead. Its rows are
             // deleted below just as a tmux row's are, so refusing here would
@@ -146,6 +147,7 @@ extension WorktreeLifecycle {
             // and its job outlive the only record of their pids. Its Closed
             // Terminals entry is written before the disposal releases the
             // reader it is captured from.
+            let stopped: Bool
             if terminal.transport == .holder {
                 await Self.recordHolderClosedTerminal(
                     terminal, registry: holderRegistry, resolver: holderScreenResolver,
@@ -153,11 +155,24 @@ extension WorktreeLifecycle {
                 if let failure = await disposeHolder(for: terminal) {
                     archiveLogger.warning(
                         "archive left a holder running: \(failure, privacy: .public)")
+                    stopped = false
+                } else {
+                    stopped = true
                 }
             } else {
-                await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
+                stopped = await captureThenKillWindow(
+                    terminal: terminal, server: worktree.tmuxServer)
+            }
+            if Self.sessionHasEnded(terminal, teardownStoppedIt: stopped) {
+                endedSessions.append(terminal)
             }
         }
+
+        // Each ended session's directory goes, draft included. The teardown
+        // above waited for each pane's process to exit, escalating to SIGKILL,
+        // or SIGKILLed the holder's job, so the mod's final write on
+        // `session.end` cannot land after the removal.
+        removeSessionDirectories(for: endedSessions)
 
         // Delete terminals from db
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)
