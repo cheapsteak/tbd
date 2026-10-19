@@ -20,8 +20,9 @@ import TBDShared
 /// the incarnation id is the load-bearing one. `AgentProcessEnvironment.replacement`
 /// exports `TBD_TERMINAL_INCARNATION_ID` on every woken or restarted agent, so a
 /// daemon restarted from such a session carries it; nothing on a fresh spawn
-/// overwrites it, because the export prefix sets only `TBD_TERMINAL_ID` and
-/// `TBD_WORKTREE_ID`. A fresh terminal row has no incarnation, so the guard in
+/// made with every session-mod feature off overwrites it, because the export
+/// prefix sets only `TBD_TERMINAL_ID` and `TBD_WORKTREE_ID`. Such a fresh
+/// terminal row has no incarnation, so the guard in
 /// `TerminalStore.applySessionStart` (`record.sessionIncarnationID ==
 /// reportedIncarnationID?.uuidString`) fails and the job's SessionStart,
 /// SessionEnd and activity hooks are all dropped: no session id, no transcript

@@ -4926,8 +4926,9 @@ public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
 /// hook payload changes don't immediately break this bridge.
 public struct TerminalSessionEventParams: Codable, Sendable {
     public let terminalID: UUID
-    /// Process incarnation planted by TBD before a replacement agent starts.
-    /// Legacy, never-replaced terminals omit it and remain on the nil/nil
+    /// Process incarnation planted by TBD before a replacement agent starts,
+    /// and before a fresh Claude spawn made with a session-mod feature on.
+    /// Other never-replaced terminals omit it and remain on the nil/nil
     /// compatibility path until their first managed replacement.
     public let sessionIncarnationID: UUID?
     public let sessionID: String

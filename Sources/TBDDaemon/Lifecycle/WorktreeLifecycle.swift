@@ -235,6 +235,12 @@ public struct WorktreeLifecycle: Sendable {
     /// Behavior clock for the holder arm's phase budget. `Duration` is
     /// behavior and `Date` is data, so this is a separate seam from `now`.
     let clock: any Clock<Duration>
+    /// Root of the per-session directories a Claude spawn writes `spawn.json`
+    /// under when a session-mod feature is on. Defaults to
+    /// `TBDConstants.sessionsDir()` (which follows `TBD_HOME`); tests inject a
+    /// scratch directory. The router and the hibernation coordinator each hold
+    /// their own, defaulted the same way.
+    let sessionsDir: URL
 
     public init(
         db: TBDDatabase,
@@ -253,11 +259,13 @@ public struct WorktreeLifecycle: Sendable {
         reaperPollInterval: Duration = .milliseconds(100),
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        sessionsDir: URL = TBDConstants.sessionsDir(),
         now: @escaping @Sendable () -> Date = { Date() },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.now = now
         self.clock = clock
+        self.sessionsDir = sessionsDir
         self.db = db
         self.git = git
         self.tmux = tmux

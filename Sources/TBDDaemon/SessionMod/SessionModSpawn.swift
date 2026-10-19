@@ -1,5 +1,6 @@
 import Foundation
 import os
+import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "composer-draft")
 
@@ -23,6 +24,45 @@ enum SessionModSpawn {
     static let sessionsDirVariable = "TBD_SESSIONS_DIR"
     static let featuresVariable = "TBD_MOD_FEATURES"
     static let incarnationVariable = "TBD_TERMINAL_INCARNATION_ID"
+
+    /// The entry point every Claude spawn site calls: derives the features
+    /// from `config`, mints a fresh spawn's incarnation, and hands both to
+    /// `prepare(features:claudeSessionID:incarnationID:sessionsDir:now:)`.
+    ///
+    /// Nil, with nothing written and nothing minted, when every feature is
+    /// off — the spawn then launches exactly as it did before the mod existed.
+    ///
+    /// - Parameters:
+    ///   - config: the config read for this spawn, or nil when reading it
+    ///     failed. A nil config spawns without the mod, logged at `.notice`.
+    ///   - incarnationID: the incarnation the row already persists, for a
+    ///     replacement spawn. Nil for a fresh spawn, whose row does not exist
+    ///     yet: one is minted only when a feature is on, and the caller writes
+    ///     the returned context's `incarnationID` into the row it creates, so
+    ///     the incarnation the process reports back is the one its row holds.
+    static func prepare(
+        config: Config?,
+        claudeSessionID: String?,
+        incarnationID: UUID?,
+        sessionsDir: URL,
+        now: Date
+    ) -> SessionModSpawnContext? {
+        guard let config else {
+            logger.notice("""
+                session mod: spawning session \(claudeSessionID ?? "nil", privacy: .public) \
+                without the mod — the config could not be read
+                """)
+            return nil
+        }
+        let features = SessionModFeature.enabled(in: config)
+        guard !features.isEmpty else { return nil }
+        return prepare(
+            features: features,
+            claudeSessionID: claudeSessionID,
+            incarnationID: incarnationID ?? UUID(),
+            sessionsDir: sessionsDir,
+            now: now)
+    }
 
     /// Writes `<sessionsDir>/<claudeSessionID>/spawn.json` for a process about
     /// to launch under `incarnationID`, and returns the variables to export.
@@ -117,5 +157,17 @@ enum SessionModSpawn {
 
     private static func epochMilliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1000).rounded())
+    }
+}
+
+extension Dictionary where Key == String, Value == String {
+    /// This launch environment with the session mod's variables added, the
+    /// mod's winning on a collision; unchanged when `context` is nil. The same
+    /// precedence `ClaudeSpawnCommandBuilder` gives the variables it is handed,
+    /// for the replacement spawns that compose their command before they know
+    /// their incarnation.
+    func addingSessionMod(_ context: SessionModSpawnContext?) -> [String: String] {
+        guard let context else { return self }
+        return merging(context.environment) { _, mod in mod }
     }
 }

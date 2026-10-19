@@ -96,6 +96,11 @@ extension WorktreeLifecycle {
     ///     `transport` for the same reason.
     ///   - serverName: the declared dev server this tab runs (`server.start`),
     ///     nil for every other spawn.
+    ///   - sessionIncarnationID: the incarnation a Claude spawn made with a
+    ///     session-mod feature on exports (`SessionModSpawnContext`), written
+    ///     into the row so its process's hooks match it. Nil for every other
+    ///     spawn — shells, Codex, dev servers, forks, and Claude with every
+    ///     feature off.
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
@@ -114,7 +119,8 @@ extension WorktreeLifecycle {
         transport: TerminalSpawnTransport,
         attachment: ModelProxyRouteAttachment.Outcome?,
         modelProxySupervisor: (any ModelProxyRouting)?,
-        serverName: String? = nil
+        serverName: String? = nil,
+        sessionIncarnationID: UUID? = nil
     ) async throws -> Terminal {
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below.
@@ -208,7 +214,8 @@ extension WorktreeLifecycle {
                 // snapshotted by a concurrent caller, and a late stamp would
                 // make every replacement that snapshot authorized reject.
                 transcriptStreamPath: attachment?.streamPath,
-                serverName: serverName
+                serverName: serverName,
+                sessionIncarnationID: sessionIncarnationID
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource

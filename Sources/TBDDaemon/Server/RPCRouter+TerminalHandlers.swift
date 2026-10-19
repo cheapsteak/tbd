@@ -529,6 +529,16 @@ extension RPCRouter {
         } else {
             spawnTitle = nil
         }
+        // The session mod, for a Claude spawn: its session id is known before
+        // it launches — minted above for a fresh session, or the one
+        // `--resume` names — so its spawn record can be written now. The
+        // incarnation it exports is written into the row below, the one the
+        // process's hooks are checked against.
+        let sessionMod = isClaudeType
+            ? SessionModSpawn.prepare(
+                config: createConfig, claudeSessionID: claudeSessionID,
+                incarnationID: nil, sessionsDir: sessionsDir, now: now())
+            : nil
         let spawn = ClaudeSpawnCommandBuilder.build(
             resumeID: params.resumeSessionID,
             freshSessionID: freshSessionID,
@@ -552,7 +562,8 @@ extension RPCRouter {
             settingsOverlayPath: overlayPath,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: spawnTitle?.name
+            sessionName: spawnTitle?.name,
+            sessionModEnvironment: sessionMod?.environment ?? [:]
         )
 
         // For Claude terminals, layer the builder's auth/routing env ON TOP of
@@ -592,7 +603,8 @@ extension RPCRouter {
                         kind: terminalKind,
                         transport: transport,
                         attachment: attachment,
-                        modelProxySupervisor: modelProxySupervisor)
+                        modelProxySupervisor: modelProxySupervisor,
+                        sessionIncarnationID: sessionMod?.incarnationID)
                     return spawned
                 }
             }
@@ -1254,6 +1266,11 @@ extension RPCRouter {
                 db: db, store: lifecycle.sessionTitles,
                 worktreeID: worktree.id, displayName: worktree.displayName,
                 terminalID: plannedTerminalID)
+            // A plain `--resume` of the entry's session, whose id is known
+            // before it launches, so it carries the session mod.
+            let sessionMod = SessionModSpawn.prepare(
+                config: reviveConfig, claudeSessionID: sessionID,
+                incarnationID: nil, sessionsDir: sessionsDir, now: now())
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: sessionID,
                 freshSessionID: nil,
@@ -1276,7 +1293,8 @@ extension RPCRouter {
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: reviveSpawnTitle.name
+                sessionName: reviveSpawnTitle.name,
+                sessionModEnvironment: sessionMod?.environment ?? [:]
             )
             let env: [String: String] = [
                 "TBD_WORKTREE_ID": worktree.id.uuidString,
@@ -1302,7 +1320,8 @@ extension RPCRouter {
                         profileID: resolvedProfile?.profileID,
                         cols: resolvedCols,
                         rows: resolvedRows,
-                        transport: transport
+                        transport: transport,
+                        sessionIncarnationID: sessionMod?.incarnationID
                     )
                 }
             } catch {
@@ -1354,7 +1373,8 @@ extension RPCRouter {
     /// Shared plumbing for spawning an ADDITIONAL terminal into a live worktree
     /// during revive: spawn it, insert the row, append it to the persisted tab
     /// order as the new active tab, and broadcast the same `.terminalCreated`
-    /// delta the normal create path emits.
+    /// delta the normal create path emits. `sessionIncarnationID` is the
+    /// session mod's, for a resumed Claude made with a feature on.
     private func spawnRevivedTerminal(
         worktree: Worktree,
         plannedTerminalID: UUID,
@@ -1367,7 +1387,8 @@ extension RPCRouter {
         profileID: UUID?,
         cols: Int,
         rows: Int,
-        transport: TerminalSpawnTransport
+        transport: TerminalSpawnTransport,
+        sessionIncarnationID: UUID? = nil
     ) async throws -> Terminal {
         // The transport is decided like every other spawn's — once, by the
         // caller, from the same gate — and carried here rather than re-asked.
@@ -1392,7 +1413,8 @@ extension RPCRouter {
                 kind: kind,
                 transport: transport,
                 attachment: nil,
-                modelProxySupervisor: modelProxySupervisor)
+                modelProxySupervisor: modelProxySupervisor,
+                sessionIncarnationID: sessionIncarnationID)
         }
         var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
         if !order.contains(terminal.id) { order.append(terminal.id) }
@@ -2746,6 +2768,21 @@ extension RPCRouter {
             terminalID: plannedTerminalID)
         let swapSessionName = swapSpawnTitle.name
 
+        // The session mod, for the one swap that is a fresh spawn: a fork of a
+        // blank session, which opens a NEW tab on a new session under the id
+        // the plan minted. A fork of a real conversation (`--fork-session`)
+        // learns its id only once it has launched, so it stays legacy. The
+        // in-place arms replace a live process, and their launches export the
+        // mod themselves under the incarnation they persist.
+        let forkSessionMod: SessionModSpawnContext?
+        if mode == .fork, case .fresh(let newSessionID) = plan {
+            forkSessionMod = SessionModSpawn.prepare(
+                config: swapConfig, claudeSessionID: newSessionID,
+                incarnationID: nil, sessionsDir: sessionsDir, now: now())
+        } else {
+            forkSessionMod = nil
+        }
+
         // The spawn each arm runs, as a closure rather than a value: the
         // holder arm cannot compose its own until after its park, because its
         // endpoint comes from a model proxy route and that route may only be
@@ -2757,7 +2794,8 @@ extension RPCRouter {
                 overlayPath: overlayPath, profileConfigDir: profileConfigDir,
                 worktree: worktree, repo: repo, swapConfig: swapConfig,
                 claudeEnvOverrides: claudeEnvOverrides,
-                sessionName: swapSessionName)
+                sessionName: swapSessionName,
+                sessionModEnvironment: forkSessionMod?.environment ?? [:])
         }
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
@@ -2790,7 +2828,8 @@ extension RPCRouter {
                     scheduleRecapture: scheduleRecapture,
                     cols: resolvedCols,
                     rows: resolvedRows,
-                    transport: forkTransport
+                    transport: forkTransport,
+                    sessionIncarnationID: forkSessionMod?.incarnationID
                 )
 
             case .inPlace where oldTerminal.transport == .holder:
@@ -2958,6 +2997,9 @@ extension RPCRouter {
     ///   own URL where one is in play, the profile's otherwise. Callers with a
     ///   route pass `ModelProxyRouteAttachment.Outcome.builderBaseURL(profile:)`
     ///   rather than deriving it a second way.
+    /// - Parameter sessionModEnvironment: the session mod's variables, for the
+    ///   one arm that is a fresh spawn (a fork of a blank session); empty for
+    ///   every other arm.
     private func swapSpawn(
         plan: SwapSpawnPlan,
         mode: TerminalSwapMode,
@@ -2969,7 +3011,8 @@ extension RPCRouter {
         repo: Repo?,
         swapConfig: Config?,
         claudeEnvOverrides: [String: ClaudeEnvValue],
-        sessionName: String?
+        sessionName: String?,
+        sessionModEnvironment: [String: String]
     ) -> ClaudeSpawnCommandBuilder.Result {
         switch plan {
         case .resume(let resumeID):
@@ -2992,7 +3035,8 @@ extension RPCRouter {
                 settingsOverlayPath: overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: sessionName
+                sessionName: sessionName,
+                sessionModEnvironment: sessionModEnvironment
             )
         case .fresh(let newSessionID):
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
@@ -3016,7 +3060,8 @@ extension RPCRouter {
                 settingsOverlayPath: overlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: sessionName
+                sessionName: sessionName,
+                sessionModEnvironment: sessionModEnvironment
             )
         }
     }
@@ -3338,7 +3383,8 @@ extension RPCRouter {
     /// `.fork` swap: spawn a NEW window + terminal row in the same worktree,
     /// leaving the source session's tab untouched. Preserves the original
     /// fork-into-new-tab behavior; now only reached via the explicit "Fork
-    /// session" action.
+    /// session" action. `sessionIncarnationID` is the session mod's, set only
+    /// when the fork is a fresh spawn of a blank session.
     private func forkSwapNewTab(
         worktree: Worktree,
         plannedTerminalID: UUID,
@@ -3350,7 +3396,8 @@ extension RPCRouter {
         scheduleRecapture: Bool,
         cols: Int,
         rows: Int,
-        transport: TerminalSpawnTransport
+        transport: TerminalSpawnTransport,
+        sessionIncarnationID: UUID?
     ) async throws -> RPCResponse {
         // The transport is decided like every other spawn's — once, by the
         // caller, from the same gate — and carried here rather than re-asked.
@@ -3375,7 +3422,8 @@ extension RPCRouter {
                 kind: .claude,
                 transport: transport,
                 attachment: nil,
-                modelProxySupervisor: modelProxySupervisor)
+                modelProxySupervisor: modelProxySupervisor,
+                sessionIncarnationID: sessionIncarnationID)
             return (terminal, currentWorktree.tmuxServer)
         }
 
@@ -3416,22 +3464,6 @@ extension RPCRouter {
             return RPCResponse(error: "Terminal vanished after swap")
         }
         return try RPCResponse(result: updated)
-    }
-
-    /// The session mod's environment for a replacement Claude about to launch
-    /// under `incarnationID` — the incarnation the row already persists —
-    /// after writing its `spawn.json`. Empty, with nothing written, when every
-    /// feature is off. Reads the config here so the flag is read at the moment
-    /// of the spawn it gates. The coordinator's wake has its own twin, over the
-    /// same `sessionsDir`.
-    func sessionModEnvironment(claudeSessionID: String, incarnationID: UUID) async -> [String: String] {
-        let features = (try? await db.config.get()).map(SessionModFeature.enabled(in:)) ?? []
-        return SessionModSpawn.prepare(
-            features: features,
-            claudeSessionID: claudeSessionID,
-            incarnationID: incarnationID,
-            sessionsDir: sessionsDir,
-            now: now())?.environment ?? [:]
     }
 
     /// `.inPlace` swap (seamless "Switch account"): gracefully interrupt the
@@ -3515,8 +3547,10 @@ extension RPCRouter {
             base: env, incarnationID: incarnationID)
         // `storedSessionID` is the session `spawnCommand` runs, and the one
         // `prepareProfileAgentRespawn` just committed to the row.
-        let modEnv = await sessionModEnvironment(
-            claudeSessionID: storedSessionID, incarnationID: incarnationID)
+        let sessionMod = SessionModSpawn.prepare(
+            config: try? await db.config.get(),
+            claudeSessionID: storedSessionID, incarnationID: incarnationID,
+            sessionsDir: sessionsDir, now: now())
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.
@@ -3527,7 +3561,7 @@ extension RPCRouter {
                 cwd: worktree.localPath,
                 shellCommand: spawnCommand,
                 env: replacementEnv,
-                sensitiveEnv: sensitiveEnv.merging(modEnv) { _, mod in mod },
+                sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
                 cols: cols,
                 rows: rows
             )

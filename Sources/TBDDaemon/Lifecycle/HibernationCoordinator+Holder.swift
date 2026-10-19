@@ -1255,8 +1255,10 @@ extension HibernationCoordinator {
         // `sessionID` is the session `spawnCommand` runs — the resume, or the
         // fresh session an in-place swap planned — so it names the directory
         // the replacement's mod writes under.
-        let modEnv = await sessionModEnvironment(
-            claudeSessionID: sessionID, incarnationID: incarnationID)
+        let sessionMod = SessionModSpawn.prepare(
+            config: try? await db.config.get(),
+            claudeSessionID: sessionID, incarnationID: incarnationID,
+            sessionsDir: sessionsDir, now: now())
 
         let handle: HolderHandle
         do {
@@ -1284,7 +1286,7 @@ extension HibernationCoordinator {
                     //
                     // The session mod's variables ride here too, empty when
                     // every feature is off.
-                    sensitiveEnv: attachment.sensitiveEnv.merging(modEnv) { _, mod in mod },
+                    sensitiveEnv: attachment.sensitiveEnv.addingSessionMod(sessionMod),
                     workingDirectory: worktree.path,
                     cols: cols ?? TmuxManager.defaultCols,
                     rows: rows ?? TmuxManager.defaultRows,

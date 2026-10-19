@@ -111,6 +111,62 @@ func readSpawnRecord(sessionsDir: URL, sessionID: String) -> SessionModFiles.Spa
             sessionsDir: root, now: Self.now) == nil)
     }
 
+    /// The entry point every spawn site calls. With every feature off, or a
+    /// config that could not be read, it mints nothing and writes nothing.
+    /// With a feature on, a fresh spawn (no incarnation yet) gets a new one,
+    /// and a replacement keeps the one its row already persists.
+    @Test func prepareFromConfigMintsOnlyWithAFeatureOn() throws {
+        let root = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var config = Config()
+        config.composerDraftEnabled = false
+
+        #expect(SessionModSpawn.prepare(
+            config: config, claudeSessionID: "flag-off", incarnationID: nil,
+            sessionsDir: root, now: Self.now) == nil)
+        #expect(SessionModSpawn.prepare(
+            config: nil, claudeSessionID: "unreadable-config", incarnationID: nil,
+            sessionsDir: root, now: Self.now) == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+
+        config.composerDraftEnabled = true
+        let fresh = try #require(SessionModSpawn.prepare(
+            config: config, claudeSessionID: "fresh", incarnationID: nil,
+            sessionsDir: root, now: Self.now))
+        #expect(fresh.features == [.composerDraft])
+        #expect(fresh.environment[SessionModSpawn.incarnationVariable] == fresh.incarnationID.uuidString)
+        #expect(readSpawnRecord(sessionsDir: root, sessionID: "fresh")?.incarnationId
+            == fresh.incarnationID.uuidString)
+
+        let another = try #require(SessionModSpawn.prepare(
+            config: config, claudeSessionID: "another-fresh", incarnationID: nil,
+            sessionsDir: root, now: Self.now))
+        #expect(another.incarnationID != fresh.incarnationID,
+                "two fresh spawns were given the same incarnation")
+
+        let persisted = UUID()
+        let replacement = try #require(SessionModSpawn.prepare(
+            config: config, claudeSessionID: "replacement", incarnationID: persisted,
+            sessionsDir: root, now: Self.now))
+        #expect(replacement.incarnationID == persisted)
+        #expect(readSpawnRecord(sessionsDir: root, sessionID: "replacement")?.incarnationId
+            == persisted.uuidString)
+    }
+
+    /// The replacement sites merge the mod's variables over the launch's own,
+    /// the precedence the spawn builder gives them; no mod leaves the launch
+    /// environment as it was.
+    @Test func addingSessionModLetsTheModWin() {
+        let base = ["ACME_TOKEN": "1", SessionModSpawn.featuresVariable: "stale"]
+        #expect(base.addingSessionMod(nil) == base)
+        let context = SessionModSpawnContext(
+            features: [.composerDraft],
+            incarnationID: UUID(),
+            environment: [SessionModSpawn.featuresVariable: "composer-draft"])
+        #expect(base.addingSessionMod(context)
+            == ["ACME_TOKEN": "1", SessionModSpawn.featuresVariable: "composer-draft"])
+    }
+
     @Test func carryForwardCopiesTheLiveIncarnationOnly() throws {
         let root = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: root) }

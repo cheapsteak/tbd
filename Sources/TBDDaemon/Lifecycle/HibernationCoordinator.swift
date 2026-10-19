@@ -485,21 +485,6 @@ public actor HibernationCoordinator {
             .appendingPathComponent("projects", isDirectory: true)
     }
 
-    /// The session mod's environment for a replacement agent about to launch
-    /// under `incarnationID` — the incarnation the row already persists — after
-    /// writing its `spawn.json`. Empty, with nothing written, when every
-    /// feature is off. Reads the config here rather than taking it from the
-    /// caller, so the flag is read at the moment of the spawn it gates.
-    func sessionModEnvironment(claudeSessionID: String, incarnationID: UUID) async -> [String: String] {
-        let features = (try? await db.config.get()).map(SessionModFeature.enabled(in:)) ?? []
-        return SessionModSpawn.prepare(
-            features: features,
-            claudeSessionID: claudeSessionID,
-            incarnationID: incarnationID,
-            sessionsDir: sessionsDir,
-            now: now())?.environment ?? [:]
-    }
-
     /// Wire the post-`ensureServer` hook (see `onServerCreated`). Set once by
     /// Daemon.swift right after construction, mirroring how the RPC router's
     /// `controlMode` is wired post-construction.
@@ -2205,15 +2190,17 @@ public actor HibernationCoordinator {
                 }
                 let replacementEnv = AgentProcessEnvironment.replacement(
                     base: env, incarnationID: incarnationID)
-                let modEnv = await sessionModEnvironment(
-                    claudeSessionID: claudeSessionID, incarnationID: incarnationID)
+                let sessionMod = SessionModSpawn.prepare(
+                    config: try? await db.config.get(),
+                    claudeSessionID: claudeSessionID, incarnationID: incarnationID,
+                    sessionsDir: sessionsDir, now: now())
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
                     cwd: worktree.localPath,
                     shellCommand: spawnCommand,
                     env: replacementEnv,
-                    sensitiveEnv: sensitiveEnv.merging(modEnv) { _, mod in mod },
+                    sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
                     cols: cols,
                     rows: rows
                 )
@@ -2322,8 +2309,10 @@ public actor HibernationCoordinator {
                     base: env, incarnationID: incarnationID)
                 // Only the agent launch carries the mod; the inert staging
                 // pane above is not a Claude spawn.
-                let modEnv = await sessionModEnvironment(
-                    claudeSessionID: claudeSessionID, incarnationID: incarnationID)
+                let sessionMod = SessionModSpawn.prepare(
+                    config: try? await db.config.get(),
+                    claudeSessionID: claudeSessionID, incarnationID: incarnationID,
+                    sessionsDir: sessionsDir, now: now())
                 do {
                     try await tmux.respawnWindow(
                         server: server,
@@ -2331,7 +2320,7 @@ public actor HibernationCoordinator {
                         cwd: worktree.localPath,
                         shellCommand: spawnCommand,
                         env: replacementEnv,
-                        sensitiveEnv: sensitiveEnv.merging(modEnv) { _, mod in mod },
+                        sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
                         cols: resolvedCols,
                         rows: resolvedRows)
                 } catch {

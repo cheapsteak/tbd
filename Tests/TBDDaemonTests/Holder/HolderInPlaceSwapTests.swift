@@ -536,7 +536,7 @@ struct HolderInPlaceSwapTests {
     /// The launch's process environment is not observable in this suite: its
     /// spawner cannot start a holder, and a real spawn belongs to the live
     /// target. What this pins is the record written ahead of the launch, which
-    /// the same `sessionModEnvironment` call returns the variables from.
+    /// the same `SessionModSpawn.prepare` call returns the variables from.
     @Test("a holder wake with the flag on writes the spawn record for the incarnation it persisted")
     func holderWakeWithTheFlagOnWritesTheSpawnRecord() async throws {
         let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
