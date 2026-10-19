@@ -394,8 +394,16 @@ gone. It sends SIGTERM to the Claude process. Claude Code's SIGTERM handler
 runs the same graceful shutdown as Ctrl+C and SIGHUP, so `session.end` makes
 the final save, and the existing escalation (`respawn-window -k` on tmux,
 abandon on the holder) still guarantees the process ends. The rule covers the
-tmux park, the holder park, and both in-place profile swaps; the tmux swap
-loses drafts today.
+tmux park, the holder park, and both in-place profile swaps. Without the
+feature, the tmux swap's Ctrl+C clears the box.
+
+An in-place profile swap ("Switch account") never refuses or asks, whatever
+the feature answers. It is an explicit gesture, and it ends and resumes the
+session the way a park and a wake do, so a confirmed draft comes back in the
+new process. When the answer is unknown, the swap restores whatever was last
+saved, which may be stale or missing; a draft marked not restorable comes back
+without its pasted content. A session spawned without the feature swaps as it
+always has. "Fork session" leaves the source session, and its draft, untouched.
 
 While the flag exists, a park of a confirmed session still runs
 `hasPendingInput`, only to compare with the feature. Each disagreement goes to
@@ -619,6 +627,9 @@ Each gating branch gets its own test.
 - **Build the daemon-to-mod channel now.** No feature needs one yet, and its
   shape depends on the first consumer. The per-session directory leaves room
   for it.
+- **Gate a profile swap like a manual park, refusing and asking when the
+  draft is unconfirmed.** A swap is a gesture the person makes at that moment,
+  not a background action, so it proceeds and restores what was saved.
 - **Restore silently, or announce with a toast.** A draft that reappears
   without a word is easy to send by accident. A notice above the prompt, where
   queued messages appear, explains the text at the spot the person is looking,
