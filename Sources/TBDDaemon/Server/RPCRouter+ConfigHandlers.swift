@@ -616,6 +616,18 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the composer draft gate (default OFF, soaking). Sessions pick the
+    /// feature up when they next start.
+    /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md.
+    func handleConfigSetComposerDraftEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetComposerDraftEnabledParams.self, from: paramsData)
+        try await db.config.setComposerDraftEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the clone-backed worktree checkout gate (default OFF, soaking).
     /// No live switch: `WorktreeLifecycle` reads the column on every create.
     /// Design: docs/specs/2026-10-09-clone-backed-worktree-checkout-design.md.

@@ -1,0 +1,90 @@
+import Foundation
+import Testing
+@testable import TBDApp
+import TBDShared
+
+/// The Settings toggle for `composer_draft_enabled`: the setter writes
+/// through the injected closure and reads the daemon back, and a failed write
+/// is surfaced rather than followed by a refresh.
+///
+/// Every `AppState` here runs over its own throwaway `UserDefaults` suite —
+/// `.standard` on this unbundled executable is the developer's real
+/// `TBDApp.plist`.
+@MainActor
+@Suite("Composer draft settings")
+struct ComposerDraftSettingsTests {
+    private func withAppState(_ body: (AppState) async -> Void) async {
+        let name = "tbd-composer-draft-settings-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        await body(AppState(userDefaults: defaults))
+        defaults.removePersistentDomain(forName: name)
+    }
+
+    private static func capabilities(composerDraft: Bool) -> DaemonCapabilitiesResult {
+        var result = DaemonCapabilitiesResult(controlModeEnabled: false)
+        result.composerDraftEnabled = composerDraft
+        return result
+    }
+
+    @Test func setterPersistsOnAndRefreshesCapabilities() async {
+        await withAppState { state in
+            var written: [Bool] = []
+            var refreshes = 0
+            state.composerDraftFlagSetter = { @MainActor enabled in written.append(enabled) }
+            state.daemonCapabilitiesFetcher = { @MainActor in
+                refreshes += 1
+                return Self.capabilities(composerDraft: true)
+            }
+
+            await state.setComposerDraftEnabled(true)
+
+            #expect(written == [true])
+            #expect(refreshes == 1, "the toggle must read the daemon back, not its own guess")
+            #expect(state.daemonCapabilities?.composerDraftEnabled == true)
+        }
+    }
+
+    @Test func setterPersistsOffAndRefreshesCapabilities() async {
+        await withAppState { state in
+            var written: [Bool] = []
+            state.composerDraftFlagSetter = { @MainActor enabled in written.append(enabled) }
+            state.daemonCapabilitiesFetcher = { @MainActor in
+                Self.capabilities(composerDraft: false)
+            }
+
+            await state.setComposerDraftEnabled(false)
+
+            #expect(written == [false])
+            #expect(state.daemonCapabilities?.composerDraftEnabled == false)
+        }
+    }
+
+    @Test func setterSurfacesAFailureAndLeavesCapabilitiesAlone() async {
+        struct Boom: Error {}
+        await withAppState { state in
+            var refreshes = 0
+            state.composerDraftFlagSetter = { @MainActor _ in throw Boom() }
+            state.daemonCapabilitiesFetcher = { @MainActor in
+                refreshes += 1
+                return nil
+            }
+
+            await state.setComposerDraftEnabled(true)
+
+            #expect(refreshes == 0, "a failed write must not be followed by a refresh")
+            #expect(state.daemonCapabilities == nil)
+            #expect(state.alertMessage != nil)
+        }
+    }
+
+    @Test func computedFlagFollowsCapabilities() async {
+        await withAppState { state in
+            #expect(state.daemonCapabilities == nil)
+            #expect(state.composerDraftEnabled == false)
+            state.daemonCapabilities = Self.capabilities(composerDraft: true)
+            #expect(state.composerDraftEnabled == true)
+            state.daemonCapabilities = Self.capabilities(composerDraft: false)
+            #expect(state.composerDraftEnabled == false)
+        }
+    }
+}

@@ -25,6 +25,7 @@ struct ConfigGet: AsyncParsableCommand {
             "update-mode: \(config.updateMode.rawValue)",
             "pr-poll-schedule: \(config.prPollScheduleEnabled ? "on" : "off")",
             "transcript-prompt-answer: \(config.transcriptPromptAnswerEnabled ? "on" : "off")",
+            "composer-draft: \(config.composerDraftEnabled ? "on" : "off")",
             "clone-checkout: \(config.cloneCheckoutEnabled ? "on" : "off")",
         ].joined(separator: "\n")
     }
@@ -52,7 +53,7 @@ struct ConfigSet: AsyncParsableCommand {
     /// express one key's vocabulary.
     static let onOffKeys = [
         "auto-archive-on-merge", "auto-hibernate-on-merge", "pr-poll-schedule",
-        "transcript-prompt-answer",
+        "transcript-prompt-answer", "composer-draft",
         "clone-checkout",
     ]
     static let modeKeys = ["update-mode"]
@@ -60,11 +61,11 @@ struct ConfigSet: AsyncParsableCommand {
 
     @Argument(help: """
         Setting key (auto-archive-on-merge, auto-hibernate-on-merge, pr-poll-schedule, \
-        transcript-prompt-answer, clone-checkout, update-mode)
+        transcript-prompt-answer, composer-draft, clone-checkout, update-mode)
         """)
     var key: String
 
-    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer and clone-checkout; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer, composer-draft and clone-checkout; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -91,6 +92,12 @@ struct ConfigSet: AsyncParsableCommand {
         case ("transcript-prompt-answer", .off):
             return "Set transcript-prompt-answer to off. Prompts can no longer be answered from "
                 + "the transcript. Sessions already running keep their hooks until they restart."
+        case ("composer-draft", .on):
+            return "Set composer-draft to on. Claude sessions started from now on save unsent "
+                + "drafts, and hibernation keeps them."
+        case ("composer-draft", .off):
+            return "Set composer-draft to off. Sessions started while it was on can't confirm a "
+                + "saved draft until they restart, so automatic hibernation skips them."
         case ("clone-checkout", .on):
             return "Set clone-checkout to on. New worktrees are cloned from a per-repo template "
                 + "checkout where the volume supports it, so unchanged files share disk blocks. "
@@ -167,6 +174,12 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
                 params: ConfigSetPromptAnswerParams(enabled: parsed.boolValue))
+        case "composer-draft":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetComposerDraftEnabled,
+                params: ConfigSetComposerDraftEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
         case "clone-checkout":
             let parsed = try Self.parseOnOff(value, key: key)
             try client.callVoid(

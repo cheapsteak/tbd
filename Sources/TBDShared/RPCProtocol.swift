@@ -370,6 +370,11 @@ public enum RPCMethod {
     /// Hook changes reach a session on its next start. Reading needs no method
     /// of its own: `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetTranscriptPromptAnswerEnabled = "config.setTranscriptPromptAnswerEnabled"
+    /// The composer draft gate (`composer_draft_enabled`): whether Claude
+    /// sessions started from now on save the unsent text in their prompt box
+    /// through the session mod. Reading needs no method of its own:
+    /// `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetComposerDraftEnabled = "config.setComposerDraftEnabled"
     /// The live remote transcript sync gate
     /// (`remote_transcript_live_sync_enabled`). Takes effect on the next sync —
     /// the daemon reads it fresh at every decision — and turning it off drops
@@ -3976,6 +3981,14 @@ public struct ConfigSetPromptAnswerParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setComposerDraftEnabled` — the gate for saving and
+/// restoring a Claude session's unsent prompt-box text (default OFF during
+/// soak). Design: `docs/specs/2026-10-19-tbd-session-mod-design.md`.
+public struct ConfigSetComposerDraftEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setRemoteTranscriptLiveSyncEnabled` — the gate for
 /// tail-first loading, earlier-history loading and hint-driven background
 /// sync of remote session transcripts (default OFF during soak). Design:
@@ -4402,6 +4415,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
     /// Resolved through `Config.transcriptPromptAnswerDefault`.
     public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
+    /// Whether composer draft save-and-restore is on
+    /// (`composer_draft_enabled`). Default OFF while it soaks. Resolved
+    /// through `Config.composerDraftDefault`.
+    public var composerDraftEnabled: Bool = Config.composerDraftDefault
     /// Balancing's usage ceiling and maximum reading age as stored, nil when
     /// never set, so the app runs the picker under the daemon's thresholds.
     /// Assigned after construction, for the type-checker reason
@@ -4562,6 +4579,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
+        composerDraftEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingUsageCeilingPercent)

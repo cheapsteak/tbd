@@ -280,6 +280,7 @@ struct GeneralSettingsTab: View {
                 modelProxyToggle
                 transcriptStreamingToggle
                 transcriptPromptAnswerToggle
+                composerDraftToggle
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
@@ -537,6 +538,23 @@ struct GeneralSettingsTab: View {
     static let transcriptPromptAnswerHelp = "Shows question and permission dialogs as cards you can answer in the "
         + "transcript. The terminal dialog stays live, and whichever answers first wins. Applies to sessions "
         + "started after you turn it on."
+
+    /// Save and restore the unsent text in a Claude session's prompt box.
+    /// Reads `daemon.capabilities`, writes `config.setComposerDraftEnabled`.
+    /// Off by default (soaking). New sessions pick it up.
+    @ViewBuilder
+    private var composerDraftToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Save and restore composer drafts", isOn: Binding(
+            get: { capabilities?.composerDraftEnabled ?? Config.composerDraftDefault },
+            set: { newValue in Task { await appState.setComposerDraftEnabled(newValue) } }
+        ))
+        .help(Self.composerDraftHelp)
+    }
+
+    static let composerDraftHelp = "Saves what you type in a Claude session's prompt box and puts it back "
+        + "when a hibernated session wakes, so hibernating never loses an unsent draft. Applies to "
+        + "sessions started after you turn it on."
 
     /// Schedule-based PR polling. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,

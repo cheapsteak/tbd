@@ -1775,6 +1775,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// Assigned after construction by the daemon, so it is a stored property
     /// with a default rather than a required initializer argument.
     public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
+    /// Composer draft save-and-restore through the session mod. Resolved as
+    /// `composer_draft_enabled ?? Config.composerDraftDefault`. Assigned after
+    /// construction by the daemon, like `transcriptPromptAnswerEnabled`.
+    public var composerDraftEnabled: Bool = Config.composerDraftDefault
     /// Clone-backed worktree checkout: populate a fresh worktree by APFS-cloning
     /// a per-repo template checkout instead of writing every tracked file.
     /// Resolved as `clone_checkout_enabled ?? Config.cloneCheckoutDefault`.
@@ -1914,6 +1918,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `transcriptPromptAnswerEnabled`, and the single
     /// place it lives. Graduation flips this constant.
     public static let transcriptPromptAnswerDefault = false
+    /// The shipped default for `composerDraftEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let composerDraftDefault = false
     /// The shipped default for `remoteTranscriptLiveSyncEnabled`, and the
     /// single place it lives. Ships off; graduation is a change to this
     /// constant, with no forcing `UPDATE` migration and every explicit opt-out
@@ -2142,6 +2150,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
+        composerDraftEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
         cloneCheckoutEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .cloneCheckoutEnabled) ?? Config.cloneCheckoutDefault
         // Absent means never set, the NULL column's situation; the policy

@@ -1906,6 +1906,11 @@ final class AppState {
     var transcriptPromptAnswerEnabled: Bool {
         daemonCapabilities?.transcriptPromptAnswerEnabled ?? false
     }
+    /// Whether composer drafts are saved and restored, as the daemon reports
+    /// it. False until capabilities have been fetched.
+    var composerDraftEnabled: Bool {
+        daemonCapabilities?.composerDraftEnabled ?? false
+    }
     /// How `loadModelProfiles()` fetches its config-bearing response.
     /// Injectable because `DaemonClient` is concrete, matching the other
     /// settings seams below.
@@ -2100,6 +2105,10 @@ final class AppState {
     /// prompt-answer gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var transcriptPromptAnswerFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setTranscriptPromptAnswer(enabled: enabled) }
+    /// How `setComposerDraftEnabled` persists the composer draft gate —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var composerDraftFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setComposerDraft(enabled: enabled) }
     /// How `setRemoteTranscriptLiveSyncEnabled` persists the live remote
     /// transcript sync gate — injectable for the same reason as
     /// `controlModeSetter`.

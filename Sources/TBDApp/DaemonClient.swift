@@ -1233,6 +1233,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the composer draft gate (default OFF, soaking). Sessions started
+    /// afterwards save drafts.
+    func setComposerDraft(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetComposerDraftEnabled,
+            params: ConfigSetComposerDraftEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the live remote transcript sync gate (default OFF, soaking).
     /// The daemon reads it at every decision, so it applies from the next sync.
     func setRemoteTranscriptLiveSync(enabled: Bool) async throws {
