@@ -67,8 +67,12 @@ public final class RepoCloner: RepoCloning {
     private struct RunState {
         var pid: pid_t?
         var cancelled = false
-        /// Set the moment `waitpid` has reaped the child, after which its pid
-        /// may belong to someone else and must never be signalled.
+        /// Set once the exit is recorded (`markExited`, right after `waitpid`
+        /// reaps the child); signals stop from then on, since the pid may
+        /// belong to someone else. A cancel racing the few instructions between
+        /// `waitpid` returning and `markExited` can still reach the reaped pid:
+        /// accepted, as the window is microseconds and reuse inside it very
+        /// unlikely.
         var exited = false
     }
 
@@ -328,6 +332,8 @@ public final class RepoCloner: RepoCloning {
         }
     }
 
+    /// Records the exit so later cancels stop signalling. Runs just after
+    /// `waitpid`; the gap between the two is the accepted pid-reuse window.
     private func markExited(_ pid: pid_t) {
         state.withLock { run in
             run.exited = true
