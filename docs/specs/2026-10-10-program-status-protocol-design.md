@@ -268,9 +268,12 @@ rail is not consulted.
 
 For OSC-authoritative terminals only, with the flag on:
 
-- **Worktree row** – `.error` and `.needsAuth` get badges of their own; a
-  working session with running task entries shows a small background count.
-  The existing working, idle and awaiting-input badges are unchanged.
+- **Worktree row** – `.error` and `.needsAuth` get badges of their own.
+  The existing working, idle and awaiting-input badges are unchanged. A
+  running task entry keeps the row on the working badge even after the main
+  entry stops working (rule 3); the row draws no count of running tasks,
+  since a number beside the working dots crowds them and the tooltip
+  already names each task.
 - **Done shows as idle** – `.done` has no badge. Claude Code reports `done`
   after every turn and keeps it until the next one, so a badge for it would
   sit on nearly every waiting session. The row already marks the case that
