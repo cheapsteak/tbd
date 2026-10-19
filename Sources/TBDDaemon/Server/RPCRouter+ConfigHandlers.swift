@@ -625,6 +625,13 @@ extension RPCRouter {
         try await db.config.setComposerDraftEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
+        // Add or remove the session mod in the plugin. The features come from
+        // the fresh config rather than this one flag, so the mod stays while
+        // any feature's flag is still on.
+        if let sessionModPluginSync {
+            let config = try await db.config.get()
+            sessionModPluginSync(SessionModFeature.enabled(in: config))
+        }
         return .ok()
     }
 

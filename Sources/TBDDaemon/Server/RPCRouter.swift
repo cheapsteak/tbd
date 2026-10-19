@@ -325,6 +325,13 @@ public final class RPCRouter: Sendable {
     /// requests for one server never both act.
     let devServerClaims = DevServerActionClaims()
 
+    /// Rewrites the TBD Claude plugin for the session-mod features the fresh
+    /// config turns on, called after a session-mod feature flag changes.
+    /// Wired by `Daemon.swift` before the socket serves; `nil` in tests that
+    /// do not exercise it, where a flag change writes only its column.
+    /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md, "Presence".
+    nonisolated(unsafe) var sessionModPluginSync: (@Sendable ([SessionModFeature]) -> Void)?
+
     /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
     /// from the same value the lifecycle and the hibernation coordinator hold.
     /// Two things read it: `daemon.capabilities`, which reports whether this

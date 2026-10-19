@@ -77,7 +77,7 @@ struct NightwatchHandoffCeilingTests {
         let home = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("tbd-handoff-ceiling-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        try PluginDirWriter(applicationSupportRoot: home.path).writePlugin()
+        try PluginDirWriter(applicationSupportRoot: home.path).writePlugin(sessionModFeatures: [])
         return (home, home.appendingPathComponent(
             "TBD/plugin/skills/nightwatch/scripts/handoff.py").path)
     }

@@ -101,7 +101,7 @@ struct NightwatchContextNumeratorAgreementTests {
             .appendingPathComponent("tbd-ctx-agree-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try PluginDirWriter(applicationSupportRoot: root.path).writePlugin()
+        try PluginDirWriter(applicationSupportRoot: root.path).writePlugin(sessionModFeatures: [])
         let tick = root.appendingPathComponent("TBD/plugin/skills/nightwatch/scripts/tick.py").path
 
         // Each case is one where a plausible *other* rule gives a different
@@ -160,7 +160,7 @@ struct NightwatchContextNumeratorAgreementTests {
             .appendingPathComponent("tbd-ctx-const-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try PluginDirWriter(applicationSupportRoot: root.path).writePlugin()
+        try PluginDirWriter(applicationSupportRoot: root.path).writePlugin(sessionModFeatures: [])
         let tick = root.appendingPathComponent("TBD/plugin/skills/nightwatch/scripts/tick.py").path
         let empty = try writeTranscript([#"{"message":{}}"#], in: root)
 

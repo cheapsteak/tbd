@@ -6,6 +6,20 @@ import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+/// Records each feature list the router hands `sessionModPluginSync`.
+private final class SessionModPluginSyncRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [[SessionModFeature]] = []
+
+    func append(_ features: [SessionModFeature]) {
+        lock.withLock { calls.append(features) }
+    }
+
+    func snapshot() -> [[SessionModFeature]] {
+        lock.withLock { calls }
+    }
+}
+
 /// Schema and resolution guards for `config.composer_draft_enabled`, the
 /// default-off soak gate for saving and restoring composer drafts. The column carries no
 /// SQL default, so NULL ("never chose") stays distinct from 0 ("off").
@@ -113,5 +127,28 @@ struct ComposerDraftFlagTests {
             let caps = try capsResponse.decodeResult(DaemonCapabilitiesResult.self)
             #expect(caps.composerDraftEnabled == value)
         }
+    }
+
+    /// The setter re-syncs the plugin with the features the fresh config turns
+    /// on. The router in `setterRPCWritesTheColumnAndCapabilitiesReportIt`
+    /// leaves the hook unset, which covers the other branch.
+    @Test func setterRPCSyncsThePluginWithTheFreshFeatures() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
+        let recorder = SessionModPluginSyncRecorder()
+        router.sessionModPluginSync = { recorder.append($0) }
+
+        for value in [true, false] {
+            let request = try RPCRequest(
+                method: RPCMethod.configSetComposerDraftEnabled,
+                params: ConfigSetComposerDraftEnabledParams(enabled: value))
+            let response = await router.handle(request)
+            #expect(response.success)
+        }
+
+        #expect(recorder.snapshot() == [[.composerDraft], []])
     }
 }
