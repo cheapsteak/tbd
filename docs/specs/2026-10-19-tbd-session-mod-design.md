@@ -155,6 +155,10 @@ variables:
 - **`TBD_TERMINAL_INCARNATION_ID`** – already set on wake, swap and recreate;
   every spawn made with a feature on sets it, fresh spawns included.
 
+A spawn that forks a new session (`--fork-session`, as carryover and a forked
+profile swap do) learns its session ID only after it starts, so it sets none of
+them and stays legacy until it next wakes.
+
 A spawn with every feature off sets none of them. Every feature's hooks check
 `TBD_MOD_FEATURES`, read once through `$.env.get` and cached, and a feature
 not on the list passes each event straight to `next(e)` and writes nothing. A

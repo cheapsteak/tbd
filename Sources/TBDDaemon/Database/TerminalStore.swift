@@ -1043,10 +1043,13 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            // Legacy terminals have never had a managed replacement and carry
-            // no process token on either side. Once TBD rotates a row to a
-            // durable token, every replacement-process SessionStart must echo
-            // that exact value; nil and mismatches are stale by construction.
+            // Legacy terminals, and fresh rows spawned with every session-mod
+            // feature off, carry no process token on either side until their
+            // first managed replacement. A row that holds a durable token —
+            // rotated in by a replacement, or written at creation by a fresh
+            // Claude spawn made with a feature on — accepts only a SessionStart
+            // echoing that exact value; nil and mismatches are stale by
+            // construction.
             guard record.pendingSessionIncarnationID == nil else { return nil }
             guard record.sessionIncarnationID == reportedIncarnationID?.uuidString else {
                 return nil

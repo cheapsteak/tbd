@@ -122,9 +122,18 @@ enum SpawnBaseEnvironment {
     /// scrub runs, so dropping it for children costs that read nothing.
     /// Installation-wide configuration (TBD_HOME, TBD_SOCKET_PATH) is
     /// deliberately not here.
+    ///
+    /// The session mod's other two variables travel with the incarnation: a
+    /// spawn sets all three or none (`SessionModSpawn`). Inherited, the pair
+    /// would list mod features in a spawn that set none of them and carries no
+    /// incarnation — a fork, a carryover, or any spawn made with every feature
+    /// off — so `TBD_SESSIONS_DIR` is per-spawn here even though its value
+    /// follows `TBD_HOME`.
     static let tbdProcessMarkers: Set<String> = [
         "TBD_TERMINAL_ID",
         "TBD_TERMINAL_INCARNATION_ID",
+        SessionModSpawn.sessionsDirVariable,
+        SessionModSpawn.featuresVariable,
         "TBD_WORKTREE_ID",
         "TBD_CLI_PATH",
         "TBD_EVENT",

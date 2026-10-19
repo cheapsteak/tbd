@@ -668,10 +668,12 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// begin. Nil means no durable boundary is known for this session.
     public var codexTranscriptBoundaryOffset: Int64?
     /// Durable process-incarnation nonce used to reject delayed SessionStart
-    /// hooks after a terminal is recreated. Nil identifies legacy rows, and
-    /// rows created with every session-mod feature off, until their first
-    /// process replacement; a Claude spawn made with a feature on carries one
-    /// from creation.
+    /// hooks after a terminal is recreated. A Claude spawn made with a
+    /// session-mod feature on carries one from creation, unless it forks a new
+    /// session (`--fork-session`: a carryover, a forked profile swap), which
+    /// learns its session ID only after it starts. Nil identifies legacy rows,
+    /// those forks, and rows created with every feature off, until their first
+    /// process replacement.
     public var sessionIncarnationID: UUID?
     /// Replacement token staged while the current process is being made
     /// inert. Process-bound hooks are rejected while this is non-nil; tmux
