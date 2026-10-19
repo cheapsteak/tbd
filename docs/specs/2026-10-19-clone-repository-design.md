@@ -99,11 +99,18 @@ The `gh` call goes through an injected runner, like `PRStatusManager`'s
   The claim is atomic: two clones aimed at the same path cannot both own it, so
   neither can later delete the other's folder. git then clones into the empty
   folder this run owns.
-- **Cancel and failure.** Cancel sends SIGTERM to git. When git fails or gets
-  that signal, it removes what it wrote but keeps the folder it was given.
-  After git exits, `RepoCloner` deletes the folder, because this run created
-  it. It never deletes a folder it did not claim, and it deletes nothing when
-  it cannot tell how git exited.
+- **Cancel.** Cancel sends SIGTERM to git. git removes what it wrote but keeps
+  the folder it was given. After git exits, `RepoCloner` deletes the claimed
+  folder and anything left in it, because the person asked to stop.
+- **Failure.** When a fetch fails, git removes what it wrote and leaves the
+  claimed folder empty, and `RepoCloner` removes that empty folder. But git
+  sometimes exits non-zero and keeps a complete repository on purpose: when
+  the checkout fails (for example, a missing Git LFS filter) or a
+  `post-checkout` hook fails, git tells the person to inspect it. So after a
+  failure `RepoCloner` removes the claimed folder only if it is empty, and
+  leaves a repository git kept.
+- **What it never deletes.** It never deletes a folder it did not claim, and it
+  deletes nothing when it cannot tell how git exited.
 - **No timeout.** A large repository can take many minutes to clone, and only
   the person knows whether to wait. So there is no new timer and no clock seam.
 
@@ -190,6 +197,8 @@ finish, so the empty claimed folder can stay behind (see "Who reclaims what").
   - After the clone, it calls `repo.add` and prints the same "Added repository"
     text, or the same JSON, as today.
   - If git fails, the CLI exits non-zero. git has already printed its error.
+    If git never started, for example because TBD could not create the
+    destination folder, the CLI prints TBD's own reason to stderr first.
   - If the clone worked but `repo.add` failed, the CLI keeps the clone, prints
     "Cloned into `<dest>`, but TBD could not add it: `<error>`. Run `tbd repo
     add <dest>` to retry.", and exits non-zero.
@@ -212,14 +221,17 @@ for these reasons:
   location they chose. Once it is added, it is an ordinary local repository, and
   `repo.remove` does not delete a local repository's folder either.
 - **A failed or cancelled clone cleans itself up.** git removes what it wrote
-  on failure, SIGINT and SIGTERM. `RepoCloner` then deletes the folder, which
-  it claimed itself.
+  on a failed fetch, SIGINT and SIGTERM. `RepoCloner` then deletes the folder,
+  which it claimed itself.
+- **A repository git kept is the person's to inspect.** After a failed checkout
+  or `post-checkout` hook, git keeps a complete repository and says so. TBD
+  leaves it, and does not register it.
 - **The leaks are visible and bounded.** Two cases leave a folder at the chosen
   path. If the app quits during a clone, it does not wait for git, so the empty
   claimed folder can stay. If git is killed with SIGKILL, or the machine loses
   power, a partial clone stays. Either way the person can see the folder there.
-  The next clone to the same path refuses with "folder already exists", so a
-  leftover cannot pile up unseen.
+  The next clone to the same path refuses because the destination already
+  exists, so a leftover cannot pile up unseen.
 - **A sweep would be worse than the leak.** TBD keeps no record of a clone
   attempt, so a sweep would have to guess which of the person's own folders to
   delete.
