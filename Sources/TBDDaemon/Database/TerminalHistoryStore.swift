@@ -249,6 +249,21 @@ public struct TerminalHistoryStore: Sendable {
         }
     }
 
+    /// Claude session IDs of closed-terminal history rows whose worktree is not
+    /// archived: sessions a person can still resume through
+    /// `terminalHistory.revive`. Raw columns, so a row whose other columns fail
+    /// to decode still counts; `OrphanGC`'s session-directory arm reclaims
+    /// whatever is NOT referenced.
+    public func claudeSessionReferencesInUnarchivedWorktrees() async throws -> Set<String> {
+        try await writer.read { db in
+            Set(try String.fetchAll(db, sql: """
+                SELECT h.claudeSessionID FROM terminal_history h
+                JOIN worktree w ON w.id = h.worktreeID
+                WHERE h.claudeSessionID IS NOT NULL AND w.status != ?
+                """, arguments: [WorktreeStatus.archived.rawValue]))
+        }
+    }
+
     /// The newest entry still attached to each dev server in a worktree,
     /// keyed by server name. Ties on `closedAt` break by insertion order, as
     /// the prune does.

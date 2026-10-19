@@ -807,6 +807,18 @@ public struct TerminalStore: Sendable {
         return terminal
     }
 
+    /// Every Claude session ID any terminal row names, as raw column text.
+    /// Read through SQL rather than `list()` so a row whose other columns fail
+    /// to decode still counts as a reference: `OrphanGC`'s session-directory
+    /// arm reclaims whatever is NOT referenced.
+    public func claudeSessionReferences() async throws -> Set<String> {
+        try await writer.read { db in
+            Set(try String.fetchAll(db, sql: """
+                SELECT claudeSessionID FROM terminal WHERE claudeSessionID IS NOT NULL
+                """))
+        }
+    }
+
     /// List terminals, optionally filtered by worktree.
     public func list(worktreeID: UUID? = nil) async throws -> [Terminal] {
         try await writer.read { db in
