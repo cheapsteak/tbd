@@ -222,18 +222,19 @@ for these reasons:
 - **The finished folder belongs to the person.** It is a repository in a
   location they chose. Once it is added, it is an ordinary local repository, and
   `repo.remove` does not delete a local repository's folder either.
-- **A failed or cancelled clone cleans itself up.** git removes what it wrote
-  on a failed fetch, SIGINT and SIGTERM. `RepoCloner` then deletes the folder,
-  which it claimed itself.
+- **A failed or cancelled clone cleans itself up.** On a failed fetch, and on
+  SIGINT or SIGTERM before the checkout starts, git removes what it wrote.
+  `RepoCloner` then deletes the folder, which it claimed itself.
 - **A repository git kept is the person's to inspect.** After a failed checkout
   or `post-checkout` hook, git keeps a complete repository and says so. TBD
   leaves it, and does not register it.
 - **The leaks are visible and bounded.** Two cases leave a folder at the chosen
-  path. If the app quits during a clone, it does not wait for git, so the empty
-  claimed folder can stay. If git is killed with SIGKILL, or the machine loses
-  power, a partial clone stays. Either way the person can see the folder there.
-  The next clone to the same path refuses because the destination already
-  exists, so a leftover cannot pile up unseen.
+  path. If the app quits during a clone, it does not wait for git, so the
+  claimed folder can stay: empty, or holding the repository git kept if the
+  quit came during the checkout. If git is killed with SIGKILL, or the machine
+  loses power, a partial clone stays. Either way the person can see the folder
+  there. The next clone to the same path refuses because the destination
+  already exists, so a leftover cannot pile up unseen.
 - **A sweep would be worse than the leak.** TBD keeps no record of a clone
   attempt, so a sweep would have to guess which of the person's own folders to
   delete.
