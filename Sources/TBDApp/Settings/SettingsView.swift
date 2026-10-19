@@ -569,7 +569,7 @@ struct GeneralSettingsTab: View {
     }
 
     static let programStatusHelp = "Lets Claude Code report its state to TBD over the terminal on "
-        + "pty-holder sessions: permission prompts, finished and failed turns, sign-in problems and "
+        + "pty-holder sessions: permission prompts, failed turns, sign-in problems and "
         + "background tasks. Applies to Claude sessions started after you turn it on."
 
     /// Pending-input veto for auto-hibernate. Reads the persisted flag from

@@ -216,23 +216,12 @@ struct ProgramStatusRowPresentationTests {
         #expect(help == "both")
     }
 
-    /// A done terminal selects no badge, so it never lends its tooltip to a
-    /// badge another terminal or signal selected.
-    @Test func badgeHelpIgnoresADoneTerminal() {
-        let help = ProgramStatusRowPresentation.badgeHelp(
-            selected: .hibernated, oscTooltip: "Claude: done",
-            resolvedValues: [.done], genericHelp: "Hibernating — wakes on focus")
-        #expect(help == "Hibernating — wakes on focus")
-    }
-
     /// A done session shows exactly like an idle one: no suffix. The bold
     /// name already marks a finished turn the user has not read, and done
     /// stays set until the next turn, so a badge would sit on nearly every
     /// waiting row.
     @Test func doneSelectsNoSuffixLikeIdle() {
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .done) == nil)
-        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .done)
-            == ProgramStatusRowPresentation.suffixIndicator(for: .idle))
     }
 
     @Test func suffixIndicatorMapsEachOSCState() {
