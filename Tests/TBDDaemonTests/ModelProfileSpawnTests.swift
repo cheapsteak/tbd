@@ -1425,8 +1425,8 @@ struct ModelProfileSpawnTests {
         let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
         let row = try #require(try await db.terminals.get(id: oldTerm.id))
         let incarnation = try #require(row.sessionIncarnationID)
-        let spawn = try #require(readSpawnRecord(
-            sessionsDir: sessionsDir, sessionID: try #require(row.claudeSessionID)))
+        let sessionID = try #require(row.claudeSessionID)
+        let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID))
         #expect(UUID(uuidString: spawn.incarnationId) == incarnation)
 
         let beforeSwap = recorder.calls.count
