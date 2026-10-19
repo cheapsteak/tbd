@@ -281,8 +281,9 @@ collapsing or being renamed, where the regex would zero-match or over-skip its
 way to a green run of nothing. Keep them updated.
 
 **Wall-clock handshake deadlines are hang-catchers sized against the population
-of the day.** `ciSafeDeadline` (`Tests/TBDDaemonTests/ControlModeTestSupport.swift`)
-and `waitForSuspension`'s `timeout` / `.clockDriven`'s limit
+of the day.** `ciSafeDeadline` (`Tests/TBDDaemonTests/ControlModeTestSupport.swift`),
+the `timeout` of `EventDrivenTestClock`'s arming waits
+(`Tests/TestSupport/EventDrivenTestClock.swift`) and `.clockDriven`'s limit
 (`Tests/TestSupport/ClockTestSupport.swift`) bound a hang; they assert nothing
 and cost passing runs nothing. They are the first things to re-derive when the
 population moves materially — that is what turned the `ControlModeInputHealth`,
@@ -290,7 +291,7 @@ population moves materially — that is what turned the `ControlModeInputHealth`
 rate on `main` with **zero** logic assertions failing.
 
 **Derive the three together, and know the invariant.** They are currently
-`ciSafeDeadline` 90 s, `waitForSuspension` 45 s, `.clockDriven`
+`ciSafeDeadline` 90 s, the arming waits 45 s, `.clockDriven`
 `.timeLimit(.minutes(4))` = 240 s. The suite limit and the two wait deadlines
 race each other for real: `AttachRPCOrchestrationTests` and
 `PaneRepairCoordinatorTests` are both `.clockDriven` **and** consume
@@ -310,23 +311,19 @@ limit. The rule is:
 > truncates the test. Chains beyond the first belong to a test that is already
 > failing; truncating those is acceptable and deliberate.
 
-Checked against 240 s: one `waitFor` + one `waitForSuspension` = 135 s ✓; two
-`waitFor` = 180 s ✓; two `waitForSuspension` = 90 s ✓ (this is the "a test that
+Checked against 240 s: one `waitFor` + one arming wait = 135 s ✓; two
+`waitFor` = 180 s ✓; two arming waits = 90 s ✓ (this is the "a test that
 waits twice must afford both waits" property the old pairing was reasoned
 from).
 
 **Past that pair the margin is thin — 240 s is not roomy, and the real numbers
 are worth knowing before someone reaches for a raise.**
-**Count `advanceWhenSuspended` as a `waitForSuspension`** — it opens with one
-(`await waitForSuspension(...)`, then `advance`), so it pays the full 45 s
-guard. Grepping only for the literal `waitForSuspension(` undercounts every
-chain below, which is exactly the miscount a PR #547 reviewer made. Count
-`advanceUntil` as **one** guard (45 s) too — it replaces an
-`advanceWhenSuspended` plus the `waitFor` that used to follow it, so converting
-a site takes 135 s off that test's paper worst case.
+**Count each arming wait as one 45 s guard, and count `advanceUntil` as one
+too.** `advanceUntil` applies its `timeout` to every arming wait it makes, but
+the first one that times out throws, so a single call can pay at most one guard.
 
 **A single advance is the wrong instrument for a poll-and-re-arm loop, and the
-failure it produces is a hang, not a red.** `advanceWhenSuspended` proves a
+failure it produces is a hang, not a red.** `requireAdvanceWhenArmed` proves a
 sleeper was armed when it advanced; it cannot prove the loop *observes* the
 state the test just created on the probe that follows. Where the code under test
 probes external state and re-arms if it is not there yet, one advance stakes the
@@ -334,24 +331,11 @@ run on one probe, and a probe that reads "keep waiting" re-arms a sleep nothing
 will ever advance again. `PaneRepairCoordinatorTests`' broken-pipe test wedged
 in CI that way for its full 240 s limit — one write, `repairing` still set —
 and had already done so once before, on a diff that touched only
-`Sources/TBDCLI`. Drive those with `advanceUntil` (`Tests/TestSupport/ClockTestSupport.swift`),
-which advances for as long as the code keeps re-arming and fails with a named
-diagnostic carrying the advance count. Keep explicit single advances where the
+`Sources/TBDCLI`. Drive those with `EventDrivenTestClock.advanceUntil`, which
+steps the loop one armed sleeper at a time until its condition holds (see "The
+event-driven clock" below). Keep explicit single advances, or an explicit ladder
+of `requireAdvanceWhenArmed` closed by a `requireSleeperArmed`, where the
 *number* of advances is the property under test.
-
-**`TestClock.advanceUntil` is for one-shot waits only, though — under the
-saturated fast pass it starves the very re-arm it is waiting for.** Its loop
-probes `checkSuspension()` every 25 ms, and each of those probes is a
-`megaYield`: twenty serially-awaited **background-QoS** tasks. Forty-five
-seconds of probing therefore floods the cooperative pool with exactly the
-low-priority work a re-arming poller needs a turn from.
-The field signature is a diagnostic reading **"observed 1 clock advance"** —
-the first tick landed, the second re-arm was never seen — and on 2026-09-08 it
-reddened `ModelProxySupervisorTests` on three consecutive dispatches of one
-SHA. So a **re-arming** loop belongs on `EventDrivenTestClock`
-instead, driven by an explicit ladder of `requireAdvanceWhenArmed` with a
-closing `requireSleeperArmed` — the re-arm being the proof that the tick before
-it finished. See "The event-driven clock" below.
 
 On that basis, the deepest chains in the tree are the poller tests, and their
 paper tallies do not all fit under the ceiling:
@@ -372,8 +356,7 @@ which records and continues — sits *last*, with no wait behind it to inherit t
 run. So the real worst case is one 45 s guard, and 270 s describes a run that
 cannot happen. That is a property of these chains' *shape*, not of strictness
 alone: put a `next()` mid-chain and its 45 s becomes payable on top of whatever
-follows. Suites on the predecessor helpers have no such property at all and pay
-the full tally. And counting `waitFor` at 90 s plus
+follows. And counting `waitFor` at 90 s plus
 each clock wait at 45 s, **6 of the 13** `PaneRepairCoordinatorTests` have a
 worst case above 240 s — not just the 6-deep chain (540 s) usually cited. Every one of those is still consistent with
 the invariant, because only an already-failing test walks a full chain of
@@ -395,10 +378,10 @@ a mutation-verified proof with nothing going red. Those pin their own
 child must outlive the limit), `GitManagerTimeoutTests` and
 `SubprocessTimeoutTests` (a regressed EOF-waiting drain must outlive it). Don't
 "tidy" them back to `.clockDriven`; the residual — that a 45 s arming guard makes
-two chained waits exceed 60 s, on either clock — is acceptable only because none
+two chained waits exceed 60 s — is acceptable only because none
 of those suites chains two and a healthy handshake there returns in
-milliseconds. `GitManagerTimeoutTests` is on `EventDrivenTestClock` for that
-reason too: a guard that fires at 45 s reports a named `NoSleeperArmed` before
+milliseconds. The 45 s guard is also what keeps `GitManagerTimeoutTests`
+attributable: a guard that fires at 45 s reports a named `NoSleeperArmed` before
 the 60 s limit cuts the test off unattributed, and raising it to
 `TestDeadlines.saturatedPass` would put the diagnostic past the limit.
 
@@ -827,14 +810,12 @@ Tests pass `EventDrivenTestClock` and drive time with its strict waits —
 `requireAdvanceWhenArmed(by:)` and `requireSleeperArmed()` — which buys exact
 virtual timings instead of tolerance windows. `ImmediateClock` stays available
 for code whose sleeps should simply return. swift-clocks' `TestClock` is not
-used outside the two files that test it (`ClockTestSupport.swift` and
+used outside the two files that hold and test its helpers (`ClockTestSupport.swift` and
 `ClockTestSupportTests.swift`): the SwiftLint rule `no_polling_test_clock`
 fails `swiftlint --strict` on any construction of it and on any call to its
 polling probes `advanceWhenSuspended`, `waitForSuspension` and
-`checkSuspension`. Existing uses carry a
-`// swiftlint:disable:next no_polling_test_clock - legacy, #1171` line until
-they are migrated; issue #1171 tracks which files still do, and a new
-suppression draws the same review scrutiny as a new `no_raw_task_sleep` one.
+`checkSuspension`. No test carries a suppression of that rule, and adding one
+draws the same review scrutiny as a new `no_raw_task_sleep` suppression.
 See "The event-driven clock" below and
 `docs/specs/2026-10-14-retire-polling-test-clock-design.md`.
 
@@ -885,8 +866,7 @@ are exposed. `EventDrivenTestClock`'s strict waits — `requireSleeperArmed`,
 anything advances, so the chain stops at the first bad step, nothing later runs
 against a desynced clock, and the failure is a named diagnostic rather than a
 hang. **The rule is not lifted for strict callers.** A short chain is cheaper
-to read and to bound, legacy suites on the polling helpers still carry the
-desync in full, and a test that seems to need a long chain needs injected
+to read and to bound, and a test that seems to need a long chain needs injected
 pacing instead. A future case with a real need can argue it on evidence now
 that the mechanism is written down.
 
@@ -956,20 +936,11 @@ or date box. This file is the whole shared surface:
   sleep nobody advances. See "Population is the scheduler" above for the
   triple, its invariant, and the three tier-3 live suites that pin their own
   `.timeLimit` instead because their limit is a regression detector.
-- `await clock.advanceWhenSuspended(by:)` and `await clock.waitForSuspension()`
-  — the polling `TestClock` helpers, kept only for the legacy sites tracked in
-  #1171; `no_polling_test_clock` rejects new calls. New tests use
+- The polling `TestClock` helpers — `advanceWhenSuspended(by:)`,
+  `waitForSuspension()` and `advanceUntil` — are not used by tests: they live here
+  only alongside `ClockTestSupportTests`, which tests them, and
+  `no_polling_test_clock` rejects them everywhere else. Tests drive time with
   `EventDrivenTestClock` (`Tests/TestSupport/EventDrivenTestClock.swift`, below).
-  The `timeout:` of `advanceWhenSuspended` passes through to `waitForSuspension`
-  and is left at the 45 s default except where the polled probe is itself under
-  test (`ClockTestSupportTests`, which passes `TestDeadlines.saturatedPass`). Each
-  `checkSuspension()` probe is raced against what is left of `timeout`, because
-  its megaYield can go unscheduled for minutes under saturation and the guard is
-  only read between probes: unbounded, one stuck probe held the test past its
-  45 s guard until `.clockDriven`'s 240 s limit cut it off with nothing recorded
-  (#503). A probe still running at the deadline counts as "not suspended" and
-  the named diagnostic fires. `advance` itself still megaYields and is not
-  bounded; a suite that stalls there belongs on `EventDrivenTestClock`.
 - `TestDateSource` — a lock-guarded box behind the `now: @Sendable () -> Date`
   seam. Deliberately a class with a lock rather than an actor, because that
   seam is a *synchronous* `() -> Date`.
@@ -988,8 +959,8 @@ detached task the time limit cannot cancel). It usually works and is worth
 keeping. Do not make it your *only* hang guard: stress harnesses, corpus
 runners and fuzzers need an outer timeout of their own.
 
-One caution on the two legacy helpers: they record an `Issue` and continue rather
-than throwing, which is safe *only* because neither returns a value. A
+One caution on waiters that record an `Issue` and continue rather than
+throwing: that is safe *only* for a waiter that returns no value. A
 non-throwing waiter that does return something — `ControlModeTestSupport.waitFor`
 (PR #415) — also keeps going after recording, so anything you index out of its
 result must be `#require`-guarded or the test crashes instead of failing
@@ -1054,17 +1025,15 @@ watches the condition while waiting so a loop whose last tick does not re-arm
 still ends the call. Design:
 `docs/specs/2026-10-14-retire-polling-test-clock-design.md` §4.
 
-**Migrating a `TestClock` suite, the real work is not the clock swap.** It is
-replacing clock-state inference with the observable the test already holds: a
-poller suite that asked `checkSuspension()` whether its sleep had ended was reading a
-snapshot and relying on that call's internal megaYield to have let the resumed
-task run first. `hasSleeper` has no such nudge, so port those to the positive
-fact — `FireRecorder.next()` on the effect, or joining the task — rather than to
-a weaker negative.
+**To learn that a sleep has ended, wait on the observable the test already
+holds, not on clock state.** `hasSleeper` is a snapshot, and `advance` does no
+yielding, so reading it says nothing about whether the resumed task has run.
+Await the positive fact instead — `FireRecorder.next()` on the effect, or
+joining the task — rather than a weaker negative.
 
 **Count each `FireRecorder.next()` in the
-`.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like a
-`waitForSuspension`, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
+`.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like an
+arming wait, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
 180 s worst case against the 240 s limit. And `next()` is **non-throwing** — it
 records and returns `nil` — so it does not stop a chain the way a strict arming
 wait does: a `next()` that times out mid-chain leaves every guard after it
