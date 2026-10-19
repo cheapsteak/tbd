@@ -19,7 +19,7 @@ extension AppState {
         do {
             try await tryAddRepo(path: path)
         } catch {
-            logger.error("Failed to add repo: \(error)")
+            logger.error("Failed to add repo: \(error, privacy: .public)")
         }
     }
 

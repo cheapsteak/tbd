@@ -2,6 +2,8 @@ import Testing
 import Foundation
 @testable import TBDShared
 
+/// Tier 1 — pure parsing. `pathExists` answers from a set, so no filesystem
+/// is touched.
 @Suite("RepoSource")
 struct RepoSourceTests {
     private func parse(_ text: String, existing: Set<String> = []) -> RepoSource {

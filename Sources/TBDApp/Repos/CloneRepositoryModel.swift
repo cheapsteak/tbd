@@ -166,6 +166,17 @@ final class CloneRepositoryModel {
         !name.isEmpty && name != "." && name != ".." && !name.contains("/")
     }
 
+    /// `url` fit for a persisted log line. A `scheme://` URL loses everything
+    /// up to the last `@` of its authority — the user and password, which can
+    /// carry an access token. An scp-like `user@host:path` has no password
+    /// field and passes through unchanged.
+    nonisolated static func loggableURL(_ url: String) -> String {
+        guard let scheme = url.range(of: "://") else { return url }
+        let authority = url[scheme.upperBound...].prefix { $0 != "/" }
+        guard let at = authority.lastIndex(of: "@") else { return url }
+        return String(url[..<scheme.upperBound]) + String(url[url.index(after: at)...])
+    }
+
     // MARK: - Cloning
 
     /// Remembers the parent folder, clones, and adds the clone to TBD.
@@ -214,7 +225,8 @@ final class CloneRepositoryModel {
                     + "\(error.localizedDescription). Use Local Folder… to add it.")
             }
         case .failed(let exitCode, let lastErrorLines):
-            logger.error("git clone exited \(exitCode, privacy: .public) for \(url, privacy: .public)")
+            let loggedURL = Self.loggableURL(url)
+            logger.error("git clone exited \(exitCode, privacy: .public) for \(loggedURL, privacy: .public)")
             let gitText = lastErrorLines.isEmpty
                 ? "git clone failed with exit status \(exitCode)."
                 : lastErrorLines.joined(separator: "\n")

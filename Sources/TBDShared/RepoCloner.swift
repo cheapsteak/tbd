@@ -46,8 +46,12 @@ public protocol RepoCloning: AnyObject, Sendable {
 /// `.refusedDestinationExists`. A check followed by git's own `mkdir` would
 /// not do: whatever appeared between the two — another `tbd repo add` of the
 /// same repository — would be deleted as this run's failed clone. git clones
-/// into the empty folder this run owns, keeps it (emptied) when it fails or is
-/// signalled, and `run` then removes it. No other path ever deletes.
+/// into the empty folder this run owns and keeps that folder when it fails or
+/// is signalled. After a cancel, `run` removes the folder and whatever git
+/// left in it. After any other failure, `run` removes it only if git emptied
+/// it: when a checkout or a `post-checkout` hook fails, git exits non-zero but
+/// keeps the repository it fetched for the person to inspect, and so does TBD.
+/// No other path ever deletes.
 ///
 /// One instance runs one clone; call `run` once.
 public final class RepoCloner: RepoCloning {
@@ -172,7 +176,7 @@ public final class RepoCloner: RepoCloning {
             return .failed(exitCode: 127, lastErrorLines: [reason])
         }
         // From here on, `destination` is the empty folder this run created —
-        // the fact that lets `clone` remove whatever git leaves there.
+        // the fact that lets `clone` remove it after a failure or a cancel.
         return await withTaskCancellationHandler {
             await self.clone(onProgress: onProgress)
         } onCancel: {
@@ -182,10 +186,10 @@ public final class RepoCloner: RepoCloning {
 
     /// Sends SIGTERM: to the clone's whole process group in `.noPrompt` (git and
     /// the transport helpers it started), to git alone in
-    /// `.attachedToTerminal`, whose group is the terminal's. git empties its
-    /// partial clone on SIGTERM, and `run` removes the folder and reports
-    /// `.cancelled`. A clone that had already finished is complete, is kept,
-    /// and still reports `.succeeded`.
+    /// `.attachedToTerminal`, whose group is the terminal's. git stops on
+    /// SIGTERM, and `run` removes the folder with whatever git kept in it and
+    /// reports `.cancelled`. A clone that had already finished is complete, is
+    /// kept, and still reports `.succeeded`.
     public func cancel() {
         let mode = self.mode
         state.withLock { run in
@@ -198,8 +202,9 @@ public final class RepoCloner: RepoCloning {
 
     /// SIGTERM to every running clone, as `cancel()` would send it. For
     /// `applicationWillTerminate`, so git can empty its partial clones before
-    /// the app is gone. The emptied folders themselves are removed only by a
-    /// `run` that gets to return, which a quitting process may not reach.
+    /// the app is gone. It is not a cancel: a `run` that gets to return, which
+    /// a quitting process may not reach, reports `.failed` and removes its
+    /// folder only if git emptied it.
     public static func terminateAll() {
         liveClones.withLock { clones in
             for (pid, mode) in clones {
@@ -270,9 +275,20 @@ public final class RepoCloner: RepoCloning {
         let cancelled = state.withLock { $0.cancelled }
         let outcome = Self.outcome(waitStatus: waitStatus, cancelled: cancelled, lastLines: lastLines)
         // An unknowable status (git reaped elsewhere) may hide a finished
-        // clone, so only a known failure deletes.
-        if outcome != .succeeded, waitStatus != nil, FileManager.default.fileExists(atPath: destination) {
+        // clone, so only a known outcome deletes.
+        guard waitStatus != nil else { return outcome }
+        switch outcome {
+        case .cancelled:
+            // The person asked to stop, so even a repository git kept goes.
             try? FileManager.default.removeItem(atPath: destination)
+        case .failed:
+            // A failed fetch leaves the folder empty. A failed checkout or
+            // `post-checkout` hook leaves a repository git kept on purpose, and
+            // `rmdir` refuses it with ENOTEMPTY — honouring git's decision
+            // without reading its text.
+            _ = rmdir(destination)
+        case .succeeded, .refusedDestinationExists:
+            break
         }
         return outcome
     }

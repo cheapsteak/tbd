@@ -3,6 +3,8 @@ import TBDShared
 
 @testable import TBDCLI
 
+/// Tier 1 — pure planning over a fixed working folder and an injected
+/// `pathExists`; no daemon, no filesystem, no git.
 @Suite("RepoAddPlanning")
 struct RepoAddPlanningTests {
     private func plan(

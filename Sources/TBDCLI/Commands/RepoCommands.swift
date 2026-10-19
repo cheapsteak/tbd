@@ -61,7 +61,9 @@ struct RepoAdd: AsyncParsableCommand {
             writeStderr("Cloning \(url) into \(destination)…\n")
             // Like system(3): ignore SIGINT/SIGQUIT in this process while git runs. git
             // still gets Ctrl-C (default dispositions, same foreground group) and cleans
-            // up; the CLI must survive long enough for RepoCloner to remove the folder.
+            // up; the CLI must survive long enough for RepoCloner to remove the folder
+            // git emptied. To RepoCloner this is a failure, not a cancel, so a repository
+            // git kept (Ctrl-C during checkout) stays, as git's own warning says.
             let previousInterrupt = signal(SIGINT, SIG_IGN)
             let previousQuit = signal(SIGQUIT, SIG_IGN)
             let outcome = await RepoCloner(url: url, destination: destination, mode: .attachedToTerminal)
@@ -74,7 +76,12 @@ struct RepoAdd: AsyncParsableCommand {
             case .refusedDestinationExists:
                 writeStderr("Destination already exists: \(destination)\n")
                 throw ExitCode.failure
-            case .failed(let code, _):
+            case .failed(let code, let lines):
+                // Attached, git wrote its own error to the terminal and `lines`
+                // is empty; it holds TBD's reason only when git never ran.
+                for line in lines {
+                    writeStderr(line + "\n")
+                }
                 throw ExitCode(code)
             case .cancelled:
                 throw ExitCode.failure

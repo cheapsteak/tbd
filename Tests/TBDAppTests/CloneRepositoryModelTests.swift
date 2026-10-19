@@ -148,6 +148,19 @@ struct CloneRepositoryModelTests {
         }
     }
 
+    /// A token in a clone URL must not reach the persisted log.
+    @Test func loggedURLDropsCredentials() {
+        #expect(CloneRepositoryModel.loggableURL("https://x-access-token:t0ken@github.com/acme/widgets.git")
+            == "https://github.com/acme/widgets.git")
+        #expect(CloneRepositoryModel.loggableURL("https://t0ken@example.com/acme/widgets.git")
+            == "https://example.com/acme/widgets.git")
+        // Positive controls: nothing to strip, and the scp-like form, which has
+        // no password field, pass through unchanged.
+        #expect(CloneRepositoryModel.loggableURL(Self.remoteURL) == Self.remoteURL)
+        #expect(CloneRepositoryModel.loggableURL("git@github.com:acme/widgets.git")
+            == "git@github.com:acme/widgets.git")
+    }
+
     @Test func failureHintIsTheSpecCopy() {
         #expect(CloneRepositoryModel.failureHint
             == "Private repo? Make sure git can log in: run `gh auth setup-git` for HTTPS URLs, "
@@ -185,6 +198,12 @@ struct CloneRepositoryModelTests {
         }
     }
 
+    /// Pins the observable contract, not one line of it: a cancel before a
+    /// clone does not stop the next one, and a cancel after the clone finished
+    /// changes nothing. Closing the sheet calls `cancel()` in `.done`. Two
+    /// defenses each make this hold on their own — `cancel()`'s `isCloning`
+    /// guard, and `start()` clearing `cancelRequested` and dropping the
+    /// finished cloner — so the test goes red only when a change removes both.
     @Test func cancelOutsideACloneDoesNothing() async {
         await withDefaults { defaults in
             let cloner = FakeCloner()
@@ -193,8 +212,6 @@ struct CloneRepositoryModelTests {
             model.cancel()
             await model.start()
             #expect(model.phase == .done)
-            // `.done` is the state the sheet is in when it closes, and closing
-            // calls `cancel()`; that must not reach a cloner that has finished.
             model.cancel()
             #expect(cloner.cancelCount == 0)
             #expect(model.phase == .done)

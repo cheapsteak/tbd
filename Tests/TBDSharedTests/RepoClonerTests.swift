@@ -3,6 +3,9 @@ import os
 import Testing
 @testable import TBDShared
 
+/// Tier 2: real `git` and `sh` children, ended by events — a cancel, a
+/// signal, the child's own exit — never by a wall-clock deadline.
+///
 /// `RepoCloner` against real child processes: real `git clone` of a local
 /// `file://` repository, and `sh -c` scripts through the command seam for the
 /// paths git cannot be made to take on demand (a scripted failure, a long
@@ -110,20 +113,45 @@ struct RepoClonerTests {
 
     // MARK: - Command seam
 
-    /// Discriminates the cloner's own cleanup: the script leaves the folder
-    /// behind.
+    /// A failure that leaves the claimed folder empty, as a failed fetch
+    /// does, removes it. Discriminates the cloner's own cleanup: the claim
+    /// created the folder and the script never touches it, so without the
+    /// cleanup the empty folder would stay.
     @Test func failureRemovesFolderItCreated() async throws {
         let root = try Self.makeScratch()
         defer { try? FileManager.default.removeItem(at: root) }
-        let dest = root.appendingPathComponent("made-by-script")
+        let dest = root.appendingPathComponent("emptied")
 
         let cloner = RepoCloner(
-            command: ["sh", "-c", "mkdir -p \"$0\"; echo 'fatal: nope' >&2; exit 2", dest.path],
+            command: ["sh", "-c", "echo 'fatal: nope' >&2; exit 2"],
             destination: dest.path, mode: .noPrompt)
         let outcome = await cloner.run { _ in }
 
         #expect(outcome == .failed(exitCode: 2, lastErrorLines: ["fatal: nope"]))
         #expect(!FileManager.default.fileExists(atPath: dest.path))
+    }
+
+    /// git exits non-zero but keeps the repository it fetched when the
+    /// checkout or a `post-checkout` hook fails, and tells the person to
+    /// inspect it. A failure that leaves the claimed folder non-empty keeps the
+    /// folder and what is in it. Discriminates `rmdir` from a removal of the
+    /// whole tree, which would delete the kept repository.
+    @Test func failureKeepsWhatGitKept() async throws {
+        let root = try Self.makeScratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let dest = root.appendingPathComponent("kept")
+        let kept = dest.appendingPathComponent("README")
+
+        let cloner = RepoCloner(
+            command: ["sh", "-c",
+                      "echo hello > \"$0/README\"; echo 'warning: Clone succeeded, but checkout failed.' >&2; exit 128",
+                      dest.path],
+            destination: dest.path, mode: .noPrompt)
+        let outcome = await cloner.run { _ in }
+
+        #expect(outcome == .failed(exitCode: 128,
+                                   lastErrorLines: ["warning: Clone succeeded, but checkout failed."]))
+        #expect(FileManager.default.fileExists(atPath: kept.path))
     }
 
     @Test func progressSplitsOnCarriageReturn() async throws {
@@ -144,13 +172,17 @@ struct RepoClonerTests {
     /// wall-clock bound to flake under a loaded pass: a clone that exits 0
     /// reports `.succeeded` even after a cancel, so a `sleep 30` that cancel
     /// failed to stop would come back `.succeeded` thirty seconds later.
+    ///
+    /// The script leaves a file in the folder, as git does when signalled
+    /// during checkout, so this discriminates a cancel's removal of the whole
+    /// folder from the `rmdir` a plain failure gets.
     @Test func cancelKillsAndRemovesFolder() async throws {
         let root = try Self.makeScratch()
         defer { try? FileManager.default.removeItem(at: root) }
         let dest = root.appendingPathComponent("cancelled")
 
         let cloner = RepoCloner(
-            command: ["sh", "-c", "mkdir -p \"$0\"; echo started >&2; exec sleep 30", dest.path],
+            command: ["sh", "-c", "echo partial > \"$0/partial\"; echo started >&2; exec sleep 30", dest.path],
             destination: dest.path, mode: .noPrompt)
         let outcome = await cloner.run { line in
             if line == "started" { cloner.cancel() }
