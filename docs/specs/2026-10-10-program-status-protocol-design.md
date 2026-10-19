@@ -255,7 +255,8 @@ matches:
 2. Any task entry is `blocked` → `.awaitingInput`, labelled with that task's
    title.
 3. The main entry is `working`, or any task entry is `working` → `.working`,
-   with a count of working task entries.
+   with a count of working task entries carried in the resolution (the row
+   does not draw it).
 4. Otherwise → the main entry's `.done` or `.idle`.
 
 Rule 3 closes the gap that
@@ -273,7 +274,7 @@ For OSC-authoritative terminals only, with the flag on:
   running task entry keeps the row on the working badge even after the main
   entry stops working (rule 3); the row draws no count of running tasks,
   since a number beside the working dots crowds them and the tooltip
-  already names each task.
+  already lists every task entry with its state.
 - **Done shows as idle** – `.done` has no badge. Claude Code reports `done`
   after every turn and keeps it until the next one, so a badge for it would
   sit on nearly every waiting session. The row already marks the case that

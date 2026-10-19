@@ -369,8 +369,8 @@ public struct ProgramStatusSnapshot: Codable, Sendable, Equatable {
 /// The state an OSC-authoritative terminal resolves to.
 public struct ProgramStatusResolution: Sendable, Equatable {
     public let value: SessionStateValue
-    /// Task entries currently `working` — the row's background count. Set in
-    /// every branch, not only the working one.
+    /// Task entries currently `working`. Set in every branch, not only the
+    /// working one. The sidebar row does not draw it.
     public let workingTaskCount: Int
     public let observedAt: Date
 
