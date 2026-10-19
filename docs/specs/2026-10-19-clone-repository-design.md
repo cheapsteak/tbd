@@ -93,13 +93,17 @@ The `gh` call goes through an injected runner, like `PRStatusManager`'s
 - **Progress (app mode).** Each line git writes to stderr goes to a callback.
   git ends a progress update with a carriage return, so the reader splits on
   both `\r` and `\n`.
-- **Before starting.** `RepoCloner` refuses if `<dest>` already exists. It
-  records that it checked this, because that check is what later allows it to
-  delete the folder.
-- **Cancel.** Cancel sends SIGTERM to git. git deletes its own partial folder
-  when it receives that signal. After git exits, `RepoCloner` deletes `<dest>`
-  if it still exists, but only when its own check showed `<dest>` did not exist
-  before the clone.
+- **Before starting.** `RepoCloner` claims `<dest>` by creating it as an empty
+  folder with `mkdir`, after creating any missing parent folders. If `<dest>`
+  already exists, `mkdir` fails and `RepoCloner` refuses without starting git.
+  The claim is atomic: two clones aimed at the same path cannot both own it, so
+  neither can later delete the other's folder. git then clones into the empty
+  folder this run owns.
+- **Cancel and failure.** Cancel sends SIGTERM to git. When git fails or gets
+  that signal, it removes what it wrote but keeps the folder it was given.
+  After git exits, `RepoCloner` deletes the folder, because this run created
+  it. It never deletes a folder it did not claim, and it deletes nothing when
+  it cannot tell how git exited.
 - **No timeout.** A large repository can take many minutes to clone, and only
   the person knows whether to wait. So there is no new timer and no clock seam.
 
@@ -111,7 +115,10 @@ The app and the CLI run git in two different modes:
   fast with git's error, and does not hang.
 - **CLI: git is attached to the terminal.** git inherits the terminal, so the
   person sees git's own progress and git can ask for a password in the normal
-  way. Ctrl-C reaches git, which deletes its partial folder.
+  way. While git runs, the CLI ignores SIGINT and SIGQUIT, as `system(3)`
+  does. Ctrl-C still reaches git, which stops and cleans up; the CLI stays
+  alive long enough for `RepoCloner` to delete the claimed folder, then exits
+  non-zero.
 
 ## The app
 
@@ -148,7 +155,8 @@ The app and the CLI run git in two different modes:
 The fields lock. A spinner shows, with git's most recent progress line, for
 example `Receiving objects: 45% (1234/2700)`. "Cancel" stops the clone as
 described above. If the app quits during a clone, it sends SIGTERM to git
-first, so git can delete its partial folder.
+first, so git can remove what it wrote. The app does not wait for git to
+finish, so the empty claimed folder can stay behind (see "Who reclaims what").
 
 ### After the clone
 
@@ -203,13 +211,15 @@ for these reasons:
 - **The finished folder belongs to the person.** It is a repository in a
   location they chose. Once it is added, it is an ordinary local repository, and
   `repo.remove` does not delete a local repository's folder either.
-- **A failed or cancelled clone cleans itself up.** git deletes its partial
-  folder on failure, SIGINT and SIGTERM. `RepoCloner` also deletes it after a
-  cancel, but only when it created the folder.
-- **The one leak is visible and bounded.** If git is killed with SIGKILL, or the
-  machine loses power, a partial folder stays at the chosen path. The person can
-  see it there. The next clone to the same path refuses with "folder already
-  exists", so the leftover cannot pile up unseen.
+- **A failed or cancelled clone cleans itself up.** git removes what it wrote
+  on failure, SIGINT and SIGTERM. `RepoCloner` then deletes the folder, which
+  it claimed itself.
+- **The leaks are visible and bounded.** Two cases leave a folder at the chosen
+  path. If the app quits during a clone, it does not wait for git, so the empty
+  claimed folder can stay. If git is killed with SIGKILL, or the machine loses
+  power, a partial clone stays. Either way the person can see the folder there.
+  The next clone to the same path refuses with "folder already exists", so a
+  leftover cannot pile up unseen.
 - **A sweep would be worse than the leak.** TBD keeps no record of a clone
   attempt, so a sweep would have to guess which of the person's own folders to
   delete.
