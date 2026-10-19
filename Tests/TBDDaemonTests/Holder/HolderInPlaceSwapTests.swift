@@ -226,8 +226,8 @@ struct HolderInPlaceSwapTests {
     /// actuation says `transport-failed` rather than inheriting a success.
     ///
     /// The refusal is the park's own text, not a new one: this fixture's
-    /// registry adopted nothing, so the daemon holds no reader to write the
-    /// polite `/exit` through.
+    /// registry adopted nothing, so the daemon holds no reader for the
+    /// session, and a park refuses a session it has not adopted.
     @Test("a swap whose park refuses leaves the row awake on its old account and records transport-failed")
     func swapParkRefusalLeavesTheRowAwake() async throws {
         let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())

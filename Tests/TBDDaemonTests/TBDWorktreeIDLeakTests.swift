@@ -63,7 +63,11 @@ private final class ServerLockGate: @unchecked Sendable {
     }
 }
 
-private final class BlockingProfileInterruptProbe: @unchecked Sendable {
+/// Holds the first `respawn-window` it records until released: the in-place
+/// swap's respawn, reached with the server lock held and the replacement
+/// identity already reserved. The swap types nothing into the pane, so its
+/// respawn is the first tmux command it records inside the lock.
+private final class BlockingProfileRespawnProbe: @unchecked Sendable {
     private let lock = NSLock()
     private let releaseGate = DispatchSemaphore(value: 0)
     private var blocked = false
@@ -71,14 +75,14 @@ private final class BlockingProfileInterruptProbe: @unchecked Sendable {
     var isBlocked: Bool { lock.withLock { blocked } }
 
     func record(_ args: [String]) {
-        guard args.contains("send-keys") else { return }
+        guard args.contains("respawn-window") else { return }
         let shouldBlock = lock.withLock { () -> Bool in
             guard !blocked else { return false }
             blocked = true
             return true
         }
         if shouldBlock {
-            releaseGate.waitForGate("profile replacement interrupt")
+            releaseGate.waitForGate("profile replacement respawn")
         }
     }
 
@@ -748,16 +752,16 @@ func delayedClaudeReparkRejectsProfileReplacement() async throws {
             "a stale re-park must issue no kill, create, or respawn")
 }
 
-@Test("a re-park queued during profile interrupt leaves the replacement alive")
-func reparkDuringProfileInterruptLeavesReplacementAlive() async throws {
+@Test("a re-park queued during a profile replacement leaves the replacement alive")
+func reparkDuringProfileReplacementLeavesReplacementAlive() async throws {
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()
-    let profileInterrupt = BlockingProfileInterruptProbe()
+    let profileRespawn = BlockingProfileRespawnProbe()
     let tmux = TmuxManager(
         dryRun: true,
         dryRunRecorder: { args in
             recorded.append(args)
-            profileInterrupt.record(args)
+            profileRespawn.record(args)
         })
     let configDirs = ClaudeProfileConfigDirManager(
         baseDirectory: FileManager.default.temporaryDirectory
@@ -793,8 +797,8 @@ func reparkDuringProfileInterruptLeavesReplacementAlive() async throws {
         params: TerminalSwapProfileParams(
             terminalID: terminal.id, newProfileID: profile.id, mode: .inPlace))
     let profileTask = gateHoldingTask { await router.handle(profileRequest) }
-    guard await waitUntil({ profileInterrupt.isBlocked }, timeout: ciSafeDeadline) else {
-        profileInterrupt.release()
+    guard await waitUntil({ profileRespawn.isBlocked }, timeout: ciSafeDeadline) else {
+        profileRespawn.release()
         _ = await profileTask.value
         Issue.record("profile replacement never reached the respawn")
         return
@@ -817,13 +821,13 @@ func reparkDuringProfileInterruptLeavesReplacementAlive() async throws {
             $0["method"] as? String == RPCMethod.terminalRecreateWindow
         }) == true
     }, timeout: ciSafeDeadline) else {
-        profileInterrupt.release()
+        profileRespawn.release()
         _ = await profileTask.value
         _ = await repark.value
         Issue.record("re-park never reached the held server lock")
         return
     }
-    profileInterrupt.release()
+    profileRespawn.release()
 
     let profileResponse = await profileTask.value
     #expect(profileResponse.success)

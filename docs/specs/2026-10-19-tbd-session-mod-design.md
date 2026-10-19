@@ -394,16 +394,22 @@ gone. It sends SIGTERM to the Claude process. Claude Code's SIGTERM handler
 runs the same graceful shutdown as Ctrl+C and SIGHUP, so `session.end` makes
 the final save, and the existing escalation (`respawn-window -k` on tmux,
 abandon on the holder) still guarantees the process ends. The rule covers the
-tmux park, the holder park, and both in-place profile swaps. Without the
-feature, the tmux swap's Ctrl+C clears the box.
+tmux park and the holder park.
 
-An in-place profile swap ("Switch account") never refuses or asks, whatever
-the feature answers. It is an explicit gesture, and it ends and resumes the
-session the way a park and a wake do, so a confirmed draft comes back in the
-new process. When the answer is unknown, the swap restores whatever was last
-saved, which may be stale or missing; a draft marked not restorable comes back
-without its pasted content. A session spawned without the feature swaps as it
-always has. "Fork session" leaves the source session, and its draft, untouched.
+An in-place profile swap ("Switch account") ends by SIGTERM for every
+session, with or without the feature, on both transports, and types nothing
+into the terminal: no `/exit`, no Escape, no Ctrl+C. A swap skips the screen
+check that keeps a legacy park's typed `/exit` off a draft, so a typed `/exit`
+would land after whatever the box holds and Enter would submit it to the model.
+
+A swap never refuses or asks, whatever the feature answers. It is an explicit
+gesture, and it ends and resumes the session the way a park and a wake do, so
+a confirmed draft comes back in the new process. When the answer is unknown,
+the swap restores whatever was last saved, which may be stale or missing; a
+draft marked not restorable comes back without its pasted content. A session
+spawned without the feature has saved nothing, so its draft is lost at a swap
+and nothing restores it, but it is never typed into or sent. "Fork session"
+leaves the source session, and its draft, untouched.
 
 While the flag exists, a park of a confirmed session still runs
 `hasPendingInput`, only to compare with the feature. Each disagreement goes to
@@ -514,10 +520,17 @@ Each gating branch gets its own test.
   mark, reads `draft-not-restorable`; an empty box needs no mark.
 - **Park gate** – a legacy session takes the scrape path; a confirmed session
   follows its file and never consults the scrape's answer.
-- **Park ending** – a session spawned with the feature gets a signal and no
-  keys, asserted on the transport, for both transports and both profile swaps,
-  and against a real holder, where the job's own stdin records nothing and its
-  `SIGTERM` handler runs; a legacy session gets the typed `/exit` as today.
+- **Park ending** – a park of a session spawned with the feature gets a
+  signal and no keys, asserted on the transport, for both transports, and
+  against a real holder, where the job's own stdin records nothing and its
+  `SIGTERM` handler runs; a park of a legacy session gets the typed `/exit` as
+  today.
+- **Swap ending** – every in-place profile swap gets a signal and no keys,
+  whatever the session's status: the ending chosen for a swap is a signal for
+  legacy, unknown and confirmed sessions alike; the tmux swap sends no
+  `send-keys` and signals the Claude process under the pane, with and without
+  the feature; and against a real holder, a legacy session's swap park leaves
+  the job's stdin record empty and runs its `SIGTERM` handler.
 - **Manual park** – unknown returns the distinct refusal, and the override
   parks.
 - **Shadow log** – a disagreement produces the log line, asserted on its

@@ -61,12 +61,16 @@ gains a holder arm beside the tmux one. In order:
    earlier park stored, as every park does when it has no capture. Neither
    what the frame shows nor whether it can be read refuses the park.
    Everything else is the park as it stands: park intent is written before the
-   process is touched, then the ending ladder — polite `/exit`, poll,
-   `SIGTERM` to the identity-verified child, abandon the holder — and the same
-   "child survived the escalation" outcome, which rolls the park intent back
-   and leaves the row awake. The row parks with reason `.auto`, so a daemon
-   that dies between the halves leaves a row the next focus-wake heals, not
-   one that needs a manual wake.
+   process is touched, then the ending ladder from its `SIGTERM` rung —
+   `SIGTERM` to the identity-verified child, poll, abandon the holder — and the
+   same "child survived the escalation" outcome, which rolls the park intent
+   back and leaves the row awake. The ladder's typed `/exit` rung is skipped
+   for every session: with the typed-input rail skipped, `/exit` would land
+   after whatever draft the composer holds and submit it (see
+   [`2026-10-19-tbd-session-mod-design.md`](2026-10-19-tbd-session-mod-design.md),
+   "Parking"). The row parks with reason `.auto`, so a daemon that dies
+   between the halves leaves a row the next focus-wake heals, not one that
+   needs a manual wake.
 2. **Re-home**, which is the existing cold-swap block: set the parked row's
    `profile_id` to the destination profile and broadcast
    `terminalProfileChanged`. The transcript carry already happened upstream.

@@ -43,7 +43,16 @@ extension TBDHomeSerialized {
         let router: RPCRouter
         let terminal: Terminal
         let deltas: FireRecorder<StateDelta>
+        /// Where the swap's SIGTERM goes. A fake, so nothing real is signalled.
+        let signaller: FakeProcessSignaller
     }
+
+    /// The pane's shell pid, as the dry-run tmux answers it, and the Claude
+    /// process the inspector finds beneath it: the pid the swap's signal
+    /// ending sends SIGTERM to. Both sit above macOS's PID_MAX (99999), so
+    /// neither can name a real process.
+    private static let shellPID: Int32 = 900_021
+    private static let claudePID: Int32 = 900_022
 
     private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
         let home = FileManager.default.temporaryDirectory
@@ -84,7 +93,14 @@ extension TBDHomeSerialized {
             try await db.terminals.updateSession(
                 id: terminal.id, sessionID: "sess-swap", transcriptPath: transcript)
         }
-        let tmux = TmuxManager(dryRun: true, dryRunRecorder: recorder)
+        // The pane answers a shell pid with Claude beneath it, so the swap's
+        // signal ending finds a process to SIGTERM and then polls on `clock`.
+        // The dry-run pane reports `zsh` as its current command, so the first
+        // poll after that sleep sees Claude gone.
+        let tmux = TmuxManager(
+            dryRun: true, dryRunRecorder: recorder,
+            dryRunPanePID: { _, _ in String(Self.shellPID) })
+        let signaller = FakeProcessSignaller()
         let deltas = FireRecorder<StateDelta>()
         let subscriptions = StateSubscriptionManager()
         subscriptions.addSubscriber { data in
@@ -101,10 +117,13 @@ extension TBDHomeSerialized {
             startTime: Date(),
             subscriptions: subscriptions,
             configDirManager: isolatedConfigDirManager(),
+            paneProcessInspector: FakeInspector(claudePID: Self.claudePID),
+            processSignaller: signaller,
             actuationLog: makeTestActuationLog(),
             clock: clock)
         let reloaded = try #require(try await db.terminals.get(id: terminal.id))
-        return Fixture(db: db, router: router, terminal: reloaded, deltas: deltas)
+        return Fixture(
+            db: db, router: router, terminal: reloaded, deltas: deltas, signaller: signaller)
     }
 
     private func swap(
@@ -129,10 +148,13 @@ extension TBDHomeSerialized {
 
     // MARK: -
 
-    /// The interrupt itself can deliver SessionEnd before respawn. That hook
+    /// The swap's SIGTERM can deliver SessionEnd before respawn. That hook
     /// must describe the predecessor, never park the row being replaced.
-    @Test(.clockDriven, arguments: [true, false])
-    func sessionEndDuringInterruptDoesNotAbortSwap(afterEscape: Bool) async throws {
+    ///
+    /// The hooks land while the signal ending polls for Claude to leave: the
+    /// one sleep between the SIGTERM and the respawn.
+    @Test(.clockDriven, arguments: ["permission_prompt", "idle_prompt"])
+    func sessionEndDuringTheSignalEndingDoesNotAbortSwap(notificationType: String) async throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let clock = EventDrivenTestClock()
@@ -145,31 +167,27 @@ extension TBDHomeSerialized {
         defer { task.cancel() }
 
         try await clock.requireSleeperArmed()
-        if !afterEscape {
-            try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
-            try await clock.requireSleeperArmed()
-        }
+        #expect(fixture.signaller.terminatedProcessOnly == [Self.claudePID],
+                "the swap was not polling after its SIGTERM")
         let stamped = try await fixture.db.terminals.stampSessionExited(
             id: predecessor.id,
             reportedIncarnationID: predecessor.sessionIncarnationID)
-        #expect(!stamped, "the interrupted predecessor must already be fenced")
+        #expect(!stamped, "the signalled predecessor must already be fenced")
         // Notification predates incarnation tokens. Unlike SessionEnd it can
-        // still write during the interrupt, so the swap must retract its
+        // still write during the ending, so the swap must retract its
         // persisted reason before the successor starts.
         let notification = try RPCRequest(
             method: RPCMethod.terminalNotificationEvent,
             params: TerminalNotificationEventParams(
                 terminalID: predecessor.id,
-                notificationType: afterEscape ? "permission_prompt" : "idle_prompt",
+                notificationType: notificationType,
                 message: "Predecessor prompt"))
         #expect((await fixture.router.handle(notification)).success)
         let interrupted = try #require(try await fixture.db.terminals.get(id: predecessor.id))
         #expect(interrupted.awaitingInputReason != nil)
 
-        try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
-        if afterEscape {
-            try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
-        }
+        try await clock.requireAdvanceWhenArmed(
+            by: fixture.router.hibernationCoordinator.exitPollInterval)
 
         let response = try await task.value
         #expect(response.error == nil, "swap errored: \(response.error ?? "")")
@@ -189,6 +207,8 @@ extension TBDHomeSerialized {
         #expect(try await fixture.db.terminals.list(worktreeID: after.worktreeID).count == 1)
         #expect(commands.values.filter { $0.contains("respawn-window") }.count == 1)
         #expect(!commands.values.contains { $0.contains("new-window") })
+        #expect(!commands.values.contains { $0.contains("send-keys") },
+                "the swap typed into the pane it was ending")
     }
 
     @Test(.clockDriven)
@@ -208,7 +228,7 @@ extension TBDHomeSerialized {
             id: fixture.terminal.id,
             reason: AwaitingInputReason(message: "Predecessor prompt", hookEventName: "Notification"),
             observedAt: Date())
-        // Fail only the post-interrupt metadata clear, after the replacement
+        // Fail only the post-ending metadata clear, after the replacement
         // reservation has already committed. All reads and respawn work remain
         // available, just as with a transient failure of this one write.
         try await fixture.db.writerForTests.write { database in
@@ -221,8 +241,8 @@ extension TBDHomeSerialized {
                 END
                 """)
         }
-        try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
-        try await clock.requireAdvanceWhenArmed(by: .milliseconds(150))
+        try await clock.requireAdvanceWhenArmed(
+            by: fixture.router.hibernationCoordinator.exitPollInterval)
 
         let response = try await task.value
         #expect(response.success, "metadata cleanup must not abort respawn: \(response.error ?? "")")

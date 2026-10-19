@@ -185,6 +185,40 @@ struct HolderHibernationLiveTests {
         }, "the recorder never saw the legacy park's typed /exit")
     }
 
+    /// A profile swap's park of a session spawned without the feature ends by
+    /// signal and types nothing too. A swap skips the screen check that keeps
+    /// a legacy park's typed `/exit` off a draft, so a typed `/exit` would
+    /// land after whatever the box holds and submit it to the model.
+    ///
+    /// No session-mod files are seeded, so the session reads legacy; the
+    /// recording job is the one `theStdinRecorderSeesTheLegacyExit` shows
+    /// seeing a manual park's `/exit`, which is what makes the empty record
+    /// here mean the swap's ladder started at SIGTERM.
+    @Test func profileSwapParkOfALegacySessionSignalsAndTypesNothing() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath))
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.parkForProfileSwap(terminalID: terminal.id)
+        #expect(result == .ok, "swap park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(parked.childPID == nil)
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the swap park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(!typed.contains("/exit"),
+                "the swap park typed /exit into a legacy session: \(typed.debugDescription)")
+        #expect(typed.isEmpty,
+                "the swap park wrote to a legacy session's terminal: \(typed.debugDescription)")
+    }
+
     /// Wake after that park: a fresh holder, a fresh job, and a row that names
     /// both and is no longer parked.
     ///

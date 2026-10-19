@@ -141,9 +141,11 @@ enum HolderParkLadder {
         case abandon
     }
 
-    /// A legacy session starts with the typed `/exit`. A session spawned with
-    /// the composer-draft feature skips it and starts at SIGTERM, so nothing is
-    /// ever typed into its composer. The forced rung follows either way.
+    /// A typed ending, a park of a session spawned without the
+    /// composer-draft feature, starts with `/exit`. A signal ending, every
+    /// profile swap and every park of a session spawned with the feature,
+    /// skips it and starts at SIGTERM, so nothing is typed into the composer.
+    /// The forced rung follows either way.
     static func firstRung(for style: ParkEndingStyle) -> Rung {
         switch style {
         case .typedExit: return .typedExit
@@ -530,7 +532,9 @@ extension HibernationCoordinator {
         // arm of the same action has never asked it. It still reads the
         // screen once, for the backdrop alone: the tab shows the last frame
         // under its "Switching account" caption for the second or two the
-        // ladder takes. See `holderSwapBackdrop`.
+        // ladder takes. See `holderSwapBackdrop`. Having not judged the
+        // screen, the swap's park types nothing into it: its ladder starts at
+        // SIGTERM, below.
         let capturedSnapshot: String?
         if sessionEnded {
             capturedSnapshot = nil
@@ -561,9 +565,9 @@ extension HibernationCoordinator {
         // The reader the polite `/exit` below is written through. Read after
         // the rail rather than inside it: the rail's subject is the screen, and
         // a reader that answered a live screen a moment ago is the one this
-        // park writes to. A session spawned with the composer-draft feature is
-        // never written to, and is still refused without one: no reader means
-        // a session this daemon has not adopted, whatever the ending.
+        // park writes to. A park that ends by signal never writes to it, and
+        // is still refused without one: no reader means a session this daemon
+        // has not adopted, whatever the ending.
         let reader: HolderReader?
         if sessionEnded {
             reader = nil
@@ -634,10 +638,12 @@ extension HibernationCoordinator {
         // exit and nothing to signal, and `sessionHasEnded` has already
         // established that the child is gone.
         //
-        // A session spawned with the composer-draft feature skips this rung
-        // and starts at SIGTERM: a typed `/exit` would go through its composer,
-        // and nothing is ever typed there to end it. `HolderParkLadder` picks
-        // the rung from `spawnedWithFeature` alone.
+        // A profile swap, and a park of a session spawned with the
+        // composer-draft feature, skip this rung and start at SIGTERM: a typed
+        // `/exit` would go through the composer. A swap skips the screen check
+        // that keeps `/exit` off a draft, and a feature session is never typed
+        // into to end it. `ComposerDraftParkGate.endingStyle(for:policy:)`
+        // makes that choice and `HolderParkLadder` maps it to a rung.
         let firstRung = HolderParkLadder.firstRung(for: composerDraft.endingStyle)
         var gone = sessionEnded
         if let reader, firstRung == .typedExit {
@@ -676,7 +682,7 @@ extension HibernationCoordinator {
                 if firstRung == .typedExit {
                     logger.debug("hibernate: /exit did not end the job for \(terminal.id, privacy: .public) within the poll window — sending SIGTERM to child \(childPID, privacy: .public)")
                 } else {
-                    logger.debug("hibernate: ending \(terminal.id, privacy: .public) by SIGTERM to child \(childPID, privacy: .public) — a session spawned with the composer-draft feature is never typed into")
+                    logger.debug("hibernate: ending \(terminal.id, privacy: .public) by SIGTERM to child \(childPID, privacy: .public) — neither a profile swap nor a session spawned with the composer-draft feature is typed into")
                 }
                 signaller.terminateProcessOnly(childPID)
                 gone = await pollUntilChildIsGone(

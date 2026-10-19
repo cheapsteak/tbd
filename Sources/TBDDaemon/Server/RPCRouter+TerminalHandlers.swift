@@ -3093,8 +3093,8 @@ extension RPCRouter {
     ///   `.alreadyHibernated` whenever any other hibernate of this terminal is
     ///   mid-ladder — the idle sweep's autopark, a racing "Hibernate now" —
     ///   independent of whether that ladder will finish. The holder park
-    ///   writes `hibernatedAt` as INTENT before it sends the polite `/exit`,
-    ///   so the row can read parked while its ladder is still deciding, and a
+    ///   writes `hibernatedAt` as INTENT before it touches the process, so
+    ///   the row can read parked while its ladder is still deciding, and a
     ///   child that survives the escalation makes that ladder call
     ///   `clearHibernated`. A re-home committed in between would land the row
     ///   awake, labelled with the NEW account, while the un-killed process
@@ -3128,10 +3128,10 @@ extension RPCRouter {
     /// tab — answers in-flight instead of racing the re-home.
     ///
     /// - Parameter resumeProjectsRoot: the destination profile's `projects/`
-    ///   tree on a resume, nil on a fresh spawn. The park's polite `/exit` is
-    ///   what makes Claude flush the tail of its transcript, so the copy the
-    ///   handler took before the park is short by exactly that flush; this is
-    ///   where the arm re-takes it.
+    ///   tree on a resume, nil on a fresh spawn. The park's SIGTERM runs
+    ///   Claude's graceful shutdown, which flushes the tail of its transcript,
+    ///   so the copy the handler took before the park is short by exactly that
+    ///   flush; this is where the arm re-takes it.
     /// - Parameter composeSpawn: the swap's command, composed from the base
     ///   URL the route decides. A closure because the route may only be minted
     ///   after the park.
@@ -3254,9 +3254,9 @@ extension RPCRouter {
         // 1b. RE-CARRY the transcript, now that the park has ended. The handler
         //     copied it into the destination config dir before the transport
         //     branch, and that copy skips a destination that already exists —
-        //     but the park's polite `/exit` is precisely the gesture that makes
-        //     Claude flush the tail of the conversation, and that flush lands
-        //     in the SOURCE profile's jsonl afterwards. Without this pass the
+        //     but the park's SIGTERM runs exactly the graceful shutdown that
+        //     makes Claude flush the tail of the conversation, and that flush
+        //     lands in the SOURCE profile's jsonl afterwards. Without this pass the
         //     resume below reads a copy that stops short of the last turn.
         //     Copy-if-newer, detached off this handler's executor, and
         //     best-effort in the same way the carry upstream is: every failure
@@ -3473,10 +3473,10 @@ extension RPCRouter {
     }
 
     /// `.inPlace` swap (seamless "Switch account"): gracefully stop the pane's
-    /// current Claude (the keyed interrupt for a legacy session, SIGTERM for
-    /// one spawned with the composer-draft feature), respawn `claude` under the
-    /// new profile IN THE SAME tmux window, and update the EXISTING terminal
-    /// row (new profile id, same session id + tmux ids). One tab, no new row.
+    /// current Claude by SIGTERM, typing nothing into the pane, respawn
+    /// `claude` under the new profile IN THE SAME tmux window, and update the
+    /// EXISTING terminal row (new profile id, same session id + tmux ids). One
+    /// tab, no new row.
     ///
     /// The terminal row's `profile_id` is set to the new profile BEFORE the
     /// respawn so a respawn failure still leaves the row on the new account
@@ -3488,6 +3488,15 @@ extension RPCRouter {
     /// caller's actuation row can say `transport-failed` instead of inheriting
     /// the response's success. Callers must hold the worktree tmux-server lock
     /// across this whole helper.
+    ///
+    /// **Acts on an unverified coordinate (issue #384).** `paneID` and
+    /// `windowID` come from the terminal row, and tmux reuses pane ids, so a
+    /// stale row aims the SIGTERM's lookup and the forced respawn at a live
+    /// stranger. Unlike `terminal.send`, which consults `paneSendTarget` and
+    /// refuses on disagreement, nothing here consults it: what a *refusal*
+    /// should do to a user's account switch (fail it, mark the row, or fall
+    /// back to a coordinate-free path) is a product decision, and belongs in a
+    /// spec rather than being bolted on here.
     private func inPlaceSwapRespawn(
         oldTerminal: Terminal,
         worktree: Worktree,
@@ -3504,18 +3513,6 @@ extension RPCRouter {
         let paneID = oldTerminal.tmuxPaneID
         let windowID = oldTerminal.tmuxWindowID
         var respawnError: String?
-
-        // 0. How the old process ends, read before step 1 rotates the row's
-        //    incarnation and before the launch below rewrites the session's
-        //    spawn record: both name the replacement, and this question is
-        //    about the process being replaced. Only whether it was spawned
-        //    with the composer-draft feature matters here — a swap proceeds on
-        //    an unconfirmed draft — so the status is read for its ending alone.
-        let endingStyle = ComposerDraftParkGate.endingStyle(for: ComposerDraftStatus.read(
-            sessionsDir: sessionsDir,
-            claudeSessionID: oldTerminal.claudeSessionID,
-            liveIncarnationID: oldTerminal.sessionIncarnationID,
-            now: now()))
 
         // 1. Reserve the replacement identity before interrupting the old
         //    process. Its SessionEnd hook can arrive during the graceful stop:
@@ -3538,22 +3535,21 @@ extension RPCRouter {
         // 2. Gracefully stop the old process after fencing its hooks.
         //    `respawn-window -k` remains the termination guarantee; the graceful
         //    stop gives Claude a chance to flush before the forced replacement.
-        switch endingStyle {
-        case .typedExit:
-            await gracefullyInterruptPane(server: server, paneID: paneID)
-        case .signal:
-            // A session spawned with the composer-draft feature is never typed
-            // into: the keyed interrupt's Ctrl+C would clear its box, and the
-            // feature would record the draft as gone. SIGTERM runs the same
-            // graceful shutdown, so `session.end` makes the final save. The
-            // poll window is the park's, so a swap waits for that save exactly
-            // as long as a park does.
-            await TmuxSignalEnding.end(
-                tmux: tmux, server: server, paneID: paneID, terminalID: oldTerminal.id,
-                inspector: paneProcessInspector, signaller: processSignaller, clock: clock,
-                attempts: hibernationCoordinator.exitPollAttempts,
-                interval: hibernationCoordinator.exitPollInterval)
-        }
+        //
+        //    By SIGTERM for every session, spawned with the composer-draft
+        //    feature or not, and nothing typed into the pane: a swap runs no
+        //    screen check, so a typed `/exit` would submit whatever draft the
+        //    box holds, and a Ctrl+C would clear a draft the feature then
+        //    records as gone. See
+        //    `ComposerDraftParkGate.endingStyle(for:policy:)`. SIGTERM runs
+        //    the same graceful shutdown, so a feature session's `session.end`
+        //    makes the final save. The poll window is the park's, so a swap
+        //    waits for that save exactly as long as a park does.
+        await TmuxSignalEnding.end(
+            tmux: tmux, server: server, paneID: paneID, terminalID: oldTerminal.id,
+            inspector: paneProcessInspector, signaller: processSignaller, clock: clock,
+            attempts: hibernationCoordinator.exitPollAttempts,
+            interval: hibernationCoordinator.exitPollInterval)
         // Legacy Notification hooks carry no incarnation token. Retract any
         // wait reason the predecessor recorded during the interrupt, before
         // launching a successor that could raise a legitimate new prompt.
@@ -3637,39 +3633,6 @@ extension RPCRouter {
 
         logger.info("inPlace swap: terminal \(oldTerminal.id, privacy: .public) switched to profile \(newProfileID?.uuidString ?? "ambient", privacy: .public) in window \(windowID, privacy: .public)")
         return (try RPCResponse(result: updated), respawnError)
-    }
-
-    /// Best-effort graceful interrupt of a legacy session's foreground program
-    /// before an in-place respawn: Escape (stop a Claude generation), a brief
-    /// settle, then C-c C-c, another settle, then a SIGTERM to the pane pid as
-    /// a backstop. Every step is best-effort — failures are logged and
-    /// ignored, since the subsequent `respawn-window -k` guarantees
-    /// termination. Never used on a session spawned with the composer-draft
-    /// feature, which `TmuxSignalEnding` ends without a keystroke.
-    ///
-    /// **Acts on an unverified coordinate (issue #384).** `paneID` comes from
-    /// the terminal row, and tmux reuses pane ids, so a stale row aims this at
-    /// a live stranger — and unlike `terminal.send`, which now consults
-    /// `paneSendTarget` before typing and refuses on disagreement, what lands
-    /// here is a SIGTERM and then a forced respawn of that window. The
-    /// consultation is not the missing piece: what a *refusal* should do to a
-    /// user's account switch or hibernate is a product decision (fail it, mark
-    /// the row, or fall back to a coordinate-free path), and belongs in a spec
-    /// rather than being bolted on here. Same note on
-    /// `HibernationCoordinator`'s copy of this helper.
-    private func gracefullyInterruptPane(server: String, paneID: String) async {
-        // Escape: ask Claude to stop generating.
-        try? await tmux.sendKey(server: server, paneID: paneID, key: "Escape")
-        try? await clock.sleep(for: .milliseconds(150))
-        // C-c C-c: interrupt / exit the TUI.
-        try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
-        try? await tmux.sendKey(server: server, paneID: paneID, key: "C-c")
-        try? await clock.sleep(for: .milliseconds(150))
-        // SIGTERM the pane pid as a backstop (respawn -k is the real guarantee).
-        if let pidStr = try? await tmux.panePID(server: server, paneID: paneID),
-           let pid = Int32(pidStr), pid > 0 {
-            kill(pid, SIGTERM)
-        }
     }
 
     /// Schedule the post-resume session-id recapture. `claude --resume <id>

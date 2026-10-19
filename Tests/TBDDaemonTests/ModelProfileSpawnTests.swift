@@ -1394,16 +1394,16 @@ struct ModelProfileSpawnTests {
 
     /// The pane's own pid — its login-shell wrapper — and the Claude process
     /// beneath it, for the swap's signal ending. Both sit above macOS's
-    /// PID_MAX (99999), so no regression into the keyed interrupt's raw `kill`
-    /// of the pane pid can reach a real process; the Claude pid only ever
-    /// reaches the fake signaller.
+    /// PID_MAX (99999), so a regression into a raw `kill` of either cannot
+    /// reach a real process; the Claude pid only ever reaches the fake
+    /// signaller.
     private static let swapShellPID: Int32 = 900_011
     private static let swapClaudePID: Int32 = 900_012
 
     /// The tmux in-place swap of a session spawned with the composer-draft
-    /// feature types nothing into the pane — the keyed interrupt's Ctrl+C
-    /// would clear its box — and sends SIGTERM to the Claude pid under the
-    /// pane's shell before the respawn.
+    /// feature types nothing into the pane — a Ctrl+C would clear its box —
+    /// and sends SIGTERM to the Claude pid under the pane's shell before the
+    /// respawn.
     @Test("in-place swap of a composer-draft session: SIGTERM to Claude, no keys")
     func featureTmuxSwapSendsNoKeys() async throws {
         let sessionsDir = try makeSessionsDir()
@@ -1444,17 +1444,19 @@ struct ModelProfileSpawnTests {
         #expect(signaller.terminated == [Self.swapClaudePID], "a signal went somewhere else too")
     }
 
-    /// The same swap of a session spawned without the feature keeps the keyed
-    /// interrupt and never reaches the signaller. Its pane pid stays the
-    /// dry-run "0", so the interrupt's raw backstop `kill` has nothing to aim
-    /// at.
-    @Test("in-place swap of a legacy session: keyed interrupt, signaller untouched")
-    func legacyTmuxSwapKeepsTheKeyedInterrupt() async throws {
+    /// The same swap of a session spawned without the feature — flag off, no
+    /// spawn record — types nothing either and ends by the same SIGTERM. A
+    /// swap runs no screen check, so a typed `/exit` would submit whatever
+    /// draft the box holds; no Escape, Ctrl+C or `/exit` reaches the pane, and
+    /// the only signal is the one to the Claude pid under the pane's shell.
+    @Test("in-place swap of a legacy session: SIGTERM to Claude, no keys")
+    func legacyTmuxSwapSendsNoKeys() async throws {
         let sessionsDir = try makeSessionsDir()
         defer { try? FileManager.default.removeItem(at: sessionsDir) }
         let signaller = FakeProcessSignaller()
         let (router, db, recorder) = makeFixture(
             sessionsDir: sessionsDir,
+            panePID: String(Self.swapShellPID),
             paneProcessInspector: FakeInspector(claudePID: Self.swapClaudePID),
             processSignaller: signaller)
         defer { Task { await cleanup(db) } }
@@ -1463,6 +1465,11 @@ struct ModelProfileSpawnTests {
         let b = try await seedOAuthProfile(db, name: "B")
         try await db.config.setDefaultProfileID(a.id)
         let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+        // Legacy by construction: the flag was never turned on, so the create
+        // wrote no spawn record and the session reads as spawned without the
+        // feature.
+        let sessionID = try #require(oldTerm.claudeSessionID)
+        #expect(readSpawnRecord(sessionsDir: sessionsDir, sessionID: sessionID) == nil)
 
         let beforeSwap = recorder.calls.count
         let swapResp = await router.handle(try RPCRequest(
@@ -1472,9 +1479,11 @@ struct ModelProfileSpawnTests {
         #expect(swapResp.success, "swap failed: \(swapResp.error ?? "nil")")
 
         let postSwap = Array(recorder.calls.dropFirst(beforeSwap)).map { $0.joined(separator: " ") }
-        #expect(postSwap.contains { $0.contains("send-keys") && $0.contains("C-c") },
-                "a legacy session lost its keyed interrupt: \(postSwap)")
-        #expect(signaller.terminated.isEmpty)
+        let keys = postSwap.filter { $0.contains("send-keys") }
+        #expect(keys.isEmpty, "the swap typed into a legacy session: \(keys)")
+        #expect(postSwap.contains { $0.contains("respawn-window") })
+        #expect(signaller.terminatedProcessOnly == [Self.swapClaudePID])
+        #expect(signaller.terminated == [Self.swapClaudePID], "a signal went somewhere else too")
     }
 
     /// Give `term`'s session a BLANK transcript on disk: the file exists and

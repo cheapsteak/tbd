@@ -24,7 +24,8 @@ enum ComposerDraftParkDecision: Equatable, Sendable {
 /// replaces. See `docs/specs/2026-10-19-tbd-session-mod-design.md`, "Parking".
 enum ParkEndingStyle: Equatable, Sendable {
     /// `/exit` typed into the composer, then the transport's existing
-    /// fallbacks. Only a session spawned without the feature ends this way.
+    /// fallbacks. Only a park of a session spawned without the feature ends
+    /// this way, never a profile swap.
     case typedExit
     /// SIGTERM to the Claude process, and nothing typed into its terminal.
     case signal
@@ -59,20 +60,35 @@ enum ComposerDraftParkGate {
         }
     }
 
-    /// How the park ends the process: a typed `/exit` only for a legacy
-    /// session.
+    /// How the park ends the process: a typed `/exit` only for a park of a
+    /// legacy session.
+    ///
+    /// A profile swap ends by signal whatever the status. It honours no live
+    /// rail, so the screen check that keeps a legacy park's typed `/exit` off
+    /// a draft never runs, and a typed `/exit` would land after whatever the
+    /// box holds and submit it to the model. A legacy session's draft is lost
+    /// at a swap, since nothing saved it, but it is never typed into or sent.
+    /// The tmux in-place swap, which never reaches a park, ends by signal for
+    /// the same reason.
     ///
     /// A session spawned with the feature is never typed into: no `/exit`, and
     /// no Escape or Ctrl+C fallback either, because a daemon-sent Ctrl+C clears
     /// the box and the feature would record the draft as gone. SIGTERM runs
     /// the same graceful shutdown, so `session.end` still makes the final save.
     ///
-    /// Reads only `spawnedWithFeature`, which the replacement-snapshot check
-    /// keeps stable across the wait for the server lock. Whether the box holds
-    /// a draft, and how fresh the heartbeat is, never change how the process
-    /// ends.
-    static func endingStyle(for status: ComposerDraftStatus) -> ParkEndingStyle {
-        status.spawnedWithFeature ? .signal : .typedExit
+    /// Reads the policy and `spawnedWithFeature`, which the
+    /// replacement-snapshot check keeps stable across the wait for the server
+    /// lock. Whether the box holds a draft, and how fresh the heartbeat is,
+    /// never change how the process ends.
+    static func endingStyle(
+        for status: ComposerDraftStatus, policy: HibernateEligibilityPolicy
+    ) -> ParkEndingStyle {
+        switch policy {
+        case .profileSwap:
+            return .signal
+        case .manual, .merge, .automatic:
+            return status.spawnedWithFeature ? .signal : .typedExit
+        }
     }
 
     /// The log line for a park where the feature and the pending-input scrape
@@ -110,15 +126,17 @@ enum ComposerDraftParkGate {
 struct ComposerDraftParkContext: Sendable {
     let status: ComposerDraftStatus
     let decision: ComposerDraftParkDecision
+    /// The park's policy, which the ending reads beside `status`.
+    let policy: HibernateEligibilityPolicy
     /// Where a shadow disagreement goes. Nil logs it at `.notice`, which is
     /// what production does; a test records the lines through the
     /// coordinator's `composerDraftShadowLog` seam.
     var shadowLog: (@Sendable (String) -> Void)?
 
     /// How the transport leg ends the process. See
-    /// `ComposerDraftParkGate.endingStyle(for:)`.
+    /// `ComposerDraftParkGate.endingStyle(for:policy:)`.
     var endingStyle: ParkEndingStyle {
-        ComposerDraftParkGate.endingStyle(for: status)
+        ComposerDraftParkGate.endingStyle(for: status, policy: policy)
     }
 
     /// Whether one pending-input scrape result refuses the park.
@@ -156,8 +174,8 @@ struct ComposerDraftParkContext: Sendable {
 }
 
 /// Ends the Claude process in a tmux pane by signal, typing nothing into the
-/// pane: the ending of a session spawned with the composer-draft feature, for
-/// both the tmux park and the tmux in-place profile swap.
+/// pane: the tmux park's ending for a session spawned with the composer-draft
+/// feature, and the tmux in-place profile swap's ending for every session.
 ///
 /// The pane's own pid is its login-shell wrapper, so the Claude process is
 /// looked up beneath it on the process table, never read off the screen.

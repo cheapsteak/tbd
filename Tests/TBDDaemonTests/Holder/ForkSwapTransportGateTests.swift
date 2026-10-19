@@ -270,8 +270,8 @@ struct ForkSwapTransportGateTests {
 
     /// `.inPlace` on a holder row is no longer refused on its transport: it
     /// takes the holder arm, which parks the session first. This fixture's
-    /// registry adopted nothing, so the park stops at the reader the polite
-    /// `/exit` needs — enough to say the transport is not what stopped it, and
+    /// registry adopted nothing, so the park stops at its reader lookup —
+    /// enough to say the transport is not what stopped it, and
     /// enough to say the fork path below is still the only one that spawns.
     /// The arm itself is `HolderInPlaceSwapTests` and the live suite.
     @Test("an in-place swap on a holder row takes the holder arm rather than refusing")

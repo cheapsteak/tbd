@@ -149,15 +149,18 @@ func writeComposerDraftSession(
     /// The fast rail and the authoritative read answer alike.
     @Test func onlyALegacyParkIsRefusedOnTheScrape() {
         let id = UUID()
-        let legacy = ComposerDraftParkContext(status: .legacy, decision: .legacy)
+        let legacy = ComposerDraftParkContext(status: .legacy, decision: .legacy, policy: .manual)
         #expect(legacy.scrapeRefuses(hasPendingInput: true))
         #expect(!legacy.scrapeRefuses(hasPendingInput: false))
         #expect(legacy.judgeAuthoritativeScrape(hasPendingInput: true, terminalID: id))
         #expect(!legacy.judgeAuthoritativeScrape(hasPendingInput: false, terminalID: id))
         let proceeding = [
-            ComposerDraftParkContext(status: .confirmed(hasDraft: false), decision: .proceed),
-            ComposerDraftParkContext(status: .confirmed(hasDraft: true), decision: .proceed),
-            ComposerDraftParkContext(status: .unknown(.noAliveFile), decision: .proceed),
+            ComposerDraftParkContext(
+                status: .confirmed(hasDraft: false), decision: .proceed, policy: .manual),
+            ComposerDraftParkContext(
+                status: .confirmed(hasDraft: true), decision: .proceed, policy: .manual),
+            ComposerDraftParkContext(
+                status: .unknown(.noAliveFile), decision: .proceed, policy: .manual),
         ]
         for context in proceeding {
             #expect(!context.scrapeRefuses(hasPendingInput: true))
@@ -174,7 +177,8 @@ func writeComposerDraftSession(
         let id = UUID()
         let lines = ShadowLines()
         let confirmedEmpty = ComposerDraftParkContext(
-            status: .confirmed(hasDraft: false), decision: .proceed, shadowLog: lines.append)
+            status: .confirmed(hasDraft: false), decision: .proceed, policy: .manual,
+            shadowLog: lines.append)
 
         _ = confirmedEmpty.scrapeRefuses(hasPendingInput: true)
         #expect(lines.snapshot().isEmpty, "the fast rail compared")
@@ -186,9 +190,11 @@ func writeComposerDraftSession(
         #expect(lines.snapshot() == [expected])
 
         let unanswered = [
-            ComposerDraftParkContext(status: .legacy, decision: .legacy, shadowLog: lines.append),
             ComposerDraftParkContext(
-                status: .unknown(.noAliveFile), decision: .proceed, shadowLog: lines.append),
+                status: .legacy, decision: .legacy, policy: .manual, shadowLog: lines.append),
+            ComposerDraftParkContext(
+                status: .unknown(.noAliveFile), decision: .proceed, policy: .manual,
+                shadowLog: lines.append),
         ]
         for context in unanswered {
             _ = context.judgeAuthoritativeScrape(hasPendingInput: true, terminalID: id)
@@ -196,30 +202,79 @@ func writeComposerDraftSession(
         #expect(lines.snapshot().count == 1, "a session with no feature answer was compared")
     }
 
-    /// Only a session spawned without the feature is ended by typing `/exit`.
-    /// Every other status — confirmed with or without a draft, and every
-    /// unknown reason — ends by signal: the ending reads `spawnedWithFeature`
-    /// and nothing else.
-    @Test func endingStyleIsTypedExitOnlyForLegacy() {
-        #expect(ComposerDraftParkGate.endingStyle(for: .legacy) == .typedExit)
-        let featureStatuses: [ComposerDraftStatus] = [
-            .confirmed(hasDraft: false),
-            .confirmed(hasDraft: true),
-            .unknown(.noAliveFile),
-            .unknown(.otherIncarnation),
-            .unknown(.staleHeartbeat),
-            .unknown(.featureNotRunning),
-            .unknown(.unreadableFile),
-            .unknown(.draftNotRestorable),
-        ]
-        for status in featureStatuses {
-            #expect(ComposerDraftParkGate.endingStyle(for: status) == .signal,
-                    "\(status) was typed into")
-            #expect(ComposerDraftParkContext(status: status, decision: .proceed).endingStyle
-                == .signal)
+    /// Every status the feature can answer: legacy, then confirmed with and
+    /// without a draft, then every unknown reason.
+    private static let everyStatus: [ComposerDraftStatus] = [.legacy] + featureStatuses
+
+    /// Every status of a session spawned with the feature.
+    private static let featureStatuses: [ComposerDraftStatus] = [
+        .confirmed(hasDraft: false),
+        .confirmed(hasDraft: true),
+        .unknown(.noAliveFile),
+        .unknown(.otherIncarnation),
+        .unknown(.staleHeartbeat),
+        .unknown(.featureNotRunning),
+        .unknown(.unreadableFile),
+        .unknown(.draftNotRestorable),
+    ]
+
+    /// The park policies: every policy but the profile swap.
+    private static let parkPolicies: [HibernateEligibilityPolicy] = everyPolicy.filter {
+        if case .profileSwap = $0 { return false }
+        return true
+    }
+
+    /// Only a park of a session spawned without the feature is ended by typing
+    /// `/exit`. Every other status — confirmed with or without a draft, and
+    /// every unknown reason — ends by signal under every park policy: the
+    /// ending reads `spawnedWithFeature` and the policy, nothing else.
+    @Test func parkEndingIsTypedExitOnlyForLegacy() {
+        #expect(Self.parkPolicies.count == 3, "a park policy is missing from the table")
+        for policy in Self.parkPolicies {
+            #expect(ComposerDraftParkGate.endingStyle(for: .legacy, policy: policy) == .typedExit,
+                    "\(policy) no longer types `/exit` into a legacy session")
+            #expect(ComposerDraftParkContext(status: .legacy, decision: .legacy, policy: policy)
+                .endingStyle == .typedExit)
+            for status in Self.featureStatuses {
+                #expect(ComposerDraftParkGate.endingStyle(for: status, policy: policy) == .signal,
+                        "\(status) was typed into under \(policy)")
+                #expect(ComposerDraftParkContext(status: status, decision: .proceed, policy: policy)
+                    .endingStyle == .signal)
+            }
         }
-        #expect(ComposerDraftParkContext(status: .legacy, decision: .legacy).endingStyle
-            == .typedExit)
+    }
+
+    /// An in-place profile swap skips the screen check that keeps a typed
+    /// `/exit` off a draft, so it ends by signal for every status: legacy,
+    /// unknown and confirmed alike. Nothing is typed into any swap.
+    @Test func profileSwapEndsBySignalWhateverTheStatus() {
+        for status in Self.everyStatus {
+            #expect(ComposerDraftParkGate.endingStyle(for: status, policy: .profileSwap) == .signal,
+                    "a profile swap of \(status) was typed into")
+            let decision = ComposerDraftParkGate.decide(
+                status: status, policy: .profileSwap, overrideUnconfirmed: false)
+            #expect(ComposerDraftParkContext(status: status, decision: decision, policy: .profileSwap)
+                .endingStyle == .signal)
+        }
+    }
+
+    /// The holder ladder of a legacy session's profile swap starts at SIGTERM,
+    /// and a legacy session's park still starts with the typed `/exit`. The
+    /// same composition `performHolderHibernate` makes: the gate's ending for
+    /// the park's status and policy, mapped to a rung.
+    @Test func legacyHolderSwapLadderStartsAtTerminate() {
+        let swap = ComposerDraftParkContext(
+            status: .legacy,
+            decision: ComposerDraftParkGate.decide(
+                status: .legacy, policy: .profileSwap, overrideUnconfirmed: false),
+            policy: .profileSwap)
+        #expect(HolderParkLadder.firstRung(for: swap.endingStyle) == .terminate)
+        let park = ComposerDraftParkContext(
+            status: .legacy,
+            decision: ComposerDraftParkGate.decide(
+                status: .legacy, policy: .manual, overrideUnconfirmed: false),
+            policy: .manual)
+        #expect(HolderParkLadder.firstRung(for: park.endingStyle) == .typedExit)
     }
 
     /// The holder ladder skips the typed `/exit` rung for a signal ending and
