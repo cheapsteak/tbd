@@ -75,6 +75,12 @@ public enum TBDConstants {
         configDir(environment: environment).appendingPathComponent("holders")
     }
 
+    /// Directory holding one subdirectory per Claude session for the session
+    /// mod's files: `~/tbd/sessions`. Honors TBD_HOME.
+    public static func sessionsDir(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        configDir(environment: environment).appendingPathComponent("sessions")
+    }
+
     /// Directory the update path owns: `~/tbd/updates`. Honors TBD_HOME.
     ///
     /// Holds the dedicated update clone (`src`), the append-only `update.log`
