@@ -57,11 +57,12 @@ current tree. Only the newest Claude Code release is supported.
 - **The mod API reads and writes the composer.** A mod is a plugin whose
   `hooks/hooks.json` names a hooks module. Its typed API offers:
   - `$.prompt.read()`, which returns `{ text, cursor }`.
-  - `prompt.edit`, raised on every edit the person makes, keys and pastes alike.
-    `await next(e)` resolves the box after the edit.
+  - `prompt.edit`, raised on the edits the person's keys make, short pastes
+    included. `await next(e)` resolves the box after the edit.
   - `prompt.change`, raised on every other change, with `origin.kind`: `clear`
-    (submit, Ctrl+C, stash), `history`, `undo`, `plugin` (a fill), and `engine`
-    (everything else, a draft put back included).
+    (submit, Ctrl+C, stash), `history`, `undo`, `plugin` (a fill), `app`, and
+    `engine` (everything else: a draft put back, a large paste). A kind the
+    engine adds later is to be treated as `engine`.
   - `$.prompt.fill({ text, mode })`, which writes the box and answers
     `isFilled: false` under a dialog or before the box mounts.
   - `session.start` and `session.end`. `session.end` fires with reason `other`
@@ -78,7 +79,10 @@ current tree. Only the newest Claude Code release is supported.
   a folder change, the session reloads the plugin: `register` runs again and
   `session.start` fires again. Values in `$.state` survive a reload; the
   module's own variables start over. Removing the module from the folder
-  unloads it. `claude -p` and SDK hosts do not hot-reload.
+  unloads it. `claude -p` and SDK hosts do not hot-reload. Every load and
+  unload prints a dim system line in the session's transcript, `tbd: reloaded
+  …` or `… unloaded`, in every running session that loaded the plugin, legacy
+  sessions included (measured live).
 - **A plugin's name is part of its identity.** It names the plugin's skills
   (`tbd:tbd`, `tbd:nightwatch`), its error lines, `$.plugin.name`, and the keys
   of its `$.state` and `$.store`.
@@ -89,6 +93,20 @@ current tree. Only the newest Claude Code release is supported.
   - Ctrl+C raised `prompt.change` with `clear` and an empty box
   - typing one character and deleting it raised `prompt.edit` with an empty box
   - the up arrow raised `prompt.change` with `engine` and the recalled draft
+- **Some of what the box holds never reaches the mod.** Measured against
+  2.1.303 with the fake model API:
+  - a 50-line paste raised no `prompt.edit`. It raised `prompt.change` with
+    `engine`, and its `text` held only Claude Code's placeholder,
+    `x[Pasted text #2 +50 lines]`, never the pasted lines
+  - the up arrow recalling a cleared draft that held such a paste raised
+    `prompt.change` with `engine` and the placeholder
+  - a short paste, `short paste`, raised `prompt.edit` whose `inputText` was
+    the text itself, with no placeholder
+  - Ctrl+C raised `prompt.change` with `clear`
+
+  A draft holding a collapsed paste therefore cannot be saved from the box's
+  text: restoring that text would restore the placeholder, and so would
+  restoring anything else the box shows as one, such as an image.
 - **Modules can be withheld.** The engine loads no hooks module until the
   workspace is trusted, organization policy can refuse a module, and the
   worker that runs modules can die.
@@ -126,11 +144,16 @@ the per-session directory, and the feature gate.
 ### Presence
 
 The module is present only while at least one feature's flag is on.
-`PluginDirWriter` owns the plugin's `hooks/` directory:
+`PluginDirWriter` owns the plugin's `hooks/` directory and its plugin-root
+`types/` directory, which holds the mod's `$.state` contract:
 
-- It writes `hooks/` whenever any feature flag is on, and removes it when every
-  feature flag is off. It acts at daemon start and whenever a feature flag
-  changes.
+- It writes `hooks/` and `types/` whenever any feature flag is on, and removes
+  both when every feature flag is off. While they are present, the plugin
+  manifest names the contract, `"types": "./types/index.d.ts"`; with every flag
+  off, the manifest names none. It acts whenever a feature flag changes, and at
+  daemon start once the database is open, since the flags live there, and
+  before any spawn path is reachable. A daemon in mock mode writes nothing to
+  the plugin folder, which lives outside `TBD_HOME`.
 - It writes a file only when its content differs from what is on disk. Every
   write reloads the plugin in every running session, so an unchanged daemon
   restart must write nothing. The same rule applies to the skill files it
@@ -173,13 +196,20 @@ a reload in `$.state`, never in module variables. A feature's `session.start`
 work that must happen once per process checks `$.state` first. The heartbeat
 timer starts with each load.
 
+A reload is visible: every load and unload prints a dim `tbd: reloaded …` or
+`… unloaded` system line in the transcript of each running session that
+loaded the plugin, legacy sessions included. Each flag toggle and each update
+that changes the mod prints one.
+
 ### Per-session directory
 
 Each Claude session gets `<TBD_SESSIONS_DIR>/<claudeSessionID>/`. It is keyed
 by Claude session ID because `--resume` keeps that ID across every wake and
 revive, while terminal IDs change on archive and history revive. The mod
 resolves the directory from `$.session.id()` at each write, so a `/clear` that
-moves the process to a new session ID moves its writes too.
+moves the process to a new session ID moves its writes too. The daemon holds
+the sessions root at mode 0700 whenever it writes a spawn record, because
+drafts can hold pasted secrets.
 
 Shared files:
 
@@ -205,17 +235,21 @@ the mod, such as an inbox a feature reads. This design builds none.
 incarnation ID and the current time (the injected date seam). It answers, for
 a named feature, one of three states:
 
-- **Legacy** – no `spawn.json`, or one whose feature list lacks the feature.
-  The session was spawned without that feature and keeps the old behavior
-  until it next respawns.
+- **Legacy** – no `spawn.json`, one whose feature list lacks the feature, or
+  one naming a different incarnation than the live one. The process was
+  spawned without that feature and keeps the old behavior until it next
+  respawns.
 - **Confirmed** – `spawn.json` and `alive.json` name the live incarnation,
   `alive.json` lists the feature, and its heartbeat is no older than 90
   seconds.
 - **Unknown** – the feature was spawned but the mod has not confirmed this
-  process. The reason is one of: no `alive.json`; one from another incarnation
-  (the module did not load this time); a heartbeat older than 90 seconds (a
-  dead worker, a module unloaded because every flag turned off, or writes
-  failing on a full disk); an unreadable file.
+  process. The reason is one of: `no-alive-file`; `other-incarnation`, an
+  `alive.json` from another incarnation (the module did not load this time);
+  `feature-not-running`, an `alive.json` that does not list the feature;
+  `stale-heartbeat`, older than 90 seconds (a dead worker, a module unloaded
+  because every flag turned off, or writes failing on a full disk);
+  `unreadable-file`. A feature can add a reason of its own read from its
+  files: composer-draft adds `draft-not-restorable` (see "Parking").
 
 Every daemon-side consumer of a feature starts from this answer. The 30-second
 heartbeat and the 90-second limit are named constants. They are liveness
@@ -229,10 +263,17 @@ and one new `OrphanGC` arm under `gcEnabled` reclaims the rest.
 **Archive deletes them.** Every path that archives a worktree removes the
 session directory of each Claude session in it, draft included, once that
 session's process has exited. The mod writes the box one last time on
-`session.end`, so a removal before the exit would be undone by that write. A
-parked session has no process, so its directory goes at once. The sessions of a
-revived worktree therefore resume with an empty box and no notice. Archive has
-always treated a live session's box this way: ending the process discards
+`session.end`, so a removal before the exit would be undone by that write. The
+wait covers the pane's process on tmux and the job on the holder. When the
+login shell execs Claude, as zsh does for the spawn command's `-c`, that
+process is Claude; otherwise a late `session.end` write can recreate the
+directory, and the `OrphanGC` arm reclaims it after `gcGraceSeconds`. A
+session whose teardown may have left it running, such as a window whose kill
+failed and whose pane's process could not be read, keeps its directory, and so
+does a session another row names while that row may still be running. A
+parked session has no process, so its directory goes at once. The sessions of
+a revived worktree therefore resume with an empty box and no notice. Archive
+has always treated a live session's box this way: ending the process discards
 whatever the box held.
 
 **The arm reclaims the rest.** A session directory stays while a person can
@@ -257,20 +298,22 @@ with a shorter life names its own rule inside the directory; later features add
 files, not reconcilers.
 
 The plugin directory needs no new reconciler: it is the existing one, and
-`PluginDirWriter` decides what `hooks/` holds.
+`PluginDirWriter` decides what `hooks/` and `types/` hold.
 
 ## The composer-draft feature
 
 ### Overview
 
 The feature writes the composer's state to `composer-draft.json` on every
-change. Before a park, the daemon checks the feature's liveness and reads that
-file. If the feature is confirmed for the live process, the park proceeds,
-with or without a draft, and ends Claude with a signal instead of typed keys.
-When the session resumes, the feature fills the saved draft back into the box
-and shows a short notice above the prompt. When liveness is unknown, automatic
-parks skip the session, and a manual park asks the person. Archiving the
-worktree deletes the draft (see "Reclaiming files").
+change, with a mark saying whether the saved text holds all of the draft.
+Before a park, the daemon checks the feature's liveness and reads that file.
+If the feature is confirmed for the live process and the draft, if any, is
+marked restorable, the park proceeds and ends Claude with a signal instead of
+typed keys. When the session resumes, the feature fills the saved draft back
+into the box and shows a short notice above the prompt. When TBD cannot
+confirm the draft, because liveness is unknown or the draft is not
+restorable, automatic parks skip the session, and a manual park asks the
+person. Archiving the worktree deletes the draft (see "Reclaiming files").
 
 ### Hooks
 
@@ -279,23 +322,52 @@ worktree deletes the draft (see "Reclaiming files").
   It does not await the write, so typing never waits on disk.
 - **`prompt.change`** – queues a write of `e.text`. A `clear` empties the box,
   so the write records no draft.
-- **`session.end`** – queues a final write and awaits it.
+- **`session.end`** – queues a write of the box when it is non-empty, and
+  awaits every queued write. An empty box needs no final write: every clear
+  was already saved by `prompt.change`, and a box the shutdown has already
+  unmounted reads empty, which must not overwrite the saved draft.
 - **`ui.render` on `AbovePrompt`** – draws the restore notice while it is
   visible, and otherwise passes through with `next(e)`.
 
+Every hook registration carries a `.catch` that passes the event on, so a hook
+that throws leaves the event as it would be without the mod.
+
 Writes run one at a time, and a queued write replaces any queued write behind
 it, so an older box can never land after a newer one. A non-empty box saves
-its text and cursor. An empty box removes the text and records that no draft
-exists.
+its text, its cursor and its restorable mark. An empty box removes the text
+and records that no draft exists.
+
+**The restorable mark** says whether the box's text holds all of the draft.
+Some changes put content in the box that its text does not carry (see "Facts
+this design rests on"), so the mark is tracked from origins, never from the
+text:
+
+- A `prompt.change` whose origin is anything but `clear` or `plugin` (`engine`,
+  `history`, `undo`, `app`, or a kind this build does not know) and that leaves
+  a non-empty box marks the draft not restorable.
+- The mark clears whenever the box becomes empty: a `clear`, or an edit or
+  change that leaves `''`.
+- A `prompt.edit` keeps the mark. Typing after a paste does not put the paste
+  in the text.
+- The feature's own restore fill sets the mark to the restored draft's saved
+  value. When the engine changed the text the fill put in (an over-long text
+  collapsed into a placeholder), the draft is marked not restorable.
+- Another plugin's fill keeps the mark.
+
+The mark lives in `$.state`, so a reload keeps it.
 
 ### Files
 
 - **`composer-draft.json`** – whether a draft exists, the draft text and
-  cursor, and when the box was last saved.
+  cursor, whether the text holds all of the draft (`restorable`, on a draft
+  only), and when the box was last saved.
 - **`composer-draft.unrestored`** – the text of a draft the feature could not
   restore because the box already held text. Later saves never touch it.
   `OrphanGC` removes it 30 days after its last write, as the `unsent-prompts/`
   arm does.
+- **`composer-draft.restore.json`** – the outcome of the latest restore in
+  this session, `restored` or `unrestored`, with the incarnation that ran it
+  and when. Each outcome overwrites it. It goes with its directory.
 
 ### Parking
 
@@ -303,11 +375,17 @@ The gate's existing rails run unchanged. The feature's liveness, then its
 file, decides:
 
 - **Legacy** – today's path: `hasPendingInput`, then the typed `/exit`.
-- **Confirmed** – the park proceeds, draft or no draft.
+- **Confirmed** – the park proceeds, with an empty box or with a draft marked
+  restorable.
 - **Unknown** – the idle sweep and merge-park skip the session and log the
   reason. A manual park returns a distinct refusal; the app turns it into
   "TBD can't confirm this session's draft is saved. Hibernate anyway?", and a
   yes reissues the park with an override.
+
+A confirmed session whose draft is marked not restorable, or carries no mark,
+reads unknown with the reason `draft-not-restorable`: a wake would restore the
+placeholder in place of the pasted content. It takes the unknown path
+unchanged.
 
 For a session spawned with the feature, TBD never types into the composer to
 end it: no `/exit`, and no Escape or Ctrl+C fallback either, because a
@@ -340,10 +418,15 @@ restore has run, the feature:
 
 The `$.state` record keeps a reload from restoring a second time into a box
 that already holds the draft. The fill raises `prompt.change`, which saves the
-draft again, so a second park before any edit still keeps it. If the person's
-own text reaches the box before the fill lands, the feature leaves the box
-alone, writes the saved draft to `composer-draft.unrestored`, records the
-restore as done, and logs it.
+draft again with its saved mark, so a second park before any edit still keeps
+it. Until the fill lands, an empty box is not saved, because it would
+overwrite the only copy of the draft. If the person's own text reaches the box
+before the fill lands, the feature leaves the box alone, writes the saved
+draft to `composer-draft.unrestored`, records the restore as done, and logs
+it. Either outcome is written to `composer-draft.restore.json`.
+
+A draft marked not restorable is restored as saved after a park the person
+overrode: they were warned that part of it could be lost.
 
 A message delivered with the wake arrives as an argument to `claude --resume`.
 Implementation verifies, against the fake model API, that Claude submits that
@@ -377,13 +460,17 @@ its features. A park follows `spawn.json`, not the current flag:
 
 ### Soak and graduation
 
-The flag is turned on on the author's machine. The soak reads three log lines:
-feature-versus-scrape disagreements, unknown liveness with its reasons, and
-restores (with any `.unrestored`). The flag graduates when every case where the
-scrape saw a draft and the feature did not is explained as a scrape false
-positive, such as a grayed suggestion the scrape read as typed text, and
-restores have been seen working on both tmux and holder. Graduation flips
-`Config.composerDraftDefault`.
+The flag is turned on on the author's machine. The soak reads three signals.
+Two are `com.tbd.daemon` log lines under category `composer-draft`:
+feature-versus-scrape disagreements, and parks skipped or refused for an
+unknown reason, with the reason. The third is restores, read from the session
+directories rather than any log: each `~/tbd/sessions/*/composer-draft.restore.json`
+records its session's latest restore outcome, and a
+`composer-draft.unrestored` beside it holds a draft that could not go back.
+The flag graduates when every case where the scrape saw a draft and the
+feature did not is explained as a scrape false positive, such as a grayed
+suggestion the scrape read as typed text, and restores have been seen working
+on both tmux and holder. Graduation flips `Config.composerDraftDefault`.
 
 ### Deletion after graduation
 
@@ -405,20 +492,24 @@ parks automatically.
 
 Each gating branch gets its own test.
 
-- **Plugin writer** – `hooks/` present when any feature flag is on and absent
-  when all are off; a flag change writes or removes it; an unchanged daemon
-  start writes nothing; `.claude-plugin/types/` and `skills/` runtime folders
-  survive every write.
-- **Liveness** – legacy (no `spawn.json`; a feature list without the feature),
-  confirmed, and each unknown reason: no `alive.json`, another incarnation, a
-  stale heartbeat, an unreadable file.
-- **Draft status** – confirmed with a draft and confirmed empty, on top of the
-  liveness answer.
+- **Plugin writer** – `hooks/` and `types/` present, and the manifest naming
+  the contract, when any feature flag is on, and all three absent when all are
+  off; a flag change writes or removes them; an unchanged daemon start writes
+  nothing; `.claude-plugin/types/` and `skills/` runtime folders survive every
+  write.
+- **Liveness** – legacy (no `spawn.json`; a feature list without the feature;
+  another incarnation's `spawn.json`), confirmed, and each unknown reason: no
+  `alive.json`, another incarnation, the feature not running, a stale
+  heartbeat, an unreadable file.
+- **Draft status** – confirmed with a restorable draft and confirmed empty, on
+  top of the liveness answer; a draft marked not restorable, or carrying no
+  mark, reads `draft-not-restorable`; an empty box needs no mark.
 - **Park gate** – a legacy session takes the scrape path; a confirmed session
   follows its file and never consults the scrape's answer.
 - **Park ending** – a session spawned with the feature gets a signal and no
-  keys, asserted on the transport, for both transports and both profile swaps;
-  a legacy session gets the typed `/exit` as today.
+  keys, asserted on the transport, for both transports and both profile swaps,
+  and against a real holder, where the job's own stdin records nothing and its
+  `SIGTERM` handler runs; a legacy session gets the typed `/exit` as today.
 - **Manual park** – unknown returns the distinct refusal, and the override
   parks.
 - **Shadow log** – a disagreement produces the log line, asserted on its
@@ -434,14 +525,21 @@ Each gating branch gets its own test.
   worktree, is removed past the grace period; an unreferenced one inside the
   grace period is kept; and `composer-draft.unrestored` goes at 30 days.
 - **Archive** – archiving a worktree with a parked session that holds a draft
-  removes that session's directory, and reviving the worktree restores nothing.
+  removes that session's directory, and reviving the worktree restores nothing;
+  a session whose teardown may have left it running, or that another row left
+  running names, keeps its directory.
 - **Mod** (`claude plugin test`, mock clock):
   - `alive.json` is written at load and its heartbeat ticks
   - a feature missing from `TBD_MOD_FEATURES` writes nothing and passes every
     event through
   - an edit saves; a clear records no draft
+  - the restorable mark: an `engine` change marks the draft, a clear or an
+    emptied box resets it, an edit keeps it, the restore fill carries the saved
+    value, and the record carries the mark
   - a restore fills an empty box; a non-empty box produces
-    `composer-draft.unrestored`
+    `composer-draft.unrestored`; each outcome writes
+    `composer-draft.restore.json`; an empty box is not saved while a restore is
+    pending
   - a second `session.start` in the same process, as after a reload, restores
     nothing
   - the notice appears and disappears at 3 seconds
@@ -449,7 +547,8 @@ Each gating branch gets its own test.
   `scripts/claude-stub.py`:
   - a change to the `--plugin-dir` folder reloads the module in a running
     interactive session without asking the person anything, and removing
-    `hooks/` unloads it
+    `hooks/` unloads it; each prints its `tbd: reloaded …` or `… unloaded`
+    line in the transcript, legacy sessions included
   - rewriting a skill file with unchanged content triggers no reload
   - a SIGTERM park leaves a valid transcript tail, and the wake restores the
     draft, on tmux and on the holder
@@ -489,6 +588,11 @@ Each gating branch gets its own test.
   behavior.
 - **Keystroke tracking as the primary signal.** Input bytes cannot tell a
   submitted draft from a cleared one; the composer's own state can.
+- **Parse Claude Code's paste placeholders** to tell a draft holding a
+  collapsed paste. The placeholder is display copy: when Claude Code rewords
+  or redraws it, the parse breaks silently and in the unsafe direction, the
+  same failure as the screen-scrape this design removes. Change origins are a
+  typed API.
 - **Clear the box before typing `/exit`.** The mod cannot tell a daemon-sent
   clear from the person's own, so it would delete the draft it just saved.
 - **A separate plugin for the mod, passed by a second `--plugin-dir` only to
