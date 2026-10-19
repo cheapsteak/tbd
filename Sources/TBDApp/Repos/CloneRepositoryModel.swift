@@ -45,18 +45,25 @@ final class CloneRepositoryModel {
     /// source, until the person edits the folder name themselves.
     var repositoryText: String = "" {
         didSet {
-            guard repositoryText != oldValue, !folderNameEdited else { return }
+            guard repositoryText != oldValue else { return }
+            clearStaleFailure()
+            guard !folderNameEdited else { return }
             fillingFolderName = true
             folderName = parsedSource.cloneFolderName ?? ""
             fillingFolderName = false
         }
     }
 
-    var parentDirectory: String
+    var parentDirectory: String {
+        didSet {
+            if parentDirectory != oldValue { clearStaleFailure() }
+        }
+    }
 
     var folderName: String = "" {
         didSet {
             guard !fillingFolderName, folderName != oldValue else { return }
+            clearStaleFailure()
             // Clearing the field hands it back to the repository text.
             folderNameEdited = !folderName.isEmpty
         }
@@ -135,6 +142,20 @@ final class CloneRepositoryModel {
         Self.isValidFolderName(folderName) && fileExists(destinationPath)
     }
 
+    /// Whether the sheet shows the "already exists" warning under the
+    /// destination. It is the only explanation for a disabled Clone button when
+    /// git kept a repository there, or after the folder name is edited to an
+    /// existing path. Hidden while a clone runs, once the clone is kept
+    /// (`.done`, `.addFailed` — the folder is the clone itself), and when the
+    /// failure text already says it.
+    var showsDestinationExistsWarning: Bool {
+        switch phase {
+        case .cloning, .done, .addFailed: return false
+        case .failed(let message): return message != Self.destinationExistsMessage && destinationExists
+        case .editing: return destinationExists
+        }
+    }
+
     var isCloning: Bool {
         if case .cloning = phase { return true }
         return false
@@ -159,6 +180,14 @@ final class CloneRepositoryModel {
         switch parsedSource {
         case .remote, .githubShortForm: return parsedSource
         case .local, .invalid: return nil
+        }
+    }
+
+    /// An edit to the inputs makes an old failure text stale: back to editing.
+    private func clearStaleFailure() {
+        switch phase {
+        case .failed, .addFailed: phase = .editing
+        case .editing, .cloning, .done: break
         }
     }
 

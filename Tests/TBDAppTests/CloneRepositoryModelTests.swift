@@ -178,6 +178,52 @@ struct CloneRepositoryModelTests {
         }
     }
 
+    @Test func warningShownAfterFailureWhenGitKeptRepo() async {
+        await withDefaults { defaults in
+            let disk = FakeDisk()
+            let cloner = FakeCloner(outcome: .failed(exitCode: 1, lastErrorLines: ["hook failed"]))
+            let model = makeModel(defaults: defaults, cloner: cloner, recorder: Recorder(), disk: disk)
+            model.repositoryText = Self.remoteURL
+            await model.start()
+            guard case .failed = model.phase else {
+                Issue.record("expected .failed, got \(model.phase)")
+                return
+            }
+            // git kept the repository: the folder exists after the run.
+            disk.existing.insert(model.destinationPath)
+            #expect(model.canClone == false)
+            #expect(model.showsDestinationExistsWarning)
+        }
+    }
+
+    @Test func warningNotDuplicatedForRefusedDestination() async {
+        await withDefaults { defaults in
+            let disk = FakeDisk()
+            let cloner = FakeCloner(outcome: .refusedDestinationExists)
+            let model = makeModel(defaults: defaults, cloner: cloner, recorder: Recorder(), disk: disk)
+            model.repositoryText = Self.remoteURL
+            await model.start()
+            disk.existing.insert(model.destinationPath)
+            #expect(model.phase == .failed(message: CloneRepositoryModel.destinationExistsMessage))
+            #expect(model.showsDestinationExistsWarning == false)
+        }
+    }
+
+    @Test func editingAfterFailureReturnsToEditing() async {
+        await withDefaults { defaults in
+            let cloner = FakeCloner(outcome: .failed(exitCode: 128, lastErrorLines: ["fatal: nope"]))
+            let model = makeModel(defaults: defaults, cloner: cloner, recorder: Recorder())
+            model.repositoryText = Self.remoteURL
+            await model.start()
+            guard case .failed = model.phase else {
+                Issue.record("expected .failed, got \(model.phase)")
+                return
+            }
+            model.folderName = "other"
+            #expect(model.phase == .editing)
+        }
+    }
+
     // MARK: - Cancelling
 
     @Test func dismissCancelsRunningClone() async {

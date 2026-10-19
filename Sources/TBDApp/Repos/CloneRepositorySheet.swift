@@ -85,10 +85,9 @@ private struct CloneRepositoryForm: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                // Only while editing: after a refusal the failure message
-                // already says it, and after an add failure the existing
-                // folder is the clone itself.
-                if model.destinationExists, model.phase == .editing {
+                // The model decides: it is the only explanation for a disabled
+                // Clone button, but not shown twice or over a kept clone.
+                if model.showsDestinationExistsWarning {
                     Text(CloneRepositoryModel.destinationExistsMessage)
                         .font(.caption)
                         .foregroundStyle(.red)
