@@ -24,7 +24,7 @@ import TestSupport
 /// route is a write to `localProcess`'s descriptor, and `LocalProcess.send`
 /// drops everything unless a process is actually running — so a coordinator
 /// with no child would report "no bytes escaped" for the wrong reason. The
-/// harness therefore starts one (`/bin/sleep 120`, killed at teardown) and reads
+/// harness therefore starts one (`/bin/cat`, killed at teardown) and reads
 /// the tty's own echo back through the `LocalProcessDelegate`. That descriptor
 /// is also the witness for the resize guard.
 ///
@@ -355,9 +355,8 @@ final class QuietIngestHarness {
         terminalView.onNotification = nil
         terminalView.terminalDelegate = nil
         coordinator.localProcess = nil
-        // The child is a `sleep` that would exit on its own; end it now so a
-        // failing run leaves nothing behind. `LocalProcess`'s own exit monitor
-        // does the `waitpid`.
+        // The child never exits on its own; end it now. `LocalProcess`'s own
+        // exit monitor does the `waitpid`.
         if childPID > 0 { kill(childPID, SIGKILL) }
         defaults.removePersistentDomain(forName: defaultsSuiteName)
     }
@@ -404,10 +403,17 @@ func makeCoordinatorHarness() -> QuietIngestHarness {
     // echo straight back into the view under test.
     let outgoing = OutgoingRecorder()
     let process = LocalProcess(delegate: outgoing, dispatchQueue: .main)
-    // Long enough to outlive a test that is merely starved for scheduling on a
-    // loaded box — a child that exits mid-test closes the pty and turns every
-    // probe on it into a zero. Killed in `tearDown`.
-    process.startProcess(executable: "/bin/sleep", args: ["120"], environment: nil, execName: nil)
+    // The child must live exactly as long as the test, however starved the
+    // test is: a `sleep N` exits mid-test once the pass delays the test past N
+    // seconds (the suite has hit its 240 s limit), after which
+    // `LocalProcess.send` drops every write and every probe reads as an
+    // absence. `cat` blocks reading its tty forever, and since the tty is in
+    // canonical mode and no test sends a newline it writes nothing back; the
+    // line discipline's echo, which `sentBytes` reads, is unaffected.
+    // `tearDown` kills it; if teardown never runs, the kernel hangs up the pty
+    // when this process's master descriptor closes and SIGHUP ends the child
+    // (it is the session leader on that tty).
+    process.startProcess(executable: "/bin/cat", args: [], environment: nil, execName: nil)
     coordinator.localProcess = process
 
     view.terminalDelegate = coordinator
