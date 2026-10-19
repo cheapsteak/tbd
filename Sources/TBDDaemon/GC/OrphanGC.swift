@@ -577,14 +577,7 @@ public actor OrphanGC {
     private func reclaimSessionDirectories(
         config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
     ) async {
-        let fm = FileManager.default
-        guard let names = try? fm.contentsOfDirectory(atPath: sessionsBase.path) else { return }
-        let candidates = names.sorted().filter { !$0.hasPrefix(".") }.filter {
-            var isDirectory: ObjCBool = false
-            return fm.fileExists(
-                atPath: sessionsBase.appendingPathComponent($0).path, isDirectory: &isDirectory)
-                && isDirectory.boolValue
-        }
+        let candidates = Self.sessionDirectoryNames(base: sessionsBase.path)
         guard !candidates.isEmpty else { return }
 
         let referenced: Set<String>
@@ -619,7 +612,7 @@ public actor OrphanGC {
             planned.append("REAP session-directory \(directory)")
             guard !dryRun else { continue }
             do {
-                try fm.removeItem(atPath: directory)
+                try FileManager.default.removeItem(atPath: directory)
                 reaped += 1
                 logger.info("gc: reclaimed session directory \(directory, privacy: .public)")
             } catch {
@@ -629,6 +622,20 @@ public actor OrphanGC {
                 \(error.localizedDescription, privacy: .public)
                 """)
             }
+        }
+    }
+
+    /// Names of the non-hidden subdirectories of the sessions root, sorted. A
+    /// synchronous helper so the async arm never holds a `FileManager` across
+    /// an `await`. An unreadable or absent root yields nothing.
+    private static func sessionDirectoryNames(base: String) -> [String] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: base) else { return [] }
+        return names.sorted().filter { name in
+            guard !name.hasPrefix(".") else { return false }
+            var isDirectory: ObjCBool = false
+            return fm.fileExists(atPath: "\(base)/\(name)", isDirectory: &isDirectory)
+                && isDirectory.boolValue
         }
     }
 
