@@ -34,7 +34,8 @@ struct HibernationCoordinatorTests {
         activityState: TerminalActivityState = .idle,
         keepWarm: Bool = false,
         sessionID: String? = "sess-1",
-        kind: TerminalKind? = .claude
+        kind: TerminalKind? = .claude,
+        sessionIncarnationID: UUID? = nil
     ) async throws -> (TBDDatabase, UUID, UUID) {
         let db = try TBDDatabase(inMemory: true)
         // wake() refuses to respawn into a missing directory, so the (shared,
@@ -48,7 +49,8 @@ struct HibernationCoordinatorTests {
         )
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: sessionID, kind: kind
+            label: "claude", claudeSessionID: sessionID, kind: kind,
+            sessionIncarnationID: sessionIncarnationID
         )
         if activityState != .unknown {
             try await db.terminals.setActivityState(id: terminal.id, activityState: activityState, source: .derived)
@@ -3252,6 +3254,206 @@ struct HibernationCoordinatorTests {
 
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil,
                 "an unrecordable park must not happen")
+    }
+
+    // MARK: - Composer-draft park gate
+
+    /// A coordinator over dry-run tmux that reads session files from
+    /// `sessionsDir`. `capture` answers every pane read and counts them, which
+    /// is how a test sees whether a park reached the transport at all.
+    private func draftGateCoordinator(
+        _ db: TBDDatabase, sessionsDir: URL, capture: MutableHibernationCapture,
+        now: @escaping @Sendable () -> Date,
+        actuationLog: ActuationLog = makeTestActuationLog()
+    ) -> HibernationCoordinator {
+        HibernationCoordinator(
+            db: db,
+            tmux: TmuxManager(dryRun: true, dryRunCapturePane: capture.capture),
+            configDirManager: isolatedConfigDirManager(),
+            now: now,
+            exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
+            sessionsDir: sessionsDir,
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: actuationLog)
+    }
+
+    /// A pane read that shows a half-composed prompt.
+    private func typedPane() -> MutableHibernationCapture {
+        let capture = MutableHibernationCapture()
+        capture.setPendingInput()
+        return capture
+    }
+
+    /// A session spawned without the feature is judged as it always was: the
+    /// scrape reads a typed composer and refuses the park.
+    @Test func legacySessionStillRefusedByTheScrape() async throws {
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: UUID())
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: typedPane(), now: { Date() })
+
+        #expect(await coord.manualHibernate(terminalID: terminalID)
+            == .notEligible(reason: "Terminal has unsent typed input"))
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+    }
+
+    /// The same typed pane over a session the feature confirms: the park goes
+    /// on. Both scrape sites still read the pane, for the shadow comparison,
+    /// but neither decides.
+    @Test func confirmedSessionParksDespiteTheScrape() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: true)
+        let capture = typedPane()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: { now })
+
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+        #expect(capture.count >= 2, "the scrape sites stopped reading the pane")
+    }
+
+    /// A spawn record and no heartbeat: TBD cannot confirm the draft is
+    /// saved, and a manual park says so with its own result — before any
+    /// pane read, and with the row untouched.
+    @Test func unknownManualReturnsDraftUnconfirmed() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let capture = MutableHibernationCapture()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: { Date() })
+        let before = try #require(try await db.terminals.get(id: terminalID))
+
+        #expect(await coord.manualHibernate(terminalID: terminalID)
+            == .draftUnconfirmed(reason: "no-alive-file"))
+        #expect(try await db.terminals.get(id: terminalID) == before)
+        #expect(capture.count == 0, "the refusal came after the park reached the transport")
+    }
+
+    /// "Hibernate anyway": the override parks the same unknown session, and
+    /// the typed pane does not refuse it either.
+    @Test func overrideParksAnUnknownSession() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: typedPane(), now: { Date() })
+
+        #expect(await coord.manualHibernate(
+            terminalID: terminalID, overrideUnconfirmedDraft: true) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+    }
+
+    /// The idle sweep skips an unknown session: nothing parks, no pane is
+    /// read, and the sweep's own record names the reason.
+    @Test func sweepSkipsAnUnknownSession() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let capture = MutableHibernationCapture()
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: dates.provider,
+            actuationLog: ActuationLog(path: logPath))
+
+        await sweepUntilParked(coord, dates: dates)
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+        #expect(capture.count == 0, "the skip came after the park reached the transport")
+        let written = try logRows(at: logPath)
+        #expect(written.count == 2, "exactly one request row and its outcome")
+        let outcome = try #require(written.last)
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-eligible")
+        #expect(outcome["error"] as? String
+            == ComposerDraftParkGate.unconfirmedRefusal(reason: "no-alive-file"))
+    }
+
+    /// The merge-park skips an unknown session the way the sweep does.
+    @Test func mergeParkSkipsAnUnknownSession() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let capture = MutableHibernationCapture()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: { Date() })
+
+        #expect(await coord.hibernateForMerge(terminalID: terminalID, inputVetoEnabled: true)
+            == .notEligible(reason: ComposerDraftParkGate.unconfirmedRefusal(reason: "no-alive-file")))
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+        #expect(capture.count == 0)
+    }
+
+    /// `terminal.hibernate` carries the refusal's code, so the app can ask
+    /// instead of matching text; the same request with the override parks.
+    @Test func hibernateRPCCarriesTheUnconfirmedCode() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let tmux = TmuxManager(dryRun: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir,
+            actuationLog: makeTestActuationLog())
+
+        let refused = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHibernate,
+            params: TerminalHibernateParams(terminalID: terminalID)))
+        #expect(!refused.success)
+        #expect(refused.errorCode == RPCErrorCode.composerDraftUnconfirmed.rawValue)
+        #expect(refused.error == "TBD can't confirm this session's draft is saved (no-alive-file).")
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+
+        let overridden = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHibernate,
+            params: TerminalHibernateParams(terminalID: terminalID, overrideUnconfirmedDraft: true)))
+        #expect(overridden.success, "the override was refused: \(overridden.error ?? "nil")")
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+    }
+
+    /// An app or CLI built before the override decodes as no override.
+    @Test func hibernateParamsDecodeWithoutTheOverride() throws {
+        let id = UUID()
+        let legacy = try JSONDecoder().decode(
+            TerminalHibernateParams.self,
+            from: Data("{\"terminalID\":\"\(id.uuidString)\"}".utf8))
+        #expect(legacy.terminalID == id)
+        #expect(legacy.overrideUnconfirmedDraft == nil)
+
+        let overriding = try JSONDecoder().decode(
+            TerminalHibernateParams.self,
+            from: JSONEncoder().encode(
+                TerminalHibernateParams(terminalID: id, overrideUnconfirmedDraft: true)))
+        #expect(overriding.overrideUnconfirmedDraft == true)
     }
 }
 

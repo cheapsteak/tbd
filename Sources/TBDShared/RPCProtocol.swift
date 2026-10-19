@@ -125,6 +125,11 @@ public enum RPCErrorCode: String, Sendable {
     /// provider identity is not the required source provider. This includes a
     /// repeated Continue-in-Claude request after the row already became Claude.
     case terminalWrongProvider
+    /// A `terminal.hibernate` was refused because the session was spawned with
+    /// the composer-draft feature and TBD cannot confirm its unsent draft is
+    /// saved. The app asks whether to hibernate anyway, and a yes reissues the
+    /// park with `TerminalHibernateParams.overrideUnconfirmedDraft`.
+    case composerDraftUnconfirmed
 }
 
 // MARK: - RPC Method Names
@@ -3218,7 +3223,14 @@ public struct ConfigSetScratchProfileOverrideParams: Codable, Sendable {
 /// rails but not keep-warm or idle-time.
 public struct TerminalHibernateParams: Codable, Sendable {
     public let terminalID: UUID
-    public init(terminalID: UUID) { self.terminalID = terminalID }
+    /// Park even when TBD can't confirm the session's composer draft is saved,
+    /// which is otherwise refused with `RPCErrorCode.composerDraftUnconfirmed`.
+    /// Set only on the person's explicit "Hibernate anyway". nil == false.
+    public let overrideUnconfirmedDraft: Bool?
+    public init(terminalID: UUID, overrideUnconfirmedDraft: Bool? = nil) {
+        self.terminalID = terminalID
+        self.overrideUnconfirmedDraft = overrideUnconfirmedDraft
+    }
 }
 
 /// Params for `terminal.wake` — respawn `claude --resume <id>` in the

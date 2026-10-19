@@ -403,11 +403,15 @@ extension HibernationCoordinator {
     /// so there is nothing for a server lock to exclude. `hibernatesInFlight`
     /// is the whole exclusion here, and it is enough: every mutation below
     /// addresses one terminal row and one holder.
+    ///
+    /// `composerDraft` is the gate's answer from `performHibernate`: the
+    /// typed-input rail below consults it, and the ladder reads its status.
     func performHolderHibernate(
         terminal: Terminal,
         worktree: LocalWorktree,
         reason: HibernateReason,
-        policy: HibernateEligibilityPolicy
+        policy: HibernateEligibilityPolicy,
+        composerDraft: ComposerDraftParkContext
     ) async -> HibernateResult {
         // Re-read and re-check, in the same order and with the same refusal
         // strings the tmux path uses under its server lock. This method is
@@ -513,7 +517,11 @@ extension HibernationCoordinator {
                 logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — \(refusal, privacy: .public)")
                 return .notEligible(reason: refusal)
             case .readable(let screen):
-                if HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output) {
+                // The typed-input check decides only a legacy session's park;
+                // the composer-draft feature decides the rest.
+                if composerDraft.scrapeRefuses(
+                    hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output),
+                    terminalID: terminal.id) {
                     logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
                     return .notEligible(reason: "Terminal has unsent typed input")
                 }

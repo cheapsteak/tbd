@@ -3234,6 +3234,12 @@ extension RPCRouter {
         case .notEligible(let reason):
             logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
             return (RPCResponse(error: reason), reason)
+        case .draftUnconfirmed(let unconfirmed):
+            // Not produced by a swap's park, which proceeds on an unconfirmed
+            // draft; refused like any other decline if it ever is.
+            let reason = ComposerDraftParkGate.unconfirmedRefusal(reason: unconfirmed)
+            logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
+            return (RPCResponse(error: reason), reason)
         }
         guard let parkedRow = try await db.terminals.get(id: oldTerminal.id),
               parkedRow.isParked else {

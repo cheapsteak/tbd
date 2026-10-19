@@ -9,6 +9,12 @@ public enum HibernateResult: Equatable, Sendable {
     case alreadyHibernated
     case notEligible(reason: String)
     case notFound
+    /// A manual park of a session spawned with the composer-draft feature,
+    /// refused because TBD cannot confirm its unsent draft is saved. `reason`
+    /// is the `SessionModLiveness.UnknownReason` raw value. Distinct from
+    /// `.notEligible` so `terminal.hibernate` can carry a code the app turns
+    /// into "Hibernate anyway?"; a yes reissues the park with the override.
+    case draftUnconfirmed(reason: String)
 }
 
 /// Which rails a park attempt is judged by, and the config facts those rails
@@ -555,7 +561,14 @@ public actor HibernationCoordinator {
 
     /// Manual "Hibernate now". Honors the running / permission-prompt rails but
     /// not keep-warm or idle-time (the user asked explicitly).
-    public func manualHibernate(terminalID: UUID) async -> HibernateResult {
+    ///
+    /// `overrideUnconfirmedDraft` is the person's "Hibernate anyway": it parks
+    /// a session spawned with the composer-draft feature even when TBD cannot
+    /// confirm its draft is saved, where the park would otherwise return
+    /// `.draftUnconfirmed`.
+    public func manualHibernate(
+        terminalID: UUID, overrideUnconfirmedDraft: Bool = false
+    ) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
         }
@@ -564,7 +577,8 @@ public actor HibernationCoordinator {
             return .notEligible(reason: manualBlockReason(terminal))
         }
         return await performHibernate(
-            terminal: terminal, reason: .manual, policy: .manual)
+            terminal: terminal, reason: .manual, policy: .manual,
+            overrideUnconfirmedDraft: overrideUnconfirmedDraft)
     }
 
     /// Claim this row for the whole of an in-place profile swap, refusing if
@@ -1177,7 +1191,8 @@ public actor HibernationCoordinator {
     private func performHibernate(
         terminal: Terminal,
         reason: HibernateReason,
-        policy: HibernateEligibilityPolicy
+        policy: HibernateEligibilityPolicy,
+        overrideUnconfirmedDraft: Bool = false
     ) async -> HibernateResult {
         guard !hibernatesInFlight.contains(terminal.id) else {
             return .alreadyHibernated
@@ -1190,6 +1205,38 @@ public actor HibernationCoordinator {
         // through their own gates; `.profileSwap` reads none, so this line is
         // what keeps every policy to the same answer.
         if let refusal = Self.parkRefusal(for: terminal) { return refusal }
+
+        // The composer-draft gate, read once and ahead of any transport work:
+        // a session spawned with the feature is judged by the feature's files,
+        // and a refusal or a skip must leave the session untouched. The answer
+        // travels down to the transport leg, whose pending-input rails and
+        // ending consult it.
+        let composerDraftStatus = ComposerDraftStatus.read(
+            sessionsDir: sessionsDir,
+            claudeSessionID: terminal.claudeResumeDecision.resumableSessionID,
+            liveIncarnationID: terminal.sessionIncarnationID,
+            now: now())
+        let composerDraft = ComposerDraftParkContext(
+            status: composerDraftStatus,
+            decision: ComposerDraftParkGate.decide(
+                status: composerDraftStatus, policy: policy,
+                overrideUnconfirmed: overrideUnconfirmedDraft))
+        switch composerDraft.decision {
+        case .legacy, .proceed:
+            break
+        case .refuse(let unconfirmed):
+            return .draftUnconfirmed(reason: unconfirmed)
+        case .skip(let unconfirmed):
+            // The condition outlives this attempt — a session spawned with the
+            // feature reads unknown until it respawns — so the idle markers are
+            // cleared like every other lasting refusal's, and the next attempt
+            // waits out a fresh idle window instead of re-firing every sweep.
+            ComposerDraftParkGate.logSkip(terminalID: terminal.id, reason: unconfirmed)
+            idleSince[terminal.id] = nil
+            pendingKillSince[terminal.id] = nil
+            return .notEligible(reason: ComposerDraftParkGate.unconfirmedRefusal(reason: unconfirmed))
+        }
+
         guard let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) else {
             return .notFound
         }
@@ -1201,7 +1248,8 @@ public actor HibernationCoordinator {
         // everything below it is the tmux mechanic, unchanged.
         if terminal.transport == .holder {
             return await performHolderHibernate(
-                terminal: terminal, worktree: worktree, reason: reason, policy: policy)
+                terminal: terminal, worktree: worktree, reason: reason, policy: policy,
+                composerDraft: composerDraft)
         }
 
         let server = worktree.tmuxServer
@@ -1214,8 +1262,11 @@ public actor HibernationCoordinator {
         if let capture = try? await tmux.capturePaneWithAnsi(server: server, paneID: paneID) {
             // Rail: typed-but-unsent input. Chrome's single biggest tab-discard
             // backlash was lost typed text — never park a pane with a
-            // half-composed prompt.
-            if HibernationSafetyChecks.hasPendingInput(paneCapture: capture) {
+            // half-composed prompt. It decides only a legacy session's park;
+            // the composer-draft feature decides the rest.
+            if composerDraft.scrapeRefuses(
+                hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: capture),
+                terminalID: terminal.id) {
                 logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
                 return .notEligible(reason: "Terminal has unsent typed input")
             }
@@ -1241,7 +1292,8 @@ public actor HibernationCoordinator {
                     terminal: terminal,
                     worktree: currentWorktree,
                     reason: reason,
-                    policy: policy)
+                    policy: policy,
+                    composerDraft: composerDraft)
             }
         } catch {
             logger.warning("hibernate: failed to lock the current tmux server for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -1255,11 +1307,15 @@ public actor HibernationCoordinator {
     /// in-place process replacement on that server participates in the same
     /// lock, while the two database transitions additionally CAS the captured
     /// process incarnation so a request that waited cannot act on stale state.
+    ///
+    /// `composerDraft` is the gate's answer from `performHibernate`: the
+    /// pending-input rail below consults it, and the ending reads its status.
     private func performHibernateReplacementLocked(
         terminal: Terminal,
         worktree: LocalWorktree,
         reason: HibernateReason,
-        policy: HibernateEligibilityPolicy
+        policy: HibernateEligibilityPolicy,
+        composerDraft: ComposerDraftParkContext
     ) async -> HibernateResult {
         guard let currentTerminal = try? await db.terminals.get(id: terminal.id) else {
             return .notFound
@@ -1315,7 +1371,9 @@ public actor HibernationCoordinator {
         // replacement or hook had its turn under the same server lock.
         let capturedSnapshot: String?
         if let capture = try? await tmux.capturePaneWithAnsi(server: server, paneID: paneID) {
-            if HibernationSafetyChecks.hasPendingInput(paneCapture: capture) {
+            if composerDraft.scrapeRefuses(
+                hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: capture),
+                terminalID: terminal.id) {
                 logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
                 return .notEligible(reason: "Terminal has unsent typed input")
             }

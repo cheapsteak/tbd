@@ -289,6 +289,12 @@ actor TerminalTransportMigrator {
             // session and its reason is the one a person should read.
             logger.debug("transport migration: skipping \(terminalID, privacy: .public) — the park refused: \(reason, privacy: .public)")
             return .skipped(reason: reason)
+        case .draftUnconfirmed(let unconfirmed):
+            // The park is a manual one with no override, so a session whose
+            // draft TBD cannot confirm is skipped like any other refusal.
+            let reason = ComposerDraftParkGate.unconfirmedRefusal(reason: unconfirmed)
+            logger.debug("transport migration: skipping \(terminalID, privacy: .public) — the park refused: \(reason, privacy: .public)")
+            return .skipped(reason: reason)
         }
 
         // The snapshot has to be taken AFTER the park: the park wrote the
