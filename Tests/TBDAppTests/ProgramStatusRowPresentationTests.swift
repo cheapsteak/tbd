@@ -211,9 +211,17 @@ struct ProgramStatusRowPresentationTests {
 
     @Test func badgeHelpMatchesAnyOSCTerminalNotOnlyTheFirst() {
         let help = ProgramStatusRowPresentation.badgeHelp(
-            selected: .finished, oscTooltip: "both",
-            resolvedValues: [.idle, .done], genericHelp: "Finished")
+            selected: .turnFailed, oscTooltip: "both",
+            resolvedValues: [.idle, .error], genericHelp: "The last turn failed")
         #expect(help == "both")
+    }
+
+    /// A done session shows exactly like an idle one: no suffix. The bold
+    /// name already marks a finished turn the user has not read, and done
+    /// stays set until the next turn, so a badge would sit on nearly every
+    /// waiting row.
+    @Test func doneSelectsNoSuffixLikeIdle() {
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .done) == nil)
     }
 
     @Test func suffixIndicatorMapsEachOSCState() {
@@ -221,7 +229,6 @@ struct ProgramStatusRowPresentationTests {
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .awaitingInput(reason: nil)) == .attention)
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .needsAuth) == .needsAuth)
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .error) == .turnFailed)
-        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .done) == .finished)
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .idle) == nil)
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .unknown(why: "x")) == nil)
     }
