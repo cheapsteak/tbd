@@ -3,6 +3,11 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "composer-draft")
 
+/// `TmuxSignalEnding`'s lines go where the coordinator logs every other park
+/// and swap ending. They fire for legacy swaps too, so they are not
+/// composer-draft soak signals.
+private let endingLogger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation")
+
 /// What a park does with what the composer-draft feature knows about the
 /// session. See `docs/specs/2026-10-19-tbd-session-mod-design.md`, "Parking".
 enum ComposerDraftParkDecision: Equatable, Sendable {
@@ -203,9 +208,9 @@ enum TmuxSignalEnding {
     /// poll, `try?` on the sleep is not a cancellation check: a cancelled task
     /// burns the attempts at zero delay and reports `.stillRunning`, and the
     /// caller's respawn still ends the process. An outcome short of `.exited`
-    /// is logged, naming `terminalID`: `.noClaudeProcess` at `.notice`,
-    /// because no SIGTERM went out and the ending falls to the respawn alone,
-    /// and `.stillRunning` at `.debug`.
+    /// is logged under the `Hibernation` category, naming `terminalID`:
+    /// `.noClaudeProcess` at `.notice`, because no SIGTERM went out and the
+    /// ending falls to the respawn alone, and `.stillRunning` at `.debug`.
     @discardableResult
     static func end(
         tmux: TmuxManager,
@@ -224,7 +229,7 @@ enum TmuxSignalEnding {
               let panePID = Int32(panePIDString), panePID > 0,
               let claudePID = inspector.foregroundClaudePID(panePID: panePID),
               claudePID > 0 else {
-            logger.notice("composer-draft: found no claude process under \(terminalID.uuidString, privacy: .public)'s pane to signal, so no SIGTERM was sent — the respawn ends whatever is there")
+            endingLogger.notice("signal ending: found no claude process under \(terminalID.uuidString, privacy: .public)'s pane, so no SIGTERM was sent — respawn-window -k alone ends the pane")
             return .noClaudeProcess
         }
         signaller.terminateProcessOnly(claudePID)
@@ -235,7 +240,7 @@ enum TmuxSignalEnding {
                 return .exited(pid: claudePID)
             }
         }
-        logger.debug("composer-draft: SIGTERM did not end claude pid \(claudePID, privacy: .public) for \(terminalID.uuidString, privacy: .public) within the poll window — the respawn ends it")
+        endingLogger.debug("signal ending: SIGTERM did not end claude pid \(claudePID, privacy: .public) for \(terminalID.uuidString, privacy: .public) within the poll window — respawn-window -k ends it")
         return .stillRunning(pid: claudePID)
     }
 }

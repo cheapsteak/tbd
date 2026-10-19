@@ -327,13 +327,14 @@ public actor HibernationCoordinator {
     /// 25 at the production `exitPollInterval` of 200 ms is five seconds, and
     /// the number is sized against what a Claude session actually does with a
     /// `SIGTERM` it means to honour: run its Stop hooks, tear down its MCP
-    /// children, and flush the transcript it is mid-write on. Three seconds of
-    /// polite `/exit` has already passed by the time this rung is reached, so a
-    /// session that is shutting down cleanly and slowly gets eight seconds in
-    /// total before anything is killed — which is the whole reason this rung
-    /// exists, since the alternative it replaced was a `SIGKILL` of the process
-    /// group at three seconds. A session spawned with the composer-draft
-    /// feature is never sent `/exit`: it starts at this rung and gets these
+    /// children, and flush the transcript it is mid-write on. A park of a
+    /// session spawned without the composer-draft feature reaches this rung
+    /// after three seconds of polite `/exit`, so a session that is shutting
+    /// down cleanly and slowly gets eight seconds in total before anything is
+    /// killed — which is the whole reason this rung exists, since the
+    /// alternative it replaced was a `SIGKILL` of the process group at three
+    /// seconds. A profile swap, and a park of a session spawned with the
+    /// feature, never send `/exit`: they start at this rung and get these
     /// five. Injectable on the same terms as the pair above.
     nonisolated let holderTerminateAttempts: Int
 

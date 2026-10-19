@@ -710,7 +710,7 @@ func delayedClaudeReparkRejectsProfileReplacement() async throws {
     let profile = try await db.modelProfiles.create(name: "Replacement", kind: .oauth)
 
     // Capture the re-park's predecessor snapshot BEFORE the profile transaction.
-    // Blocking at the graceful interrupt is too late: the swap has already
+    // Blocking inside the swap's ending is too late: the swap has already
     // reserved its replacement identity there, so such a caller is current.
     let lockGate = ServerLockGate()
     let holder = lockGate.hold(tmux, server: worktree.tmuxServer)

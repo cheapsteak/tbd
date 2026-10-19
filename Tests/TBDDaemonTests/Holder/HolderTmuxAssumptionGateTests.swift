@@ -1194,9 +1194,9 @@ struct HolderTmuxAssumptionGateTests {
     /// category error, and what stops it here is the PARK rather than the
     /// transport.
     ///
-    /// This suite's registry adopted nothing, so the daemon holds no reader to
-    /// write the polite `/exit` through and the park refuses by name — which
-    /// is this suite's standing way of saying a path got as far as the reader.
+    /// This suite's registry adopted nothing, so the daemon holds no reader
+    /// for the session and the park refuses by name — which is this suite's
+    /// standing way of saying a path got as far as the reader lookup.
     /// The row assertions are the half a return value cannot see: the arm
     /// parks BEFORE it re-homes precisely so that a park which refuses leaves
     /// the row claiming nothing new.

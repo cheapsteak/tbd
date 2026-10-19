@@ -401,6 +401,10 @@ session, with or without the feature, on both transports, and types nothing
 into the terminal: no `/exit`, no Escape, no Ctrl+C. A swap skips the screen
 check that keeps a legacy park's typed `/exit` off a draft, so a typed `/exit`
 would land after whatever the box holds and Enter would submit it to the model.
+The existing escalation still guarantees the process ends: `respawn-window -k`
+on tmux, abandon on the holder. On tmux, the SIGTERM goes to the Claude
+process found under the pane's shell; when none is found, no SIGTERM is sent
+and `respawn-window -k` alone ends the pane.
 
 A swap never refuses or asks, whatever the feature answers. It is an explicit
 gesture, and it ends and resumes the session the way a park and a wake do, so

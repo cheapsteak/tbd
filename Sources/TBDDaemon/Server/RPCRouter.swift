@@ -455,12 +455,12 @@ public final class RPCRouter: Sendable {
     /// The one process-fact reader, injected for the same reason `AgentReaper`
     /// and `AppLivenessArbiter` take one: the re-verification must be statable
     /// in a test without a process to inspect. Also how the tmux in-place
-    /// swap sends SIGTERM to a session spawned with the composer-draft
-    /// feature, so a test can see the pid it signalled.
+    /// swap sends SIGTERM to the session it ends, so a test can see the pid
+    /// it signalled.
     let processSignaller: any ProcessSignaller
 
     /// Behavior seam for send-path settling after an image paste and the
-    /// graceful interrupt before an in-place profile replacement. A
+    /// signal ending's poll before an in-place profile replacement. A
     /// `Duration` is behavior, so this is the `Clock` seam rather than the
     /// `now` date seam beside it, and it is existential (`any Clock<Duration>`)
     /// for the reason every other subsystem here holds one that way — a generic
