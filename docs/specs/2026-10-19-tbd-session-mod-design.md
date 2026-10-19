@@ -220,12 +220,28 @@ attestation, which the placement doctrine keeps compiled.
 ### Reclaiming files
 
 The per-session directories are a new durable resource, reclaimed by one new
-`OrphanGC` arm under `gcEnabled`. The arm removes a whole session directory
-once no terminal row's `claudeSessionID` and no worktree's
-`archivedClaudeSessions` names its session ID, and nothing has written inside
-it within `gcGraceSeconds`. A parked session's files therefore survive however
-long the park lasts. A feature that keeps files with a shorter life names its
-own rule inside the directory; later features add files, not reconcilers.
+`OrphanGC` arm under `gcEnabled`. A session directory stays while TBD can still
+resume its session, which is while any of three records names its session ID:
+
+- **A terminal row's `claudeSessionID`** – the session is running or parked.
+- **A worktree's `archivedClaudeSessions`** – the worktree is archived. Archive
+  copies every resumable session ID into this list, parked sessions included,
+  in the transaction that flips the status and before it deletes the terminal
+  rows. Revive resumes every listed session and clears the list only once the
+  new terminal rows name the same IDs. A revive that skips Claude keeps the
+  list.
+- **A `terminal_history` row's `claudeSessionID`** – the terminal was closed,
+  and `terminalHistory.revive` can resume it. Archive also writes these rows.
+  History keeps the newest 50 entries per worktree, so a session that falls off
+  the end can no longer be resumed, and its files go with it.
+
+Once no record names it and nothing has written inside it within
+`gcGraceSeconds`, the arm removes the whole directory. A parked session's files
+therefore survive however long the park lasts, and an archived session's for as
+long as its worktree stays archived. Forgetting a worktree deletes its terminal
+rows, its history rows and the worktree row, which releases every reference. A
+feature that keeps files with a shorter life names its own rule inside the
+directory; later features add files, not reconcilers.
 
 The plugin directory needs no new reconciler: it is the existing one, and
 `PluginDirWriter` decides what `hooks/` holds.
@@ -398,8 +414,11 @@ Each gating branch gets its own test.
   feature off sets none of them and writes nothing.
 - **Flag states** – a pre-migration row reads NULL, and an explicit `false`
   survives a change to `Config.composerDraftDefault`.
-- **Reconciler** – a referenced session directory is kept, an unreferenced one
-  inside the grace period is kept, an unreferenced one past it is removed, and
+- **Reconciler** – a session directory referenced only by a terminal row, only
+  by `archivedClaudeSessions`, or only by a `terminal_history` row is kept; an
+  unreferenced one inside the grace period is kept; an unreferenced one past it
+  is removed; a parked session's directory survives archive, revive and
+  forgetting the worktree in turn as kept, kept and removed; and
   `composer-draft.unrestored` goes at 30 days.
 - **Mod** (`claude plugin test`, mock clock):
   - `alive.json` is written at load and its heartbeat ticks
