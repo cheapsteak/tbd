@@ -24,8 +24,10 @@ const BAND: RenderPropsOf['AbovePrompt'] = {
 const NOTICE = { type: 'Text', text: 'Restored your unsent draft' }
 
 type World = {
-  /** What composer-draft.json holds as a draft; undefined for no file. */
-  draft: string | undefined
+  /** composer-draft.json's text; undefined for no file. */
+  file: string | undefined
+  /** The file is there, but reading it fails. */
+  readFails: boolean
   /** The prompt box's text; a fill that lands replaces it. */
   box: string
   /** Answers for successive fills; `true` once they run out. */
@@ -36,16 +38,34 @@ type World = {
   clock: MockClock
 }
 
+type WorldOptions = {
+  /** A draft composer-draft.json holds at the start. */
+  draft?: string
+  file?: string
+  readFails?: boolean
+  box?: string
+  fillAnswers?: boolean[]
+  slowDraftWrite?: boolean
+  /** Spawned with no TBD_MOD_FEATURES. */
+  withoutFeatures?: boolean
+}
+
+/** composer-draft.json as the feature writes it for a draft. */
+function draftFile(text: string): string {
+  return JSON.stringify({ schemaVersion: 1, sessionId: SESSION_ID, hasDraft: true, text, cursor: text.length, savedAtMs: 500 })
+}
+
 // Answers everything the mod calls beneath it, from the world's fields as
 // they stand when each call lands, and records what the mod did.
-function world(on: On, options: { draft?: string; box?: string; fillAnswers?: boolean[]; slowDraftWrite?: boolean } = {}): World {
+function world(on: On, options: WorldOptions = {}): World {
   mock.env(on, {
     TBD_SESSIONS_DIR: '/sessions',
-    TBD_MOD_FEATURES: 'composer-draft',
     TBD_TERMINAL_INCARNATION_ID: INCARNATION,
+    ...(options.withoutFeatures ? {} : { TBD_MOD_FEATURES: 'composer-draft' }),
   })
   const w: World = {
-    draft: options.draft,
+    file: options.draft === undefined ? options.file : draftFile(options.draft),
+    readFails: options.readFails ?? false,
     box: options.box ?? '',
     fillAnswers: [...(options.fillAnswers ?? [])],
     writes: [],
@@ -61,20 +81,13 @@ function world(on: On, options: { draft?: string; box?: string; fillAnswers?: bo
     w.writes.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
-  on('fs.read', ($, e) =>
-    e.path === DRAFT && w.draft !== undefined
-      ? {
-          value: JSON.stringify({
-            schemaVersion: 1,
-            sessionId: SESSION_ID,
-            hasDraft: true,
-            text: w.draft,
-            cursor: w.draft.length,
-            savedAtMs: 500,
-          }),
-        }
-      : { deny: `ENOENT: ${e.path}` },
-  )
+  on('fs.exists', ($, e) => ({ value: e.path === DRAFT && (w.file !== undefined || w.readFails) }))
+  on('fs.read', ($, e) => {
+    if (e.path === DRAFT && w.readFails) {
+      return { deny: `EACCES: ${e.path}` }
+    }
+    return e.path === DRAFT && w.file !== undefined ? { value: w.file } : { deny: `ENOENT: ${e.path}` }
+  })
   on('prompt.read', () => ({ value: { text: w.box, cursor: w.box.length } }))
   on('prompt.fill', ($, e) => {
     const isFilled = w.fillAnswers.shift() ?? true
@@ -145,6 +158,11 @@ test('aDraftRecordsItsTextAndCursor', () => {
   })
 })
 
+test('aDraftRecordsWholeMilliseconds', () => {
+  expect(draftRecord(SESSION_ID, { text: SAVED, cursor: 4 }, 1_234.75)).toMatchObject({ savedAtMs: 1_234 })
+  expect(draftRecord(SESSION_ID, { text: '', cursor: 0 }, 1_234.75)).toMatchObject({ savedAtMs: 1_234 })
+})
+
 test('aFailingWriteNeverLosesTheEdit', async () => {
   const written: string[] = []
   const writer = createDraftWriter(async box => {
@@ -171,6 +189,33 @@ test('aStartWithoutADraftSavesTheBox', async ($, on) => {
   expect(w.fills).toEqual([])
   expect(draftRecords(w)).toEqual([{ schemaVersion: 1, sessionId: SESSION_ID, hasDraft: false, savedAtMs: 1_000 }])
 })
+
+// An unreadable file may hold a draft: the start neither overwrites it nor
+// settles the process, so a later start that can read it still restores it.
+for (const [name, options] of [
+  ['aDraftFileThatDoesNotParseIsLeftAlone', { file: '{"hasDraft":tru' }],
+  ['aDraftFileThatCannotBeReadIsLeftAlone', { readFails: true }],
+] as const) {
+  test(name, async ($, on) => {
+    const w = world(on, options)
+
+    await $.session.start(START)
+    await w.clock.settle()
+
+    expect(draftRecords(w)).toEqual([])
+    expect(w.fills).toEqual([])
+    expect(w.logs.some(line => line.startsWith('composer-draft: could not read composer-draft.json, left it alone'))).toBe(
+      true,
+    )
+
+    w.readFails = false
+    w.file = draftFile(SAVED)
+    await $.session.start(START)
+    await w.clock.settle()
+
+    expect(w.fills).toEqual([{ text: SAVED, mode: 'replace', isFilled: true }])
+  })
+}
 
 test('restoreFillsAnEmptyBox', async ($, on) => {
   const w = world(on, { draft: SAVED })
@@ -235,7 +280,7 @@ test('aReloadNeverTakesThePersonsOwnDraftForOneToRestore', async ($, on) => {
 
   // The person typed a draft, which was saved; then the module reloads.
   w.box = 'typed since'
-  w.draft = 'typed since'
+  w.file = draftFile('typed since')
   await $.session.start(START)
   await w.clock.settle()
 
@@ -283,6 +328,19 @@ test('theNoticeYieldsToASurvey', async ($, on) => {
 
   expect(await band.find(NOTICE)).toBeUndefined()
   expect(await band.find({ type: 'Text', text: 'engine band' })).toBeDefined()
+})
+
+test('withoutTheFeatureListTheBandPassesThroughAndNothingIsRestored', async ($, on) => {
+  const w = world(on, { draft: SAVED, withoutFeatures: true })
+  await $.session.start(START)
+  await w.clock.settle()
+
+  const band = await $.ui.mount({ plugin: 'tbd', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+
+  expect(await band.find(NOTICE)).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: 'engine band' })).toBeDefined()
+  expect(w.fills).toEqual([])
+  expect(w.writes).toEqual([])
 })
 
 test('aNoticeLeftByAnEarlierLoadIsTakenDownAtTheNextStart', async ($, on) => {

@@ -56,12 +56,16 @@ export function createDraftWriter(write: (box: PromptBox) => Promise<void>): Dra
   }
 }
 
-/** The composer-draft.json record of a box: its text and cursor, or no draft. */
+/**
+ * The composer-draft.json record of a box: its text and cursor, or no draft.
+ * The daemon reads the numbers as integers, so they are written whole.
+ */
 export function draftRecord(sessionId: string, box: PromptBox, now: number): object {
+  const savedAtMs = Math.trunc(now)
   if (box.text === '') {
-    return { schemaVersion: 1, sessionId, hasDraft: false, savedAtMs: now }
+    return { schemaVersion: 1, sessionId, hasDraft: false, savedAtMs }
   }
-  return { schemaVersion: 1, sessionId, hasDraft: true, text: box.text, cursor: box.cursor, savedAtMs: now }
+  return { schemaVersion: 1, sessionId, hasDraft: true, text: box.text, cursor: Math.trunc(box.cursor), savedAtMs }
 }
 
 let writer: DraftWriter | undefined
@@ -82,18 +86,42 @@ async function saveBox($: EngineInterface, box: PromptBox): Promise<void> {
   }
 }
 
-/** The saved draft's text, or undefined when there is none or it cannot be read. */
-async function savedDraft($: EngineInterface, ctx: SessionContext): Promise<string | undefined> {
-  const file = await $.fs.read(`${ctx.dir}/composer-draft.json`).catch(() => undefined)
-  if (file === undefined) {
-    return undefined
+/** What composer-draft.json holds at a session's start. */
+type SavedDraft =
+  /** No file, or a file recording an empty box. */
+  | { kind: 'none' }
+  | { kind: 'draft'; text: string }
+  /** A file that is there but cannot be read: it may hold a draft, so it is kept. */
+  | { kind: 'unreadable'; reason: string }
+
+async function readSavedDraft($: EngineInterface, ctx: SessionContext): Promise<SavedDraft> {
+  const path = `${ctx.dir}/composer-draft.json`
+  if (!(await $.fs.exists(path))) {
+    return { kind: 'none' }
   }
+  let file: string
   try {
-    const record = JSON.parse(file) as { hasDraft?: unknown; text?: unknown } | null
-    return record?.hasDraft === true && typeof record.text === 'string' && record.text !== '' ? record.text : undefined
-  } catch {
-    return undefined
+    file = await $.fs.read(path)
+  } catch (error) {
+    return { kind: 'unreadable', reason: describe(error) }
   }
+  let record: unknown
+  try {
+    record = JSON.parse(file)
+  } catch {
+    return { kind: 'unreadable', reason: 'not JSON' }
+  }
+  const fields = typeof record === 'object' && record !== null ? (record as { hasDraft?: unknown; text?: unknown }) : {}
+  if (typeof fields.hasDraft !== 'boolean') {
+    return { kind: 'unreadable', reason: 'no hasDraft' }
+  }
+  if (!fields.hasDraft) {
+    return { kind: 'none' }
+  }
+  if (typeof fields.text !== 'string' || fields.text === '') {
+    return { kind: 'unreadable', reason: 'a draft without text' }
+  }
+  return { kind: 'draft', text: fields.text }
 }
 
 /**
@@ -153,8 +181,13 @@ export async function sessionStart($: EngineInterface, ctx: SessionContext): Pro
     if ((await $.state.get(restoredIncarnation)).value === ctx.incarnationId) {
       return
     }
-    const text = await savedDraft($, ctx)
-    if (text === undefined) {
+    const saved = await readSavedDraft($, ctx)
+    if (saved.kind === 'unreadable') {
+      // It may hold a draft: neither overwrite it nor settle this process.
+      log($, `could not read composer-draft.json, left it alone: ${saved.reason}`)
+      return
+    }
+    if (saved.kind === 'none') {
       // Nothing to restore: save the box as it stands so the file exists, and
       // settle this process, so a later reload never takes the person's own
       // draft for one to restore.
@@ -162,7 +195,7 @@ export async function sessionStart($: EngineInterface, ctx: SessionContext): Pro
       await $.state.set(restoredIncarnation, ctx.incarnationId)
       return
     }
-    void restoreDraft($, ctx, text)
+    void restoreDraft($, ctx, saved.text)
   } catch (error) {
     log($, `session.start failed: ${describe(error)}`)
   }

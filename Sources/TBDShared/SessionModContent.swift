@@ -66,12 +66,16 @@ export function createDraftWriter(write: (box: PromptBox) => Promise<void>): Dra
   }
 }
 
-/** The composer-draft.json record of a box: its text and cursor, or no draft. */
+/**
+ * The composer-draft.json record of a box: its text and cursor, or no draft.
+ * The daemon reads the numbers as integers, so they are written whole.
+ */
 export function draftRecord(sessionId: string, box: PromptBox, now: number): object {
+  const savedAtMs = Math.trunc(now)
   if (box.text === '') {
-    return { schemaVersion: 1, sessionId, hasDraft: false, savedAtMs: now }
+    return { schemaVersion: 1, sessionId, hasDraft: false, savedAtMs }
   }
-  return { schemaVersion: 1, sessionId, hasDraft: true, text: box.text, cursor: box.cursor, savedAtMs: now }
+  return { schemaVersion: 1, sessionId, hasDraft: true, text: box.text, cursor: Math.trunc(box.cursor), savedAtMs }
 }
 
 let writer: DraftWriter | undefined
@@ -92,18 +96,42 @@ async function saveBox($: EngineInterface, box: PromptBox): Promise<void> {
   }
 }
 
-/** The saved draft's text, or undefined when there is none or it cannot be read. */
-async function savedDraft($: EngineInterface, ctx: SessionContext): Promise<string | undefined> {
-  const file = await $.fs.read(`${ctx.dir}/composer-draft.json`).catch(() => undefined)
-  if (file === undefined) {
-    return undefined
+/** What composer-draft.json holds at a session's start. */
+type SavedDraft =
+  /** No file, or a file recording an empty box. */
+  | { kind: 'none' }
+  | { kind: 'draft'; text: string }
+  /** A file that is there but cannot be read: it may hold a draft, so it is kept. */
+  | { kind: 'unreadable'; reason: string }
+
+async function readSavedDraft($: EngineInterface, ctx: SessionContext): Promise<SavedDraft> {
+  const path = `${ctx.dir}/composer-draft.json`
+  if (!(await $.fs.exists(path))) {
+    return { kind: 'none' }
   }
+  let file: string
   try {
-    const record = JSON.parse(file) as { hasDraft?: unknown; text?: unknown } | null
-    return record?.hasDraft === true && typeof record.text === 'string' && record.text !== '' ? record.text : undefined
-  } catch {
-    return undefined
+    file = await $.fs.read(path)
+  } catch (error) {
+    return { kind: 'unreadable', reason: describe(error) }
   }
+  let record: unknown
+  try {
+    record = JSON.parse(file)
+  } catch {
+    return { kind: 'unreadable', reason: 'not JSON' }
+  }
+  const fields = typeof record === 'object' && record !== null ? (record as { hasDraft?: unknown; text?: unknown }) : {}
+  if (typeof fields.hasDraft !== 'boolean') {
+    return { kind: 'unreadable', reason: 'no hasDraft' }
+  }
+  if (!fields.hasDraft) {
+    return { kind: 'none' }
+  }
+  if (typeof fields.text !== 'string' || fields.text === '') {
+    return { kind: 'unreadable', reason: 'a draft without text' }
+  }
+  return { kind: 'draft', text: fields.text }
 }
 
 /**
@@ -163,8 +191,13 @@ export async function sessionStart($: EngineInterface, ctx: SessionContext): Pro
     if ((await $.state.get(restoredIncarnation)).value === ctx.incarnationId) {
       return
     }
-    const text = await savedDraft($, ctx)
-    if (text === undefined) {
+    const saved = await readSavedDraft($, ctx)
+    if (saved.kind === 'unreadable') {
+      // It may hold a draft: neither overwrite it nor settle this process.
+      log($, `could not read composer-draft.json, left it alone: ${saved.reason}`)
+      return
+    }
+    if (saved.kind === 'none') {
       // Nothing to restore: save the box as it stands so the file exists, and
       // settle this process, so a later reload never takes the person's own
       // draft for one to restore.
@@ -172,7 +205,7 @@ export async function sessionStart($: EngineInterface, ctx: SessionContext): Pro
       await $.state.set(restoredIncarnation, ctx.incarnationId)
       return
     }
-    void restoreDraft($, ctx, text)
+    void restoreDraft($, ctx, saved.text)
   } catch (error) {
     log($, `session.start failed: ${describe(error)}`)
   }
@@ -245,7 +278,15 @@ export async function abovePrompt(
 // engine follows `$` only into functions it can name at the call site, so a
 // feature's hooks are imported function declarations, called directly. A new
 // feature adds its import and one line in each hook it uses.
-import type { Register } from 'claude-code'
+import type {
+  EngineInterface,
+  Frozen,
+  PromptChangeInput,
+  PromptChangeResult,
+  PromptEditInput,
+  PromptEditResult,
+  Register,
+} from 'claude-code'
 
 import {
   FEATURE as COMPOSER_DRAFT,
@@ -256,6 +297,43 @@ import {
   sessionStart as composerDraftSessionStart,
 } from './features/composer-draft.tsx'
 import { readSessionEnv, resolveContext, startHeartbeat } from './shared/session.ts'
+import type { SessionEnv } from './shared/session.ts'
+
+// The two hooks that run on every change of the prompt box. They take the
+// environment as an argument, so a test can call them directly: the test kit
+// raises neither event.
+
+/**
+ * prompt.edit: hands the box after the edit to the features and returns it
+ * to the editor unchanged. Nothing past `next` waits on more than the
+ * environment read at load, so typing never waits on a feature, and features
+ * see boxes in the order of the edits.
+ */
+export async function promptEdit(
+  $: EngineInterface,
+  env: SessionEnv | null,
+  e: Frozen<PromptEditInput>,
+  next: (e: Frozen<PromptEditInput>) => Promise<PromptEditResult>,
+): Promise<PromptEditResult> {
+  const box = await next(e)
+  if (env !== null && env.features.has(COMPOSER_DRAFT)) {
+    composerDraftPromptEdited($, { text: box.text, cursor: box.cursor })
+  }
+  return box
+}
+
+/** prompt.change: hands the box as it now stands to the features. Observe only. */
+export async function promptChange(
+  $: EngineInterface,
+  env: SessionEnv | null,
+  e: Frozen<PromptChangeInput>,
+  next: (e: Frozen<PromptChangeInput>) => Promise<PromptChangeResult>,
+): Promise<PromptChangeResult> {
+  if (env !== null && env.features.has(COMPOSER_DRAFT)) {
+    composerDraftPromptChanged($, { text: e.text, cursor: e.cursor })
+  }
+  return next(e)
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -277,25 +355,11 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Waits on nothing past `next` but the environment read at load, so typing
-  // never waits on a feature, and features see boxes in the order of the edits.
   // The box goes back to the editor whatever a feature does with it.
-  on('prompt.edit', async ($, e, next) => {
-    const box = await next(e)
-    const env = await readSessionEnv($)
-    if (env !== null && env.features.has(COMPOSER_DRAFT)) {
-      composerDraftPromptEdited($, { text: box.text, cursor: box.cursor })
-    }
-    return box
-  }).catch(($, e, next) => next(e))
+  on('prompt.edit', async ($, e, next) => promptEdit($, await readSessionEnv($), e, next))
+    .catch(($, e, next) => next(e))
 
-  on('prompt.change', async ($, e, next) => {
-    const env = await readSessionEnv($)
-    if (env !== null && env.features.has(COMPOSER_DRAFT)) {
-      composerDraftPromptChanged($, { text: e.text, cursor: e.cursor })
-    }
-    return next(e)
-  })
+  on('prompt.change', async ($, e, next) => promptChange($, await readSessionEnv($), e, next))
 
   // The band above the prompt yields to a survey. A feature that draws there
   // wraps what is drawn beneath it, and a second one would wrap the first.
@@ -417,7 +481,8 @@ async function beat($: EngineInterface): Promise<void> {
       incarnationId: ctx.incarnationId,
       modVersion: MOD_VERSION,
       features: [...ctx.features],
-      heartbeatAtMs: await $.clock.now(),
+      // The daemon reads it as an integer.
+      heartbeatAtMs: Math.trunc(await $.clock.now()),
     })
   } catch (error) {
     $.ui.log(`session mod: could not write alive.json: ${describe(error)}`, { to: 'debug' })

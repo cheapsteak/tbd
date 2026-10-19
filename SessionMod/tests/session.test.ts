@@ -17,15 +17,16 @@ type World = { writes: { path: string; text: string }[]; clock: MockClock }
 
 // Answers everything the mod calls beneath it and records each file written.
 // No composer-draft.json exists and the box is empty.
-function world(on: On, env: Record<string, string>, sessionId = SESSION_ID): World {
+function world(on: On, env: Record<string, string>, sessionId = SESSION_ID, now = 1_000): World {
   const writes: World['writes'] = []
   mock.env(on, env)
-  const clock = mock.clock(on, { now: 1_000 })
+  const clock = mock.clock(on, { now })
   on('session.id', () => ({ value: sessionId }))
   on('fs.write', ($, e) => {
     writes.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
+  on('fs.exists', () => ({ value: false }))
   on('fs.read', ($, e) => ({ deny: `ENOENT: ${e.path}` }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('ui.log', () => ({ value: undefined }))
@@ -63,6 +64,16 @@ test('heartbeatWritesAliveAtStartAndEveryThirtySeconds', async ($, on) => {
       heartbeatAtMs: 31_000,
     },
   ])
+})
+
+test('heartbeatTimesAreWholeMilliseconds', async ($, on) => {
+  const w = world(on, FEATURES_ON, SESSION_ID, 1_000.75)
+
+  await $.session.start(START)
+  await w.clock.settle()
+  await w.clock.advance(30_000)
+
+  expect(aliveRecords(w).map(alive => alive.heartbeatAtMs)).toEqual([1_000, 31_000])
 })
 
 test('withoutTheFeatureListNothingIsWritten', async ($, on) => {

@@ -105,7 +105,8 @@ async function beat($: EngineInterface): Promise<void> {
       incarnationId: ctx.incarnationId,
       modVersion: MOD_VERSION,
       features: [...ctx.features],
-      heartbeatAtMs: await $.clock.now(),
+      // The daemon reads it as an integer.
+      heartbeatAtMs: Math.trunc(await $.clock.now()),
     })
   } catch (error) {
     $.ui.log(`session mod: could not write alive.json: ${describe(error)}`, { to: 'debug' })
