@@ -219,29 +219,38 @@ attestation, which the placement doctrine keeps compiled.
 
 ### Reclaiming files
 
-The per-session directories are a new durable resource, reclaimed by one new
-`OrphanGC` arm under `gcEnabled`. A session directory stays while TBD can still
-resume its session, which is while any of three records names its session ID:
+The per-session directories are a new durable resource. Archive removes them,
+and one new `OrphanGC` arm under `gcEnabled` reclaims the rest.
+
+**Archive deletes them.** Every path that archives a worktree removes the
+session directory of each Claude session in it, draft included, once that
+session's process has exited. The mod writes the box one last time on
+`session.end`, so a removal before the exit would be undone by that write. A
+parked session has no process, so its directory goes at once. The sessions of a
+revived worktree therefore resume with an empty box and no notice. Archive has
+always treated a live session's box this way: ending the process discards
+whatever the box held.
+
+**The arm reclaims the rest.** A session directory stays while a person can
+resume its session from a worktree that is not archived, which is while either
+record names its session ID:
 
 - **A terminal row's `claudeSessionID`** – the session is running or parked.
-- **A worktree's `archivedClaudeSessions`** – the worktree is archived. Archive
-  copies every resumable session ID into this list, parked sessions included,
-  in the transaction that flips the status and before it deletes the terminal
-  rows. Revive resumes every listed session and clears the list only once the
-  new terminal rows name the same IDs. A revive that skips Claude keeps the
-  list.
-- **A `terminal_history` row's `claudeSessionID`** – the terminal was closed,
-  and `terminalHistory.revive` can resume it. Archive also writes these rows.
-  History keeps the newest 50 entries per worktree, so a session that falls off
-  the end can no longer be resumed, and its files go with it.
+- **A `terminal_history` row's `claudeSessionID`, in a worktree that is not
+  archived** – the terminal was closed, and `terminalHistory.revive` can resume
+  it. History keeps the newest 50 entries per worktree, so a session that falls
+  off the end can no longer be resumed, and its files go with it.
 
-Once no record names it and nothing has written inside it within
-`gcGraceSeconds`, the arm removes the whole directory. A parked session's files
-therefore survive however long the park lasts, and an archived session's for as
-long as its worktree stays archived. Forgetting a worktree deletes its terminal
-rows, its history rows and the worktree row, which releases every reference. A
-feature that keeps files with a shorter life names its own rule inside the
-directory; later features add files, not reconcilers.
+A worktree's `archivedClaudeSessions` is not a reference. Once no record names a
+directory and nothing has written inside it within `gcGraceSeconds`, the arm
+removes the whole directory. That covers a closed terminal that falls out of
+history, a forgotten worktree, a write that lands after archive's removal
+because teardown failed to stop the process, and an archive path that missed
+its removal. Archive already logs a teardown failure, and a revive inside the
+grace period that follows one could still restore the late draft. A parked
+session's files survive however long the park lasts. A feature that keeps files
+with a shorter life names its own rule inside the directory; later features add
+files, not reconcilers.
 
 The plugin directory needs no new reconciler: it is the existing one, and
 `PluginDirWriter` decides what `hooks/` holds.
@@ -256,7 +265,8 @@ file. If the feature is confirmed for the live process, the park proceeds,
 with or without a draft, and ends Claude with a signal instead of typed keys.
 When the session resumes, the feature fills the saved draft back into the box
 and shows a short notice above the prompt. When liveness is unknown, automatic
-parks skip the session, and a manual park asks the person.
+parks skip the session, and a manual park asks the person. Archiving the
+worktree deletes the draft (see "Reclaiming files").
 
 ### Hooks
 
@@ -414,12 +424,13 @@ Each gating branch gets its own test.
   feature off sets none of them and writes nothing.
 - **Flag states** – a pre-migration row reads NULL, and an explicit `false`
   survives a change to `Config.composerDraftDefault`.
-- **Reconciler** – a session directory referenced only by a terminal row, only
-  by `archivedClaudeSessions`, or only by a `terminal_history` row is kept; an
-  unreferenced one inside the grace period is kept; an unreferenced one past it
-  is removed; a parked session's directory survives archive, revive and
-  forgetting the worktree in turn as kept, kept and removed; and
-  `composer-draft.unrestored` goes at 30 days.
+- **Reconciler** – a session directory named only by a terminal row, or only by
+  a `terminal_history` row in a worktree that is not archived, is kept; one
+  named only by `archivedClaudeSessions`, or only by history in an archived
+  worktree, is removed past the grace period; an unreferenced one inside the
+  grace period is kept; and `composer-draft.unrestored` goes at 30 days.
+- **Archive** – archiving a worktree with a parked session that holds a draft
+  removes that session's directory, and reviving the worktree restores nothing.
 - **Mod** (`claude plugin test`, mock clock):
   - `alive.json` is written at load and its heartbeat ticks
   - a feature missing from `TBD_MOD_FEATURES` writes nothing and passes every
@@ -439,6 +450,8 @@ Each gating branch gets its own test.
   - a SIGTERM park leaves a valid transcript tail, and the wake restores the
     draft, on tmux and on the holder
   - a wake carrying a message does not mix it into the draft
+  - archiving a worktree whose live session holds a draft leaves no session
+    directory once archive returns, on tmux and on the holder
   - where the notice sits relative to queued messages
 
 ## Out of scope
