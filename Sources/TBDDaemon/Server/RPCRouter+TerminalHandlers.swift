@@ -3472,10 +3472,11 @@ extension RPCRouter {
         return try RPCResponse(result: updated)
     }
 
-    /// `.inPlace` swap (seamless "Switch account"): gracefully interrupt the
-    /// pane's current Claude, respawn `claude` under the new profile IN THE SAME
-    /// tmux window, and update the EXISTING terminal row (new profile id, same
-    /// session id + tmux ids). One tab, no new row.
+    /// `.inPlace` swap (seamless "Switch account"): gracefully stop the pane's
+    /// current Claude (the keyed interrupt for a legacy session, SIGTERM for
+    /// one spawned with the composer-draft feature), respawn `claude` under the
+    /// new profile IN THE SAME tmux window, and update the EXISTING terminal
+    /// row (new profile id, same session id + tmux ids). One tab, no new row.
     ///
     /// The terminal row's `profile_id` is set to the new profile BEFORE the
     /// respawn so a respawn failure still leaves the row on the new account
@@ -3504,6 +3505,18 @@ extension RPCRouter {
         let windowID = oldTerminal.tmuxWindowID
         var respawnError: String?
 
+        // 0. How the old process ends, read before step 1 rotates the row's
+        //    incarnation and before the launch below rewrites the session's
+        //    spawn record: both name the replacement, and this question is
+        //    about the process being replaced. Only whether it was spawned
+        //    with the composer-draft feature matters here — a swap proceeds on
+        //    an unconfirmed draft — so the status is read for its ending alone.
+        let endingStyle = ComposerDraftParkGate.endingStyle(for: ComposerDraftStatus.read(
+            sessionsDir: sessionsDir,
+            claudeSessionID: oldTerminal.claudeSessionID,
+            liveIncarnationID: oldTerminal.sessionIncarnationID,
+            now: now()))
+
         // 1. Reserve the replacement identity before interrupting the old
         //    process. Its SessionEnd hook can arrive during the graceful stop:
         //    fencing that hook first prevents our own interrupt from parking
@@ -3522,10 +3535,25 @@ extension RPCRouter {
         guard let prepared = try await db.terminals.get(id: oldTerminal.id) else {
             return (RPCResponse(error: "Terminal vanished before swap"), nil)
         }
-        // 2. Gracefully interrupt the old process after fencing its hooks.
+        // 2. Gracefully stop the old process after fencing its hooks.
         //    `respawn-window -k` remains the termination guarantee; the graceful
         //    stop gives Claude a chance to flush before the forced replacement.
-        await gracefullyInterruptPane(server: server, paneID: paneID)
+        switch endingStyle {
+        case .typedExit:
+            await gracefullyInterruptPane(server: server, paneID: paneID)
+        case .signal:
+            // A session spawned with the composer-draft feature is never typed
+            // into: the keyed interrupt's Ctrl+C would clear its box, and the
+            // feature would record the draft as gone. SIGTERM runs the same
+            // graceful shutdown, so `session.end` makes the final save. The
+            // poll window is the park's, so a swap waits for that save exactly
+            // as long as a park does.
+            await TmuxSignalEnding.end(
+                tmux: tmux, server: server, paneID: paneID, terminalID: oldTerminal.id,
+                inspector: paneProcessInspector, signaller: processSignaller, clock: clock,
+                attempts: hibernationCoordinator.exitPollAttempts,
+                interval: hibernationCoordinator.exitPollInterval)
+        }
         // Legacy Notification hooks carry no incarnation token. Retract any
         // wait reason the predecessor recorded during the interrupt, before
         // launching a successor that could raise a legitimate new prompt.
@@ -3611,11 +3639,13 @@ extension RPCRouter {
         return (try RPCResponse(result: updated), respawnError)
     }
 
-    /// Best-effort graceful interrupt of a pane's foreground program before an
-    /// in-place respawn: Escape (stop a Claude generation), a brief settle,
-    /// then C-c C-c, another settle, then a SIGTERM to the pane pid as a
-    /// backstop. Every step is best-effort — failures are logged and ignored,
-    /// since the subsequent `respawn-window -k` guarantees termination.
+    /// Best-effort graceful interrupt of a legacy session's foreground program
+    /// before an in-place respawn: Escape (stop a Claude generation), a brief
+    /// settle, then C-c C-c, another settle, then a SIGTERM to the pane pid as
+    /// a backstop. Every step is best-effort — failures are logged and
+    /// ignored, since the subsequent `respawn-window -k` guarantees
+    /// termination. Never used on a session spawned with the composer-draft
+    /// feature, which `TmuxSignalEnding` ends without a keystroke.
     ///
     /// **Acts on an unverified coordinate (issue #384).** `paneID` comes from
     /// the terminal row, and tmux reuses pane ids, so a stale row aims this at

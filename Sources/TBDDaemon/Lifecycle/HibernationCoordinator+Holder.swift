@@ -127,6 +127,31 @@ extension HolderChildDisposition {
     }
 }
 
+/// The holder park's escalation ladder, as far as a unit test can reach it:
+/// the rung a park starts on. The rungs themselves run in
+/// `performHolderHibernate`, against a live reader and process table.
+enum HolderParkLadder {
+    enum Rung: Equatable, Sendable {
+        /// `/exit` written to the pty, then a poll for the child to leave.
+        case typedExit
+        /// SIGTERM to the child alone, then a poll.
+        case terminate
+        /// `HolderRegistry.abandon`: the holder lets go of the pty and the job
+        /// is killed by process group.
+        case abandon
+    }
+
+    /// A legacy session starts with the typed `/exit`. A session spawned with
+    /// the composer-draft feature skips it and starts at SIGTERM, so nothing is
+    /// ever typed into its composer. The forced rung follows either way.
+    static func firstRung(for style: ParkEndingStyle) -> Rung {
+        switch style {
+        case .typedExit: return .typedExit
+        case .signal: return .terminate
+        }
+    }
+}
+
 /// Park and wake for the pty-holder transport.
 ///
 /// Split from `HibernationCoordinator` so the diff to that file is a set of
@@ -518,8 +543,9 @@ extension HibernationCoordinator {
                 return .notEligible(reason: refusal)
             case .readable(let screen):
                 // The typed-input check decides only a legacy session's park;
-                // the composer-draft feature decides the rest.
-                if composerDraft.scrapeRefuses(
+                // the composer-draft feature decides the rest. The holder park
+                // reads the screen once, so this is its authoritative read.
+                if composerDraft.judgeAuthoritativeScrape(
                     hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output),
                     terminalID: terminal.id) {
                     logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
@@ -535,7 +561,9 @@ extension HibernationCoordinator {
         // The reader the polite `/exit` below is written through. Read after
         // the rail rather than inside it: the rail's subject is the screen, and
         // a reader that answered a live screen a moment ago is the one this
-        // park writes to.
+        // park writes to. A session spawned with the composer-draft feature is
+        // never written to, and is still refused without one: no reader means
+        // a session this daemon has not adopted, whatever the ending.
         let reader: HolderReader?
         if sessionEnded {
             reader = nil
@@ -605,8 +633,14 @@ extension HibernationCoordinator {
         // An ended session skips the whole ladder: there is nothing to tell to
         // exit and nothing to signal, and `sessionHasEnded` has already
         // established that the child is gone.
+        //
+        // A session spawned with the composer-draft feature skips this rung
+        // and starts at SIGTERM: a typed `/exit` would go through its composer,
+        // and nothing is ever typed there to end it. `HolderParkLadder` picks
+        // the rung from `spawnedWithFeature` alone.
+        let firstRung = HolderParkLadder.firstRung(for: composerDraft.endingStyle)
         var gone = sessionEnded
-        if let reader {
+        if let reader, firstRung == .typedExit {
             do {
                 try await reader.write(Data("/exit\r".utf8))
             } catch {
@@ -639,7 +673,11 @@ extension HibernationCoordinator {
                 return await refuseUnverifiableHolderChild(
                     currentTerminal, childPID: childPID, verdict: verdict, registry: registry)
             case .ours:
-                logger.debug("hibernate: /exit did not end the job for \(terminal.id, privacy: .public) within the poll window — sending SIGTERM to child \(childPID, privacy: .public)")
+                if firstRung == .typedExit {
+                    logger.debug("hibernate: /exit did not end the job for \(terminal.id, privacy: .public) within the poll window — sending SIGTERM to child \(childPID, privacy: .public)")
+                } else {
+                    logger.debug("hibernate: ending \(terminal.id, privacy: .public) by SIGTERM to child \(childPID, privacy: .public) — a session spawned with the composer-draft feature is never typed into")
+                }
                 signaller.terminateProcessOnly(childPID)
                 gone = await pollUntilChildIsGone(
                     childPID: childPID, terminalID: terminal.id, registry: registry,

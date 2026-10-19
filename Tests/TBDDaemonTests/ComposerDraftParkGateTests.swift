@@ -123,24 +123,104 @@ func writeComposerDraftSession(
 
     /// The scrape refuses only a legacy session's park, whatever it reads; a
     /// confirmed or unconfirmed-but-proceeding session is never refused on it.
+    /// The fast rail and the authoritative read answer alike.
     @Test func onlyALegacyParkIsRefusedOnTheScrape() {
         let id = UUID()
         let legacy = ComposerDraftParkContext(status: .legacy, decision: .legacy)
-        #expect(legacy.scrapeRefuses(hasPendingInput: true, terminalID: id))
-        #expect(!legacy.scrapeRefuses(hasPendingInput: false, terminalID: id))
+        #expect(legacy.scrapeRefuses(hasPendingInput: true))
+        #expect(!legacy.scrapeRefuses(hasPendingInput: false))
+        #expect(legacy.judgeAuthoritativeScrape(hasPendingInput: true, terminalID: id))
+        #expect(!legacy.judgeAuthoritativeScrape(hasPendingInput: false, terminalID: id))
         let proceeding = [
             ComposerDraftParkContext(status: .confirmed(hasDraft: false), decision: .proceed),
             ComposerDraftParkContext(status: .confirmed(hasDraft: true), decision: .proceed),
             ComposerDraftParkContext(status: .unknown(.noAliveFile), decision: .proceed),
         ]
         for context in proceeding {
-            #expect(!context.scrapeRefuses(hasPendingInput: true, terminalID: id))
-            #expect(!context.scrapeRefuses(hasPendingInput: false, terminalID: id))
+            #expect(!context.scrapeRefuses(hasPendingInput: true))
+            #expect(!context.scrapeRefuses(hasPendingInput: false))
+            #expect(!context.judgeAuthoritativeScrape(hasPendingInput: true, terminalID: id))
+            #expect(!context.judgeAuthoritativeScrape(hasPendingInput: false, terminalID: id))
         }
+    }
+
+    /// Only the authoritative read compares, and only a confirmed session has
+    /// an answer to compare with: the fast rail logs nothing whatever it reads,
+    /// an agreement logs nothing, and a disagreement logs its one line.
+    @Test func onlyTheAuthoritativeReadLogsADisagreement() throws {
+        let id = UUID()
+        let lines = ShadowLines()
+        let confirmedEmpty = ComposerDraftParkContext(
+            status: .confirmed(hasDraft: false), decision: .proceed, shadowLog: lines.append)
+
+        _ = confirmedEmpty.scrapeRefuses(hasPendingInput: true)
+        #expect(lines.snapshot().isEmpty, "the fast rail compared")
+        _ = confirmedEmpty.judgeAuthoritativeScrape(hasPendingInput: false, terminalID: id)
+        #expect(lines.snapshot().isEmpty, "an agreement was logged")
+        let expected = try #require(ComposerDraftParkGate.shadowDisagreement(
+            terminalID: id, featureHasDraft: false, scrapeHasDraft: true))
+        _ = confirmedEmpty.judgeAuthoritativeScrape(hasPendingInput: true, terminalID: id)
+        #expect(lines.snapshot() == [expected])
+
+        let unanswered = [
+            ComposerDraftParkContext(status: .legacy, decision: .legacy, shadowLog: lines.append),
+            ComposerDraftParkContext(
+                status: .unknown(.noAliveFile), decision: .proceed, shadowLog: lines.append),
+        ]
+        for context in unanswered {
+            _ = context.judgeAuthoritativeScrape(hasPendingInput: true, terminalID: id)
+        }
+        #expect(lines.snapshot().count == 1, "a session with no feature answer was compared")
+    }
+
+    /// Only a session spawned without the feature is ended by typing `/exit`.
+    /// Every other status — confirmed with or without a draft, and every
+    /// unknown reason — ends by signal: the ending reads `spawnedWithFeature`
+    /// and nothing else.
+    @Test func endingStyleIsTypedExitOnlyForLegacy() {
+        #expect(ComposerDraftParkGate.endingStyle(for: .legacy) == .typedExit)
+        let featureStatuses: [ComposerDraftStatus] = [
+            .confirmed(hasDraft: false),
+            .confirmed(hasDraft: true),
+            .unknown(.noAliveFile),
+            .unknown(.otherIncarnation),
+            .unknown(.staleHeartbeat),
+            .unknown(.featureNotRunning),
+            .unknown(.unreadableFile),
+        ]
+        for status in featureStatuses {
+            #expect(ComposerDraftParkGate.endingStyle(for: status) == .signal,
+                    "\(status) was typed into")
+            #expect(ComposerDraftParkContext(status: status, decision: .proceed).endingStyle
+                == .signal)
+        }
+        #expect(ComposerDraftParkContext(status: .legacy, decision: .legacy).endingStyle
+            == .typedExit)
+    }
+
+    /// The holder ladder skips the typed `/exit` rung for a signal ending and
+    /// starts at SIGTERM; a typed ending still starts with `/exit`.
+    @Test func holderLadderStartsAtTerminateForSignal() {
+        #expect(HolderParkLadder.firstRung(for: .signal) == .terminate)
+        #expect(HolderParkLadder.firstRung(for: .typedExit) == .typedExit)
     }
 
     @Test func unconfirmedRefusalNamesTheReason() {
         #expect(ComposerDraftParkGate.unconfirmedRefusal(reason: "no-alive-file")
             == "TBD can't confirm this session's draft is saved (no-alive-file).")
+    }
+}
+
+/// Records shadow-disagreement lines from any thread.
+final class ShadowLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+
+    var append: @Sendable (String) -> Void {
+        { [self] line in lock.withLock { lines.append(line) } }
+    }
+
+    func snapshot() -> [String] {
+        lock.withLock { lines }
     }
 }

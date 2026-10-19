@@ -95,15 +95,26 @@ struct ModelProfileSpawnTests {
         }
     }
 
+    /// `panePID` is what the dry-run tmux answers for every pane's pid (its
+    /// own default is "0"); the inspector and signaller are the router's
+    /// process-table seams, production by default as in the router itself.
     private func makeFixture(
         respawnWindowError: (@Sendable (String) -> Error?)? = nil,
-        sessionsDir: URL? = nil
+        sessionsDir: URL? = nil,
+        panePID: String? = nil,
+        paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
+        processSignaller: any ProcessSignaller = ProductionProcessSignaller()
     ) -> (RPCRouter, TBDDatabase, TmuxRecorder) {
         let recorder = TmuxRecorder()
+        var panePIDAnswer: (@Sendable (String, String) throws -> String)?
+        if let panePID {
+            panePIDAnswer = { _, _ in panePID }
+        }
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { args in recorder.record(args) },
-            dryRunRespawnWindowError: respawnWindowError)
+            dryRunRespawnWindowError: respawnWindowError,
+            dryRunPanePID: panePIDAnswer)
         let db = try! TBDDatabase(inMemory: true)
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
@@ -115,6 +126,8 @@ struct ModelProfileSpawnTests {
             startTime: Date(),
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: isolatedConfigDirManager(),
+            paneProcessInspector: paneProcessInspector,
+            processSignaller: processSignaller,
             sessionsDir: sessionsDir ?? TBDConstants.sessionsDir(),
             actuationLog: makeTestActuationLog()
         )
@@ -1377,6 +1390,91 @@ struct ModelProfileSpawnTests {
             #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
             #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
         }
+    }
+
+    /// The pane's own pid — its login-shell wrapper — and the Claude process
+    /// beneath it, for the swap's signal ending. Both sit above macOS's
+    /// PID_MAX (99999), so no regression into the keyed interrupt's raw `kill`
+    /// of the pane pid can reach a real process; the Claude pid only ever
+    /// reaches the fake signaller.
+    private static let swapShellPID: Int32 = 900_011
+    private static let swapClaudePID: Int32 = 900_012
+
+    /// The tmux in-place swap of a session spawned with the composer-draft
+    /// feature types nothing into the pane — the keyed interrupt's Ctrl+C
+    /// would clear its box — and sends SIGTERM to the Claude pid under the
+    /// pane's shell before the respawn.
+    @Test("in-place swap of a composer-draft session: SIGTERM to Claude, no keys")
+    func featureTmuxSwapSendsNoKeys() async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let signaller = FakeProcessSignaller()
+        let (router, db, recorder) = makeFixture(
+            sessionsDir: sessionsDir,
+            panePID: String(Self.swapShellPID),
+            paneProcessInspector: FakeInspector(claudePID: Self.swapClaudePID),
+            processSignaller: signaller)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+        // On before the create, so the session is spawned with the feature:
+        // the create writes the spawn record for the incarnation it persists.
+        try await db.config.setComposerDraftEnabled(true)
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+        let row = try #require(try await db.terminals.get(id: oldTerm.id))
+        let incarnation = try #require(row.sessionIncarnationID)
+        let spawn = try #require(readSpawnRecord(
+            sessionsDir: sessionsDir, sessionID: try #require(row.claudeSessionID)))
+        #expect(UUID(uuidString: spawn.incarnationId) == incarnation)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success, "swap failed: \(swapResp.error ?? "nil")")
+
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap)).map { $0.joined(separator: " ") }
+        let keys = postSwap.filter { $0.contains("send-keys") }
+        #expect(keys.isEmpty, "the swap typed into a feature session: \(keys)")
+        #expect(postSwap.contains { $0.contains("respawn-window") })
+        #expect(signaller.terminatedProcessOnly == [Self.swapClaudePID])
+        #expect(signaller.terminated == [Self.swapClaudePID], "a signal went somewhere else too")
+    }
+
+    /// The same swap of a session spawned without the feature keeps the keyed
+    /// interrupt and never reaches the signaller. Its pane pid stays the
+    /// dry-run "0", so the interrupt's raw backstop `kill` has nothing to aim
+    /// at.
+    @Test("in-place swap of a legacy session: keyed interrupt, signaller untouched")
+    func legacyTmuxSwapKeepsTheKeyedInterrupt() async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let signaller = FakeProcessSignaller()
+        let (router, db, recorder) = makeFixture(
+            sessionsDir: sessionsDir,
+            paneProcessInspector: FakeInspector(claudePID: Self.swapClaudePID),
+            processSignaller: signaller)
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        let a = try await seedOAuthProfile(db, name: "A")
+        let b = try await seedOAuthProfile(db, name: "B")
+        try await db.config.setDefaultProfileID(a.id)
+        let oldTerm = try await seedNonBlankClaudeTerminal(router, db, worktreeID: wt.id)
+
+        let beforeSwap = recorder.calls.count
+        let swapResp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalSwapProfile,
+            params: TerminalSwapProfileParams(terminalID: oldTerm.id, newProfileID: b.id, mode: .inPlace)
+        ))
+        #expect(swapResp.success, "swap failed: \(swapResp.error ?? "nil")")
+
+        let postSwap = Array(recorder.calls.dropFirst(beforeSwap)).map { $0.joined(separator: " ") }
+        #expect(postSwap.contains { $0.contains("send-keys") && $0.contains("C-c") },
+                "a legacy session lost its keyed interrupt: \(postSwap)")
+        #expect(signaller.terminated.isEmpty)
     }
 
     /// Give `term`'s session a BLANK transcript on disk: the file exists and

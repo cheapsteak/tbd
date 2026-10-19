@@ -434,8 +434,9 @@ public final class RPCRouter: Sendable {
 
     /// How the daemon asks whether Claude owns a pane's foreground process
     /// group. The same seam the limit-resume actuator uses, held here so the
-    /// send path can refuse a pane whose agent has left without any test
-    /// needing a real `ps`. A process-table fact, never screen text.
+    /// send path can refuse a pane whose agent has left, and the tmux in-place
+    /// swap can find the Claude process it signals, without any test needing
+    /// a real `ps`. A process-table fact, never screen text.
     let paneProcessInspector: any PaneProcessInspecting
 
     /// The identity the FD-vending sidecar recorded for its current client.
@@ -453,7 +454,9 @@ public final class RPCRouter: Sendable {
     let recordedAppIdentity: @Sendable () async -> ProcessIdentity?
     /// The one process-fact reader, injected for the same reason `AgentReaper`
     /// and `AppLivenessArbiter` take one: the re-verification must be statable
-    /// in a test without a process to inspect.
+    /// in a test without a process to inspect. Also how the tmux in-place
+    /// swap sends SIGTERM to a session spawned with the composer-draft
+    /// feature, so a test can see the pid it signalled.
     let processSignaller: any ProcessSignaller
 
     /// Behavior seam for send-path settling after an image paste and the

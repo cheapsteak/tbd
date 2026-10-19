@@ -328,7 +328,9 @@ public actor HibernationCoordinator {
     /// session that is shutting down cleanly and slowly gets eight seconds in
     /// total before anything is killed — which is the whole reason this rung
     /// exists, since the alternative it replaced was a `SIGKILL` of the process
-    /// group at three seconds. Injectable on the same terms as the pair above.
+    /// group at three seconds. A session spawned with the composer-draft
+    /// feature is never sent `/exit`: it starts at this rung and gets these
+    /// five. Injectable on the same terms as the pair above.
     nonisolated let holderTerminateAttempts: Int
 
     /// How many times the holder park re-checks its child AFTER escalating to
@@ -386,6 +388,12 @@ public actor HibernationCoordinator {
     /// A throw means the same thing as a refused projection.
     var holderScreenOracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
 
+    /// Receives each composer-draft shadow disagreement in place of the
+    /// `.notice` log line. A **test seam only** — production leaves it nil and
+    /// the line goes to the log — so a test can count how many lines one park
+    /// writes.
+    var composerDraftShadowLog: (@Sendable (String) -> Void)?
+
     /// Starts and undoes the holder the running-shell transport move needs. A
     /// **test seam only** — production leaves it nil and the move goes through
     /// `holderRegistry`. See `HolderSpawnOracle`.
@@ -398,15 +406,19 @@ public actor HibernationCoordinator {
     /// the real kernel answers for.
     var holderProcessIsLive: @Sendable (Int32) -> Bool = { HolderSpawner.isLiveHolder(pid: $0) }
 
-    /// How the holder park observes and ends a child process. Injected so a
-    /// test can state "the job declined `/exit`" in one line instead of
-    /// arranging a real one.
+    /// How the holder park observes and ends a child process, and how the
+    /// tmux park signals the Claude process of a session spawned with the
+    /// composer-draft feature. Injected so a test can state "the job declined
+    /// `/exit`" in one line instead of arranging a real one, and can see which
+    /// pid a park signalled.
     let signaller: any ProcessSignaller
 
     /// Reads a tmux pane's foreground process group from the process table.
-    /// Used by exactly one rail — the exit-stamped wake guard — and injected
-    /// so a test can state "the pane's shell is idle" or "something is running
-    /// in it" without arranging a real process.
+    /// Used by the exit-stamped wake guard, and by the tmux park to find the
+    /// Claude process it signals for a session spawned with the composer-draft
+    /// feature. Injected so a test can state "the pane's shell is idle",
+    /// "something is running in it" or "Claude is this pid" without arranging
+    /// a real process.
     private let paneProcessInspector: any PaneProcessInspecting
 
     /// The daemon's actuation record. The idle sweep and the merge-park rail
@@ -527,6 +539,12 @@ public actor HibernationCoordinator {
         _ oracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
     ) {
         holderScreenOracle = oracle
+    }
+
+    /// Wire the shadow-disagreement seam. Tests only — see
+    /// `composerDraftShadowLog`.
+    func setComposerDraftShadowLog(_ log: (@Sendable (String) -> Void)?) {
+        composerDraftShadowLog = log
     }
 
     /// Wire the running-shell move's holder seam. Tests only — see
@@ -1220,7 +1238,8 @@ public actor HibernationCoordinator {
             status: composerDraftStatus,
             decision: ComposerDraftParkGate.decide(
                 status: composerDraftStatus, policy: policy,
-                overrideUnconfirmed: overrideUnconfirmedDraft))
+                overrideUnconfirmed: overrideUnconfirmedDraft),
+            shadowLog: composerDraftShadowLog)
         switch composerDraft.decision {
         case .legacy, .proceed:
             break
@@ -1263,10 +1282,11 @@ public actor HibernationCoordinator {
             // Rail: typed-but-unsent input. Chrome's single biggest tab-discard
             // backlash was lost typed text — never park a pane with a
             // half-composed prompt. It decides only a legacy session's park;
-            // the composer-draft feature decides the rest.
+            // the composer-draft feature decides the rest. Not compared with
+            // the feature here: the read under the lock is the authoritative
+            // one, and it is the only one that logs a disagreement.
             if composerDraft.scrapeRefuses(
-                hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: capture),
-                terminalID: terminal.id) {
+                hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: capture)) {
                 logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
                 return .notEligible(reason: "Terminal has unsent typed input")
             }
@@ -1371,7 +1391,7 @@ public actor HibernationCoordinator {
         // replacement or hook had its turn under the same server lock.
         let capturedSnapshot: String?
         if let capture = try? await tmux.capturePaneWithAnsi(server: server, paneID: paneID) {
-            if composerDraft.scrapeRefuses(
+            if composerDraft.judgeAuthoritativeScrape(
                 hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: capture),
                 terminalID: terminal.id) {
                 logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
@@ -1414,17 +1434,33 @@ public actor HibernationCoordinator {
             return .notEligible(reason: "Failed to persist hibernation")
         }
 
-        // Polite park: try an in-band `/exit` first (ported from Suspend) so
-        // Claude flushes its transcript, shuts down MCP children, and fires Stop
-        // hooks, then poll up to ~3s for the process to actually leave. Only if
-        // it's still a claude process after the poll window do we escalate to
-        // the graceful-interrupt SIGTERM fallback. Either way, `respawn-window
-        // -k` below guarantees termination.
-        let exited = await politeExitThenPoll(
-            server: server, paneID: paneID, terminalID: terminal.id)
-        if !exited {
-            logger.debug("hibernate: /exit did not terminate \(terminal.id, privacy: .public) within poll window — falling back to graceful interrupt")
-            await gracefullyInterruptPane(server: server, paneID: paneID)
+        // The ending. Either way, `respawn-window -k` below guarantees
+        // termination.
+        switch composerDraft.endingStyle {
+        case .typedExit:
+            // Polite park: try an in-band `/exit` first (ported from Suspend) so
+            // Claude flushes its transcript, shuts down MCP children, and fires
+            // Stop hooks, then poll up to ~3s for the process to actually leave.
+            // Only if it's still a claude process after the poll window do we
+            // escalate to the graceful-interrupt SIGTERM fallback.
+            let exited = await politeExitThenPoll(
+                server: server, paneID: paneID, terminalID: terminal.id)
+            if !exited {
+                logger.debug("hibernate: /exit did not terminate \(terminal.id, privacy: .public) within poll window — falling back to graceful interrupt")
+                await gracefullyInterruptPane(server: server, paneID: paneID)
+            }
+        case .signal:
+            // A session spawned with the composer-draft feature is never typed
+            // into — no `/exit`, no Escape, no Ctrl+C — so its draft is never
+            // cleared by the park. SIGTERM to its Claude process runs the
+            // graceful shutdown, and `session.end` makes the final save; the
+            // poll is `politeExitThenPoll`'s window. No pid found, or a Claude
+            // that outlives the window, goes straight to the respawn below —
+            // never to the keyed interrupt, whose Ctrl+C would clear the box.
+            await TmuxSignalEnding.end(
+                tmux: tmux, server: server, paneID: paneID, terminalID: terminal.id,
+                inspector: paneProcessInspector, signaller: signaller, clock: clock,
+                attempts: exitPollAttempts, interval: exitPollInterval)
         }
 
         let baseEnvironment = [

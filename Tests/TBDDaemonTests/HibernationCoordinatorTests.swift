@@ -3385,6 +3385,14 @@ struct HibernationCoordinatorTests {
         #expect(outcome["reason"] as? String == "not-eligible")
         #expect(outcome["error"] as? String
             == ComposerDraftParkGate.unconfirmedRefusal(reason: "no-alive-file"))
+
+        // The skip cleared the idle markers, so a sweep past another settle
+        // window starts a fresh idle window rather than firing the same skip
+        // again. Left armed, this sweep would write a second pair.
+        dates.advance(by: HibernationCoordinator.killDebounce + 1)
+        await coord.sweep()
+        #expect(try logRows(at: logPath).count == 2,
+                "the skip re-fired without waiting out a fresh idle window")
     }
 
     /// The merge-park skips an unknown session the way the sweep does.
@@ -3454,6 +3462,225 @@ struct HibernationCoordinatorTests {
             from: JSONEncoder().encode(
                 TerminalHibernateParams(terminalID: id, overrideUnconfirmedDraft: true)))
         #expect(overriding.overrideUnconfirmedDraft == true)
+    }
+
+    /// One tmux park reads the pane twice — the fast rail before the server
+    /// lock, the authoritative read under it — and logs a disagreement once,
+    /// from the authoritative read.
+    @Test func tmuxParkLogsOneShadowDisagreement() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        // The feature saved an empty box; the scrape reads a typed one.
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: false)
+        let capture = typedPane()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: { now })
+        let lines = ShadowLines()
+        await coord.setComposerDraftShadowLog(lines.append)
+        let expected = try #require(ComposerDraftParkGate.shadowDisagreement(
+            terminalID: terminalID, featureHasDraft: false, scrapeHasDraft: true))
+
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        #expect(capture.count >= 2, "a scrape site stopped reading the pane")
+        #expect(lines.snapshot() == [expected])
+    }
+
+    // MARK: - Composer-draft sessions end by signal
+    //
+    // A session spawned with the feature is never typed into to end it: no
+    // `/exit`, and no Escape or Ctrl+C fallback, because a daemon-sent Ctrl+C
+    // clears the box. The park sends SIGTERM to the Claude process, polls the
+    // pane on the injected clock, and then respawns as always.
+
+    /// The pane's own pid — its login-shell wrapper — and the Claude process
+    /// beneath it. Both sit above macOS's PID_MAX (99999), so no regression
+    /// into the keyed fallback's raw `kill` of the pane pid can reach a real
+    /// process; the Claude pid only ever reaches the fake signaller.
+    private static let shellPID: Int32 = 900_001
+    private static let claudePID: Int32 = 900_002
+
+    /// A coordinator over dry-run tmux whose pane pid is `shellPID`, with an
+    /// inspector that answers `claudePID` beneath it (or nothing) and a
+    /// signaller that records every signal it is asked to send.
+    private func signalEndingCoordinator(
+        _ db: TBDDatabase, sessionsDir: URL, recorded: RecordedTmuxCommands,
+        signaller: FakeProcessSignaller, claudePID: Int32?, clock: EventDrivenTestClock,
+        exitPollAttempts: Int = 15,
+        paneCurrentCommand: (@Sendable (String, String) -> String)? = nil,
+        now: @escaping @Sendable () -> Date
+    ) -> HibernationCoordinator {
+        HibernationCoordinator(
+            db: db,
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunRecorder: recorded.append,
+                dryRunPaneCurrentCommand: paneCurrentCommand,
+                dryRunPanePID: { _, _ in String(Self.shellPID) }),
+            configDirManager: isolatedConfigDirManager(),
+            now: now,
+            exitPollAttempts: exitPollAttempts,
+            exitPollInterval: .milliseconds(200),
+            clock: clock,
+            signaller: signaller,
+            paneProcessInspector: FakeInspector(claudePID: claudePID),
+            sessionsDir: sessionsDir,
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+    }
+
+    private func sentKeys(_ recorded: RecordedTmuxCommands) -> [String] {
+        recorded.snapshot()
+            .map { $0.joined(separator: " ") }
+            .filter { $0.contains("send-keys") }
+    }
+
+    private func respawned(_ recorded: RecordedTmuxCommands) -> Bool {
+        recorded.snapshot().contains { $0.contains("respawn-window") }
+    }
+
+    /// A confirmed feature session holding a draft: the park types nothing,
+    /// SIGTERMs the Claude pid the inspector found (not the pane's shell),
+    /// sees Claude leave on the first poll, and respawns.
+    @Test func featureParkOnTmuxSendsNoKeys() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: true)
+        let recorded = RecordedTmuxCommands()
+        let signaller = FakeProcessSignaller()
+        let clock = EventDrivenTestClock()
+        let coord = signalEndingCoordinator(
+            db, sessionsDir: sessionsDir, recorded: recorded, signaller: signaller,
+            claudePID: Self.claudePID, clock: clock, now: { now })
+
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+        // The dry-run pane reports `zsh`: the first poll sees Claude gone.
+        try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
+        #expect(await park.value == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+
+        #expect(sentKeys(recorded).isEmpty, "a feature session was typed into: \(sentKeys(recorded))")
+        #expect(signaller.terminatedProcessOnly == [Self.claudePID])
+        #expect(signaller.terminated == [Self.claudePID], "a signal went somewhere else too")
+        #expect(respawned(recorded))
+    }
+
+    /// Claude outlives the whole poll window: the park waits out every
+    /// attempt — the window is Claude's time to make its final save — then
+    /// goes straight to the respawn, still without a keystroke.
+    @Test func featureParkEscalatesToRespawnWhenClaudeStays() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: false)
+        let recorded = RecordedTmuxCommands()
+        let signaller = FakeProcessSignaller()
+        let clock = EventDrivenTestClock()
+        let attempts = 3
+        let coord = signalEndingCoordinator(
+            db, sessionsDir: sessionsDir, recorded: recorded, signaller: signaller,
+            claudePID: Self.claudePID, clock: clock, exitPollAttempts: attempts,
+            paneCurrentCommand: { _, _ in "1.2.3" },  // claude, every attempt
+            now: { now })
+
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+        for _ in 0..<(attempts - 1) {
+            try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
+        }
+        // Armed for the last attempt, or already respawned early.
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            clock.hasSleeper || respawned(recorded)
+        } == .satisfied)
+        #expect(!respawned(recorded), "the respawn came before the poll window closed")
+
+        try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
+        #expect(await park.value == .ok)
+        #expect(respawned(recorded))
+        #expect(sentKeys(recorded).isEmpty, "the escalation typed into a feature session: \(sentKeys(recorded))")
+        #expect(signaller.terminatedProcessOnly == [Self.claudePID])
+        #expect(signaller.terminated == [Self.claudePID])
+    }
+
+    /// No Claude process answers under the pane: nothing is signalled — the
+    /// shell wrapper least of all — nothing is waited for, nothing is typed,
+    /// and the respawn ends whatever is there.
+    @Test func featureParkWithoutAClaudePidGoesStraightToRespawn() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: true)
+        let recorded = RecordedTmuxCommands()
+        let signaller = FakeProcessSignaller()
+        let clock = EventDrivenTestClock()
+        let coord = signalEndingCoordinator(
+            db, sessionsDir: sessionsDir, recorded: recorded, signaller: signaller,
+            claudePID: nil, clock: clock, exitPollAttempts: 1, now: { now })
+        let finished = FireRecorder<HibernateResult>()
+
+        let park = Task {
+            let result = await coord.manualHibernate(terminalID: terminalID)
+            finished.record(result)
+            return result
+        }
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            !finished.values.isEmpty || clock.hasSleeper
+        } == .satisfied)
+        #expect(!clock.hasSleeper, "no Claude pid answered, yet the park waited for one to exit")
+        if clock.hasSleeper {
+            // Release the regression so the test ends red instead of hanging.
+            await clock.advance(by: coord.exitPollInterval)
+        }
+        #expect(await park.value == .ok)
+        #expect(sentKeys(recorded).isEmpty, "a feature session was typed into: \(sentKeys(recorded))")
+        #expect(signaller.terminated.isEmpty, "something was signalled: \(signaller.terminated)")
+        #expect(respawned(recorded))
+    }
+
+    /// A session spawned without the feature keeps the typed `/exit`, and its
+    /// ending never reaches the signaller. Its pane pid stays the dry-run
+    /// "0", so the keyed fallback's raw `kill` has nothing to aim at.
+    @Test func legacyParkStillTypesExit() async throws {
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: UUID())
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let recorded = RecordedTmuxCommands()
+        let signaller = FakeProcessSignaller()
+        let clock = EventDrivenTestClock()
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: TmuxManager(dryRun: true, dryRunRecorder: recorded.append),
+            configDirManager: isolatedConfigDirManager(),
+            clock: clock,
+            signaller: signaller,
+            paneProcessInspector: FakeInspector(claudePID: Self.claudePID),
+            sessionsDir: sessionsDir,
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+        try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
+        #expect(await park.value == .ok)
+
+        #expect(sentKeys(recorded).contains { $0.contains("/exit") },
+                "a legacy session lost its typed /exit: \(sentKeys(recorded))")
+        #expect(signaller.terminated.isEmpty)
     }
 }
 

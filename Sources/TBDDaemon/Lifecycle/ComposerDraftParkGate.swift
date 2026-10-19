@@ -20,6 +20,16 @@ enum ComposerDraftParkDecision: Equatable, Sendable {
     case skip(reason: String)
 }
 
+/// How a park, or an in-place profile swap, ends the Claude process it
+/// replaces. See `docs/specs/2026-10-19-tbd-session-mod-design.md`, "Parking".
+enum ParkEndingStyle: Equatable, Sendable {
+    /// `/exit` typed into the composer, then the transport's existing
+    /// fallbacks. Only a session spawned without the feature ends this way.
+    case typedExit
+    /// SIGTERM to the Claude process, and nothing typed into its terminal.
+    case signal
+}
+
 /// The park gate for sessions spawned with the composer-draft feature.
 enum ComposerDraftParkGate {
     /// Legacy keeps the old path; confirmed proceeds; unknown proceeds for a
@@ -47,6 +57,22 @@ enum ComposerDraftParkGate {
                 return .skip(reason: reason)
             }
         }
+    }
+
+    /// How the park ends the process: a typed `/exit` only for a legacy
+    /// session.
+    ///
+    /// A session spawned with the feature is never typed into: no `/exit`, and
+    /// no Escape or Ctrl+C fallback either, because a daemon-sent Ctrl+C clears
+    /// the box and the feature would record the draft as gone. SIGTERM runs
+    /// the same graceful shutdown, so `session.end` still makes the final save.
+    ///
+    /// Reads only `spawnedWithFeature`, which the replacement-snapshot check
+    /// keeps stable across the wait for the server lock. Whether the box holds
+    /// a draft, and how fresh the heartbeat is, never change how the process
+    /// ends.
+    static func endingStyle(for status: ComposerDraftStatus) -> ParkEndingStyle {
+        status.spawnedWithFeature ? .signal : .typedExit
     }
 
     /// The log line for a park where the feature and the pending-input scrape
@@ -84,21 +110,112 @@ enum ComposerDraftParkGate {
 struct ComposerDraftParkContext: Sendable {
     let status: ComposerDraftStatus
     let decision: ComposerDraftParkDecision
+    /// Where a shadow disagreement goes. Nil logs it at `.notice`, which is
+    /// what production does; a test records the lines through the
+    /// coordinator's `composerDraftShadowLog` seam.
+    var shadowLog: (@Sendable (String) -> Void)?
+
+    /// How the transport leg ends the process. See
+    /// `ComposerDraftParkGate.endingStyle(for:)`.
+    var endingStyle: ParkEndingStyle {
+        ComposerDraftParkGate.endingStyle(for: status)
+    }
 
     /// Whether one pending-input scrape result refuses the park.
     ///
     /// Only a legacy session is refused on the scrape. For any other session
-    /// the scrape never decides; while the flag exists, a confirmed session's
-    /// result is still compared with the feature's answer and any
-    /// disagreement logged at `.notice`.
-    func scrapeRefuses(hasPendingInput: Bool, terminalID: UUID) -> Bool {
+    /// the scrape never decides. Compares nothing and logs nothing: the tmux
+    /// park's fast pre-lock rail asks this, and the authoritative read under
+    /// the lock is the one compared, so a park logs a disagreement at most
+    /// once.
+    func scrapeRefuses(hasPendingInput: Bool) -> Bool {
+        decision == .legacy && hasPendingInput
+    }
+
+    /// The park's authoritative pending-input read: whether it refuses the
+    /// park, exactly as `scrapeRefuses(hasPendingInput:)` answers.
+    ///
+    /// While the flag exists, a confirmed session's result is also compared
+    /// with the feature's answer and any disagreement logged at `.notice`.
+    /// Each park calls this once: the tmux park under its server lock, the
+    /// holder park on its one screen read.
+    func judgeAuthoritativeScrape(hasPendingInput: Bool, terminalID: UUID) -> Bool {
         if case .confirmed(let featureHasDraft) = status,
            let line = ComposerDraftParkGate.shadowDisagreement(
                terminalID: terminalID,
                featureHasDraft: featureHasDraft,
                scrapeHasDraft: hasPendingInput) {
-            logger.notice("\(line, privacy: .public)")
+            if let shadowLog {
+                shadowLog(line)
+            } else {
+                logger.notice("\(line, privacy: .public)")
+            }
         }
-        return decision == .legacy && hasPendingInput
+        return scrapeRefuses(hasPendingInput: hasPendingInput)
+    }
+}
+
+/// Ends the Claude process in a tmux pane by signal, typing nothing into the
+/// pane: the ending of a session spawned with the composer-draft feature, for
+/// both the tmux park and the tmux in-place profile swap.
+///
+/// The pane's own pid is its login-shell wrapper, so the Claude process is
+/// looked up beneath it on the process table, never read off the screen.
+/// SIGTERM goes to exactly that pid, never to the wrapper and never to a
+/// process group. Then the pane's current command is polled on the injected
+/// clock for Claude to leave.
+///
+/// Best-effort, like the typed ending it stands in for: each caller's
+/// `respawn-window -k` is what guarantees the process ends, and it follows
+/// every outcome.
+enum TmuxSignalEnding {
+    enum Outcome: Equatable, Sendable {
+        /// SIGTERM went to `pid`, and the pane stopped running Claude inside
+        /// the poll window.
+        case exited(pid: Int32)
+        /// SIGTERM went to `pid`, and Claude was still running when the poll
+        /// window closed.
+        case stillRunning(pid: Int32)
+        /// No Claude process answered under the pane, so nothing was signalled
+        /// and nothing was waited for.
+        case noClaudeProcess
+    }
+
+    /// `attempts` × `interval` is the poll window. Like the typed ending's
+    /// poll, `try?` on the sleep is not a cancellation check: a cancelled task
+    /// burns the attempts at zero delay and reports `.stillRunning`, and the
+    /// caller's respawn still ends the process. An outcome short of `.exited`
+    /// is logged at `.debug`, naming `terminalID`.
+    @discardableResult
+    static func end(
+        tmux: TmuxManager,
+        server: String,
+        paneID: String,
+        terminalID: UUID,
+        inspector: any PaneProcessInspecting,
+        signaller: any ProcessSignaller,
+        clock: any Clock<Duration>,
+        attempts: Int,
+        interval: Duration
+    ) async -> Outcome {
+        // `panePID > 0` is not decoration: a tmux that cannot answer reports
+        // "0", and the process table has no meaningful answer about pid 0.
+        guard let panePIDString = try? await tmux.panePID(server: server, paneID: paneID),
+              let panePID = Int32(panePIDString), panePID > 0,
+              let claudePID = inspector.foregroundClaudePID(panePID: panePID),
+              claudePID > 0 else {
+            logger.debug("composer-draft: found no claude process under \(terminalID.uuidString, privacy: .public)'s pane to signal — the respawn ends whatever is there")
+            return .noClaudeProcess
+        }
+        signaller.terminateProcessOnly(claudePID)
+        for _ in 0..<max(0, attempts) {
+            try? await clock.sleep(for: interval)
+            if let command = try? await tmux.paneCurrentCommand(server: server, paneID: paneID),
+               !ClaudeStateDetector.isClaudeProcess(command) {
+                return .exited(pid: claudePID)
+            }
+        }
+        logger.debug("composer-draft: SIGTERM did not end claude pid \(claudePID, privacy: .public) for \(terminalID.uuidString, privacy: .public) within the poll window — the respawn ends it")
+        return .stillRunning(pid: claudePID)
     }
 }
