@@ -1982,6 +1982,19 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var ptyHolderFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPtyHolderEnabled(enabled: enabled) }
+    /// How `hibernateTerminals` reaches the daemon (terminal, override flag) —
+    /// injectable so the unconfirmed-draft flow is testable without a daemon.
+    @ObservationIgnored
+    lazy var terminalHibernateSender: @MainActor (UUID, Bool) async throws -> Void =
+        { [daemonClient] terminalID, override in
+            try await daemonClient.terminalHibernate(
+                terminalID: terminalID, overrideUnconfirmedDraft: override)
+        }
+    /// How the "Hibernate anyway?" question reaches the person (count of refused
+    /// sessions) — injectable because the real one is a modal `NSAlert`.
+    @ObservationIgnored
+    lazy var unconfirmedDraftConfirmer: @MainActor (Int) -> Bool =
+        { [unowned self] count in self.confirmUnconfirmedDraftHibernate(count: count) }
     /// How `wakeTerminalOutcome` reaches the daemon — injectable for the same
     /// reason as `controlModeSetter`, so the wake's prompt plumbing and its
     /// failure branches are testable without a running daemon.

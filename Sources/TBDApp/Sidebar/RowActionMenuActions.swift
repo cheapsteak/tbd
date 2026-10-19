@@ -189,11 +189,7 @@ struct RowActionMenuActions {
         case .hibernateNow:
             let wtID = worktree.id
             let ids = manuallyParkableTerminals.map { $0.id }
-            Task {
-                for id in ids {
-                    await appState.hibernateTerminal(terminalID: id, worktreeID: wtID)
-                }
-            }
+            Task { await appState.hibernateTerminals(ids, worktreeID: wtID) }
 
         case .wakeHibernated:
             let wtID = worktree.id

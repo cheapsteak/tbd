@@ -1824,10 +1824,14 @@ actor DaemonClient {
 
     /// Manually hibernate one Claude terminal (kill its process, keep the
     /// tmux window). Honors the running/permission rails.
-    func terminalHibernate(terminalID: UUID) async throws {
+    /// `overrideUnconfirmedDraft` is set only after the person answered "Hibernate
+    /// anyway" to a `composerDraftUnconfirmed` refusal.
+    func terminalHibernate(terminalID: UUID, overrideUnconfirmedDraft: Bool = false) async throws {
         try await callVoidAsync(
             method: RPCMethod.terminalHibernate,
-            params: TerminalHibernateParams(terminalID: terminalID)
+            params: TerminalHibernateParams(
+                terminalID: terminalID,
+                overrideUnconfirmedDraft: overrideUnconfirmedDraft ? true : nil)
         )
     }
 

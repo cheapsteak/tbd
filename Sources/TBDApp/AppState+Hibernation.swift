@@ -46,13 +46,68 @@ extension AppState {
     /// Manually hibernate one Claude terminal. The daemon enforces the
     /// running/permission rails and returns an error string we surface.
     func hibernateTerminal(terminalID: UUID, worktreeID: UUID) async {
-        do {
-            try await daemonClient.terminalHibernate(terminalID: terminalID)
-            await refreshTerminals(worktreeID: worktreeID)
-        } catch {
-            logger.error("Failed to hibernate terminal: \(error, privacy: .public)")
-            showAlert("Couldn't hibernate: \(error.localizedDescription)", isError: false)
+        await hibernateTerminals([terminalID], worktreeID: worktreeID)
+    }
+
+    /// Manually hibernate several terminals. A terminal the daemon refuses with
+    /// `composerDraftUnconfirmed` is collected; after the pass the person is
+    /// asked ONCE (with the count) and a yes reissues only those terminals with
+    /// the override. A no does nothing and shows no error. Any other failure
+    /// keeps the plain "Couldn't hibernate" alert.
+    func hibernateTerminals(_ terminalIDs: [UUID], worktreeID: UUID) async {
+        var refused: [UUID] = []
+        for id in terminalIDs {
+            do {
+                try await terminalHibernateSender(id, false)
+            } catch {
+                if (error as? DaemonClientError)?.rpcCode == RPCErrorCode.composerDraftUnconfirmed.rawValue {
+                    refused.append(id)
+                } else {
+                    reportHibernateFailure(error)
+                }
+            }
         }
+        if !refused.isEmpty, unconfirmedDraftConfirmer(refused.count) {
+            for id in refused {
+                do {
+                    try await terminalHibernateSender(id, true)
+                } catch {
+                    reportHibernateFailure(error)
+                }
+            }
+        }
+        await refreshTerminals(worktreeID: worktreeID)
+    }
+
+    private func reportHibernateFailure(_ error: Error) {
+        logger.error("Failed to hibernate terminal: \(error, privacy: .public)")
+        showAlert("Couldn't hibernate: \(error.localizedDescription)", isError: false)
+    }
+
+    /// Copy for the "can't confirm the draft is saved" confirm. Pure so the
+    /// wording is unit-tested; the modal is `confirmUnconfirmedDraftHibernate`.
+    static func unconfirmedDraftPrompt(count: Int) -> (message: String, informative: String, confirm: String) {
+        (
+            message: count == 1
+                ? "TBD can't confirm this session's draft is saved. Hibernate anyway?"
+                : "TBD can't confirm \(count) sessions' drafts are saved. Hibernate anyway?",
+            informative: "Text typed but not sent may be lost.",
+            confirm: "Hibernate Anyway"
+        )
+    }
+
+    /// Present the unconfirmed-draft confirm. True when the person chose to
+    /// hibernate anyway. Modal (mirrors `confirmDefaultAccountFallback`).
+    @MainActor
+    func confirmUnconfirmedDraftHibernate(count: Int) -> Bool {
+        let prompt = Self.unconfirmedDraftPrompt(count: count)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = prompt.message
+        alert.informativeText = prompt.informative
+        alert.addButton(withTitle: prompt.confirm)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Core explicit/implicit wake returning the structured outcome. `wakeTerminal`
