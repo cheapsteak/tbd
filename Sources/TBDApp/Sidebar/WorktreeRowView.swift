@@ -138,10 +138,6 @@ struct WorktreeRowView: View {
         programStatusResolutions.values.contains { $0.value == .error }
     }
 
-    private var hasTurnFinishedTerminal: Bool {
-        programStatusResolutions.values.contains { $0.value == .done }
-    }
-
     /// Running task entries across this row's OSC-authoritative terminals —
     /// the small count on the working dots.
     private var backgroundTaskCount: Int {
@@ -610,8 +606,7 @@ struct WorktreeRowView: View {
             isHibernated: hasParkedTerminal,
             hasPromptOnScreen: hasPromptOnScreenTerminal,
             needsAuth: hasNeedsAuthTerminal,
-            turnFailed: hasTurnFailedTerminal,
-            turnFinished: hasTurnFinishedTerminal
+            turnFailed: hasTurnFailedTerminal
         ) {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)
@@ -652,7 +647,6 @@ struct WorktreeRowView: View {
         case .hibernated: return "Hibernating — wakes on focus"
         case .needsAuth:  return "Needs you to sign in again"
         case .turnFailed: return "The last turn failed"
-        case .finished:   return "Finished"
         }
     }
 

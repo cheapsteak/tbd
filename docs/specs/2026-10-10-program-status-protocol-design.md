@@ -69,7 +69,7 @@ and sends a bare `state=clear` on exit and when restoring terminal modes.
 
 - Show permission and question blocks the moment they happen, and clear them
   the moment they resolve.
-- Distinguish a finished turn (`done`) from a never-started or stopped one
+- Resolve a finished turn (`done`) apart from a never-started or stopped one
   (`idle`), and show failed turns (`error`) and lapsed sign-ins (`needsAuth`)
   as their own states.
 - Keep a session whose main turn ended visibly working while its background
@@ -267,10 +267,16 @@ rail is not consulted.
 
 For OSC-authoritative terminals only, with the flag on:
 
-- **Worktree row** – `.done` shows a quiet "finished" badge distinct from
-  idle; `.error` and `.needsAuth` get badges of their own; a working session
-  with running task entries shows a small background count. The existing
-  working, idle and awaiting-input badges are unchanged.
+- **Worktree row** – `.error` and `.needsAuth` get badges of their own; a
+  working session with running task entries shows a small background count.
+  The existing working, idle and awaiting-input badges are unchanged.
+- **Done shows as idle** – `.done` has no badge. Claude Code reports `done`
+  after every turn and keeps it until the next one, so a badge for it would
+  sit on nearly every waiting session. The row already marks the case that
+  matters: a bold worktree name means a turn finished with a response the
+  user has not read, and it clears when the user selects the worktree.
+  `.done` stays a distinct resolved state for the tooltip and for any later
+  consumer.
 - **Tooltip** – hovering the worktree row lists, per OSC-authoritative
   terminal in the worktree, the main entry's state, `title`, `msg` and
   `progress`, then one line per task entry with its title, state and `msg`.

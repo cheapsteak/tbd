@@ -26,16 +26,17 @@ enum ProgramStatusRowPresentation {
     }
 
     /// The suffix badge an OSC-authoritative state selects, or nil for a
-    /// state that selects none (idle, unknown, and the TBD-owned states,
-    /// which never come out of a resolution).
+    /// state that selects none: idle and done (a done session shows like an
+    /// idle one; the bold name already marks a finished turn the user has not
+    /// read), unknown, and the TBD-owned states, which never come out of a
+    /// resolution.
     static func suffixIndicator(for value: SessionStateValue) -> SuffixRowIndicator? {
         switch value {
         case .working: return .working
         case .awaitingInput: return .attention
         case .needsAuth: return .needsAuth
         case .error: return .turnFailed
-        case .done: return .finished
-        case .idle, .rateLimited, .parked, .gone, .unknown: return nil
+        case .idle, .done, .rateLimited, .parked, .gone, .unknown: return nil
         }
     }
 
