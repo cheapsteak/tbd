@@ -138,12 +138,6 @@ struct WorktreeRowView: View {
         programStatusResolutions.values.contains { $0.value == .error }
     }
 
-    /// Running task entries across this row's OSC-authoritative terminals —
-    /// the small count on the working dots.
-    private var backgroundTaskCount: Int {
-        programStatusResolutions.values.reduce(0) { $0 + $1.workingTaskCount }
-    }
-
     /// The status badge's tooltip when any terminal is OSC-authoritative; nil
     /// otherwise, so the badge keeps its generic help text.
     private var programStatusTooltip: String? {
@@ -597,7 +591,6 @@ struct WorktreeRowView: View {
     private func suffixIcon() -> some View {
         let tooltip: String? = programStatusTooltip
         let resolvedValues: [SessionStateValue] = programStatusResolutions.values.map(\.value)
-        let taskCount: Int = backgroundTaskCount
         switch RowStatusIndicator.suffix(
             notification: notification,
             isWorking: hasWorkingTerminal,
@@ -611,13 +604,6 @@ struct WorktreeRowView: View {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)
                 .frame(width: 14, height: 12)
-                .overlay(alignment: .topTrailing) {
-                    if taskCount > 0 {
-                        Text("\(taskCount)")
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
                 .padding(.leading, -3)
                 .offset(y: 2)
                 .help(ProgramStatusRowPresentation.badgeHelp(
