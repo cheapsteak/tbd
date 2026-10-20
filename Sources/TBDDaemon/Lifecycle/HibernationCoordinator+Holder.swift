@@ -1234,9 +1234,10 @@ extension HibernationCoordinator {
         cols: Int?,
         rows: Int?,
         spawnTitle: ClaudeSpawnTitle? = nil,
-        // The overlay `spawnCommand` was composed with, when it was resolved
-        // before this spawn's session-mod features were known: settled against
-        // the context `SessionModSpawn.prepare` returns, before the launch.
+        // The overlay `spawnCommand` was composed with, when it was planned
+        // before this spawn's session-mod features were known: written from
+        // the context `SessionModSpawn.prepare` returns, just before the
+        // launch, and never by a wake that adopts a live holder instead.
         overlay: ReplacementSpawnOverlay? = nil
     ) async -> WakeResult {
         // Every refusal below goes through this rather than returning
@@ -1317,14 +1318,17 @@ extension HibernationCoordinator {
             config: try? await db.config.get(),
             claudeSessionID: sessionID, incarnationID: incarnationID,
             sessionsDir: sessionsDir, now: now())
-        overlay?.settle(carrying: sessionMod)
+        // Written here and not when the overlay was planned: the adopting
+        // branch above launches nothing, and must leave the running process's
+        // overlay and statusline capture as they are.
+        let launchCommand = overlay?.settle(carrying: sessionMod, command: spawnCommand) ?? spawnCommand
 
         let handle: HolderHandle
         do {
             handle = try await registry.spawn(
                 terminalID: terminal.id,
                 launch: WorktreeLifecycle.holderLaunch(
-                    shellCommand: spawnCommand,
+                    shellCommand: launchCommand,
                     env: replacementEnv,
                     // `sensitiveEnv` is the job's process environment, and
                     // it is what carries the route: `holderLaunch` inlines

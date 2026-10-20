@@ -169,8 +169,6 @@ extension TBDHomeSerialized {
         #expect(!ClaudeHookOverlay.installsStatuslineTee(carrying: sessionMod([.usage])))
         #expect(!ClaudeHookOverlay.installsStatuslineTee(
             carrying: sessionMod([.composerDraft, .usage])))
-        #expect(ClaudeHookOverlay.installsStatuslineTee(features: []))
-        #expect(!ClaudeHookOverlay.installsStatuslineTee(features: [.usage]))
     }
 
     @Test func aDeskSpawnCarryingUsageKeepsThePersonsOwnStatusLine() throws {
@@ -200,8 +198,8 @@ extension TBDHomeSerialized {
             fallbackModels: nil, sessionKey: key,
             watchDeskRole: .readOnlyCoordinator, statuslineTee: false)
 
-        // Still a per-session file, so a replacement spawn can rewrite the
-        // path its command already names once its features are known…
+        // Still a per-session file, so a replacement spawn's command can name
+        // this path before its features are known…
         #expect(path == ClaudeHookOverlay.perSessionOverlayPath(sessionKey: key))
         // …whose body is the one any session without fragments gets.
         let written = try Data(contentsOf: URL(fileURLWithPath: path))
@@ -243,74 +241,122 @@ extension TBDHomeSerialized {
         #expect(try statusLine(inOverlayAt: withTee) == nil)
     }
 
-    // MARK: - A replacement spawn's overlay settles on what `prepare` returned
+    // MARK: - A replacement spawn's overlay is written at launch
 
     private func replacementOverlay(
-        sessionKey: String, role: WatchDeskRole?, planned: [SessionModFeature]
+        sessionKey: String, role: WatchDeskRole?, fallbackModels: [String]? = nil,
+        repoSettingsJSON: String? = nil
     ) -> ReplacementSpawnOverlay {
-        ReplacementSpawnOverlay.resolve(
-            fallbackModels: nil,
+        ReplacementSpawnOverlay.plan(
+            fallbackModels: fallbackModels,
             sessionKey: sessionKey,
-            repoSettingsJSON: nil,
+            repoSettingsJSON: repoSettingsJSON,
             watchDeskRole: role,
             worktreePath: nil,
             profileConfigDir: nil,
-            promptAnswerHooks: false,
-            plannedFeatures: planned)
+            promptAnswerHooks: false)
     }
 
-    /// Planned `usage`, but the spawn record could not be written: the spawn
-    /// has no `usage`, so the desk must get its tee back — on the very file
-    /// its command already names.
-    @Test func aDeskPlannedWithUsageThatLaunchesWithoutItGetsTheTee() throws {
+    /// Writes `bytes` where the session's per-session overlay lives, standing
+    /// in for the overlay a running process was launched with.
+    private func seedOverlay(sessionKey: String, _ bytes: Data) throws -> String {
+        let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: sessionKey)
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: path).deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try bytes.write(to: URL(fileURLWithPath: path))
+        return path
+    }
+
+    private static let runningOverlay = Data(#"{"previous":"life"}"#.utf8)
+    private static let command = "claude --resume s"
+
+    private func commandNaming(_ path: String) -> String {
+        "\(Self.command) --settings \(SystemPromptBuilder.shellEscape(path))"
+    }
+
+    /// Planning is what a spawn that never launches does — a wake that adopts
+    /// a holder still running, a swap that fails before its replacement
+    /// starts — so it must leave the running process's overlay and capture as
+    /// they are.
+    @Test func planningWritesNothingAndDeletesNothing() throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let key = UUID().uuidString
+        let capturePath = try seedCapture(sessionKey: key)
+        let overlayPath = try seedOverlay(sessionKey: key, Self.runningOverlay)
 
-        let overlay = replacementOverlay(
-            sessionKey: key, role: .readOnlyCoordinator, planned: [.usage])
-        #expect(!overlay.installsTee)
-        #expect(try statusLine(inOverlayAt: overlay.path) == nil)
+        let overlay = replacementOverlay(sessionKey: key, role: .readOnlyCoordinator)
 
-        overlay.settle(carrying: nil)
+        #expect(overlay.path == overlayPath)
+        #expect(overlay.isPerSession)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: overlayPath)) == Self.runningOverlay)
+        #expect(FileManager.default.fileExists(atPath: capturePath))
+    }
+
+    /// The command is composed before `settle` writes the file, so the
+    /// builder must be told the planned path will exist — otherwise a first
+    /// launch would drop `--settings`, and with it every TBD hook.
+    @Test func theCommandNamesThePlannedPathBeforeItExists() {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let overlay = replacementOverlay(sessionKey: UUID().uuidString, role: .readOnlyCoordinator)
+        #expect(!FileManager.default.fileExists(atPath: overlay.path))
+
+        let spawn = ClaudeSpawnCommandBuilder.build(
+            resumeID: "s", freshSessionID: nil, appendSystemPrompt: nil, initialPrompt: nil,
+            profileSecret: nil, cmd: nil, shellFallback: "",
+            settingsOverlayPath: overlay.path, fileExists: overlay.commandFileExists)
+
+        #expect(spawn.command.contains(" --settings \(SystemPromptBuilder.shellEscape(overlay.path))"))
+        // Anything else is still asked of the disk.
+        #expect(!overlay.commandFileExists("/nonexistent/\(UUID().uuidString)"))
+    }
+
+    /// The spawn has no `usage` — `prepare` returned nil — so the desk gets
+    /// the tee, written at launch on the file its command already names.
+    @Test func settlingADeskLaunchedWithoutUsageInstallsTheTee() throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let key = UUID().uuidString
+        let overlay = replacementOverlay(sessionKey: key, role: .readOnlyCoordinator)
+        let command = commandNaming(overlay.path)
+
+        #expect(overlay.settle(carrying: nil, command: command) == command)
 
         let entry = try #require(try statusLine(inOverlayAt: overlay.path),
                                  "settling a usage-less spawn left the desk without its tee")
-        let command = try #require(entry["command"] as? String)
-        #expect(command.contains(StatuslineTee.scriptPath))
-        #expect(command.contains(StatuslineTee.capturePath(sessionKey: key)))
+        let teeCommand = try #require(entry["command"] as? String)
+        #expect(teeCommand.contains(StatuslineTee.scriptPath))
+        #expect(teeCommand.contains(StatuslineTee.capturePath(sessionKey: key)))
     }
 
-    @Test func aDeskPlannedWithoutUsageThatLaunchesWithItDropsTheTee() throws {
+    @Test func settlingADeskLaunchedWithUsageDropsTheTeeAndTheCapture() throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let key = UUID().uuidString
         let capturePath = try seedCapture(sessionKey: key)
+        _ = try seedOverlay(sessionKey: key, Self.runningOverlay)
+        let overlay = replacementOverlay(sessionKey: key, role: .readOnlyCoordinator)
+        let command = commandNaming(overlay.path)
 
-        let overlay = replacementOverlay(
-            sessionKey: key, role: .readOnlyCoordinator, planned: [])
-        #expect(overlay.installsTee)
-        #expect(try statusLine(inOverlayAt: overlay.path) != nil)
-        #expect(FileManager.default.fileExists(atPath: capturePath))
+        #expect(overlay.settle(carrying: sessionMod([.usage]), command: command) == command)
 
-        overlay.settle(carrying: sessionMod([.usage]))
-
-        #expect(try statusLine(inOverlayAt: overlay.path) == nil)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: overlay.path))
+                == (try ClaudeHookOverlay.generateBody()))
         #expect(!FileManager.default.fileExists(atPath: capturePath))
     }
 
-    @Test func aSettleThatAgreesWithThePlanLeavesTheOverlayAlone() throws {
+    @Test func settlingADeskLaunchedWithoutUsageKeepsTheCapture() throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let key = UUID().uuidString
         let capturePath = try seedCapture(sessionKey: key)
-        let overlay = replacementOverlay(
-            sessionKey: key, role: .readOnlyCoordinator, planned: [])
-        let before = try Data(contentsOf: URL(fileURLWithPath: overlay.path))
+        let overlay = replacementOverlay(sessionKey: key, role: .readOnlyCoordinator)
 
-        overlay.settle(carrying: sessionMod([.composerDraft]))
+        _ = overlay.settle(carrying: sessionMod([.composerDraft]), command: Self.command)
 
-        #expect(try Data(contentsOf: URL(fileURLWithPath: overlay.path)) == before)
+        #expect(try statusLine(inOverlayAt: overlay.path) != nil)
         #expect(FileManager.default.fileExists(atPath: capturePath))
     }
 
@@ -318,16 +364,93 @@ extension TBDHomeSerialized {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let key = UUID().uuidString
-        let overlay = replacementOverlay(sessionKey: key, role: nil, planned: [.usage])
-        #expect(!overlay.installsTee)
+        let overlay = replacementOverlay(sessionKey: key, role: nil)
+        #expect(!overlay.isPerSession)
         #expect(overlay.path == ClaudeHookOverlay.overlayPath)
 
-        overlay.settle(carrying: nil)
+        #expect(overlay.settle(carrying: nil, command: Self.command) == Self.command)
 
         // No per-session file appeared: a non-desk never gets a tee, whatever
         // its session mod turned out to be.
         #expect(!FileManager.default.fileExists(
             atPath: ClaudeHookOverlay.perSessionOverlayPath(sessionKey: key)))
+    }
+
+    /// A non-desk with fallback models gets a per-session file too, and it is
+    /// written at launch as well, not when planned.
+    @Test func aNonDeskPerSessionOverlayIsAlsoWrittenOnlyAtLaunch() throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let key = UUID().uuidString
+        let models = ["claude-haiku-4-5-20251001"]
+        let overlay = replacementOverlay(sessionKey: key, role: nil, fallbackModels: models)
+        #expect(overlay.isPerSession)
+        #expect(!FileManager.default.fileExists(atPath: overlay.path))
+
+        _ = overlay.settle(carrying: nil, command: commandNaming(overlay.path))
+
+        #expect(try Data(contentsOf: URL(fileURLWithPath: overlay.path))
+                == (try ClaudeHookOverlay.generateBody(fallbackModels: models)))
+    }
+
+    /// The model proxy decides before the launch whether the overlay will set
+    /// `ANTHROPIC_BASE_URL`, so the answer comes from the planned body — not
+    /// from a file that does not exist yet, or that holds another process's.
+    @Test func theRoutingQuestionIsAnsweredFromThePlanNotTheFile() throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let key = UUID().uuidString
+        let setsURL = #"{"env":{"ANTHROPIC_BASE_URL":"https://proxy.acme.test"}}"#
+        _ = try seedOverlay(sessionKey: key, Data(setsURL.utf8))
+
+        let plain = replacementOverlay(sessionKey: key, role: .readOnlyCoordinator)
+        #expect(!plain.setsEnv("ANTHROPIC_BASE_URL"),
+                "the routing question read the running process's overlay")
+
+        let other = UUID().uuidString
+        let routed = replacementOverlay(
+            sessionKey: other, role: nil, repoSettingsJSON: setsURL)
+        #expect(routed.setsEnv("ANTHROPIC_BASE_URL"))
+        #expect(!FileManager.default.fileExists(atPath: routed.path),
+                "answering the routing question wrote the overlay")
+    }
+
+    /// When the per-session write fails at launch, `resolveOverlayPath` falls
+    /// back to the global overlay, and the command must follow it rather than
+    /// name a file that is missing or still holds an earlier process's overlay.
+    @Test func aFailedWriteAtLaunchRepointsTheCommandAwayFromThePlannedFile() throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let key = UUID().uuidString
+        let overlay = replacementOverlay(sessionKey: key, role: .readOnlyCoordinator)
+        // A directory where the file belongs: the atomic write cannot replace it.
+        try FileManager.default.createDirectory(
+            atPath: overlay.path, withIntermediateDirectories: true)
+        let planned = " --settings \(SystemPromptBuilder.shellEscape(overlay.path))"
+
+        let launched = overlay.settle(carrying: nil, command: commandNaming(overlay.path))
+
+        #expect(!launched.contains(planned), "the command still names the file that was not written")
+        #expect(launched.hasPrefix(Self.command))
+        if FileManager.default.fileExists(atPath: ClaudeHookOverlay.overlayPath) {
+            #expect(launched.contains(
+                " --settings \(SystemPromptBuilder.shellEscape(ClaudeHookOverlay.overlayPath))"))
+        } else {
+            #expect(!launched.contains("--settings"))
+        }
+    }
+
+    @Test func repointingFollowsTheBuildersRuleForAMissingFile() {
+        let from = "/runtime/claude-overlay-session-x.json"
+        let to = "/runtime/claude-overlay.json"
+        let command = "claude --settings \(SystemPromptBuilder.shellEscape(from)) --name n"
+
+        #expect(ReplacementSpawnOverlay.repointSettings(
+            in: command, from: from, to: to, fileExists: { _ in true })
+            == "claude --settings \(SystemPromptBuilder.shellEscape(to)) --name n")
+        #expect(ReplacementSpawnOverlay.repointSettings(
+            in: command, from: from, to: to, fileExists: { _ in false })
+            == "claude --name n")
     }
 }
 }

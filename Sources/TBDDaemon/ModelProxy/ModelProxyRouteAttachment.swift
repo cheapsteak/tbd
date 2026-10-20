@@ -260,6 +260,8 @@ enum ModelProxyRouteAttachment {
     ///     unproxied outcome's environment, the source of an override base URL,
     ///     and the environment a route is added to — one value, so the three
     ///     cannot drift apart.
+    ///   - overlayPath: the resolved `--settings` overlay the spawn runs with,
+    ///     already written.
     static func attachIfRoutable(
         terminalID: UUID,
         isHolderSpawn: Bool,
@@ -268,6 +270,39 @@ enum ModelProxyRouteAttachment {
         profileBaseURL: String?,
         envOverrides: [String: String],
         overlayPath: String?,
+        holderEnvironment: [String: String]?,
+        supervisor: (any ModelProxyRouting)?
+    ) async -> Outcome {
+        await attachIfRoutable(
+            terminalID: terminalID,
+            isHolderSpawn: isHolderSpawn,
+            config: config,
+            profileKind: profileKind,
+            profileBaseURL: profileBaseURL,
+            envOverrides: envOverrides,
+            // The SAME resolved overlay the spawn runs with: whether it sets
+            // `env.ANTHROPIC_BASE_URL` decides whether a route can be honored
+            // at all, because Claude Code reads that block after the process
+            // environment.
+            overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
+                "ANTHROPIC_BASE_URL", overlayPath: overlayPath),
+            holderEnvironment: holderEnvironment,
+            supervisor: supervisor)
+    }
+
+    /// The same decision for a spawn whose overlay is written only at launch
+    /// (`ReplacementSpawnOverlay`): the caller answers whether the overlay it
+    /// will run with sets `env.ANTHROPIC_BASE_URL`, from
+    /// `ReplacementSpawnOverlay.setsEnv(_:)`, instead of naming a file that
+    /// does not hold that overlay yet.
+    static func attachIfRoutable(
+        terminalID: UUID,
+        isHolderSpawn: Bool,
+        config: Config?,
+        profileKind: CredentialKind?,
+        profileBaseURL: String?,
+        envOverrides: [String: String],
+        overlaySetsBaseURL: Bool,
         holderEnvironment: [String: String]?,
         supervisor: (any ModelProxyRouting)?
     ) async -> Outcome {
@@ -284,12 +319,7 @@ enum ModelProxyRouteAttachment {
             profileKind: profileKind,
             profileBaseURL: profileBaseURL,
             envOverrideBaseURL: envOverrides["ANTHROPIC_BASE_URL"],
-            // The SAME resolved overlay the spawn runs with: whether it sets
-            // `env.ANTHROPIC_BASE_URL` decides whether a route can be honored
-            // at all, because Claude Code reads that block after the process
-            // environment.
-            overlaySetsBaseURL: ClaudeHookOverlay.overlaySetsEnv(
-                "ANTHROPIC_BASE_URL", overlayPath: overlayPath),
+            overlaySetsBaseURL: overlaySetsBaseURL,
             sensitiveEnv: envOverrides,
             baseEnvironment: holderEnvironment,
             supervisor: supervisor)

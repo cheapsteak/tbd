@@ -19,8 +19,10 @@ import TestSupport
 /// no lease. But `release`/`revoke` NULL that column for the whole worktree, and
 /// a hibernated desk is exactly what makes `DeskSessionManager` revoke, so the
 /// role is not durable in every direction. The staleness is closed regardless:
-/// resolving an overlay **without** a tee deletes the session's capture, so a
-/// session that is not (re)installing one has nothing left to misread.
+/// writing an overlay **without** a tee deletes the session's capture, so a
+/// session that is not (re)installing one has nothing left to misread. A wake
+/// writes its overlay only when it launches, so one that launches nothing
+/// leaves the overlay and capture alone.
 ///
 /// Nested under `TBDHomeSerialized`: the per-session overlay and the capture
 /// path resolve through the process-global `TBD_HOME`.
@@ -64,7 +66,8 @@ extension TBDHomeSerialized {
     /// A parked Claude terminal in a worktree whose path exists on disk (wake
     /// refuses to respawn into a missing directory).
     private func parkedTerminal(
-        db: TBDDatabase, repoPath: String, desk: DeskMarking, sessionID: String = "sess-desk"
+        db: TBDDatabase, repoPath: String, desk: DeskMarking, sessionID: String = "sess-desk",
+        transport: TerminalTransport = .tmux
     ) async throws -> Terminal {
         let repo = try await db.repos.create(
             path: repoPath, displayName: "repo", defaultBranch: "main")
@@ -74,7 +77,8 @@ extension TBDHomeSerialized {
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
             label: "claude", claudeSessionID: sessionID, kind: .claude,
-            watchDeskRole: desk == .stampedAtCreate ? .readOnlyCoordinator : nil)
+            watchDeskRole: desk == .stampedAtCreate ? .readOnlyCoordinator : nil,
+            transport: transport)
         if desk == .byLease {
             _ = try await db.watchDeskLeases.acquire(
                 worktreeID: worktree.id, terminalID: terminal.id)
@@ -301,10 +305,9 @@ extension TBDHomeSerialized {
         #expect(try FileManager.default.contentsOfDirectory(atPath: sessions.path).isEmpty)
     }
 
-    /// The case only the settle can catch: the plan said `usage`, so the
-    /// overlay was resolved without the tee, and then the spawn record could
-    /// not be written. The launch carries no mod, so the overlay it reads must
-    /// carry the tee again.
+    /// The flag is on, but the spawn record could not be written, so the
+    /// launch carries no mod: the overlay, written at launch from what
+    /// `prepare` returned, carries the tee.
     @Test func wakingADeskWhoseSpawnRecordCannotBeWrittenKeepsTheTee() async throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
@@ -322,6 +325,50 @@ extension TBDHomeSerialized {
         #expect(try #require(entry["command"] as? String).contains(StatuslineTee.scriptPath))
         let launch = try #require(recorded.launchEnvironment("respawn-window"))
         #expect(launch[SessionModSpawn.featuresVariable] == nil)
+    }
+
+    /// A wake that launches nothing writes nothing. A wake that adopts a
+    /// holder still running returns from the same place this one does —
+    /// before the launch, where the overlay is written — so the running
+    /// process keeps the overlay it was spawned with and its capture, even
+    /// though the flag now says a fresh spawn would carry `usage` and no tee.
+    /// Staged as a holder row on a daemon with no holder registry, which
+    /// refuses at that point without needing a live holder.
+    @Test func aWakeThatLaunchesNothingLeavesTheOverlayAndCaptureAlone() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setSessionModUsageEnabled(true)
+        let terminal = try await parkedTerminal(
+            db: db, repoPath: try makeRepoDir(scratch), desk: .stampedAtCreate,
+            transport: .holder)
+        let key = terminal.id.uuidString
+        let running = Data(#"{"previous":"life"}"#.utf8)
+        let overlayPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: key)
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: overlayPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try running.write(to: URL(fileURLWithPath: overlayPath))
+        let capturePath = StatuslineTee.capturePath(sessionKey: key)
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: capturePath).deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data(#"{"context_window":{"context_window_size":200000}}"#.utf8)
+            .write(to: URL(fileURLWithPath: capturePath))
+        let sessions = try sessionsDir(scratch)
+        let recorded = RecordedTmux()
+
+        let result = await wake(terminal, db: db, sessionsDir: sessions, recorded: recorded)
+
+        guard case .respawnFailed(let reason) = result else {
+            Issue.record("expected the registry-less holder wake to refuse, got \(result)")
+            return
+        }
+        #expect(reason.contains("holder registry"), "the wake refused somewhere else: \(reason)")
+        #expect(try Data(contentsOf: URL(fileURLWithPath: overlayPath)) == running,
+                "a wake that launched nothing rewrote the overlay")
+        #expect(FileManager.default.fileExists(atPath: capturePath),
+                "a wake that launched nothing deleted the capture")
     }
 
     @Test func wakingADeskWithTheFlagOffKeepsTheTeeAndCarriesNoUsage() async throws {
@@ -409,7 +456,7 @@ extension TBDHomeSerialized {
     // MARK: - The invariant that does not depend on the tee coming back
 
     /// The more important half of the fix, and the one that holds even when the
-    /// role does not survive: a session resolving an overlay **without** a tee
+    /// role does not survive: a session writing an overlay **without** a tee
     /// cannot read a capture published in a previous life.
     ///
     /// A wake reuses the terminal row and therefore the capture path, so

@@ -126,18 +126,26 @@ it off, desk spawns are unchanged.
 A fresh spawn runs `SessionModSpawn.prepare` before it resolves the overlay, so
 the overlay is written once from the real feature list. A replacement spawn —
 a wake, an in-place profile swap, Continue in Claude — learns its incarnation
-only at launch, after its command and overlay are built. It resolves the
-overlay from the features `prepare` is expected to return, then, once
-`prepare` has run and before the process launches, rewrites that same overlay
-file if the real list differs: a spawn record that could not be written, or a
-flag changed in between. Every desk keeps a per-session overlay file whether or
-not it carries the tee, so the path in the spawn command never changes.
+only at launch, after its command is built, and some replacement spawns never
+launch: a wake that adopts a holder process still running starts nothing, and
+a swap can fail before its replacement starts. So a replacement spawn only
+plans its overlay up front: it computes the `--settings` path its command
+names, without writing anything. Every desk gets a per-session overlay file
+whether or not it carries the tee, so that path does not depend on the
+features. Once `prepare` has run, immediately before the process launches, the
+spawn writes the overlay from the features `prepare` returned and, when it
+installs no tee, deletes the session's statusline capture. A spawn that does
+not launch therefore leaves the overlay and capture of the process the row
+still names exactly as they were.
 
-A wake that adopts a holder process still running launches nothing, so the
-correction never runs; the overlay follows the expected list. If that process
-was spawned without `usage` and the flag has since been turned on, its tee is
-dropped and its capture deleted, and its window reads as `unknown` until it
-next respawns — never as a stale figure.
+The model proxy's routing decision, which comes before the command, asks
+whether the overlay sets `ANTHROPIC_BASE_URL`; a replacement spawn answers from
+the planned body, not from the file. If the per-session write fails at launch,
+the spawn falls back to the shared global overlay, as every spawn's overlay
+resolution does, and launches with its command's `--settings` repointed there
+(or dropped, when the global overlay is missing too). The process then runs
+without a tee and with only TBD's hooks, never against a missing file or one
+an earlier process left.
 
 A reader trusts `usage.json` only when its `incarnationID` names the live
 incarnation; a file left by an earlier process of the same session reads as
@@ -212,6 +220,10 @@ session-mod design already keeps compiled — and the flag.
   heartbeat with a file naming the live incarnation gives the same paired
   reading, and with any other file gives `unknown`; every other unknown
   liveness gives `unknown` with its `why`; legacy reads the tee capture.
+- Replacement spawns: planning the overlay writes nothing and deletes nothing;
+  a wake that launches nothing and an in-place swap that fails before its
+  launch leave the overlay and capture untouched; a per-session write that
+  fails at launch repoints the command to the global overlay.
 - A zero, negative or boolean window is refused by both the Swift and the
   Python reader.
 
