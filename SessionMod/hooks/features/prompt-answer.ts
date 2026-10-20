@@ -20,6 +20,7 @@ import type {
   EngineInterface,
   Frozen,
   Next,
+  NextBudget,
   PermissionRequestDecision,
   ToolCallInput,
   ToolCallResult,
@@ -28,14 +29,12 @@ import type {
 import {
   isRecord,
   isReportStanding,
-  repostStandingReports,
   request,
   standReport,
   standingReportBody,
   withdrawReport,
 } from '../shared/channel.ts'
 import type { ChannelEnv } from '../shared/channel.ts'
-import { describe } from '../shared/session.ts'
 
 export const FEATURE = 'prompt-answer'
 
@@ -43,6 +42,8 @@ export const FEATURE = 'prompt-answer'
 export const ANSWER_RETRY_LIMIT = 5
 /** The pause between failed answer waits. It is the hook's own time, so the retries stay inside its budget. */
 export const ANSWER_RETRY_MS = 1_000
+/** The least hook budget a retry pause may start with; below it the dialog is left to the terminal. */
+export const ANSWER_BUDGET_FLOOR_MS = 2_000
 
 const OPEN_PATH = '/v1/prompts/open'
 const QUESTION_TOOL = 'AskUserQuestion'
@@ -64,6 +65,12 @@ type CallInFlight = {
   agentId: string | undefined
   /** Set once a permission dialog has claimed the call. */
   isPaired: boolean
+  /**
+   * Set once the permission hook returned TBD's deny. Whether it took effect
+   * shows only when the tool's `next(e)` settles: a terminal Yes before it
+   * does not abort the hook, and Claude Code then ignores the deny.
+   */
+  isDenyReturned: boolean
 }
 
 /** Calls in flight by tool use id, oldest first (a Map keeps insertion order). */
@@ -75,6 +82,7 @@ type AnswerOutcome =
   | { kind: 'resolved' }
   | { kind: 'aborted' }
   | { kind: 'failed' }
+  | { kind: 'outOfBudget' }
 
 // MARK: - tool.call
 
@@ -99,15 +107,28 @@ export async function toolCalled(
     args: stableJSON(args),
     agentId: typeof e.agentId === 'string' ? e.agentId : undefined,
     isPaired: false,
+    isDenyReturned: false,
   })
+  let result: ToolCallResult | undefined
   try {
     if (String(e.tool) === QUESTION_TOOL) {
-      return await answerQuestion($, env, e, next, toolUseId, args)
+      result = await answerQuestion($, env, e, next, toolUseId, args)
+    } else {
+      result = await next(e)
     }
-    return await next(e)
+    return result
   } finally {
+    const isDenyReturned = callsInFlight.get(toolUseId)?.isDenyReturned === true
     callsInFlight.delete(toolUseId)
-    if (withdrawReport(toolUseId)) {
+    if (isDenyReturned) {
+      // TBD's deny took effect when the call ended denied or errored; a call
+      // that ran means the terminal's Yes came first. A call that threw says
+      // neither, and the daemon reports the answer unconfirmed.
+      if (result !== undefined) {
+        const wasDenied = 'deny' in result || result.isError === true
+        postQuietly($, env, wasDenied ? 'receipt' : 'closed', toolUseId)
+      }
+    } else if (withdrawReport(toolUseId)) {
       postQuietly($, env, 'closed', toolUseId)
     }
   }
@@ -149,7 +170,7 @@ async function answerQuestion(
     return dialog
   }
 
-  const answered = awaitAnswer($, env, toolUseId, next.signal, () => isDialogSettled).then(outcome => ({
+  const answered = awaitAnswer($, env, toolUseId, next.signal, next.budget, () => isDialogSettled).then(outcome => ({
     kind: 'tbd' as const,
     outcome,
   }))
@@ -213,11 +234,19 @@ export async function permissionRequested(
     return next(e)
   }
 
-  const outcome = await awaitAnswer($, env, toolUseId, next.signal, () => !isReportStanding(toolUseId))
+  const outcome = await awaitAnswer($, env, toolUseId, next.signal, next.budget, () => !isReportStanding(toolUseId))
   if (outcome.kind === 'decision' && !next.signal.aborted && withdrawReport(toolUseId)) {
     const decision = permissionDecision(outcome.decision)
     if (decision !== null) {
-      postQuietly($, env, 'receipt', toolUseId)
+      if (decision.behavior === 'deny') {
+        // Confirmed by toolCalled once the call ends: a terminal Yes may have
+        // come first, and then the tool runs whatever the card said.
+        call.isDenyReturned = true
+      } else {
+        // An allow and a terminal Yes end alike (the tool runs), so the
+        // receipt goes at once.
+        postQuietly($, env, 'receipt', toolUseId)
+      }
       return { decision }
     }
     $.ui.log(`prompt-answer: dialog ${toolUseId} got an unusable decision`, { to: 'debug' })
@@ -225,8 +254,9 @@ export async function permissionRequested(
     return next(e)
   }
   // The terminal answered (No or Escape abort the hook), the daemon resolved
-  // the prompt, or it could not be reached: the dialog stays the terminal's.
-  if (withdrawReport(toolUseId) && outcome.kind !== 'resolved') {
+  // the prompt, it could not be reached, or the hook's budget ran low: the
+  // dialog stays the terminal's.
+  if (withdrawReport(toolUseId) && outcome.kind !== 'resolved' && outcome.kind !== 'outOfBudget') {
     postQuietly($, env, 'closed', toolUseId)
   }
   return next(e)
@@ -283,6 +313,8 @@ async function openDialog($: EngineInterface, env: ChannelEnv, body: { toolUseID
     $.ui.log(`prompt-answer: ${body.toolUseID} was not opened (${reply?.status ?? 'no reply'})`, { to: 'debug' })
     return false
   }
+  // Standing, the poll loop posts it again after a reconnect
+  // (repostStandingReports in channel.ts).
   standReport(body.toolUseID, OPEN_PATH, body)
   return true
 }
@@ -291,13 +323,15 @@ async function openDialog($: EngineInterface, env: ChannelEnv, body: { toolUseID
  * Waits on held answer requests, one after another, until TBD answers, the
  * daemon resolves the prompt, `signal` aborts, or `isOver` says the dialog
  * ended. A failed wait (a daemon restart) is retried after ANSWER_RETRY_MS,
- * posting the dialog open again first, until ANSWER_RETRY_LIMIT in a row.
+ * posting the dialog open again first, until ANSWER_RETRY_LIMIT in a row, or
+ * until the hook's budget would not outlast the pause (ANSWER_BUDGET_FLOOR_MS).
  */
 async function awaitAnswer(
   $: EngineInterface,
   env: ChannelEnv,
   toolUseId: string,
   signal: AbortSignal,
+  budget: NextBudget,
   isOver: () => boolean,
 ): Promise<AnswerOutcome> {
   const path = `/v1/prompts/${encodeURIComponent(toolUseId)}/answer`
@@ -310,6 +344,10 @@ async function awaitAnswer(
       return { kind: 'resolved' }
     }
     if (failures > 0) {
+      // The pause is the hook's own time; past its budget the hook is skipped.
+      if (budget.remainingMs < ANSWER_BUDGET_FLOOR_MS) {
+        return { kind: 'outOfBudget' }
+      }
       try {
         await $.clock.sleep(ANSWER_RETRY_MS, { signal })
       } catch {
@@ -372,20 +410,8 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T | nul
 /** Posts `receipt` or `closed` for a dialog without holding the hook on it. */
 function postQuietly($: EngineInterface, env: ChannelEnv, report: 'receipt' | 'closed', toolUseId: string): void {
   const body = report === 'closed' ? { by: 'terminal' } : {}
-  void request($, env, 'POST', `/v1/prompts/${encodeURIComponent(toolUseId)}/${report}`, body).catch(error => {
-    $.ui.log(`prompt-answer: could not post ${report} for ${toolUseId}: ${describe(error)}`, { to: 'debug' })
-  })
-}
-
-// MARK: - Reconnect
-
-/**
- * Posts `open` again for every dialog still open. The poll loop runs it after
- * the first poll to succeed following a failure, through the channel's
- * standing reports, where every open dialog's `open` is kept.
- */
-export async function repostOpenDialogs($: EngineInterface, env: ChannelEnv): Promise<void> {
-  await repostStandingReports($, env)
+  // request never rejects; it logs its own failure.
+  void request($, env, 'POST', `/v1/prompts/${encodeURIComponent(toolUseId)}/${report}`, body)
 }
 
 // MARK: - Pairing keys

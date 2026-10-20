@@ -116,7 +116,7 @@ async function pollLoop($: EngineInterface, env: ChannelEnv): Promise<void> {
     try {
       const items = pollItems(await request($, env, 'GET', `/v1/poll?after=${lastSeq}`))
       if (items === null) {
-        const delay = POLL_BACKOFF_MS[Math.min(failures, POLL_BACKOFF_MS.length - 1)] ?? 10_000
+        const delay = backoffDelay(failures)
         failures += 1
         $.ui.log(`session mod channel: poll failed (${failures} in a row), retrying in ${delay} ms`, { to: 'debug' })
         await $.clock.sleep(delay)
@@ -138,14 +138,20 @@ async function pollLoop($: EngineInterface, env: ChannelEnv): Promise<void> {
     } catch (error) {
       // A step that threw is retried as a failed poll, never ends the loop.
       $.ui.log(`session mod channel: poll step failed: ${describe(error)}`, { to: 'debug' })
+      const delay = backoffDelay(failures)
       failures += 1
       try {
-        await $.clock.sleep(POLL_BACKOFF_MS[POLL_BACKOFF_MS.length - 1] ?? 10_000)
+        await $.clock.sleep(delay)
       } catch {
         // Nothing to do but try again.
       }
     }
   }
+}
+
+/** The wait after `failures` failed polls in a row before this one. */
+function backoffDelay(failures: number): number {
+  return POLL_BACKOFF_MS[Math.min(failures, POLL_BACKOFF_MS.length - 1)] ?? 10_000
 }
 
 /** A poll reply's items, sorted by sequence, or null for a failed poll. */

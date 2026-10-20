@@ -48,6 +48,8 @@ export type FakeChannel = {
   /** Every request, in the order sent. */
   sent: Sent[]
   logs: string[]
+  /** The options of every `$.ui.log`, in order. */
+  logOptions: unknown[]
   /** The length of every `$.clock.sleep`, in the order asked. */
   sleeps: number[]
   /**
@@ -73,6 +75,7 @@ export async function flush(): Promise<void> {
 export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLES): FakeChannel {
   const sent: Sent[] = []
   const logs: string[] = []
+  const logOptions: unknown[] = []
   const sleeps: number[] = []
   const replies = new Map<string, Reply>()
   const held: Held[] = []
@@ -102,8 +105,9 @@ export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLE
     env: { get: async (name: string) => variables[name] },
     session: { id: async () => SESSION_ID },
     ui: {
-      log: (text: string) => {
+      log: (text: string, options?: unknown) => {
         logs.push(text)
+        logOptions.push(options)
       },
     },
     clock: {
@@ -162,6 +166,7 @@ export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLE
     engine,
     sent,
     logs,
+    logOptions,
     sleeps,
     replies,
     answer: async (method, path, reply) => {
@@ -200,6 +205,8 @@ export type Below<T> = {
   calls: () => number
   settle: (result: unknown) => void
   abort: () => void
+  /** The hook's budget as `next.budget` reads it. */
+  budget: { ms: number; remainingMs: number }
 }
 
 export function below<T>(answer?: unknown): Below<T> {
@@ -212,18 +219,21 @@ export function below<T>(answer?: unknown): Below<T> {
   if (answer !== undefined) {
     settle(answer)
   }
+  // A metered budget that never runs low unless a test lowers it.
+  const budget = { ms: 10_000, remainingMs: 10_000 }
   const next = Object.assign(
     async () => {
       calls += 1
       return settled
     },
-    { signal: controller.signal },
+    { signal: controller.signal, budget },
   )
   return {
     next: next as unknown as T,
     calls: () => calls,
     settle: result => settle(result),
     abort: () => controller.abort(),
+    budget,
   }
 }
 

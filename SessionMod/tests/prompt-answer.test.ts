@@ -78,7 +78,8 @@ test('pairsPermissionWithCallByExactArgs', async () => {
 
   expect(await forFirst.done).toEqual({ decision: { behavior: 'deny', message: DENY_TEXT } })
   expect(await forSecond.done).toEqual({ decision: { behavior: 'allow' } })
-  await finish(first)
+  // The deny took effect: the call ends refused.
+  await finish(first, { deny: DENY_TEXT })
   await finish(second)
   expect(sentTo(fake, 'POST', receiptPath('toolu_a'))).toHaveLength(1)
   expect(sentTo(fake, 'POST', receiptPath('toolu_b'))).toHaveLength(1)
@@ -153,9 +154,66 @@ test('denyCarriesMessageAndNoInterrupt', async () => {
   const result = (await dialog.done) as { decision: Record<string, unknown> }
   expect(result).toEqual({ decision: { behavior: 'deny', message: DENY_TEXT } })
   expect('interrupt' in result.decision).toBe(false)
-  await flush()
-  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toHaveLength(1)
   await finish(call, { deny: DENY_TEXT })
+  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toHaveLength(1)
+})
+
+/** Starts a Bash call, raises its dialog, and has TBD deny it; resolves the call and what the hook returned. */
+async function deniedFromTBD(fake: FakeChannel): Promise<{ call: Call; returned: unknown }> {
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'make' })
+  await flush()
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'make' } })
+  await fake.answer('GET', answerPath('toolu_1'), {
+    status: 200,
+    json: { state: 'decision', decision: { behavior: 'deny', message: DENY_TEXT } },
+  })
+  const returned = await dialog.done
+  await flush()
+  return { call, returned }
+}
+
+// A terminal Yes does not abort the hook, so a card clicked Deny while the
+// tool runs returns a deny Claude Code ignores.
+test('denyAfterTerminalYesPostsClosedNotReceipt', async () => {
+  const fake = fakeChannel()
+  const { call, returned } = await deniedFromTBD(fake)
+  expect(returned).toEqual({ decision: { behavior: 'deny', message: DENY_TEXT } })
+  // Nothing is confirmed until the call ends.
+  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
+
+  await finish(call, TOOL_RESULT)
+
+  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
+  expect(sentTo(fake, 'POST', closedPath('toolu_1')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+})
+
+test('denyTakingEffectPostsReceiptAfterToolDenied', async () => {
+  for (const ended of [{ deny: DENY_TEXT }, { result: 'refused', isError: true }]) {
+    const fake = fakeChannel()
+    const { call } = await deniedFromTBD(fake)
+    expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
+
+    await finish(call, ended)
+
+    expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toHaveLength(1)
+    expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
+  }
+})
+
+test('failedWaitStopsRetryingWhenBudgetRunsLow', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+  dialog.below.budget.remainingMs = 1_500
+
+  await fake.answer('GET', answerPath('toolu_1'), 'fail')
+
+  // No pause is started: the dialog is left to the terminal at once.
+  expect(await dialog.done).toEqual(PASSED)
+  expect(fake.sleeps).toEqual([])
+  await finish(call)
+  expect(fake.sent.filter(request => request.path.endsWith('/closed'))).toEqual([])
 })
 
 test('abortPostsClosedAndPassesOn', async () => {

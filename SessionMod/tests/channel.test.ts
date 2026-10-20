@@ -60,8 +60,12 @@ test('pollBacksOffOneTwoFiveTen', async () => {
   await fake.answer('GET', POLL_FROM_ZERO, 'fail')
   expect(fake.sleeps.at(-1)).toBe(1_000)
 
-  // Failures log at debug level only.
+  // Failures log at debug level only: nothing reaches the transcript.
   expect(fake.logs.length).toBeGreaterThan(0)
+  expect(fake.logOptions).toHaveLength(fake.logs.length)
+  for (const options of fake.logOptions) {
+    expect(options).toEqual({ to: 'debug' })
+  }
 })
 
 test('pollDropsRepeatedSeq', async () => {
