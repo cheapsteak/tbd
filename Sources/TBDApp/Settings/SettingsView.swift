@@ -553,8 +553,9 @@ struct GeneralSettingsTab: View {
     }
 
     static let composerDraftHelp = "Saves what you type in a Claude session's prompt box and puts it back "
-        + "when a hibernated session wakes, so hibernating never loses an unsent draft. Applies to "
-        + "sessions started after you turn it on."
+        + "when a hibernated session wakes. If TBD can't confirm a draft is saved, such as one holding a "
+        + "large paste, automatic hibernation skips the session and hibernating it yourself asks first. "
+        + "Applies to sessions started after you turn it on."
 
     /// Schedule-based PR polling. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,
