@@ -1261,6 +1261,7 @@ struct TranscriptEstimatorAccuracyTests {
         case .toolCall(_, let name, _, _, _, _): return "toolCall/\(name)"
         case .activityGroupSummary: return "activityGroup"
         case .subagentSummary: return "subagentSummary"
+        case .thinking: return "thinking"
         }
     }
 

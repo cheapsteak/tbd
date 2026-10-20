@@ -10,9 +10,9 @@ import TestSupport
 /// `daemon.capabilities` — resolved daemon-side, so a Settings toggle and the
 /// daemon can never disagree about which of them last wrote the column.
 ///
-/// The coupling the assertions here pin belongs to `ConfigStore`, not to the
-/// handlers; these tests exist to prove the RPC layer actually routes to those
-/// setters rather than to a second, uncoupled write.
+/// The two flags are independent: each RPC writes its own column and leaves
+/// the other alone. Transcript streaming comes from the session mod, not the
+/// proxy.
 @Suite("Model proxy config RPCs")
 struct ModelProxyConfigRPCTests {
     let db: TBDDatabase
@@ -50,10 +50,9 @@ struct ModelProxyConfigRPCTests {
         #expect(try await db.config.get().modelProxyEnabled)
     }
 
-    /// The coupling in the proxy's direction: switching the proxy off has
-    /// switched streaming off whether or not the operator knows the second flag
-    /// exists, because the provisional row reads a file only the proxy writes.
-    @Test func turningTheProxyOffAlsoTurnsStreamingOff() async throws {
+    /// Switching the proxy off leaves streaming on: the provisional rows come
+    /// from the session mod's file, which the proxy has no part in.
+    @Test func turningTheProxyOffLeavesStreamingOn() async throws {
         _ = await router.handle(try RPCRequest(
             method: RPCMethod.configSetTranscriptStreamingEnabled,
             params: ConfigSetTranscriptStreamingParams(enabled: true)))
@@ -66,11 +65,11 @@ struct ModelProxyConfigRPCTests {
         #expect(response.success)
         let config = try await db.config.get()
         #expect(config.modelProxyEnabled == false)
-        #expect(config.transcriptStreamingEnabled == false)
+        #expect(config.transcriptStreamingEnabled)
     }
 
-    /// And not the other way about: turning the proxy back on is not a request
-    /// for the provisional transcript row, so streaming stays where it was.
+    /// Turning the proxy on is not a request for the provisional transcript
+    /// rows, so streaming stays where it was.
     @Test func turningTheProxyOnLeavesStreamingAlone() async throws {
         _ = await router.handle(try RPCRequest(
             method: RPCMethod.configSetModelProxyEnabled,
@@ -83,9 +82,9 @@ struct ModelProxyConfigRPCTests {
 
     // MARK: - The streaming gate
 
-    /// The coupling in streaming's direction: the file it reads does not exist
-    /// without the proxy, so asking for streaming is asking for both.
-    @Test func turningStreamingOnAlsoTurnsTheProxyOn() async throws {
+    /// Asking for streaming is not asking for the proxy: the stream comes from
+    /// the session mod.
+    @Test func turningStreamingOnLeavesTheProxyAlone() async throws {
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.configSetTranscriptStreamingEnabled,
             params: ConfigSetTranscriptStreamingParams(enabled: true)))
@@ -93,12 +92,14 @@ struct ModelProxyConfigRPCTests {
         #expect(response.success)
         let config = try await db.config.get()
         #expect(config.transcriptStreamingEnabled)
-        #expect(config.modelProxyEnabled)
+        #expect(config.modelProxyEnabled == Config.modelProxyDefault)
     }
 
-    /// Turning streaming off is not a request to stop routing: a session may
-    /// still want the proxy without the transcript's provisional row.
+    /// Turning streaming off is not a request to stop routing either.
     @Test func turningStreamingOffLeavesTheProxyAlone() async throws {
+        _ = await router.handle(try RPCRequest(
+            method: RPCMethod.configSetModelProxyEnabled,
+            params: ConfigSetModelProxyEnabledParams(enabled: true)))
         _ = await router.handle(try RPCRequest(
             method: RPCMethod.configSetTranscriptStreamingEnabled,
             params: ConfigSetTranscriptStreamingParams(enabled: true)))
@@ -135,7 +136,7 @@ struct ModelProxyConfigRPCTests {
         let caps = try await capabilities()
 
         #expect(caps.modelProxyEnabled)
-        // The proxy alone does not stream; the reported value is the conjunction.
+        // The proxy alone does not stream.
         #expect(caps.transcriptStreamingEnabled == false)
     }
 
@@ -146,27 +147,20 @@ struct ModelProxyConfigRPCTests {
 
         let caps = try await capabilities()
 
-        #expect(caps.modelProxyEnabled)
+        #expect(caps.modelProxyEnabled == Config.modelProxyDefault)
         #expect(caps.transcriptStreamingEnabled)
     }
 
-    /// `daemon.capabilities` reports the *effective* value, so a row holding a
-    /// combination no toggle can produce — streaming on, proxy off — is
-    /// reported as not streaming rather than passed to the app to re-derive.
-    @Test func capabilitiesReportTheConjunctionNotTheRawColumn() async throws {
+    /// Streaming on with the proxy off is reported as streaming: the flag no
+    /// longer depends on the proxy.
+    @Test func capabilitiesReportStreamingWithTheProxyOff() async throws {
         try await db.config.setTranscriptStreamingEnabled(true)
-        // Reach past the coupled setter, the way a hand-edited database would.
-        try await db.writerForTests.write { conn in
-            try conn.execute(
-                sql: "UPDATE config SET model_proxy_enabled = 0 WHERE id = ?",
-                arguments: [ConfigStore.singletonID])
-        }
-        #expect(try await db.config.get().transcriptStreamingEnabled)
+        try await db.config.setModelProxyEnabled(false)
 
         let caps = try await capabilities()
 
         #expect(caps.modelProxyEnabled == false)
-        #expect(caps.transcriptStreamingEnabled == false)
+        #expect(caps.transcriptStreamingEnabled)
     }
 
     /// An older daemon sends none of these keys. It runs no proxy either, so
@@ -225,11 +219,9 @@ struct ModelProxyConfigRPCTests {
         #expect(supervisor.startCalls == 1, "the off flip must not also start one")
     }
 
-    /// Streaming on writes the proxy column on, in the same transaction, so it
-    /// is a second way to arm the supervisor and has to start one too — a user
-    /// who asked for the provisional row and got no proxy would watch for a
-    /// stream file that never appears.
-    @Test func turningStreamingOnStartsTheSupervisor() async throws {
+    /// Streaming no longer arms the proxy, so turning it on starts no
+    /// supervisor.
+    @Test func turningStreamingOnStartsNoSupervisor() async throws {
         let supervisor = FakeModelProxySupervisor()
         router.modelProxySupervisor = supervisor
 
@@ -237,7 +229,7 @@ struct ModelProxyConfigRPCTests {
             method: RPCMethod.configSetTranscriptStreamingEnabled,
             params: ConfigSetTranscriptStreamingParams(enabled: true)))
 
-        #expect(supervisor.startCalls == 1)
+        #expect(supervisor.startCalls == 0)
         #expect(supervisor.drainCalls == 0)
     }
 

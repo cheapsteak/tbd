@@ -236,16 +236,6 @@ enum TranscriptBubbleGeometry {
         }
     }
 
-    /// Trailing mark on the model-proxy stream's provisional row: this answer
-    /// is still arriving and the transcript has not confirmed it yet.
-    ///
-    /// Appended to the message text before rendering rather than drawn as
-    /// separate chrome, so it inherits the bubble's font, colour and line
-    /// wrapping and adds no layout node — the row measures and re-renders
-    /// exactly as it did before. U+258D LEFT FIVE EIGHTHS BLOCK, the same glyph
-    /// a terminal draws for a bar cursor.
-    static let provisionalCursor = "\u{258D}"
-
     /// The message's blocks: rendered markdown split at GFM tables, with the
     /// token-usage badge (when present) appended to the LAST prose block — or, if
     /// the message ends in a table (or has no prose), a trailing prose block
@@ -254,11 +244,10 @@ enum TranscriptBubbleGeometry {
     static func composedBlocks(
         for item: TranscriptItem,
         badgeUsage: TokenUsage?,
-        linkResolver: TranscriptPathResolver?,
-        isProvisional: Bool = false
+        linkResolver: TranscriptPathResolver?
     ) -> [MessageBlock] {
         var blocks = MarkdownAttributedRenderer.renderBlocks(
-            text(for: item) + (isProvisional ? provisionalCursor : ""),
+            text(for: item),
             theme: .chatBubble, linkResolver: linkResolver,
             // Terminal pastes are unwrapped for the user's own prompts only; an
             // assistant or peer message quoting the tags renders them verbatim.

@@ -155,10 +155,9 @@ struct ModelProxySpawnEnvTests {
             == Self.carriedEnv["EXAMPLE_CARRIED_SECRET"])
     }
 
-    /// The route carries the *effective* streaming flag, not the raw column: a
-    /// hand-edited row with streaming on and the proxy off streams nothing, and
-    /// a route may not describe that state.
-    @Test("the route carries the effective streaming flag, not the raw column")
+    /// The route carries the streaming flag: a route exists only with the
+    /// proxy on, so the streaming column alone decides whether it tees.
+    @Test("the route carries the streaming flag")
     func routeCarriesEffectiveStreaming() async throws {
         let on = FakeModelProxySupervisor()
         _ = await attach(config: proxyOnConfig(streaming: true), supervisor: on)

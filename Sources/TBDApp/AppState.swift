@@ -1888,9 +1888,9 @@ final class AppState {
     /// Published so the Settings control-mode toggle re-renders after
     /// `setControlModeEnabled` refreshes it.
     var daemonCapabilities: DaemonCapabilitiesResult?
-    /// Whether the daemon reports transcript streaming as effective — the
-    /// conjunction of `transcript_streaming_enabled` and `model_proxy_enabled`,
-    /// already resolved daemon-side, so the app never re-derives the pair.
+    /// Whether the daemon reports transcript streaming as on — the resolved
+    /// `transcript_streaming_enabled` flag, which spawns sessions with the
+    /// session mod's `transcript-stream` feature.
     ///
     /// False until capabilities have been fetched, which is the conservative
     /// reading: a pane that registers no stream file renders exactly what it

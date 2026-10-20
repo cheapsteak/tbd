@@ -1730,15 +1730,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
     /// explicit gesture and is honored forever.
     public var modelProxyEnabled: Bool
-    /// Whether the transcript renders a provisional assistant row that grows
-    /// with the model proxy's stream file and is retired when the JSONL line
-    /// for that message lands.
+    /// Whether Claude sessions spawn with the session mod's
+    /// `transcript-stream` feature, and the transcript shows the provisional
+    /// rows it writes until the JSONL rows with the same `uuid`s land.
     ///
-    /// It ships OFF, and it is meaningful only with `modelProxyEnabled`: the
-    /// stream file it reads is written by the proxy. Read
-    /// `transcriptStreamingEffective` rather than this property — a
-    /// hand-edited row with streaming on and the proxy off records two
-    /// choices, and streams nothing.
+    /// It ships OFF, and it depends on no other flag.
     ///
     /// **Resolved, not stored**, same shape as `modelProxyEnabled`:
     /// `transcript_streaming_enabled ?? Config.transcriptStreamingDefault`.
@@ -2188,19 +2184,6 @@ public extension Config {
         ProfilePoolPolicy.resolved(
             usageCeilingPercent: profileBalancingUsageCeilingPercent,
             maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
-    }
-
-    /// Whether transcript streaming is actually on: the conjunction of the two
-    /// flags, and the only form any caller should act on.
-    ///
-    /// Streaming reads a file the proxy writes, so streaming without the proxy
-    /// is not a state that can do anything. The setters keep the pair coherent
-    /// for anyone using the toggles, but a hand-edited row — or a row written
-    /// by a build that had only one of the flags — can still hold streaming on
-    /// with the proxy off, and that row must stream nothing rather than tail a
-    /// file nobody is writing.
-    var transcriptStreamingEffective: Bool {
-        modelProxyEnabled && transcriptStreamingEnabled
     }
 
     /// Which auto-resume gate governs a `scheduled_resumes` row: the

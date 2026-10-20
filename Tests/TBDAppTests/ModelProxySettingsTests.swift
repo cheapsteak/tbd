@@ -3,14 +3,12 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
-/// The Settings surface for the two model-proxy gates — the proxy itself, and
-/// the transcript streaming that reads what the proxy writes.
+/// The Settings surface for the model-proxy gate and the transcript-streaming
+/// gate, two independent switches.
 ///
-/// The pairing is the point: the daemon owns the coupling (streaming on turns
-/// the proxy on; the proxy off turns streaming off), and the app's job is only
-/// to send the gesture and read the daemon back. So every test here asserts the
-/// app forwarded the toggled value and re-fetched capabilities — never that it
-/// computed a coupled value of its own.
+/// The app's job is only to send the gesture and read the daemon back, so every
+/// test here asserts the app forwarded the toggled value and re-fetched
+/// capabilities — never that it computed a value of its own.
 ///
 /// Every test that constructs `AppState` does so against a unique throwaway
 /// `UserDefaults` suite and tears it down — TBDApp ships as an unbundled SPM
@@ -133,10 +131,8 @@ struct ModelProxySettingsTests {
         }
     }
 
-    /// The coupling lives in the daemon, so the app must send the gesture even
-    /// when the proxy it depends on is currently off — an app that pre-empted
-    /// the write would make "turn streaming on" a no-op on exactly the fleet
-    /// that has never opted in.
+    /// Streaming does not depend on the proxy, so the app sends the gesture
+    /// while the proxy is off and never writes the proxy flag itself.
     @Test func streamingSetterFiresEvenWhileTheProxyIsOff() async {
         await withAppState { state in
             var written: [Bool] = []
@@ -145,9 +141,8 @@ struct ModelProxySettingsTests {
             }
             state.transcriptStreamingFlagSetter = { @MainActor enabled in written.append(enabled) }
             state.daemonCapabilitiesFetcher = { @MainActor in
-                // What the daemon reports after coupling the two columns.
                 DaemonCapabilitiesResult(
-                    controlModeEnabled: false, modelProxyEnabled: true,
+                    controlModeEnabled: false, modelProxyEnabled: false,
                     modelProxySupported: true, transcriptStreamingEnabled: true)
             }
             // The starting point: nobody has ever turned the proxy on.
@@ -158,7 +153,7 @@ struct ModelProxySettingsTests {
             await state.setTranscriptStreamingEnabled(true)
 
             #expect(written == [true], "the app forwards the gesture regardless of the proxy state")
-            #expect(state.daemonCapabilities?.modelProxyEnabled == true)
+            #expect(state.daemonCapabilities?.modelProxyEnabled == false)
             #expect(state.daemonCapabilities?.transcriptStreamingEnabled == true)
         }
     }
@@ -184,17 +179,15 @@ struct ModelProxySettingsTests {
     // MARK: - Help strings
 
     /// Both help strings carry a promise the operator acts on — that the change
-    /// applies to sessions started after it, and (for streaming) that it turns
-    /// the proxy on too. Pinned here so a rewrite that drops either has to be
-    /// deliberate.
-    @Test func helpStringsStateWhenTheChangeAppliesAndWhatItTurnsOn() {
+    /// applies to sessions started after it, and (for streaming) that it needs
+    /// Claude Code to load TBD's mod. Streaming no longer mentions the proxy.
+    /// Pinned here so a rewrite that drops any of it has to be deliberate.
+    @Test func helpStringsStateWhenTheChangeAppliesAndWhatItNeeds() {
         #expect(AppState.modelProxyHelp.contains("Applies to sessions started after you change it."))
         #expect(AppState.modelProxyHelp.contains("Off by default (soaking)."))
         #expect(
             AppState.transcriptStreamingHelp.contains(
-                "Turning this on also turns on the model proxy."))
-        #expect(
-            AppState.transcriptStreamingHelp.contains(
-                "Applies to sessions started after you change it."))
+                "Applies to sessions started after you turn it on, and only where Claude Code loads TBD's mod."))
+        #expect(!AppState.transcriptStreamingHelp.contains("proxy"))
     }
 }

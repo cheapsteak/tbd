@@ -444,36 +444,29 @@ extension RPCRouter {
     }
 
     /// Persist the transcript-streaming gate — the default-off soak switch for
-    /// the transcript's provisional assistant row, read from the file the proxy
-    /// writes.
+    /// the session mod's `transcript-stream` feature and the provisional rows
+    /// the transcript pane reads from it.
     ///
-    /// **It applies to sessions created after the call**, for the same reason
-    /// the proxy gate does: only a session spawned with a route has a stream
-    /// file to read.
+    /// **It applies to sessions created after the call**: the feature list is
+    /// fixed in a session's environment at spawn. It touches no proxy setting
+    /// and starts or drains no proxy.
     ///
-    /// The coupling — turning streaming on also writes the proxy on, in one
-    /// transaction — lives in `ConfigStore.setTranscriptStreamingEnabled`. What
-    /// readers act on is `Config.transcriptStreamingEffective`, the conjunction
-    /// of the two columns, because a hand-edited row can hold a combination no
-    /// gesture here can produce.
-    ///
-    /// Because turning streaming on turns the proxy on, this is also a way to
-    /// arm the supervisor, and it starts one for the same reason
-    /// `setModelProxyEnabled` does: a user who asked for the provisional row
-    /// and got no proxy would see a stream file that never appears. Turning
-    /// streaming **off** retires nothing — the proxy column is untouched by
-    /// that direction, and a route still routes.
+    /// The `tbd` plugin on disk is brought in line with the new feature set,
+    /// as the composer-draft gate does: the session mod is present while any
+    /// feature's flag is on.
+    /// Design: docs/specs/2026-10-20-transcript-stream-mod-design.md.
     func handleConfigSetTranscriptStreamingEnabled(
         _ paramsData: Data
     ) async throws -> RPCResponse {
         let params = try decoder.decode(
             ConfigSetTranscriptStreamingParams.self, from: paramsData)
         try await db.config.setTranscriptStreamingEnabled(params.enabled)
-        if params.enabled {
-            await modelProxySupervisor?.startIfEnabled()
-        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
+        if let sessionModPluginSync {
+            let config = try await db.config.get()
+            sessionModPluginSync(SessionModFeature.enabled(in: config))
+        }
         return .ok()
     }
 

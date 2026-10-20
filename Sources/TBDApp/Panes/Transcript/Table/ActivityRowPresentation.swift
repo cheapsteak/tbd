@@ -135,7 +135,29 @@ enum ActivityRowFormatter {
             return activityGroup(summary)
         case let .subagentSummary(_, count, agentType):
             return subagentSummary(count: count, agentType: agentType)
+        case let .thinking(_, text):
+            return thinking(text: text, isProvisional: node.isProvisional)
         }
+    }
+
+    /// A streamed thinking summary (mirrors `ThinkingRow`): the brain glyph,
+    /// "Thinking", then the summary, which the row truncates to its one line.
+    /// No overlay target: the row is provisional and leaves once the JSONL
+    /// confirms it, so nothing may hold its id open.
+    private static func thinking(text: String, isProvisional: Bool) -> ActivityRowPresentation {
+        let summary = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return ActivityRowPresentation(
+            iconSystemName: "brain",
+            titleSegments: [
+                ActivityRowSegment(text: "Thinking", style: .primary),
+                ActivityRowSegment(text: summary, style: .tertiary),
+            ],
+            timestamp: nil,
+            isError: false,
+            badges: isProvisional ? [ActivityRowBadge(text: "streaming", kind: .neutral)] : [],
+            openTargetID: nil,
+            accessibilityLabel: "Thinking: \(summary)"
+        )
     }
 
     private static func activityGroup(_ summary: ActivityGroupSummary) -> ActivityRowPresentation {
