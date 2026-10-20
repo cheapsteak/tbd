@@ -58,6 +58,19 @@ struct PendingPromptResolutionTests {
         return waiter
     }
 
+    /// Takes the held decision with a wait request and then runs `then`, all
+    /// in one turn on the store's executor: a held decision returns without
+    /// suspending, so a parked `answer` cannot resume between the two.
+    private func pickUpThen(
+        _ store: isolated PendingPromptStore, terminal: UUID, toolUseID: String = "toolu_1",
+        _ then: (isolated PendingPromptStore) -> Set<UUID>
+    ) async -> PendingPromptStore.WaitResult {
+        let picked = await store.waitForAnswer(
+            terminalID: terminal, toolUseID: toolUseID, token: UUID(), hold: .seconds(25))
+        _ = then(store)
+        return picked
+    }
+
     private func decision(
         _ answer: PromptAnswer = PendingPromptResolutionTests.allow,
         input: String = PendingPromptResolutionTests.bashInput
@@ -190,6 +203,65 @@ struct PendingPromptResolutionTests {
         #expect(retry.outcome == .alreadyResolved, "the timed-out prompt is resolved, so a retry cannot answer twice")
     }
 
+    /// A second answer racing the first one's receipt timeout must come back
+    /// too: the timeout ends the prompt in its own actor turn, so the second
+    /// answer finds it answered or gone and never parks on it.
+    @Test func secondAnswerAfterReceiptTimeoutReturns() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
+
+        let first = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        _ = await waiter.value
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
+        let second = await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow)
+
+        #expect(second.outcome == .alreadyResolved)
+        #expect(await first.value.outcome == .deliveryUnconfirmed)
+        #expect(await openIDs(store, terminal).isEmpty)
+    }
+
+    /// A receipt landing after a wait request took the held decision but
+    /// before the answer parks for its receipt still settles it as delivered.
+    /// `pickUpThen` runs both on the store's executor, so the answer cannot
+    /// resume in between.
+    @Test func receiptBetweenPickupAndReceiptParkIsDelivered() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        try await clock.requireSleeperArmed()
+
+        let picked = await pickUpThen(store, terminal: terminal) {
+            $0.receipt(terminalID: terminal, toolUseID: "toolu_1")
+        }
+
+        #expect(picked == .decision(try decision()))
+        #expect(await answering.value.outcome == .delivered)
+        #expect(await openIDs(store, terminal).isEmpty)
+    }
+
+    /// The same gap with a close instead: the terminal answered first.
+    @Test func closedBetweenPickupAndReceiptParkIsAlreadyResolved() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        try await clock.requireSleeperArmed()
+
+        let picked = await pickUpThen(store, terminal: terminal) {
+            $0.closed(terminalID: terminal, toolUseID: "toolu_1")
+        }
+
+        #expect(picked == .decision(try decision()))
+        #expect(await answering.value.outcome == .alreadyResolved)
+        #expect(await openIDs(store, terminal).isEmpty)
+    }
+
     /// No wait request is attached when the answer arrives (the mod is
     /// between polls): the decision is held, and the next wait request
     /// within the pickup window takes it at once.
@@ -309,7 +381,8 @@ struct PendingPromptResolutionTests {
         let store = makeStore()
         let terminal = UUID()
         await open(store, terminal: terminal)
-        let stale = await attachWaiter(store, terminal: terminal)
+        let staleToken = UUID()
+        let stale = await attachWaiter(store, terminal: terminal, token: staleToken)
 
         let freshToken = UUID()
         let fresh = Task {
@@ -318,7 +391,8 @@ struct PendingPromptResolutionTests {
         #expect(await stale.value == .pending)
 
         // The stale request's token no longer detaches anything.
-        await store.waiterGone(token: UUID())
+        await store.waiterGone(token: staleToken)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1"))
         let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
         #expect(await fresh.value == .decision(try decision()))
         await store.receipt(terminalID: terminal, toolUseID: "toolu_1")

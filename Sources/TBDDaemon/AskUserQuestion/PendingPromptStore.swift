@@ -136,6 +136,7 @@ public actor PendingPromptStore {
 
     private struct PromptRecord {
         var payload: PendingPromptPayload
+        /// Kept for session-end clearing and the log.
         var sessionID: String
         /// Distinguishes this record from a later one under the same key, so
         /// an `answer` that outlived its prompt cannot act on a newer one.
@@ -452,10 +453,15 @@ public actor PendingPromptStore {
             return (.delivered, [terminalID])
         case .resolved:
             return (.alreadyResolved, [terminalID])
-        case .timedOut, .pickedUp:
-            // `.pickedUp` is only ever sent before the hand-over; it cannot
-            // reach this park, and is handled like the timeout it would be.
-            if promptRecords[key]?.generation == generation {
+        case .timedOut:
+            // `answerTimedOut` already resolved the prompt.
+            return (.deliveryUnconfirmed, [terminalID])
+        case .pickedUp:
+            // Only ever sent before the hand-over, so it cannot reach this
+            // park; handled like the timeout it would be, touching the prompt
+            // only while this answer is still the one it holds.
+            if promptRecords[key]?.generation == generation,
+               promptRecords[key]?.pendingAnswer?.token == answerToken {
                 promptRecords[key]?.pendingAnswer = nil
                 resolve(key, .answered)
             }
@@ -493,15 +499,21 @@ public actor PendingPromptStore {
         return signal
     }
 
-    /// The parked answer's timeout. Before the hand-over the decision is
-    /// withdrawn here, in the same actor turn, so no wait request can take
-    /// it after the answer has been told `.hookDetached`.
+    /// The parked answer's timeout, settled in this actor turn so nothing
+    /// can slip in before the parked call resumes. Before the hand-over the
+    /// decision is withdrawn and the prompt stays open, so no wait request
+    /// can take it after the answer has been told `.hookDetached`. After the
+    /// hand-over the prompt resolves `.answered` here, so a second answer
+    /// cannot install itself on a prompt this one is about to end.
     private func answerTimedOut(key: Key, parkID: UUID) {
         guard var record = promptRecords[key], let answer = record.pendingAnswer,
               answer.parkID == parkID, let continuation = answer.continuation else { return }
         record.pendingAnswer = nil
         promptRecords[key] = record
         continuation.resume(returning: .timedOut)
+        if answer.handedOver {
+            resolve(key, .answered)
+        }
     }
 
     /// Delivers `signal` to the answer: to its parked call, or into
