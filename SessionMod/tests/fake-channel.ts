@@ -28,6 +28,9 @@ export const CHANNEL_VARIABLES: Record<string, string> = {
 /** What the daemon answers: a status and a JSON body, or a request that fails to connect. */
 export type Reply = { status: number; json?: unknown } | 'fail'
 
+/** A `replies` entry: a reply given at once, or 'hold' to hold the request until the test answers it. */
+export type Scripted = Reply | 'hold'
+
 /** One request the mod sent. */
 export type Sent = {
   method: string
@@ -53,10 +56,11 @@ export type FakeChannel = {
   /** The length of every `$.clock.sleep`, in the order asked. */
   sleeps: number[]
   /**
-   * How the daemon answers a request at once, by `METHOD path`; one listed
-   * nowhere is answered 200 `{}` when it is a POST and held when it is a GET.
+   * How the daemon answers a request, by `METHOD path`: at once, or held
+   * ('hold') until the test answers it. One listed nowhere is answered 200
+   * `{}` when it is a POST and held when it is a GET.
    */
-  replies: Map<string, Reply>
+  replies: Map<string, Scripted>
   /** Answers the oldest held request to `METHOD path`; fails the test when none is held. */
   answer: (method: string, path: string, reply: Reply) => Promise<void>
   /** How many requests to `METHOD path` are held unanswered. */
@@ -77,7 +81,7 @@ export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLE
   const logs: string[] = []
   const logOptions: unknown[] = []
   const sleeps: number[] = []
-  const replies = new Map<string, Reply>()
+  const replies = new Map<string, Scripted>()
   const held: Held[] = []
   const waits: Wait[] = []
   let now = 0
@@ -151,7 +155,9 @@ export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLE
           }
           sent.push(request)
           const known = replies.get(`${method} ${path}`)
-          if (known !== undefined) {
+          if (known === 'hold') {
+            held.push({ ...request, reply: reply => respond(reply, resolve, reject) })
+          } else if (known !== undefined) {
             respond(known, resolve, reject)
           } else if (method === 'POST') {
             respond({ status: 200, json: {} }, resolve, reject)

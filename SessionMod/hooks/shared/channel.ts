@@ -187,9 +187,17 @@ export function standingReportBody(key: string): unknown {
   return standingReports.get(key)?.body
 }
 
-/** Posts every standing report once more, oldest first. Failures are logged and left. */
+/**
+ * Posts every standing report once more, oldest first. Each is looked up
+ * again just before its post, so one withdrawn while an earlier post was in
+ * flight (its dialog closed) is skipped. Failures are logged and left.
+ */
 export async function repostStandingReports($: EngineInterface, env: ChannelEnv): Promise<void> {
-  for (const [key, report] of [...standingReports]) {
+  for (const key of [...standingReports.keys()]) {
+    const report = standingReports.get(key)
+    if (report === undefined) {
+      continue
+    }
     const reply = await request($, env, 'POST', report.path, report.body)
     if (reply === null || reply.status !== 200) {
       $.ui.log(`session mod channel: could not post ${key} again (${reply?.status ?? 'no reply'})`, { to: 'debug' })

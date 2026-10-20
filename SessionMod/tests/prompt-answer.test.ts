@@ -212,8 +212,53 @@ test('failedWaitStopsRetryingWhenBudgetRunsLow', async () => {
   // No pause is started: the dialog is left to the terminal at once.
   expect(await dialog.done).toEqual(PASSED)
   expect(fake.sleeps).toEqual([])
+  // The card stays standing, so the call's end tells the daemon the
+  // terminal took the dialog.
+  expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
   await finish(call)
-  expect(fake.sent.filter(request => request.path.endsWith('/closed'))).toEqual([])
+  expect(sentTo(fake, 'POST', closedPath('toolu_1')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+})
+
+test('receiptIsAwaitedBeforeTheHookReturns', async () => {
+  const fake = fakeChannel()
+  fake.replies.set(`POST ${receiptPath('toolu_1')}`, 'hold')
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+  let returned = false
+  void dialog.done.then(() => {
+    returned = true
+  })
+  await fake.answer('GET', answerPath('toolu_1'), { status: 200, json: { state: 'decision', decision: { behavior: 'allow' } } })
+
+  // The receipt is in flight: the hook has not returned.
+  expect(fake.heldCount('POST', receiptPath('toolu_1'))).toBe(1)
+  expect(returned).toBe(false)
+
+  await fake.answer('POST', receiptPath('toolu_1'), { status: 200, json: {} })
+  expect(await dialog.done).toEqual({ decision: { behavior: 'allow' } })
+  await finish(call)
+})
+
+test('closedIsAwaitedBeforeTheToolCallReturns', async () => {
+  const fake = fakeChannel()
+  fake.replies.set(`POST ${closedPath('toolu_q')}`, 'hold')
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  let returned = false
+  void call.done.then(() => {
+    returned = true
+  })
+  call.tool.settle(TOOL_RESULT)
+  await flush()
+
+  expect(fake.heldCount('POST', closedPath('toolu_q'))).toBe(1)
+  expect(returned).toBe(false)
+
+  // A failed close is swallowed: the call still returns the dialog's result.
+  await fake.answer('POST', closedPath('toolu_q'), 'fail')
+  expect(await call.done).toEqual(TOOL_RESULT)
+  await fake.answer('GET', answerPath('toolu_q'), { status: 200, json: { state: 'resolved' } })
 })
 
 test('abortPostsClosedAndPassesOn', async () => {
@@ -379,4 +424,71 @@ test('subagentAgentIdSeparatesPairing', async () => {
   expect(await forMain.done).toEqual(PASSED)
   await finish(main)
   await finish(sub)
+})
+
+// A daemon restart while a question is open: its waits fail for as long as
+// the daemon is down, and the question keeps retrying, posting the card open
+// again before each wait, until the daemon answers.
+test('questionWaitRetriesAcrossADaemonRestart', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  const opened = sentTo(fake, 'POST', OPEN)[0]?.body
+
+  const pauses = [1_000, 2_000, 5_000, 10_000, 10_000, 10_000, 10_000]
+  for (const pause of pauses) {
+    await fake.answer('GET', answerPath('toolu_q'), 'fail')
+    expect(fake.sleeps.at(-1)).toBe(pause)
+    await fake.advance(pause)
+  }
+  expect(fake.sleeps).toEqual(pauses)
+  // One open, then one before each retried wait.
+  expect(sentTo(fake, 'POST', OPEN).map(request => request.body)).toEqual(Array(pauses.length + 1).fill(opened))
+
+  const answers = { 'Which database?': 'SQLite' }
+  await fake.answer('GET', answerPath('toolu_q'), {
+    status: 200,
+    json: { state: 'decision', decision: { behavior: 'allow', updatedInput: { questions: QUESTIONS, answers } } },
+  })
+  expect(await call.done).toEqual({ result: { questions: QUESTIONS, answers } })
+  expect(sentTo(fake, 'POST', receiptPath('toolu_q'))).toHaveLength(1)
+  call.tool.settle(TOOL_RESULT)
+  await flush()
+})
+
+test('questionRetriesStopWhenTheDialogSettles', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  await fake.answer('GET', answerPath('toolu_q'), 'fail')
+  expect(fake.sleeps).toEqual([1_000])
+
+  // The terminal answers during the pause.
+  const answeredHere = { result: { questions: QUESTIONS, answers: { 'Which database?': 'Postgres' } } }
+  call.tool.settle(answeredHere)
+  expect(await call.done).toEqual(answeredHere)
+  await fake.advance(1_000)
+
+  expect(sentTo(fake, 'POST', OPEN)).toHaveLength(1)
+  expect(fake.heldCount('GET', answerPath('toolu_q'))).toBe(0)
+  expect(sentTo(fake, 'POST', closedPath('toolu_q')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+})
+
+// Once the dialog is open, a failure on TBD's side returns the dialog's own
+// result rather than throwing: a throw would make register.ts call next(e)
+// again and open a second dialog.
+test('questionFailureAfterTheDialogOpensReturnsTheDialog', async () => {
+  const fake = fakeChannel()
+  const session = (fake.engine as unknown as { session: { id: () => Promise<string> } }).session
+  session.id = async () => {
+    throw new Error('session unavailable')
+  }
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  expect(call.tool.calls()).toBe(1)
+  expect(sentTo(fake, 'POST', OPEN)).toEqual([])
+
+  call.tool.settle(TOOL_RESULT)
+  expect(await call.done).toEqual(TOOL_RESULT)
+  expect(call.tool.calls()).toBe(1)
 })

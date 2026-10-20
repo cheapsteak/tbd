@@ -3,7 +3,7 @@
 // running holds only that test's stand-in.
 import { expect, test } from 'claude-code/testing'
 
-import { readChannelEnv, request, startPolling } from '../hooks/shared/channel.ts'
+import { readChannelEnv, request, standReport, startPolling, withdrawReport } from '../hooks/shared/channel.ts'
 import { CHANNEL, CHANNEL_VARIABLES, fakeChannel, flush, sentTo } from './fake-channel.ts'
 
 const POLL_FROM_ZERO = '/v1/poll?after=0'
@@ -94,6 +94,27 @@ test('pollDropsRepeatedSeq', async () => {
     'session mod channel: no handler for item 2 (later)',
     'session mod channel: no handler for item 3 (later)',
   ])
+})
+
+test('repostSkipsAReportWithdrawnMidRepost', async () => {
+  const fake = fakeChannel()
+  standReport('toolu_r1', '/v1/prompts/open', { toolUseID: 'toolu_r1' })
+  standReport('toolu_r2', '/v1/prompts/open-second', { toolUseID: 'toolu_r2' })
+  fake.replies.set('POST /v1/prompts/open', 'hold')
+
+  startPolling(fake.engine, CHANNEL)
+  await fake.advance(0)
+  await fake.answer('GET', POLL_FROM_ZERO, 'fail')
+  await fake.advance(1_000)
+  await fake.answer('GET', POLL_FROM_ZERO, { status: 200, json: { items: [] } })
+  expect(fake.heldCount('POST', '/v1/prompts/open')).toBe(1)
+
+  // The second dialog closes while the first is being posted again.
+  withdrawReport('toolu_r2')
+  await fake.answer('POST', '/v1/prompts/open', { status: 200, json: {} })
+
+  expect(sentTo(fake, 'POST', '/v1/prompts/open-second')).toEqual([])
+  withdrawReport('toolu_r1')
 })
 
 // The only test here that reads the environment: it is read once per load.
