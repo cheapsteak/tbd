@@ -39,8 +39,28 @@ import {
   measured as usageMeasured,
   sessionStart as usageSessionStart,
 } from './features/usage.ts'
+import {
+  FEATURE as PROMPT_ANSWER,
+  permissionRequested as promptAnswerPermissionRequested,
+  toolCalled as promptAnswerToolCalled,
+} from './features/prompt-answer.ts'
+import { readChannelEnv, startPolling } from './shared/channel.ts'
+import type { ChannelEnv } from './shared/channel.ts'
 import { readSessionEnv, resolveContext, startHeartbeat } from './shared/session.ts'
 import type { SessionEnv } from './shared/session.ts'
+
+// Whether this load's channel poll runs: one per load, however many
+// session.start events it sees.
+let isPolling = false
+
+/** The channel, when this spawn listed prompt-answer and was given it; else null. */
+export async function promptAnswerChannel($: EngineInterface): Promise<ChannelEnv | null> {
+  const env = await readSessionEnv($)
+  if (env === null || !env.features.has(PROMPT_ANSWER)) {
+    return null
+  }
+  return readChannelEnv($)
+}
 
 // The two hooks that run on every change of the prompt box. They take the
 // environment as an argument, so a test can call them directly: the test kit
@@ -101,6 +121,11 @@ export const register: Register = on => {
     if (ctx !== null && ctx.features.has(USAGE)) {
       await usageMeasured($, ctx, e)
     }
+    const channel = await promptAnswerChannel($)
+    if (channel !== null && !isPolling) {
+      isPolling = true
+      startPolling($, channel)
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -152,6 +177,26 @@ export const register: Register = on => {
       return next(e)
     }
     return transcriptStreamTurnComplete(transcriptStream($), e, next)
+  }).catch(($, e, next) => next(e))
+
+  // prompt-answer: every call is recorded while it runs, and AskUserQuestion
+  // is answered here. A spawn without the feature passes the call straight on.
+  on('tool.call', async ($, e, next) => {
+    const channel = await promptAnswerChannel($)
+    if (channel === null) {
+      return next(e)
+    }
+    return promptAnswerToolCalled($, channel, e, next)
+  }).catch(($, e, next) => next(e))
+
+  // prompt-answer: a permission dialog waits for TBD's answer while the
+  // terminal can still answer it.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const channel = await promptAnswerChannel($)
+    if (channel === null) {
+      return next(e)
+    }
+    return promptAnswerPermissionRequested($, channel, e, next)
   }).catch(($, e, next) => next(e))
 
   // The band above the prompt yields to a survey. A feature that draws there
