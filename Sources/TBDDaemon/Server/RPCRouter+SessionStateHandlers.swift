@@ -91,6 +91,7 @@ struct SessionStateFactGatherer {
         return contextLoadReader.read(
             capturePath: capturePath(terminal.id.uuidString),
             usagePath: usage.path,
+            usageIncarnationID: terminal.sessionIncarnationID,
             usageLiveness: usage.liveness,
             transcriptPath: terminal.transcriptPath,
             tee: teeStatus(for: terminal))

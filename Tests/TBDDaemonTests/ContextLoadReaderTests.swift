@@ -419,10 +419,12 @@ import TBDShared
 
     /// The shape `SessionMod/hooks/features/usage.ts` writes, with the window
     /// spelled as a raw JSON literal so a test can hand it a malformed one.
-    private static func usageJSON(window: String = "200000", tokens: Int? = 50_000) -> String {
+    private static func usageJSON(
+        window: String = "200000", tokens: Int? = 50_000, incarnationID: String = "i"
+    ) -> String {
         let tokensField = tokens.map { #","tokens":\#($0),"percent":25"# } ?? ""
         return """
-        {"schemaVersion":1,"claudeSessionID":"s","incarnationID":"i",\
+        {"schemaVersion":1,"claudeSessionID":"s","incarnationID":"\(incarnationID)",\
         "measuredAt":\(usageMeasuredAtMs),"context":{"window":\(window)\(tokensField)},\
         "rateLimits":[{"kind":"five_hour","percentUsed":12}],"cost":{"usd":1.5}}
         """
@@ -536,6 +538,39 @@ import TBDShared
         #expect(load.used?.source == .transcriptTail)
     }
 
+    /// A confirmed mod vouches for the process, not for the file: the new
+    /// process's heartbeat can land before its first usage write, leaving the
+    /// file an earlier process of the same session wrote.
+    @Test func aUsageFileFromAnEarlierProcessIsAnUnknownWindow() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeTranscript(tokens: 42_000, timestamp: Self.transcriptStamp)
+        let live = UUID()
+        let stalePath = try writeUsage(Self.usageJSON(incarnationID: UUID().uuidString), in: scratch)
+
+        let stale = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: stalePath, usageIncarnationID: live,
+            usageLiveness: .confirmed, transcriptPath: scratch.transcriptPath, tee: .notADesk)
+        guard case .unknown(let why) = stale.window else {
+            Issue.record("expected an unknown window for an earlier process's file, got \(stale.window)")
+            return
+        }
+        #expect(why.contains("earlier process"))
+        #expect(stale.used?.source == .transcriptTail)
+        #expect(stale.used?.value == 42_000)
+
+        // The same file naming the live incarnation — lowercased, since the
+        // comparison is by UUID rather than by text — is this process's reading.
+        let ownPath = try writeUsage(
+            Self.usageJSON(incarnationID: live.uuidString.lowercased()), in: scratch)
+        let own = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: ownPath, usageIncarnationID: live,
+            usageLiveness: .confirmed, transcriptPath: scratch.transcriptPath, tee: .notADesk)
+        #expect(own.window == .observed(
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
+        #expect(own.isPairedReading)
+    }
+
     /// A spawn that chose the mod's file over the tee, but whose mod has not
     /// confirmed itself, must not fall back to a capture an earlier life of the
     /// session left on disk: it describes a process this one may not be.
@@ -598,7 +633,7 @@ import TBDShared
             sessionId: sessionID, incarnationId: incarnation.uuidString, features: ["usage"],
             heartbeatAtMs: Int64(pinned.timeIntervalSince1970 * 1000)))
             .write(to: dir.appendingPathComponent(SessionModFiles.aliveFileName))
-        try Data(Self.usageJSON().utf8)
+        try Data(Self.usageJSON(incarnationID: incarnation.uuidString).utf8)
             .write(to: dir.appendingPathComponent(SessionModFiles.usageFileName))
         try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
 

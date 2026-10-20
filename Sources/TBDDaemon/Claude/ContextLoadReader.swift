@@ -24,7 +24,9 @@ import TBDShared
 ///
 /// 1. **Spawned with `usage`, and the mod is confirmed running.** Take the
 ///    file's window, and its tokens when it carries them — measured together,
-///    so the reading is paired.
+///    so the reading is paired. The file must name the live incarnation: the
+///    new process's heartbeat can land before its first usage write, and a
+///    file an earlier process left behind describes that process.
 /// 2. **Spawned with `usage`, but the mod is not confirmed, or its file is
 ///    missing, torn or carries no valid window.** The numerator comes from the
 ///    transcript tail and the window is `unknown`. A tee capture left on disk
@@ -76,6 +78,10 @@ struct ContextLoadReader {
     ///   - usagePath: the session mod's `usage.json` for this session, when the
     ///     session has a directory. Read only when `usageLiveness` is
     ///     `.confirmed`.
+    ///   - usageIncarnationID: the session's live incarnation. When given, a
+    ///     usage file naming any other incarnation — or none — was written by
+    ///     an earlier process of the same Claude session and is not read. The
+    ///     gatherer always passes it; nil skips the check.
     ///   - usageLiveness: `SessionModLiveness` for the `usage` feature. `.legacy`
     ///     — a spawn made without the feature, and the default — keeps the tee
     ///     path; any other answer means the spawn chose the mod's file over
@@ -90,6 +96,7 @@ struct ContextLoadReader {
     func read(
         capturePath: String,
         usagePath: String? = nil,
+        usageIncarnationID: UUID? = nil,
         usageLiveness: SessionModLiveness = .legacy,
         transcriptPath: String?,
         tee: TeeStatus
@@ -105,7 +112,9 @@ struct ContextLoadReader {
                         + "but the mod is not confirmed running in it (\(reason.rawValue)), so "
                         + "nothing has reported its resolved context window"))
         case .confirmed:
-            return readFromUsage(usagePath: usagePath, transcriptPath: transcriptPath)
+            return readFromUsage(
+                usagePath: usagePath, liveIncarnationID: usageIncarnationID,
+                transcriptPath: transcriptPath)
         }
     }
 
@@ -116,7 +125,11 @@ struct ContextLoadReader {
     /// malformed, or a window that is zero, negative or a boolean — reads as
     /// "not observed", never as zero: the window is `unknown` with a `why`
     /// naming the file, and the numerator falls back to the transcript tail.
-    private func readFromUsage(usagePath: String?, transcriptPath: String?) -> ContextLoad {
+    /// So does a file from another incarnation: liveness confirms the mod is
+    /// running in this process, not that this process has written yet.
+    private func readFromUsage(
+        usagePath: String?, liveIncarnationID: UUID?, transcriptPath: String?
+    ) -> ContextLoad {
         func unobserved(_ why: String) -> ContextLoad {
             ContextLoad(used: transcriptUsed(transcriptPath: transcriptPath), window: .unknown(why: why))
         }
@@ -134,6 +147,12 @@ struct ContextLoadReader {
                 + "mid-write or malformed — so it reports no context window")
         case .record(let decoded):
             record = decoded
+        }
+        // Compared as `SessionModLiveness.sameIncarnation` does: parsed, so
+        // the UUID's case does not matter.
+        if let live = liveIncarnationID, record.incarnationID.flatMap(UUID.init(uuidString:)) != live {
+            return unobserved("the session mod's usage file for this session is from an earlier "
+                + "process of it, and this process has not written its own yet")
         }
         guard let size = record.validWindow else {
             return unobserved("the session mod's usage file for this session carries no valid "
