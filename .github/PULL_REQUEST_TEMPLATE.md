@@ -57,11 +57,20 @@ true, Y breaks". -->
 
 <!-- ═══════════════════════ FEATURE ═══════════════════════ -->
 
+## User story
+
+<!-- Required: the `PR user story` check fails a feature PR without prose
+here. One sentence in either form:
+  As a <who>, I want <what>, so that <why>.
+  When <situation>, I want to <motivation>, so I can <outcome>.
+Titles typed fix, docs, chore, test, ci, build or revert are exempt. -->
+
 ## Summary
 
-<!-- The job to be done: who this is for, what they can do now that they
-couldn't, and why it matters. Pragmatics and semantics, minimal syntax and
-jargon — explain it the way you'd explain it to a user, not a compiler. -->
+<!-- Why it matters: what someone can do now that they couldn't, and the
+context a reviewer needs to see the change's value. Pragmatics and semantics,
+minimal syntax and jargon — explain it the way you'd explain it to a user, not
+a compiler. -->
 
 ## Why this shape
 

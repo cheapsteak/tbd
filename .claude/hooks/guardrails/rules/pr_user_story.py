@@ -1,0 +1,144 @@
+"""Guardrail: nudge toward a `## User story` section in the body of a new feature PR.
+
+The `pr-user-story` CI check fails a PR whose title is not exempt (fix, docs,
+chore, test, ci, build, revert) and whose description has no filled user-story
+section. This rule tells an agent so at `gh pr create` time, so the PR is right
+on the first push instead of red until someone edits the description. Design:
+docs/specs/2026-10-20-pr-user-story-check-design.md.
+
+INFORMATIONAL ONLY: it never denies. The CI check is the enforcement; this is
+the early warning.
+
+**One rule, two callers.** The exemption and section logic is not copied here:
+it is loaded by path from the CI script
+(`.github/workflows/pr-user-story/check_user_story.py`), so the nudge and the
+check cannot drift apart. If that file cannot be loaded, the rule has no
+opinion.
+
+**Command parsing is borrowed from `pr_worktree_link`**, which already
+tokenizes `gh pr create` with heredoc and `$(…)` handling and documents every
+defense. Only `gh` is considered — the CI check runs on GitHub PRs only.
+
+What the rule reads, and how it fails:
+
+- **Title** — the last `--title`/`-t`. With no title (`--fill`, an interactive
+  prompt) or one built by a substitution, exemption cannot be judged and the
+  rule stays silent.
+- **Body** — the last `--body`/`-b` text, or the first window of the last
+  `--body-file`/`-F` file. A body composed by heredoc (`--body "$(cat <<'EOF'`,
+  or `-F - <<EOF`) is stripped out of the command by the tokenizer, so any
+  heredoc text in the invocation also counts as body for every create in it —
+  the same deliberate generosity `pr_worktree_link` applies.
+- **Several creates in one call** — each is judged on its own; any one that
+  needs a story and lacks it arms the nudge.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+import stat
+
+from guardrails.lib.rule import Decision, Rule
+from guardrails.rules.pr_worktree_link import (
+    _command_segments,
+    _forge_create_tool,
+    _last_flag_value,
+    _split_heredoc_bodies,
+)
+
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+)
+CHECK_SCRIPT = os.path.join(
+    _REPO_ROOT, ".github", "workflows", "pr-user-story", "check_user_story.py"
+)
+
+_TITLE_FLAGS = ("--title", "-t")
+_BODY_TEXT_FLAGS = ("--body", "-b")
+_BODY_FILE_FLAGS = ("--body-file", "-F")
+
+# The story section sits at the top of a feature body, so one bounded read
+# covers it; the cap keeps a huge or odd file from stalling every Bash call.
+_MAX_BODY_BYTES = 64 * 1024
+
+_check_module = None
+
+
+def _load_check():
+    """The CI script as a module, loaded once; None if it cannot be loaded."""
+    global _check_module
+    if _check_module is None:
+        try:
+            spec = importlib.util.spec_from_file_location("check_user_story", CHECK_SCRIPT)
+            if spec is None or spec.loader is None:
+                return None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _check_module = module
+        except Exception:
+            return None
+    return _check_module
+
+
+def _read_body_file(path: str) -> str:
+    """The head of a regular file at `path`, or "" if it cannot be read.
+
+    Opened non-blocking and checked by descriptor, as in
+    `pr_worktree_link._file_has_link`, so a fifo or device cannot hang the hook.
+    """
+    try:
+        descriptor = os.open(os.path.expanduser(path), os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return ""
+            return os.read(descriptor, _MAX_BODY_BYTES).decode("utf-8", errors="replace")
+        finally:
+            os.close(descriptor)
+    except Exception:
+        return ""
+
+
+def _segment_needs_story(check, words: list, heredoc_text: str) -> bool:
+    title = _last_flag_value(words, _TITLE_FLAGS)
+    if title is None or "$(" in title or "`" in title:
+        return False
+    if check.is_exempt(title):
+        return False
+    bodies = [heredoc_text]
+    text = _last_flag_value(words, _BODY_TEXT_FLAGS)
+    if text is not None:
+        bodies.append(text)
+    path = _last_flag_value(words, _BODY_FILE_FLAGS)
+    if path is not None and path != "-":
+        bodies.append(_read_body_file(path))
+    return not any(check.has_user_story(body) for body in bodies)
+
+
+class PRUserStoryRule(Rule):
+    id = "pr-user-story"
+    description = "Nudge toward a ## User story section in the body of a new feature PR."
+    tools = {"Bash"}
+
+    def check(self, tool_input: dict, ctx: dict) -> "Decision | None":
+        command = tool_input.get("command", "") or ""
+        if "pr" not in command or "create" not in command:
+            return None
+        command_text, heredoc_text = _split_heredoc_bodies(command)
+        segments = [w for w in _command_segments(command_text) if _forge_create_tool(w) == "gh"]
+        if not segments:
+            return None
+        check = _load_check()
+        if check is None:
+            return None
+        if any(_segment_needs_story(check, words, heredoc_text) for words in segments):
+            return Decision.info(
+                "[pr-user-story] "
+                + check.MESSAGE
+                + "\n\n(This is informational — nothing is blocked, but the "
+                "`PR user story` CI check fails the PR until the section is filled.)"
+            )
+        return None
+
+
+RULES = [PRUserStoryRule()]

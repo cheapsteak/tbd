@@ -260,6 +260,10 @@ jobs:
       # temp dir, and every tool it would otherwise reach — `tbd`, `gh`, `lsof`
       # — is a fake behind a seam, with failing shims first on PATH.
       #
+      # The `pr-user-story` check script's tests run here too: the script is
+      # stdlib-only and shared with the `pr-user-story` guardrail, whose own
+      # tests the self-test above runs against the same file.
+      #
       # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
       # drives the spike detector, the report and the run-directory sweep over
       # synthetic series and temp directories: it touches no kernel counter, no
@@ -270,6 +274,7 @@ jobs:
       - name: Test agent guardrails and the script harnesses
         run: |
           python3 .claude/hooks/guardrails/dispatch.py --self-test
+          python3 -m unittest discover -s .github/workflows/pr-user-story/tests
           python3 scripts/test-swift-safe.py
           python3 scripts/test-claude-stub.py
           python3 scripts/test-remote-verify.py

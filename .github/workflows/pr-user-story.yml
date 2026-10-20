@@ -1,0 +1,39 @@
+name: PR User Story
+
+# Fails a feature PR whose description has no filled `## User story` section.
+# Titles with an exempt conventional-commit type (fix, docs, chore, test, ci,
+# build, revert) pass without one. Rule and rationale:
+# docs/specs/2026-10-20-pr-user-story-check-design.md.
+#
+# `pull_request`, not `pull_request_target`: the check needs nothing but the
+# event payload and a checkout of the PR's own script, so it never needs a
+# write token or secrets. `edited` is in the types so that fixing the title or
+# description re-runs it; `synchronize` keeps the result attached to the
+# newest head commit.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-user-story-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  user-story:
+    name: PR user story
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Title and body arrive through `env:` and are read by the script, never
+      # spliced into the shell: both are attacker-controlled text.
+      - name: Check for a user story
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 .github/workflows/pr-user-story/check_user_story.py
