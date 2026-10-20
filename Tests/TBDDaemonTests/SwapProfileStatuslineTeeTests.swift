@@ -72,7 +72,8 @@ extension TBDHomeSerialized {
     private func makeFixture(
         _ scratch: Scratch, desk: Bool, withConversation: Bool,
         recorder: (@Sendable ([String]) -> Void)? = nil,
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        sessionsDir: URL? = nil
     ) async throws -> Fixture {
         let repoPath = scratch.home.appendingPathComponent("repo", isDirectory: true).path
         try FileManager.default.createDirectory(atPath: repoPath, withIntermediateDirectories: true)
@@ -119,6 +120,7 @@ extension TBDHomeSerialized {
             configDirManager: isolatedConfigDirManager(),
             paneProcessInspector: FakeInspector(claudePID: Self.claudePID),
             processSignaller: signaller,
+            sessionsDir: sessionsDir ?? TBDConstants.sessionsDir(),
             actuationLog: makeTestActuationLog(),
             clock: clock)
         let reloaded = try #require(try await db.terminals.get(id: terminal.id))
@@ -292,6 +294,91 @@ extension TBDHomeSerialized {
         // TBD's per-session `--settings` outranks the operator's `statusLine` in
         // every scope they can write, so a leak here takes over a slot they own.
         #expect(statusLineCommand(forSessionKey: fixture.terminal.id.uuidString) == nil)
+    }
+
+    // MARK: - A desk whose swap carries the session mod's `usage`
+
+    /// A sessions directory under the scratch home, or — `writable: false` — a
+    /// regular file where one should be, so writing a spawn record fails and
+    /// `SessionModSpawn.prepare` returns nil.
+    private func sessionsDir(_ scratch: Scratch, writable: Bool = true) throws -> URL {
+        let url = scratch.home.appendingPathComponent("sessions", isDirectory: true)
+        if writable {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        } else {
+            try FileManager.default.createDirectory(
+                at: scratch.home, withIntermediateDirectories: true)
+            try Data("not a directory".utf8).write(to: url)
+        }
+        return url
+    }
+
+    @Test(arguments: [true, false])
+    func anInPlaceSwapOnADeskCarryingUsageKeepsThePersonsStatusLine(
+        withConversation: Bool
+    ) async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let sessions = try sessionsDir(scratch)
+        let commands = FireRecorder<[String]>()
+        let fixture = try await makeFixture(
+            scratch, desk: true, withConversation: withConversation,
+            recorder: { commands.record($0) }, sessionsDir: sessions)
+        try await fixture.db.config.setSessionModUsageEnabled(true)
+
+        let response = try await swap(fixture, mode: .inPlace)
+        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
+
+        let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(after.watchDeskRole != nil)
+        #expect(statusLineCommand(forSessionKey: fixture.terminal.id.uuidString) == nil,
+                "an in-place swap on a desk carrying usage still took over its statusLine")
+        let launch = try #require(
+            commands.values.last { $0.contains("respawn-window") }.map(tmuxEnvironmentFlags))
+        #expect(launch[SessionModSpawn.featuresVariable] == "usage")
+        let sessionID = try #require(after.claudeSessionID)
+        let record = try #require(readSpawnRecord(sessionsDir: sessions, sessionID: sessionID))
+        #expect(record.features == ["usage"])
+    }
+
+    /// Planned `usage`, but the spawn record could not be written, so the
+    /// launch carries no mod: the overlay is settled back to the tee before it.
+    @Test func anInPlaceSwapOnADeskWhoseSpawnRecordFailsKeepsTheTee() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let blocked = try sessionsDir(scratch, writable: false)
+        let commands = FireRecorder<[String]>()
+        let fixture = try await makeFixture(
+            scratch, desk: true, withConversation: true,
+            recorder: { commands.record($0) }, sessionsDir: blocked)
+        try await fixture.db.config.setSessionModUsageEnabled(true)
+
+        let response = try await swap(fixture, mode: .inPlace)
+        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
+
+        let command = try #require(
+            statusLineCommand(forSessionKey: fixture.terminal.id.uuidString),
+            "an in-place swap on a desk spawned without the mod lost its tee")
+        #expect(command.contains(StatuslineTee.scriptPath))
+        let launch = try #require(
+            commands.values.last { $0.contains("respawn-window") }.map(tmuxEnvironmentFlags))
+        #expect(launch[SessionModSpawn.featuresVariable] == nil)
+    }
+
+    @Test func anInPlaceSwapOnAnOrdinaryTerminalWithUsageOnInstallsNoStatusline() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let sessions = try sessionsDir(scratch)
+        let fixture = try await makeFixture(
+            scratch, desk: false, withConversation: true, sessionsDir: sessions)
+        try await fixture.db.config.setSessionModUsageEnabled(true)
+
+        let response = try await swap(fixture, mode: .inPlace)
+        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
+
+        #expect(statusLineCommand(forSessionKey: fixture.terminal.id.uuidString) == nil)
+        let record = try #require(readSpawnRecord(sessionsDir: sessions, sessionID: "sess-swap"))
+        #expect(record.features == ["usage"])
     }
 
     /// The other direction of the same rule. A fork mints a fresh row branded

@@ -64,7 +64,7 @@ extension TBDHomeSerialized {
     /// A parked Claude terminal in a worktree whose path exists on disk (wake
     /// refuses to respawn into a missing directory).
     private func parkedTerminal(
-        db: TBDDatabase, repoPath: String, desk: DeskMarking
+        db: TBDDatabase, repoPath: String, desk: DeskMarking, sessionID: String = "sess-desk"
     ) async throws -> Terminal {
         let repo = try await db.repos.create(
             path: repoPath, displayName: "repo", defaultBranch: "main")
@@ -73,14 +73,14 @@ extension TBDHomeSerialized {
             tmuxServer: "tbd-desk-resume")
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: "sess-desk", kind: .claude,
+            label: "claude", claudeSessionID: sessionID, kind: .claude,
             watchDeskRole: desk == .stampedAtCreate ? .readOnlyCoordinator : nil)
         if desk == .byLease {
             _ = try await db.watchDeskLeases.acquire(
                 worktreeID: worktree.id, terminalID: terminal.id)
         }
         try await db.terminals.setHibernated(
-            id: terminal.id, sessionID: "sess-desk", reason: .auto)
+            id: terminal.id, sessionID: sessionID, reason: .auto)
         return try #require(try await db.terminals.get(id: terminal.id))
     }
 
@@ -205,6 +205,205 @@ extension TBDHomeSerialized {
             worktree: plainWorktree, repo: repo, skipClaude: false, preSessionTerminalID: nil)
         let plain = try await db.terminals.list(worktreeID: plainWorktree.id)
         #expect(plain.allSatisfy { $0.watchDeskRole == nil })
+    }
+
+    // MARK: - A desk whose spawn carries the session mod's `usage`
+
+    /// Thread-safe collector for the dry-run tmux argv.
+    private final class RecordedTmux: @unchecked Sendable {
+        private let lock = NSLock()
+        private var commands: [[String]] = []
+        func append(_ args: [String]) {
+            lock.lock(); defer { lock.unlock() }
+            commands.append(args)
+        }
+        func snapshot() -> [[String]] {
+            lock.lock(); defer { lock.unlock() }
+            return commands
+        }
+        /// The process environment of the last launch whose argv contains
+        /// `verb` (`respawn-window` for a wake, `new-window` for a fresh spawn).
+        func launchEnvironment(_ verb: String) -> [String: String]? {
+            snapshot().last { $0.contains(verb) }.map(tmuxEnvironmentFlags)
+        }
+    }
+
+    /// A sessions directory under the scratch home, or — `writable: false` — a
+    /// regular file where one should be, so writing a spawn record fails and
+    /// `SessionModSpawn.prepare` returns nil.
+    private func sessionsDir(_ scratch: Scratch, writable: Bool = true) throws -> URL {
+        let url = scratch.home.appendingPathComponent("sessions", isDirectory: true)
+        if writable {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        } else {
+            try FileManager.default.createDirectory(
+                at: scratch.home, withIntermediateDirectories: true)
+            try Data("not a directory".utf8).write(to: url)
+        }
+        return url
+    }
+
+    private func wake(
+        _ terminal: Terminal, db: TBDDatabase, sessionsDir: URL, recorded: RecordedTmux
+    ) async -> WakeResult {
+        let coordinator = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) }),
+            configDirManager: isolatedConfigDirManager(), sessionsDir: sessionsDir,
+            sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        return await coordinator.wake(terminalID: terminal.id)
+    }
+
+    @Test func wakingADeskWhoseSpawnCarriesUsageKeepsThePersonsStatusLine() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setSessionModUsageEnabled(true)
+        let terminal = try await parkedTerminal(
+            db: db, repoPath: try makeRepoDir(scratch), desk: .stampedAtCreate)
+        let sessions = try sessionsDir(scratch)
+        let recorded = RecordedTmux()
+
+        #expect(await wake(terminal, db: db, sessionsDir: sessions, recorded: recorded).isOk)
+
+        // The overlay exists (a desk always gets a per-session file) but leaves
+        // the statusLine slot to the person.
+        #expect(FileManager.default.fileExists(
+            atPath: ClaudeHookOverlay.perSessionOverlayPath(sessionKey: terminal.id.uuidString)))
+        #expect(statusLine(inOverlayFor: terminal.id.uuidString) == nil,
+                "a woken desk carrying usage still had its statusLine taken over")
+        let launch = try #require(recorded.launchEnvironment("respawn-window"))
+        #expect(launch[SessionModSpawn.featuresVariable] == "usage")
+        let record = try #require(readSpawnRecord(sessionsDir: sessions, sessionID: "sess-desk"))
+        #expect(record.features == ["usage"])
+    }
+
+    /// The decision keys on what `prepare` returned, not on config: a session
+    /// ID with no safe directory spawns without the mod, so the desk keeps its
+    /// tee even with the flag on.
+    @Test func wakingADeskWhoseSessionIDHasNoDirectoryKeepsTheTee() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setSessionModUsageEnabled(true)
+        let terminal = try await parkedTerminal(
+            db: db, repoPath: try makeRepoDir(scratch), desk: .stampedAtCreate,
+            sessionID: "sess.desk")
+        let sessions = try sessionsDir(scratch)
+        let recorded = RecordedTmux()
+
+        #expect(await wake(terminal, db: db, sessionsDir: sessions, recorded: recorded).isOk)
+
+        let entry = try #require(statusLine(inOverlayFor: terminal.id.uuidString),
+                                 "a desk spawned without the mod lost its tee")
+        #expect(try #require(entry["command"] as? String).contains(StatuslineTee.scriptPath))
+        let launch = try #require(recorded.launchEnvironment("respawn-window"))
+        #expect(launch[SessionModSpawn.featuresVariable] == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: sessions.path).isEmpty)
+    }
+
+    /// The case only the settle can catch: the plan said `usage`, so the
+    /// overlay was resolved without the tee, and then the spawn record could
+    /// not be written. The launch carries no mod, so the overlay it reads must
+    /// carry the tee again.
+    @Test func wakingADeskWhoseSpawnRecordCannotBeWrittenKeepsTheTee() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setSessionModUsageEnabled(true)
+        let terminal = try await parkedTerminal(
+            db: db, repoPath: try makeRepoDir(scratch), desk: .stampedAtCreate)
+        let blocked = try sessionsDir(scratch, writable: false)
+        let recorded = RecordedTmux()
+
+        #expect(await wake(terminal, db: db, sessionsDir: blocked, recorded: recorded).isOk)
+
+        let entry = try #require(statusLine(inOverlayFor: terminal.id.uuidString),
+                                 "a desk whose spawn record failed lost its tee")
+        #expect(try #require(entry["command"] as? String).contains(StatuslineTee.scriptPath))
+        let launch = try #require(recorded.launchEnvironment("respawn-window"))
+        #expect(launch[SessionModSpawn.featuresVariable] == nil)
+    }
+
+    @Test func wakingADeskWithTheFlagOffKeepsTheTeeAndCarriesNoUsage() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let db = try TBDDatabase(inMemory: true)
+        let terminal = try await parkedTerminal(
+            db: db, repoPath: try makeRepoDir(scratch), desk: .stampedAtCreate)
+        let sessions = try sessionsDir(scratch)
+        let recorded = RecordedTmux()
+
+        #expect(await wake(terminal, db: db, sessionsDir: sessions, recorded: recorded).isOk)
+
+        let entry = try #require(statusLine(inOverlayFor: terminal.id.uuidString))
+        #expect(try #require(entry["command"] as? String).contains(StatuslineTee.scriptPath))
+        let launch = try #require(recorded.launchEnvironment("respawn-window"))
+        #expect(launch[SessionModSpawn.featuresVariable] == nil)
+        #expect(readSpawnRecord(sessionsDir: sessions, sessionID: "sess-desk") == nil)
+    }
+
+    @Test func wakingAnOrdinaryTerminalWithTheFlagOnInstallsNoStatusline() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setSessionModUsageEnabled(true)
+        let terminal = try await parkedTerminal(
+            db: db, repoPath: try makeRepoDir(scratch), desk: .none)
+        let sessions = try sessionsDir(scratch)
+        let recorded = RecordedTmux()
+
+        #expect(await wake(terminal, db: db, sessionsDir: sessions, recorded: recorded).isOk)
+
+        #expect(statusLine(inOverlayFor: terminal.id.uuidString) == nil)
+        let record = try #require(readSpawnRecord(sessionsDir: sessions, sessionID: "sess-desk"))
+        #expect(record.features == ["usage"])
+    }
+
+    /// The fresh desk spawn `DeskSessionManager` makes. Its session mod is
+    /// prepared before the overlay resolves, so the overlay follows it.
+    @Test(arguments: [true, false])
+    func aFreshDeskSpawnFollowsItsOwnSessionMod(recordWritable: Bool) async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setSessionModUsageEnabled(true)
+        let repoPath = try makeRepoDir(scratch)
+        let repo = try await db.repos.create(
+            path: repoPath, displayName: "repo", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "wt", branch: "main", path: repoPath,
+            tmuxServer: "tbd-desk-usage")
+        let sessions = try sessionsDir(scratch, writable: recordWritable)
+        let recorded = RecordedTmux()
+        let lifecycle = WorktreeLifecycle(
+            db: db, git: GitManager(),
+            tmux: TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) }),
+            hooks: HookResolver(), configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessions)
+
+        _ = try await lifecycle.spawnPrimaryTerminals(
+            worktree: worktree, repo: repo, skipClaude: false,
+            preSessionTerminalID: nil, watchDeskRole: .readOnlyCoordinator)
+
+        let primary = try #require(
+            try await db.terminals.list(worktreeID: worktree.id).first { $0.kind == .claude })
+        let sessionID = try #require(primary.claudeSessionID)
+        let launch = try #require(recorded.snapshot().last {
+            $0.contains("new-window") && ($0.last?.contains(primary.id.uuidString) ?? false)
+        }.map(tmuxEnvironmentFlags))
+        if recordWritable {
+            #expect(statusLine(inOverlayFor: primary.id.uuidString) == nil,
+                    "a fresh desk carrying usage still had its statusLine taken over")
+            #expect(launch[SessionModSpawn.featuresVariable] == "usage")
+            let record = try #require(readSpawnRecord(sessionsDir: sessions, sessionID: sessionID))
+            #expect(record.features == ["usage"])
+        } else {
+            // `prepare` returned nil, so the spawn has no usage and gets the tee.
+            let entry = try #require(statusLine(inOverlayFor: primary.id.uuidString),
+                                     "a fresh desk spawned without the mod lost its tee")
+            #expect(try #require(entry["command"] as? String).contains(StatuslineTee.scriptPath))
+            #expect(launch[SessionModSpawn.featuresVariable] == nil)
+        }
     }
 
     // MARK: - The invariant that does not depend on the tee coming back

@@ -1971,7 +1971,13 @@ public actor HibernationCoordinator {
             profile: resolvedProfile?.envOverrides
         )
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
-        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
+        // Resolved against the session-mod features the resume is planned to
+        // carry, because the incarnation `SessionModSpawn.prepare` writes into
+        // `spawn.json` is minted only at launch, long after the command below
+        // is composed. Each launch settles the overlay against what `prepare`
+        // returned, so a desk whose spawn ends up without `usage` still gets
+        // its tee.
+        let overlay = ReplacementSpawnOverlay.resolve(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString,
             // Repo fragment is file-backed config, read fresh — reapplied on wake.
@@ -2002,13 +2008,19 @@ public actor HibernationCoordinator {
             // WITHOUT a tee, so a session that is not (re)installing one cannot
             // read a capture from a previous life. An ordinary terminal has nil
             // here and gets a byte-identical overlay.
+            //
+            // A desk whose resume carries the session mod's `usage` installs no
+            // tee: the mod reports its window instead.
             watchDeskRole: terminal.watchDeskRole,
             worktreePath: worktree.path,
             // The same config dir the resume below runs with, so the tee
             // delegates to the user-scope statusline THIS session reads.
             profileConfigDir: profileConfigDir,
-            promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+            promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault,
+            plannedFeatures: SessionModSpawn.plannedFeatures(
+                config: config, claudeSessionID: sessionID)
         )
+        let overlayPath = overlay.path
         // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
         // isolated profile dir (never seeded before) doesn't re-prompt — the
         // dialog blocks before SessionStart, so the stalled wake would be
@@ -2127,7 +2139,8 @@ public actor HibernationCoordinator {
                 attachment: attachment.withEnvironment(sensitiveEnv),
                 cols: cols,
                 rows: rows,
-                spawnTitle: spawnTitle)
+                spawnTitle: spawnTitle,
+                overlay: overlay)
         }
 
         // The window/pane the rest of wake must reference: the original ones
@@ -2165,7 +2178,8 @@ public actor HibernationCoordinator {
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     cols: cols,
-                    rows: rows
+                    rows: rows,
+                    overlay: overlay
                 )
             }
         } catch {
@@ -2246,7 +2260,10 @@ public actor HibernationCoordinator {
         env: [String: String],
         sensitiveEnv: [String: String],
         cols: Int?,
-        rows: Int?
+        rows: Int?,
+        // The overlay `spawnCommand` was composed with, settled against the
+        // session mod each launch below is actually given.
+        overlay: ReplacementSpawnOverlay
     ) async -> WakeTmuxOutcome {
         // Post-reboot a fresh tmux server reissues window ids from @1 again,
         // so a stale parked row's window id can equal a window that ANOTHER
@@ -2294,6 +2311,7 @@ public actor HibernationCoordinator {
                     config: try? await db.config.get(),
                     claudeSessionID: claudeSessionID, incarnationID: incarnationID,
                     sessionsDir: sessionsDir, now: now())
+                overlay.settle(carrying: sessionMod)
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
@@ -2413,6 +2431,7 @@ public actor HibernationCoordinator {
                     config: try? await db.config.get(),
                     claudeSessionID: claudeSessionID, incarnationID: incarnationID,
                     sessionsDir: sessionsDir, now: now())
+                overlay.settle(carrying: sessionMod)
                 do {
                     try await tmux.respawnWindow(
                         server: server,

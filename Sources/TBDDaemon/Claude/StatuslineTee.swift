@@ -48,9 +48,10 @@ enum StatuslineTee {
         TBDConstants.statuslineCapturePath(sessionKey: sessionKey)
     }
 
-    /// The `statusLine.command` string TBD installs in a desk session's
-    /// overlay: the tee script, its capture path, and the operator's own
-    /// statusline command (empty when they have none).
+    /// The `statusLine.command` string TBD installs in the overlay of a desk
+    /// session spawned without the session mod's `usage` feature: the tee
+    /// script, its capture path, and the operator's own statusline command
+    /// (empty when they have none).
     ///
     /// All three are shell-escaped. The delegate arrives as a single argument
     /// and is re-run by the script through `sh -c "$2"`, which is exactly how

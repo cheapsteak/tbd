@@ -2739,22 +2739,32 @@ extension RPCRouter {
         // and trust seed have both succeeded — not earlier, because both calls
         // below have real side effects: the config-dir lookup creates the
         // profile's OAuth dir, and the overlay resolution writes an overlay
-        // file and (for a roleless session) deletes the row's statusline
-        // capture. Neither should fire for a swap `beginActuation` goes on to
+        // file and (for a session installing no tee) deletes the row's
+        // statusline capture. Neither should fire for a swap `beginActuation` goes on to
         // reject. Both arms need them, and the routing decision the holder arm
         // makes needs the overlay before any command is composed (whether the
         // overlay sets `ANTHROPIC_BASE_URL` decides whether a route can be
         // honoured at all).
+        //
+        // Only an in-place swap has a desk role, and its launch is a
+        // replacement spawn whose incarnation is minted just before it starts,
+        // so the overlay is resolved against the session-mod features that
+        // launch is planned to carry and settled against the ones
+        // `SessionModSpawn.prepare` gives it (`ReplacementSpawnOverlay`): a
+        // desk carrying `usage` installs no statusline tee.
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
-        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
+        let overlay = ReplacementSpawnOverlay.resolve(
             fallbackModels: resolved?.fallbackModels,
             sessionKey: plannedTerminalID.uuidString,
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
             watchDeskRole: swapDeskRole,
             worktreePath: worktree.path,
             profileConfigDir: profileConfigDir,
-            promptAnswerHooks: swapConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+            promptAnswerHooks: swapConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault,
+            plannedFeatures: SessionModSpawn.plannedFeatures(
+                config: swapConfig, claudeSessionID: storedSessionID)
         )
+        let overlayPath = overlay.path
 
         // The session name is the swapped tab's: the new tab on a fork, the
         // same row on an in-place swap. Reserved here, confirmed only once
@@ -2839,7 +2849,7 @@ extension RPCRouter {
                     storedSessionID: storedSessionID,
                     env: env,
                     envOverrides: mergedEnvOverrides,
-                    overlayPath: overlayPath,
+                    overlay: overlay,
                     resolved: resolved,
                     swapConfig: swapConfig,
                     cols: resolvedCols,
@@ -2877,7 +2887,8 @@ extension RPCRouter {
                         newProfileID: resolved?.profileID,
                         scheduleRecapture: scheduleRecapture,
                         cols: resolvedCols,
-                        rows: resolvedRows
+                        rows: resolvedRows,
+                        overlay: overlay
                     )
                 }
                 response = outcome.response
@@ -3143,7 +3154,7 @@ extension RPCRouter {
         storedSessionID: String,
         env: [String: String],
         envOverrides: [String: String],
-        overlayPath: String?,
+        overlay: ReplacementSpawnOverlay,
         resolved: ResolvedModelProfile?,
         swapConfig: Config?,
         cols: Int,
@@ -3183,7 +3194,7 @@ extension RPCRouter {
                 storedSessionID: storedSessionID,
                 env: env,
                 envOverrides: envOverrides,
-                overlayPath: overlayPath,
+                overlay: overlay,
                 resolved: resolved,
                 swapConfig: swapConfig,
                 cols: cols,
@@ -3208,7 +3219,7 @@ extension RPCRouter {
         storedSessionID: String,
         env: [String: String],
         envOverrides: [String: String],
-        overlayPath: String?,
+        overlay: ReplacementSpawnOverlay,
         resolved: ResolvedModelProfile?,
         swapConfig: Config?,
         cols: Int,
@@ -3319,7 +3330,7 @@ extension RPCRouter {
             profileKind: resolved?.kind,
             profileBaseURL: resolved?.baseURL,
             envOverrides: envOverrides,
-            overlayPath: overlayPath,
+            overlayPath: overlay.path,
             holderEnvironment: holderRegistry?.environment,
             supervisor: modelProxySupervisor)
         let spawn = composeSpawn(attachment.builderBaseURL(profile: resolved?.baseURL))
@@ -3334,7 +3345,8 @@ extension RPCRouter {
             attachment: attachment.withEnvironment(sensitiveEnv),
             cols: cols,
             rows: rows,
-            spawnTitle: spawnTitle)
+            spawnTitle: spawnTitle,
+            overlay: overlay)
 
         guard let updated = try await db.terminals.get(id: target.id) else {
             return (RPCResponse(error: "Terminal vanished after swap"), nil)
@@ -3507,7 +3519,10 @@ extension RPCRouter {
         newProfileID: UUID?,
         scheduleRecapture: Bool,
         cols: Int,
-        rows: Int
+        rows: Int,
+        // The overlay `spawnCommand` was composed with, settled below against
+        // the session mod this launch is actually given.
+        overlay: ReplacementSpawnOverlay
     ) async throws -> (response: RPCResponse, respawnError: String?) {
         let server = worktree.tmuxServer
         let paneID = oldTerminal.tmuxPaneID
@@ -3581,6 +3596,7 @@ extension RPCRouter {
             config: try? await db.config.get(),
             claudeSessionID: storedSessionID, incarnationID: incarnationID,
             sessionsDir: sessionsDir, now: now())
+        overlay.settle(carrying: sessionMod)
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.

@@ -64,6 +64,20 @@ enum SessionModSpawn {
             now: now)
     }
 
+    /// The features `prepare(config:…)` would give a spawn of `claudeSessionID`
+    /// — the enabled ones, or none when `config` is nil or the session ID has
+    /// no safe directory — without writing anything or minting an incarnation.
+    ///
+    /// For a replacement spawn that must resolve its overlay before its row
+    /// mints the incarnation `prepare` needs. It is a plan, not the answer:
+    /// writing the spawn record can still fail, so such a spawn settles its
+    /// overlay against what `prepare` returns (`ReplacementSpawnOverlay`).
+    static func plannedFeatures(config: Config?, claudeSessionID: String?) -> [SessionModFeature] {
+        guard let config, let claudeSessionID,
+              SessionModFiles.isSafeSessionID(claudeSessionID) else { return [] }
+        return SessionModFeature.enabled(in: config)
+    }
+
     /// Writes `<sessionsDir>/<claudeSessionID>/spawn.json` for a process about
     /// to launch under `incarnationID`, and returns the variables to export.
     ///

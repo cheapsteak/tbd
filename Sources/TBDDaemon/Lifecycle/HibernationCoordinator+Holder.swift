@@ -1147,7 +1147,8 @@ extension HibernationCoordinator {
         attachment: ModelProxyRouteAttachment.Outcome,
         cols: Int?,
         rows: Int?,
-        spawnTitle: ClaudeSpawnTitle? = nil
+        spawnTitle: ClaudeSpawnTitle? = nil,
+        overlay: ReplacementSpawnOverlay? = nil
     ) async -> WakeResult {
         guard !hibernatesInFlight.contains(terminal.id),
               !wakesInFlight.contains(terminal.id) else {
@@ -1185,7 +1186,8 @@ extension HibernationCoordinator {
             attachment: attachment,
             cols: cols,
             rows: rows,
-            spawnTitle: spawnTitle)
+            spawnTitle: spawnTitle,
+            overlay: overlay)
     }
 
     /// The mutate half of a holder wake: spawn a fresh holder running the
@@ -1231,7 +1233,11 @@ extension HibernationCoordinator {
         attachment: ModelProxyRouteAttachment.Outcome,
         cols: Int?,
         rows: Int?,
-        spawnTitle: ClaudeSpawnTitle? = nil
+        spawnTitle: ClaudeSpawnTitle? = nil,
+        // The overlay `spawnCommand` was composed with, when it was resolved
+        // before this spawn's session-mod features were known: settled against
+        // the context `SessionModSpawn.prepare` returns, before the launch.
+        overlay: ReplacementSpawnOverlay? = nil
     ) async -> WakeResult {
         // Every refusal below goes through this rather than returning
         // `.respawnFailed` directly, because each one is a spawn that did not
@@ -1311,6 +1317,7 @@ extension HibernationCoordinator {
             config: try? await db.config.get(),
             claudeSessionID: sessionID, incarnationID: incarnationID,
             sessionsDir: sessionsDir, now: now())
+        overlay?.settle(carrying: sessionMod)
 
         let handle: HolderHandle
         do {

@@ -125,6 +125,10 @@ private struct PreparedContinueInClaude: Sendable {
     let profileID: UUID?
     let freshClaudeSessionID: String
     let claudeCommand: String
+    /// The `--settings` overlay `claudeCommand` names, resolved before the
+    /// destination's incarnation exists and settled at launch against the
+    /// session mod `SessionModSpawn.prepare` gives it.
+    let claudeOverlay: ReplacementSpawnOverlay
     /// The `--name` in `claudeCommand`, reserved in the title store by
     /// preparation; the handler confirms it once the replacement is finalized
     /// and releases it on every other outcome.
@@ -359,6 +363,20 @@ extension RPCRouter {
             db: db, store: lifecycle.sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
             terminalID: source.id)
+        // The destination's incarnation is minted only when the replacement
+        // begins, so its session mod is prepared at launch; the overlay is
+        // resolved against the features it is planned to carry and settled
+        // there. A desk whose spawn carries `usage` installs no statusline tee.
+        let claudeOverlay = ReplacementSpawnOverlay.resolve(
+            fallbackModels: resolvedProfile?.fallbackModels,
+            sessionKey: source.id.uuidString,
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            watchDeskRole: source.watchDeskRole,
+            worktreePath: worktree.path,
+            profileConfigDir: profileConfigDir,
+            promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault,
+            plannedFeatures: SessionModSpawn.plannedFeatures(
+                config: config, claudeSessionID: freshClaudeSessionID))
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
@@ -374,14 +392,7 @@ extension RPCRouter {
             profileConfigDir: profileConfigDir,
             cmd: nil,
             shellFallback: "",
-            settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                fallbackModels: resolvedProfile?.fallbackModels,
-                sessionKey: source.id.uuidString,
-                repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                watchDeskRole: source.watchDeskRole,
-                worktreePath: worktree.path,
-                profileConfigDir: profileConfigDir,
-                promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault),
+            settingsOverlayPath: claudeOverlay.path,
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: config?.envSettingOverrides ?? [:],
             sessionName: claudeSpawnTitle.name)
@@ -415,6 +426,7 @@ extension RPCRouter {
             profileID: resolvedProfile?.profileID,
             freshClaudeSessionID: freshClaudeSessionID,
             claudeCommand: claudeSpawn.command,
+            claudeOverlay: claudeOverlay,
             claudeSpawnTitle: claudeSpawnTitle,
             packetFilePath: packetFilePath,
             claudeEnv: claudeEnv,
@@ -496,6 +508,7 @@ extension RPCRouter {
             claudeSessionID: prepared.freshClaudeSessionID,
             incarnationID: destinationToken,
             sessionsDir: sessionsDir, now: now())
+        prepared.claudeOverlay.settle(carrying: sessionMod)
         var destinationFailure: Error?
         do {
             // No graceful interrupt: this single tmux operation kills Codex
