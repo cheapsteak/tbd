@@ -23,6 +23,7 @@ const BAND: RenderPropsOf['AbovePrompt'] = {
   view: {},
 }
 const NOTICE = { type: 'Text', text: 'Restored your unsent draft' }
+const PASTED = 'see [Pasted text #1 +50 lines]'
 
 type World = {
   /** composer-draft.json's text; undefined for no file. */
@@ -58,14 +59,14 @@ type WorldOptions = {
 }
 
 /** composer-draft.json as the feature writes it for a draft. */
-function draftFile(text: string): string {
+function draftFile(text: string, restorable = true): string {
   return JSON.stringify({
     schemaVersion: 1,
     sessionId: SESSION_ID,
     hasDraft: true,
     text,
     cursor: text.length,
-    restorable: true,
+    restorable,
     savedAtMs: 500,
   })
 }
@@ -486,6 +487,34 @@ test('noticeShowsThenHidesAfterThreeSeconds', async ($, on) => {
     expect(await band.find(NOTICE)).toBeUndefined()
     expect(await band.find({ type: 'Text', text: 'engine band' })).toBeDefined()
   }
+})
+
+test('aRestorableDraftsNoticeSaysItWasRestored', async ($, on) => {
+  const w = world(on, { draft: SAVED })
+  await $.session.start(START)
+  await w.clock.settle()
+
+  const band = await $.ui.mount({ plugin: 'tbd', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+
+  // `find` matches text by inclusion, so the whole text is compared.
+  expect((await band.find(NOTICE))?.text).toBe('Restored your unsent draft')
+})
+
+// A large paste reaches the box as a placeholder the mod never sees expanded.
+// After a park the person overrode, the draft comes back as that placeholder,
+// and the notice says the pasted text did not.
+test('aDraftMarkedNotRestorableSaysItsPastedTextDidNotComeBack', async ($, on) => {
+  const w = world(on, { file: draftFile(PASTED, false) })
+  await $.session.start(START)
+  await w.clock.settle()
+
+  expect(w.fills).toEqual([{ text: PASTED, mode: 'replace', isFilled: true }])
+  const band = await $.ui.mount({ plugin: 'tbd', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await band.find(NOTICE))?.text).toBe('Restored your unsent draft, but not its pasted text')
+
+  await w.clock.advance(NOTICE_MS)
+  expect(await band.find(NOTICE)).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: 'engine band' })).toBeDefined()
 })
 
 test('theNoticeYieldsToASurvey', async ($, on) => {

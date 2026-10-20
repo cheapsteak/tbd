@@ -5,8 +5,12 @@ declare module 'claude-code' {
     tbd: {
       /** The incarnation whose composer-draft restore is settled in this process. */
       composerDraftRestoredIncarnation: string
-      /** Whether the band above the prompt shows the restore notice. */
-      composerDraftNoticeVisible: boolean
+      /**
+       * The restore notice the band above the prompt shows: `restored` for a
+       * draft whose text held all of it, `restoredWithoutPaste` for a draft
+       * marked not restorable, `hidden` for none.
+       */
+      composerDraftNotice: 'hidden' | 'restored' | 'restoredWithoutPaste'
       /**
        * Whether the box's text holds all of the draft: false once a change the
        * mod cannot read (a collapsed paste, an image) left the box non-empty,
