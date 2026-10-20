@@ -406,6 +406,11 @@ struct TerminalClose: AsyncParsableCommand {
             check applies only while the pane's window is alive, so a session
             that died mid-turn stays closeable without --force.
 
+            A terminal whose composer in the TBD app holds an unsent draft is
+            refused the same way (exit 2), because the draft lives only in the
+            app and closing discards it. `tbd terminal list --json` shows it as
+            `hasComposerDraft`.
+
             A terminal cannot close itself: killing the window SIGHUPs the
             calling shell, so this command could never report its own result.
             Spawn a successor and have it close you.
@@ -418,7 +423,7 @@ struct TerminalClose: AsyncParsableCommand {
     @Option(name: .long, help: "Terminal ID")
     var terminal: String
 
-    @Flag(name: .long, help: "Close even if the terminal is mid-turn or waiting on a permission prompt")
+    @Flag(name: .long, help: "Close even if the terminal is mid-turn, waiting on a permission prompt, or holding an unsent draft in TBD's composer")
     var force = false
 
     @Flag(name: .long, help: "Output JSON")
@@ -452,7 +457,8 @@ struct TerminalClose: AsyncParsableCommand {
 
         guard response.success else {
             // Branch on the machine-readable code, never the prose.
-            if response.errorCode == RPCErrorCode.terminalBusy.rawValue {
+            if response.errorCode == RPCErrorCode.terminalBusy.rawValue
+                || response.errorCode == RPCErrorCode.terminalHasComposerDraft.rawValue {
                 FileHandle.standardError.write(Data(((response.error ?? "Terminal is busy.") + "\n").utf8))
                 throw ExitCode(2)
             }

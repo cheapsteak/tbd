@@ -938,6 +938,12 @@ final class AppState {
     /// `ComposerDraft` is itself `@Observable` — an observable registry would
     /// republish every composer in the app whenever any one of them appeared.
     @ObservationIgnored var composerDrafts: [ComposerKey: ComposerDraft] = [:]
+    /// The last `pushComposerDrafts` report, which the next one waits on.
+    @ObservationIgnored var composerDraftsPush: Task<Void, Never>?
+    /// How `pushComposerDrafts` reports to the daemon — injectable for the
+    /// same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var composerDraftsSetter: @MainActor ([UUID]) async throws -> Void =
+        { [daemonClient] ids in try await daemonClient.setComposerDrafts(terminalIDs: ids) }
     /// Weak composer text views keyed by target, so Cmd+/ can move focus into
     /// one. `@ObservationIgnored` for the same reason `terminalFocusTargets` is:
     /// focus is not state anything renders from.
@@ -2984,7 +2990,12 @@ final class AppState {
         Task { [weak self] in await self?.hydrateProgramStatus() }
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
-            await self.daemonClient.subscribe { [weak self] delta in
+            await self.daemonClient.subscribe(onSubscribed: { [weak self] in
+                // The daemon forgets which terminals hold a composer draft
+                // when the last subscription closes, so each new one
+                // re-reports them once the daemon has registered it.
+                Task { @MainActor [weak self] in self?.pushComposerDrafts() }
+            }) { [weak self] delta in
                 Task { @MainActor [weak self] in
                     self?.handleDelta(delta)
                 }

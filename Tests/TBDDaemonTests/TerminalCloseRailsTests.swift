@@ -162,6 +162,116 @@ struct TerminalCloseRailsTests {
                 "an unanswered probe let the close delete a possibly-live session")
     }
 
+    // MARK: - Composer-draft rail
+
+    private func reportDrafts(_ router: RPCRouter, _ ids: [UUID]) async throws {
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.appSetComposerDrafts,
+            params: AppSetComposerDraftsParams(terminalIDs: ids)))
+        #expect(resp.success)
+    }
+
+    private func list(_ router: RPCRouter, _ worktreeID: UUID) async throws -> [Terminal] {
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalList,
+            params: TerminalListParams(worktreeID: worktreeID)))
+        return try resp.decodeResult([Terminal].self)
+    }
+
+    @Test("rails on: a terminal with an unsent app-composer draft is refused")
+    func railsOnRefusesTerminalWithComposerDraft() async throws {
+        let fx = try await makeFixture()
+        let router = makeRouter(db: fx.db)
+        try await reportDrafts(router, [fx.terminal.id])
+
+        let resp = try await close(router, fx.terminal.id, rails: true)
+
+        #expect(!resp.success)
+        #expect(resp.errorCode == RPCErrorCode.terminalHasComposerDraft.rawValue,
+                "CLI maps the code to exit 2 without parsing prose")
+        #expect(resp.error?.contains("--force") == true, "the message must name the escape hatch")
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) != nil)
+    }
+
+    /// The draft lives in the app, not the pane, so a dead window does not
+    /// make it any less the person's text.
+    @Test("rails on: a draft still refuses when the window is dead")
+    func railsOnRefusesDraftEvenWithDeadWindow() async throws {
+        let fx = try await makeFixture()
+        let router = makeRouter(db: fx.db, windowIsDead: true)
+        try await reportDrafts(router, [fx.terminal.id])
+
+        let resp = try await close(router, fx.terminal.id, rails: true)
+
+        #expect(resp.errorCode == RPCErrorCode.terminalHasComposerDraft.rawValue)
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) != nil)
+    }
+
+    @Test("rails omitted (--force, and the app's own tab close): a draft does not block")
+    func railsOffClosesTerminalWithComposerDraft() async throws {
+        let fx = try await makeFixture()
+        let router = makeRouter(db: fx.db)
+        try await reportDrafts(router, [fx.terminal.id])
+
+        let resp = try await close(router, fx.terminal.id, rails: nil)
+
+        #expect(resp.success)
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) == nil)
+    }
+
+    @Test("rails on: a draft another terminal holds does not block this one")
+    func railsOnClosesWhenOnlyAnotherTerminalHasADraft() async throws {
+        let fx = try await makeFixture()
+        let router = makeRouter(db: fx.db)
+        try await reportDrafts(router, [UUID()])
+
+        let resp = try await close(router, fx.terminal.id, rails: true)
+
+        #expect(resp.success)
+    }
+
+    @Test("each report replaces the last: a cleared draft no longer blocks")
+    func aLaterReportReplacesTheSet() async throws {
+        let fx = try await makeFixture()
+        let router = makeRouter(db: fx.db)
+        try await reportDrafts(router, [fx.terminal.id])
+        try await reportDrafts(router, [])
+
+        let resp = try await close(router, fx.terminal.id, rails: true)
+
+        #expect(resp.success)
+    }
+
+    @Test("terminal.list shows which terminals hold a draft")
+    func listShowsComposerDraft() async throws {
+        let fx = try await makeFixture()
+        let router = makeRouter(db: fx.db)
+
+        #expect(try await list(router, fx.worktree.id).first?.hasComposerDraft == false)
+        try await reportDrafts(router, [fx.terminal.id])
+        #expect(try await list(router, fx.worktree.id).first?.hasComposerDraft == true)
+    }
+
+    /// The drafts lived in the app's memory, so once the app's last
+    /// subscription is gone they are gone too, and must not keep refusing.
+    @Test("the last subscription closing forgets every draft")
+    func lastSubscriptionClosingForgetsDrafts() async throws {
+        let fx = try await makeFixture()
+        let router = makeRouter(db: fx.db)
+        let first = router.registerSubscription(writer: { _ in true })
+        let second = router.registerSubscription(writer: { _ in true })
+        try await reportDrafts(router, [fx.terminal.id])
+
+        router.removeSubscription(id: first)
+        #expect(router.composerDrafts.hasDraft(terminalID: fx.terminal.id),
+                "a subscription is still open, so the app is still there")
+
+        router.removeSubscription(id: second)
+        #expect(!router.composerDrafts.hasDraft(terminalID: fx.terminal.id))
+        let resp = try await close(router, fx.terminal.id, rails: true)
+        #expect(resp.success)
+    }
+
     // MARK: - Idempotency and result payload
 
     @Test("closing an already-closed terminal is a no-op success")

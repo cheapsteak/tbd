@@ -118,6 +118,7 @@ final class ComposerHarness {
         self.defaults = defaults
         appState = AppState(userDefaults: defaults)
         appState.composerCompletionsFetcher = { _ in Self.inventory() }
+        appState.composerDraftsSetter = { _ in }
 
         let worktree = Self.worktree()
         self.worktree = worktree

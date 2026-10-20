@@ -760,6 +760,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// Stamped at spawn and never changed.
     public var serverName: String?
 
+    /// Whether the app's own composer holds an unsent draft for this terminal,
+    /// as the app last reported it. Response-derived and never persisted: the
+    /// draft lives only in the app's memory, and `terminal.list` fills this in
+    /// so a caller can see what a `terminal close` would discard. nil wherever
+    /// a response did not fill it in.
+    public var hasComposerDraft: Bool?
+
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
     /// Nil whenever either provenance column is missing, deliberately: a bare
@@ -879,7 +886,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
         case transport, holderPID, childPID, holderChildStartedAt
-        case transcriptStreamPath, serverName
+        case transcriptStreamPath, serverName, hasComposerDraft
     }
 
     public init(from decoder: Decoder) throws {
@@ -936,6 +943,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
         transcriptStreamPath = try c.decodeIfPresent(String.self, forKey: .transcriptStreamPath)
         serverName = try c.decodeIfPresent(String.self, forKey: .serverName)
+        hasComposerDraft = try c.decodeIfPresent(Bool.self, forKey: .hasComposerDraft)
     }
 }
 
