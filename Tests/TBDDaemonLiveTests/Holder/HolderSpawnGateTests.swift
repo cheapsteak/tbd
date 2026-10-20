@@ -265,6 +265,7 @@ struct HolderSpawnGateTests {
     @Test func terminalCreateRoutesAnExtraClaudeTerminalLikeAPrimary() async throws {
         let fixture = try await GateFixture.make(flagEnabled: true)
         defer { fixture.tearDown() }
+        try await fixture.db.config.setModelProxyEnabled(true)
         try await fixture.db.config.setTranscriptStreamingEnabled(true)
         let supervisor = RoutingRecorder()
         fixture.router.modelProxySupervisor = supervisor

@@ -93,8 +93,9 @@ struct TerminalCreateTransportGateTests {
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorder.record($0) })
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setPtyHolderEnabled(holderFlag)
-        // Streaming turns the proxy on in the same transaction; the routed
-        // branch asserts the stream path, which is what streaming reads.
+        // The routed branch asserts the proxy's stream path, which the proxy
+        // tees only with streaming on too; the two flags are set separately.
+        try await db.config.setModelProxyEnabled(proxyFlag)
         try await db.config.setTranscriptStreamingEnabled(proxyFlag)
 
         let configDirManager = makeIsolatedConfigDirManager(tag: "terminal-create-gate")
