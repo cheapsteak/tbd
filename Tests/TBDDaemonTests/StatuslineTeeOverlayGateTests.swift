@@ -130,6 +130,66 @@ extension TBDHomeSerialized {
         #expect(command.contains(operatorCommand))
     }
 
+    /// A worktree whose project settings carry a statusline, beside a profile
+    /// config dir whose user settings carry a different one.
+    private func writeStatusLineScopes(
+        under root: URL, projectCommand: String, userCommand: String
+    ) throws -> (worktree: URL, profileConfigDir: URL) {
+        let worktree = root.appendingPathComponent("worktree")
+        let projectClaude = worktree.appendingPathComponent(".claude")
+        let profileConfigDir = root.appendingPathComponent("profile")
+        try FileManager.default.createDirectory(at: projectClaude, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: profileConfigDir, withIntermediateDirectories: true)
+        try Data(#"{"statusLine":{"type":"command","command":"\#(projectCommand)"}}"#.utf8)
+            .write(to: projectClaude.appendingPathComponent("settings.json"))
+        try Data(#"{"statusLine":{"type":"command","command":"\#(userCommand)"}}"#.utf8)
+            .write(to: profileConfigDir.appendingPathComponent("settings.json"))
+        return (worktree, profileConfigDir)
+    }
+
+    @Test func aDeskInAnOrdinaryWorktreeDelegatesToItsProjectStatusLine() throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let scopes = try writeStatusLineScopes(
+            under: scratch.home, projectCommand: "./project-statusline.sh", userCommand: "~/bin/user-statusline.sh")
+
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            watchDeskRole: .readOnlyCoordinator,
+            worktreePath: scopes.worktree.path,
+            profileConfigDir: scopes.profileConfigDir.path
+        )
+
+        let command = try #require(try statusLine(inOverlayAt: path)?["command"] as? String)
+        #expect(command.contains("./project-statusline.sh"))
+    }
+
+    /// A fork-head session launches with `--setting-sources user`, so its
+    /// worktree's statusline is the fork author's command and one the session
+    /// would never show. The tee runs its delegate from TBD's own overlay,
+    /// which the launch flag does not filter, so the overlay has to skip the
+    /// project scopes itself.
+    @Test func aDeskInAForeignHeadWorktreeNeverDelegatesToItsProjectStatusLine() throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let scopes = try writeStatusLineScopes(
+            under: scratch.home, projectCommand: "./project-statusline.sh", userCommand: "~/bin/user-statusline.sh")
+
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: nil,
+            sessionKey: UUID().uuidString,
+            watchDeskRole: .readOnlyCoordinator,
+            worktreePath: scopes.worktree.path,
+            profileConfigDir: scopes.profileConfigDir.path,
+            foreignHead: true
+        )
+
+        let command = try #require(try statusLine(inOverlayAt: path)?["command"] as? String)
+        #expect(!command.contains("./project-statusline.sh"))
+        #expect(command.contains("~/bin/user-statusline.sh"))
+    }
+
     @Test func aFragmentStatusLineOnANonDeskSpawnIsLeftExactlyAsGiven() throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }

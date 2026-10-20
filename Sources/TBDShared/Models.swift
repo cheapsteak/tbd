@@ -282,17 +282,23 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// local branch) get tracked.
     public var prNumber: Int?
 
-    /// True when this worktree's *contents* were checked out from a ref TBD
-    /// cannot vouch for — today, a `refs/pull/<n>/head` fetch of a PR whose
-    /// commits may come from a third-party fork. TBD created the directory, but
-    /// a stranger authored what is in it (`.claude/settings.json`, hooks, MCP
-    /// config, `CLAUDE.md`), so the folder-trust question does *not* have a
-    /// known answer and `ClaudeTrustSeeder` must not pre-answer it.
+    /// True when this worktree's *contents* were checked out from a fork's
+    /// pull-request head: a `refs/pull/<n>/head` fetch of a cross-repository
+    /// PR. TBD created the directory, but the fork's author wrote what is in it
+    /// (`.claude/settings.json`, hooks, MCP config, `CLAUDE.md`), so Claude
+    /// launches there with `--setting-sources user` and none of that project
+    /// configuration loads
+    /// (`ClaudeSpawnCommandBuilder.foreignHeadSettingSourcesArguments`). Folder
+    /// trust is still seeded: Claude answers it per repository, so the trust
+    /// dialog never gated these contents once the repo was trusted.
     ///
-    /// Set only by the PR-head checkout branch of `completeCreateWorktree`.
-    /// `false` for everything else — including a *decorated* same-repo PR row,
-    /// which stamps `prNumber` for status tracking but checks out an ordinary
-    /// local branch, so it stays seedable.
+    /// Set only by the PR-head checkout branch of `completeCreateWorktree`,
+    /// and only for a cross-repository PR, or a PR head the caller could not
+    /// say was same-repo. `false` for everything else — including a same-repo
+    /// PR head fetched the same way, whose branch lives on the operator's own
+    /// remote, and a *decorated* same-repo PR row, which stamps `prNumber` for
+    /// status tracking but checks out an ordinary local branch. Never cleared
+    /// once set.
     public var foreignHead: Bool = false
 
     /// When this worktree was pinned to the sidebar dock; `nil` = unpinned.
@@ -1492,10 +1498,12 @@ public struct Config: Codable, Sendable, Equatable {
     /// hook fires while it is up, so a stalled-on-trust session is invisible to
     /// TBD and prevention is the only available fix.
     ///
-    /// Worktrees flagged `Worktree.foreignHead` — contents fetched from a PR
-    /// head that a third-party fork may have authored — are never seeded, on or
-    /// off: TBD vouches for the directory it created, not for what was fetched
-    /// into it.
+    /// Worktrees flagged `Worktree.foreignHead` — contents fetched from a
+    /// fork's pull-request head — are seeded like any other. What keeps the
+    /// fork's project configuration out is the launch, not the dialog: Claude
+    /// starts there with `--setting-sources user`, and because Claude answers
+    /// trust per repository, the dialog would not have asked once the repo was
+    /// trusted.
     ///
     /// Turning this OFF only stops future seeding of non-scratch worktrees —
     /// including worktrees that already exist but were never seeded — and never

@@ -548,10 +548,10 @@ actor DaemonClient {
     /// When `useExistingBranch` is true, `branch` MUST be set to an existing
     /// ref name (local like `foo` or remote like `origin/foo`) — the daemon
     /// checks it out instead of creating a new `tbd/*` branch.
-    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil) async throws -> Worktree {
+    func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, useExistingBranch: Bool = false, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, prIsCrossRepository: Bool? = nil) async throws -> Worktree {
         return try await callAsync(
             method: RPCMethod.worktreeCreate,
-            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch, profileID: profileID, model: model, primaryAgentPreference: primaryAgentPreference, prNumber: prNumber, checkoutPRHead: checkoutPRHead),
+            params: WorktreeCreateParams(repoID: repoID, folder: folder, branch: branch, displayName: displayName, cols: cols, rows: rows, parentWorktreeID: parentWorktreeID, useExistingBranch: useExistingBranch, profileID: profileID, model: model, primaryAgentPreference: primaryAgentPreference, prNumber: prNumber, checkoutPRHead: checkoutPRHead, prIsCrossRepository: prIsCrossRepository),
             resultType: Worktree.self
         )
     }

@@ -35,6 +35,12 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "completions.
 /// - Without the strict empty MCP configuration, the profile's real MCP servers
 ///   start: measured leaking orphaned processes and writing logs into the
 ///   person's Library folder.
+/// - Without `--setting-sources user` on a `foreignHead` worktree, the fork's
+///   project settings load. Measured on 2.1.302: a project `apiKeyHelper` ran
+///   on every probe, with no trust record for the folder and whether or not
+///   the environment already carried a credential, and the answer listed
+///   project commands and skills that the worktree's session, launched with
+///   the same flag, never loads.
 ///
 /// The environment is the session's own spawn environment, unmodified. The probe
 /// adds no credentials of its own: adding an API key to an OAuth profile's
@@ -77,8 +83,9 @@ enum ClaudeCompletionProbe {
     static let requestID = "r1"
 
     /// The argv, minus argv[0]. Pure so the measured command line is a test
-    /// expectation rather than a comment.
-    static func arguments(mcpConfigPath: String) -> [String] {
+    /// expectation rather than a comment. `foreignHead` is the worktree row's
+    /// flag, the same value its session's spawn command was built with.
+    static func arguments(mcpConfigPath: String, foreignHead: Bool = false) -> [String] {
         [
             "-p",
             "--output-format", "stream-json",
@@ -87,7 +94,7 @@ enum ClaudeCompletionProbe {
             "--strict-mcp-config",
             "--mcp-config", mcpConfigPath,
             "--settings", settingsOverlay,
-        ]
+        ] + (foreignHead ? ClaudeSpawnCommandBuilder.foreignHeadSettingSourcesArguments : [])
     }
 
     struct Outcome: Sendable, Equatable {
@@ -181,6 +188,7 @@ enum ClaudeCompletionProbe {
         executablePath: String,
         workingDirectory: String,
         environment: [String: String],
+        foreignHead: Bool = false,
         timeout: Duration = .seconds(5),
         clock: any Clock<Duration> = ContinuousClock()
     ) async throws -> Outcome {
@@ -193,7 +201,7 @@ enum ClaudeCompletionProbe {
         do {
             result = try await runBoundedProcess(
                 executable: executablePath,
-                arguments: arguments(mcpConfigPath: mcpPath.path),
+                arguments: arguments(mcpConfigPath: mcpPath.path, foreignHead: foreignHead),
                 currentDirectory: workingDirectory,
                 environment: environment,
                 stdin: Data(initializeRequestLine.utf8),

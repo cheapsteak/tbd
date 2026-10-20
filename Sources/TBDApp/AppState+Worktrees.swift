@@ -21,6 +21,7 @@ struct WorktreeCreateRequest: Sendable {
     let primaryAgentPreference: PrimaryAgentPreference?
     let prNumber: Int?
     let checkoutPRHead: Bool?
+    let prIsCrossRepository: Bool?
 }
 
 extension AppState {
@@ -41,7 +42,7 @@ extension AppState {
     /// `model` is an optional per-spawn Claude model override (picker model
     /// buttons); it applies to the initial spawn only — later respawns fall
     /// back to the profile default.
-    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, displayName: String? = nil) {
+    func createWorktree(repoID: UUID, parentWorktreeID: UUID? = nil, existingBranch: BranchInfo? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, prIsCrossRepository: Bool? = nil, displayName: String? = nil) {
         // Optimistic placeholder so the row appears instantly. When picking an
         // existing branch we use its local name so the placeholder name
         // doesn't briefly show a fake `tbd/*` value.
@@ -111,7 +112,8 @@ extension AppState {
                     model: model,
                     primaryAgentPreference: primaryAgentPreference,
                     prNumber: prNumber,
-                    checkoutPRHead: checkoutPRHead
+                    checkoutPRHead: checkoutPRHead,
+                    prIsCrossRepository: prIsCrossRepository
                 ))
                 // Hand the modal the daemon's ID. Until this lands the modal
                 // has nothing to park against, which is what makes "the

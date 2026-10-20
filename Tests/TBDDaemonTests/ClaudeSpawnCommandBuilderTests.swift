@@ -683,6 +683,96 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(!r.command.contains("--plugin-dir"))
     }
 
+    // MARK: - foreignHead / --setting-sources user
+
+    @Test("foreignHead resume → --setting-sources user")
+    func foreignHeadResumeLimitsSettingSources() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            foreignHead: true
+        )
+        #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions --setting-sources user")
+    }
+
+    @Test("foreignHead fresh → the flag lands before the system prompt and the initial prompt")
+    func foreignHeadFreshLimitsSettingSources() {
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil,
+            freshSessionID: "sid",
+            appendSystemPrompt: "sys",
+            initialPrompt: "do the thing",
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "",
+            foreignHead: true
+        )
+        #expect(r.command == "claude --session-id sid --dangerously-skip-permissions --setting-sources user --append-system-prompt 'sys' 'do the thing'")
+    }
+
+    /// The flag keeps the fork's project scope out; TBD's own overlay and
+    /// plugin dir must still reach the session, or the SessionStart hook and
+    /// TBD's skills would go with it.
+    @Test("foreignHead keeps --settings and --plugin-dir")
+    func foreignHeadKeepsOverlayAndPluginDir() throws {
+        let tmpDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-plugin-foreign-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        let tmpFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("tbd-overlay-foreign-\(UUID().uuidString).json")
+        try "{}".data(using: .utf8)!.write(to: tmpFile)
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+
+        let r = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc",
+            freshSessionID: nil,
+            appendSystemPrompt: nil,
+            initialPrompt: nil,
+            profileSecret: nil,
+            cmd: nil,
+            shellFallback: "/bin/zsh",
+            settingsOverlayPath: tmpFile.path,
+            pluginDirPath: tmpDir.path,
+            foreignHead: true
+        )
+        #expect(r.command.contains(" --settings \(SystemPromptBuilder.shellEscape(tmpFile.path))"))
+        #expect(r.command.contains(" --plugin-dir \(SystemPromptBuilder.shellEscape(tmpDir.path))"))
+        #expect(r.command.hasSuffix(" --setting-sources user"))
+    }
+
+    @Test("not foreignHead (the default) → no --setting-sources on either branch")
+    func ordinaryWorktreeLoadsEverySettingSource() {
+        let resumed = ClaudeSpawnCommandBuilder.build(
+            resumeID: "abc-123", freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+        let fresh = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: "sid-1", appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh",
+            foreignHead: false)
+        #expect(!resumed.command.contains("--setting-sources"))
+        #expect(!fresh.command.contains("--setting-sources"))
+    }
+
+    @Test("--setting-sources is NOT emitted in cmd or shell-fallback branches")
+    func foreignHeadIgnoredForNonClaudeBranches() {
+        let cmd = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil, cmd: "ls -la", shellFallback: "/bin/zsh",
+            foreignHead: true)
+        let shell = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh",
+            foreignHead: true)
+        #expect(cmd.command == "ls -la")
+        #expect(shell.command == "/bin/zsh")
+    }
+
     // MARK: - sessionName / --name (cross-session peer registry)
 
     // Field-measured on CLI 2.1.227: `claude --name "TBD Name Probe"` writes
