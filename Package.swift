@@ -214,31 +214,6 @@ let package = Package(
             ],
             path: "Sources/TBDHolder"
         ),
-        // One process per TBD home
-        // (docs/specs/2026-09-05-transcript-streaming-model-proxy-design.md).
-        // It listens on a loopback port, forwards every request under its base
-        // URL byte-for-byte to the upstream a route names, and tees assistant
-        // text deltas into a per-terminal stream file the app tails.
-        //
-        // A separate executable rather than a thread in the daemon for the
-        // reason the holder is one: a session reads `ANTHROPIC_BASE_URL` once
-        // at start, so the listener has to survive every daemon restart for
-        // that session's whole life. The daemon spawns it, adopts a live one
-        // at startup, and replaces one whose version differs from its own.
-        //
-        // Deliberately NOT linked against TBDDaemonLib. It needs the route,
-        // stream-line and path schemas, all of which live in TBDShared, and
-        // nothing else.
-        .executableTarget(
-            name: "TBDModelProxy",
-            dependencies: [
-                "TBDShared",
-                .product(name: "NIO", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
-            ],
-            path: "Sources/TBDModelProxy"
-        ),
         .systemLibrary(
             name: "CComrakFFI",
             path: "Sources/CComrakFFI"
@@ -326,14 +301,6 @@ let package = Package(
                 // the product has to be built and sit in the same products
                 // directory as the test bundle. Nothing here imports it.
                 "TBDHolder",
-                // Here for the same reason as `TBDHolder` above, one part
-                // ahead of the suites that need it: Part B2's supervisor
-                // suites will spawn the real `TBDModelProxy` binary through
-                // the real spawner, so the product has to be built beside the
-                // test bundle. Landing the dependency with the target means
-                // the products directory is never the thing that breaks first.
-                // Nothing here imports it either.
-                "TBDModelProxy",
                 // The attach-handoff suite replays a snapshot preamble into a
                 // fresh headless `Terminal` and compares screens, which is the
                 // only honest test of a preamble: it asserts on what a viewer
@@ -408,35 +375,6 @@ let package = Package(
                 // hand-rolled blocking wait in a target that spawns children,
                 // which is the thing that helper exists to end.
                 "TestSupport",
-            ]
-        ),
-        // The model proxy's own suite, carrying the same load-bearing
-        // dependency on the EXECUTABLE target that `TBDHolderTests` documents:
-        // the suites that will drive the proxy end to end spawn the real
-        // `TBDModelProxy` binary, so the product has to be built and sit in the
-        // same products directory as the test bundle. `ProxyBinaryTests`
-        // asserts that now, so a products-directory regression fails here
-        // rather than in Part B2. `@testable import` reaching the proxy's
-        // internals is the lesser half, and `ProxyInvocationTests` uses it.
-        //
-        // The NIO products are for `FakeUpstream`, the in-process stand-in for
-        // the model API that every proxy test forwards to. It serves the same
-        // SSE event sequence as the fake model API (`docs/fake-model-api.md`)
-        // at zero tokens, on loopback, and never reaches `~/tbd` or the
-        // network.
-        .testTarget(
-            name: "TBDModelProxyTests",
-            dependencies: [
-                "TBDModelProxy",
-                "TBDShared",
-                // `pollUntilTrue`, the repo's one bounded poll. It brings
-                // `TBDDaemonLib` in behind it, which nothing else here needs;
-                // the alternative is a seventh hand-rolled poll loop, which is
-                // the thing that helper exists to end.
-                "TestSupport",
-                .product(name: "NIO", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
             ]
         ),
     ]

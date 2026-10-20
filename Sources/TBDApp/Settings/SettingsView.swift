@@ -277,7 +277,6 @@ struct GeneralSettingsTab: View {
                     .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 controlModeToggle
                 ptyHolderToggle
-                modelProxyToggle
                 transcriptStreamingToggle
                 transcriptPromptAnswerToggle
                 composerDraftToggle
@@ -400,25 +399,10 @@ struct GeneralSettingsTab: View {
         }
     }
 
-    /// Model-proxy opt-in. Reads the persisted flag from `daemon.capabilities`
-    /// and writes via `config.setModelProxyEnabled`. Stays enabled even when
-    /// the daemon reports `modelProxySupported == false`: turning the flag OFF
-    /// has to remain possible on a daemon that cannot start the proxy, which is
-    /// exactly the daemon an operator most wants to stop routing through.
-    @ViewBuilder
-    private var modelProxyToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Route new sessions through the TBD model proxy", isOn: Binding(
-            get: { capabilities?.modelProxyEnabled ?? false },
-            set: { newValue in Task { await appState.setModelProxyEnabled(newValue) } }
-        ))
-        .help(AppState.modelProxyHelp)
-    }
-
     /// Transcript-streaming opt-in. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setTranscriptStreamingEnabled`.
-    /// Independent of the proxy: the stream comes from the session mod's
-    /// `transcript-stream` feature, on both terminal transports.
+    /// The stream comes from the session mod's `transcript-stream` feature, on
+    /// both terminal transports.
     @ViewBuilder
     private var transcriptStreamingToggle: some View {
         let capabilities = appState.daemonCapabilities

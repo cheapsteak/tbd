@@ -1519,22 +1519,6 @@ extension WorktreeLifecycle {
         let primarySessionID: String?
         let primaryProfileID: UUID?
         let primaryLabel: String
-        // What the model proxy did with this spawn: the stream file to stamp on
-        // the row below, and the route to undo if the row never gets written.
-        //
-        // Filled in by the `.claude` branch alone, which is the only agent the
-        // model proxy speaks for: a shell has no upstream, and Codex does not
-        // talk to the Messages API, so neither may be handed an
-        // `ANTHROPIC_BASE_URL`. The gate is structural rather than a field
-        // check — the other branches never call `attach` at all.
-        //
-        // **Optional, and there is no empty `Outcome` to use instead.** An
-        // attachment that stood for "never attempted" would have to carry an
-        // empty environment, and `attachment.sensitiveEnv` would then compile at
-        // a shell or Codex spawn site and launch it with no env overrides, no
-        // `DISABLE_AUTO_UPDATE`, and no auth env at all — silently. `nil` makes
-        // that read a compile error instead.
-        var primaryAttachment: ModelProxyRouteAttachment.Outcome? = nil
         // The Claude primary's `--name`, reserved in the title store until
         // its spawn succeeds or fails. Stays nil for any other primary, which
         // reserves nothing.
@@ -1621,11 +1605,6 @@ extension WorktreeLifecycle {
                     storedTranscriptPath: nil
                 )
             }
-            // Hoisted out of the `build` call because the model proxy must read
-            // the SAME resolved file the spawn runs with: whether it sets
-            // `env.ANTHROPIC_BASE_URL` decides whether a route can be honored at
-            // all. Resolving it a second time would rewrite the per-session
-            // overlay and could answer about a different file.
             let primaryOverlayPath = ClaudeHookOverlay.resolveOverlayPath(
                 fallbackModels: resolvedProfile?.fallbackModels,
                 sessionKey: plannedTerminalID1.uuidString,
@@ -1645,34 +1624,6 @@ extension WorktreeLifecycle {
                 profileConfigDir: profileConfigDir,
                 promptAnswerHooks: config.transcriptPromptAnswerEnabled
             )
-            // **The routing decision, and it happens BEFORE the command is
-            // composed.** `ClaudeSpawnCommandBuilder.build` re-exports every
-            // profile routing key inline into the command string it returns,
-            // and those exports run *after* the process environment is applied
-            // — so a profile carrying its own `ANTHROPIC_BASE_URL` would
-            // clobber the route's, and the session would talk straight to the
-            // profile endpoint while the row recorded a stream file that never
-            // fills. Deciding here means a routed spawn can be built with
-            // `profileBaseURL: nil`, and the profile's URL survives only as the
-            // route's upstream.
-            //
-            // Only the holder transport is routed (spec: pty-holder only), so
-            // the registry is the gate. A refusal returns this environment
-            // unchanged; nothing below can fail because of it. The gate and the
-            // call are one function because the wake path makes exactly the
-            // same five-step decision.
-            let attachment = await ModelProxyRouteAttachment.attachIfRoutable(
-                terminalID: plannedTerminalID1,
-                isHolderSpawn: transport.isHolder,
-                config: config,
-                profileKind: resolvedProfile?.kind,
-                profileBaseURL: resolvedProfile?.baseURL,
-                envOverrides: mergedEnvOverrides,
-                // The SAME resolved overlay the spawn runs with, read above.
-                overlayPath: primaryOverlayPath,
-                holderEnvironment: holderRegistry?.environment,
-                supervisor: modelProxySupervisor)
-            primaryAttachment = attachment
             let spawnTitle = await ClaudeSessionTitle.forSpawn(
                 db: db, store: sessionTitles,
                 worktreeID: worktreeID, displayName: worktree.displayName,
@@ -1703,14 +1654,7 @@ extension WorktreeLifecycle {
                 initialPrompt: isResume ? nil : effectivePrompt,
                 profileSecret: resolvedProfile?.secret,
                 profileKind: resolvedProfile?.kind,
-                // The route's own URL on a routed spawn, the profile's
-                // otherwise. The builder inlines an
-                // `export ANTHROPIC_BASE_URL=…` that runs after the shell's rc
-                // files, which is how this endpoint survives a `.zshrc` that
-                // sets one of its own — a defence the profile's URL has always
-                // had and the route needs just as much.
-                profileBaseURL: attachment.builderBaseURL(
-                    profile: resolvedProfile?.baseURL),
+                profileBaseURL: resolvedProfile?.baseURL,
                 // Per-spawn model override (picker model buttons) wins over
                 // the profile default for this initial spawn only.
                 profileModel: modelOverride ?? resolvedProfile?.model,
@@ -1732,11 +1676,8 @@ extension WorktreeLifecycle {
             ]
             // Layer the builder's auth/routing env ON TOP of free-form
             // overrides so auth/routing stays final and free-form vars can't
-            // clobber it. Through the attachment's own method, because the wake
-            // path makes the same merge and the order is silent when it is
-            // wrong.
-            primarySensitiveEnv = attachment.launchEnvironment(
-                mergingBuilder: spawn.sensitiveEnv)
+            // clobber it.
+            primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
             primaryProfileID = resolvedProfile?.profileID
             primaryLabel = TerminalLabel.claudeCode
         }
@@ -1769,8 +1710,6 @@ extension WorktreeLifecycle {
                 // reuses this row, and the wake site has nothing else to read.
                 watchDeskRole: watchDeskRole,
                 transport: transport,
-                attachment: primaryAttachment,
-                modelProxySupervisor: modelProxySupervisor,
                 sessionIncarnationID: primarySessionIncarnationID)
         } catch {
             await sessionTitles.release(primarySpawnTitle)
@@ -1888,9 +1827,7 @@ extension WorktreeLifecycle {
                 claudeSessionID: nil,
                 profileID: nil,
                 kind: .shell,
-                transport: transport,
-                attachment: nil,
-                modelProxySupervisor: modelProxySupervisor)
+                transport: transport)
             createdTerminals.append((id: plannedTerminalID2, label: TerminalLabel.setup))
             createdTerminalWindowIDs.insert(setupTerminal.tmuxWindowID)
             if let setupMarkerPath, let setupHookPath {
@@ -2001,14 +1938,6 @@ extension WorktreeLifecycle {
                 // A restored archived session is born onto the same transport
                 // as the primary, through the same gate and the same spawn, so
                 // only the tmux one wants a server.
-                //
-                // It is NOT routed through the model proxy — and neither are
-                // revive-from-history tabs or fork-session tabs. A route has to
-                // be minted before the command is composed, because the command
-                // re-exports the profile's own routing keys over it, and these
-                // three sites do not compose their commands that way yet. That
-                // is a follow-up rather than a regression: a tmux spawn was
-                // never routed either, so nothing loses a route it used to have.
                 let archivedTerminal: Terminal
                 do {
                     if !transport.isHolder {
@@ -2030,8 +1959,6 @@ extension WorktreeLifecycle {
                         profileID: resolvedProfile?.profileID,
                         kind: .claude,
                         transport: transport,
-                        attachment: nil,
-                        modelProxySupervisor: modelProxySupervisor,
                         sessionIncarnationID: restoreSessionMod?.incarnationID)
                 } catch {
                     await sessionTitles.release(restoreSpawnTitle)

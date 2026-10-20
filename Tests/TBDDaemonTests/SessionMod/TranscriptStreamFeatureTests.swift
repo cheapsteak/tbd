@@ -19,8 +19,8 @@ private final class PluginSyncRecorder: @unchecked Sendable {
 }
 
 /// The session mod's `transcript-stream` feature is spawned exactly when
-/// `transcript_streaming_enabled` is on, beside composer-draft and without the
-/// model proxy (docs/specs/2026-10-20-transcript-stream-mod-design.md, "Flag").
+/// `transcript_streaming_enabled` is on, beside composer-draft
+/// (docs/specs/2026-10-20-transcript-stream-mod-design.md, "Flag").
 @Suite struct TranscriptStreamFeatureTests {
 
     @Test func theRawValueIsTheModsFeatureName() {
@@ -41,14 +41,6 @@ private final class PluginSyncRecorder: @unchecked Sendable {
 
         config.transcriptStreamingEnabled = false
         #expect(SessionModFeature.enabled(in: config) == [.composerDraft])
-    }
-
-    /// The proxy flag plays no part.
-    @Test func theProxyFlagDoesNotGateTheFeature() {
-        var config = Config()
-        config.transcriptStreamingEnabled = true
-        config.modelProxyEnabled = false
-        #expect(SessionModFeature.enabled(in: config).contains(.transcriptStream))
     }
 
     @Test func theShippedConfigSpawnsNoTranscriptStream() {

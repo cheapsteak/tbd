@@ -33,8 +33,8 @@ profile**:
   override never replaces the account. Repo overrides do not apply; the command
   runs under a profile, not in a repo.
 
-What a session gets from its **terminal** is left out: the model-proxy route,
-the settings overlay with TBD's hooks, and the interactive-only variables
+What a session gets from its **terminal** is left out: the settings overlay
+with TBD's hooks, and the interactive-only variables
 (`DISABLE_AUTO_UPDATE`, and the Claude display settings in the Terminal
 settings pane, such as fullscreen rendering).
 

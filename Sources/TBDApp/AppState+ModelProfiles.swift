@@ -416,9 +416,8 @@ extension AppState {
     /// the shipped ON has its watch modes refused and turned off at boot even
     /// on a daemon that cannot start a holder — and the only way to get them
     /// back is to turn the transport off. Greying the toggle out there would
-    /// name a remedy and withhold the control for it, the way the model-proxy
-    /// toggle deliberately stays usable on a daemon that cannot start a proxy.
-    /// So the toggle goes inert only where neither direction does anything.
+    /// name a remedy and withhold the control for it. So the toggle goes inert
+    /// only where neither direction does anything.
     static func ptyHolderToggleIsInteractive(supported: Bool, flagOn: Bool) -> Bool {
         supported || flagOn
     }
@@ -444,22 +443,12 @@ extension AppState {
         }
     }
 
-    /// Help text for the model-proxy toggle. A stored constant rather than a
-    /// literal in the view so it is assertable: it must say what the switch
-    /// puts in the request path and when the change takes hold, because a
-    /// session's base URL is fixed in the environment it was spawned with and
-    /// nothing already running moves.
-    static let modelProxyHelp = """
-        Routes new Claude sessions through a loopback proxy TBD runs, so TBD \
-        can see the model stream. Applies to sessions started after you change \
-        it. Off by default (soaking).
-        """
-
-    /// Help text for the transcript-streaming toggle. Assertable for the same
-    /// reason as `modelProxyHelp`, and it carries the two limits the operator
-    /// cannot see anywhere else: the feature reaches only sessions spawned
-    /// after the change, and only those where Claude Code loads TBD's mod
-    /// (not in an untrusted workspace, nor under a policy that blocks mods).
+    /// Help text for the transcript-streaming toggle. A stored constant rather
+    /// than a literal in the view so it is assertable, and it carries the two
+    /// limits the operator cannot see anywhere else: the feature reaches only
+    /// sessions spawned after the change, and only those where Claude Code
+    /// loads TBD's mod (not in an untrusted workspace, nor under a policy that
+    /// blocks mods).
     static let transcriptStreamingHelp = """
         Shows Claude's answer and thinking summaries in the transcript pane as \
         they are written, before they reach the session file. Applies to \
@@ -467,31 +456,10 @@ extension AppState {
         loads TBD's mod. Off by default (soaking).
         """
 
-    /// Persist the model-proxy gate, then re-fetch capabilities so the Settings
-    /// toggle reflects the daemon's persisted state.
-    ///
-    /// **Applies to sessions started after the call, and to no others.** A
-    /// session's Messages API base URL is fixed in the environment it was
-    /// spawned with, so turning this on never reroutes a running session and
-    /// turning it off never takes a live route away.
-    ///
-    /// Writes one flag; transcript streaming is a separate choice.
-    func setModelProxyEnabled(_ enabled: Bool) async {
-        do {
-            try await modelProxyFlagSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set model proxy: \(error, privacy: .public)")
-            showAlert("Failed to set the model proxy: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Persist the transcript-streaming gate, then re-fetch capabilities so the
     /// Settings toggle reflects the daemon's persisted state. Applies to
-    /// sessions started after the call, for the same reason as the proxy gate.
-    ///
-    /// Sends the gesture whatever the proxy's state: streaming comes from the
-    /// session mod and does not depend on the proxy.
+    /// sessions started after the call: the feature list is fixed in a
+    /// session's environment at spawn.
     func setTranscriptStreamingEnabled(_ enabled: Bool) async {
         do {
             try await transcriptStreamingFlagSetter(enabled)

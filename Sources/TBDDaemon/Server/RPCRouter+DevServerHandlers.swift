@@ -213,8 +213,8 @@ extension RPCRouter {
                 id: terminalID, worktreeID: current.id, tmuxServer: current.tmuxServer,
                 workingDirectory: cwd, command: command, env: spawnEnv, sensitiveEnv: [:],
                 cols: cols, rows: rows, label: label, claudeSessionID: nil, profileID: nil,
-                kind: .shell, transport: transport, attachment: nil,
-                modelProxySupervisor: self.modelProxySupervisor, serverName: serverName)
+                kind: .shell, transport: transport,
+                serverName: serverName)
         }
         subscriptions.broadcast(delta: .terminalCreated(TerminalDelta(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, label: terminal.label)))

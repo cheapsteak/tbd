@@ -385,71 +385,12 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Persist the model-proxy gate — the default-off soak switch for routing a
-    /// pty-holder session's Messages API traffic through the loopback proxy.
-    /// This is how the soak is turned on: the flag is the feature's only opt-in,
-    /// and leaving it reachable only by hand-editing `~/tbd/state.db` would put
-    /// the sole way to enable it behind a database the project's own rules say
-    /// not to go into.
-    ///
-    /// **It applies to sessions created after the call, and to no others.** A
-    /// session's `ANTHROPIC_BASE_URL` is fixed in its environment at spawn, so
-    /// flipping this on never re-routes a running session and flipping it off
-    /// never un-routes one.
-    ///
-    /// The coupling — turning the proxy off also writes streaming off, in one
-    /// transaction — lives in `ConfigStore.setModelProxyEnabled`, not here, so
-    /// every caller of the store gets it, not only this RPC.
-    ///
-    /// **The supervisor follows the flag on the daemon already running**, which
-    /// is the half a column write cannot do: the boot path starts a supervisor
-    /// only when the flag was already on, so without this a user who turned the
-    /// proxy on would get routes minted against nothing until the next restart.
-    /// On the way off the supervisor starts **draining** rather than retiring
-    /// the proxy where it stands — see `beginDraining`. The sessions already
-    /// routed through it carry its port in their environment for the rest of
-    /// their lives, so cutting the proxy would break them mid-task rather than
-    /// merely un-routing them, and the help text above promises otherwise.
-    ///
-    /// Acted on the *written* value rather than on a flip computed from a
-    /// preceding read: both calls are idempotent (`startIfEnabled` returns
-    /// early on a supervisor already started, `beginDraining` on one that never
-    /// started), so a second call in the same direction changes nothing, and no
-    /// window opens between reading the old value and writing the new one.
-    ///
-    /// Both are awaited before this RPC answers, which is what makes the
-    /// Settings checkbox's response wait on them. Milliseconds normally, and
-    /// bounded in the worst case by the control client's 2-second probe plus
-    /// the spawner's 10-second bind budget — and, when a session is still
-    /// routed against the persisted port and something transient holds it, by
-    /// the supervisor's port wait of up to 30 seconds
-    /// (`ModelProxySupervisor.defaultPortRetryAttempts` ×
-    /// `defaultPortRetryInterval`), paid only in the case where minting a fresh
-    /// port would strand that session. Answering early would be worse than
-    /// the wait: the reply is what the app reloads its capabilities on, and a
-    /// reply that landed before the supervisor had a port would render the
-    /// toggle's own state wrong.
-    func handleConfigSetModelProxyEnabled(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(
-            ConfigSetModelProxyEnabledParams.self, from: paramsData)
-        try await db.config.setModelProxyEnabled(params.enabled)
-        if params.enabled {
-            await modelProxySupervisor?.startIfEnabled()
-        } else {
-            await modelProxySupervisor?.beginDraining()
-        }
-        // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
     /// Persist the transcript-streaming gate — the default-off soak switch for
     /// the session mod's `transcript-stream` feature and the provisional rows
     /// the transcript pane reads from it.
     ///
     /// **It applies to sessions created after the call**: the feature list is
-    /// fixed in a session's environment at spawn. It touches no proxy setting
-    /// and starts or drains no proxy.
+    /// fixed in a session's environment at spawn.
     ///
     /// The `tbd` plugin on disk is brought in line with the new feature set,
     /// as the composer-draft gate does: the session mod is present while any

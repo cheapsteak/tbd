@@ -45,10 +45,10 @@ these steps in order.
   the procedure updates itself, and an environment marker holds it to a single
   hop.
 - **Builds** the same products `scripts/restart.sh` builds — `TBDDaemon`,
-  `TBDApp`, `TBDCLI`, `TBDHolder`, `TBDPeerHelper` and `TBDModelProxy` —
-  through `scripts/swift-safe`, with the same shared module cache. With the
-  update source at `release`, it downloads and verifies the published build
-  instead and compiles only `TBDApp`; see "Where the binaries come from". A failed build
+  `TBDApp`, `TBDCLI`, `TBDHolder` and `TBDPeerHelper` — through
+  `scripts/swift-safe`, with the same shared module cache. With the update
+  source at `release`, it downloads and verifies the published build instead
+  and compiles only `TBDApp`; see "Where the binaries come from". A failed build
   stops here and the running installation, and the clone's own build
   identity sidecar (below), are both untouched. The run's full compiler output
   is kept in `~/tbd/updates/build.log`, overwritten by the next run; a failure
@@ -158,7 +158,7 @@ woken, and how many could not be.
 By default `tbd update` compiles every product in the update clone. The
 release workflow (`.github/workflows/release.yml`) also publishes a release
 build for every commit on `main` whose tests passed: `TBDDaemon`, `TBDCLI`,
-`TBDHolder`, `TBDPeerHelper` and `TBDModelProxy`, with their resource bundles,
+`TBDHolder` and `TBDPeerHelper`, with their resource bundles,
 in the `main-builds` prerelease on GitHub. With the update source set to
 `release`, `tbd update` installs that build and compiles only `TBDApp`, which
 cannot yet run from a build made on another machine.

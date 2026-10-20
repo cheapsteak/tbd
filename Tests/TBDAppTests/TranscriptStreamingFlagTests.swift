@@ -95,8 +95,7 @@ struct TranscriptPaneTaskKeyTests {
         #expect(on.streamPath == "/tmp/tbd-test-sessions/s1/transcript-stream.json")
     }
 
-    /// The path comes from the sessions directory and the session id, never
-    /// from the terminal row's proxy-era stream path.
+    /// The path comes from the sessions directory and the session id.
     @Test("a /clear's new session id is a new stream path")
     func theStreamPathFollowsTheSessionID() {
         #expect(Self.key(streaming: true, sessionID: "s2").streamPath

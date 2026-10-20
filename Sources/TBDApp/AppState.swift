@@ -2071,18 +2071,8 @@ final class AppState {
             try await daemonClient.remoteTranscriptLoadEarlier(
                 provider: selection.provider, sessionID: selection.sessionID)
         }
-    /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
-    /// for the same reason as `controlModeSetter`.
-    @ObservationIgnored
-    lazy var modelProxyFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in
-            try await daemonClient.setModelProxyEnabled(enabled: enabled)
-        }
     /// How `setTranscriptStreamingEnabled` persists the streaming gate —
-    /// injectable for the same reason as `controlModeSetter`. Separate from
-    /// `modelProxyFlagSetter` even though the two flags are coupled: the
-    /// coupling is the daemon's, and an app that wrote both would be guessing
-    /// at a rule it does not own.
+    /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored
     lazy var transcriptStreamingFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in

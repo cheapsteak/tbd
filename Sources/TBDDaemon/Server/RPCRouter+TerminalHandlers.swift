@@ -299,8 +299,7 @@ extension RPCRouter {
                         cols: resolvedCols, rows: resolvedRows)
                     // The holder runs any command, so a Codex terminal takes
                     // the transport the flag chose exactly as the primary
-                    // path's Codex branch does. No attachment: Codex does not
-                    // talk to the Messages API and is never routed.
+                    // path's Codex branch does.
                     return try await lifecycle.spawnTerminal(
                         id: plannedTerminalID,
                         worktreeID: params.worktreeID,
@@ -318,9 +317,7 @@ extension RPCRouter {
                         claudeSessionID: nil,
                         profileID: nil,
                         kind: .codex,
-                        transport: decidedTransport,
-                        attachment: nil,
-                        modelProxySupervisor: modelProxySupervisor)
+                        transport: decidedTransport)
                 }
             }
 
@@ -459,11 +456,6 @@ extension RPCRouter {
             )
         }
 
-        // Hoisted out of the `build` call because the model proxy must read
-        // the SAME resolved file the spawn runs with: whether it sets
-        // `env.ANTHROPIC_BASE_URL` decides whether a route can be honored at
-        // all. Resolving it a second time would rewrite the per-session
-        // overlay and could answer about a different file.
         let overlayPath: String? = isClaudeType
             ? ClaudeHookOverlay.resolveOverlayPath(
                 fallbackModels: resolvedProfile?.fallbackModels,
@@ -489,32 +481,6 @@ extension RPCRouter {
                 repo: repo?.envOverrides,
                 profile: resolvedProfile?.envOverrides)
             : [:]
-
-        // **The routing decision, before the command is composed** — the same
-        // five steps the primary spawn takes, through the same function, so an
-        // extra Claude terminal on the holder transport is routed exactly as a
-        // primary session is. The builder re-exports the profile's routing
-        // keys inline into the command it returns, and those exports run after
-        // the process environment, so the decision has to exist before `build`
-        // is given its base URL. Only the `.claude` kind ever asks: a shell has
-        // no upstream, and its `nil` here is structural rather than a field
-        // check.
-        let attachment: ModelProxyRouteAttachment.Outcome?
-        if isClaudeType {
-            attachment = await ModelProxyRouteAttachment.attachIfRoutable(
-                terminalID: plannedTerminalID,
-                isHolderSpawn: transport.isHolder,
-                config: createConfig,
-                profileKind: resolvedProfile?.kind,
-                profileBaseURL: resolvedProfile?.baseURL,
-                envOverrides: mergedEnvOverrides,
-                // The SAME resolved overlay the spawn runs with, read above.
-                overlayPath: overlayPath,
-                holderEnvironment: holderRegistry?.environment,
-                supervisor: modelProxySupervisor)
-        } else {
-            attachment = nil
-        }
 
         // Only a Claude spawn carries a session name; a shell's command never
         // reads it, so none is reserved for one. A login session passes the
@@ -546,13 +512,7 @@ extension RPCRouter {
             initialPrompt: params.prompt,
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
-            // The route's own URL on a routed spawn, the profile's otherwise —
-            // and the profile's again for a shell, which has no attachment.
-            // The builder inlines an `export ANTHROPIC_BASE_URL=…` that runs
-            // after the shell's rc files, which is how this endpoint survives
-            // a `.zshrc` that sets one of its own.
-            profileBaseURL: attachment?.builderBaseURL(profile: resolvedProfile?.baseURL)
-                ?? resolvedProfile?.baseURL,
+            profileBaseURL: resolvedProfile?.baseURL,
             profileModel: resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
@@ -567,13 +527,9 @@ extension RPCRouter {
         )
 
         // For Claude terminals, layer the builder's auth/routing env ON TOP of
-        // the attachment's — the merged free-form overrides plus the route —
-        // so auth wins. Through the attachment's own method, because the
-        // primary and wake paths make the same merge and the order is silent
-        // when it is wrong. A shell has no attachment and gets the builder's
-        // env alone, as it always has.
-        let primarySensitiveEnv = attachment?.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
-            ?? spawn.sensitiveEnv
+        // the merged free-form overrides, so auth wins. A shell's overrides are
+        // empty, so it gets the builder's env alone, as it always has.
+        let primarySensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
         let terminalKind: TerminalKind? = isClaudeType ? .claude : .shell
         let spawnEnv = env
         let spawnProfileID = resolvedProfile?.profileID
@@ -602,8 +558,6 @@ extension RPCRouter {
                         profileID: spawnProfileID,
                         kind: terminalKind,
                         transport: transport,
-                        attachment: attachment,
-                        modelProxySupervisor: modelProxySupervisor,
                         sessionIncarnationID: sessionMod?.incarnationID)
                     return spawned
                 }
@@ -1165,9 +1119,7 @@ extension RPCRouter {
     /// cannot drift apart about what tearing a holder down means — they did,
     /// as two hand-maintained near-copies, until this call replaced the second.
     func disposeHolder(for terminal: Terminal) async -> String? {
-        await WorktreeLifecycle.disposeHolder(
-            for: terminal, registry: holderRegistry, config: db.config,
-            supervisor: modelProxySupervisor)
+        await WorktreeLifecycle.disposeHolder(for: terminal, registry: holderRegistry)
     }
 
     /// Closed-terminal capture metadata for a worktree, newest first. Content
@@ -1412,8 +1364,6 @@ extension RPCRouter {
                 profileID: profileID,
                 kind: kind,
                 transport: transport,
-                attachment: nil,
-                modelProxySupervisor: modelProxySupervisor,
                 sessionIncarnationID: sessionIncarnationID)
         }
         var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
@@ -2741,10 +2691,7 @@ extension RPCRouter {
         // profile's OAuth dir, and the overlay resolution writes an overlay
         // file and (for a roleless session) deletes the row's statusline
         // capture. Neither should fire for a swap `beginActuation` goes on to
-        // reject. Both arms need them, and the routing decision the holder arm
-        // makes needs the overlay before any command is composed (whether the
-        // overlay sets `ANTHROPIC_BASE_URL` decides whether a route can be
-        // honoured at all).
+        // reject. Both arms need them.
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
         let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: resolved?.fallbackModels,
@@ -2783,20 +2730,17 @@ extension RPCRouter {
             forkSessionMod = nil
         }
 
-        // The spawn each arm runs, as a closure rather than a value: the
-        // holder arm cannot compose its own until after its park, because its
-        // endpoint comes from a model proxy route and that route may only be
-        // minted once the park has finished retiring the old one.
-        let composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result = { builderBaseURL in
-            self.swapSpawn(
-                plan: plan, mode: mode, resolved: resolved,
-                builderBaseURL: builderBaseURL,
-                overlayPath: overlayPath, profileConfigDir: profileConfigDir,
-                worktree: worktree, repo: repo, swapConfig: swapConfig,
-                claudeEnvOverrides: claudeEnvOverrides,
-                sessionName: swapSessionName,
-                sessionModEnvironment: forkSessionMod?.environment ?? [:])
-        }
+        // The spawn every arm runs, composed once from the plan.
+        let spawn = swapSpawn(
+            plan: plan, mode: mode, resolved: resolved,
+            overlayPath: overlayPath, profileConfigDir: profileConfigDir,
+            worktree: worktree, repo: repo, swapConfig: swapConfig,
+            claudeEnvOverrides: claudeEnvOverrides,
+            sessionName: swapSessionName,
+            sessionModEnvironment: forkSessionMod?.environment ?? [:])
+        // The builder's auth and routing env layered ON TOP of the merged
+        // free-form overrides, so auth wins.
+        let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
@@ -2815,8 +2759,6 @@ extension RPCRouter {
         do {
             switch mode {
             case .fork:
-                let spawn = composeSpawn(resolved?.baseURL)
-                let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
                 response = try await forkSwapNewTab(
                     worktree: worktree.worktree,
                     plannedTerminalID: plannedTerminalID,
@@ -2838,21 +2780,17 @@ extension RPCRouter {
                     worktree: worktree,
                     storedSessionID: storedSessionID,
                     env: env,
-                    envOverrides: mergedEnvOverrides,
-                    overlayPath: overlayPath,
+                    spawnCommand: spawn.command,
+                    sensitiveEnv: sensitiveEnv,
                     resolved: resolved,
-                    swapConfig: swapConfig,
                     cols: resolvedCols,
                     rows: resolvedRows,
                     resumeProjectsRoot: resumeProjectsRoot,
-                    composeSpawn: composeSpawn,
                     spawnTitle: swapSpawnTitle)
                 response = outcome.response
                 respawnFailure = outcome.failure
 
             case .inPlace:
-                let spawn = composeSpawn(resolved?.baseURL)
-                let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
                 let expectedIncarnation = TerminalSessionIncarnation(terminal: oldTerminal)
                 let replacementBaseEnv = env
                 let outcome = try await tmux.withWorktreeServerLock(
@@ -2984,19 +2922,6 @@ extension RPCRouter {
 
     /// The spawn a `terminal.swapProfile` will run, composed from its plan.
     ///
-    /// A named helper rather than the inline switch it replaces, because the
-    /// arms compose it at different moments. The tmux and fork arms compose as
-    /// soon as they are chosen, from the profile's own endpoint. The holder
-    /// arm cannot: its spawn's endpoint is decided by a model proxy route, and
-    /// that route has to be minted AFTER the park — the park ends by retiring
-    /// whatever route its terminal id holds, so a route minted before it is
-    /// one the park itself may drop.
-    ///
-    /// - Parameter builderBaseURL: the endpoint the built command re-exports
-    ///   inline, where the export runs after the shell's rc files — a route's
-    ///   own URL where one is in play, the profile's otherwise. Callers with a
-    ///   route pass `ModelProxyRouteAttachment.Outcome.builderBaseURL(profile:)`
-    ///   rather than deriving it a second way.
     /// - Parameter sessionModEnvironment: the session mod's variables, for the
     ///   one arm that is a fresh spawn (a fork of a blank session); empty for
     ///   every other arm.
@@ -3004,7 +2929,6 @@ extension RPCRouter {
         plan: SwapSpawnPlan,
         mode: TerminalSwapMode,
         resolved: ResolvedModelProfile?,
-        builderBaseURL: String?,
         overlayPath: String?,
         profileConfigDir: String?,
         worktree: LocalWorktree,
@@ -3025,7 +2949,7 @@ extension RPCRouter {
                 initialPrompt: nil,
                 profileSecret: resolved?.secret,
                 profileKind: resolved?.kind,
-                profileBaseURL: builderBaseURL,
+                profileBaseURL: resolved?.baseURL,
                 profileModel: resolved?.model,
                 profileAwsRegion: resolved?.awsRegion,
                 profileAwsProfile: resolved?.awsProfile,
@@ -3050,7 +2974,7 @@ extension RPCRouter {
                 initialPrompt: nil,
                 profileSecret: resolved?.secret,
                 profileKind: resolved?.kind,
-                profileBaseURL: builderBaseURL,
+                profileBaseURL: resolved?.baseURL,
                 profileModel: resolved?.model,
                 profileAwsRegion: resolved?.awsRegion,
                 profileAwsProfile: resolved?.awsProfile,
@@ -3132,9 +3056,9 @@ extension RPCRouter {
     ///   Claude's graceful shutdown, which flushes the tail of its transcript,
     ///   so the copy the handler took before the park is short by exactly that
     ///   flush; this is where the arm re-takes it.
-    /// - Parameter composeSpawn: the swap's command, composed from the base
-    ///   URL the route decides. A closure because the route may only be minted
-    ///   after the park.
+    /// - Parameter spawnCommand: the swap's command, composed from its plan.
+    /// - Parameter sensitiveEnv: the job's process environment for that
+    ///   command.
     /// - Returns: the response to send, and the transport failure to record
     ///   against the actuation (nil when the swap completed).
     private func holderInPlaceSwap(
@@ -3142,14 +3066,12 @@ extension RPCRouter {
         worktree: LocalWorktree,
         storedSessionID: String,
         env: [String: String],
-        envOverrides: [String: String],
-        overlayPath: String?,
+        spawnCommand: String,
+        sensitiveEnv: [String: String],
         resolved: ResolvedModelProfile?,
-        swapConfig: Config?,
         cols: Int,
         rows: Int,
         resumeProjectsRoot: URL?,
-        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result,
         spawnTitle: ClaudeSpawnTitle?
     ) async throws -> (response: RPCResponse, failure: String?) {
         // THE CLAIM, ahead of the park and released after the wake.
@@ -3182,14 +3104,12 @@ extension RPCRouter {
                 worktree: worktree,
                 storedSessionID: storedSessionID,
                 env: env,
-                envOverrides: envOverrides,
-                overlayPath: overlayPath,
+                spawnCommand: spawnCommand,
+                sensitiveEnv: sensitiveEnv,
                 resolved: resolved,
-                swapConfig: swapConfig,
                 cols: cols,
                 rows: rows,
                 resumeProjectsRoot: resumeProjectsRoot,
-                composeSpawn: composeSpawn,
                 spawnTitle: spawnTitle)
             await hibernationCoordinator.releaseSwap(terminalID: oldTerminal.id)
             return outcome
@@ -3207,14 +3127,12 @@ extension RPCRouter {
         worktree: LocalWorktree,
         storedSessionID: String,
         env: [String: String],
-        envOverrides: [String: String],
-        overlayPath: String?,
+        spawnCommand: String,
+        sensitiveEnv: [String: String],
         resolved: ResolvedModelProfile?,
-        swapConfig: Config?,
         cols: Int,
         rows: Int,
         resumeProjectsRoot: URL?,
-        composeSpawn: @Sendable (String?) -> ClaudeSpawnCommandBuilder.Result,
         spawnTitle: ClaudeSpawnTitle?
     ) async throws -> (response: RPCResponse, failure: String?) {
         // 1. PARK, through the coordinator's own holder park under the
@@ -3306,32 +3224,15 @@ extension RPCRouter {
             return (RPCResponse(error: reason), reason)
         }
 
-        // 3. WAKE. The routing decision first, because the builder re-exports
-        //    the endpoint inline into the command and that export runs after
-        //    the shell's rc files — the same five steps, through the same
-        //    function, that the create path and `HibernationCoordinator.wake`
-        //    take. It is minted HERE rather than before the park: the park
-        //    ends by retiring whatever route this terminal id holds.
-        let attachment = await ModelProxyRouteAttachment.attachIfRoutable(
-            terminalID: target.id,
-            isHolderSpawn: true,
-            config: swapConfig,
-            profileKind: resolved?.kind,
-            profileBaseURL: resolved?.baseURL,
-            envOverrides: envOverrides,
-            overlayPath: overlayPath,
-            holderEnvironment: holderRegistry?.environment,
-            supervisor: modelProxySupervisor)
-        let spawn = composeSpawn(attachment.builderBaseURL(profile: resolved?.baseURL))
-        let sensitiveEnv = attachment.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
+        // 3. WAKE, onto the command the handler composed.
         let woken = await hibernationCoordinator.wakeHolderAfterInPlaceChange(
             terminal: target,
             worktree: worktree,
             sessionID: storedSessionID,
             expectedReplacementState: TerminalReplacementSnapshot(terminal: target),
-            spawnCommand: spawn.command,
+            spawnCommand: spawnCommand,
             env: env,
-            attachment: attachment.withEnvironment(sensitiveEnv),
+            sensitiveEnv: sensitiveEnv,
             cols: cols,
             rows: rows,
             spawnTitle: spawnTitle)
@@ -3427,8 +3328,6 @@ extension RPCRouter {
                 profileID: profileID,
                 kind: .claude,
                 transport: transport,
-                attachment: nil,
-                modelProxySupervisor: modelProxySupervisor,
                 sessionIncarnationID: sessionIncarnationID)
             return (terminal, currentWorktree.tmuxServer)
         }

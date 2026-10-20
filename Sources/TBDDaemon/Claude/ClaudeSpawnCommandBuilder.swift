@@ -256,14 +256,6 @@ enum ClaudeSpawnCommandBuilder {
     /// come from `credentialEnv` and are never returned here, so nothing this
     /// function produces can leak a secret into `ps`.
     ///
-    /// The one qualification is `ANTHROPIC_BASE_URL` on a proxied session,
-    /// where the value carries a model-proxy route token. That is not a
-    /// credential either — it authorizes nothing but a forward to an upstream
-    /// the daemon itself wrote — and it is deliberately inlined anyway: see
-    /// `ModelProxyRouteAttachment.Outcome.builderBaseURL`, which explains why
-    /// the rc-file defence is worth more than keeping the token out of `ps`
-    /// when the route file backing it is already readable by the same user.
-    ///
     /// Extracted from `build` because the spawn path is no longer the only
     /// caller that has to run a session's `claude` binary the way the session
     /// runs it: `terminal.completions` probes it for the command list, and a
@@ -332,17 +324,13 @@ enum ClaudeSpawnCommandBuilder {
     /// terminal.
     ///
     /// The profile's routing keys and credential are layered **on top of** the
-    /// merged env overrides, the order
-    /// `ModelProxyRouteAttachment.Outcome.launchEnvironment(mergingBuilder:)`
-    /// gives a session, so an override can never clobber the account the
-    /// profile names.
+    /// merged env overrides, the order every spawn path gives a session, so an
+    /// override can never clobber the account the profile names.
     ///
     /// What `build` adds beyond that is left out, because it belongs to a
     /// terminal rather than to a profile: `DISABLE_AUTO_UPDATE` exists to keep
     /// an interactive rc file from prompting, and the `ClaudeEnvRegistry`
-    /// settings tune the interactive UI. A headless child has neither. A
-    /// session's model-proxy route is left out too: it is attached to one
-    /// terminal on the holder transport, and an exec child is not a terminal.
+    /// settings tune the interactive UI. A headless child has neither.
     static func execEnvironment(
         profileSecret: String?,
         profileKind: CredentialKind?,

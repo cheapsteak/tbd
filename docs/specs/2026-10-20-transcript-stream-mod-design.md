@@ -249,11 +249,21 @@ comment saying it is unused.
 At daemon start, a one-time step removes `~/tbd/proxy` and `~/tbd/streams` if
 they exist. It logs what it removed and ignores errors.
 
-A proxy process still running at upgrade is not touched: it retires itself
-after 24 hours without a supervisor. A session still routed through it fails
-its next request after that, and must be restarted. That cost is accepted: the
-proxy flag was experimental and default-off, and a session started after the
-upgrade is never routed.
+A proxy process still running at upgrade is not stopped by the daemon: it
+retires itself once 24 hours pass with no daemon adopting it and no stream in
+flight. It is no longer one of the binaries the orphan-process sweep protects
+by name, so it may be reaped sooner. That sweep runs only with
+`gc_orphan_processes_enabled` on (default off), and reaps a process only when
+it has been reparented to launchd, is owned by the daemon's user, its working
+directory lies under an archived worktree, that worktree's scratchpad or a
+deletion-queue entry, and the grace window has passed. A proxy spawned with its
+working directory pinned to `/` never matches; one that kept the launching
+worktree's working directory does once that worktree is archived.
+
+A session still routed through the proxy fails its next request once the proxy
+exits, and must be restarted. That cost is accepted: the proxy flag was
+experimental and default-off, and a session started after the upgrade is never
+routed.
 
 ### Reclaiming the new file
 
@@ -273,7 +283,7 @@ flag.
 - **Soak:** turn the toggle on in Settings, start new sessions on both
   transports, and compare the provisional rows against the final JSONL rows.
   Check that thinking summaries stream as deltas rather than arriving whole.
-- **Graduation:** flip `Config.transcriptStreamingEnabledDefault` once the soak
+- **Graduation:** flip `Config.transcriptStreamingDefault` once the soak
   shows no lost or stuck rows.
 
 ## Delivery
