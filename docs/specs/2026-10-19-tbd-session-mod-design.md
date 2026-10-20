@@ -361,10 +361,12 @@ The mark lives in `$.state`, so a reload keeps it.
 - **`composer-draft.json`** – whether a draft exists, the draft text and
   cursor, whether the text holds all of the draft (`restorable`, on a draft
   only), and when the box was last saved.
-- **`composer-draft.unrestored`** – the text of a draft the feature could not
-  restore because the box already held text. Later saves never touch it.
-  `OrphanGC` removes it 30 days after its last write, as the `unsent-prompts/`
-  arm does.
+- **`composer-draft.unrestored`** – the text of each draft the feature could
+  not restore because the box already held text. The first draft is the
+  file's whole text; each later one is appended after a blank line, a line
+  reading `--- unrestored draft ---` and another blank line, so a later rescue
+  never replaces an earlier one. Nothing else writes the file. `OrphanGC`
+  removes it 30 days after its last write, as the `unsent-prompts/` arm does.
 - **`composer-draft.restore.json`** – the outcome of the latest restore in
   this session, `restored` or `unrestored`, with the incarnation that ran it
   and when. Each outcome overwrites it. It goes with its directory.
@@ -431,20 +433,27 @@ restore has run, the feature:
 1. Waits until the box is mounted and empty, retrying `$.prompt.fill` every
    500 milliseconds while it answers `isFilled: false`.
 2. Fills the box with `mode: 'replace'`, and records the restore in `$.state`.
-3. Shows "Restored your unsent draft" above the prompt for 3 seconds. A
-   `$.clock.after` timer hides it, and the band redraws without it.
+3. Shows a notice above the prompt for 3 seconds: "Restored your unsent
+   draft", or "Restored your unsent draft, but not its pasted text" for a
+   draft marked not restorable. A `$.clock.after` timer hides it, and the
+   band redraws without it.
 
 The `$.state` record keeps a reload from restoring a second time into a box
 that already holds the draft. The fill raises `prompt.change`, which saves the
 draft again with its saved mark, so a second park before any edit still keeps
 it. Until the fill lands, an empty box is not saved, because it would
 overwrite the only copy of the draft. If the person's own text reaches the box
-before the fill lands, the feature leaves the box alone, writes the saved
-draft to `composer-draft.unrestored`, records the restore as done, and logs
-it. Either outcome is written to `composer-draft.restore.json`.
+before the fill lands, the feature leaves the box alone, adds the saved draft
+to `composer-draft.unrestored`, records the restore as done, and logs it. When
+that file is there but cannot be read, the feature leaves it as it is rather
+than overwrite the drafts it may hold, logs that the draft was dropped, and
+still records the restore as done, so the restore is not retried. Either
+outcome is written to `composer-draft.restore.json`.
 
 A draft marked not restorable is restored as saved after a park the person
-overrode: they were warned that part of it could be lost.
+overrode: they were warned that part of it could be lost. The box gets the
+text with its paste placeholders, and the notice says the pasted text did not
+come back.
 
 A message delivered with the wake arrives as an argument to `claude --resume`.
 Implementation verifies, against the fake model API, that Claude submits that
@@ -484,7 +493,7 @@ feature-versus-scrape disagreements, and parks skipped or refused for an
 unknown reason, with the reason. The third is restores, read from the session
 directories rather than any log: each `~/tbd/sessions/*/composer-draft.restore.json`
 records its session's latest restore outcome, and a
-`composer-draft.unrestored` beside it holds a draft that could not go back.
+`composer-draft.unrestored` beside it holds the drafts that could not go back.
 The flag graduates when every case where the scrape saw a draft and the
 feature did not is explained as a scrape false positive, such as a grayed
 suggestion the scrape read as typed text, and restores have been seen working
@@ -528,7 +537,9 @@ Each gating branch gets its own test.
   signal and no keys, asserted on the transport, for both transports, and
   against a real holder, where the job's own stdin records nothing and its
   `SIGTERM` handler runs; a park of a legacy session gets the typed `/exit` as
-  today.
+  today. The job puts its terminal in non-canonical mode, so it records bytes
+  no Enter follows, a bare Escape or a Ctrl+C among them, and a control test
+  shows it recording such bytes written through the session's reader.
 - **Swap ending** – every in-place profile swap gets a signal and no keys,
   whatever the session's status: the ending chosen for a swap is a signal for
   legacy, unknown and confirmed sessions alike; the tmux swap sends no
@@ -562,12 +573,14 @@ Each gating branch gets its own test.
     emptied box resets it, an edit keeps it, the restore fill carries the saved
     value, and the record carries the mark
   - a restore fills an empty box; a non-empty box produces
-    `composer-draft.unrestored`; each outcome writes
-    `composer-draft.restore.json`; an empty box is not saved while a restore is
-    pending
+    `composer-draft.unrestored`, holding the bare draft when the file is new,
+    appending after the separator when it exists, and left alone when it
+    cannot be read; each outcome writes `composer-draft.restore.json`; an
+    empty box is not saved while a restore is pending
   - a second `session.start` in the same process, as after a reload, restores
     nothing
-  - the notice appears and disappears at 3 seconds
+  - the notice appears and disappears at 3 seconds, and for a draft marked
+    not restorable it says the pasted text did not come back
 - **Live checks during implementation**, at zero token cost with
   `scripts/claude-stub.py`:
   - a change to the `--plugin-dir` folder reloads the module in a running
