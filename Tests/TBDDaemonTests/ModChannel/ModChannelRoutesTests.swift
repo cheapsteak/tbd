@@ -239,6 +239,25 @@ struct ModChannelRoutesTests {
         #expect(Self.json(after) == ["state": "resolved"])
     }
 
+    /// The session ID is informational: an open without one is still an open,
+    /// while one missing its tool use id is refused.
+    @Test func openWithoutSessionIDIsAccepted() async {
+        let h = makeHarness()
+        var body = Self.openBody()
+        body.removeValue(forKey: "sessionID")
+        let opened = await h.routes.handle(
+            h.request("POST", "/v1/prompts/open", body: body), token: UUID())
+        #expect(opened.status == 200)
+        #expect(await h.store.prompts(forTerminal: h.terminal).map(\.id) == ["toolu_1"])
+
+        var noID = Self.openBody(toolUseID: "toolu_2")
+        noID.removeValue(forKey: "toolUseID")
+        let refused = await h.routes.handle(
+            h.request("POST", "/v1/prompts/open", body: noID), token: UUID())
+        #expect(refused.status == 400)
+        #expect(await h.store.prompts(forTerminal: h.terminal).map(\.id) == ["toolu_1"])
+    }
+
     @Test func answerHoldsThenReportsPending() async throws {
         let h = makeHarness()
         await h.store.open(

@@ -33,10 +33,10 @@ extension RPCRouter {
     }
 
     /// The disconnect sweep over this router's prompt store, publishing each
-    /// terminal it clears.
-    func makeModDisconnectSweep(channel: ModChannel) -> ModDisconnectSweep {
+    /// terminal it clears. It judges each prompt by its own wait requests, so
+    /// it needs no channel.
+    func makeModDisconnectSweep() -> ModDisconnectSweep {
         ModDisconnectSweep(
-            channel: channel,
             store: pendingQuestions,
             broadcast: { [weak self] terminals in
                 await self?.broadcastPendingPrompts(terminals: terminals)

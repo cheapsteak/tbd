@@ -23,7 +23,7 @@ import TBDShared
 /// Memory-only; a daemon restart wipes the store, and the mod re-posts its
 /// open dialogs. It creates no durable resource: Claude Code owns the dialog,
 /// and every record here resolves on its own (a receipt, a close, the terminal
-/// or session ending, the mod going quiet, or shutdown).
+/// or session ending, no wait request for a minute, or shutdown).
 ///
 /// Not to be confused with `PendingPromptCoordinator`, which parks a
 /// worktree's queued first message.
@@ -57,7 +57,8 @@ public actor PendingPromptStore {
         case terminalGone
         /// The terminal's Claude session ended.
         case sessionEnded
-        /// The terminal's mod stopped polling.
+        /// No wait request held the prompt for the idle threshold: the mod
+        /// that reported it is no longer waiting on it.
         case modDisconnected
         /// The daemon is stopping.
         case daemonShutdown
@@ -136,8 +137,13 @@ public actor PendingPromptStore {
 
     private struct PromptRecord {
         var payload: PendingPromptPayload
-        /// Kept for session-end clearing and the log.
-        var sessionID: String
+        /// The Claude session the mod reported, for the log only. Prompts are
+        /// keyed and cleared by terminal; a session ID is not an address.
+        var sessionID: String?
+        /// When a wait request last attached to or left this prompt, or when
+        /// it was opened. With no wait attached, the idle sweep measures from
+        /// here (``resolveIdlePrompts(now:threshold:)``).
+        var lastWaitAt: Date
         /// Distinguishes this record from a later one under the same key, so
         /// an `answer` that outlived its prompt cannot act on a newer one.
         let generation: UUID
@@ -258,14 +264,16 @@ public actor PendingPromptStore {
     /// prompt set changed.
     ///
     /// `kind` is `.question` for `AskUserQuestion`, `.permission` otherwise.
+    /// `sessionID` is informational (the log); the mod may omit it.
     /// A repeat for the same `(terminalID, toolUseID)` is the same prompt
     /// re-posted after a reconnect: it refreshes the payload and keeps
-    /// `createdAt`, any held wait request and any answer in flight. The same
+    /// `createdAt`, any held wait request and any answer in flight. Every
+    /// open, repeat or not, restarts the prompt's idle measure. The same
     /// `toolUseID` under another terminal is a separate prompt — two
     /// terminals resumed into one session stay apart because the address is
     /// the terminal.
     @discardableResult
-    public func open(terminalID: UUID, sessionID: String, toolUseID: String, toolName: String,
+    public func open(terminalID: UUID, sessionID: String?, toolUseID: String, toolName: String,
                      toolInputJSON: String, suggestionsJSON: String?) -> Set<UUID> {
         let key = Key(terminalID: terminalID, toolUseID: toolUseID)
         let kind: PendingPromptKind = toolName == "AskUserQuestion" ? .question : .permission
@@ -277,15 +285,16 @@ public actor PendingPromptStore {
         if var record = existing {
             record.payload = payload
             record.sessionID = sessionID
+            record.lastWaitAt = now()
             promptRecords[key] = record
         } else {
             promptRecords[key] = PromptRecord(
-                payload: payload, sessionID: sessionID, generation: UUID(),
-                waiter: nil, pendingAnswer: nil)
+                payload: payload, sessionID: sessionID, lastWaitAt: now(),
+                generation: UUID(), waiter: nil, pendingAnswer: nil)
         }
         bumpRevision(terminalID)
         Self.log.debug(
-            "prompt opened id=\(toolUseID, privacy: .public) kind=\(kind.rawValue, privacy: .public) session=\(sessionID, privacy: .public) repeat=\(existing != nil, privacy: .public)")
+            "prompt opened id=\(toolUseID, privacy: .public) kind=\(kind.rawValue, privacy: .public) session=\(sessionID ?? "-", privacy: .public) repeat=\(existing != nil, privacy: .public)")
         return [terminalID]
     }
 
@@ -303,10 +312,14 @@ public actor PendingPromptStore {
     ///   elapses with no answer.
     ///
     /// `token` names this request, so `waiterGone(token:)` detaches only it.
+    /// Every request, and every way one ends, stamps the prompt's
+    /// `lastWaitAt`, so the idle sweep spares a prompt the mod is still
+    /// waiting on.
     public func waitForAnswer(terminalID: UUID, toolUseID: String, token: UUID,
                               hold: Duration) async -> WaitResult {
         let key = Key(terminalID: terminalID, toolUseID: toolUseID)
         guard let record = promptRecords[key] else { return .resolved }
+        stampWait(key)
         if let decision = takeDecision(key) { return .decision(decision) }
         return await withCheckedContinuation { (continuation: CheckedContinuation<WaitResult, Never>) in
             guard var current = promptRecords[key], current.generation == record.generation else {
@@ -317,6 +330,7 @@ public actor PendingPromptStore {
                 continuation.resume(returning: .decision(decision))
                 return
             }
+            current.lastWaitAt = now()
             if let old = current.waiter {
                 old.holdTimer.cancel()
                 old.continuation.resume(returning: .pending)
@@ -346,9 +360,15 @@ public actor PendingPromptStore {
     private func detachWaiter(_ key: Key, returning result: WaitResult) {
         guard var record = promptRecords[key], let waiter = record.waiter else { return }
         record.waiter = nil
+        record.lastWaitAt = now()
         promptRecords[key] = record
         waiter.holdTimer.cancel()
         waiter.continuation.resume(returning: result)
+    }
+
+    /// Restarts the prompt's idle measure: a wait request arrived or left.
+    private func stampWait(_ key: Key) {
+        promptRecords[key]?.lastWaitAt = now()
     }
 
     /// The decision of the answer in flight, marking it handed over and
@@ -434,6 +454,7 @@ public actor PendingPromptStore {
         if let waiter = record.waiter {
             _ = takeDecision(key)
             promptRecords[key]?.waiter = nil
+            stampWait(key)
             waiter.holdTimer.cancel()
             waiter.continuation.resume(returning: .decision(decisionJSON))
         } else {
@@ -542,6 +563,26 @@ public actor PendingPromptStore {
     /// The terminals holding at least one open prompt.
     public func terminalsWithOpenPrompts() -> Set<UUID> {
         Set(promptRecords.keys.map(\.terminalID))
+    }
+
+    /// Resolves `.modDisconnected` every prompt that has no wait request
+    /// attached and whose `lastWaitAt` is more than `threshold` before `now`,
+    /// and returns the terminals whose prompt set changed.
+    ///
+    /// Liveness is judged per prompt, not per terminal: a mod that keeps
+    /// polling but stopped waiting on one dialog (a lost close, a reload that
+    /// forgot the dialog) still loses that card, and a mod whose poll loop is
+    /// down but whose dialog waits still run keeps its cards. A prompt opened
+    /// a moment ago, before its first wait arrives, is measured from its open.
+    @discardableResult
+    public func resolveIdlePrompts(now: Date, threshold: Duration) -> Set<UUID> {
+        let thresholdSeconds = Self.seconds(threshold)
+        var changed: Set<UUID> = []
+        for (key, record) in promptRecords
+        where record.waiter == nil && now.timeIntervalSince(record.lastWaitAt) > thresholdSeconds {
+            if let terminal = resolve(key, .modDisconnected) { changed.insert(terminal) }
+        }
+        return changed
     }
 
     /// The terminals holding at least one capture or open prompt — the ones a

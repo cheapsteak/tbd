@@ -228,7 +228,7 @@ public final class Daemon: Sendable {
     /// not be loaded or the socket could not be bound — the feature then
     /// degrades to answering in the terminal.
     nonisolated(unsafe) var modChannelServer: ModChannelServer?
-    /// Clears the prompts of terminals whose mod stopped polling. `nil`
+    /// Clears open prompts no wait request has held for a minute. `nil`
     /// whenever `modChannelServer` is.
     nonisolated(unsafe) var modDisconnectSweep: ModDisconnectSweep?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?

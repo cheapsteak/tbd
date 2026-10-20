@@ -4,11 +4,14 @@ import Testing
 @testable import TBDDaemonLib
 import TBDShared
 
-/// Tier 1 — `ModDisconnectSweep` clearing the prompts of terminals whose mod
-/// stopped polling (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`,
-/// "Answering prompts → Clearing"). One `TestDateSource` feeds the channel, the
-/// store and the sweep, and every timer runs on an `EventDrivenTestClock`, so
-/// passes are driven with `sweepOnce()` or by advancing the sweep's clock.
+/// Tier 1 — `ModDisconnectSweep` clearing open prompts no mod is waiting on
+/// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`, "Answering
+/// prompts → Daemon: the store"). Liveness is per prompt: a prompt with no
+/// wait attached, and none attached or released for more than 60 s, is
+/// cleared whatever the terminal's poll is doing. One `TestDateSource` feeds
+/// the channel, the store and the sweep, and every timer runs on an
+/// `EventDrivenTestClock`, so passes are driven with `sweepOnce()` or by
+/// advancing the sweep's clock.
 @Suite(.clockDriven)
 struct ModDisconnectSweepTests {
 
@@ -42,6 +45,29 @@ struct ModDisconnectSweepTests {
             let seq = await channel.enqueue(terminalID: terminal, kind: "message", body: "{}") {}
             _ = await channel.poll(terminalID: terminal, after: seq - 1, token: UUID())
         }
+
+        /// Starts a wait request on the prompt and returns once it is held.
+        func attachWait(_ toolUseID: String = "toolu_1", token: UUID = UUID()) async -> Task<PendingPromptStore.WaitResult, Never> {
+            let store = self.store
+            let terminal = self.terminal
+            let waiting = Task {
+                await store.waitForAnswer(terminalID: terminal, toolUseID: toolUseID, token: token, hold: .seconds(25))
+            }
+            let attached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+                await store.isWaiterAttached(terminalID: terminal, toolUseID: toolUseID)
+            }
+            #expect(attached != .timedOut, "the wait request never attached")
+            return waiting
+        }
+
+        /// A wait request that attaches and then loses its connection, as the
+        /// mod's hold cycle ends: the prompt is left with no wait attached.
+        func waitAndLeave(_ toolUseID: String = "toolu_1") async {
+            let token = UUID()
+            let waiting = await attachWait(toolUseID, token: token)
+            await store.waiterGone(token: token)
+            #expect(await waiting.value == .pending)
+        }
     }
 
     private func makeHarness() -> Harness {
@@ -52,7 +78,7 @@ struct ModDisconnectSweepTests {
         let store = PendingPromptStore(now: dates.provider, clock: clock)
         let broadcasts = BroadcastLog()
         let sweep = ModDisconnectSweep(
-            channel: channel, store: store,
+            store: store,
             broadcast: { await broadcasts.record($0) },
             now: dates.provider, clock: sweepClock)
         return Harness(
@@ -65,19 +91,26 @@ struct ModDisconnectSweepTests {
         #expect(ModDisconnectSweep.defaultThreshold == .seconds(60))
     }
 
-    @Test func sweepClearsPromptsAfterSixtySecondsWithoutPoll() async {
+    /// The terminal keeps polling the whole time, yet the prompt nobody waits
+    /// on is cleared 60 s after its last wait ended: poll state is not read.
+    @Test func sweepClearsAPromptWhoseWaitsStoppedWhileTheTerminalPolls() async {
         let h = makeHarness()
-        await h.pollOnce()
         await h.open()
+        await h.waitAndLeave()
 
-        // Past the 30 s liveness window but inside the 60 s threshold: kept.
-        h.dates.advance(by: 59)
-        #expect(await !h.channel.isConnected(terminalID: h.terminal))
+        for _ in 0..<3 {
+            h.dates.advance(by: 20)
+            await h.pollOnce()
+        }
+        #expect(await h.channel.isConnected(terminalID: h.terminal))
+        // 60 s after the wait ended, not more: kept.
         await h.sweep.sweepOnce()
         #expect(await h.openIDs() == ["toolu_1"])
         #expect(await h.broadcasts.sets.isEmpty)
 
-        h.dates.advance(by: 2)
+        h.dates.advance(by: 1)
+        await h.pollOnce()
+        #expect(await h.channel.isConnected(terminalID: h.terminal))
         await h.sweep.sweepOnce()
         #expect(await h.openIDs().isEmpty)
         #expect(await h.broadcasts.sets == [[h.terminal]])
@@ -87,79 +120,76 @@ struct ModDisconnectSweepTests {
         #expect(await h.broadcasts.sets.count == 1)
     }
 
-    /// The clearing ends a held wait request like any other resolution, so
-    /// the mod is told to stop waiting.
-    @Test func sweepReleasesAHeldWaitAsResolved() async {
+    /// A held wait keeps its prompt however long it is held, and with no poll
+    /// at all: a mod whose poll loop is down but whose dialog waits work
+    /// keeps its cards.
+    @Test func sweepKeepsAPromptWithAWaitAttached() async {
         let h = makeHarness()
-        await h.pollOnce()
         await h.open()
-        let store = h.store
-        let terminal = h.terminal
-        let waiting = Task {
-            await store.waitForAnswer(terminalID: terminal, toolUseID: "toolu_1", token: UUID(), hold: .seconds(25))
-        }
-        let attached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1")
-        }
-        #expect(attached != .timedOut)
+        let waiting = await h.attachWait()
 
-        h.dates.advance(by: 61)
+        h.dates.advance(by: 300)
+        #expect(await !h.channel.isConnected(terminalID: h.terminal))
         await h.sweep.sweepOnce()
+        #expect(await h.openIDs() == ["toolu_1"])
+        #expect(await h.broadcasts.sets.isEmpty)
+
+        // A close ends the prompt and tells the held wait to stop.
+        await h.store.closed(terminalID: h.terminal, toolUseID: "toolu_1")
         #expect(await waiting.value == .resolved)
     }
 
-    @Test func sweepKeepsPromptsWhilePolling() async {
+    /// Waits that come and go every 20 s keep the prompt; once they stop it
+    /// goes 60 s after the last one ended.
+    @Test func sweepKeepsAPromptWhoseLastWaitEndedUnderSixtySecondsAgo() async {
         let h = makeHarness()
         await h.open()
-        let channel = h.channel
-        let terminal = h.terminal
-        let token = UUID()
-        let held = Task { await channel.poll(terminalID: terminal, after: 0, token: token) }
-        let attached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await channel.isPollAttached(terminalID: terminal)
-        }
-        #expect(attached != .timedOut)
-
-        // A held poll is connected however old its arrival.
-        h.dates.advance(by: 300)
-        await h.sweep.sweepOnce()
-        #expect(await h.openIDs() == ["toolu_1"])
-
-        await channel.pollGone(token: token)
-        _ = await held.value
-
-        // Polls every few seconds keep it connected too.
         for _ in 0..<10 {
             h.dates.advance(by: 20)
-            await h.pollOnce()
+            await h.waitAndLeave()
             await h.sweep.sweepOnce()
         }
         #expect(await h.openIDs() == ["toolu_1"])
-        #expect(await h.broadcasts.sets.isEmpty)
-    }
 
-    /// A terminal that never polled this daemon run is measured from its
-    /// newest prompt's `createdAt`, so a prompt opened just now is not swept
-    /// before its mod has had the full 60 s to start polling.
-    @Test func sweepUsesCreatedAtWhenNeverPolled() async {
-        let h = makeHarness()
-        await h.open("toolu_1")
-        h.dates.advance(by: 100)
-        await h.open("toolu_2")
-        #expect(await h.channel.lastPollAt(terminalID: h.terminal) == nil)
-
-        // 150 s after the first prompt, 50 s after the newest: kept.
-        h.dates.advance(by: 50)
+        h.dates.advance(by: 59)
         await h.sweep.sweepOnce()
-        #expect(await h.openIDs() == ["toolu_1", "toolu_2"])
+        #expect(await h.openIDs() == ["toolu_1"])
+        #expect(await h.broadcasts.sets.isEmpty)
 
-        h.dates.advance(by: 11)
+        h.dates.advance(by: 2)
         await h.sweep.sweepOnce()
         #expect(await h.openIDs().isEmpty)
         #expect(await h.broadcasts.sets == [[h.terminal]])
     }
 
-    /// Only the quiet terminal is cleared.
+    /// A prompt opened before its first wait arrives is measured from its
+    /// open, so a fresh prompt is not cleared before 60 s. A repeat open (the
+    /// mod re-posting after a reconnect) restarts the measure.
+    @Test func sweepSparesAFreshPromptForSixtySeconds() async {
+        let h = makeHarness()
+        await h.open("toolu_1")
+        h.dates.advance(by: 40)
+        await h.open("toolu_2")
+
+        h.dates.advance(by: 21)
+        await h.sweep.sweepOnce()
+        // 61 s after the first open, 21 s after the second.
+        #expect(await h.openIDs() == ["toolu_2"])
+        #expect(await h.broadcasts.sets == [[h.terminal]])
+
+        h.dates.advance(by: 30)
+        await h.open("toolu_2")
+        h.dates.advance(by: 59)
+        await h.sweep.sweepOnce()
+        #expect(await h.openIDs() == ["toolu_2"])
+
+        h.dates.advance(by: 2)
+        await h.sweep.sweepOnce()
+        #expect(await h.openIDs().isEmpty)
+        #expect(await h.broadcasts.sets == [[h.terminal], [h.terminal]])
+    }
+
+    /// Only the idle prompt's terminal is cleared.
     @Test func sweepLeavesOtherTerminalsAlone() async {
         let h = makeHarness()
         let other = UUID()
@@ -187,7 +217,7 @@ struct ModDisconnectSweepTests {
         let cleared = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await store.prompts(forTerminal: terminal).isEmpty
         }
-        #expect(cleared != .timedOut, "the timed pass never cleared the quiet terminal")
+        #expect(cleared != .timedOut, "the timed pass never cleared the idle prompt")
         await h.sweep.stop()
     }
 }

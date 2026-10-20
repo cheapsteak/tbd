@@ -184,11 +184,13 @@ struct ModChannelRoutes: Sendable {
         guard await promptAnswerEnabled() else { return Self.error(409, "disabled") }
         guard let object = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
               let toolUseID = object["toolUseID"] as? String, !toolUseID.isEmpty,
-              let sessionID = object["sessionID"] as? String,
               let toolName = object["toolName"] as? String,
               let toolInput = object["toolInput"],
               let toolInputJSON = Self.canonicalJSON(toolInput)
         else { return Self.error(400, "bad request") }
+        // Informational only (the log): prompts are keyed by terminal, so an
+        // open without a session ID is still a valid open.
+        let sessionID = object["sessionID"] as? String
         var suggestionsJSON: String?
         if let suggestions = object["suggestions"], !(suggestions is NSNull) {
             guard let encoded = Self.canonicalJSON(suggestions) else { return Self.error(400, "bad request") }

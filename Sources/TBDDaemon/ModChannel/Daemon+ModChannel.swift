@@ -39,7 +39,7 @@ extension Daemon {
         }
         modChannelServer = server
 
-        let sweep = router.makeModDisconnectSweep(channel: channel)
+        let sweep = router.makeModDisconnectSweep()
         modDisconnectSweep = sweep
         await sweep.start()
     }
