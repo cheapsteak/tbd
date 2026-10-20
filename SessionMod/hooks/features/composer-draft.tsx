@@ -20,6 +20,9 @@ export const NOTICE_MS = 3_000
 /** The plugin's own name, as a `plugin` origin names the plugin that filled. */
 const PLUGIN = 'tbd'
 
+/** Between two drafts in composer-draft.unrestored. */
+const UNRESTORED_SEPARATOR = '\n\n--- unrestored draft ---\n\n'
+
 const restoredIncarnation = { plugin: 'tbd', key: 'composerDraftRestoredIncarnation' } as const
 const noticeVisible = { plugin: 'tbd', key: 'composerDraftNoticeVisible' } as const
 const restorableMark = { plugin: 'tbd', key: 'composerDraftRestorable' } as const
@@ -211,7 +214,7 @@ async function readSavedDraft($: EngineInterface, ctx: SessionContext): Promise<
  * Fills the saved draft into the empty box, retrying every RESTORE_RETRY_MS
  * while the box refuses it (not mounted yet, or under a dialog). When the
  * person's own text reaches the box first, the box is left alone and the
- * draft goes to composer-draft.unrestored. Each outcome is recorded in
+ * draft is added to composer-draft.unrestored. Each outcome is recorded in
  * composer-draft.restore.json. Resolves after one attempt and never rejects;
  * the retries run on timers.
  */
@@ -219,10 +222,9 @@ export async function restoreDraft($: EngineInterface, ctx: SessionContext, draf
   try {
     const box = await $.prompt.read()
     if (box.text !== '') {
-      await $.fs.write(`${ctx.dir}/composer-draft.unrestored`, draft.text)
+      await keepUnrestored($, ctx, draft.text)
       await $.state.set(restoredIncarnation, ctx.incarnationId)
       restoring = false
-      log($, 'box was not empty, saved the draft to composer-draft.unrestored')
       await recordRestore($, ctx, 'unrestored')
       return
     }
@@ -244,6 +246,27 @@ export async function restoreDraft($: EngineInterface, ctx: SessionContext, draf
     restoring = false
     log($, `restore failed: ${describe(error)}`)
   }
+}
+
+/**
+ * Adds a draft to composer-draft.unrestored: as the whole text when there is
+ * no file, else after the drafts already there and UNRESTORED_SEPARATOR, so a
+ * later rescue never replaces an earlier one. A file that is there but cannot
+ * be read is left alone, since writing it would drop the drafts it holds.
+ */
+async function keepUnrestored($: EngineInterface, ctx: SessionContext, text: string): Promise<void> {
+  const path = `${ctx.dir}/composer-draft.unrestored`
+  let kept: string | undefined
+  if (await $.fs.exists(path)) {
+    try {
+      kept = await $.fs.read(path)
+    } catch (error) {
+      log($, `could not read composer-draft.unrestored, left it alone and dropped the draft: ${describe(error)}`)
+      return
+    }
+  }
+  await $.fs.write(path, kept === undefined ? text : `${kept}${UNRESTORED_SEPARATOR}${text}`)
+  log($, 'box was not empty, saved the draft to composer-draft.unrestored')
 }
 
 /**
