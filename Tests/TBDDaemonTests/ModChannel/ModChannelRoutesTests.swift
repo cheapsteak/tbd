@@ -101,7 +101,7 @@ struct ModChannelRoutesTests {
         (try? JSONSerialization.jsonObject(with: response.body)) as? NSDictionary
     }
 
-    private static let unauthorized: NSDictionary = ["error": "unauthorized"]
+    private static var unauthorized: NSDictionary { ["error": "unauthorized"] }
 
     // MARK: Auth
 
