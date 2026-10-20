@@ -9,7 +9,7 @@ import type { EngineInterface, Timer } from 'claude-code'
 
 export const MOD_VERSION = 1
 export const HEARTBEAT_MS = 30_000
-export const KNOWN_FEATURES: readonly string[] = ['composer-draft']
+export const KNOWN_FEATURES: readonly string[] = ['composer-draft', 'transcript-stream']
 
 /** The spawn's environment: where session directories live, and what runs. */
 export type SessionEnv = {
