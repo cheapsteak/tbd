@@ -54,9 +54,15 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
     case userAction(String)
     /// The session's transcript JSONL, read from the tail.
     case transcriptTail
-    /// The statusline wrapper's captured stdin JSON — the one surface on which
-    /// Claude Code tells a third party its *resolved* context window.
+    /// The statusline wrapper's captured stdin JSON — one of the two surfaces
+    /// on which Claude Code tells a third party its *resolved* context window,
+    /// and the one a session spawned without the session mod's `usage`
+    /// feature has.
     case statuslineTee
+    /// The session mod's `usage.json`, written from `$.session.usage()` and
+    /// each `session.measure` — the other surface carrying the resolved
+    /// window, read only while the mod is confirmed running in the session.
+    case sessionMod
     /// TBD's own persisted record: the hibernation columns, the scheduled-resume
     /// rows, anything the daemon wrote down earlier and is now reading back.
     case database
@@ -97,6 +103,7 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         case .userAction: return "user-action"
         case .transcriptTail: return "transcript-tail"
         case .statuslineTee: return "statusline-tee"
+        case .sessionMod: return "session-mod"
         case .database: return "database"
         case .processLiveness: return "process-liveness"
         case .forge: return "forge"
@@ -139,6 +146,7 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
             if let detail, !detail.isEmpty { self = .userAction(detail) } else { self = .unrecognized(kind) }
         case "transcript-tail": self = .transcriptTail
         case "statusline-tee": self = .statuslineTee
+        case "session-mod": self = .sessionMod
         case "database": self = .database
         case "process-liveness": self = .processLiveness
         case "forge": self = .forge
@@ -705,7 +713,8 @@ public struct ContextLoad: Codable, Sendable, Equatable {
     ///
     /// True only when both halves came from the same source at the same
     /// instant — in practice, when the statusline tee's captured payload
-    /// carried a `current_usage` and a `context_window_size` together, which is
+    /// carried a `current_usage` and a `context_window_size` together, or the
+    /// session mod's `usage.json` carried `tokens` beside its `window`, which is
     /// Claude Code computing both at once from its own state. False whenever
     /// the numerator was read from the transcript tail while the denominator
     /// came from an earlier capture, and false when the window is unknown.

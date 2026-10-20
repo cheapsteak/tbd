@@ -409,4 +409,224 @@ import TBDShared
             tee: .notADesk)
         #expect(load.used == nil)
     }
+
+    // MARK: - The session mod's usage file
+
+    private static let usageMeasuredAtMs: Int64 = 1_770_000_000_000
+    private static var usageMeasuredAt: Date {
+        Date(timeIntervalSince1970: Double(usageMeasuredAtMs) / 1000)
+    }
+
+    /// The shape `SessionMod/hooks/features/usage.ts` writes, with the window
+    /// spelled as a raw JSON literal so a test can hand it a malformed one.
+    private static func usageJSON(window: String = "200000", tokens: Int? = 50_000) -> String {
+        let tokensField = tokens.map { #","tokens":\#($0),"percent":25"# } ?? ""
+        return """
+        {"schemaVersion":1,"claudeSessionID":"s","incarnationID":"i",\
+        "measuredAt":\(usageMeasuredAtMs),"context":{"window":\(window)\(tokensField)},\
+        "rateLimits":[{"kind":"five_hour","percentUsed":12}],"cost":{"usd":1.5}}
+        """
+    }
+
+    private func writeUsage(_ json: String, in scratch: Scratch) throws -> String {
+        let path = scratch.root.appendingPathComponent(SessionModFiles.usageFileName).path
+        try Data(json.utf8).write(to: URL(fileURLWithPath: path))
+        return path
+    }
+
+    @Test func confirmedUsageGivesThePairedReadingFromTheFile() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        // Both other sources exist and disagree — the file the spawn chose wins.
+        try scratch.writeTranscript(tokens: 999_999, timestamp: Self.transcriptStamp)
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+        let usagePath = try writeUsage(Self.usageJSON(), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .confirmed,
+            transcriptPath: scratch.transcriptPath, tee: .notADesk)
+
+        let used = try #require(load.used)
+        #expect(used == ObservedFact(value: 50_000, source: .sessionMod, observedAt: Self.usageMeasuredAt))
+        #expect(load.window == .observed(
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
+        #expect(load.isPairedReading)
+        #expect(load.percentUsed()?.percent == 25.0)
+        #expect(load.percentUsed()?.assumedWindow == false)
+    }
+
+    /// The `session.start` baseline carries the window before any response
+    /// reported a fill. The window is observed; the numerator is the
+    /// transcript's, and the pair is not presented as one reading.
+    @Test func aBaselineWithoutTokensKeepsTheWindowAndTakesTheTranscriptNumerator() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeTranscript(tokens: 40_000, timestamp: Self.transcriptStamp)
+        let usagePath = try writeUsage(Self.usageJSON(tokens: nil), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .confirmed,
+            transcriptPath: scratch.transcriptPath, tee: .notADesk)
+
+        #expect(load.window == .observed(
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
+        #expect(load.used == ObservedFact(value: 40_000, source: .transcriptTail, observedAt: Self.transcriptDate))
+        #expect(!load.isPairedReading)
+    }
+
+    /// `$.fs` has no rename, so a reader can meet a file cut off mid-write.
+    /// That is "not observed", never a zero window, and never a reason to
+    /// reach for the tee capture.
+    @Test func aTornUsageFileIsAnUnknownWindowNotAZero() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeTranscript(tokens: 60_000, timestamp: Self.transcriptStamp)
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+        let full = Self.usageJSON()
+        let usagePath = try writeUsage(String(full.prefix(full.count / 2)), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .confirmed,
+            transcriptPath: scratch.transcriptPath, tee: .notADesk)
+
+        guard case .unknown(let why) = load.window else {
+            Issue.record("expected an unknown window for a torn usage file, got \(load.window)")
+            return
+        }
+        #expect(why.contains("unreadable"))
+        #expect(load.used == ObservedFact(value: 60_000, source: .transcriptTail, observedAt: Self.transcriptDate))
+    }
+
+    @Test func aMissingUsageFileIsAnUnknownWindow() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath,
+            usagePath: scratch.root.appendingPathComponent(SessionModFiles.usageFileName).path,
+            usageLiveness: .confirmed, transcriptPath: nil, tee: .notADesk)
+
+        guard case .unknown(let why) = load.window else {
+            Issue.record("expected an unknown window for a missing usage file, got \(load.window)")
+            return
+        }
+        #expect(why.contains("has not been written yet"))
+        #expect(load.used == nil)
+    }
+
+    /// Same refusals as the capture's `context_window_size`: a boolean, zero,
+    /// a negative, a fraction, a string or null is no window. JSON `true` is the
+    /// sharp one — it would otherwise read as a one-token window.
+    @Test(arguments: ["true", "false", "0", "-1", "1.5", #""200000""#, "null", "[]", "{}"])
+    func aMalformedUsageWindowIsNoWindowRatherThanAWrongOne(literal: String) throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeTranscript(tokens: 70_000, timestamp: Self.transcriptStamp)
+        let usagePath = try writeUsage(Self.usageJSON(window: literal), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .confirmed,
+            transcriptPath: scratch.transcriptPath, tee: .notADesk)
+
+        guard case .unknown = load.window else {
+            Issue.record("window literal \(literal) was read as \(load.window)")
+            return
+        }
+        #expect(load.used?.source == .transcriptTail)
+    }
+
+    /// A spawn that chose the mod's file over the tee, but whose mod has not
+    /// confirmed itself, must not fall back to a capture an earlier life of the
+    /// session left on disk: it describes a process this one may not be.
+    @Test func anUnconfirmedModDoesNotFallBackToAStaleTeeCapture() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeTranscript(tokens: 80_000, timestamp: Self.transcriptStamp)
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+        let usagePath = try writeUsage(Self.usageJSON(), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath,
+            usageLiveness: .unknown(.noAliveFile),
+            transcriptPath: scratch.transcriptPath, tee: .installed)
+
+        guard case .unknown(let why) = load.window else {
+            Issue.record("expected an unknown window for an unconfirmed mod, got \(load.window)")
+            return
+        }
+        #expect(why.contains(SessionModLiveness.UnknownReason.noAliveFile.rawValue))
+        #expect(load.used == ObservedFact(value: 80_000, source: .transcriptTail, observedAt: Self.transcriptDate))
+    }
+
+    /// A spawn made without `usage` keeps today's tee path, whatever a usage
+    /// file on disk says.
+    @Test func aLegacySpawnReadsTheTeeCaptureAndIgnoresAUsageFile() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+        let usagePath = try writeUsage(Self.usageJSON(), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .legacy,
+            transcriptPath: nil, tee: .installed)
+
+        #expect(load.window == .observed(
+            ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: Self.captureModified)))
+        #expect(load.used?.source == .statuslineTee)
+    }
+
+    // MARK: - The gatherer's liveness check
+
+    /// End to end through the session files: the gatherer evaluates liveness
+    /// against the row's live incarnation, and only a Claude row reads the
+    /// mod's file.
+    @Test func theGathererReadsUsageOnlyForAConfirmedClaudeSession() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        let pinned = Date(timeIntervalSince1970: 1_770_000_010)
+        let sessionsDir = scratch.root.appendingPathComponent("sessions", isDirectory: true)
+        let sessionID = "sess-usage"
+        let incarnation = UUID()
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: sessionID, incarnationId: incarnation.uuidString,
+                  spawnedAtMs: Self.usageMeasuredAtMs, features: ["usage"]),
+            sessionsDir: sessionsDir)
+        let dir = try #require(
+            SessionModFiles.directory(sessionsDir: sessionsDir, claudeSessionID: sessionID))
+        try JSONEncoder().encode(SessionModFiles.AliveRecord(
+            sessionId: sessionID, incarnationId: incarnation.uuidString, features: ["usage"],
+            heartbeatAtMs: Int64(pinned.timeIntervalSince1970 * 1000)))
+            .write(to: dir.appendingPathComponent(SessionModFiles.aliveFileName))
+        try Data(Self.usageJSON().utf8)
+            .write(to: dir.appendingPathComponent(SessionModFiles.usageFileName))
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+
+        let capturePath = scratch.capturePath
+        let gatherer = SessionStateFactGatherer(
+            now: { pinned }, capturePath: { _ in capturePath }, sessionsDir: sessionsDir)
+
+        let claude = Terminal(
+            worktreeID: UUID(), tmuxWindowID: "@0", tmuxPaneID: "%0",
+            claudeSessionID: sessionID, sessionIncarnationID: incarnation, kind: .claude,
+            watchDeskRole: .readOnlyCoordinator)
+        let load = gatherer.contextLoad(for: claude)
+        #expect(load.window == .observed(
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
+        #expect(load.isPairedReading)
+
+        // Another incarnation of the same session: the spawn record does not
+        // vouch for it, so it is legacy and reads the tee.
+        var respawned = claude
+        respawned.sessionIncarnationID = UUID()
+        #expect(gatherer.contextLoad(for: respawned).window == .observed(
+            ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: Self.captureModified)))
+
+        // A Codex row never reads the mod's file: it is legacy, and takes the
+        // tee path (the injected capture path serves every row).
+        var codex = claude
+        codex.kind = .codex
+        #expect(gatherer.contextLoad(for: codex).window == .observed(
+            ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: Self.captureModified)))
+    }
 }

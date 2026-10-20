@@ -11,12 +11,14 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "statusline-t
 /// **Why a tee at all.** A session's *effective* context window is a session
 /// fact, not a model fact — Claude Code resolves it per session from the model
 /// id, a long-context suffix, a beta header, environment overrides and a remote
-/// flag. The one surface on which Claude Code tells a third party the value it
-/// resolved is the statusline command's stdin JSON, whose `context_window`
-/// object carries `context_window_size` alongside the used/remaining figures.
-/// Reading it is the only honest way to get a denominator; every out-of-band
-/// source reports *capability* instead, and capability errs in the dangerous
-/// direction.
+/// flag. Claude Code tells a third party the value it resolved on two
+/// surfaces: the statusline command's stdin JSON, whose `context_window`
+/// object carries `context_window_size` alongside the used/remaining figures,
+/// and the mod API's `$.session.usage()` and `session.measure`, which the
+/// session mod's `usage` feature records to `usage.json`. The tee serves desk
+/// sessions spawned without that feature. Reading one of the two is the only
+/// honest way to get a denominator; every out-of-band source reports
+/// *capability* instead, and capability errs in the dangerous direction.
 ///
 /// **Why desk sessions only.** The denominator exists to serve a desk's own
 /// context-recycling thresholds, which are fractions of the session's effective
@@ -29,8 +31,9 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "statusline-t
 /// costs nobody anything.
 ///
 /// The consequence is carried honestly rather than papered over: for every
-/// non-desk session the context-window denominator is unknown and is reported
-/// as unknown — raw token counts with no percentage. See `ContextLoadReader`.
+/// non-desk session spawned without the session mod's `usage` feature, the
+/// context-window denominator is unknown and is reported as unknown — raw
+/// token counts with no percentage. See `ContextLoadReader`.
 ///
 /// One script serves the whole fleet. It takes the capture path and the
 /// operator's statusline command as arguments, so nothing session-specific is

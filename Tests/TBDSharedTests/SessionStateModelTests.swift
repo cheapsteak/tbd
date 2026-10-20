@@ -319,6 +319,7 @@ import Testing
         FactSource.hookEvent("Notification"),
         .transcriptTail,
         .statuslineTee,
+        .sessionMod,
         .database,
         .processLiveness,
         .forge,
@@ -330,6 +331,17 @@ import Testing
     ])
     func everySourceRoundTrips(source: FactSource) throws {
         #expect(try roundTrip(source) == source)
+    }
+
+    @Test func sessionModSourceUsesItsKind() throws {
+        let data = try JSONEncoder().encode(FactSource.sessionMod)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["kind"] as? String == "session-mod")
+        #expect(object.count == 1)
+        let json = #"{"kind":"session-mod"}"#
+        let decoded = try JSONDecoder().decode(FactSource.self, from: Data(json.utf8))
+        #expect(decoded == .sessionMod)
     }
 
     @Test func programStatusSourceUsesItsKind() throws {

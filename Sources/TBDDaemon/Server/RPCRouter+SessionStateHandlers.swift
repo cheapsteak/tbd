@@ -11,9 +11,11 @@ private let sessionStateLog = Logger(subsystem: "com.tbd.daemon", category: "ses
 ///
 /// Separated from the handler so the whole fact-gathering pass is a value with
 /// injectable seams — and so the cost model is legible in one place. Per
-/// terminal it performs **at most two byte-bounded file reads** (the transcript
-/// tail, once for the rate-limit classification and once inside
-/// `ContextLoadReader`, plus the statusline capture when one exists) and
+/// terminal it performs **a handful of small or byte-bounded file reads** (the
+/// transcript tail, once for the rate-limit classification and once inside
+/// `ContextLoadReader`; for a Claude session with a session directory, its
+/// `spawn.json`, `alive.json` and — when the mod is confirmed running —
+/// `usage.json`; and on the tee path, the statusline capture when one exists) and
 /// **zero** subprocesses, tmux calls, pane reads and model calls. That is the
 /// property that lets the whole fleet be asked about every cycle.
 /// Not `Sendable`, and it does not need to be: one gatherer is built inside a
@@ -30,6 +32,10 @@ struct SessionStateFactGatherer {
     /// Resolves a session's statusline capture path. Injected so a test can
     /// point it at a temp dir without reaching for `TBD_HOME`.
     var capturePath: @Sendable (String) -> String = { StatuslineTee.capturePath(sessionKey: $0) }
+    /// The session mod's sessions root, where each Claude session's
+    /// `spawn.json`, `alive.json` and `usage.json` live. Injected for the same
+    /// reason as `capturePath`.
+    var sessionsDir: URL = TBDConstants.sessionsDir()
 
     /// Written out rather than left memberwise so the injected date seam
     /// reaches the collaborator that has one of its own.
@@ -46,12 +52,14 @@ struct SessionStateFactGatherer {
         now: @escaping @Sendable () -> Date = { Date() },
         capturePath: @escaping @Sendable (String) -> String = {
             StatuslineTee.capturePath(sessionKey: $0)
-        }
+        },
+        sessionsDir: URL = TBDConstants.sessionsDir()
     ) {
         self.tailWindowBytes = tailWindowBytes
         self.contextLoadReader = contextLoadReader ?? ContextLoadReader(now: now)
         self.now = now
         self.capturePath = capturePath
+        self.sessionsDir = sessionsDir
     }
 
     /// - Parameter programStatus: the terminal's OSC 7501 snapshot, read by
@@ -79,10 +87,35 @@ struct SessionStateFactGatherer {
     }
 
     func contextLoad(for terminal: Terminal) -> ContextLoad {
-        contextLoadReader.read(
+        let usage = usageSource(for: terminal)
+        return contextLoadReader.read(
             capturePath: capturePath(terminal.id.uuidString),
+            usagePath: usage.path,
+            usageLiveness: usage.liveness,
             transcriptPath: terminal.transcriptPath,
             tee: teeStatus(for: terminal))
+    }
+
+    /// Whether this session was spawned to record its usage through the
+    /// session mod, and where that file lives.
+    ///
+    /// Liveness is evaluated against the row's live incarnation, as
+    /// `ComposerDraftStatus` does, so a `spawn.json` left by an earlier life of
+    /// the session reads `.legacy` rather than vouching for this one. The mod
+    /// loads into Claude Code only, so every other kind is `.legacy` — and so
+    /// is a row with no session ID, or one unsafe to use as a path, which has
+    /// no directory to read.
+    private func usageSource(
+        for terminal: Terminal
+    ) -> (path: String?, liveness: SessionModLiveness) {
+        guard terminal.kind == .claude, let id = terminal.claudeSessionID,
+              let dir = SessionModFiles.directory(sessionsDir: sessionsDir, claudeSessionID: id) else {
+            return (nil, .legacy)
+        }
+        let liveness = SessionModLiveness.evaluate(
+            feature: .usage, sessionsDir: sessionsDir, claudeSessionID: id,
+            liveIncarnationID: terminal.sessionIncarnationID, now: now())
+        return (dir.appendingPathComponent(SessionModFiles.usageFileName).path, liveness)
     }
 
     /// The desk role brands the ROW; the tee installs on the Claude spawn path

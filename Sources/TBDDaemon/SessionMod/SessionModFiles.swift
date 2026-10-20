@@ -10,6 +10,7 @@ public enum SessionModFiles {
     public static let aliveFileName = "alive.json"
     public static let composerDraftFileName = "composer-draft.json"
     public static let composerDraftUnrestoredFileName = "composer-draft.unrestored"
+    public static let usageFileName = "usage.json"
 
     /// Written by the daemon when it spawns a session.
     public struct SpawnRecord: Codable, Equatable, Sendable {
@@ -72,6 +73,71 @@ public enum SessionModFiles {
             self.cursor = cursor
             self.restorable = restorable
             self.savedAtMs = savedAtMs
+        }
+    }
+
+    /// Written by the mod's `usage` feature at `session.start` and on every
+    /// `session.measure`. Only the fields the daemon reads are decoded;
+    /// `rateLimits` and `cost` are recorded for later readers and ignored here.
+    ///
+    /// `$.fs` has no rename, so a reader can meet a torn file. A file that does
+    /// not parse, or lacks `measuredAt` or `context`, reads `.unreadable`
+    /// through `SessionModFiles.read`. A figure that is present but not a
+    /// number of the right shape decodes as nil rather than failing the
+    /// record, and `windowIsBoolean` keeps a JSON `true` from passing as a
+    /// one-token window: callers validate the window, never the decoder.
+    public struct UsageRecord: Decodable, Equatable, Sendable {
+        public struct Context: Decodable, Equatable, Sendable {
+            /// The window this session resolved, as written. Not validated:
+            /// zero, negative and boolean windows are the reader's to refuse.
+            public var window: Int?
+            /// Whether `window` was written as a JSON boolean.
+            public var windowIsBoolean: Bool
+            /// Tokens in the window. Absent before the first response.
+            public var tokens: Int?
+            public var percent: Double?
+
+            public init(window: Int?, windowIsBoolean: Bool = false,
+                        tokens: Int? = nil, percent: Double? = nil) {
+                self.window = window
+                self.windowIsBoolean = windowIsBoolean
+                self.tokens = tokens
+                self.percent = percent
+            }
+
+            private enum CodingKeys: String, CodingKey {
+                case window, tokens, percent
+            }
+
+            public init(from decoder: any Decoder) throws {
+                let c = try decoder.container(keyedBy: CodingKeys.self)
+                // Decoding `Bool` succeeds only on a JSON boolean, so this is
+                // the one test that tells `true` from `1` on every decoder.
+                windowIsBoolean = (try? c.decodeIfPresent(Bool.self, forKey: .window)) != nil
+                window = windowIsBoolean ? nil : (try? c.decodeIfPresent(Int.self, forKey: .window))
+                tokens = try? c.decodeIfPresent(Int.self, forKey: .tokens)
+                percent = try? c.decodeIfPresent(Double.self, forKey: .percent)
+            }
+        }
+
+        public var claudeSessionID: String?
+        public var incarnationID: String?
+        /// When the figures were measured, in milliseconds since the epoch.
+        public var measuredAt: Int64
+        public var context: Context
+
+        public init(claudeSessionID: String? = nil, incarnationID: String? = nil,
+                    measuredAt: Int64, context: Context) {
+            self.claudeSessionID = claudeSessionID
+            self.incarnationID = incarnationID
+            self.measuredAt = measuredAt
+            self.context = context
+        }
+
+        /// The window when it is a positive integer, else nil.
+        public var validWindow: Int? {
+            guard !context.windowIsBoolean, let window = context.window, window > 0 else { return nil }
+            return window
         }
     }
 
