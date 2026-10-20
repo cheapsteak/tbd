@@ -124,4 +124,66 @@ struct PromptDecisionEncoderTests {
                 toolInputJSON: askInput, suggestionsJSON: nil)
         }
     }
+
+    // MARK: decisionJSON
+
+    private func parsedDecisionJSON(
+        _ answer: PromptAnswer, _ kind: PendingPromptKind, input: String = "{}", suggestions: String? = nil
+    ) throws -> (json: String, parsed: NSDictionary) {
+        let json = try PromptDecisionEncoder.decisionJSON(
+            answer: answer, kind: kind, toolInputJSON: input, suggestionsJSON: suggestions)
+        let parsed = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary)
+        return (json, parsed)
+    }
+
+    @Test func decisionJSONMatchesHookOutputDecision() throws {
+        let s = #"[{"type":"addDirectories","directories":["/w"],"destination":"localSettings"}]"#
+        let cases: [(PromptAnswer, PendingPromptKind, String, String?)] = [
+            (.permission(decision: .allow, message: nil), .permission, "{}", nil),
+            (.permission(decision: .allowAlways, message: nil), .permission, "{}", s),
+            (.permission(decision: .deny, message: ""), .permission, "{}", nil),
+            (.question(answers: ["Which environment?": "staging", "Which checks?": "lint"]), .question, askInput, nil),
+        ]
+        for (answer, kind, input, suggestions) in cases {
+            let json = try PromptDecisionEncoder.decisionJSON(
+                answer: answer, kind: kind, toolInputJSON: input, suggestionsJSON: suggestions)
+            let hook = try PromptDecisionEncoder.hookOutput(
+                answer: answer, kind: kind, toolInputJSON: input, suggestionsJSON: suggestions)
+            let root = try #require(try JSONSerialization.jsonObject(with: Data(hook.utf8)) as? NSDictionary)
+            let inner = try #require((root["hookSpecificOutput"] as? NSDictionary)?["decision"] as? NSDictionary)
+            let parsed = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary)
+            #expect(parsed == inner)
+            // The envelope embeds the same sorted, slash-unescaped bytes.
+            #expect(hook.contains(json))
+        }
+    }
+
+    @Test func decisionJSONShapes() throws {
+        let allow = try parsedDecisionJSON(.permission(decision: .allow, message: nil), .permission)
+        #expect(allow.json == #"{"behavior":"allow"}"#)
+
+        let s = #"[{"type":"addDirectories","directories":["/w"],"destination":"localSettings"}]"#
+        let always = try parsedDecisionJSON(
+            .permission(decision: .allowAlways, message: nil), .permission, suggestions: s)
+        let perms = try #require(always.parsed["updatedPermissions"] as? [[String: Any]])
+        #expect(perms.allSatisfy { $0["destination"] as? String == "session" })
+
+        let deny = try parsedDecisionJSON(.permission(decision: .deny, message: ""), .permission)
+        #expect(deny.json == #"{"behavior":"deny","message":"The user declined this from TBD."}"#)
+        #expect(deny.parsed["interrupt"] == nil)
+
+        let q = try parsedDecisionJSON(
+            .question(answers: ["Which environment?": "staging", "Which checks?": "lint"]), .question, input: askInput)
+        let updated = try #require(q.parsed["updatedInput"] as? [String: Any])
+        #expect(updated["questions"] != nil)
+        #expect((updated["answers"] as? [String: String])?["Which environment?"] == "staging")
+    }
+
+    @Test func decisionJSONThrowsOnKindMismatch() {
+        #expect(throws: PromptAnswerValidation.kindMismatch) {
+            _ = try PromptDecisionEncoder.decisionJSON(
+                answer: .permission(decision: .allow, message: nil), kind: .question,
+                toolInputJSON: askInput, suggestionsJSON: nil)
+        }
+    }
 }

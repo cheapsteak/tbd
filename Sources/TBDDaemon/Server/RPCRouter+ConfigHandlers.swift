@@ -529,6 +529,12 @@ extension RPCRouter {
         let params = try decoder.decode(ConfigSetPromptAnswerParams.self, from: paramsData)
         try await db.config.setTranscriptPromptAnswerEnabled(params.enabled)
         subscriptions.broadcast(delta: .modelProfilesChanged)
+        // Add or remove the session mod's prompt-answer feature in the plugin;
+        // the features come from the fresh config, as for the composer draft.
+        if let sessionModPluginSync {
+            let config = try await db.config.get()
+            sessionModPluginSync(SessionModFeature.enabled(in: config))
+        }
         return .ok()
     }
 

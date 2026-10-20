@@ -43,6 +43,28 @@ public enum PromptDecisionEncoder {
         return line
     }
 
+    /// The inner `decision` object serialized as one JSON string, for the
+    /// session mod, which wraps it in the `PermissionRequest` envelope itself.
+    /// Same bytes as the `decision` inside `hookOutput`.
+    ///
+    /// Throws `PromptAnswerValidation` when the answer does not fit the prompt.
+    public static func decisionJSON(
+        answer: PromptAnswer, kind: PendingPromptKind, toolInputJSON: String, suggestionsJSON: String?
+    ) throws -> String {
+        let decision = try decisionObject(
+            answer: answer, kind: kind, toolInputJSON: toolInputJSON, suggestionsJSON: suggestionsJSON)
+        guard JSONSerialization.isValidJSONObject(decision) else {
+            throw EncodingError.invalidValue(decision, .init(
+                codingPath: [], debugDescription: "decision is not serializable"))
+        }
+        let data = try JSONSerialization.data(withJSONObject: decision, options: [.sortedKeys, .withoutEscapingSlashes])
+        guard let json = String(bytes: data, encoding: .utf8) else {
+            throw EncodingError.invalidValue(decision, .init(
+                codingPath: [], debugDescription: "decision is not UTF-8"))
+        }
+        return json
+    }
+
     /// The inner `decision` object alone.
     static func decisionObject(
         answer: PromptAnswer, kind: PendingPromptKind, toolInputJSON: String, suggestionsJSON: String?
