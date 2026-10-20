@@ -116,17 +116,21 @@ A prompt resolves on the first of these:
   peer is the recorded app identity, the check `terminal.send` uses for
   envelope suppression, so another session's process and the HTTP transport
   are refused. The store hands the payload to the session's mod, and the RPC
-  returns once the mod acknowledges delivery. A mod that reports it never got
-  the decision answers `already_resolved`. If no acknowledgement arrives
+  returns once the mod acknowledges delivery. The RPC answers
+  `already_resolved` when the prompt is gone or a second answer arrives, and
+  when the mod reports the dialog closed (the terminal answered first) while
+  the answer waits for its acknowledgement. If no acknowledgement arrives
   within 5 seconds, the decision may or may not have reached Claude, so the
   RPC answers `unknown` and the card shows "May not have arrived" with Retry;
   the prompt resolves either way, so a retry of an answer that did arrive
   comes back `already_resolved`.
-  - If the mod is not reachable at that moment, the RPC returns a retryable
-    error. The card offers Retry.
+  - If no wait request from the mod picks the answer up within 60 seconds,
+    the store withdraws it, the prompt stays open, and the RPC returns a
+    retryable error. The card offers Retry.
 - **The mod reporting the dialog closed.** The terminal answered, or the tool
   finished.
-- **The terminal or session ending**, or the mod going silent.
+- **The terminal or session ending**, or no wait request from the mod for
+  60 seconds.
 
 Each change emits a per-terminal `pendingPrompts` delta, which carries
 everything the cards render. The daemon stops sending the old
@@ -378,7 +382,10 @@ Each branch of the flag gets a test, following the repo rule.
   acknowledged or timed out; `disabled` while the flag is off. The mod side
   and the channel are tested in the channel design.
 - **Decision encoding:** the question, multi-select, free-text, allow,
-  `allow_always` and deny outputs, asserted against the exact shapes above.
+  `allow_always` and deny outputs, asserted against the decision shapes
+  `PromptDecisionEncoder` produces, which the
+  [channel design](2026-10-20-mod-channel-prompt-answer-design.md) describes
+  under "Permission dialogs" and "Questions".
 - **`remote.answer`:**
   - capability refusal
   - flag refusal

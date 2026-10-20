@@ -100,10 +100,16 @@ incarnation; the daemon recomputes the token from the incarnation and refuses
 the request unless it matches and the terminal's row holds that incarnation.
 An incarnation is minted per spawn, so binding the token to it binds it to one
 process in one terminal. Because the token is derived, it survives a daemon
-restart with no database change. Another process
-running as the same user cannot learn a session's token without deliberately
-reading the key file, which is the same trust boundary that protects
-`state.db`.
+restart with no database change. A process outside the session, running as
+the same user, cannot learn a session's token without deliberately reading the
+key file, which is the same trust boundary that protects `state.db`. The
+session's own descendants do inherit `TBD_MOD_TOKEN` with the rest of its
+environment: a command the Bash tool runs, an MCP server. Such a process can
+forge the session's **opened**, **receipt** and **closed** reports, or take a
+decision meant for one of its dialogs, so the harm is denial of service: a
+card that vanishes, or an answer that never reaches the dialog. It cannot
+answer a dialog, because answers come only from the app through
+`prompt.answer`, and the terminal can still answer every dialog.
 
 A request for a terminal whose row holds a different incarnation is refused,
 so a process that outlived its row cannot receive what its successor should.
@@ -136,15 +142,22 @@ crashed, or spawned without the mod — is known before a send through
 ### Mod to daemon: reports
 
 Reports are short `POST` requests on the same socket: a dialog opened, a dialog
-closed and by whom, and receipts for items the mod acted on. A dialog's own
-wait (below) is also a request on this socket.
+closed and by whom, and receipts for items the mod acted on. A hook waits for
+the daemon's reply to a receipt or close before it returns, so neither is
+dropped with the hook; the wait is one local round trip, and a `$` call in
+flight stops the hook's clock. A failed report is logged at debug level and
+otherwise ignored. A dialog's own wait (below) is also a request on this
+socket.
 
 ### Liveness
 
 A poll received in the last 30 seconds marks the terminal's mod connected. The
-channel exposes this per terminal; the disconnect sweep below reads it, and
-`SessionModLiveness` takes it as a further signal beside `alive.json` once a
-feature needs it — message delivery is the first. `alive.json` stays.
+channel exposes this per terminal, and `SessionModLiveness` takes it as a
+further signal beside `alive.json` once a feature needs it — message delivery
+is the first. `alive.json` stays. The disconnect sweep below does not read
+it: an open prompt's liveness is its own wait requests, since a dialog's hook
+repeats its wait for as long as the dialog is open, whatever the poll loop is
+doing.
 
 ### Orphans
 
@@ -176,7 +189,12 @@ the RPCs today.
    tool call id, tool name, input and permission suggestions.
 3. It waits on its own request, `GET /v1/prompts/<id>/answer`, held up to
    25 seconds and repeated while the dialog is open. Holding its own request
-   keeps the hook's clock stopped.
+   keeps the hook's clock stopped. A failed wait (the daemon restarting) is
+   retried after a 1-second pause, posting **opened** again first; the pause
+   is the hook's own time, so after five failures in a row, or once the
+   hook's remaining budget falls below 2 seconds, the dialog is left to the
+   terminal. A hook that ran short of budget leaves its card up, and the mod
+   posts **closed** when the tool call ends.
 4. On an answer it returns the decision and posts a **receipt**:
    - `allow` returns `{ behavior: 'allow' }`;
    - `allowAlways` returns `allow` with the suggested rule as
@@ -206,6 +224,11 @@ Claude Code.
 2. It races `p` against its own answer request. If TBD answers first, it
    returns `{ result: { questions, answers } }` and posts a **receipt**. Every
    question needs an answer; multi-select answers are joined with ", ".
+   Because `p` keeps the hook's clock stopped, a failed wait is retried with
+   the poll's backoff (1, 2, 5, then every 10 seconds), posting **opened**
+   again before each retry, until `p` settles; a card that outlives a daemon
+   restart can therefore still be answered. Once `p` is open, any failure on
+   TBD's side returns `p`'s own result, never a second `next(e)`.
 3. If `p` settles first, the terminal answered; the mod posts **closed** with
    `by: terminal` and returns `p`'s result.
 
@@ -223,16 +246,27 @@ in the pane are separate and stay.
   because the address is the terminal.
 - **`prompt.answer`** is unchanged: only the app may call it, and the first
   answer wins. The answer goes to the dialog's waiting request, or is held for
-  the next one within the 60-second window.
+  the next one within the 60-second window. A wait that arrives after the
+  decision was handed to an earlier one gets the same decision again: that
+  covers a reply lost when its connection dropped, and Claude Code applies
+  only the first decision it receives.
 - **Receipt** resolves the prompt as delivered. **Closed** resolves it as
   answered in the terminal, so an answer racing it reports `alreadyResolved`.
   An answer sent with no receipt within 5 seconds reports `unknown`, as today.
 - **Re-post after restart.** The mod keeps its open dialogs in memory and
   posts each again as **opened** after any reconnect, so the cards return
   after a daemon restart. The store treats a repeat as the same prompt.
-- **Clearing.** A terminal's open prompts are cleared when its mod has not
-  polled for 60 seconds, when its session ends, and when the terminal is
-  removed. Session end does not clear them today.
+- **Clearing.** The store records, per prompt, when a wait request last
+  attached to it or left it, starting from its **opened** (a repeat
+  **opened** restarts the measure). Every 15 seconds a disconnect sweep clears
+  each prompt that has no wait attached and whose last such moment is more
+  than 60 seconds old, whatever the terminal's poll is doing: a mod that still
+  polls but has stopped waiting on a dialog loses that card, and a mod whose
+  poll loop is down while its dialog waits still work keeps its cards. A
+  terminal's open prompts are also cleared when its session ends and when the
+  terminal is removed.
+- **Session ID.** **Opened** may carry the Claude session ID; the store keeps
+  it for the log only, since prompts are keyed by terminal.
 - **Snapshot.** A new `state.subscribe` subscriber receives the open prompts
   with its initial state. Today it waits for the next change.
 - **Flag off.** New prompts are refused; prompts already open still resolve.
@@ -277,7 +311,9 @@ session the mod feature.
 - **The answer arrives but the receipt is lost.** The card reports unknown.
 - **A mod reload during an open dialog.** The old hook stops and the dialog
   falls back to the terminal. The reloaded mod does not know the dialog, so it
-  does not re-post it, and the disconnect sweep clears it within 60 seconds.
+  neither re-posts it nor waits on it, and the disconnect sweep clears its
+  prompt about 60 seconds after its last wait ended, even though the reloaded
+  mod polls again.
 - **An organization manages Claude Code.** Permission dialogs fall back to the
   terminal; questions still work.
 
@@ -289,14 +325,18 @@ session the mod feature.
     holding and `notConnected` expiry;
   - the store: opened, answered, receipt and closed; first answer wins;
     `unknown` without a receipt; re-post after restart; clearing on session end,
-    terminal removal and disconnect; the subscribe snapshot;
+    terminal removal and a prompt with no wait for 60 seconds while its
+    terminal still polls, sparing one with a wait attached; the subscribe
+    snapshot;
   - both flag branches: on, `prompt-answer` is in the spawn's feature list and
     the routes accept new prompts; off, it is absent and new prompts are refused
     while open ones resolve.
 - **Mod (`claude plugin test`, handlers exported as named functions):** pairing
   by exact input and `agent_id`; the allow, allow-always and deny decisions;
   the abort path posting **closed**; the question race in both directions;
-  re-post after reconnect; backoff.
+  re-post after reconnect; backoff; a question's waits retried across a daemon
+  restart until its dialog settles; receipts and closes awaited before the
+  hook returns.
 - **Live, before merge:** a zero-token run with `claude-stub` against a fake
   daemon that answers a question and a permission dialog, and checks the
   terminal can still answer each. Manual, not CI.
