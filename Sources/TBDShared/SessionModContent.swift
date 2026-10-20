@@ -414,7 +414,8 @@ function markAfterChange(box: PromptBox, origin: Frozen<PromptChangeOrigin>): bo
 /**
  * Draws the restore notice above what is drawn beneath, while it is visible.
  * A draft marked not restorable came back as its text alone, without the
- * content its paste placeholders stand for, and the notice says so.
+ * pasted content (a collapsed paste, an image) its placeholders stand for,
+ * and the notice says so.
  */
 export async function abovePrompt(
   $: EngineInterface,
@@ -432,7 +433,7 @@ export async function abovePrompt(
   return (
     <Box flexDirection="column">
       <Text dimColor>
-        {shown === 'restored' ? 'Restored your unsent draft' : 'Restored your unsent draft, but not its pasted text'}
+        {shown === 'restored' ? 'Restored your unsent draft' : 'Restored your unsent draft, but not its pasted content'}
       </Text>
       {await below()}
     </Box>

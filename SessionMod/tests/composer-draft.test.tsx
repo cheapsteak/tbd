@@ -500,17 +500,17 @@ test('aRestorableDraftsNoticeSaysItWasRestored', async ($, on) => {
   expect((await band.find(NOTICE))?.text).toBe('Restored your unsent draft')
 })
 
-// A large paste reaches the box as a placeholder the mod never sees expanded.
-// After a park the person overrode, the draft comes back as that placeholder,
-// and the notice says the pasted text did not.
-test('aDraftMarkedNotRestorableSaysItsPastedTextDidNotComeBack', async ($, on) => {
+// A large paste or an image reaches the box as a placeholder the mod never
+// sees expanded. After a park the person overrode, the draft comes back as
+// that placeholder, and the notice says the pasted content did not.
+test('aDraftMarkedNotRestorableSaysItsPastedContentDidNotComeBack', async ($, on) => {
   const w = world(on, { file: draftFile(PASTED, false) })
   await $.session.start(START)
   await w.clock.settle()
 
   expect(w.fills).toEqual([{ text: PASTED, mode: 'replace', isFilled: true }])
   const band = await $.ui.mount({ plugin: 'tbd', surface: 'terminal', component: 'AbovePrompt', props: BAND })
-  expect((await band.find(NOTICE))?.text).toBe('Restored your unsent draft, but not its pasted text')
+  expect((await band.find(NOTICE))?.text).toBe('Restored your unsent draft, but not its pasted content')
 
   await w.clock.advance(NOTICE_MS)
   expect(await band.find(NOTICE)).toBeUndefined()

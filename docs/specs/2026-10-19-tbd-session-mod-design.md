@@ -434,7 +434,7 @@ restore has run, the feature:
    500 milliseconds while it answers `isFilled: false`.
 2. Fills the box with `mode: 'replace'`, and records the restore in `$.state`.
 3. Shows a notice above the prompt for 3 seconds: "Restored your unsent
-   draft", or "Restored your unsent draft, but not its pasted text" for a
+   draft", or "Restored your unsent draft, but not its pasted content" for a
    draft marked not restorable. A `$.clock.after` timer hides it, and the
    band redraws without it.
 
@@ -452,8 +452,8 @@ outcome is written to `composer-draft.restore.json`.
 
 A draft marked not restorable is restored as saved after a park the person
 overrode: they were warned that part of it could be lost. The box gets the
-text with its paste placeholders, and the notice says the pasted text did not
-come back.
+text with the placeholders that stand for a collapsed paste or an image, and
+the notice says the pasted content did not come back.
 
 A message delivered with the wake arrives as an argument to `claude --resume`.
 Implementation verifies, against the fake model API, that Claude submits that
@@ -580,7 +580,7 @@ Each gating branch gets its own test.
   - a second `session.start` in the same process, as after a reload, restores
     nothing
   - the notice appears and disappears at 3 seconds, and for a draft marked
-    not restorable it says the pasted text did not come back
+    not restorable it says the pasted content did not come back
 - **Live checks during implementation**, at zero token cost with
   `scripts/claude-stub.py`:
   - a change to the `--plugin-dir` folder reloads the module in a running
