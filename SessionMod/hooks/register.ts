@@ -26,6 +26,11 @@ import {
   sessionEnd as composerDraftSessionEnd,
   sessionStart as composerDraftSessionStart,
 } from './features/composer-draft.tsx'
+import {
+  FEATURE as USAGE,
+  measured as usageMeasured,
+  sessionStart as usageSessionStart,
+} from './features/usage.ts'
 import { readSessionEnv, resolveContext, startHeartbeat } from './shared/session.ts'
 import type { SessionEnv } from './shared/session.ts'
 
@@ -76,6 +81,17 @@ export const register: Register = on => {
       if (ctx.features.has(COMPOSER_DRAFT)) {
         await composerDraftSessionStart($, ctx)
       }
+      if (ctx.features.has(USAGE)) {
+        await usageSessionStart($, ctx)
+      }
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('session.measure', async ($, e, next) => {
+    const ctx = await resolveContext($)
+    if (ctx !== null && ctx.features.has(USAGE)) {
+      await usageMeasured($, ctx, e)
     }
     return next(e)
   }).catch(($, e, next) => next(e))
