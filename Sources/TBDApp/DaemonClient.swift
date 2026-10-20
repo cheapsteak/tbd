@@ -1242,6 +1242,15 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the session usage gate (default OFF, soaking). Sessions started
+    /// afterwards record their usage.
+    func setSessionModUsage(enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetSessionModUsageEnabled,
+            params: ConfigSetSessionModUsageEnabledParams(enabled: enabled)
+        )
+    }
+
     /// Persist the live remote transcript sync gate (default OFF, soaking).
     /// The daemon reads it at every decision, so it applies from the next sync.
     func setRemoteTranscriptLiveSync(enabled: Bool) async throws {

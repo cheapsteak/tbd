@@ -1041,6 +1041,21 @@ extension AppState {
         }
     }
 
+    // MARK: - Session usage
+
+    /// Persist the session usage gate and refresh daemon capabilities, so the
+    /// toggle shows what the daemon holds. Sessions pick the feature up on
+    /// their next start.
+    func setSessionModUsageEnabled(_ enabled: Bool) async {
+        do {
+            try await sessionModUsageFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set session usage: \(error, privacy: .public)")
+            showAlert("Failed to set session usage: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     // MARK: - Live remote transcript sync
 
     /// Persist the live remote transcript sync gate and refresh daemon

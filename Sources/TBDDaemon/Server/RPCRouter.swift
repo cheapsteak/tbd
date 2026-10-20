@@ -1106,6 +1106,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
             case RPCMethod.configSetComposerDraftEnabled:
                 return try await handleConfigSetComposerDraftEnabled(request.paramsData)
+            case RPCMethod.configSetSessionModUsageEnabled:
+                return try await handleConfigSetSessionModUsageEnabled(request.paramsData)
             case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
                 return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
             case RPCMethod.configSetCloneCheckoutEnabled:
@@ -1290,6 +1292,7 @@ public final class RPCRouter: Sendable {
         result.programStatusEnabled = config.programStatusEnabled
         result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
         result.composerDraftEnabled = config.composerDraftEnabled
+        result.sessionModUsageEnabled = config.sessionModUsageEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
