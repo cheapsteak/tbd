@@ -58,16 +58,25 @@ struct PendingPromptResolutionTests {
         return waiter
     }
 
-    /// Takes the held decision with a wait request and then runs `then`, all
-    /// in one turn on the store's executor: a held decision returns without
+    /// Takes the held decision with a wait request and then delivers a receipt,
+    /// all in one turn on the store's executor: a held decision returns without
     /// suspending, so a parked `answer` cannot resume between the two.
-    private func pickUpThen(
-        _ store: isolated PendingPromptStore, terminal: UUID, toolUseID: String = "toolu_1",
-        _ then: (isolated PendingPromptStore) -> Set<UUID>
+    private func pickUpThenReceipt(
+        _ store: isolated PendingPromptStore, terminal: UUID, toolUseID: String = "toolu_1"
     ) async -> PendingPromptStore.WaitResult {
         let picked = await store.waitForAnswer(
             terminalID: terminal, toolUseID: toolUseID, token: UUID(), hold: .seconds(25))
-        _ = then(store)
+        _ = store.receipt(terminalID: terminal, toolUseID: toolUseID)
+        return picked
+    }
+
+    /// As `pickUpThenReceipt`, but the terminal closes the prompt instead.
+    private func pickUpThenClosed(
+        _ store: isolated PendingPromptStore, terminal: UUID, toolUseID: String = "toolu_1"
+    ) async -> PendingPromptStore.WaitResult {
+        let picked = await store.waitForAnswer(
+            terminalID: terminal, toolUseID: toolUseID, token: UUID(), hold: .seconds(25))
+        _ = store.closed(terminalID: terminal, toolUseID: toolUseID)
         return picked
     }
 
@@ -225,7 +234,7 @@ struct PendingPromptResolutionTests {
 
     /// A receipt landing after a wait request took the held decision but
     /// before the answer parks for its receipt still settles it as delivered.
-    /// `pickUpThen` runs both on the store's executor, so the answer cannot
+    /// `pickUpThenReceipt` runs both on the store's executor, so the answer cannot
     /// resume in between.
     @Test func receiptBetweenPickupAndReceiptParkIsDelivered() async throws {
         let clock = EventDrivenTestClock()
@@ -235,9 +244,7 @@ struct PendingPromptResolutionTests {
         let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
         try await clock.requireSleeperArmed()
 
-        let picked = await pickUpThen(store, terminal: terminal) {
-            $0.receipt(terminalID: terminal, toolUseID: "toolu_1")
-        }
+        let picked = await pickUpThenReceipt(store, terminal: terminal)
 
         #expect(picked == .decision(try decision()))
         #expect(await answering.value.outcome == .delivered)
@@ -253,9 +260,7 @@ struct PendingPromptResolutionTests {
         let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
         try await clock.requireSleeperArmed()
 
-        let picked = await pickUpThen(store, terminal: terminal) {
-            $0.closed(terminalID: terminal, toolUseID: "toolu_1")
-        }
+        let picked = await pickUpThenClosed(store, terminal: terminal)
 
         #expect(picked == .decision(try decision()))
         #expect(await answering.value.outcome == .alreadyResolved)
