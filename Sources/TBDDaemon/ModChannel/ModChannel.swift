@@ -23,6 +23,9 @@ import os
 /// item without calling `onExpired`.
 actor ModChannel {
     struct Item: Codable, Sendable, Equatable {
+        /// Increases per terminal, across daemon restarts too: each daemon
+        /// life numbers from a base above every number an earlier life could
+        /// have issued, so the mod must not reset its `after` on reconnect.
         let seq: UInt64
         let kind: String
         /// JSON text.
@@ -54,7 +57,7 @@ actor ModChannel {
     }
 
     private struct TerminalState {
-        var lastSeq: UInt64 = 0
+        var lastSeq: UInt64
         var outbox: [Queued] = []
         var waiter: PollWaiter?
         var lastPollAt: Date?
@@ -64,6 +67,12 @@ actor ModChannel {
 
     private let now: @Sendable () -> Date
     private let clock: any Clock<Duration>
+    /// The number below every terminal's first sequence number in this daemon
+    /// life: milliseconds since 1970 at init, shifted left 10 bits. A mod
+    /// still polling with `after` from an earlier life therefore confirms
+    /// nothing this life issued, as long as that life issued fewer than 1024
+    /// items per terminal per millisecond it ran.
+    private let seqBase: UInt64
 
     init(
         now: @escaping @Sendable () -> Date = { Date() },
@@ -71,17 +80,20 @@ actor ModChannel {
     ) {
         self.now = now
         self.clock = clock
+        let millis = max(0, now().timeIntervalSince1970 * 1000)
+        self.seqBase = UInt64(millis) << 10
     }
 
     // MARK: - Outbox
 
-    /// Queues an item for the terminal's mod and returns its sequence number.
+    /// Queues an item for the terminal's mod and returns its sequence number
+    /// (see ``Item/seq``).
     /// A held poll returns at once with it. `onExpired` runs if no poll takes
     /// the item within ``holdWindow``.
     @discardableResult
     func enqueue(terminalID: UUID, kind: String, body: String,
                  onExpired: @escaping @Sendable () -> Void) -> UInt64 {
-        var state = terminals[terminalID] ?? TerminalState()
+        var state = terminals[terminalID] ?? TerminalState(lastSeq: seqBase)
         state.lastSeq += 1
         let seq = state.lastSeq
         let expiryID = UUID()
@@ -110,7 +122,7 @@ actor ModChannel {
     /// `token` names this request, so `pollGone(token:)` releases only it.
     func poll(terminalID: UUID, after: UInt64, token: UUID,
               hold: Duration = .seconds(25)) async -> [Item] {
-        var state = terminals[terminalID] ?? TerminalState()
+        var state = terminals[terminalID] ?? TerminalState(lastSeq: seqBase)
         state.lastPollAt = now()
         var confirmed: [Queued] = []
         state.outbox.removeAll { queued in
@@ -138,7 +150,7 @@ actor ModChannel {
                 continuation.resume(returning: late)
                 return
             }
-            var current = terminals[terminalID] ?? TerminalState()
+            var current = terminals[terminalID] ?? TerminalState(lastSeq: seqBase)
             if let other = current.waiter {
                 other.holdTimer.cancel()
                 other.continuation.resume(returning: [])

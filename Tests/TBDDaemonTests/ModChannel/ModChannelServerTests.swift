@@ -58,64 +58,78 @@ struct ModChannelServerTests {
         try? FileManager.default.removeItem(atPath: h.root)
     }
 
-    @Test func serverRoundTripsOverUnixSocket() async throws {
+    /// Starts a server, runs `body`, and stops the server and removes its
+    /// root whether `body` returns or throws (a failed `#require` included).
+    private func withServer(_ body: (Harness) async throws -> Void) async throws {
         let h = try await startServer()
-        let mode = try FileManager.default.attributesOfItem(atPath: h.socketPath)[.posixPermissions] as? Int
-        #expect(mode == 0o600)
-
-        let fd = try connectUnix(h.socketPath)
-        defer { close(fd) }
-        try writeAll(fd, h.pollRequest())
-
-        // Nothing queued: the poll holds for its full 25 s, then answers empty.
-        try await h.clock.requireAdvanceWhenArmed(by: .seconds(25))
-        let data = await readToEOF(fd)
-        let response = try #require(String(data: data, encoding: .utf8))
-
-        let parts = response.components(separatedBy: "\r\n\r\n")
-        let head = parts.first ?? ""
-        #expect(head.hasPrefix("HTTP/1.1 200"), "\(response)")
-        #expect(head.lowercased().contains("content-type: application/json"), "\(response)")
-        #expect(head.lowercased().contains("connection: close"), "\(response)")
-        let body = parts.dropFirst().joined(separator: "\r\n\r\n")
-        let json = try JSONSerialization.jsonObject(with: Data(body.utf8)) as? NSDictionary
-        #expect(json == ["items": [Any]()])
-
+        do {
+            try await body(h)
+        } catch {
+            await tearDown(h)
+            throw error
+        }
         await tearDown(h)
-        #expect(!FileManager.default.fileExists(atPath: h.socketPath))
+    }
+
+    @Test func serverRoundTripsOverUnixSocket() async throws {
+        var socketPath = ""
+        try await withServer { h in
+            socketPath = h.socketPath
+            let mode = try FileManager.default.attributesOfItem(atPath: h.socketPath)[.posixPermissions] as? Int
+            #expect(mode == 0o600)
+
+            let fd = try connectUnix(h.socketPath)
+            defer { close(fd) }
+            try writeAll(fd, h.pollRequest())
+
+            // Nothing queued: the poll holds for its full 25 s, then answers empty.
+            try await h.clock.requireAdvanceWhenArmed(by: .seconds(25))
+            let data = await readToEOF(fd)
+            let response = try #require(String(data: data, encoding: .utf8))
+
+            let parts = response.components(separatedBy: "\r\n\r\n")
+            let head = parts.first ?? ""
+            #expect(head.hasPrefix("HTTP/1.1 200"), "\(response)")
+            #expect(head.lowercased().contains("content-type: application/json"), "\(response)")
+            #expect(head.lowercased().contains("connection: close"), "\(response)")
+            let body = parts.dropFirst().joined(separator: "\r\n\r\n")
+            let json = try JSONSerialization.jsonObject(with: Data(body.utf8)) as? NSDictionary
+            #expect(json == ["items": [Any]()])
+        }
+        #expect(!FileManager.default.fileExists(atPath: socketPath))
     }
 
     @Test func unauthorizedRequestIs401OverTheSocket() async throws {
-        let h = try await startServer()
-        let fd = try connectUnix(h.socketPath)
-        defer { close(fd) }
-        try writeAll(fd, "GET /v1/poll?after=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        let data = await readToEOF(fd)
-        let response = String(data: data, encoding: .utf8) ?? ""
-        #expect(response.hasPrefix("HTTP/1.1 401"), "\(response)")
-        #expect(response.hasSuffix(#"{"error":"unauthorized"}"#), "\(response)")
-        await tearDown(h)
+        try await withServer { h in
+            let fd = try connectUnix(h.socketPath)
+            defer { close(fd) }
+            try writeAll(fd, "GET /v1/poll?after=0 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            let data = await readToEOF(fd)
+            let response = String(data: data, encoding: .utf8) ?? ""
+            #expect(response.hasPrefix("HTTP/1.1 401"), "\(response)")
+            #expect(response.hasSuffix(#"{"error":"unauthorized"}"#), "\(response)")
+        }
     }
 
     /// Review Focus 3: the mod aborts its fetch while the poll is held. The
     /// connection's close releases the held poll rather than leaving it to
     /// its 25 s hold.
     @Test func closingClientReleasesPoll() async throws {
-        let h = try await startServer()
-        let fd = try connectUnix(h.socketPath)
-        try writeAll(fd, h.pollRequest())
+        try await withServer { h in
+            let fd = try connectUnix(h.socketPath)
+            try writeAll(fd, h.pollRequest())
 
-        let attached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await h.channel.isPollAttached(terminalID: h.terminal)
-        }
-        #expect(attached == .satisfied)
+            let attached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+                await h.channel.isPollAttached(terminalID: h.terminal)
+            }
+            #expect(attached == .satisfied)
 
-        close(fd)
-        let released = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await !h.channel.isPollAttached(terminalID: h.terminal)
+            close(fd)
+            let released = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+                await !h.channel.isPollAttached(terminalID: h.terminal)
+            }
+            #expect(released == .satisfied)
         }
-        #expect(released == .satisfied)
-        await tearDown(h)
     }
 
     @Test func startReplacesStaleSocketFile() async throws {

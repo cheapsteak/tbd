@@ -11,6 +11,10 @@ import Testing
 @Suite(.clockDriven)
 struct ModChannelTests {
 
+    /// A channel created at the epoch numbers from a base of 0, so its first
+    /// item is seq 1 and the tests can name sequence numbers literally.
+    static let epoch: @Sendable () -> Date = { Date(timeIntervalSince1970: 0) }
+
     private func attachPoll(
         _ channel: ModChannel, terminal: UUID, after: UInt64 = 0, token: UUID = UUID(),
         sourceLocation: SourceLocation = #_sourceLocation
@@ -26,7 +30,7 @@ struct ModChannelTests {
     }
 
     @Test func pollReturnsQueuedItemsAtOnce() async {
-        let channel = ModChannel(clock: EventDrivenTestClock())
+        let channel = ModChannel(now: Self.epoch, clock: EventDrivenTestClock())
         let terminal = UUID()
         let first = await channel.enqueue(terminalID: terminal, kind: "message", body: #"{"n":1}"#) {}
         let second = await channel.enqueue(terminalID: terminal, kind: "message", body: #"{"n":2}"#) {}
@@ -43,7 +47,7 @@ struct ModChannelTests {
 
     @Test func pollHoldsThenReturnsEmptyAfterTwentyFiveSeconds() async throws {
         let clock = EventDrivenTestClock()
-        let channel = ModChannel(clock: clock)
+        let channel = ModChannel(now: Self.epoch, clock: clock)
         let terminal = UUID()
         let poll = await attachPoll(channel, terminal: terminal)
 
@@ -56,7 +60,7 @@ struct ModChannelTests {
     }
 
     @Test func enqueueWakesWaitingPoll() async {
-        let channel = ModChannel(clock: EventDrivenTestClock())
+        let channel = ModChannel(now: Self.epoch, clock: EventDrivenTestClock())
         let terminal = UUID()
         let other = UUID()
         let poll = await attachPoll(channel, terminal: terminal)
@@ -70,7 +74,7 @@ struct ModChannelTests {
     }
 
     @Test func afterConfirmsAndUnconfirmedAreResent() async {
-        let channel = ModChannel(clock: EventDrivenTestClock())
+        let channel = ModChannel(now: Self.epoch, clock: EventDrivenTestClock())
         let terminal = UUID()
         for n in 1...3 {
             await channel.enqueue(terminalID: terminal, kind: "message", body: "{\"n\":\(n)}") {}
@@ -95,7 +99,7 @@ struct ModChannelTests {
 
     @Test func unconfirmedItemExpiresAfterSixtySecondsAndCallsOnExpired() async throws {
         let clock = EventDrivenTestClock()
-        let channel = ModChannel(clock: clock)
+        let channel = ModChannel(now: Self.epoch, clock: clock)
         let terminal = UUID()
         let expired = FireRecorder<UInt64>()
         let seq = await channel.enqueue(terminalID: terminal, kind: "message", body: "{}") {
@@ -144,7 +148,7 @@ struct ModChannelTests {
     }
 
     @Test func pollGoneReleasesWaiter() async {
-        let channel = ModChannel(clock: EventDrivenTestClock())
+        let channel = ModChannel(now: Self.epoch, clock: EventDrivenTestClock())
         let terminal = UUID()
         let token = UUID()
         let poll = await attachPoll(channel, terminal: terminal, token: token)
@@ -159,7 +163,7 @@ struct ModChannelTests {
     }
 
     @Test func newerPollReleasesOlderOne() async {
-        let channel = ModChannel(clock: EventDrivenTestClock())
+        let channel = ModChannel(now: Self.epoch, clock: EventDrivenTestClock())
         let terminal = UUID()
         let older = await attachPoll(channel, terminal: terminal)
         let newerToken = UUID()
@@ -168,5 +172,29 @@ struct ModChannelTests {
 
         await channel.enqueue(terminalID: terminal, kind: "message", body: "{}") {}
         #expect(await newer.value.map(\.seq) == [1])
+    }
+
+    /// A daemon restart must not reset numbering: a mod still polling with
+    /// `after` from the previous daemon life would otherwise confirm, and
+    /// silently drop, the new life's first items.
+    @Test func sequenceNumbersKeepRisingAcrossRestart() async {
+        let terminal = UUID()
+        let bootTime = Date(timeIntervalSince1970: 1_700_000_000)
+        let previous = ModChannel(now: { bootTime }, clock: EventDrivenTestClock())
+        var lastSeq: UInt64 = 0
+        for _ in 0..<3 {
+            lastSeq = await previous.enqueue(terminalID: terminal, kind: "message", body: "{}") {}
+        }
+        #expect(await previous.poll(terminalID: terminal, after: 0, token: UUID()).last?.seq == lastSeq)
+
+        // The next daemon life starts one second later.
+        let restarted = ModChannel(
+            now: { bootTime.addingTimeInterval(1) }, clock: EventDrivenTestClock())
+        let fresh = await restarted.enqueue(terminalID: terminal, kind: "message", body: #"{"n":1}"#) {}
+        #expect(fresh > lastSeq)
+
+        // The mod reconnects still carrying the old life's `after`.
+        let items = await restarted.poll(terminalID: terminal, after: lastSeq, token: UUID())
+        #expect(items == [ModChannel.Item(seq: fresh, kind: "message", body: #"{"n":1}"#)])
     }
 }

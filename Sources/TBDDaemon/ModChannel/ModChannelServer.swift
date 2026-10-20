@@ -58,8 +58,16 @@ final class ModChannelServer: Sendable {
             }
 
         let boundFD = try SocketServer.bindListeningSocket(at: socketPath)
-        // Before NIO listens, so nothing can connect at a wider mode.
-        chmod(socketPath, 0o600)
+        // Before NIO listens, so nothing can connect at a wider mode. A socket
+        // left at the umask's mode is not served at all.
+        guard chmod(socketPath, 0o600) == 0 else {
+            let code = errno
+            close(boundFD)
+            try? fileManager.removeItem(atPath: socketPath)
+            logger.error(
+                "mod channel could not restrict \(self.socketPath, privacy: .public) to 0600: errno \(code, privacy: .public)")
+            throw ModChannelServerError.chmodFailed(path: socketPath, code: code)
+        }
         let identity = SocketFileIdentity(path: socketPath)
         let ch: Channel
         do {
@@ -103,6 +111,11 @@ final class ModChannelServer: Sendable {
         }
         try? FileManager.default.removeItem(atPath: socketPath)
     }
+}
+
+enum ModChannelServerError: Error, Equatable {
+    /// The bound socket could not be restricted to mode 0600.
+    case chmodFailed(path: String, code: Int32)
 }
 
 // MARK: - Handler
@@ -151,6 +164,9 @@ private final class ModChannelHTTPHandler: ChannelInboundHandler, @unchecked Sen
             }
             body.append(contentsOf: buffer.readableBytesView)
         case .end:
+            // One request per connection: every response carries
+            // `Connection: close`, so a second request pipelined behind the
+            // first is ignored and goes with the close.
             guard let requestHead = head, inFlightToken == nil else { return }
             head = nil
             if tooLarge {

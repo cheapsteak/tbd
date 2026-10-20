@@ -68,7 +68,8 @@ struct ModChannelRoutesTests {
 
     private func makeHarness() -> Harness {
         let clock = EventDrivenTestClock()
-        let channel = ModChannel(clock: clock)
+        // At the epoch the channel numbers from 1, so tests name seqs literally.
+        let channel = ModChannel(now: { Date(timeIntervalSince1970: 0) }, clock: clock)
         let store = PendingPromptStore(clock: clock)
         let token = ModChannelToken(key: SymmetricKey(size: .bits256))
         let fixture = Fixture()
