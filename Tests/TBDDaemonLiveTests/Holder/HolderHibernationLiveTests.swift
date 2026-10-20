@@ -130,7 +130,9 @@ struct HolderHibernationLiveTests {
     /// every byte its terminal delivers, so an empty record and a caught
     /// `SIGTERM` together say the park signalled and typed nothing.
     /// `theStdinRecorderSeesTheLegacyExit` proves the recorder sees a typed
-    /// `/exit`, which is what makes the empty record here mean something.
+    /// `/exit`, and `theStdinRecorderSeesInputWithNoLineTerminator` that it
+    /// sees bytes no Enter follows, which is what makes the empty record here
+    /// mean something.
     @Test func parkOfAFeatureSessionSignalsAndTypesNothing() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
@@ -183,6 +185,53 @@ struct HolderHibernationLiveTests {
         #expect(await pollUntil("the typed /exit to reach the job's stdin", timeout: 5) {
             ((try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? "").contains("/exit")
         }, "the recorder never saw the legacy park's typed /exit")
+    }
+
+    /// The control for input no Enter follows: `/exit` without Enter, an
+    /// Escape and a Ctrl+C, written through the session's reader, the
+    /// descriptor the legacy park writes its `/exit` to. A canonical-mode
+    /// terminal would hold all of it back from the job, so a park that typed
+    /// any of it would leave an empty record and the "types nothing" tests
+    /// above green; this shows the recorder sees each byte as it arrives.
+    @Test func theStdinRecorderSeesInputWithNoLineTerminator() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath))
+        let childPID = try #require(terminal.childPID)
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let partial = "/exit\u{1B}\u{03}"
+        let reader = try #require(await fixture.registry.reader(for: terminal.id))
+        try await reader.write(Data(partial.utf8))
+
+        var recorded = ""
+        let seen = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            recorded = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+            return recorded.contains(partial)
+        }
+        // No park ends this job, and the teardown kills only the pids the row
+        // names, so the job is ended by `SIGTERM`: its handler takes `cat`
+        // down with it.
+        if holderProcessIsAlive(childPID) {
+            kill(childPID, SIGTERM)
+            #expect(await pollUntil("the job to catch the SIGTERM") {
+                FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath)
+            })
+        }
+        switch seen {
+        case .satisfied:
+            break
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            throw BoundedWaitTimeout(
+                what: "the job's stdin to record \(partial.debugDescription), which no Enter follows",
+                observed: recorded.debugDescription, deadline: TestDeadlines.saturatedPass)
+        }
     }
 
     /// A profile swap's park of a session spawned without the feature ends by
@@ -680,8 +729,19 @@ private final class HibernationFixture {
     /// explicit redirection overrides that. `cat` copies what it reads into
     /// `inputPath` as it reads it. The `SIGTERM` handler ends `cat` too, so
     /// the job leaves no process behind that the row does not name.
+    ///
+    /// The holder never sets termios, so the pty starts in canonical mode,
+    /// where the line discipline holds input back until a newline arrives:
+    /// `cat` would never see `/exit` typed without Enter, or a bare Escape.
+    /// `stty -icanon` hands `cat` every byte as it arrives, and `-isig` makes
+    /// a typed Ctrl+C a recorded byte rather than a `SIGINT`. A failed `stty`
+    /// leaves `stty-failed` in the record, ahead of anything `cat` appends, so
+    /// a test that expects an empty record fails instead of passing on a
+    /// recorder that could not see what it was there to catch.
     static func stdinRecordingJob(markerPath: String, inputPath: String) -> String {
-        "exec 3<&0; cat <&3 > \"\(inputPath)\" & reader=$!; "
+        "exec 3<&0; "
+            + "stty -icanon -isig min 1 time 0 <&3 || printf stty-failed > \"\(inputPath)\"; "
+            + "cat <&3 >> \"\(inputPath)\" & reader=$!; "
             + "trap 'printf term > \"\(markerPath)\"; kill $reader 2>/dev/null; exit 0' TERM; "
             + "while :; do sleep 0.2; done"
     }
