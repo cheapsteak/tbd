@@ -92,12 +92,15 @@ under, both already in its environment (`TBD_TERMINAL_ID`,
 terminals can share one, and `/clear` changes it.
 
 Only TBD may deliver into a session. At spawn, a session with any mod feature
-on gets `TBD_MOD_TOKEN`: an HMAC-SHA256 of the terminal ID and incarnation
-under a daemon key kept in `~/tbd/runtime/mod-key` (mode 0600, 32 random
-bytes, created on first use). Every request carries the token in an
-`Authorization: Bearer` header; the daemon recomputes it and refuses a request
-whose token does not match its terminal and incarnation. Because the token is
-derived, it survives a daemon restart with no database change. Another process
+on gets `TBD_MOD_TOKEN`: an HMAC-SHA256 of its incarnation under a daemon key
+kept in `~/tbd/runtime/mod-key` (mode 0600, 32 random bytes, created on first
+use), plus `TBD_MOD_SOCKET`, the listener's path. Every request carries the
+token in an `Authorization: Bearer` header and names its terminal and
+incarnation; the daemon recomputes the token from the incarnation and refuses
+the request unless it matches and the terminal's row holds that incarnation.
+An incarnation is minted per spawn, so binding the token to it binds it to one
+process in one terminal. Because the token is derived, it survives a daemon
+restart with no database change. Another process
 running as the same user cannot learn a session's token without deliberately
 reading the key file, which is the same trust boundary that protects
 `state.db`.
@@ -138,8 +141,10 @@ wait (below) is also a request on this socket.
 
 ### Liveness
 
-A poll received in the last 30 seconds marks the terminal's mod connected. This
-feeds `SessionModLiveness` as a further signal beside `alive.json`, which stays.
+A poll received in the last 30 seconds marks the terminal's mod connected. The
+channel exposes this per terminal; the disconnect sweep below reads it, and
+`SessionModLiveness` takes it as a further signal beside `alive.json` once a
+feature needs it — message delivery is the first. `alive.json` stays.
 
 ### Orphans
 
