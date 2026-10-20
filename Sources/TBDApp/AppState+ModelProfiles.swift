@@ -456,20 +456,16 @@ extension AppState {
         """
 
     /// Help text for the transcript-streaming toggle. Assertable for the same
-    /// reason as `modelProxyHelp`, and it carries one promise the operator
-    /// cannot see anywhere else: flipping this one switch flips the proxy on
-    /// too, because the stream file it reads is written by nothing else.
+    /// reason as `modelProxyHelp`, and it carries the two limits the operator
+    /// cannot see anywhere else: the feature reaches only sessions spawned
+    /// after the change, and only those where Claude Code loads TBD's mod
+    /// (not in an untrusted workspace, nor under a policy that blocks mods).
     static let transcriptStreamingHelp = """
-        Shows assistant text in the transcript pane as it is generated, before \
-        it reaches the session file. Turning this on also turns on the model \
-        proxy. Applies to sessions started after you change it.
+        Shows Claude's answer and thinking summaries in the transcript pane as \
+        they are written, before they reach the session file. Applies to \
+        sessions started after you turn it on, and only where Claude Code \
+        loads TBD's mod. Off by default (soaking).
         """
-
-    /// Why the transcript-streaming toggle is inert on this daemon. Shown only
-    /// when `modelProxySupported` is false: with no proxy there is no stream
-    /// file, so the switch would change nothing an operator could observe.
-    static let transcriptStreamingUnsupportedCaption =
-        "Needs the TBD model proxy, which this daemon could not start."
 
     /// Persist the model-proxy gate, then re-fetch capabilities so the Settings
     /// toggle reflects the daemon's persisted state.
@@ -479,9 +475,7 @@ extension AppState {
     /// spawned with, so turning this on never reroutes a running session and
     /// turning it off never takes a live route away.
     ///
-    /// Writes one flag. Turning the proxy off also clears transcript streaming,
-    /// but the daemon does that in the same transaction — the read-back is how
-    /// the app learns it happened.
+    /// Writes one flag; transcript streaming is a separate choice.
     func setModelProxyEnabled(_ enabled: Bool) async {
         do {
             try await modelProxyFlagSetter(enabled)
@@ -496,10 +490,8 @@ extension AppState {
     /// Settings toggle reflects the daemon's persisted state. Applies to
     /// sessions started after the call, for the same reason as the proxy gate.
     ///
-    /// Sends the gesture unconditionally, including while the proxy is off:
-    /// turning streaming on turns the proxy on too, and that coupling belongs
-    /// to the daemon. An app that pre-empted the write would make this switch a
-    /// no-op on exactly the installs that never opted into the proxy.
+    /// Sends the gesture whatever the proxy's state: streaming comes from the
+    /// session mod and does not depend on the proxy.
     func setTranscriptStreamingEnabled(_ enabled: Bool) async {
         do {
             try await transcriptStreamingFlagSetter(enabled)

@@ -337,9 +337,11 @@ enum ModelProxyRouteAttachment {
             route = try await supervisor.makeRoute(
                 terminalID: terminalID,
                 upstream: upstream,
-                // The conjunction, never the raw column: streaming with the
-                // proxy off is not a state a route may describe.
-                streamingEnabled: config.transcriptStreamingEffective)
+                // A route exists only with the proxy on, so the streaming
+                // column alone decides whether the proxy tees a stream file.
+                // Nothing reads that file any more; the transcript streams from
+                // the session mod's `transcript-stream` feature.
+                streamingEnabled: config.transcriptStreamingEnabled)
         } catch {
             // The kind is public and the description is not, because the
             // description can carry the token: `ModelProxyRouteStore.Failure

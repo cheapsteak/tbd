@@ -5,7 +5,7 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Schema, resolution and coupling guards for the model proxy's two flags and
+/// Schema, resolution and independence guards for the model proxy's two flags and
 /// its port column
 /// (`docs/specs/2026-09-05-transcript-streaming-model-proxy-design.md`,
 /// "Flags and migrations" and "Port").
@@ -17,9 +17,8 @@ import Testing
 /// `rowWrittenBeforeTheMigrationStillReadsNull` go red — that is their only
 /// job.
 ///
-/// The two flags are coupled in one direction each by the setters, and their
-/// conjunction is what any reader acts on; both properties are pinned below,
-/// the conjunction against a row no setter can produce.
+/// The two flags are independent: each setter writes its own column, and
+/// streaming resolves without reference to the proxy flag.
 @Suite("ModelProxyFlag")
 struct ModelProxyFlagTests {
 
@@ -181,7 +180,6 @@ struct ModelProxyFlagTests {
         let config = try await db.config.get()
         #expect(config.modelProxyEnabled == false)
         #expect(config.transcriptStreamingEnabled == false)
-        #expect(config.transcriptStreamingEffective == false)
         #expect(config.modelProxyPort == nil)
     }
 
@@ -203,63 +201,51 @@ struct ModelProxyFlagTests {
         #expect(decoded.modelProxyEnabled)
         #expect(decoded.transcriptStreamingEnabled)
         #expect(decoded.modelProxyPort == 51_234)
-        #expect(decoded.transcriptStreamingEffective)
     }
 
-    // MARK: - Coupling: one direction each
+    // MARK: - No coupling: each setter writes its own column
 
-    /// Asking for streaming is asking for the proxy too, because the file
-    /// streaming reads is the one the proxy writes.
-    @Test func turningStreamingOnTurnsTheProxyOn() async throws {
+    /// Streaming comes from the session mod, so asking for it no longer asks
+    /// for the proxy.
+    @Test func turningStreamingOnLeavesTheProxyAlone() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setTranscriptStreamingEnabled(true)
-        let config = try await db.config.get()
-        #expect(config.transcriptStreamingEnabled)
-        #expect(config.modelProxyEnabled, "streaming on must have written the proxy flag on")
-        #expect(config.transcriptStreamingEffective)
+        let record = try #require(try await fetchConfigRecord(db))
+        #expect(record.transcript_streaming_enabled == true)
+        #expect(
+            record.model_proxy_enabled == nil,
+            "turning streaming on must not lift the proxy out of NULL")
+        #expect(try await db.config.get().transcriptStreamingEnabled)
     }
 
-    /// And the reverse: switching the proxy off switches streaming off, so it
-    /// cannot silently re-arm when the proxy next comes on.
-    @Test func turningTheProxyOffTurnsStreamingOff() async throws {
+    /// And switching the proxy off leaves streaming where the user left it.
+    @Test func turningTheProxyOffLeavesStreamingAlone() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setTranscriptStreamingEnabled(true)
         try await db.config.setModelProxyEnabled(false)
 
         let config = try await db.config.get()
         #expect(config.modelProxyEnabled == false)
-        #expect(config.transcriptStreamingEnabled == false)
-        #expect(config.transcriptStreamingEffective == false)
-
-        try await db.config.setModelProxyEnabled(true)
-        #expect(
-            try await db.config.get().transcriptStreamingEnabled == false,
-            "streaming must stay off until it is asked for again")
+        #expect(config.transcriptStreamingEnabled, "streaming no longer depends on the proxy")
     }
 
-    /// The off-write fires even when streaming was never touched: a fresh row
-    /// has `transcript_streaming_enabled` at NULL, and turning the proxy off
-    /// is still the gesture that lifts it into an explicit `false` — not a
-    /// value that merely happens to resolve to false through the default.
-    @Test func turningTheProxyOffFromAFreshRowWritesStreamingExplicitlyFalse() async throws {
+    /// Turning the proxy off from a fresh row writes the proxy column alone,
+    /// leaving streaming at NULL so it keeps following the shipped default.
+    @Test func turningTheProxyOffFromAFreshRowLeavesStreamingNull() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let before = try #require(try await fetchConfigRecord(db))
-        #expect(before.transcript_streaming_enabled == nil)
-
         try await db.config.setModelProxyEnabled(false)
 
         let after = try #require(try await fetchConfigRecord(db))
+        #expect(after.model_proxy_enabled == false)
         #expect(
-            after.transcript_streaming_enabled == false,
+            after.transcript_streaming_enabled == nil,
             """
-            turning the proxy off from a fresh row must write streaming to an \
-            explicit 0, not leave it NULL — read back \
+            turning the proxy off must not write streaming — read back \
             \(String(describing: after.transcript_streaming_enabled)).
             """)
     }
 
-    /// Turning the proxy ON is not coupled: it must leave streaming exactly
-    /// where the user left it rather than turning it on as a side effect.
+    /// Turning the proxy on leaves streaming untouched too.
     @Test func turningTheProxyOnLeavesStreamingAlone() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setModelProxyEnabled(true)
@@ -268,11 +254,10 @@ struct ModelProxyFlagTests {
         #expect(
             record.transcript_streaming_enabled == nil,
             "turning the proxy on must not lift streaming out of NULL")
-        #expect(try await db.config.get().transcriptStreamingEffective == false)
+        #expect(try await db.config.get().transcriptStreamingEnabled == false)
     }
 
-    /// Turning streaming OFF is not coupled either — a user who wants the row
-    /// but not the proxy would have no way back otherwise.
+    /// Turning streaming off leaves the proxy alone.
     @Test func turningStreamingOffLeavesTheProxyAlone() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setModelProxyEnabled(true)
@@ -280,12 +265,11 @@ struct ModelProxyFlagTests {
         let config = try await db.config.get()
         #expect(config.modelProxyEnabled)
         #expect(config.transcriptStreamingEnabled == false)
-        #expect(config.transcriptStreamingEffective == false)
     }
 
-    /// The conjunction, against a combination no setter can produce: a
-    /// hand-edited row with streaming on and the proxy off streams nothing.
-    @Test func effectiveIsFalseWhenStreamingIsOnAndTheProxyIsOff() async throws {
+    /// A row with streaming on and the proxy off streams: the two flags are
+    /// independent choices.
+    @Test func streamingOnWithTheProxyOffResolvesOn() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.writerForTests.write { conn in
             try conn.execute(
@@ -298,10 +282,7 @@ struct ModelProxyFlagTests {
         }
         let config = try await db.config.get()
         #expect(config.modelProxyEnabled == false)
-        #expect(config.transcriptStreamingEnabled, "the row's own choice is preserved")
-        #expect(
-            config.transcriptStreamingEffective == false,
-            "streaming without the proxy has no file to read and must resolve off")
+        #expect(config.transcriptStreamingEnabled)
     }
 
     // MARK: - The port

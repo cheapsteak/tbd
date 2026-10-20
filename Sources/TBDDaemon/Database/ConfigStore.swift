@@ -141,10 +141,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `20260907215725_config_transcript_streaming` migration carries no SQL
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.transcriptStreamingDefault`, never through `?? false`.
-    ///
-    /// Resolving it is not the whole answer: streaming needs the proxy, so what
-    /// callers act on is `Config.transcriptStreamingEffective`, the conjunction
-    /// with `modelProxyEnabled`.
     var transcript_streaming_enabled: Bool?
     /// The loopback port this TBD home's model proxy binds, or nil if none has
     /// been minted. **Not a flag**, exactly like `holder_owner_token`: NULL
@@ -260,9 +256,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   traffic through the loopback model proxy.
     /// - Parameter transcriptStreamingDefault: and its companion, for
     ///   `transcript_streaming_enabled` — the gate on the transcript's
-    ///   provisional assistant row. Resolved here on its own; what callers act
-    ///   on is `Config.transcriptStreamingEffective`, its conjunction with the
-    ///   proxy flag.
+    ///   provisional assistant rows, which the session mod's
+    ///   `transcript-stream` feature feeds.
     /// - Parameter updateModeDefault: and truly, finally the last, for
     ///   `update_mode` — the only one of these that is not a Bool, so the
     ///   parameter proves both properties at once: a NULL row follows a changed
@@ -396,11 +391,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         config.modelProxyEnabled = model_proxy_enabled ?? modelProxyDefault
         // Clone-backed checkout gate — NOT `?? false`.
         config.cloneCheckoutEnabled = clone_checkout_enabled ?? cloneCheckoutDefault
-        // And its companion, for the provisional transcript row's gate — NOT
-        // `?? false`. Resolved on its own here; the conjunction with the proxy
-        // flag lives in `Config.transcriptStreamingEffective`, so a
-        // hand-edited row with streaming on and the proxy off is still
-        // readable as the two separate choices it records.
+        // And the provisional transcript rows' gate — NOT `?? false`.
         config.transcriptStreamingEnabled =
             transcript_streaming_enabled ?? transcriptStreamingDefault
         // Passed straight through, NULL included: "not yet minted" is a real
@@ -1058,61 +1049,32 @@ public struct ConfigStore: Sendable {
     /// Persist the model-proxy gate (default OFF, soaking) — whether new
     /// pty-holder sessions are routed through the loopback proxy.
     ///
-    /// **Turning it off also turns streaming off**, in the same transaction.
-    /// The provisional transcript row reads a file only the proxy writes, so a
-    /// user who switches the proxy off has switched streaming off whether or
-    /// not they know the second flag exists; leaving streaming set to `1` would
-    /// silently re-arm it the next time the proxy came back on. The reverse
-    /// coupling lives in `setTranscriptStreamingEnabled`.
-    ///
-    /// The proxy column is written on every call. The streaming column is
-    /// written only when the proxy is turned off — that is the one gesture
-    /// here that lifts streaming out of NULL, and it does so as a deliberate
-    /// side effect: the effective value readers see is the conjunction of the
-    /// two columns (`Config.transcriptStreamingEffective`), so streaming must
-    /// never be left holding a stale `1` once the proxy it depends on is off.
-    /// Turning the proxy back **on** leaves streaming untouched — see
-    /// `turningTheProxyOnLeavesStreamingAlone`. Applies to sessions started
-    /// after the change: a session's `ANTHROPIC_BASE_URL` is fixed in its
-    /// environment at spawn.
+    /// Writes the proxy column alone: transcript streaming comes from the
+    /// session mod and no longer depends on the proxy. Applies to sessions
+    /// started after the change: a session's `ANTHROPIC_BASE_URL` is fixed in
+    /// its environment at spawn.
     public func setModelProxyEnabled(_ enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET model_proxy_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
-            if !enabled {
-                try db.execute(
-                    sql: "UPDATE config SET transcript_streaming_enabled = 0 WHERE id = ?",
-                    arguments: [Self.singletonID]
-                )
-            }
         }
     }
 
     /// Persist the transcript-streaming gate (default OFF, soaking) — whether
-    /// the transcript renders a provisional assistant row from the proxy's
-    /// stream file.
+    /// sessions spawn with the session mod's `transcript-stream` feature, and
+    /// the transcript shows the provisional rows it feeds.
     ///
-    /// **Turning it on also turns the proxy on**, in the same transaction: the
-    /// file it reads does not exist without the proxy, so asking for streaming
-    /// is asking for both. The reverse coupling lives in
-    /// `setModelProxyEnabled`, and together they are what keeps the pair
-    /// coherent for anyone using the toggles — readers still resolve through
-    /// `Config.transcriptStreamingEffective`, because a hand-edited row can
-    /// hold a combination no gesture here can produce.
+    /// Writes the streaming column alone; the proxy flag is a separate choice.
+    /// Applies to sessions started after the change: the feature list is fixed
+    /// in a session's environment at spawn.
     public func setTranscriptStreamingEnabled(_ enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET transcript_streaming_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
-            if enabled {
-                try db.execute(
-                    sql: "UPDATE config SET model_proxy_enabled = 1 WHERE id = ?",
-                    arguments: [Self.singletonID]
-                )
-            }
         }
     }
 

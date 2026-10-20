@@ -1,4 +1,5 @@
 import Foundation
+import TBDShared
 
 /// Whether the session mod is demonstrably running in a session.
 public enum SessionModLiveness: Equatable, Sendable {
@@ -24,7 +25,7 @@ public enum SessionModLiveness: Equatable, Sendable {
     }
 
     /// Seconds after which a heartbeat no longer counts.
-    public static let staleAfter: TimeInterval = 90
+    public static let staleAfter: TimeInterval = SessionModSessionFiles.heartbeatStaleAfter
 
     public static func evaluate(
         feature: SessionModFeature,
@@ -51,8 +52,7 @@ public enum SessionModLiveness: Equatable, Sendable {
         }
         guard sameIncarnation(aliveRecord.incarnationId, live) else { return .unknown(.otherIncarnation) }
         guard aliveRecord.features.contains(feature.rawValue) else { return .unknown(.featureNotRunning) }
-        let nowMs = (now.timeIntervalSince1970 * 1000).rounded()
-        if nowMs - Double(aliveRecord.heartbeatAtMs) > staleAfter * 1000 {
+        if aliveRecord.isStale(now: now) {
             return .unknown(.staleHeartbeat)
         }
         return .confirmed
