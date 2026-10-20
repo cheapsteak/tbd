@@ -390,10 +390,13 @@ struct TranscriptPresentation {
         }
 
         for node in baseNodes {
-            if case .chatBubble = node.kind {
+            switch node.kind {
+            case .chatBubble, .thinking:
+                // A provisional thinking summary stands alone like a bubble:
+                // folded into a group it would be hidden while it streams.
                 flushActivity()
                 projected.append(node)
-            } else {
+            default:
                 pendingActivity.append(node)
             }
         }
@@ -476,9 +479,10 @@ struct TranscriptPresentation {
             return .context
         case .skillBody:
             return .skill
-        case .chatBubble, .activityGroupSummary, .subagentSummary:
-            // Unreachable in a group: bubbles flush the run, and the other two
-            // are never produced by `transcriptRenderNodes(from:)`.
+        case .chatBubble, .activityGroupSummary, .subagentSummary, .thinking:
+            // Unreachable in a group: bubbles and provisional thinking flush
+            // the run, and the other two are never produced by
+            // `transcriptRenderNodes(from:)`.
             return .other
         }
     }

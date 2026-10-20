@@ -4,7 +4,7 @@ import Testing
 import TBDShared
 
 /// `AppState.transcriptStreamingEnabled` — the single place the app asks
-/// whether a transcript pane should tail a model-proxy stream file at all.
+/// whether a transcript pane should read the session mod's stream file at all.
 ///
 /// Every test constructs `AppState` against a unique throwaway `UserDefaults`
 /// suite and tears it down: TBDApp ships as an unbundled SPM executable, so
@@ -57,7 +57,7 @@ struct TranscriptStreamingFlagTests {
 
 /// The live transcript pane's `.task(id:)` key.
 ///
-/// `appSideLoop` resolves the model-proxy stream file once, at the top of the
+/// `appSideLoop` resolves the session mod's stream file once, at the top of the
 /// run, so whatever that resolution depends on has to be part of the key or the
 /// loop keeps running against a stale reading of it. The flag is the input that
 /// actually moves: a viewer ticks "Stream assistant text into the transcript"
@@ -67,15 +67,19 @@ struct TranscriptStreamingFlagTests {
 struct TranscriptPaneTaskKeyTests {
 
     private static let terminalID = UUID()
+    private static let sessionsDir = URL(fileURLWithPath: "/tmp/tbd-test-sessions", isDirectory: true)
 
-    private static func key(streaming: Bool, streamPath: String?) -> TaskKey {
+    private static func key(
+        streaming: Bool, sessionID: String? = "s1", exited: Bool = false
+    ) -> TaskKey {
         TaskKey.resolve(
             terminalID: terminalID,
-            sessionID: "s1",
+            sessionID: sessionID,
             retryToken: 0,
             transcriptPath: "/tmp/session.jsonl",
             streamingEnabled: streaming,
-            terminalStreamPath: streamPath)
+            terminalExited: exited,
+            sessionsDir: sessionsDir)
     }
 
     /// The finding this test pins: with the flag outside the key, turning
@@ -83,33 +87,32 @@ struct TranscriptPaneTaskKeyTests {
     /// until an unrelated remount.
     @Test("flipping the streaming flag restarts the loop for the same terminal")
     func flippingTheFlagChangesTheKey() {
-        let off = Self.key(streaming: false, streamPath: "/tmp/stream.jsonl")
-        let on = Self.key(streaming: true, streamPath: "/tmp/stream.jsonl")
+        let off = Self.key(streaming: false)
+        let on = Self.key(streaming: true)
 
-        #expect(off != on,
-                "the same terminal must key differently on either side of the flag")
+        #expect(off != on, "the same terminal must key differently on either side of the flag")
         #expect(off.streamPath == nil, "the flag off resolves to no stream file")
-        #expect(on.streamPath == "/tmp/stream.jsonl")
+        #expect(on.streamPath == "/tmp/tbd-test-sessions/s1/transcript-stream.json")
     }
 
-    /// The path is stamped at spawn, but the app can learn it after the pane
-    /// mounts — the terminal row arrives over RPC.
-    @Test("the stream path landing after the pane mounted restarts the loop")
-    func theStreamPathArrivingChangesTheKey() {
-        #expect(Self.key(streaming: true, streamPath: nil)
-                != Self.key(streaming: true, streamPath: "/tmp/stream.jsonl"))
+    /// The path comes from the sessions directory and the session id, never
+    /// from the terminal row's proxy-era stream path.
+    @Test("a /clear's new session id is a new stream path")
+    func theStreamPathFollowsTheSessionID() {
+        #expect(Self.key(streaming: true, sessionID: "s2").streamPath
+                == "/tmp/tbd-test-sessions/s2/transcript-stream.json")
     }
 
-    /// A terminal that will never have a stream file must not be remounted by
-    /// somebody else's toggle.
-    @Test("a terminal with no stream file keys the same on either side of the flag")
-    func noStreamFileIsInsensitiveToTheFlag() {
-        #expect(Self.key(streaming: false, streamPath: nil)
-                == Self.key(streaming: true, streamPath: nil))
+    @Test("a session id that is missing or unsafe as a path has no stream file")
+    func anUnusableSessionIDHasNoStreamFile() {
+        #expect(Self.key(streaming: true, sessionID: nil).streamPath == nil)
+        #expect(Self.key(streaming: true, sessionID: "../escape").streamPath == nil)
     }
 
-    @Test("an empty stream path resolves to no stream file")
-    func emptyStreamPathResolvesToNil() {
-        #expect(Self.key(streaming: true, streamPath: "").streamPath == nil)
+    /// A terminal exiting retires its provisional rows, and touches no file the
+    /// scheduler watches: the restart is what publishes the retirement.
+    @Test("a terminal exiting restarts the loop")
+    func aTerminalExitChangesTheKey() {
+        #expect(Self.key(streaming: true) != Self.key(streaming: true, exited: true))
     }
 }
