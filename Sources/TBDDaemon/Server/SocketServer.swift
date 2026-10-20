@@ -572,6 +572,12 @@ private final class SocketRPCHandler: ChannelInboundHandler, @unchecked Sendable
                 }
             }
 
+            // Catch the new subscriber up on open prompts and captures, to it
+            // alone. Its deltas reach the channel through the writer above,
+            // which queues each on the same event loop the ack was queued on
+            // first, so the client reads the ack line before any of them.
+            await router.replayPendingPrompts(to: subID)
+
             // Return WITHOUT closing — this is a long-lived streaming connection
             return
         }

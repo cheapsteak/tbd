@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import TestSupport
 import Testing
@@ -23,6 +24,9 @@ struct RPCRouterPromptHandlerTests {
         let store: PendingPromptStore
         let clock: EventDrivenTestClock
         let terminalID: UUID
+        /// The terminal row's `sessionIncarnationID`, which the mod channel's
+        /// routes authorize against.
+        let incarnation: UUID
         let worktreeID: UUID
         let logPath: String
     }
@@ -52,11 +56,13 @@ struct RPCRouterPromptHandlerTests {
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "test-wt", branch: "tbd/test-wt",
             path: "/tmp/test-wt-\(UUID().uuidString)", tmuxServer: "tbd-test")
+        let incarnation = UUID()
         let terminal = try await db.terminals.create(
-            worktreeID: worktree.id, tmuxWindowID: "@mock-0", tmuxPaneID: "%mock-0")
+            worktreeID: worktree.id, tmuxWindowID: "@mock-0", tmuxPaneID: "%mock-0",
+            sessionIncarnationID: incarnation)
         return Fixture(
             db: db, router: router, store: store, clock: clock,
-            terminalID: terminal.id, worktreeID: worktree.id, logPath: logPath)
+            terminalID: terminal.id, incarnation: incarnation, worktreeID: worktree.id, logPath: logPath)
     }
 
     // MARK: Requests
@@ -103,6 +109,40 @@ struct RPCRouterPromptHandlerTests {
 
     private func isOpen(_ f: Fixture, _ promptID: String) async -> Bool {
         await f.store.prompts(forTerminal: f.terminalID).contains { $0.id == promptID }
+    }
+
+    /// A mod channel request carrying the fixture terminal's credentials.
+    private func modRequest(
+        _ f: Fixture, token: ModChannelToken, _ method: String, _ path: String,
+        body: [String: Any]? = nil
+    ) -> ModChannelRequest {
+        ModChannelRequest(
+            method: method, path: path, query: [:],
+            headers: [
+                "Authorization": "Bearer \(token.token(incarnationID: f.incarnation))",
+                "X-TBD-Terminal": f.terminalID.uuidString,
+                "X-TBD-Incarnation": f.incarnation.uuidString,
+            ],
+            body: body.map { (try? JSONSerialization.data(withJSONObject: $0)) ?? Data() } ?? Data())
+    }
+
+    private static func modOpenBody(_ toolUseID: String) -> [String: Any] {
+        ["toolUseID": toolUseID, "sessionID": "s1", "toolName": "Bash",
+         "toolInput": ["command": "ls"], "suggestions": NSNull()]
+    }
+
+    /// Subscribes a recorder of the pending-prompt deltas the router sends.
+    @discardableResult
+    private func recordDeltas(
+        _ f: Fixture, into deltas: PromptDeltaRecorder
+    ) -> StateSubscriptionManager.SubscriberID {
+        f.router.registerSubscription { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data),
+               case .terminalPendingPromptsChanged(let d) = delta {
+                deltas.append(d)
+            }
+            return true
+        }
     }
 
     // MARK: prompt.answer
@@ -260,6 +300,203 @@ struct RPCRouterPromptHandlerTests {
         let raw = await f.router.handleRaw(try JSONEncoder().encode(request))
         #expect(raw.error == RPCRouter.promptAnswerNotFromAppRefusal)
         #expect(await isOpen(f, id))
+    }
+
+    // MARK: prompt.answer — both refusals still hold with the channel wired
+
+    /// The mod channel adds a way for prompts to open, not a way to answer
+    /// them: `prompt.answer` still needs the flag and still needs the app.
+    @Test func promptAnswerStillRequiresFlagAndApp() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let token = ModChannelToken(key: SymmetricKey(size: .bits256))
+        let routes = f.router.makeModChannelRoutes(channel: ModChannel(clock: f.clock), token: token)
+        let opened = await routes.handle(
+            modRequest(f, token: token, "POST", "/v1/prompts/open", body: Self.modOpenBody("toolu_1")),
+            token: UUID())
+        #expect(opened.status == 200)
+        let id = "toolu_1"
+        #expect(await isOpen(f, id), "opened through the channel")
+
+        let fromAnotherPeer = try await answer(f, promptID: id, connection: RPCConnectionContext(peerPID: 4321))
+        #expect(fromAnotherPeer.success == false)
+        #expect(fromAnotherPeer.error == RPCRouter.promptAnswerNotFromAppRefusal)
+
+        try await f.db.config.setTranscriptPromptAnswerEnabled(false)
+        let whileOff = try await answer(f, promptID: id)
+        #expect(whileOff.success == false)
+        #expect(whileOff.error == RPCRouter.promptAnswerDisabledRefusal)
+
+        #expect(await isOpen(f, id), "neither refusal touches the prompt")
+    }
+
+    // MARK: The mod channel's routes, wired to the router
+
+    /// Review Focus 4: with the flag turned off while prompts are open, `open`
+    /// is refused (409) but the wait, receipt and closed routes still settle
+    /// the prompts already open — so turning the feature off never strands a
+    /// card or an answer in flight. Driven through the routes the daemon
+    /// builds (`makeModChannelRoutes`), so the incarnation, flag and
+    /// broadcast closures are the production ones.
+    @Test func openRefusedButClosedStillResolvesWhenFlagOff() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let token = ModChannelToken(key: SymmetricKey(size: .bits256))
+        let routes = f.router.makeModChannelRoutes(channel: ModChannel(clock: f.clock), token: token)
+        let deltas = PromptDeltaRecorder()
+        recordDeltas(f, into: deltas)
+
+        func request(_ method: String, _ path: String, body: [String: Any]? = nil) -> ModChannelRequest {
+            modRequest(f, token: token, method, path, body: body)
+        }
+        func openBody(_ toolUseID: String) -> [String: Any] { Self.modOpenBody(toolUseID) }
+
+        // Flag on: both prompts open through the route, and each is published.
+        for id in ["toolu_1", "toolu_2"] {
+            let opened = await routes.handle(request("POST", "/v1/prompts/open", body: openBody(id)), token: UUID())
+            #expect(opened.status == 200, "\(id)")
+        }
+        #expect(await f.store.prompts(forTerminal: f.terminalID).map(\.id) == ["toolu_1", "toolu_2"])
+        #expect(deltas.all.last?.prompts.map(\.id) == ["toolu_1", "toolu_2"])
+
+        // An answer for toolu_1 reaches the mod's wait while the flag is on.
+        let store = f.store
+        let terminalID = f.terminalID
+        let waitRequest = request("GET", "/v1/prompts/toolu_1/answer")
+        let waiting = Task { await routes.handle(waitRequest, token: UUID()) }
+        let attached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await store.isWaiterAttached(terminalID: terminalID, toolUseID: "toolu_1")
+        }
+        #expect(attached != .timedOut)
+        let answering = Task { try await answer(f, promptID: "toolu_1") }
+        let handed = await waiting.value
+        #expect(handed.status == 200)
+        let handedBody = (try? JSONSerialization.jsonObject(with: handed.body)) as? [String: Any]
+        #expect(handedBody?["state"] as? String == "decision")
+
+        // Flag off.
+        try await f.db.config.setTranscriptPromptAnswerEnabled(false)
+
+        // A new prompt is refused.
+        let refused = await routes.handle(request("POST", "/v1/prompts/open", body: openBody("toolu_3")), token: UUID())
+        #expect(refused.status == 409)
+        #expect(await isOpen(f, "toolu_3") == false)
+
+        // The receipt still settles the answer in flight.
+        let receipt = await routes.handle(request("POST", "/v1/prompts/toolu_1/receipt"), token: UUID())
+        #expect(receipt.status == 200)
+        let answered = try await answering.value
+        #expect(try answered.decodeResult(PromptAnswerResult.self).outcome == .delivered)
+
+        // Closed still resolves an open prompt, and the app is told.
+        let closed = await routes.handle(request("POST", "/v1/prompts/toolu_2/closed"), token: UUID())
+        #expect(closed.status == 200)
+        #expect(await f.store.prompts(forTerminal: f.terminalID).isEmpty)
+        #expect(deltas.all.last?.prompts.isEmpty == true)
+
+        // The wait route still answers: the prompt is over.
+        let after = await routes.handle(request("GET", "/v1/prompts/toolu_2/answer"), token: UUID())
+        #expect(after.status == 200)
+        let afterBody = (try? JSONSerialization.jsonObject(with: after.body)) as? [String: Any]
+        #expect(afterBody?["state"] as? String == "resolved")
+    }
+
+    /// The routes authorize against the terminal row's `sessionIncarnationID`:
+    /// a token for any other incarnation is refused.
+    @Test func modChannelRoutesAuthorizeAgainstTheRowIncarnation() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let token = ModChannelToken(key: SymmetricKey(size: .bits256))
+        let routes = f.router.makeModChannelRoutes(channel: ModChannel(clock: f.clock), token: token)
+        let stale = UUID()
+        let request = ModChannelRequest(
+            method: "POST", path: "/v1/prompts/toolu_1/closed", query: [:],
+            headers: [
+                "Authorization": "Bearer \(token.token(incarnationID: stale))",
+                "X-TBD-Terminal": f.terminalID.uuidString,
+                "X-TBD-Incarnation": stale.uuidString,
+            ],
+            body: Data())
+        #expect(await routes.handle(request, token: UUID()).status == 401)
+    }
+
+    // MARK: Session end
+
+    /// Every `SessionEnd` reason ends the session's dialogs — including the
+    /// ones that do not park the terminal — and the app is told.
+    @Test func sessionEndedClearsPromptsForEveryReason() async throws {
+        let reasons: [String?] = ["clear", "logout", "prompt_input_exit", "other", "resume", "never-heard-of-it", nil]
+        for reason in reasons {
+            let f = try await makeFixture(flagOn: true)
+            let id = await openedPromptID(f)
+            let waiter = await attachWait(f, promptID: id)
+            let deltas = PromptDeltaRecorder()
+            recordDeltas(f, into: deltas)
+
+            let request = try RPCRequest(
+                method: RPCMethod.terminalSessionEnded,
+                params: TerminalSessionEndedParams(
+                    terminalID: f.terminalID, sessionIncarnationID: f.incarnation, reason: reason))
+            let response = await f.router.handle(request)
+            #expect(response.success, "reason \(reason ?? "nil"): \(response.error ?? "none")")
+            #expect(await isOpen(f, id) == false, "reason \(reason ?? "nil")")
+            #expect(await waiter.value == .resolved, "reason \(reason ?? "nil")")
+            #expect(deltas.all.contains { $0.terminalID == f.terminalID && $0.prompts.isEmpty },
+                    "reason \(reason ?? "nil"): the cleared set is published")
+        }
+    }
+
+    /// Session end clears only that terminal's prompts.
+    @Test func sessionEndedLeavesOtherTerminalsAlone() async throws {
+        let f = try await makeFixture(flagOn: true)
+        _ = await openedPromptID(f)
+        let other = UUID()
+        await f.store.open(
+            terminalID: other, sessionID: "s2", toolUseID: "toolu_9", toolName: "Bash",
+            toolInputJSON: Self.bashInput, suggestionsJSON: nil)
+        let request = try RPCRequest(
+            method: RPCMethod.terminalSessionEnded,
+            params: TerminalSessionEndedParams(terminalID: f.terminalID, reason: "clear"))
+        #expect(await f.router.handle(request).success)
+        #expect(await f.store.prompts(forTerminal: f.terminalID).isEmpty)
+        #expect(await f.store.prompts(forTerminal: other).map(\.id) == ["toolu_9"])
+    }
+
+    // MARK: Subscribe snapshot
+
+    /// A new `state.subscribe` subscriber is sent each terminal's open
+    /// prompts and captures, to it alone; an existing subscriber, which saw
+    /// them as they changed, is sent nothing.
+    @Test func subscribeReplaysOpenPrompts() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let id = await openedPromptID(f)
+        let captureTerminal = UUID()
+        await f.store.set(terminalID: captureTerminal, PendingAskUserQuestion(
+            toolUseID: "toolu_q", inputJSON: "{}", timestamp: Date(timeIntervalSince1970: 1_700_000_000)))
+
+        let existing = PromptDeltaRecorder()
+        recordDeltas(f, into: existing)
+        let fresh = PromptDeltaRecorder()
+        let freshID = recordDeltas(f, into: fresh)
+
+        await f.router.replayPendingPrompts(to: freshID)
+
+        #expect(existing.all.isEmpty, "the replay goes to the new subscriber only")
+        let byTerminal = Dictionary(fresh.all.map { ($0.terminalID, $0) }, uniquingKeysWith: { _, last in last })
+        #expect(fresh.all.count == 2)
+        let prompts = try #require(byTerminal[f.terminalID])
+        #expect(prompts.prompts.map(\.id) == [id])
+        let revision = await f.store.snapshot(forTerminal: f.terminalID).revision
+        #expect(prompts.revision == revision)
+        let captures = try #require(byTerminal[captureTerminal])
+        #expect(captures.captures.map(\.toolUseID) == ["toolu_q"])
+        #expect(captures.prompts.isEmpty)
+    }
+
+    /// With nothing pending, a new subscriber is sent nothing.
+    @Test func subscribeReplaysNothingWhenNothingIsOpen() async throws {
+        let f = try await makeFixture(flagOn: true)
+        let fresh = PromptDeltaRecorder()
+        let freshID = recordDeltas(f, into: fresh)
+        await f.router.replayPendingPrompts(to: freshID)
+        #expect(fresh.all.isEmpty)
     }
 
     // MARK: The removed hook path

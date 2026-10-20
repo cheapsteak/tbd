@@ -6008,6 +6008,12 @@ extension RPCRouter {
     /// PR #821, "Not-running delivery").
     func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
+        // Whatever the reason, the session that opened this terminal's prompts
+        // is over, and its dialogs with it: clear them before the park guard,
+        // which returns early for reasons that do not park.
+        let resolvedPrompts = await pendingQuestions.resolvePrompts(
+            terminalID: params.terminalID, .sessionEnded)
+        await broadcastPendingPrompts(terminals: resolvedPrompts)
         await claudeDelegationTracker.clear(
             terminalID: params.terminalID,
             sessionIncarnationID: params.sessionIncarnationID)

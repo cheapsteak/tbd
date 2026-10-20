@@ -544,6 +544,12 @@ public actor PendingPromptStore {
         Set(promptRecords.keys.map(\.terminalID))
     }
 
+    /// The terminals holding at least one capture or open prompt — the ones a
+    /// new `state.subscribe` subscriber is sent a snapshot for.
+    public func terminalsWithPendingState() -> Set<UUID> {
+        Set(pending.keys.map(\.terminalID)).union(promptRecords.keys.map(\.terminalID))
+    }
+
     /// Daemon shutdown: every held wait request gets `.resolved` and every
     /// answer in flight reads `.alreadyResolved`.
     @discardableResult
