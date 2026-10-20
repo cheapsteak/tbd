@@ -65,10 +65,25 @@ class ExemptTitleTests(unittest.TestCase):
         self.assertFalse(cus.is_exempt(""))
 
     def test_type_must_be_whole_word(self):
-        # `fixture:` and `testing:` are not the `fix` or `test` types.
-        self.assertFalse(cus.is_exempt("fixture: x"))
-        self.assertFalse(cus.is_exempt("testing: x"))
-        self.assertFalse(cus.is_exempt("fix the bug"))
+        # `fixture:` and `testing:` are not the `fix` or `test` types, and a
+        # type with no colon after it is not a conventional-commit prefix.
+        for title in ("fixture: x", "testing: x", "fix the bug", "fixup", "fixup! feat: x",
+                      "fix-thing", "fix-thing: x", "docs-only change"):
+            with self.subTest(title=title):
+                self.assertFalse(cus.is_exempt(title))
+
+    def test_scoped_bang_fix_and_leading_whitespace(self):
+        for title in ("fix(app)!: x", "Fix(app)!: x", "  fix: x", "\tchore: x"):
+            with self.subTest(title=title):
+                self.assertTrue(cus.is_exempt(title))
+
+    def test_revert_needs_quote_or_colon(self):
+        self.assertTrue(cus.is_exempt("revert: feat: x"))
+        self.assertTrue(cus.is_exempt('  Revert "feat: x"'))
+        self.assertFalse(cus.is_exempt("Reverting the thing"))
+
+    def test_none_title_not_exempt(self):
+        self.assertFalse(cus.is_exempt(None))
 
 
 class UserStorySectionTests(unittest.TestCase):
@@ -111,6 +126,9 @@ class UserStorySectionTests(unittest.TestCase):
     def test_content_in_other_section_does_not_count(self):
         body = "## User story\n\n## Summary\n\nAs a user, I want x.\n"
         self.assertFalse(cus.has_user_story(body))
+
+    def test_trailing_colon_heading(self):
+        self.assertTrue(cus.has_user_story("## User story:\n\nAs a user, I want x.\n"))
 
     def test_unrelated_heading_text_not_a_story(self):
         self.assertFalse(cus.has_user_story("## User story notes\nAs a user.\n"))

@@ -28,7 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # Only the check script is read; no later step needs the token.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Title and body arrive through `env:` and are read by the script, never
       # spliced into the shell: both are attacker-controlled text.

@@ -17,11 +17,11 @@ Both call one module, `.github/workflows/pr-user-story/check_user_story.py`: the
 
 The PR title decides. A title whose conventional-commit type is `fix`, `docs`, `chore`, `test`, `ci`, `build` or `revert` needs no story; the type matches case-insensitively and may carry a `(scope)` and a `!`, so `Fix(app)!:` is exempt. GitHub's own Revert button writes `Revert "…"` with no colon, and that form is exempt too. Every other title needs a story: `feat:`, `refactor:`, `perf:`, and an untyped title alike.
 
-Bug fixes are exempt because a bug fix restores the system to its existing theory; its "why" is the broken behavior, which the bug-fix template variant already asks for. The other exempt types change no behavior a user would see. Refactors are not exempt, because the repo's convention already puts refactors on the feature skeleton with Summary carrying the motivation, and a refactor that cannot name who benefits is worth questioning.
+Bug fixes are exempt because a bug fix restores the system to its existing theory; its "why" is the broken behavior, which the bug-fix template variant already asks for. The other exempt types change no behavior a user would see, and a revert's story is the one the reverted PR already told. Refactors are not exempt, because the repo's convention already puts refactors on the feature skeleton with Summary carrying the motivation, and a refactor that cannot name who benefits is worth questioning.
 
 ## Format rule
 
-The description must contain a heading reading `User story`, `Job to be done` or `JTBD` (case-insensitive, any heading level) whose section is non-empty once HTML comments and whitespace are removed. The section ends at the next heading. Comments are stripped before headings are looked for, so a heading quoted inside a guidance comment opens nothing, and the template's untouched section, which holds only a guidance comment, fails.
+The description must contain a heading reading `User story`, `Job to be done` or `JTBD` (case-insensitive, any heading level, a trailing colon allowed) whose section is non-empty once HTML comments and whitespace are removed. The section ends at the next heading. Comments are stripped before headings are looked for, so a heading quoted inside a guidance comment opens nothing, and the template's untouched section, which holds only a guidance comment, fails.
 
 Either sentence form is fine inside, and neither is enforced:
 
@@ -32,7 +32,9 @@ Either sentence form is fine inside, and neither is enforced:
 
 The workflow runs on `pull_request` with types `opened`, `edited`, `synchronize` and `reopened`. `edited` is what lets fixing the title or description re-run the check without a push; `synchronize` keeps a result attached to the newest head commit, which is what branch protection reads.
 
-It uses `pull_request`, not `pull_request_target`, and `contents: read`. The check needs nothing but the event payload and a checkout of its own script, so it never needs a write token or secrets, and the fork-safety questions `pull_request_target` raises do not arise. The title and body reach the script through `env:` and are never interpolated into the `run:` shell, since both are author-controlled text.
+It uses `pull_request`, not `pull_request_target`, and `contents: read`. The check needs nothing but the event payload and a checkout of its own script, so it never needs a write token or secrets, and the fork-safety questions `pull_request_target` raises do not arise. The title and body reach the script through `env:` and are never interpolated into the `run:` shell, since both are author-controlled text. The checkout persists no credentials, since nothing after it needs the token.
+
+The script that judges a PR is the PR's own copy, so a PR could loosen the check that judges it. That is accepted rather than defended against: the change sits in the diff in front of the reviewer, as any edit to a test would, and checking out the base branch's copy instead would leave a PR that changes the check unable to exercise its own version.
 
 Making the check required is a branch-protection setting, an admin step outside the repository. Until an admin adds `PR user story` to the required checks, a red result is visible but does not block merging.
 

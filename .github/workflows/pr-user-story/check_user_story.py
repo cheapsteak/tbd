@@ -15,8 +15,8 @@ Two callers share this module, so the rule is defined once:
   is about to send.
 
 Stdlib only: the guardrail runs in front of every Bash call with no
-dependencies installed. Pure policy functions take plain strings; `main()` is
-the only I/O.
+dependencies installed. Pure policy functions take plain strings (None reads
+as empty); `main()` is the only I/O.
 """
 
 from __future__ import annotations
@@ -42,10 +42,10 @@ _EXEMPT_PREFIX = re.compile(
 # The title GitHub's own Revert button writes: `Revert "feat: …"`, no colon.
 _GITHUB_REVERT = re.compile(r'^\s*revert\s+"', re.IGNORECASE)
 
-# The headings that open the section. Any heading level is accepted; the
-# template uses `##`.
+# The headings that open the section. Any heading level is accepted, as is a
+# trailing colon; the template uses `## User story`.
 _STORY_HEADING = re.compile(
-    r"^\s{0,3}#{1,6}\s+(?:user\s+story|job\s+to\s+be\s+done|jtbd)\s*#*\s*$",
+    r"^\s{0,3}#{1,6}\s+(?:user\s+story|job\s+to\s+be\s+done|jtbd)\s*:?\s*#*\s*$",
     re.IGNORECASE,
 )
 
@@ -81,13 +81,13 @@ Bug fixes and other non-feature changes are exempt by their title prefix: \
 retitle it instead."""
 
 
-def is_exempt(title: str) -> bool:
+def is_exempt(title: str | None) -> bool:
     """True when the title's conventional-commit type needs no user story."""
     title = title or ""
     return bool(_EXEMPT_PREFIX.match(title) or _GITHUB_REVERT.match(title))
 
 
-def has_user_story(body: str) -> bool:
+def has_user_story(body: str | None) -> bool:
     """True when some user-story section has content beyond comments and whitespace.
 
     Comments are stripped before headings are looked for, so a heading quoted
@@ -107,7 +107,7 @@ def has_user_story(body: str) -> bool:
     return False
 
 
-def check(title: str, body: str) -> bool:
+def check(title: str | None, body: str | None) -> bool:
     """True when the PR passes: an exempt title, or a filled user-story section."""
     return is_exempt(title) or has_user_story(body)
 
