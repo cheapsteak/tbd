@@ -965,8 +965,20 @@ private struct OtherSectionContent: View {
 
     @Environment(AppState.self) var appState
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
+    @State private var showingClone = false
 
     var body: some View {
+        // On this host rather than on the empty state that opens it: the
+        // empty state goes away the moment a repo exists or the daemon drops,
+        // and a sheet that went with it would cancel a clone still running.
+        content
+            .sheet(isPresented: $showingClone) {
+                CloneRepositorySheet()
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if !appState.isConnected {
             disconnectedView
         } else if appState.selectedScratchSection {
@@ -1004,6 +1016,13 @@ private struct OtherSectionContent: View {
                 Label("Add Repository", systemImage: "folder.badge.plus")
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            Button {
+                showingClone = true
+            } label: {
+                Label("Clone Repository…", systemImage: "arrow.down.circle")
+            }
             .controlSize(.large)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
