@@ -123,6 +123,26 @@ fresh read of config, so a spawn and the readers that later consult its
 leaves the person's own `statusLine` in force, as for any other session. With
 it off, desk spawns are unchanged.
 
+A fresh spawn runs `SessionModSpawn.prepare` before it resolves the overlay, so
+the overlay is written once from the real feature list. A replacement spawn —
+a wake, an in-place profile swap, Continue in Claude — learns its incarnation
+only at launch, after its command and overlay are built. It resolves the
+overlay from the features `prepare` is expected to return, then, once
+`prepare` has run and before the process launches, rewrites that same overlay
+file if the real list differs: a spawn record that could not be written, or a
+flag changed in between. Every desk keeps a per-session overlay file whether or
+not it carries the tee, so the path in the spawn command never changes.
+
+A wake that adopts a holder process still running launches nothing, so the
+correction never runs; the overlay follows the expected list. If that process
+was spawned without `usage` and the flag has since been turned on, its tee is
+dropped and its capture deleted, and its window reads as `unknown` until it
+next respawns — never as a stale figure.
+
+A reader trusts `usage.json` only when its `incarnationID` names the live
+incarnation; a file left by an earlier process of the same session reads as
+not yet written.
+
 ### Readers
 
 **`ContextLoadReader`**, behind `session.states`, consults in order:
