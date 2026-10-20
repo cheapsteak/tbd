@@ -113,9 +113,16 @@ final class ModChannelServer: Sendable {
     }
 }
 
-enum ModChannelServerError: Error, Equatable {
+enum ModChannelServerError: LocalizedError, Equatable {
     /// The bound socket could not be restricted to mode 0600.
     case chmodFailed(path: String, code: Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .chmodFailed(let path, let code):
+            return "Could not restrict the mod channel socket at \(path) to mode 0600: \(String(cString: strerror(code))) (errno \(code))"
+        }
+    }
 }
 
 // MARK: - Handler
