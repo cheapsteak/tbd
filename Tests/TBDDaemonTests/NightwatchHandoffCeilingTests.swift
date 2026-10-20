@@ -4,8 +4,9 @@ import Testing
 @testable import TBDShared
 
 /// Tier 2. The desk's handoff ceiling is three quarters of the context window
-/// **its own session** resolved, and the only report of that window is the
-/// statusline capture TBD's tee publishes for desk sessions.
+/// **its own session** resolved. Two files report that window: the session
+/// mod's `usage.json` under `TBDConstants.sessionsDir`, read first, and the
+/// statusline capture TBD's tee publishes for desk sessions spawned without it.
 ///
 /// Two halves have to line up across a language boundary for that to work: the
 /// Python has to look where the Swift writes, and it has to take the same field
@@ -21,6 +22,7 @@ struct NightwatchHandoffCeilingTests {
     /// What the shipped `handoff.py` resolves for one session key.
     private struct Answer {
         let capturePath: String
+        let usagePath: String?
         let window: Int?
         let ceiling: Int
         let provenance: String
@@ -35,8 +37,10 @@ struct NightwatchHandoffCeilingTests {
     spec = importlib.util.spec_from_file_location("nightwatch_handoff", sys.argv[1])
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    ceiling, provenance = mod.resolve_ceiling(sys.argv[2])
+    session = sys.argv[3] if len(sys.argv) > 3 else None
+    ceiling, provenance = mod.resolve_ceiling(sys.argv[2], None, session)
     print(json.dumps({"path": mod.statusline_capture_path(sys.argv[2]),
+                      "usagePath": mod.usage_path(session),
                       "window": mod.observed_window(sys.argv[2]),
                       "ceiling": ceiling,
                       "provenance": provenance,
@@ -45,10 +49,13 @@ struct NightwatchHandoffCeilingTests {
 
     /// Runs the driver with `TBD_HOME` in the child's environment — the
     /// injection seam, so no test in this process mutates its own environment.
-    private func ask(handoffPath: String, sessionKey: String, tbdHome: String) throws -> Answer {
+    private func ask(
+        handoffPath: String, sessionKey: String, tbdHome: String, claudeSessionID: String? = nil
+    ) throws -> Answer {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         proc.arguments = ["python3", "-c", Self.driver, handoffPath, sessionKey]
+            + (claudeSessionID.map { [$0] } ?? [])
         var env = ProcessInfo.processInfo.environment
         env["TBD_HOME"] = tbdHome
         proc.environment = env
@@ -64,6 +71,7 @@ struct NightwatchHandoffCeilingTests {
         let root = try #require(object, "handoff.py driver printed no JSON. stderr:\n\(stderr)")
         return Answer(
             capturePath: try #require(root["path"] as? String),
+            usagePath: root["usagePath"] as? String,
             window: root["window"] as? Int,
             ceiling: try #require(root["ceiling"] as? Int),
             provenance: try #require(root["provenance"] as? String),
@@ -91,6 +99,25 @@ struct NightwatchHandoffCeilingTests {
         let payload = try JSONSerialization.data(
             withJSONObject: ["context_window": ["context_window_size": window]])
         try payload.write(to: URL(fileURLWithPath: path))
+    }
+
+    /// Writes `body` where the session mod's `usage` feature writes, derived
+    /// through `TBDConstants.sessionsDir` rather than spelled by hand.
+    private func publishUsage(_ body: String, claudeSessionID: String, home: URL) throws -> URL {
+        let dir = TBDConstants.sessionsDir(environment: ["TBD_HOME": home.path])
+            .appendingPathComponent(claudeSessionID, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("usage.json")
+        try Data(body.utf8).write(to: file)
+        return file
+    }
+
+    private func usageBody(window: Any) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1, "claudeSessionID": "S", "measuredAt": 0,
+            "context": ["window": window] as [String: Any], "rateLimits": [] as [Any]
+        ] as [String: Any])
+        return String(decoding: data, as: UTF8.self)
     }
 
     @Test("The script looks exactly where TBDConstants publishes, sanitizing identically")
@@ -168,6 +195,100 @@ struct NightwatchHandoffCeilingTests {
         let answer = try ask(handoffPath: handoff, sessionKey: key, tbdHome: home.path)
 
         #expect(answer.window == nil, "\(payload) was read as a window")
+        #expect(answer.ceiling == answer.fallback)
+    }
+    @Test("The usage file is read from TBDConstants.sessionsDir/<claudeSessionID>/usage.json")
+    func usagePathAgrees() throws {
+        let (home, handoff) = try fixture()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessionID = UUID().uuidString
+        let file = try publishUsage(try usageBody(window: 200_000),
+                                    claudeSessionID: sessionID, home: home)
+
+        let answer = try ask(handoffPath: handoff, sessionKey: UUID().uuidString,
+                             tbdHome: home.path, claudeSessionID: sessionID)
+
+        #expect(answer.usagePath == file.path,
+                "handoff.py looks for usage.json somewhere TBDConstants does not put it")
+        #expect(answer.window == nil, "observed_window is the capture reader, not the usage reader")
+        #expect(answer.ceiling == 150_000, "a 200k usage window gave a ceiling of \(answer.ceiling)")
+    }
+
+    /// The usage file is the session's own report from inside Claude Code; the
+    /// capture is the fallback for a desk spawned without it. Where both exist,
+    /// the file wins.
+    @Test("The usage file's window beats the capture's")
+    func usageWinsOverCapture() throws {
+        let (home, handoff) = try fixture()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let key = UUID().uuidString, sessionID = UUID().uuidString
+        try publish(window: 1_000_000, forKey: key, home: home)
+        _ = try publishUsage(try usageBody(window: 200_000), claudeSessionID: sessionID, home: home)
+
+        let answer = try ask(handoffPath: handoff, sessionKey: key, tbdHome: home.path,
+                             claudeSessionID: sessionID)
+
+        #expect(answer.ceiling == 150_000, "the capture's window beat the usage file's")
+        #expect(answer.provenance.contains("OBSERVED") && answer.provenance.contains("usage file"),
+                "the ceiling does not name the usage file as its source: \(answer.provenance)")
+    }
+
+    /// A torn write (the mod's file API has no rename), a boolean, a zero and
+    /// a missing window are each "not observed": the capture serves instead,
+    /// never a zero-derived ceiling.
+    @Test("An unusable usage file falls through to the capture", arguments: [
+        "torn", "boolean", "zero", "missing"
+    ])
+    func unusableUsageFallsThrough(shape: String) throws {
+        let (home, handoff) = try fixture()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let key = UUID().uuidString, sessionID = UUID().uuidString
+        try publish(window: 1_000_000, forKey: key, home: home)
+        let full = try usageBody(window: 200_000)
+        let body: String
+        switch shape {
+        case "torn": body = String(full.prefix(full.count / 2))
+        case "boolean": body = #"{"context":{"window":true}}"#
+        case "zero": body = try usageBody(window: 0)
+        default: body = #"{"context":{"tokens":5}}"#
+        }
+        _ = try publishUsage(body, claudeSessionID: sessionID, home: home)
+
+        let answer = try ask(handoffPath: handoff, sessionKey: key, tbdHome: home.path,
+                             claudeSessionID: sessionID)
+
+        #expect(answer.ceiling == 750_000, "a \(shape) usage file did not fall through to the capture")
+        #expect(answer.provenance.contains("statusline capture"),
+                "the fall-through ceiling does not name the capture: \(answer.provenance)")
+    }
+
+    @Test("Neither a usage window nor a capture keeps the fallback, labeled as a guess")
+    func neitherSourceFallsBack() throws {
+        let (home, handoff) = try fixture()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sessionID = UUID().uuidString
+        _ = try publishUsage(try usageBody(window: 0), claudeSessionID: sessionID, home: home)
+
+        let answer = try ask(handoffPath: handoff, sessionKey: UUID().uuidString,
+                             tbdHome: home.path, claudeSessionID: sessionID)
+
+        #expect(answer.ceiling == 600_000)
+        #expect(answer.provenance.contains("NOT observed"))
+    }
+
+    /// The session ID becomes a path component, so the script refuses one that
+    /// `SessionModFiles.isSafeSessionID` would refuse rather than reading a
+    /// file outside the session's own directory.
+    @Test("An unsafe session ID has no usage path", arguments: ["a/b", "..", "../x", ""])
+    func unsafeSessionIDRefused(sessionID: String) throws {
+        let (home, handoff) = try fixture()
+        defer { try? FileManager.default.removeItem(at: home) }
+        #expect(!SessionModFiles.isSafeSessionID(sessionID))
+
+        let answer = try ask(handoffPath: handoff, sessionKey: UUID().uuidString,
+                             tbdHome: home.path, claudeSessionID: sessionID)
+
+        #expect(answer.usagePath == nil, "handoff.py built a usage path from \(sessionID.debugDescription)")
         #expect(answer.ceiling == answer.fallback)
     }
 }

@@ -139,9 +139,9 @@ they are wrong; this rule wins.)
 
 **Hand off at the context ceiling — never push through it.** A judge session that runs past
 its context ceiling starts truncating its own shift. That ceiling is three quarters of the
-context window *this* session reported — TBD installs a statusline tee on desk sessions so
-the window Claude Code resolved is knowable — and falls back to a fixed guess when there is
-no capture to read. It is therefore a different number on a different desk, and there is no
+context window *this* session reported — read from the session mod's usage file, or, on a
+desk spawned without it, from the statusline tee TBD installs there instead — and falls back
+to a fixed guess when neither has a window to read. It is therefore a different number on a different desk, and there is no
 figure to memorise: `handoff.py --check` computes it and says which of the two it used.
 That script is the authority — don't eyeball it.
 Do not "flag for respawn" and keep working, and
@@ -1374,15 +1374,75 @@ def statusline_capture_path(terminal_id):
     return os.path.join(root, "runtime", name)
 
 
+def _is_safe_session_id(session_id):
+    """A session ID becomes a path component only when it is a plain token.
+
+    The same rule as `SessionModFiles.isSafeSessionID` in Swift: 1 to 128
+    characters, each one of `[A-Za-z0-9_-]`. Anything else — a `/`, a `..`,
+    an empty string — is refused rather than sanitized, because a sanitized ID
+    names some other session's directory.
+    """
+    if not isinstance(session_id, str) or not 1 <= len(session_id) <= 128:
+        return False
+    return all(c.isascii() and (c.isalnum() or c in "-_") for c in session_id)
+
+
+def usage_path(claude_session_id):
+    """Where the session mod's `usage` feature writes this session's figures.
+
+    `TBD_HOME/sessions/<claudeSessionID>/usage.json`, derived as
+    `TBDConstants.sessionsDir` and `SessionModFiles.usageFileName` do. None
+    when the ID is not safe to use as a path component.
+    """
+    if not _is_safe_session_id(claude_session_id):
+        return None
+    root = os.environ.get("TBD_HOME") or os.path.expanduser("~/tbd")
+    return os.path.join(root, "sessions", claude_session_id, "usage.json")
+
+
+def usage_window(claude_session_id):
+    """The context window the session mod recorded for this session, or None.
+
+    The session mod reads `$.session.usage()` inside Claude Code and writes the
+    window it reports. No liveness check: the file was written by this very
+    process. No incarnation check either: `/clear` moves the session to a new
+    ID and leaves this file behind, but does not change the window, so the
+    figure is still the right denominator for a ceiling.
+
+    The mod's file API has no rename, so a reader can meet a torn write. That,
+    a missing file, malformed JSON and a window that is absent, zero, negative,
+    boolean or not an integer are all "not observed" — never zero — and nothing
+    here raises.
+    """
+    path = usage_path(claude_session_id)
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    context = payload.get("context")
+    if not isinstance(context, dict):
+        return None
+    size = context.get("window")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        return None
+    return size
+
+
 def observed_window(terminal_id):
-    """The context window Claude Code actually resolved for this session.
+    """The context window the statusline tee captured for this session.
 
     A session's effective window is a session fact, not a model fact: Claude
     Code resolves it from the model id, a long-context suffix, a beta header,
-    environment overrides and a remote flag, and reports the result on exactly
-    one surface — the statusline command's stdin JSON. The desk is the session
-    that HAS a statusline tee: TBD installs one on desk sessions precisely so
-    this value is knowable, and it publishes the payload verbatim.
+    environment overrides and a remote flag. Outside the process it reports the
+    result on one surface — the statusline command's stdin JSON. A desk spawned
+    without the session mod's usage file HAS a statusline tee: TBD installs one
+    there precisely so this value is knowable, and it publishes the payload
+    verbatim. `resolve_ceiling` reads the usage file first and this second.
 
     Returns None when nothing reported it. Every field is treated as
     absent-able — a missing file, an unreadable one, malformed JSON, a missing
@@ -1408,26 +1468,34 @@ def observed_window(terminal_id):
     return size
 
 
-def resolve_ceiling(terminal_id, override=None):
+def resolve_ceiling(terminal_id, override=None, claude_session_id=None):
     """The ceiling for this session, and where the number came from.
 
-    The provenance is returned rather than left implicit because the two cases
-    are not equally trustworthy and a bare number reads as though something had
-    measured it. An observed window gives a ceiling that is genuinely three
-    quarters of what this session has; the fallback is a guess (see
-    FALLBACK_THRESHOLD) and says so wherever it is printed.
+    The window is read from the session mod's usage file (keyed by the
+    `claudeSessionID` on this terminal's row), then from the statusline tee's
+    capture, then not at all. The provenance is returned rather than left
+    implicit because an observed window and the fallback are not equally
+    trustworthy and a bare number reads as though something had measured it.
+    An observed window gives a ceiling that is genuinely three quarters of what
+    this session has, and names the source it came from; the fallback is a
+    guess (see FALLBACK_THRESHOLD) and says so wherever it is printed.
     """
     if override is not None:
         return override, "set explicitly with --threshold"
-    window = observed_window(terminal_id)
+    window = usage_window(claude_session_id)
+    source = "session mod usage file"
+    if window is None:
+        window = observed_window(terminal_id)
+        source = "statusline capture"
     if window is None:
         return FALLBACK_THRESHOLD, (
-            "this session's window was NOT observed — no statusline capture to read, "
-            "so this ceiling is a fallback guess rather than a fraction of a known window"
+            "this session's window was NOT observed — no session usage file or "
+            "statusline capture to read, so this ceiling is a fallback guess "
+            "rather than a fraction of a known window"
         )
     return int(window * CEILING_FRACTION), (
         f"{int(CEILING_FRACTION * 100)}% of this session's OBSERVED "
-        f"{window:,}-token window"
+        f"{window:,}-token window, from its {source}"
     )
 
 
@@ -1533,7 +1601,8 @@ def cmd_check(args):
     tid, _, row = resolve_self()
     transcript = row.get("transcriptPath") or ""
     used = context_tokens(transcript) if transcript else None
-    threshold, provenance = resolve_ceiling(tid, args.threshold)
+    threshold, provenance = resolve_ceiling(
+        tid, args.threshold, row.get("claudeSessionID"))
     if used is None:
         why = "no transcriptPath on the terminal row" if not transcript else "transcript unreadable"
         print(f"context: UNKNOWN ({why}) — failing closed, treat as OVER")
@@ -1638,7 +1707,8 @@ Transcript: {row.get('transcriptPath')}
         LATEST.unlink()
     LATEST.symlink_to(doc.name)
 
-    threshold, provenance = resolve_ceiling(tid, args.threshold)
+    threshold, provenance = resolve_ceiling(
+        tid, args.threshold, row.get("claudeSessionID"))
     prompt = successor_prompt(doc, tid, row.get("tmuxWindowID"), server, threshold, provenance)
     spawn = _run(
         [
@@ -1823,6 +1893,74 @@ def selftest():
     check("an explicit --threshold wins over both",
           resolve_ceiling("T", 42), (42, "set explicitly with --threshold"))
 
+    # THE SESSION MOD'S USAGE FILE COMES FIRST. It is keyed by the session's
+    # claudeSessionID, not the terminal id, and lives where Swift's
+    # sessionsDir puts it.
+    def publish_usage(payload, session_id="S-1"):
+        """Put a usage file where the session mod's `usage` feature writes it."""
+        path = usage_path(session_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(payload)
+        return path
+
+    def usage_payload(size):
+        return json.dumps({"schemaVersion": 1, "claudeSessionID": "S-1",
+                           "measuredAt": 0, "context": {"window": size},
+                           "rateLimits": []})
+
+    check("the usage path is TBD_HOME/sessions/<claudeSessionID>/usage.json",
+          usage_path("S-1"), os.path.join(home, "sessions", "S-1", "usage.json"))
+    for label, bad in (("a slash", "a/b"), ("a parent reference", ".."),
+                       ("an empty ID", ""), ("no ID at all", None),
+                       ("a 129-character ID", "a" * 129), ("a non-ASCII ID", "é")):
+        check(f"a session ID with {label} has no usage path", usage_path(bad), None)
+    check("a 128-character ID is still a path component",
+          usage_path("a" * 128) is not None, True)
+
+    publish_capture(window_payload(1_000_000))
+    publish_usage(usage_payload(200_000))
+    check("the usage file's window beats the capture's",
+          resolve_ceiling("T", None, "S-1")[0], 150_000)
+    check("and the provenance names the usage file",
+          ("OBSERVED" in resolve_ceiling("T", None, "S-1")[1]
+           and "usage file" in resolve_ceiling("T", None, "S-1")[1]), True)
+    check("an unsafe session ID never reads a usage file",
+          resolve_ceiling("T", None, "../sessions/S-1")[0], 750_000)
+
+    # Every unreadable usage shape is "not observed" and falls through to the
+    # capture — never a zero window, never an exception. The mod's file API has
+    # no rename, so a torn write is a shape a reader really meets.
+    full = usage_payload(200_000)
+    for label, payload in (
+        ("a truncated usage file", full[: len(full) // 2]),
+        ("a boolean window", json.dumps({"context": {"window": True}})),
+        ("a zero window", usage_payload(0)),
+        ("a negative window", usage_payload(-1)),
+        ("a fractional window", usage_payload(1.5)),
+        ("a missing window", json.dumps({"context": {"tokens": 5}})),
+        ("a missing context", json.dumps({"rateLimits": []})),
+        ("a usage file that is not an object", json.dumps([1, 2, 3])),
+    ):
+        publish_usage(payload)
+        check(f"{label} reads as no usage window", usage_window("S-1"), None)
+        check(f"{label} falls through to the capture",
+              resolve_ceiling("T", None, "S-1"),
+              (750_000, "75% of this session's OBSERVED 1,000,000-token window, "
+                        "from its statusline capture"))
+    os.unlink(usage_path("S-1"))
+    check("no usage file at all falls through to the capture",
+          resolve_ceiling("T", None, "S-1")[0], 750_000)
+
+    # Neither source: the fallback, labeled as a guess.
+    os.unlink(statusline_capture_path("T"))
+    publish_usage(usage_payload(0))
+    check("an invalid usage file and no capture falls back",
+          resolve_ceiling("T", None, "S-1")[0], FALLBACK_THRESHOLD)
+    check("and says the window was NOT observed",
+          "NOT observed" in resolve_ceiling("T", None, "S-1")[1], True)
+    os.unlink(usage_path("S-1"))
+
     # Everything below runs in the fallback regime — there is no capture left on
     # disk — so the ceiling in effect is FALLBACK_THRESHOLD.
     #
@@ -1866,6 +2004,18 @@ def selftest():
     check("an observed ceiling is reported as observed, with the window it came from",
           ("750,000" in observed_report and "OBSERVED" in observed_report
            and "1,000,000-token window" in observed_report), True)
+
+    # --check takes the session ID from the terminal row it already fetched, so
+    # a row naming a session with a usage file is held to that file's window.
+    publish_usage(usage_payload(200_000))
+    said = io.StringIO()
+    with contextlib.redirect_stdout(said):
+        with_row({"transcriptPath": small, "claudeSessionID": "S-1"})
+    usage_report = said.getvalue()
+    check("--check reads the usage file named by the row's claudeSessionID",
+          ("150,000" in usage_report and "200,000-token window" in usage_report
+           and "usage file" in usage_report), True)
+    os.unlink(usage_path("S-1"))
     os.unlink(statusline_capture_path("T"))
 
     # FAIL CLOSED. Each of these once returned 0 ("under ceiling"), which is how
