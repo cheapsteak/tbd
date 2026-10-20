@@ -119,6 +119,8 @@ struct SpawnBaseEnvironmentTests {
         let launcher = Self.kept.merging([
             "TBD_SESSIONS_DIR": "/tmp/example-tbd-home/sessions",
             "TBD_MOD_FEATURES": "composer-draft",
+            "TBD_MOD_TOKEN": "0123abcd",
+            "TBD_MOD_SOCKET": "/tmp/example-tbd-home/mod.sock",
             "TBD_TERMINAL_INCARNATION_ID": "11111111-2222-3333-4444-555555555555",
         ]) { _, launcher in launcher }
 
@@ -126,7 +128,8 @@ struct SpawnBaseEnvironmentTests {
             == Self.kept.merging(Self.pinned) { _, pin in pin })
         // An existing tmux server's global copy is stripped too.
         #expect(SpawnBaseEnvironment.serverRepairableMarkers.isSuperset(
-            of: ["TBD_SESSIONS_DIR", "TBD_MOD_FEATURES", "TBD_TERMINAL_INCARNATION_ID"]))
+            of: ["TBD_SESSIONS_DIR", "TBD_MOD_FEATURES", "TBD_MOD_TOKEN", "TBD_MOD_SOCKET",
+                "TBD_TERMINAL_INCARNATION_ID"]))
     }
 
     @Test func anUnmarkedEnvironmentPassesThroughUnchanged() {
@@ -156,6 +159,8 @@ struct SpawnBaseEnvironmentTests {
             "TBD_TERMINAL_INCARNATION_ID",
             "TBD_SESSIONS_DIR",
             "TBD_MOD_FEATURES",
+            "TBD_MOD_TOKEN",
+            "TBD_MOD_SOCKET",
             "TBD_WORKTREE_ID",
             "TBD_CLI_PATH",
             "TBD_EVENT",

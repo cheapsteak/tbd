@@ -54,6 +54,20 @@ public enum TBDConstants {
     /// overflow even though `$configDir/sock` would fit a shallow override.
     public static var socketPath: String { socketPath(environment: ProcessInfo.processInfo.environment) }
 
+    /// Unix socket the session mod's channel listens on: `~/tbd/mod.sock`.
+    /// Honors `TBD_MOD_SOCKET_PATH` independently of `TBD_HOME` — the same
+    /// `sun_path` escape hatch `socketPath` has.
+    public static func modSocketPath(environment: [String: String]) -> String {
+        if let override = environment["TBD_MOD_SOCKET_PATH"], !override.isEmpty {
+            return override
+        }
+        return configDir(environment: environment).appendingPathComponent("mod.sock").path
+    }
+
+    /// Unix socket the session mod's channel listens on. See
+    /// `modSocketPath(environment:)`.
+    public static var modSocketPath: String { modSocketPath(environment: ProcessInfo.processInfo.environment) }
+
     /// Sidecar Unix socket over which the daemon vends file descriptors to
     /// the app (SCM_RIGHTS). Sibling of `socketPath`.
     public static func vendSocketPath(environment: [String: String]) -> String {
@@ -534,6 +548,13 @@ public enum TBDConstants {
         configDir(environment: environment).appendingPathComponent("runtime")
     }
     public static var runtimeDir: URL { runtimeDir(environment: ProcessInfo.processInfo.environment) }
+
+    /// The daemon key session-mod channel tokens are derived from:
+    /// `~/tbd/runtime/mod-key`. Honors TBD_HOME.
+    public static func modKeyPath(environment: [String: String]) -> URL {
+        runtimeDir(environment: environment).appendingPathComponent("mod-key")
+    }
+    public static var modKeyPath: URL { modKeyPath(environment: ProcessInfo.processInfo.environment) }
 
     /// The one shared statusline tee script: `~/tbd/runtime/statusline-tee.sh`.
     ///

@@ -6,7 +6,8 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "composer-dra
 
 /// What a Claude spawn made with at least one session-mod feature on carries:
 /// the features it was spawned with, the incarnation its `spawn.json` names,
-/// and the three environment variables that tell the mod both.
+/// and the environment variables that tell the mod both, plus its channel
+/// credential.
 struct SessionModSpawnContext: Equatable, Sendable {
     let features: [SessionModFeature]
     let incarnationID: UUID
@@ -24,6 +25,10 @@ enum SessionModSpawn {
     static let sessionsDirVariable = "TBD_SESSIONS_DIR"
     static let featuresVariable = "TBD_MOD_FEATURES"
     static let incarnationVariable = "TBD_TERMINAL_INCARNATION_ID"
+    /// The spawn's channel credential: `ModChannelToken.token(incarnationID:)`.
+    static let tokenVariable = "TBD_MOD_TOKEN"
+    /// The path of the socket the mod's channel listens on.
+    static let socketVariable = "TBD_MOD_SOCKET"
 
     /// The entry point every Claude spawn site calls: derives the features
     /// from `config`, mints a fresh spawn's incarnation, and hands both to
@@ -45,7 +50,9 @@ enum SessionModSpawn {
         claudeSessionID: String?,
         incarnationID: UUID?,
         sessionsDir: URL,
-        now: Date
+        now: Date,
+        token: ModChannelToken? = ModChannelToken.shared,
+        modSocketPath: String = TBDConstants.modSocketPath
     ) -> SessionModSpawnContext? {
         guard let config else {
             logger.notice("""
@@ -61,7 +68,9 @@ enum SessionModSpawn {
             claudeSessionID: claudeSessionID,
             incarnationID: incarnationID ?? UUID(),
             sessionsDir: sessionsDir,
-            now: now)
+            now: now,
+            token: token,
+            modSocketPath: modSocketPath)
     }
 
     /// Writes `<sessionsDir>/<claudeSessionID>/spawn.json` for a process about
@@ -71,12 +80,18 @@ enum SessionModSpawn {
     /// ID is nil or not safe to use as a path component, or when the write
     /// fails (logged). Features are listed in `SessionModFeature.allCases`
     /// order, both in the file and in `TBD_MOD_FEATURES`.
+    ///
+    /// With a `token`, the environment also carries `TBD_MOD_TOKEN` (derived
+    /// from `incarnationID`) and `TBD_MOD_SOCKET`. A nil token — the daemon key
+    /// could not be read — omits both and leaves the other variables.
     static func prepare(
         features: [SessionModFeature],
         claudeSessionID: String?,
         incarnationID: UUID,
         sessionsDir: URL,
-        now: Date
+        now: Date,
+        token: ModChannelToken? = ModChannelToken.shared,
+        modSocketPath: String = TBDConstants.modSocketPath
     ) -> SessionModSpawnContext? {
         let ordered = SessionModFeature.allCases.filter { features.contains($0) }
         guard !ordered.isEmpty else { return nil }
@@ -102,14 +117,19 @@ enum SessionModSpawn {
                 """)
             return nil
         }
+        var environment = [
+            sessionsDirVariable: sessionsDir.path,
+            featuresVariable: names.joined(separator: ","),
+            incarnationVariable: incarnationID.uuidString,
+        ]
+        if let token {
+            environment[tokenVariable] = token.token(incarnationID: incarnationID)
+            environment[socketVariable] = modSocketPath
+        }
         return SessionModSpawnContext(
             features: ordered,
             incarnationID: incarnationID,
-            environment: [
-                sessionsDirVariable: sessionsDir.path,
-                featuresVariable: names.joined(separator: ","),
-                incarnationVariable: incarnationID.uuidString,
-            ])
+            environment: environment)
     }
 
     /// Follows a live process to a new session ID — what `/clear` does — so

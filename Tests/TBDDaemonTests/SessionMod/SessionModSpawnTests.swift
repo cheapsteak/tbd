@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import TestSupport
 import Testing
@@ -39,7 +40,8 @@ func readSpawnRecord(sessionsDir: URL, sessionID: String) -> SessionModFiles.Spa
             claudeSessionID: "sess-1",
             incarnationID: incarnation,
             sessionsDir: root,
-            now: Self.now))
+            now: Self.now,
+            token: nil))
 
         #expect(context.features == [.composerDraft])
         #expect(context.incarnationID == incarnation)
@@ -56,6 +58,39 @@ func readSpawnRecord(sessionsDir: URL, sessionID: String) -> SessionModFiles.Spa
             incarnationId: incarnation.uuidString,
             spawnedAtMs: 1_700_000_000_250,
             features: ["composer-draft"]))
+    }
+
+    @Test func prepareExportsTokenAndSocket() throws {
+        let root = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let incarnation = UUID()
+        let token = ModChannelToken(key: SymmetricKey(size: .bits256))
+
+        let context = try #require(SessionModSpawn.prepare(
+            features: [.composerDraft], claudeSessionID: "sess-1", incarnationID: incarnation,
+            sessionsDir: root, now: Self.now,
+            token: token, modSocketPath: "/tmp/example/mod.sock"))
+
+        #expect(context.environment[SessionModSpawn.tokenVariable]
+            == token.token(incarnationID: incarnation))
+        #expect(context.environment[SessionModSpawn.socketVariable] == "/tmp/example/mod.sock")
+        #expect(SessionModSpawn.tokenVariable == "TBD_MOD_TOKEN")
+        #expect(SessionModSpawn.socketVariable == "TBD_MOD_SOCKET")
+    }
+
+    @Test func prepareWithoutTokenOmitsTokenVariables() throws {
+        let root = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let incarnation = UUID()
+
+        let context = try #require(SessionModSpawn.prepare(
+            features: [.composerDraft], claudeSessionID: "sess-1", incarnationID: incarnation,
+            sessionsDir: root, now: Self.now, token: nil, modSocketPath: "/tmp/example/mod.sock"))
+
+        #expect(context.environment[SessionModSpawn.tokenVariable] == nil)
+        #expect(context.environment[SessionModSpawn.socketVariable] == nil)
+        #expect(context.environment[SessionModSpawn.featuresVariable] == "composer-draft")
+        #expect(context.environment[SessionModSpawn.incarnationVariable] == incarnation.uuidString)
     }
 
     @Test func prepareWithNoFeaturesWritesNothing() throws {
