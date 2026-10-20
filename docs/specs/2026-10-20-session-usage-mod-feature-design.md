@@ -164,11 +164,15 @@ The reader's input changes from the desk role to the spawn's source: whether
 **`handoff.py`**, the desk relay script in `NightwatchSkillContent.swift`,
 reads `usage.json` through the `claudeSessionID` on the terminal row it already
 fetches, then the tee capture, then its 600,000-token fallback, applying the
-same validity rule at each step. It does not check liveness: the file it reads
-was written by its own process. It does not check the incarnation either. A
-`/clear` moves the session to a new ID, leaving the row's file behind, but
-`/clear` does not change the window, so the stale file still holds the right
-denominator for a ceiling.
+same validity rule at each step. It trusts the usage file only when its
+`incarnationID` equals the script's own `TBD_TERMINAL_INCARNATION_ID`, which
+every spawn that loads the mod sets. Wakes and swaps keep the session ID, so
+without that check a file from an earlier process — one spawned while the flag
+was on, say, before a swap to a smaller window — would outrank a fresh tee
+capture and set the ceiling too high. A missing variable or a mismatch reads as
+"not observed". It needs no heartbeat check: a matching incarnation means its
+own process wrote the file. A `/clear` keeps the incarnation, so the file under
+the row's session ID stays acceptable, and `/clear` does not change the window.
 
 ### Reclaim
 
