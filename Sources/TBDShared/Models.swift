@@ -750,9 +750,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// session was parked, which is exactly the case `createdAt` alone cannot
     /// describe. Cleared with the two pid columns when a row parks.
     public var holderChildStartedAt: Date?
-    /// Unused: the stream file of the removed model proxy. Nothing writes it;
-    /// a row written before the proxy's removal may still carry one.
-    public var transcriptStreamPath: String?
 
     /// The declared dev server this tab runs, or nil for every other tab.
     /// Stamped at spawn and never changed.
@@ -828,8 +825,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 transport: TerminalTransport = .tmux,
                 holderPID: Int32? = nil,
                 childPID: Int32? = nil,
-                holderChildStartedAt: Date? = nil,
-                transcriptStreamPath: String? = nil) {
+                holderChildStartedAt: Date? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -864,7 +860,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.holderPID = holderPID
         self.childPID = childPID
         self.holderChildStartedAt = holderChildStartedAt
-        self.transcriptStreamPath = transcriptStreamPath
     }
 
     enum CodingKeys: String, CodingKey {
@@ -877,7 +872,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
         case transport, holderPID, childPID, holderChildStartedAt
-        case transcriptStreamPath, serverName
+        case serverName
     }
 
     public init(from decoder: Decoder) throws {
@@ -932,7 +927,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
         childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
         holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
-        transcriptStreamPath = try c.decodeIfPresent(String.self, forKey: .transcriptStreamPath)
         serverName = try c.decodeIfPresent(String.self, forKey: .serverName)
     }
 }

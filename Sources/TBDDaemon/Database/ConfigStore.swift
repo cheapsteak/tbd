@@ -22,9 +22,7 @@ private let configLogger = Logger(subsystem: "com.tbd.daemon", category: "config
 /// do `remote.transcriptSync`, the remote transcript pane and the remote
 /// composer, so nothing reads either column.
 ///
-/// `model_proxy_enabled` and `model_proxy_port` belonged to the transcript
-/// model proxy, which was removed when streaming moved into TBD's session mod
-/// (`docs/specs/2026-10-20-transcript-stream-mod-design.md`).
+/// `model_proxy_enabled` and `model_proxy_port` are unused; nothing reads them.
 ///
 /// Every one of these columns stays in the schema because a landed migration is
 /// never edited and GRDB ignores columns a record does not name.

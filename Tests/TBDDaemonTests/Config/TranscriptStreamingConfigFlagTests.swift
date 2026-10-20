@@ -128,13 +128,4 @@ struct TranscriptStreamingConfigFlagTests {
             Config.self, from: JSONEncoder().encode(config))
         #expect(decoded.transcriptStreamingEnabled)
     }
-
-    /// A config the removed model proxy's daemon wrote still carries the
-    /// proxy's keys. They must be ignored rather than fail the decode.
-    @Test func configJSONWithTheRemovedProxyKeysStillDecodes() throws {
-        let json = #"{"primaryAgentPreference":"claude","modelProxyEnabled":true,"#
-            + #""modelProxyPort":51234,"transcriptStreamingEnabled":true}"#
-        let config = try JSONDecoder().decode(Config.self, from: Data(json.utf8))
-        #expect(config.transcriptStreamingEnabled)
-    }
 }

@@ -5,7 +5,8 @@ import TBDShared
 
 private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
-/// GRDB Record type for the `terminal` table.
+/// GRDB Record type for the `terminal` table. The unused
+/// `transcript_stream_path` column is not named here; GRDB ignores it.
 struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "terminal"
 
@@ -67,10 +68,6 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// never been through a park/wake cycle, where `createdAt` is still the
     /// right identity anchor — see `Terminal.holderChildStartedAt`.
     var holder_child_started_at: Date?
-    /// Unused: the stream file of the removed model proxy. Nothing writes it
-    /// any more; it is kept only while `Terminal.transcriptStreamPath` still
-    /// exists, and is cleared when a row's process is replaced.
-    var transcript_stream_path: String?
 
     /// The declared dev server this tab runs — see `Terminal.serverName`.
     var server_name: String?
@@ -108,7 +105,6 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.holder_pid = terminal.holderPID
         self.child_pid = terminal.childPID
         self.holder_child_started_at = terminal.holderChildStartedAt
-        self.transcript_stream_path = terminal.transcriptStreamPath
         self.server_name = terminal.serverName
     }
 
@@ -160,8 +156,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             transport: transport.flatMap(TerminalTransport.init(rawValue:)) ?? .tmux,
             holderPID: holder_pid,
             childPID: child_pid,
-            holderChildStartedAt: holder_child_started_at,
-            transcriptStreamPath: transcript_stream_path
+            holderChildStartedAt: holder_child_started_at
         )
         model.serverName = server_name
         return model
@@ -316,10 +311,6 @@ struct TerminalReplacementSnapshot: Sendable {
     let kind: TerminalKind?
     let claudeSessionID: String?
     let transcriptPath: String?
-    /// The removed model proxy's stream path. Nothing stamps it any more and a
-    /// replacement clears it, so a mismatch still says the row's session was
-    /// replaced under the caller.
-    let transcriptStreamPath: String?
     let profileID: UUID?
     let suspendedAt: Date?
     let hibernatedAt: Date?
@@ -330,7 +321,6 @@ struct TerminalReplacementSnapshot: Sendable {
         kind = terminal.kind
         claudeSessionID = terminal.claudeSessionID
         transcriptPath = terminal.transcriptPath
-        transcriptStreamPath = terminal.transcriptStreamPath
         profileID = terminal.profileID
         suspendedAt = terminal.suspendedAt
         hibernatedAt = terminal.hibernatedAt
@@ -342,7 +332,6 @@ struct TerminalReplacementSnapshot: Sendable {
             && record.kind == kind?.rawValue
             && record.claudeSessionID == claudeSessionID
             && record.transcriptPath == transcriptPath
-            && record.transcript_stream_path == transcriptStreamPath
             && record.profile_id == profileID?.uuidString
             && record.suspendedAt == suspendedAt
             && record.hibernatedAt == hibernatedAt
@@ -354,7 +343,6 @@ struct TerminalReplacementSnapshot: Sendable {
             && terminal.kind == kind
             && terminal.claudeSessionID == claudeSessionID
             && terminal.transcriptPath == transcriptPath
-            && terminal.transcriptStreamPath == transcriptStreamPath
             && terminal.profileID == profileID
             && terminal.suspendedAt == suspendedAt
             && terminal.hibernatedAt == hibernatedAt
@@ -470,10 +458,6 @@ private func resetAgentProcessLifecycle(
     let incarnationID = UUID()
     record.claudeSessionID = sessionID
     record.transcriptPath = transcriptPath
-    // The removed model proxy's stream path named the process about to be
-    // replaced; a row still carrying one from before the proxy's removal
-    // drops it here.
-    record.transcript_stream_path = nil
     record.sessionOrderObservedAt = nil
     record.codexTranscriptBoundaryOffset = nil
     record.sessionIncarnationID = incarnationID.uuidString
