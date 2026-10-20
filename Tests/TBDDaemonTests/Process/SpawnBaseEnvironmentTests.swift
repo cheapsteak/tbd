@@ -109,6 +109,26 @@ struct SpawnBaseEnvironmentTests {
         #expect(request.environment == expected)
     }
 
+    /// A daemon restarted from a session spawned with the session mod on
+    /// carries the mod's three variables. A spawn sets all three or none, so
+    /// none may reach a job through the inherited base: a fork, a carryover or
+    /// a spawn made with every feature off would otherwise list mod features
+    /// with no incarnation. Spelled as literals so a renamed constant cannot
+    /// quietly take the scrub with it.
+    @Test func theSessionModsVariablesAreNotInherited() {
+        let launcher = Self.kept.merging([
+            "TBD_SESSIONS_DIR": "/tmp/example-tbd-home/sessions",
+            "TBD_MOD_FEATURES": "composer-draft",
+            "TBD_TERMINAL_INCARNATION_ID": "11111111-2222-3333-4444-555555555555",
+        ]) { _, launcher in launcher }
+
+        #expect(SpawnBaseEnvironment.inheriting(launcher)
+            == Self.kept.merging(Self.pinned) { _, pin in pin })
+        // An existing tmux server's global copy is stripped too.
+        #expect(SpawnBaseEnvironment.serverRepairableMarkers.isSuperset(
+            of: ["TBD_SESSIONS_DIR", "TBD_MOD_FEATURES", "TBD_TERMINAL_INCARNATION_ID"]))
+    }
+
     @Test func anUnmarkedEnvironmentPassesThroughUnchanged() {
         let base = Self.kept.merging(Self.pinned) { _, pin in pin }
         #expect(SpawnBaseEnvironment.inheriting(base) == base)
@@ -134,6 +154,8 @@ struct SpawnBaseEnvironmentTests {
             "TRACEPARENT",
             "TBD_TERMINAL_ID",
             "TBD_TERMINAL_INCARNATION_ID",
+            "TBD_SESSIONS_DIR",
+            "TBD_MOD_FEATURES",
             "TBD_WORKTREE_ID",
             "TBD_CLI_PATH",
             "TBD_EVENT",

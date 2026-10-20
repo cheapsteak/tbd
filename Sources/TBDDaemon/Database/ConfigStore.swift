@@ -184,6 +184,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` means "never chose". Resolve it through
     /// `Config.transcriptPromptAnswerDefault`, never through `?? false`.
     var transcript_prompt_answer_enabled: Bool?
+    /// Composer draft save-and-restore through the session mod. **Genuinely
+    /// tri-state**: the `config_composer_draft` migration carries no SQL
+    /// default, so `nil` means "never chose". Resolve it through
+    /// `Config.composerDraftDefault`, never through `?? false`.
+    var composer_draft_enabled: Bool?
     /// Live remote transcript sync gate: tail-first loading, earlier-history
     /// loading and hint-driven background sync. **Genuinely tri-state**: the
     /// `20261008230000_config_remote_transcript_live_sync` migration carries
@@ -269,6 +274,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `pr_poll_schedule_enabled`.
     /// - Parameter transcriptPromptAnswerDefault: same shape again, for
     ///   `transcript_prompt_answer_enabled`.
+    /// - Parameter composerDraftDefault: same shape again, for
+    ///   `composer_draft_enabled`.
     /// - Parameter remoteTranscriptLiveSyncDefault: same shape again, for
     ///   `remote_transcript_live_sync_enabled` — the live remote transcript
     ///   sync's soak gate.
@@ -294,6 +301,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
         prPollScheduleDefault: Bool = Config.prPollScheduleDefault,
         transcriptPromptAnswerDefault: Bool = Config.transcriptPromptAnswerDefault,
+        composerDraftDefault: Bool = Config.composerDraftDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         programStatusDefault: Bool = Config.programStatusEnabledDefault,
         cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault
@@ -406,6 +414,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Transcript prompt-answer gate — NOT `?? false`.
         config.transcriptPromptAnswerEnabled =
             transcript_prompt_answer_enabled ?? transcriptPromptAnswerDefault
+        // Composer draft gate — NOT `?? false`. Assigned after construction,
+        // like the fields around it, to keep the initializer call inside the
+        // type-checker's budget.
+        config.composerDraftEnabled = composer_draft_enabled ?? composerDraftDefault
         // Live remote transcript sync gate — NOT `?? false`.
         config.remoteTranscriptLiveSyncEnabled =
             remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
@@ -957,6 +969,17 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET transcript_prompt_answer_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the composer draft gate. Written on every call, so either value
+    /// is the explicit gesture that lifts the column out of NULL.
+    public func setComposerDraftEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET composer_draft_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

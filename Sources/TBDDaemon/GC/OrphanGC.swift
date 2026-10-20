@@ -81,6 +81,9 @@ public actor OrphanGC {
     /// The `~/tbd/repos` root the unsent-prompt leg walks. `TBDConstants` in
     /// production; tests pass a temp directory.
     private let unsentPromptsReposBase: URL
+    /// The `~/tbd/sessions` root the session-directory leg walks.
+    /// `TBDConstants.sessionsDir()` in production; tests pass a temp directory.
+    private let sessionsBase: URL
     /// The shared dev-server running-file directory the stale-file leg
     /// walks. `TBDConstants.devServersDir()` in production (honors
     /// `DEV_SERVERS_DIR`); tests pass a temp directory.
@@ -183,6 +186,7 @@ public actor OrphanGC {
         attachmentsBase: URL? = nil,
         remoteTranscriptsEnvironment: [String: String]? = nil,
         reposBase: URL? = nil,
+        sessionsBase: URL? = nil,
         devServersBase: URL? = nil,
         devServerProbe: DevServerProcessProbe? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
@@ -248,6 +252,7 @@ public actor OrphanGC {
         self.remoteTranscriptsEnvironment = remoteTranscriptsEnvironment
             ?? ProcessInfo.processInfo.environment
         self.unsentPromptsReposBase = reposBase ?? TBDConstants.reposDir
+        self.sessionsBase = sessionsBase ?? TBDConstants.sessionsDir()
         self.devServersStore = DevServerRunningFileStore(
             directory: devServersBase ?? TBDConstants.devServersDir())
         self.devServerProbe = devServerProbe ?? .live
@@ -280,6 +285,7 @@ public actor OrphanGC {
         // Same reasoning as `hangStacksReaped`: unsent-prompt files produce no
         // `ReapRecord`.
         var unsentPromptsReaped = 0
+        var sessionDirectoriesReaped = 0
         var devServerFilesReaped = 0
         // Same reasoning again: a checkout template produces no `ReapRecord`.
         var checkoutTemplatesReaped = 0
@@ -394,6 +400,10 @@ public actor OrphanGC {
 
         reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
 
+        await reclaimSessionDirectories(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &sessionDirectoriesReaped
+        )
+
         reclaimStaleDevServerFiles(
             config: config, dryRun: dryRun, planned: &planned, reaped: &devServerFilesReaped)
         reclaimCheckoutTemplates(
@@ -415,7 +425,8 @@ public actor OrphanGC {
         return .init(
             planned: planned,
             reaped: reaped + hangStacksReaped + unsentPromptsReaped + devServerFilesReaped
-                + checkoutTemplatesReaped)
+                + checkoutTemplatesReaped
+                + sessionDirectoriesReaped)
     }
 
     // MARK: - Checkout templates
@@ -539,6 +550,124 @@ public actor OrphanGC {
                     """)
                 }
             }
+        }
+    }
+
+    // MARK: - Session directories
+
+    /// How long a `composer-draft.unrestored` file is kept after its last
+    /// write: 30 days. The root `CLAUDE.md` OrphanGC entry states the same figure.
+    static let unrestoredDraftRetention: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Reclaims `~/tbd/sessions/<claudeSessionID>/` — the named reconciler for
+    /// the per-session files the session mod and the daemon share
+    /// (`docs/specs/2026-10-19-tbd-session-mod-design.md`, "Reclaiming files").
+    ///
+    /// A directory stays while a terminal row, or a closed-terminal history
+    /// row in a worktree that is not archived, names its session ID: both are
+    /// ways a person can still resume the session. An unreferenced directory
+    /// goes once nothing in it was created or modified within `gcGraceSeconds`.
+    /// Inside a kept directory, a `composer-draft.unrestored` goes 30 days
+    /// after its last write, since nothing else ever clears it.
+    ///
+    /// Under `gcEnabled` alone. If either reference query throws, the whole
+    /// arm is skipped: an unread table must never read as "nothing refers to
+    /// it". No `ReapRecord`: there is no worktree to key one by. `dryRun`
+    /// plans without touching disk.
+    private func reclaimSessionDirectories(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let candidates = Self.sessionDirectoryNames(base: sessionsBase.path)
+        guard !candidates.isEmpty else { return }
+
+        let referenced: Set<String>
+        do {
+            let terminals = try await db.terminals.claudeSessionReferences()
+            let history = try await db.terminalHistory.claudeSessionReferencesInUnarchivedWorktrees()
+            referenced = terminals.union(history)
+        } catch {
+            logger.error("""
+            gc: rows unreadable this sweep (\(error.localizedDescription, privacy: .public)) \
+            — skipping the session-directory phase
+            """)
+            planned.append("KEEP rows-unreadable session-directories")
+            return
+        }
+
+        let asOf = now()
+        for name in candidates {
+            let directory = sessionsBase.appendingPathComponent(name).path
+            if referenced.contains(name) {
+                planned.append("KEEP referenced \(directory)")
+                reclaimStaleUnrestoredDraft(
+                    directory: directory, asOf: asOf, dryRun: dryRun, planned: &planned,
+                    reaped: &reaped)
+                continue
+            }
+            if let reason = Self.youngRemoteTranscriptCacheKeepReason(
+                directory: directory, asOf: asOf, graceSeconds: config.gcGraceSeconds) {
+                planned.append("KEEP \(reason) \(directory)")
+                continue
+            }
+            planned.append("REAP session-directory \(directory)")
+            guard !dryRun else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: directory)
+                reaped += 1
+                logger.info("gc: reclaimed session directory \(directory, privacy: .public)")
+            } catch {
+                planned.append("KEEP remove-failed \(directory)")
+                logger.warning("""
+                gc: could not remove \(directory, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            }
+        }
+    }
+
+    /// Names of the non-hidden subdirectories of the sessions root, sorted. A
+    /// synchronous helper so the async arm never holds a `FileManager` across
+    /// an `await`. An unreadable or absent root yields nothing.
+    private static func sessionDirectoryNames(base: String) -> [String] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: base) else { return [] }
+        return names.sorted().filter { name in
+            guard !name.hasPrefix(".") else { return false }
+            var isDirectory: ObjCBool = false
+            return fm.fileExists(atPath: "\(base)/\(name)", isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        }
+    }
+
+    /// The 30-day rule for one kept session directory's `composer-draft.unrestored`.
+    private func reclaimStaleUnrestoredDraft(
+        directory: String, asOf: Date, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) {
+        let fm = FileManager.default
+        let path = "\(directory)/\(SessionModFiles.composerDraftUnrestoredFileName)"
+        guard let attributes = try? fm.attributesOfItem(atPath: path),
+              attributes[.type] as? FileAttributeType == .typeRegular
+        else { return }
+        guard let modified = attributes[.modificationDate] as? Date else {
+            planned.append("KEEP unknown-age \(path)")
+            return
+        }
+        guard asOf.timeIntervalSince(modified) >= Self.unrestoredDraftRetention else {
+            planned.append("KEEP retention \(path)")
+            return
+        }
+        planned.append("REAP unrestored-draft \(path)")
+        guard !dryRun else { return }
+        do {
+            try fm.removeItem(atPath: path)
+            reaped += 1
+            logger.info("gc: reclaimed unrestored draft \(path, privacy: .public)")
+        } catch {
+            planned.append("KEEP remove-failed \(path)")
+            logger.warning("""
+            gc: could not remove \(path, privacy: .public): \
+            \(error.localizedDescription, privacy: .public)
+            """)
         }
     }
 

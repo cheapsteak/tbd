@@ -1539,6 +1539,10 @@ extension WorktreeLifecycle {
         // its spawn succeeds or fails. Stays nil for any other primary, which
         // reserves nothing.
         var primarySpawnTitle: ClaudeSpawnTitle? = nil
+        // The incarnation a Claude primary made with a session-mod feature on
+        // exports, written into its row. Nil for any other primary, and for a
+        // Claude one with every feature off.
+        var primarySessionIncarnationID: UUID? = nil
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1674,6 +1678,18 @@ extension WorktreeLifecycle {
                 worktreeID: worktreeID, displayName: worktree.displayName,
                 terminalID: plannedTerminalID1)
             primarySpawnTitle = spawnTitle
+            // The session mod, for every Claude primary but a carryover. A
+            // fresh session's id is minted above and a restored one's is the
+            // id `--resume` names, so either's spawn record can be written
+            // now. A carryover forks (`--fork-session`), and its id exists
+            // only once it has launched, so it stays legacy — which the
+            // recapture below, scheduled with no incarnation, relies on.
+            let sessionMod = carryover == nil
+                ? SessionModSpawn.prepare(
+                    config: config, claudeSessionID: sessionUUID,
+                    incarnationID: nil, sessionsDir: sessionsDir, now: now())
+                : nil
+            primarySessionIncarnationID = sessionMod?.incarnationID
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,
@@ -1706,7 +1722,8 @@ extension WorktreeLifecycle {
                 settingsOverlayPath: primaryOverlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
-                sessionName: spawnTitle.name
+                sessionName: spawnTitle.name,
+                sessionModEnvironment: sessionMod?.environment ?? [:]
             )
             primaryCommand = spawn.command
             primaryEnv = [
@@ -1753,7 +1770,8 @@ extension WorktreeLifecycle {
                 watchDeskRole: watchDeskRole,
                 transport: transport,
                 attachment: primaryAttachment,
-                modelProxySupervisor: modelProxySupervisor)
+                modelProxySupervisor: modelProxySupervisor,
+                sessionIncarnationID: primarySessionIncarnationID)
         } catch {
             await sessionTitles.release(primarySpawnTitle)
             throw error
@@ -1943,6 +1961,11 @@ extension WorktreeLifecycle {
                     db: db, store: sessionTitles,
                     worktreeID: worktreeID, displayName: worktree.displayName,
                     terminalID: plannedID)
+                // A plain `--resume`, whose session id is known before it
+                // launches, so it carries the session mod like the primary.
+                let restoreSessionMod = SessionModSpawn.prepare(
+                    config: config, claudeSessionID: sessionID,
+                    incarnationID: nil, sessionsDir: sessionsDir, now: now())
                 let spawn = ClaudeSpawnCommandBuilder.build(
                     resumeID: sessionID,
                     freshSessionID: nil,
@@ -1968,7 +1991,8 @@ extension WorktreeLifecycle {
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
                     envSettingOverrides: claudeEnvOverrides,
-                    sessionName: restoreSpawnTitle.name
+                    sessionName: restoreSpawnTitle.name,
+                    sessionModEnvironment: restoreSessionMod?.environment ?? [:]
                 )
                 let perTermEnv: [String: String] = [
                     "TBD_WORKTREE_ID": worktreeID.uuidString,
@@ -2007,7 +2031,8 @@ extension WorktreeLifecycle {
                         kind: .claude,
                         transport: transport,
                         attachment: nil,
-                        modelProxySupervisor: modelProxySupervisor)
+                        modelProxySupervisor: modelProxySupervisor,
+                        sessionIncarnationID: restoreSessionMod?.incarnationID)
                 } catch {
                     await sessionTitles.release(restoreSpawnTitle)
                     throw error

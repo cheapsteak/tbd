@@ -742,6 +742,14 @@ public struct TerminalStore: Sendable {
     /// `pty_holder_enabled` gate is read at spawn time, so a session created on
     /// one transport keeps it for life. It defaults to `.tmux` so every existing
     /// call site keeps creating tmux-backed sessions untouched.
+    ///
+    /// `sessionIncarnationID` is the incarnation a fresh Claude spawn exports
+    /// as `TBD_TERMINAL_INCARNATION_ID` when a session-mod feature is on
+    /// (`SessionModSpawn.prepare`). It lands in the insert because
+    /// `applySessionStart` accepts only a hook whose reported incarnation
+    /// equals the row's: a row written without it would drop every hook its
+    /// own process sends. Nil, the default, is the row every other spawn has
+    /// always written.
     public func create(
         id: UUID = UUID(),
         worktreeID: UUID,
@@ -764,7 +772,8 @@ public struct TerminalStore: Sendable {
         // caller, and the stamp that arrives afterwards then makes every
         // replacement that snapshot authorized reject.
         transcriptStreamPath: String? = nil,
-        serverName: String? = nil
+        serverName: String? = nil,
+        sessionIncarnationID: UUID? = nil
     ) async throws -> Terminal {
         var terminal = Terminal(
             id: id,
@@ -785,6 +794,7 @@ public struct TerminalStore: Sendable {
         // already at the Swift type-checker's expression budget here.
         terminal.transcriptStreamPath = transcriptStreamPath
         terminal.serverName = serverName
+        terminal.sessionIncarnationID = sessionIncarnationID
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
@@ -795,6 +805,18 @@ public struct TerminalStore: Sendable {
             try record.insert(db)
         }
         return terminal
+    }
+
+    /// Every Claude session ID any terminal row names, as raw column text.
+    /// Read through SQL rather than `list()` so a row whose other columns fail
+    /// to decode still counts as a reference: `OrphanGC`'s session-directory
+    /// arm reclaims whatever is NOT referenced.
+    public func claudeSessionReferences() async throws -> Set<String> {
+        try await writer.read { db in
+            Set(try String.fetchAll(db, sql: """
+                SELECT claudeSessionID FROM terminal WHERE claudeSessionID IS NOT NULL
+                """))
+        }
     }
 
     /// List terminals, optionally filtered by worktree.
@@ -1021,10 +1043,13 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
-            // Legacy terminals have never had a managed replacement and carry
-            // no process token on either side. Once TBD rotates a row to a
-            // durable token, every replacement-process SessionStart must echo
-            // that exact value; nil and mismatches are stale by construction.
+            // Legacy terminals, and fresh rows spawned with every session-mod
+            // feature off, carry no process token on either side until their
+            // first managed replacement. A row that holds a durable token —
+            // rotated in by a replacement, or written at creation by a fresh
+            // Claude spawn made with a feature on — accepts only a SessionStart
+            // echoing that exact value; nil and mismatches are stale by
+            // construction.
             guard record.pendingSessionIncarnationID == nil else { return nil }
             guard record.sessionIncarnationID == reportedIncarnationID?.uuidString else {
                 return nil

@@ -27,6 +27,44 @@ struct ClaudeSpawnCommandBuilderTests {
         #expect(ClaudeSpawnCommandBuilder.spawnedPermissionClass == .bypass)
     }
 
+    // MARK: - Session mod
+
+    /// The session mod's variables ride in the process environment of both
+    /// Claude branches and never in the command string, and an empty
+    /// dictionary — every feature off — leaves the result as it was.
+    @Test func sessionModEnvironmentLandsInSensitiveEnv() {
+        let modEnv = [
+            "TBD_SESSIONS_DIR": "/tmp/acme-home/sessions",
+            "TBD_MOD_FEATURES": "composer-draft",
+            "TBD_TERMINAL_INCARNATION_ID": "6F9619FF-8B86-D011-B42D-00C04FC964FF",
+        ]
+        for (resumeID, freshID) in [("abc-123", nil), (nil, "sid-1")] as [(String?, String?)] {
+            let plain = ClaudeSpawnCommandBuilder.build(
+                resumeID: resumeID, freshSessionID: freshID, appendSystemPrompt: nil,
+                initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh")
+            let withMod = ClaudeSpawnCommandBuilder.build(
+                resumeID: resumeID, freshSessionID: freshID, appendSystemPrompt: nil,
+                initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh",
+                sessionModEnvironment: modEnv)
+            let unchanged = ClaudeSpawnCommandBuilder.build(
+                resumeID: resumeID, freshSessionID: freshID, appendSystemPrompt: nil,
+                initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh",
+                sessionModEnvironment: [:])
+
+            let expected = plain.sensitiveEnv.merging(modEnv) { _, mod in mod }
+            #expect(withMod.sensitiveEnv == expected)
+            #expect(withMod.command == plain.command)
+            #expect(!withMod.command.contains("TBD_SESSIONS_DIR"))
+            #expect(unchanged == plain)
+        }
+        // A non-Claude branch carries no process environment, mod or otherwise.
+        let shell = ClaudeSpawnCommandBuilder.build(
+            resumeID: nil, freshSessionID: nil, appendSystemPrompt: nil,
+            initialPrompt: nil, profileSecret: nil, cmd: nil, shellFallback: "/bin/zsh",
+            sessionModEnvironment: modEnv)
+        #expect(shell.sensitiveEnv.isEmpty)
+    }
+
     // MARK: - Fallback / non-token branches
 
     @Test("resume id only")

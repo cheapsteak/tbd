@@ -17,7 +17,7 @@ extension ActuationOutcome {
         switch result {
         case .ok: return .dispatched
         case .alreadyHibernated: return .refused(.noop)
-        case .notEligible: return .refused(.notEligible)
+        case .notEligible, .draftUnconfirmed: return .refused(.notEligible)
         case .notFound: return .refused(.notFound)
         }
     }
@@ -27,6 +27,7 @@ extension ActuationOutcome {
         case .ok: return nil
         case .alreadyHibernated: return "already parked"
         case .notEligible(let reason): return reason
+        case .draftUnconfirmed(let reason): return ComposerDraftParkGate.unconfirmedRefusal(reason: reason)
         case .notFound: return "Terminal not found"
         }
     }

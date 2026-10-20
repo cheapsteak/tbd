@@ -138,6 +138,7 @@ extension WorktreeLifecycle {
         // then kill its tmux window, reaping any wedged agent that survives
         // kill-window's SIGHUP. The archived worktree row and its history rows
         // survive, so the captured output stays readable later.
+        var sessions = SessionTeardownTally()
         for terminal in terminals {
             // A holder row takes the holder teardown instead. Its rows are
             // deleted below just as a tmux row's are, so refusing here would
@@ -146,6 +147,7 @@ extension WorktreeLifecycle {
             // and its job outlive the only record of their pids. Its Closed
             // Terminals entry is written before the disposal releases the
             // reader it is captured from.
+            let stopped: Bool
             if terminal.transport == .holder {
                 await Self.recordHolderClosedTerminal(
                     terminal, registry: holderRegistry, resolver: holderScreenResolver,
@@ -153,11 +155,26 @@ extension WorktreeLifecycle {
                 if let failure = await disposeHolder(for: terminal) {
                     archiveLogger.warning(
                         "archive left a holder running: \(failure, privacy: .public)")
+                    stopped = false
+                } else {
+                    stopped = true
                 }
             } else {
-                await captureThenKillWindow(terminal: terminal, server: worktree.tmuxServer)
+                stopped = await captureThenKillWindow(
+                    terminal: terminal, server: worktree.tmuxServer)
             }
+            sessions.record(terminal, teardownStoppedIt: stopped)
         }
+
+        // Each ended session's directory goes, draft included, unless another
+        // row naming the same session may still be running. The teardown
+        // above waited for each pane's process to exit, escalating to SIGKILL,
+        // or SIGKILLed the holder's job. When the login shell execs Claude, as
+        // zsh does for the spawn command's `-c`, that process is Claude and
+        // the mod's final write on `session.end` lands before the removal;
+        // otherwise a late write can recreate the directory, and `OrphanGC`'s
+        // session-directory arm reclaims it after `gcGraceSeconds`.
+        removeSessionDirectories(for: sessions)
 
         // Delete terminals from db
         try await db.terminals.deleteForWorktree(worktreeID: worktreeID)

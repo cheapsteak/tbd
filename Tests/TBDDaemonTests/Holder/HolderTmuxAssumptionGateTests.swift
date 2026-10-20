@@ -167,7 +167,8 @@ struct HolderTmuxAssumptionGateTests {
     /// living child set it, because a verdict of `.same` needs both halves.
     private func seedClaudeTerminal(
         _ db: TBDDatabase, worktreeID: UUID, transport: TerminalTransport,
-        childPID: Int32 = 9102, holderChildStartedAt: Date? = nil
+        childPID: Int32 = 9102, holderChildStartedAt: Date? = nil,
+        sessionIncarnationID: UUID? = nil
     ) async throws -> Terminal {
         let holder = transport == .holder
         let terminal = try await db.terminals.create(
@@ -180,7 +181,8 @@ struct HolderTmuxAssumptionGateTests {
             transport: transport,
             holderPID: holder ? 9101 : nil,
             childPID: holder ? childPID : nil,
-            holderChildStartedAt: holder ? holderChildStartedAt : nil)
+            holderChildStartedAt: holder ? holderChildStartedAt : nil,
+            sessionIncarnationID: sessionIncarnationID)
         try await db.terminals.setActivityState(
             id: terminal.id, activityState: .idle, source: .derived)
         return try #require(try await db.terminals.get(id: terminal.id))
@@ -208,11 +210,13 @@ struct HolderTmuxAssumptionGateTests {
     private func coordinator(
         _ db: TBDDatabase, tmux: TmuxManager, registry: HolderRegistry? = nil,
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        sessionsDir: URL = TBDConstants.sessionsDir(),
         sessionTitles: ClaudeSessionTitleStore = ClaudeSessionTitleStore()
     ) async -> HibernationCoordinator {
         let coordinator = HibernationCoordinator(
             db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
-            signaller: signaller, sessionTitles: sessionTitles, actuationLog: makeTestActuationLog())
+            signaller: signaller, sessionsDir: sessionsDir, sessionTitles: sessionTitles,
+            actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
         // A live holder, so the no-reader rail is what these rows reach;
         // the ended-session path has tests of its own.
@@ -1190,9 +1194,9 @@ struct HolderTmuxAssumptionGateTests {
     /// category error, and what stops it here is the PARK rather than the
     /// transport.
     ///
-    /// This suite's registry adopted nothing, so the daemon holds no reader to
-    /// write the polite `/exit` through and the park refuses by name — which
-    /// is this suite's standing way of saying a path got as far as the reader.
+    /// This suite's registry adopted nothing, so the daemon holds no reader
+    /// for the session and the park refuses by name — which is this suite's
+    /// standing way of saying a path got as far as the reader lookup.
     /// The row assertions are the half a return value cannot see: the arm
     /// parks BEFORE it re-homes precisely so that a park which refuses leaves
     /// the row claiming nothing new.
@@ -3367,5 +3371,75 @@ struct HolderTmuxAssumptionGateTests {
         #expect(
             HibernationCoordinator.transcriptTailRefusal(transcriptPath: nil, policy: .manual)
                 == nil)
+    }
+
+    // MARK: - Gate 2b: the composer-draft feature decides a feature session's park
+
+    /// A coordinator wired to a counting oracle, a registry that adopted
+    /// nothing, and session files read from `sessionsDir`.
+    private func draftGateCoordinator(
+        _ oracle: CountingScreenOracle, db: TBDDatabase, terminal: Terminal, sessionsDir: URL
+    ) async -> HibernationCoordinator {
+        let coord = await coordinator(
+            db, tmux: TmuxManager(dryRun: true),
+            registry: holderRegistry(listing: [terminal]), sessionsDir: sessionsDir)
+        await coord.setHolderScreenOracle(oracle.oracle())
+        return coord
+    }
+
+    /// The holder's typed-input check over a session the feature confirms: a
+    /// live screen with a half-composed prompt no longer refuses the park,
+    /// which goes on to the reader lookup. The same screen over a legacy row
+    /// is `parkRefusesTypedInputOnALiveScreen`.
+    @Test("a confirmed feature session passes the typed-input check on a live screen")
+    func confirmedFeatureSessionPassesTheTypedScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let incarnation = UUID()
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-holdergate", incarnation: incarnation,
+            heartbeatAt: Date(), hasDraft: true)
+        let typed = try Self.screen(lines: Self.typedComposer, source: .daemon)
+        let oracle = CountingScreenOracle { typed }
+
+        let coord = await draftGateCoordinator(
+            oracle, db: db, terminal: terminal, sessionsDir: sessionsDir)
+        let result = await coord.manualHibernate(terminalID: terminal.id)
+        #expect(
+            result == .notEligible(reason: HibernationCoordinator.holderNoReaderRefusal),
+            "the typed screen still decided a confirmed session's park: \(result)")
+        #expect(oracle.count > 0, "the screen was not read for the shadow comparison")
+    }
+
+    /// An unconfirmed feature session's manual park is refused before the
+    /// holder leg reads anything, and the row is left alone.
+    @Test("an unconfirmed feature session's manual park is refused before the screen is read")
+    func unknownFeatureSessionRefusesBeforeReadingTheScreen() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let incarnation = UUID()
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder, sessionIncarnationID: incarnation)
+        let before = RowFingerprint(terminal)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-holdergate", incarnation: incarnation)
+        let empty = try Self.screen(lines: Self.emptyComposer, source: .daemon)
+        let oracle = CountingScreenOracle { empty }
+
+        let coord = await draftGateCoordinator(
+            oracle, db: db, terminal: terminal, sessionsDir: sessionsDir)
+        let result = await coord.manualHibernate(terminalID: terminal.id)
+        #expect(result == .draftUnconfirmed(reason: "no-alive-file"))
+        #expect(oracle.count == 0, "the park read the screen before refusing")
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(RowFingerprint(after) == before)
     }
 }

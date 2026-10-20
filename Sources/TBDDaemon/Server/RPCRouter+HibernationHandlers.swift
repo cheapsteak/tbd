@@ -61,6 +61,12 @@ extension RPCRouter {
 
     /// `terminal.hibernate` — manually hibernate one Claude terminal (kill its
     /// process, keep the tmux window). Honors the running/permission rails.
+    ///
+    /// A session spawned with the composer-draft feature whose draft TBD
+    /// cannot confirm saved is refused with the coded error
+    /// `RPCErrorCode.composerDraftUnconfirmed`, which the app turns into
+    /// "Hibernate anyway?". Reissuing with `overrideUnconfirmedDraft` parks it
+    /// regardless.
     func handleTerminalHibernate(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -68,7 +74,9 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .terminalHibernate, actor: actor,
             target: await resolvedTerminalTarget(params.terminalID))
-        let result = await hibernationCoordinator.manualHibernate(terminalID: params.terminalID)
+        let result = await hibernationCoordinator.manualHibernate(
+            terminalID: params.terminalID,
+            overrideUnconfirmedDraft: params.overrideUnconfirmedDraft ?? false)
         await finishActuation(
             actuationID, ActuationOutcome.classify(result),
             error: ActuationOutcome.detail(result))
@@ -85,6 +93,12 @@ extension RPCRouter {
             return RPCResponse(error: reason)
         case .notFound:
             return RPCResponse(error: "Terminal not found")
+        case .draftUnconfirmed(let reason):
+            // Coded so the app can ask "Hibernate anyway?" and reissue with
+            // `overrideUnconfirmedDraft` rather than matching message text.
+            return RPCResponse(
+                error: ComposerDraftParkGate.unconfirmedRefusal(reason: reason),
+                code: RPCErrorCode.composerDraftUnconfirmed.rawValue)
         }
     }
 

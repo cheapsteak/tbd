@@ -120,6 +120,105 @@ struct HolderHibernationLiveTests {
                 "this job has no SIGTERM handler, so a marker here means the fixture wrote it")
     }
 
+    /// A session spawned with the composer-draft feature is ended by signal
+    /// and never typed into, asked of the job's own stdin rather than of the
+    /// ladder's code path.
+    ///
+    /// The session's files say what a live mod and a confirmed, restorable
+    /// draft say, so the park proceeds. A typed `/exit` would land at the end
+    /// of that draft, and Enter would send it to the model; the job records
+    /// every byte its terminal delivers, so an empty record and a caught
+    /// `SIGTERM` together say the park signalled and typed nothing.
+    /// `theStdinRecorderSeesTheLegacyExit` proves the recorder sees a typed
+    /// `/exit`, which is what makes the empty record here mean something.
+    @Test func parkOfAFeatureSessionSignalsAndTypesNothing() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let incarnation = UUID()
+        try fixture.seedComposerDraftSession(incarnation: incarnation)
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath),
+            sessionIncarnationID: incarnation)
+        let childPID = try #require(terminal.childPID)
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+        #expect(result == .ok, "park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        let signalled = kill(childPID, 0)
+        let signalErrno = errno
+        #expect(signalled == -1 && signalErrno == ESRCH,
+                "the job survived a park that reported .ok (kill returned \(signalled), errno \(signalErrno))")
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(!typed.contains("/exit"),
+                "the park typed into a session spawned with the feature: \(typed.debugDescription)")
+        #expect(typed.isEmpty,
+                "the park wrote to the terminal of a session spawned with the feature: \(typed.debugDescription)")
+    }
+
+    /// The control for the test above: the same recording job in a session
+    /// spawned without the feature, which a park still ends with a typed
+    /// `/exit`, records it. Without this, a recorder that saw nothing at all
+    /// would pass that test.
+    @Test func theStdinRecorderSeesTheLegacyExit() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath))
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+        #expect(result == .ok, "park refused: \(result)")
+
+        #expect(await pollUntil("the typed /exit to reach the job's stdin", timeout: 5) {
+            ((try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? "").contains("/exit")
+        }, "the recorder never saw the legacy park's typed /exit")
+    }
+
+    /// A profile swap's park of a session spawned without the feature ends by
+    /// signal and types nothing too. A swap skips the screen check that keeps
+    /// a legacy park's typed `/exit` off a draft, so a typed `/exit` would
+    /// land after whatever the box holds and submit it to the model.
+    ///
+    /// No session-mod files are seeded, so the session reads legacy; the
+    /// recording job is the one `theStdinRecorderSeesTheLegacyExit` shows
+    /// seeing a manual park's `/exit`, which is what makes the empty record
+    /// here mean the swap's ladder started at SIGTERM.
+    @Test func profileSwapParkOfALegacySessionSignalsAndTypesNothing() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath))
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.parkForProfileSwap(terminalID: terminal.id)
+        #expect(result == .ok, "swap park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(parked.childPID == nil)
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the swap park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(!typed.contains("/exit"),
+                "the swap park typed /exit into a legacy session: \(typed.debugDescription)")
+        #expect(typed.isEmpty,
+                "the swap park wrote to a legacy session's terminal: \(typed.debugDescription)")
+    }
+
     /// Wake after that park: a fresh holder, a fresh job, and a row that names
     /// both and is no longer parked.
     ///
@@ -574,6 +673,19 @@ private final class HibernationFixture {
     /// holder let go of, the process group `SIGKILL`ed — can end it.
     static let signalDeafJob = "trap '' TERM; while :; do sleep 0.2; done"
 
+    /// `termAwareJob`, plus a record of every byte its terminal delivers.
+    ///
+    /// The terminal is saved on descriptor 3 first because a non-interactive
+    /// shell gives a background command `/dev/null` for stdin, and only an
+    /// explicit redirection overrides that. `cat` copies what it reads into
+    /// `inputPath` as it reads it. The `SIGTERM` handler ends `cat` too, so
+    /// the job leaves no process behind that the row does not name.
+    static func stdinRecordingJob(markerPath: String, inputPath: String) -> String {
+        "exec 3<&0; cat <&3 > \"\(inputPath)\" & reader=$!; "
+            + "trap 'printf term > \"\(markerPath)\"; kill $reader 2>/dev/null; exit 0' TERM; "
+            + "while :; do sleep 0.2; done"
+    }
+
     /// A job that ignores `SIGHUP` and nothing else.
     ///
     /// For the one test that must distinguish "the park signalled this pid"
@@ -598,6 +710,16 @@ private final class HibernationFixture {
     /// Where `termAwareJob` records that it caught a `SIGTERM`. Absent until
     /// one is actually delivered and handled.
     var jobTermMarkerPath: String { "\(home)/job-caught-term" }
+
+    /// Where `stdinRecordingJob` copies what its terminal delivers.
+    var jobInputPath: String { "\(home)/job-stdin" }
+
+    /// The sessions root the coordinator reads session-mod files from, inside
+    /// this fixture's scratch root. Empty unless a test seeds it, so every
+    /// session reads as spawned without the feature by default.
+    var sessionsDir: URL {
+        URL(fileURLWithPath: home).appendingPathComponent("sessions", isDirectory: true)
+    }
 
     private let home: String
     private let tempDir: URL
@@ -760,6 +882,7 @@ private final class HibernationFixture {
             holderTerminateAttempts: holderTerminateAttempts,
             holderEscalationAttempts: holderEscalationAttempts,
             signaller: signaller,
+            sessionsDir: URL(fileURLWithPath: home).appendingPathComponent("sessions", isDirectory: true),
             sessionTitles: ClaudeSessionTitleStore(),
             actuationLog: makeTestActuationLog())
         await coordinator.setHolderRegistry(registry)
@@ -785,7 +908,9 @@ private final class HibernationFixture {
     /// A real holder supervising a real job, plus the row that names both —
     /// created in the order `WorktreeLifecycle+Create` creates them, so the
     /// registry has adopted the session before anything reads its screen.
-    func spawnHolderRow(job: String? = nil) async throws -> Terminal {
+    /// `sessionIncarnationID` is the incarnation a spawn made with a
+    /// session-mod feature writes into its row.
+    func spawnHolderRow(job: String? = nil, sessionIncarnationID: UUID? = nil) async throws -> Terminal {
         let terminalID = UUID()
         let handle = try await registry.spawn(
             terminalID: terminalID,
@@ -808,8 +933,30 @@ private final class HibernationFixture {
             transport: .holder,
             holderPID: handle.holderPID,
             childPID: handle.childPID,
-            holderChildStartedAt: Date())
+            holderChildStartedAt: Date(),
+            sessionIncarnationID: sessionIncarnationID)
         return try #require(try await db.terminals.get(id: terminalID))
+    }
+
+    /// Writes the session's files as a spawn made with the composer-draft
+    /// feature and a live mod leave them: the daemon's spawn record naming
+    /// `incarnation`, a heartbeat from now, and a saved draft marked
+    /// restorable. The park then reads the feature as confirmed.
+    func seedComposerDraftSession(incarnation: UUID) throws {
+        let nowMs = Int64((Date().timeIntervalSince1970 * 1000).rounded())
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: Self.sessionID, incarnationId: incarnation.uuidString,
+                  spawnedAtMs: nowMs, features: ["composer-draft"]),
+            sessionsDir: sessionsDir)
+        let directory = sessionsDir.appendingPathComponent(Self.sessionID, isDirectory: true)
+        try JSONEncoder().encode(SessionModFiles.AliveRecord(
+            sessionId: Self.sessionID, incarnationId: incarnation.uuidString,
+            features: ["composer-draft"], heartbeatAtMs: nowMs))
+            .write(to: directory.appendingPathComponent(SessionModFiles.aliveFileName))
+        try JSONEncoder().encode(SessionModFiles.ComposerDraftRecord(
+            sessionId: Self.sessionID, hasDraft: true, text: "half-written prompt", cursor: 19,
+            restorable: true, savedAtMs: nowMs))
+            .write(to: directory.appendingPathComponent(SessionModFiles.composerDraftFileName))
     }
 
     /// Records the pair this spawn produced, and names it in the run log.

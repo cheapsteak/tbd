@@ -58,6 +58,10 @@ public struct AutoHibernateOnMergeCoordinator: Sendable {
                     logger.debug("merge-park skipped \(terminal.id, privacy: .public): not found")
                 case .notEligible(let reason):
                     logger.debug("merge-park skipped \(terminal.id, privacy: .public): \(reason, privacy: .public)")
+                case .draftUnconfirmed(let reason):
+                    // Not produced by a merge-park, which skips an unconfirmed
+                    // draft as `.notEligible`; logged like any other skip.
+                    logger.debug("merge-park skipped \(terminal.id, privacy: .public): \(ComposerDraftParkGate.unconfirmedRefusal(reason: reason), privacy: .public)")
                 }
             }
 

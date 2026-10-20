@@ -6,16 +6,18 @@ private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startu
 private let reconcileLogger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 private let peerScopeLogger = Logger(subsystem: "com.tbd.daemon", category: "peer-bridge")
 
+/// The agent runtime assets written at startup before the database opens.
+/// The TBD Claude plugin is not among them: which files it holds depends on
+/// feature flags in the database, so `Daemon.start()` writes it once the
+/// database is open (step 5b).
 struct RuntimeIntegrationRefresher {
     var writeFallbackSkill: () throws -> Void
-    var writeClaudePlugin: () throws -> Void
     var ensureCodexProfilePlugin: () throws -> Void
     var writeClaudeHookOverlay: () -> Void
 
     static func production() -> RuntimeIntegrationRefresher {
         RuntimeIntegrationRefresher(
             writeFallbackSkill: { try SkillFileWriter().writeFallback() },
-            writeClaudePlugin: { try PluginDirWriter().writePlugin() },
             ensureCodexProfilePlugin: { _ = try CodexHomeManager().ensureProfilePlugin() },
             writeClaudeHookOverlay: {
                 ClaudeHookOverlay.writeOverlay()
@@ -34,13 +36,6 @@ struct RuntimeIntegrationRefresher {
         } catch {
             Logger(subsystem: "com.tbd.daemon", category: "skill")
                 .error("Failed to write fallback skill file: \(String(describing: error), privacy: .public)")
-        }
-
-        do {
-            try writeClaudePlugin()
-        } catch {
-            Logger(subsystem: "com.tbd.daemon", category: "plugin")
-                .error("Failed to write TBD plugin: \(String(describing: error), privacy: .public)")
         }
 
         do {
@@ -787,6 +782,25 @@ public final class Daemon: Sendable {
             peerMessagingOn: { switches.setting(for: $0).enabled })
     }
 
+    /// Serializes writes of the TBD Claude plugin, so two flag changes served
+    /// at once cannot interleave their file operations.
+    private static let claudePluginWriteLock = NSLock()
+
+    /// Write the TBD Claude plugin with the session mod present for
+    /// `sessionModFeatures` (absent when empty). A failure is logged, never
+    /// thrown: the previous plugin stays in place, which is no reason to stop
+    /// the daemon or to fail the request that changed a flag.
+    static func writeClaudePlugin(sessionModFeatures: [SessionModFeature]) {
+        claudePluginWriteLock.withLock {
+            do {
+                try PluginDirWriter().writePlugin(sessionModFeatures: sessionModFeatures)
+            } catch {
+                Logger(subsystem: "com.tbd.daemon", category: "plugin")
+                    .error("Failed to write TBD plugin: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.
     static func ensureScratchDir() {
         let fm = FileManager.default
@@ -915,6 +929,31 @@ public final class Daemon: Sendable {
         // accept traffic, so the app never sees an empty-then-populated flash.
         if case let .enabled(fixturePath) = mockMode {
             try await Self.seedMockDatabase(database, fixturePath: fixturePath)
+        }
+
+        // 5b. Write the TBD Claude plugin. It waits for the database, unlike
+        // the runtime assets refreshed at step 4, because the session mod's
+        // hooks belong in it only while a session-mod feature flag is on.
+        // Every Claude spawn loads the plugin through `--plugin-dir`, and no
+        // spawn path is reachable yet: the first are startup reconciliation
+        // (step 8d), which can wake a terminal, and the RPC socket (step 9).
+        // A config that cannot be read is written with the shipped defaults;
+        // a write failure is logged and startup continues.
+        //
+        // Skipped in mock mode: the plugin folder lives in Application
+        // Support, outside `TBD_HOME`, so a mock daemon writing it would add
+        // or remove the session mod in the developer's real sessions by a
+        // fixture's flag.
+        if mockMode == nil {
+            let startupSessionModFeatures: [SessionModFeature]
+            do {
+                let config = try await database.config.get()
+                startupSessionModFeatures = SessionModFeature.enabled(in: config)
+            } catch {
+                daemonLogger.error("Could not read config for the TBD plugin, writing it with the shipped feature defaults: \(String(describing: error), privacy: .public)")
+                startupSessionModFeatures = SessionModFeature.enabled(in: Config())
+            }
+            Self.writeClaudePlugin(sessionModFeatures: startupSessionModFeatures)
         }
 
         // 6. Initialize state subscriptions (before lifecycle/router so they can broadcast)
@@ -1321,6 +1360,15 @@ public final class Daemon: Sendable {
         )
         // Wire the shared input activity tracker to the coordinator
         await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
+        // A session-mod feature flag change rewrites the plugin, and hot
+        // reload carries it to every running session. Assigned here, before
+        // the socket serves (step 9), because a handler reads it unlocked.
+        // Not in mock mode, for the reason given at step 5b.
+        if mockMode == nil {
+            rpcRouter.sessionModPluginSync = { features in
+                Daemon.writeClaudePlugin(sessionModFeatures: features)
+            }
+        }
         // Provider-named PRs (`meta.prs`) bind through the router's
         // coordinator, which exists only now. Installed before
         // `remoteManager.start()`, so no snapshot is applied without it.

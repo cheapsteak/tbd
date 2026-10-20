@@ -61,6 +61,10 @@ import TBDShared
 /// so tmux's `-e KEY=VALUE` flag puts it directly into the spawned window's
 /// environment without appearing in the long-running shell command's `ps` argv.
 ///
+/// `sessionModEnvironment` (from `SessionModSpawn.prepare`) is merged into
+/// `sensitiveEnv` on both claude branches; it is empty when every session-mod
+/// feature is off, which leaves the result unchanged.
+///
 /// `sensitiveEnv` is **not** populated when the resolved path is `cmd` or
 /// `shellFallback`, since those branches are for non-claude shells.
 enum ClaudeSpawnCommandBuilder {
@@ -105,6 +109,7 @@ enum ClaudeSpawnCommandBuilder {
         pluginDirPath: String? = nil,
         envSettingOverrides: [String: ClaudeEnvValue] = [:],
         sessionName: String? = nil,
+        sessionModEnvironment: [String: String] = [:],
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Result {
         // Optional --settings flag merged into the claude invocation.
@@ -208,6 +213,10 @@ enum ClaudeSpawnCommandBuilder {
                 env[setting.envVar] = envValue
             }
         }
+        // The session mod's variables (`SessionModSpawn.prepare`), empty when
+        // every feature is off. Process env only: like the registry settings
+        // above they are not routing keys, so they are never inlined.
+        env.merge(sessionModEnvironment) { _, mod in mod }
 
         // Re-export the profile ROUTING env inline, ahead of the claude
         // invocation. tmux's `-e KEY=VALUE` seeds the pane's initial process

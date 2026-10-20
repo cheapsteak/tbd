@@ -34,7 +34,8 @@ struct HibernationCoordinatorTests {
         activityState: TerminalActivityState = .idle,
         keepWarm: Bool = false,
         sessionID: String? = "sess-1",
-        kind: TerminalKind? = .claude
+        kind: TerminalKind? = .claude,
+        sessionIncarnationID: UUID? = nil
     ) async throws -> (TBDDatabase, UUID, UUID) {
         let db = try TBDDatabase(inMemory: true)
         // wake() refuses to respawn into a missing directory, so the (shared,
@@ -48,7 +49,8 @@ struct HibernationCoordinatorTests {
         )
         let terminal = try await db.terminals.create(
             worktreeID: wt.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: sessionID, kind: kind
+            label: "claude", claudeSessionID: sessionID, kind: kind,
+            sessionIncarnationID: sessionIncarnationID
         )
         if activityState != .unknown {
             try await db.terminals.setActivityState(id: terminal.id, activityState: activityState, source: .derived)
@@ -1688,6 +1690,99 @@ struct HibernationCoordinatorTests {
                 "onServerCreated must fire once with the recreated server name")
     }
 
+    // MARK: - Session mod on wake
+
+    /// A draft the mod saved before the park, byte for byte as it wrote it.
+    private static let savedDraft = Data(
+        #"{"schemaVersion":1,"sessionId":"sess-1","hasDraft":true,"text":"unsent","cursor":6,"restorable":true,"savedAtMs":1}"#.utf8)
+
+    /// Seeds `sess-1`'s directory as an earlier spawn and the mod left it: a
+    /// spawn record naming a previous incarnation, and a saved draft.
+    private func seedSessionFiles(_ sessionsDir: URL) throws -> URL {
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: "sess-1", incarnationId: UUID().uuidString,
+                  spawnedAtMs: 1, features: ["composer-draft"]),
+            sessionsDir: sessionsDir)
+        let directory = sessionsDir.appendingPathComponent("sess-1", isDirectory: true)
+        try Self.savedDraft.write(
+            to: directory.appendingPathComponent(SessionModFiles.composerDraftFileName))
+        return directory
+    }
+
+    /// With the flag on, a wake launches the replacement with the three mod
+    /// variables in its process environment and rewrites `spawn.json` to name
+    /// the incarnation the row now holds — on both of wake's launch sites, the
+    /// in-place respawn of a live window and the respawn into a recreated one.
+    /// The rest of the session's directory, the saved draft above all, is
+    /// untouched: the woken mod restores from it.
+    @Test(arguments: [false, true])
+    func wakeWithTheFlagOnExportsTheModAndRewritesSpawn(windowIsDead: Bool) async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        try await db.config.setComposerDraftEnabled(true)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let directory = try seedSessionFiles(sessionsDir)
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(
+            dryRun: true,
+            dryRunRecorder: { recorded.append($0) },
+            dryRunWindowIsDead: { windowIsDead && $0 == "@0" })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir, sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coord.wake(terminalID: terminalID).isOk)
+
+        let awake = try #require(try await db.terminals.get(id: terminalID))
+        let incarnation = try #require(awake.sessionIncarnationID)
+        let launch = try #require(recorded.snapshot().last { $0.contains("respawn-window") })
+        let launchEnv = tmuxEnvironmentFlags(launch)
+        #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
+        #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
+        #expect(launchEnv[SessionModSpawn.incarnationVariable] == incarnation.uuidString)
+        if windowIsDead {
+            // The inert staging pane is not a Claude spawn and carries no mod.
+            let staged = try #require(recorded.snapshot().first { $0.contains("new-window") })
+            #expect(tmuxEnvironmentFlags(staged)[SessionModSpawn.featuresVariable] == nil)
+        }
+
+        let spawn = try #require(readSpawnRecord(sessionsDir: sessionsDir, sessionID: "sess-1"))
+        #expect(spawn.sessionId == "sess-1")
+        #expect(spawn.incarnationId == incarnation.uuidString)
+        #expect(spawn.features == ["composer-draft"])
+        #expect(try Data(contentsOf: directory.appendingPathComponent(
+            SessionModFiles.composerDraftFileName)) == Self.savedDraft)
+        #expect(try Set(FileManager.default.contentsOfDirectory(atPath: directory.path))
+            == [SessionModFiles.spawnFileName, SessionModFiles.composerDraftFileName])
+    }
+
+    /// With the flag off a wake is what it always was: no mod variable in the
+    /// launch's process environment and nothing written under the sessions
+    /// directory.
+    @Test func wakeWithTheFlagOffExportsNothing() async throws {
+        let (db, _, terminalID) = try await setup()
+        try await db.terminals.setHibernated(id: terminalID, sessionID: "sess-1")
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let recorded = RecordedTmuxCommands()
+        let tmux = TmuxManager(dryRun: true, dryRunRecorder: { recorded.append($0) })
+        let coord = HibernationCoordinator(
+            db: db, tmux: tmux, configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir, sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+
+        #expect(await coord.wake(terminalID: terminalID).isOk)
+
+        let launch = try #require(recorded.snapshot().last { $0.contains("respawn-window") })
+        let launchEnv = tmuxEnvironmentFlags(launch)
+        #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
+        #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
+        #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
+    }
+
     /// A restarted tmux server may assign the replacement the same numeric id
     /// stored by the dead pre-reboot window. Cleanup must distinguish identity
     /// from that reused coordinate and leave the fresh replacement alive for
@@ -3159,6 +3254,456 @@ struct HibernationCoordinatorTests {
 
         #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil,
                 "an unrecordable park must not happen")
+    }
+
+    // MARK: - Composer-draft park gate
+
+    /// A coordinator over dry-run tmux that reads session files from
+    /// `sessionsDir`. `capture` answers every pane read and counts them, which
+    /// is how a test sees whether a park reached the transport at all.
+    private func draftGateCoordinator(
+        _ db: TBDDatabase, sessionsDir: URL, capture: MutableHibernationCapture,
+        now: @escaping @Sendable () -> Date,
+        actuationLog: ActuationLog = makeTestActuationLog()
+    ) -> HibernationCoordinator {
+        HibernationCoordinator(
+            db: db,
+            tmux: TmuxManager(dryRun: true, dryRunCapturePane: capture.capture),
+            configDirManager: isolatedConfigDirManager(),
+            now: now,
+            exitPollAttempts: 1, exitPollInterval: .milliseconds(1),
+            sessionsDir: sessionsDir,
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: actuationLog)
+    }
+
+    /// A pane read that shows a half-composed prompt.
+    private func typedPane() -> MutableHibernationCapture {
+        let capture = MutableHibernationCapture()
+        capture.setPendingInput()
+        return capture
+    }
+
+    /// A session spawned without the feature is judged as it always was: the
+    /// scrape reads a typed composer and refuses the park.
+    @Test func legacySessionStillRefusedByTheScrape() async throws {
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: UUID())
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: typedPane(), now: { Date() })
+
+        #expect(await coord.manualHibernate(terminalID: terminalID)
+            == .notEligible(reason: "Terminal has unsent typed input"))
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+    }
+
+    /// The same typed pane over a session the feature confirms: the park goes
+    /// on. Both scrape sites still read the pane, for the shadow comparison,
+    /// but neither decides.
+    @Test func confirmedSessionParksDespiteTheScrape() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: true)
+        let capture = typedPane()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: { now })
+
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+        #expect(capture.count >= 2, "the scrape sites stopped reading the pane")
+    }
+
+    /// A spawn record and no heartbeat: TBD cannot confirm the draft is
+    /// saved, and a manual park says so with its own result — before any
+    /// pane read, and with the row untouched.
+    @Test func unknownManualReturnsDraftUnconfirmed() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let capture = MutableHibernationCapture()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: { Date() })
+        let before = try #require(try await db.terminals.get(id: terminalID))
+
+        #expect(await coord.manualHibernate(terminalID: terminalID)
+            == .draftUnconfirmed(reason: "no-alive-file"))
+        #expect(try await db.terminals.get(id: terminalID) == before)
+        #expect(capture.count == 0, "the refusal came after the park reached the transport")
+    }
+
+    /// A live, confirmed mod whose saved draft holds content its text lacks
+    /// (a collapsed paste): a park would wake to part of the draft, so the
+    /// manual park asks, and the override parks it.
+    @Test func aDraftNotRestorableAsksBeforeAManualPark() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: true, restorable: false)
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: MutableHibernationCapture(), now: { now })
+
+        #expect(await coord.manualHibernate(terminalID: terminalID)
+            == .draftUnconfirmed(reason: "draft-not-restorable"))
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == false)
+        #expect(await coord.manualHibernate(
+            terminalID: terminalID, overrideUnconfirmedDraft: true) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+    }
+
+    /// "Hibernate anyway": the override parks the same unknown session, and
+    /// the typed pane does not refuse it either.
+    @Test func overrideParksAnUnknownSession() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: typedPane(), now: { Date() })
+
+        #expect(await coord.manualHibernate(
+            terminalID: terminalID, overrideUnconfirmedDraft: true) == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+    }
+
+    /// The idle sweep skips an unknown session: nothing parks, no pane is
+    /// read, and the sweep's own record names the reason.
+    @Test func sweepSkipsAnUnknownSession() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        try await db.config.setAutoHibernate(enabled: true, idleMinutes: 1)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let capture = MutableHibernationCapture()
+        let logPath = try sweepLogPath()
+        let dates = TestDateSource()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: dates.provider,
+            actuationLog: ActuationLog(path: logPath))
+
+        await sweepUntilParked(coord, dates: dates)
+
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+        #expect(capture.count == 0, "the skip came after the park reached the transport")
+        let written = try logRows(at: logPath)
+        #expect(written.count == 2, "exactly one request row and its outcome")
+        let outcome = try #require(written.last)
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "not-eligible")
+        #expect(outcome["error"] as? String
+            == ComposerDraftParkGate.unconfirmedRefusal(reason: "no-alive-file"))
+
+        // The skip cleared the idle markers, so a sweep past another settle
+        // window starts a fresh idle window rather than firing the same skip
+        // again. Left armed, this sweep would write a second pair.
+        dates.advance(by: HibernationCoordinator.killDebounce + 1)
+        await coord.sweep()
+        #expect(try logRows(at: logPath).count == 2,
+                "the skip re-fired without waiting out a fresh idle window")
+    }
+
+    /// The merge-park skips an unknown session the way the sweep does.
+    @Test func mergeParkSkipsAnUnknownSession() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let capture = MutableHibernationCapture()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: { Date() })
+
+        #expect(await coord.hibernateForMerge(terminalID: terminalID, inputVetoEnabled: true)
+            == .notEligible(reason: ComposerDraftParkGate.unconfirmedRefusal(reason: "no-alive-file")))
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+        #expect(capture.count == 0)
+    }
+
+    /// `terminal.hibernate` carries the refusal's code, so the app can ask
+    /// instead of matching text; the same request with the override parks.
+    @Test func hibernateRPCCarriesTheUnconfirmedCode() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation)
+        let tmux = TmuxManager(dryRun: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
+                configDirManager: isolatedConfigDirManager()),
+            tmux: tmux,
+            configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir,
+            actuationLog: makeTestActuationLog())
+
+        let refused = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHibernate,
+            params: TerminalHibernateParams(terminalID: terminalID)))
+        #expect(!refused.success)
+        #expect(refused.errorCode == RPCErrorCode.composerDraftUnconfirmed.rawValue)
+        #expect(refused.error == "TBD can't confirm this session's draft is saved (no-alive-file).")
+        #expect(try await db.terminals.get(id: terminalID)?.hibernatedAt == nil)
+
+        let overridden = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalHibernate,
+            params: TerminalHibernateParams(terminalID: terminalID, overrideUnconfirmedDraft: true)))
+        #expect(overridden.success, "the override was refused: \(overridden.error ?? "nil")")
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+    }
+
+    /// An app or CLI built before the override decodes as no override.
+    @Test func hibernateParamsDecodeWithoutTheOverride() throws {
+        let id = UUID()
+        let legacy = try JSONDecoder().decode(
+            TerminalHibernateParams.self,
+            from: Data("{\"terminalID\":\"\(id.uuidString)\"}".utf8))
+        #expect(legacy.terminalID == id)
+        #expect(legacy.overrideUnconfirmedDraft == nil)
+
+        let overriding = try JSONDecoder().decode(
+            TerminalHibernateParams.self,
+            from: JSONEncoder().encode(
+                TerminalHibernateParams(terminalID: id, overrideUnconfirmedDraft: true)))
+        #expect(overriding.overrideUnconfirmedDraft == true)
+    }
+
+    /// One tmux park reads the pane twice — the fast rail before the server
+    /// lock, the authoritative read under it — and logs a disagreement once,
+    /// from the authoritative read.
+    @Test func tmuxParkLogsOneShadowDisagreement() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        // The feature saved an empty box; the scrape reads a typed one.
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: false)
+        let capture = typedPane()
+        let coord = draftGateCoordinator(
+            db, sessionsDir: sessionsDir, capture: capture, now: { now })
+        let lines = ShadowLines()
+        await coord.setComposerDraftShadowLog(lines.append)
+        let expected = try #require(ComposerDraftParkGate.shadowDisagreement(
+            terminalID: terminalID, featureHasDraft: false, scrapeHasDraft: true))
+
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        #expect(capture.count >= 2, "a scrape site stopped reading the pane")
+        #expect(lines.snapshot() == [expected])
+    }
+
+    // MARK: - Composer-draft sessions end by signal
+    //
+    // A session spawned with the feature is never typed into to end it: no
+    // `/exit`, and no Escape or Ctrl+C fallback, because a daemon-sent Ctrl+C
+    // clears the box. The park sends SIGTERM to the Claude process, polls the
+    // pane on the injected clock, and then respawns as always.
+
+    /// The pane's own pid — its login-shell wrapper — and the Claude process
+    /// beneath it. Both sit above macOS's PID_MAX (99999), so no regression
+    /// into the keyed fallback's raw `kill` of the pane pid can reach a real
+    /// process; the Claude pid only ever reaches the fake signaller.
+    private static let shellPID: Int32 = 900_001
+    private static let claudePID: Int32 = 900_002
+
+    /// A coordinator over dry-run tmux whose pane pid is `shellPID`, with an
+    /// inspector that answers `claudePID` beneath it (or nothing) and a
+    /// signaller that records every signal it is asked to send.
+    private func signalEndingCoordinator(
+        _ db: TBDDatabase, sessionsDir: URL, recorded: RecordedTmuxCommands,
+        signaller: FakeProcessSignaller, claudePID: Int32?, clock: EventDrivenTestClock,
+        exitPollAttempts: Int = 15,
+        paneCurrentCommand: (@Sendable (String, String) -> String)? = nil,
+        now: @escaping @Sendable () -> Date
+    ) -> HibernationCoordinator {
+        HibernationCoordinator(
+            db: db,
+            tmux: TmuxManager(
+                dryRun: true,
+                dryRunRecorder: recorded.append,
+                dryRunPaneCurrentCommand: paneCurrentCommand,
+                dryRunPanePID: { _, _ in String(Self.shellPID) }),
+            configDirManager: isolatedConfigDirManager(),
+            now: now,
+            exitPollAttempts: exitPollAttempts,
+            exitPollInterval: .milliseconds(200),
+            clock: clock,
+            signaller: signaller,
+            paneProcessInspector: FakeInspector(claudePID: claudePID),
+            sessionsDir: sessionsDir,
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+    }
+
+    private func sentKeys(_ recorded: RecordedTmuxCommands) -> [String] {
+        recorded.snapshot()
+            .map { $0.joined(separator: " ") }
+            .filter { $0.contains("send-keys") }
+    }
+
+    private func respawned(_ recorded: RecordedTmuxCommands) -> Bool {
+        recorded.snapshot().contains { $0.contains("respawn-window") }
+    }
+
+    /// A confirmed feature session holding a draft: the park types nothing,
+    /// SIGTERMs the Claude pid the inspector found (not the pane's shell),
+    /// sees Claude leave on the first poll, and respawns.
+    @Test func featureParkOnTmuxSendsNoKeys() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: true)
+        let recorded = RecordedTmuxCommands()
+        let signaller = FakeProcessSignaller()
+        let clock = EventDrivenTestClock()
+        let coord = signalEndingCoordinator(
+            db, sessionsDir: sessionsDir, recorded: recorded, signaller: signaller,
+            claudePID: Self.claudePID, clock: clock, now: { now })
+
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+        // The dry-run pane reports `zsh`: the first poll sees Claude gone.
+        try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
+        #expect(await park.value == .ok)
+        #expect(try await db.terminals.get(id: terminalID)?.isHibernated == true)
+
+        #expect(sentKeys(recorded).isEmpty, "a feature session was typed into: \(sentKeys(recorded))")
+        #expect(signaller.terminatedProcessOnly == [Self.claudePID])
+        #expect(signaller.terminated == [Self.claudePID], "a signal went somewhere else too")
+        #expect(respawned(recorded))
+    }
+
+    /// Claude outlives the whole poll window: the park waits out every
+    /// attempt — the window is Claude's time to make its final save — then
+    /// goes straight to the respawn, still without a keystroke.
+    @Test func featureParkEscalatesToRespawnWhenClaudeStays() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: false)
+        let recorded = RecordedTmuxCommands()
+        let signaller = FakeProcessSignaller()
+        let clock = EventDrivenTestClock()
+        let attempts = 3
+        let coord = signalEndingCoordinator(
+            db, sessionsDir: sessionsDir, recorded: recorded, signaller: signaller,
+            claudePID: Self.claudePID, clock: clock, exitPollAttempts: attempts,
+            paneCurrentCommand: { _, _ in "1.2.3" },  // claude, every attempt
+            now: { now })
+
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+        for _ in 0..<(attempts - 1) {
+            try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
+        }
+        // Armed for the last attempt, or already respawned early.
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            clock.hasSleeper || respawned(recorded)
+        } == .satisfied)
+        #expect(!respawned(recorded), "the respawn came before the poll window closed")
+
+        try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
+        #expect(await park.value == .ok)
+        #expect(respawned(recorded))
+        #expect(sentKeys(recorded).isEmpty, "the escalation typed into a feature session: \(sentKeys(recorded))")
+        #expect(signaller.terminatedProcessOnly == [Self.claudePID])
+        #expect(signaller.terminated == [Self.claudePID])
+    }
+
+    /// No Claude process answers under the pane: nothing is signalled — the
+    /// shell wrapper least of all — nothing is waited for, nothing is typed,
+    /// and the respawn ends whatever is there.
+    @Test func featureParkWithoutAClaudePidGoesStraightToRespawn() async throws {
+        let incarnation = UUID()
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: incarnation)
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let now = Date()
+        try writeComposerDraftSession(
+            sessionsDir: sessionsDir, sessionID: "sess-1", incarnation: incarnation,
+            heartbeatAt: now, hasDraft: true)
+        let recorded = RecordedTmuxCommands()
+        let signaller = FakeProcessSignaller()
+        let clock = EventDrivenTestClock()
+        let coord = signalEndingCoordinator(
+            db, sessionsDir: sessionsDir, recorded: recorded, signaller: signaller,
+            claudePID: nil, clock: clock, exitPollAttempts: 1, now: { now })
+        let finished = FireRecorder<HibernateResult>()
+
+        let park = Task {
+            let result = await coord.manualHibernate(terminalID: terminalID)
+            finished.record(result)
+            return result
+        }
+        #expect(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            !finished.values.isEmpty || clock.hasSleeper
+        } == .satisfied)
+        #expect(!clock.hasSleeper, "no Claude pid answered, yet the park waited for one to exit")
+        if clock.hasSleeper {
+            // Release the regression so the test ends red instead of hanging.
+            await clock.advance(by: coord.exitPollInterval)
+        }
+        #expect(await park.value == .ok)
+        #expect(sentKeys(recorded).isEmpty, "a feature session was typed into: \(sentKeys(recorded))")
+        #expect(signaller.terminated.isEmpty, "something was signalled: \(signaller.terminated)")
+        #expect(respawned(recorded))
+    }
+
+    /// A session spawned without the feature keeps the typed `/exit`, and its
+    /// ending never reaches the signaller. Its pane pid stays the dry-run
+    /// "0", so the keyed fallback's raw `kill` has nothing to aim at.
+    @Test func legacyParkStillTypesExit() async throws {
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: UUID())
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let recorded = RecordedTmuxCommands()
+        let signaller = FakeProcessSignaller()
+        let clock = EventDrivenTestClock()
+        let coord = HibernationCoordinator(
+            db: db,
+            tmux: TmuxManager(dryRun: true, dryRunRecorder: recorded.append),
+            configDirManager: isolatedConfigDirManager(),
+            clock: clock,
+            signaller: signaller,
+            paneProcessInspector: FakeInspector(claudePID: Self.claudePID),
+            sessionsDir: sessionsDir,
+            sessionTitles: ClaudeSessionTitleStore(),
+            actuationLog: makeTestActuationLog())
+
+        let park = Task { await coord.manualHibernate(terminalID: terminalID) }
+        try await clock.requireAdvanceWhenArmed(by: coord.exitPollInterval)
+        #expect(await park.value == .ok)
+
+        #expect(sentKeys(recorded).contains { $0.contains("/exit") },
+                "a legacy session lost its typed /exit: \(sentKeys(recorded))")
+        #expect(signaller.terminated.isEmpty)
     }
 }
 

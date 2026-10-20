@@ -221,6 +221,65 @@ struct ContinueInClaudeTransactionTests {
         #expect(replacement == updated)
     }
 
+    /// The Claude destination launches under the pending incarnation that
+    /// finalization promotes to the row. With the flag on, that launch carries
+    /// the session mod and its spawn record — written before the launch —
+    /// names the pending incarnation; with the flag off, neither.
+    @Test("the Claude destination carries the session mod only with the flag on",
+          arguments: [true, false])
+    func continueInClaudeExportsTheMod(flagOn: Bool) async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let fixture = try await makeRPCFixture(ownsPane: true, sessionsDir: sessionsDir)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try await fixture.db.config.setComposerDraftEnabled(flagOn)
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalContinueInClaude,
+            params: TerminalContinueInClaudeParams(
+                sourceTerminalID: fixture.terminal.id))
+        let responseTask = Task { await fixture.router.handle(request) }
+        let pending = try await waitForPending(
+            terminalID: fixture.terminal.id, in: fixture.db)
+        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
+            in: fixture.recorder))
+        // The launch has been issued, so whatever it carried is recorded and
+        // the spawn record, if any, is already on disk.
+        let launch = try #require(
+            fixture.recorder.commands.last { $0.contains("respawn-window") })
+        let launchEnv = tmuxEnvironmentFlags(launch)
+        if flagOn {
+            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
+            #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
+            #expect(launchEnv[SessionModSpawn.incarnationVariable] == pending.uuidString)
+            let spawn = try #require(readSpawnRecord(
+                sessionsDir: sessionsDir, sessionID: freshSessionID))
+            #expect(spawn.sessionId == freshSessionID)
+            #expect(spawn.incarnationId == pending.uuidString)
+            #expect(spawn.features == ["composer-draft"])
+        } else {
+            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
+            #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
+            #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
+        }
+
+        // Finish the transaction so the request returns.
+        let hook = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: fixture.terminal.id,
+                sessionID: freshSessionID,
+                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
+                source: "startup",
+                cwd: fixture.root.path,
+                sessionIncarnationID: pending))
+        #expect((await fixture.router.handle(hook)).success)
+        let response = await responseTask.value
+        #expect(response.success)
+        #expect(try response.decodeResult(Terminal.self).sessionIncarnationID == pending)
+    }
+
     @Test("a packet far over tmux's command limit travels as a file and is reclaimed")
     func largePacketTravelsAsFile() async throws {
         // tmux rejects a respawn-window command over about 16 KiB ("command
@@ -745,7 +804,8 @@ struct ContinueInClaudeTransactionTests {
         paneProbeThrows: Bool = false,
         sourceWindowID: String = "@source",
         paneTargetOverride: PaneSendTarget? = nil,
-        userMessage: String = "Continue the task."
+        userMessage: String = "Continue the task.",
+        sessionsDir: URL? = nil
     ) async throws -> RPCFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
@@ -804,6 +864,7 @@ struct ContinueInClaudeTransactionTests {
             tmux: tmux,
             subscriptions: subscriptions,
             configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir ?? root.appendingPathComponent("sessions", isDirectory: true),
             actuationLog: makeTestActuationLog())
         router.codexExecutableResolver = { "/opt/test/bin/codex" }
         router.codexHomeEnsurer = {

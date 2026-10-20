@@ -1026,6 +1026,21 @@ extension AppState {
         }
     }
 
+    // MARK: - Composer drafts
+
+    /// Persist the composer draft gate and refresh daemon capabilities, so the
+    /// toggle shows what the daemon holds. Sessions pick the feature up on
+    /// their next start.
+    func setComposerDraftEnabled(_ enabled: Bool) async {
+        do {
+            try await composerDraftFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set composer draft: \(error, privacy: .public)")
+            showAlert("Failed to set composer drafts: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     // MARK: - Live remote transcript sync
 
     /// Persist the live remote transcript sync gate and refresh daemon

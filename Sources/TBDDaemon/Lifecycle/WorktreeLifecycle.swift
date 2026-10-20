@@ -235,6 +235,12 @@ public struct WorktreeLifecycle: Sendable {
     /// Behavior clock for the holder arm's phase budget. `Duration` is
     /// behavior and `Date` is data, so this is a separate seam from `now`.
     let clock: any Clock<Duration>
+    /// Root of the per-session directories a Claude spawn writes `spawn.json`
+    /// under when a session-mod feature is on. Defaults to
+    /// `TBDConstants.sessionsDir()` (which follows `TBD_HOME`); tests inject a
+    /// scratch directory. The router and the hibernation coordinator each hold
+    /// their own, defaulted the same way.
+    let sessionsDir: URL
 
     public init(
         db: TBDDatabase,
@@ -253,11 +259,13 @@ public struct WorktreeLifecycle: Sendable {
         reaperPollInterval: Duration = .milliseconds(100),
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        sessionsDir: URL = TBDConstants.sessionsDir(),
         now: @escaping @Sendable () -> Date = { Date() },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.now = now
         self.clock = clock
+        self.sessionsDir = sessionsDir
         self.db = db
         self.git = git
         self.tmux = tmux
@@ -313,6 +321,32 @@ public struct WorktreeLifecycle: Sendable {
     func killWindowAndReap(
         server: String, windowID: String, paneID: String
     ) async -> String? {
+        await tearDownWindow(server: server, windowID: windowID, paneID: paneID).killFailure
+    }
+
+    /// What `tearDownWindow` did to one window.
+    struct WindowTeardown: Equatable, Sendable {
+        /// The kill error's description, or nil when `kill-window` went through.
+        let killFailure: String?
+        /// The pane's process as tmux answered before the kill, or nil when it
+        /// could not be read. A tmux that cannot answer reports `0`.
+        let panePID: Int32?
+
+        /// Whether nothing the teardown aimed at can still be running: the kill
+        /// went through, or the pane's process was read and reaped. A failed
+        /// kill of a pane whose process could not be read may have left it
+        /// running.
+        var stoppedPane: Bool {
+            killFailure == nil || (panePID ?? 0) > 0
+        }
+    }
+
+    /// `killWindowAndReap`, reporting what it did: the pane's process is read,
+    /// the window killed, and the process escalated against even when the kill
+    /// threw, since it may still be alive.
+    func tearDownWindow(
+        server: String, windowID: String, paneID: String
+    ) async -> WindowTeardown {
         let panePID = Int32((try? await tmux.panePID(server: server, paneID: paneID)) ?? "")
         var killFailure: String?
         do {
@@ -323,7 +357,7 @@ public struct WorktreeLifecycle: Sendable {
         }
         // Escalate even if killWindow threw — the pane process may still be alive.
         if let panePID { await reaper.escalateAfterHangup(panePID) }
-        return killFailure
+        return WindowTeardown(killFailure: killFailure, panePID: panePID)
     }
 
     /// Capture a live terminal's scrollback into Closed Terminals history
@@ -335,7 +369,13 @@ public struct WorktreeLifecycle: Sendable {
     /// happen before the window dies; mirrors `closeHookTerminal`'s
     /// never-throws capture (failures are logged inside `captureOnClose` and
     /// never block the teardown).
-    func captureThenKillWindow(terminal: Terminal, server: String) async {
+    ///
+    /// Returns whether the pane's process can no longer be running: false when
+    /// it refused to touch the window, which leaves the process as it was, and
+    /// false when the kill failed and the pane's process could not be read to
+    /// reap (`WindowTeardown.stoppedPane`); true otherwise.
+    @discardableResult
+    func captureThenKillWindow(terminal: Terminal, server: String) async -> Bool {
         // Refuse to capture or kill a pane that belongs to a DIFFERENT
         // terminal — see `TmuxManager.paneOwnership`. Shared by both
         // callers of this function (explicit archive, and the vanished-
@@ -352,16 +392,75 @@ public struct WorktreeLifecycle: Sendable {
                 untouched for terminal \(terminal.id, privacy: .public) — \
                 \(ownership.refusalDetail ?? "", privacy: .public)
                 """)
-            return
+            return false
         }
         await db.terminalHistory.captureOnClose(terminal: terminal) {
             try await tmux.capturePaneScrollback(server: server, paneID: terminal.tmuxPaneID)
         }
-        await killWindowAndReap(
+        return await tearDownWindow(
             server: server,
             windowID: terminal.tmuxWindowID,
             paneID: terminal.tmuxPaneID
-        )
+        ).stoppedPane
+    }
+
+    /// Whether a terminal's session has no process left once a teardown of it
+    /// has run, so its session-mod directory may go. The mod writes the box
+    /// one last time when its process ends, and a removal ahead of that write
+    /// would be undone by it.
+    ///
+    /// A teardown that stopped the process settles it. What a teardown waits
+    /// on is the pane's process or the holder's job. When the login shell
+    /// execs Claude, as zsh does for the spawn command's `-c`, that process is
+    /// Claude and its final write lands before the removal. Otherwise Claude
+    /// can still be shutting down when the wait ends, its late `session.end`
+    /// write can recreate the directory, and `OrphanGC`'s session-directory
+    /// arm reclaims it once nothing names it and `gcGraceSeconds` has passed.
+    ///
+    /// Otherwise only a parked row qualifies, because a park already ended the
+    /// process — except while the park is still in flight:
+    /// `pendingSessionIncarnationID` is set from the moment the park is
+    /// recorded until the agent has been replaced, and the agent may still be
+    /// running in between. A session left running keeps its directory, and
+    /// `OrphanGC` reclaims it once nothing names it.
+    static func sessionHasEnded(_ terminal: Terminal, teardownStoppedIt: Bool) -> Bool {
+        if teardownStoppedIt { return true }
+        return terminal.isParked && terminal.pendingSessionIncarnationID == nil
+    }
+
+    /// The terminals a teardown handled, sorted by `sessionHasEnded` into
+    /// those whose session has no process left and those it may have left
+    /// running. `removeSessionDirectories` reads both.
+    struct SessionTeardownTally: Sendable {
+        private(set) var ended: [Terminal] = []
+        private(set) var leftRunning: [Terminal] = []
+
+        mutating func record(_ terminal: Terminal, teardownStoppedIt: Bool) {
+            if WorktreeLifecycle.sessionHasEnded(terminal, teardownStoppedIt: teardownStoppedIt) {
+                ended.append(terminal)
+            } else {
+                leftRunning.append(terminal)
+            }
+        }
+
+        /// The session IDs whose directories may go: every one an ended
+        /// terminal names, less every one a terminal left running names. Two
+        /// rows can carry one session ID, and its directory stays while either
+        /// may still write to it.
+        var removableSessionIDs: Set<String> {
+            Set(ended.compactMap(\.claudeSessionID))
+                .subtracting(leftRunning.compactMap(\.claudeSessionID))
+        }
+    }
+
+    /// Removes the session-mod directory of each session
+    /// `tally.removableSessionIDs` names, draft included. A failed removal is
+    /// logged inside `SessionModFiles` and never fails the archive.
+    func removeSessionDirectories(for tally: SessionTeardownTally) {
+        for sessionID in tally.removableSessionIDs {
+            SessionModFiles.removeSessionDirectory(
+                sessionsDir: sessionsDir, claudeSessionID: sessionID)
+        }
     }
 
     /// The holder-transport counterpart of `killWindowAndReap`, for the

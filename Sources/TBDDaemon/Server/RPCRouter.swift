@@ -325,6 +325,13 @@ public final class RPCRouter: Sendable {
     /// requests for one server never both act.
     let devServerClaims = DevServerActionClaims()
 
+    /// Rewrites the TBD Claude plugin for the session-mod features the fresh
+    /// config turns on, called after a session-mod feature flag changes.
+    /// Wired by `Daemon.swift` before the socket serves; `nil` in tests that
+    /// do not exercise it, where a flag change writes only its column.
+    /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md, "Presence".
+    nonisolated(unsafe) var sessionModPluginSync: (@Sendable ([SessionModFeature]) -> Void)?
+
     /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
     /// from the same value the lifecycle and the hibernation coordinator hold.
     /// Two things read it: `daemon.capabilities`, which reports whether this
@@ -427,8 +434,9 @@ public final class RPCRouter: Sendable {
 
     /// How the daemon asks whether Claude owns a pane's foreground process
     /// group. The same seam the limit-resume actuator uses, held here so the
-    /// send path can refuse a pane whose agent has left without any test
-    /// needing a real `ps`. A process-table fact, never screen text.
+    /// send path can refuse a pane whose agent has left, and the tmux in-place
+    /// swap can find the Claude process it signals, without any test needing
+    /// a real `ps`. A process-table fact, never screen text.
     let paneProcessInspector: any PaneProcessInspecting
 
     /// The identity the FD-vending sidecar recorded for its current client.
@@ -446,17 +454,26 @@ public final class RPCRouter: Sendable {
     let recordedAppIdentity: @Sendable () async -> ProcessIdentity?
     /// The one process-fact reader, injected for the same reason `AgentReaper`
     /// and `AppLivenessArbiter` take one: the re-verification must be statable
-    /// in a test without a process to inspect.
+    /// in a test without a process to inspect. Also how the tmux in-place
+    /// swap sends SIGTERM to the session it ends, so a test can see the pid
+    /// it signalled.
     let processSignaller: any ProcessSignaller
 
     /// Behavior seam for send-path settling after an image paste and the
-    /// graceful interrupt before an in-place profile replacement. A
+    /// signal ending's poll before an in-place profile replacement. A
     /// `Duration` is behavior, so this is the `Clock` seam rather than the
     /// `now` date seam beside it, and it is existential (`any Clock<Duration>`)
     /// for the reason every other subsystem here holds one that way — a generic
     /// parameter would infect the `Sendable` conformances the router already
     /// carries.
     let clock: any Clock<Duration>
+
+    /// Root of the per-session directories the session mod and the daemon
+    /// share (`<sessionsDir>/<claudeSessionID>/`). Defaults to
+    /// `TBDConstants.sessionsDir()`, which follows `TBD_HOME`; tests inject a
+    /// scratch directory. Handed to the hibernation coordinator so a wake and
+    /// a swap write under the same root.
+    let sessionsDir: URL
 
     public init(
         db: TBDDatabase,
@@ -488,10 +505,12 @@ public final class RPCRouter: Sendable {
         completionInventory: CompletionInventoryService = CompletionInventoryService(),
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
         processSignaller: any ProcessSignaller = ProductionProcessSignaller(),
+        sessionsDir: URL = TBDConstants.sessionsDir(),
         actuationLog: ActuationLog,
         remoteTranscriptEnvironment: [String: String] = ProcessInfo.processInfo.environment,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
+        self.sessionsDir = sessionsDir
         self.recordedAppIdentity = recordedAppIdentity
         self.processSignaller = processSignaller
         self.clock = clock
@@ -574,6 +593,7 @@ public final class RPCRouter: Sendable {
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
             subscriptions: subscriptions, configDirManager: configDirManager,
+            sessionsDir: sessionsDir,
             sessionTitles: lifecycle.sessionTitles,
             actuationLog: actuationLog, programStatus: resolvedProgramStatus
         )
@@ -1084,6 +1104,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetProgramStatusEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptPromptAnswerEnabled:
                 return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
+            case RPCMethod.configSetComposerDraftEnabled:
+                return try await handleConfigSetComposerDraftEnabled(request.paramsData)
             case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
                 return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
             case RPCMethod.configSetCloneCheckoutEnabled:
@@ -1267,6 +1289,7 @@ public final class RPCRouter: Sendable {
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
         result.programStatusEnabled = config.programStatusEnabled
         result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
+        result.composerDraftEnabled = config.composerDraftEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled

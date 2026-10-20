@@ -169,6 +169,32 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("transcript-prompt-answer: on"))
     }
 
+    // MARK: - composer-draft: the soak switch for saving and restoring composer drafts
+
+    @Test func composerDraftDescribesBothStates() {
+        let on = ConfigSet.confirmation(key: "composer-draft", value: .on)
+        let off = ConfigSet.confirmation(key: "composer-draft", value: .off)
+        #expect(on.hasPrefix("Set composer-draft to on."))
+        #expect(off.hasPrefix("Set composer-draft to off."))
+        #expect(on != off)
+    }
+
+    @Test func composerDraftIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("composer-draft"))
+        #expect(try ConfigSet.parseOnOff("on", key: "composer-draft") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "composer-draft") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "composer-draft")
+        }
+    }
+
+    @Test func configGetPrintsComposerDraftInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("composer-draft: off"))
+        config.composerDraftEnabled = true
+        #expect(ConfigGet.render(config).contains("composer-draft: on"))
+    }
+
     // MARK: - clone-checkout: the soak switch for clone-backed worktree checkout
 
     @Test func cloneCheckoutDescribesBothStates() {

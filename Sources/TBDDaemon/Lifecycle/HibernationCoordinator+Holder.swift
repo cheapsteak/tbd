@@ -127,6 +127,33 @@ extension HolderChildDisposition {
     }
 }
 
+/// The holder park's escalation ladder, as far as a unit test can reach it:
+/// the rung a park starts on. The rungs themselves run in
+/// `performHolderHibernate`, against a live reader and process table.
+enum HolderParkLadder {
+    enum Rung: Equatable, Sendable {
+        /// `/exit` written to the pty, then a poll for the child to leave.
+        case typedExit
+        /// SIGTERM to the child alone, then a poll.
+        case terminate
+        /// `HolderRegistry.abandon`: the holder lets go of the pty and the job
+        /// is killed by process group.
+        case abandon
+    }
+
+    /// A typed ending, a park of a session spawned without the
+    /// composer-draft feature, starts with `/exit`. A signal ending, every
+    /// profile swap and every park of a session spawned with the feature,
+    /// skips it and starts at SIGTERM, so nothing is typed into the composer.
+    /// The forced rung follows either way.
+    static func firstRung(for style: ParkEndingStyle) -> Rung {
+        switch style {
+        case .typedExit: return .typedExit
+        case .signal: return .terminate
+        }
+    }
+}
+
 /// Park and wake for the pty-holder transport.
 ///
 /// Split from `HibernationCoordinator` so the diff to that file is a set of
@@ -403,11 +430,15 @@ extension HibernationCoordinator {
     /// so there is nothing for a server lock to exclude. `hibernatesInFlight`
     /// is the whole exclusion here, and it is enough: every mutation below
     /// addresses one terminal row and one holder.
+    ///
+    /// `composerDraft` is the gate's answer from `performHibernate`: the
+    /// typed-input rail below consults it, and the ladder reads its status.
     func performHolderHibernate(
         terminal: Terminal,
         worktree: LocalWorktree,
         reason: HibernateReason,
-        policy: HibernateEligibilityPolicy
+        policy: HibernateEligibilityPolicy,
+        composerDraft: ComposerDraftParkContext
     ) async -> HibernateResult {
         // Re-read and re-check, in the same order and with the same refusal
         // strings the tmux path uses under its server lock. This method is
@@ -501,7 +532,9 @@ extension HibernationCoordinator {
         // arm of the same action has never asked it. It still reads the
         // screen once, for the backdrop alone: the tab shows the last frame
         // under its "Switching account" caption for the second or two the
-        // ladder takes. See `holderSwapBackdrop`.
+        // ladder takes. See `holderSwapBackdrop`. Having not judged the
+        // screen, the swap's park types nothing into it: its ladder starts at
+        // SIGTERM, below.
         let capturedSnapshot: String?
         if sessionEnded {
             capturedSnapshot = nil
@@ -513,7 +546,12 @@ extension HibernationCoordinator {
                 logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — \(refusal, privacy: .public)")
                 return .notEligible(reason: refusal)
             case .readable(let screen):
-                if HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output) {
+                // The typed-input check decides only a legacy session's park;
+                // the composer-draft feature decides the rest. The holder park
+                // reads the screen once, so this is its authoritative read.
+                if composerDraft.judgeAuthoritativeScrape(
+                    hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output),
+                    terminalID: terminal.id) {
                     logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
                     return .notEligible(reason: "Terminal has unsent typed input")
                 }
@@ -527,7 +565,9 @@ extension HibernationCoordinator {
         // The reader the polite `/exit` below is written through. Read after
         // the rail rather than inside it: the rail's subject is the screen, and
         // a reader that answered a live screen a moment ago is the one this
-        // park writes to.
+        // park writes to. A park that ends by signal never writes to it, and
+        // is still refused without one: no reader means a session this daemon
+        // has not adopted, whatever the ending.
         let reader: HolderReader?
         if sessionEnded {
             reader = nil
@@ -597,8 +637,16 @@ extension HibernationCoordinator {
         // An ended session skips the whole ladder: there is nothing to tell to
         // exit and nothing to signal, and `sessionHasEnded` has already
         // established that the child is gone.
+        //
+        // A profile swap, and a park of a session spawned with the
+        // composer-draft feature, skip this rung and start at SIGTERM: a typed
+        // `/exit` would go through the composer. A swap skips the screen check
+        // that keeps `/exit` off a draft, and a feature session is never typed
+        // into to end it. `ComposerDraftParkGate.endingStyle(for:policy:)`
+        // makes that choice and `HolderParkLadder` maps it to a rung.
+        let firstRung = HolderParkLadder.firstRung(for: composerDraft.endingStyle)
         var gone = sessionEnded
-        if let reader {
+        if let reader, firstRung == .typedExit {
             do {
                 try await reader.write(Data("/exit\r".utf8))
             } catch {
@@ -631,7 +679,11 @@ extension HibernationCoordinator {
                 return await refuseUnverifiableHolderChild(
                     currentTerminal, childPID: childPID, verdict: verdict, registry: registry)
             case .ours:
-                logger.debug("hibernate: /exit did not end the job for \(terminal.id, privacy: .public) within the poll window — sending SIGTERM to child \(childPID, privacy: .public)")
+                if firstRung == .typedExit {
+                    logger.debug("hibernate: /exit did not end the job for \(terminal.id, privacy: .public) within the poll window — sending SIGTERM to child \(childPID, privacy: .public)")
+                } else {
+                    logger.debug("hibernate: ending \(terminal.id, privacy: .public) by SIGTERM to child \(childPID, privacy: .public) — neither a profile swap nor a session spawned with the composer-draft feature is typed into")
+                }
                 signaller.terminateProcessOnly(childPID)
                 gone = await pollUntilChildIsGone(
                     childPID: childPID, terminalID: terminal.id, registry: registry,
@@ -1252,6 +1304,13 @@ extension HibernationCoordinator {
         }
         let replacementEnv = AgentProcessEnvironment.replacement(
             base: env, incarnationID: incarnationID)
+        // `sessionID` is the session `spawnCommand` runs — the resume, or the
+        // fresh session an in-place swap planned — so it names the directory
+        // the replacement's mod writes under.
+        let sessionMod = SessionModSpawn.prepare(
+            config: try? await db.config.get(),
+            claudeSessionID: sessionID, incarnationID: incarnationID,
+            sessionsDir: sessionsDir, now: now())
 
         let handle: HolderHandle
         do {
@@ -1276,7 +1335,10 @@ extension HibernationCoordinator {
                     // the trade: `ps -ww` is readable by exactly the processes
                     // that can already read `routes/`, and losing the rc-file
                     // defence would be a real failure where this is not one.
-                    sensitiveEnv: attachment.sensitiveEnv,
+                    //
+                    // The session mod's variables ride here too, empty when
+                    // every feature is off.
+                    sensitiveEnv: attachment.sensitiveEnv.addingSessionMod(sessionMod),
                     workingDirectory: worktree.path,
                     cols: cols ?? TmuxManager.defaultCols,
                     rows: rows ?? TmuxManager.defaultRows,

@@ -125,6 +125,11 @@ public enum RPCErrorCode: String, Sendable {
     /// provider identity is not the required source provider. This includes a
     /// repeated Continue-in-Claude request after the row already became Claude.
     case terminalWrongProvider
+    /// A `terminal.hibernate` was refused because the session was spawned with
+    /// the composer-draft feature and TBD cannot confirm its unsent draft is
+    /// saved. The app asks whether to hibernate anyway, and a yes reissues the
+    /// park with `TerminalHibernateParams.overrideUnconfirmedDraft`.
+    case composerDraftUnconfirmed
 }
 
 // MARK: - RPC Method Names
@@ -370,6 +375,11 @@ public enum RPCMethod {
     /// Hook changes reach a session on its next start. Reading needs no method
     /// of its own: `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetTranscriptPromptAnswerEnabled = "config.setTranscriptPromptAnswerEnabled"
+    /// The composer draft gate (`composer_draft_enabled`): whether Claude
+    /// sessions started from now on save the unsent text in their prompt box
+    /// through the session mod. Reading needs no method of its own:
+    /// `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetComposerDraftEnabled = "config.setComposerDraftEnabled"
     /// The live remote transcript sync gate
     /// (`remote_transcript_live_sync_enabled`). Takes effect on the next sync —
     /// the daemon reads it fresh at every decision — and turning it off drops
@@ -3213,7 +3223,14 @@ public struct ConfigSetScratchProfileOverrideParams: Codable, Sendable {
 /// rails but not keep-warm or idle-time.
 public struct TerminalHibernateParams: Codable, Sendable {
     public let terminalID: UUID
-    public init(terminalID: UUID) { self.terminalID = terminalID }
+    /// Park even when TBD can't confirm the session's composer draft is saved,
+    /// which is otherwise refused with `RPCErrorCode.composerDraftUnconfirmed`.
+    /// Set only on the person's explicit "Hibernate anyway". nil == false.
+    public let overrideUnconfirmedDraft: Bool?
+    public init(terminalID: UUID, overrideUnconfirmedDraft: Bool? = nil) {
+        self.terminalID = terminalID
+        self.overrideUnconfirmedDraft = overrideUnconfirmedDraft
+    }
 }
 
 /// Params for `terminal.wake` — respawn `claude --resume <id>` in the
@@ -3976,6 +3993,14 @@ public struct ConfigSetPromptAnswerParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setComposerDraftEnabled` — the gate for saving and
+/// restoring a Claude session's unsent prompt-box text (default OFF during
+/// soak). Design: `docs/specs/2026-10-19-tbd-session-mod-design.md`.
+public struct ConfigSetComposerDraftEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setRemoteTranscriptLiveSyncEnabled` — the gate for
 /// tail-first loading, earlier-history loading and hint-driven background
 /// sync of remote session transcripts (default OFF during soak). Design:
@@ -4402,6 +4427,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
     /// Resolved through `Config.transcriptPromptAnswerDefault`.
     public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
+    /// Whether composer draft save-and-restore is on
+    /// (`composer_draft_enabled`). Default OFF while it soaks. Resolved
+    /// through `Config.composerDraftDefault`.
+    public var composerDraftEnabled: Bool = Config.composerDraftDefault
     /// Balancing's usage ceiling and maximum reading age as stored, nil when
     /// never set, so the app runs the picker under the daemon's thresholds.
     /// Assigned after construction, for the type-checker reason
@@ -4562,6 +4591,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
+        composerDraftEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingUsageCeilingPercent)
@@ -4907,8 +4938,9 @@ public struct TerminalTranscriptItemFullBodyResult: Codable, Sendable {
 /// hook payload changes don't immediately break this bridge.
 public struct TerminalSessionEventParams: Codable, Sendable {
     public let terminalID: UUID
-    /// Process incarnation planted by TBD before a replacement agent starts.
-    /// Legacy, never-replaced terminals omit it and remain on the nil/nil
+    /// Process incarnation planted by TBD before a replacement agent starts,
+    /// and before a fresh Claude spawn made with a session-mod feature on.
+    /// Other never-replaced terminals omit it and remain on the nil/nil
     /// compatibility path until their first managed replacement.
     public let sessionIncarnationID: UUID?
     public let sessionID: String
