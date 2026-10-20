@@ -1018,7 +1018,6 @@ test_dry_run_builds_but_installs_nothing() {
     assert_contains "--dry-run builds the CLI" "building TBDCLI" "$out"
     assert_contains "--dry-run builds the pty holder" "building TBDHolder" "$out"
     assert_contains "--dry-run builds the peer helper" "building TBDPeerHelper" "$out"
-    assert_contains "--dry-run builds the model proxy" "building TBDModelProxy" "$out"
     assert_contains "--dry-run says it installs nothing" "installing nothing" "$out"
     assert_not_contains "--dry-run does not assemble a bundle" \
         "assembling and installing" "$out"
@@ -1028,7 +1027,7 @@ test_dry_run_builds_but_installs_nothing() {
     else
         pass "--dry-run does not launch the app"
     fi
-    assert_eq "--dry-run builds the release configuration by default" "6" \
+    assert_eq "--dry-run builds the release configuration by default" "5" \
         "$(grep -c 'release' "$case_dir/build.log")"
 
     # The sidecar the build stamped.
@@ -1073,7 +1072,7 @@ test_debug_flag_selects_the_debug_configuration() {
     local case_dir
     case_dir="$(mkcase debug-case)"
     run_update "$case_dir" --dry-run --debug >/dev/null 2>&1
-    assert_eq "--debug builds the debug configuration" "6" \
+    assert_eq "--debug builds the debug configuration" "5" \
         "$(grep -c 'debug' "$case_dir/build.log")"
 }
 
@@ -2055,7 +2054,7 @@ test_release_no_asset_manual_builds_locally() {
     assert_eq "a manual run with nothing published still succeeds" "0" "$?"
     assert_contains "it says it falls back" "building locally instead" "$out"
     assert_contains "and builds" "building TBDDaemon" "$out"
-    assert_eq "every product is built" "6" "$(grep -c 'release' "$case_dir/build.log" 2>/dev/null)"
+    assert_eq "every product is built" "5" "$(grep -c 'release' "$case_dir/build.log" 2>/dev/null)"
 }
 
 test_release_non_arm64_builds_locally() {

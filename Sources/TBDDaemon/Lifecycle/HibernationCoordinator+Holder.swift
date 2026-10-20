@@ -803,27 +803,6 @@ extension HibernationCoordinator {
         } catch {
             logger.warning("hibernate: parked \(terminal.id, privacy: .public) but failed to clear its holder pids: \(error.localizedDescription, privacy: .public)")
         }
-        // A park is the end of a process, and the route named that process.
-        // Retire it here rather than at the wake: a row can stay parked for
-        // days, and a live route with no session behind it is a stream file the
-        // proxy keeps and the app may still be tailing. The wake mints a fresh
-        // one. Best-effort, exactly like the pid clear above — the row is
-        // parked either way, and `OrphanGC` is the standing guarantee.
-        //
-        // The row's stream path is read here, before the write below clears it:
-        // it is what says this session was routed, and with the flag off it is
-        // the only thing that does.
-        await ModelProxyRouteAttachment.retire(
-            terminalID: terminal.id,
-            streamPath: currentTerminal.transcriptStreamPath,
-            proxyEnabled: (try? await db.config.get())?.modelProxyEnabled ?? true,
-            supervisor: modelProxySupervisor)
-        do {
-            try await db.terminals.setTranscriptStreamPath(
-                terminalID: terminal.id, path: nil)
-        } catch {
-            logger.warning("hibernate: parked \(terminal.id, privacy: .public) but failed to clear its model proxy stream path: \(error.localizedDescription, privacy: .public)")
-        }
         inputActivity.forget(paneID: InputActivityTracker.key(for: currentTerminal))
 
         guard let persisted = try? await db.terminals.get(id: terminal.id),
@@ -1060,16 +1039,6 @@ extension HibernationCoordinator {
             do {
                 try await db.terminals.setHolderProcess(
                     id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
-                // The job that route named is gone, so the route is too. The
-                // stream path is read before the clear below, for the same
-                // reason the park reads it there.
-                await ModelProxyRouteAttachment.retire(
-                    terminalID: terminal.id,
-                    streamPath: terminal.transcriptStreamPath,
-                    proxyEnabled: (try? await db.config.get())?.modelProxyEnabled ?? true,
-                    supervisor: modelProxySupervisor)
-                try await db.terminals.setTranscriptStreamPath(
-                    terminalID: terminal.id, path: nil)
                 logger.info("startup: cleared the stale holder pids on parked terminal \(terminal.id, privacy: .public) — its recorded child \(childPID, privacy: .public) is gone")
             } catch {
                 logger.warning("startup: failed to clear the stale holder pids on \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -1121,22 +1090,16 @@ extension HibernationCoordinator {
     /// instead: everything above its single transport branch is already
     /// transport-independent, so an in-place change that only rewrote a column
     /// resumes through the code every other wake uses. This entry point exists
-    /// for the caller whose command and route had to be minted together.
+    /// for the caller that composes its own command.
     ///
     /// `wakeHolderSection` is the mutate half and claims nothing, while the
     /// public `wake` claims the in-flight sets and then composes its own
     /// resume. The swap needs the first without the second: its plan may say
     /// fresh (a blank session swapped on tmux spawns fresh rather than showing
-    /// "no conversation found", and this arm matches it), and its route and
-    /// command were minted together so that the command's inline
-    /// `export ANTHROPIC_BASE_URL=…` — which runs after the shell's rc files —
-    /// names the same endpoint the process environment carries.
+    /// "no conversation found", and this arm matches it).
     ///
-    /// A refused claim retires the route here rather than in the section,
-    /// because the section is never entered: the caller minted a route for a
-    /// spawn that is not going to happen, and leaving it behind would make the
-    /// row's route ambiguous for as long as it stayed parked. It releases
-    /// `spawnTitle` for the same reason.
+    /// A refused claim releases `spawnTitle` here rather than in the section,
+    /// because the section is never entered.
     func wakeHolderAfterInPlaceChange(
         terminal: Terminal,
         worktree: LocalWorktree,
@@ -1144,15 +1107,13 @@ extension HibernationCoordinator {
         expectedReplacementState: TerminalReplacementSnapshot,
         spawnCommand: String,
         env: [String: String],
-        attachment: ModelProxyRouteAttachment.Outcome,
+        sensitiveEnv: [String: String],
         cols: Int?,
         rows: Int?,
         spawnTitle: ClaudeSpawnTitle? = nil
     ) async -> WakeResult {
         guard !hibernatesInFlight.contains(terminal.id),
               !wakesInFlight.contains(terminal.id) else {
-            await ModelProxyRouteAttachment.retire(
-                attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
             await sessionTitles.release(spawnTitle)
             return .inFlight
         }
@@ -1167,8 +1128,6 @@ extension HibernationCoordinator {
         case .notAClaudeTab(let kind): refusal = .notAClaudeTab(kind: kind)
         }
         if let refusal {
-            await ModelProxyRouteAttachment.retire(
-                attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
             await sessionTitles.release(spawnTitle)
             return refusal
         }
@@ -1182,7 +1141,7 @@ extension HibernationCoordinator {
             expectedReplacementState: expectedReplacementState,
             spawnCommand: spawnCommand,
             env: env,
-            attachment: attachment,
+            sensitiveEnv: sensitiveEnv,
             cols: cols,
             rows: rows,
             spawnTitle: spawnTitle)
@@ -1222,26 +1181,17 @@ extension HibernationCoordinator {
         expectedReplacementState: TerminalReplacementSnapshot,
         spawnCommand: String,
         env: [String: String],
-        // What the model proxy did with this wake: the process environment to
-        // launch with, the stream file to stamp on the row beside the pids, and
-        // the route to undo if this call ends up not spawning at all. Carried
-        // as one value because the three are one decision, and a caller that
-        // could pass the environment without the token would be able to spawn a
-        // routed session it could no longer un-route.
-        attachment: ModelProxyRouteAttachment.Outcome,
+        // The job's process environment: the free-form overrides with the
+        // spawn builder's auth and routing env layered on top.
+        sensitiveEnv: [String: String],
         cols: Int?,
         rows: Int?,
         spawnTitle: ClaudeSpawnTitle? = nil
     ) async -> WakeResult {
         // Every refusal below goes through this rather than returning
         // `.respawnFailed` directly, because each one is a spawn that did not
-        // happen and the route was minted before this method was entered. A
-        // refusal that forgot to undo it would leave a route file, and later a
-        // stream file, for a session nothing ever started — the shape the
-        // `OrphanGC` leg exists to catch and should not have to.
+        // happen, and the title reserved for it must be released.
         func refuse(_ reason: String) async -> WakeResult {
-            await ModelProxyRouteAttachment.retire(
-                attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
             await sessionTitles.release(spawnTitle)
             return .respawnFailed(reason: reason)
         }
@@ -1261,14 +1211,8 @@ extension HibernationCoordinator {
         // rather than starting a second one.
         if let adopted = await adoptLiveHolderInsteadOfRespawning(
             currentTerminal, registry: registry) {
-            // No spawn happened, so the route this wake minted names a session
-            // that will never be started against it — and the live session it
-            // healed is still running on whatever route it already had. By
-            // token, so the one that is dropped is provably the unused one.
-            await ModelProxyRouteAttachment.retire(
-                attachment, terminalID: terminal.id, supervisor: modelProxySupervisor)
-            // Nor did a session launch under this wake's `--name`: the healed
-            // one keeps whatever name it had, and the store the entry it had.
+            // No session launched under this wake's `--name`: the healed one
+            // keeps whatever name it had, and the store the entry it had.
             await sessionTitles.release(spawnTitle)
             return adopted
         }
@@ -1319,35 +1263,18 @@ extension HibernationCoordinator {
                 launch: WorktreeLifecycle.holderLaunch(
                     shellCommand: spawnCommand,
                     env: replacementEnv,
-                    // `sensitiveEnv` is the job's process environment, and
-                    // it is what carries the route: `holderLaunch` inlines
-                    // `env` as `export K='v';` in front of the command and
-                    // never this dictionary.
-                    //
-                    // The token is in the job's argv all the same, and
-                    // deliberately: `spawnCommand` was composed by
-                    // `ClaudeSpawnCommandBuilder` from
-                    // `attachment.builderBaseURL(profile:)`, which re-exports
-                    // `ANTHROPIC_BASE_URL` inline so the export runs *after*
-                    // the shell's rc files — the one thing that keeps a
-                    // `.zshrc` setting one of its own from taking this woken
-                    // session off its route. `Outcome.builderBaseURL` carries
-                    // the trade: `ps -ww` is readable by exactly the processes
-                    // that can already read `routes/`, and losing the rc-file
-                    // defence would be a real failure where this is not one.
-                    //
-                    // The session mod's variables ride here too, empty when
-                    // every feature is off.
-                    sensitiveEnv: attachment.sensitiveEnv.addingSessionMod(sessionMod),
+                    // `sensitiveEnv` is the job's process environment:
+                    // `holderLaunch` inlines `env` as `export K='v';` in front
+                    // of the command and never this dictionary. The session
+                    // mod's variables ride here too, empty when every feature
+                    // is off.
+                    sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
                     workingDirectory: worktree.path,
                     cols: cols ?? TmuxManager.defaultCols,
                     rows: rows ?? TmuxManager.defaultRows,
                     environment: registry.environment))
         } catch {
             // The row stays parked, so the next focus or menu retry can wake it.
-            // Its route goes with the spawn that never happened: the retry
-            // mints a fresh one, and leaving this file behind would make the
-            // row's route ambiguous for as long as it stayed parked.
             logger.warning("wake: could not start a holder for \(terminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return await refuse(
                 "starting a holder for this session failed: \(error.localizedDescription)")
@@ -1364,35 +1291,11 @@ extension HibernationCoordinator {
             // so undo the spawn from the failing call itself.
             await registry.abandon(terminalID: terminal.id, handle: handle)
             logger.warning("wake: started a holder for \(terminal.id, privacy: .public) but could not record its pids, so it was abandoned: \(error.localizedDescription, privacy: .public)")
-            // The job is gone with the holder, so its route goes too. Unlike
-            // the `clearHibernated` failure below, which leaves a LIVE
-            // replacement running on this route and must not touch it.
             return await refuse(
                 "the replacement agent started, but recording its process ids failed: \(error.localizedDescription)")
         }
         // The replacement is running and recorded under the reserved name.
         await sessionTitles.confirm(spawnTitle)
-        // Beside the pids, and before the park marker is cleared: both describe
-        // the process this call just started, and nothing snapshots the row
-        // between here and `clearHibernated`. A separate statement rather than a
-        // fourth `setHolderProcess` argument because the other two callers of
-        // that method mean different things by a nil stream path —
-        // `restoreHolderPIDsFromRegistry` must PRESERVE the route of the session
-        // it is healing, while a park clears it.
-        //
-        // **Its own best-effort `do`, exactly like the park's.** Sharing the
-        // block above would let a failed stamp abandon a holder whose pids the
-        // row already records — a live job torn down over a display detail,
-        // and a row that no longer names the processes it just named. A stream
-        // path that did not land costs this session its live transcript view
-        // until the next wake; the route itself still works, and `OrphanGC`
-        // reclaims the file.
-        do {
-            try await db.terminals.setTranscriptStreamPath(
-                terminalID: terminal.id, path: attachment.streamPath)
-        } catch {
-            logger.warning("wake: started a holder for \(terminal.id, privacy: .public) but could not record its model proxy stream path: \(error.localizedDescription, privacy: .public)")
-        }
 
         do {
             try await db.terminals.clearHibernated(id: terminal.id)

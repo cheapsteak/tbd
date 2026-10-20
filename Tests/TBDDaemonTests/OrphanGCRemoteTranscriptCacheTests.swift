@@ -48,8 +48,6 @@ struct OrphanGCRemoteTranscriptCacheTests: ~Copyable {
             hangStackBase: home.appendingPathComponent("hs", isDirectory: true),
             processSnapshotProvider: { [] },
             holdersBase: home.appendingPathComponent("h", isDirectory: true),
-            modelProxyBase: home.appendingPathComponent("mp", isDirectory: true),
-            streamsBase: home.appendingPathComponent("st", isDirectory: true),
             attachmentsBase: home.appendingPathComponent("a", isDirectory: true),
             remoteTranscriptsEnvironment: environment)
     }

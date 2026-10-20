@@ -228,14 +228,11 @@ public struct OrphanProcessCollector: Sendable {
     ///   exclusion holds for every process the reap volley reaches and not only
     ///   for the root that entered it.
     /// - `pid > 1`, and neither `ourPID` nor one of its ancestors.
-    /// - not a `TBDDaemon`, `TBDApp` or `TBDModelProxy` process. **Not
+    /// - not a `TBDDaemon` or `TBDApp` process. **Not
     ///   hypothetical:** the daemon runs at `ppid == 1` with its cwd inside a
     ///   TBD tree — when `scripts/restart.sh` is run from a worktree, that
     ///   worktree — so archiving it would otherwise have the sweep SIGKILL the
-    ///   live daemon running the sweep. The model proxy has the same shape: it
-    ///   outlives the daemon at `ppid == 1` and is adopted by the next one, so
-    ///   a proxy spawned before `ModelProxySpawner` pinned its cwd to `/` keeps
-    ///   the launching worktree's cwd for as long as it is adopted.
+    ///   live daemon running the sweep.
     /// - its cwd is readable, and resolves under a TBD-managed root positively
     ///   known to be dead — an archived worktree (or its scratchpad), or a
     ///   `.deleting/<uuid>` queue entry. A directory nobody can attest is dead,
@@ -408,10 +405,8 @@ public struct OrphanProcessCollector: Sendable {
         return protected
     }
 
-    /// True when the executable this process is running is `TBDDaemon`,
-    /// `TBDApp` or `TBDModelProxy` — the TBD binaries whose lifecycles are
-    /// owned elsewhere (the proxy's by `ModelProxySupervisor`'s adoption and
-    /// retirement).
+    /// True when the executable this process is running is `TBDDaemon` or
+    /// `TBDApp` — the TBD binaries whose lifecycles are owned elsewhere.
     ///
     /// `TBDHolder` is deliberately NOT here. A holder whose session row is gone
     /// is a genuine orphan this sweep must still be able to reach; a holder
@@ -434,7 +429,7 @@ public struct OrphanProcessCollector: Sendable {
     /// the one this whole sweep takes. Matching stays on the **basename**, so a
     /// path that merely contains the name (every TBD worktree does) is still
     /// not mistaken for the binary.
-    static let protectedBinaryBasenames: Set<String> = ["TBDDaemon", "TBDApp", "TBDModelProxy"]
+    static let protectedBinaryBasenames: Set<String> = ["TBDDaemon", "TBDApp"]
 
     static func isTBDBinary(_ command: String) -> Bool {
         for token in command.split(whereSeparator: { $0 == " " || $0 == "\t" }) {

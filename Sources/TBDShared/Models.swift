@@ -750,14 +750,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// session was parked, which is exactly the case `createdAt` alone cannot
     /// describe. Cleared with the two pid columns when a row parks.
     public var holderChildStartedAt: Date?
-    /// Absolute path of the model proxy's transcript stream file for this
-    /// session, or nil when the session was never routed through the proxy.
-    ///
-    /// Stamped at spawn and never changed afterwards: a session's base URL is
-    /// fixed in the environment it starts with, so a terminal either has a
-    /// stream file for its whole life or never gets one, and flipping the
-    /// flags later changes neither. A nil here means "register no stream" —
-    /// the app renders exactly what it renders today.
+    /// Unused: the stream file of the removed model proxy. Nothing writes it;
+    /// a row written before the proxy's removal may still carry one.
     public var transcriptStreamPath: String?
 
     /// The declared dev server this tab runs, or nil for every other tab.
@@ -1703,55 +1697,17 @@ public struct Config: Codable, Sendable, Equatable {
     /// follows the shipped default wherever it goes; a stored name is an
     /// explicit gesture and is honored forever.
     public var updateMode: UpdateMode
-    /// Whether new pty-holder sessions are routed through the TBD model proxy
-    /// (`docs/specs/2026-09-05-transcript-streaming-model-proxy-design.md`,
-    /// "Flags and migrations"): a loopback process the daemon owns, named by
-    /// the session's `ANTHROPIC_BASE_URL`, which forwards the Messages API and
-    /// tees each conversation stream's text into a per-session file.
-    ///
-    /// It ships OFF because it puts a second process in the path of every API
-    /// call a routed session makes, and that process outlives the daemon.
-    ///
-    /// It is a switch of its own rather than half of one: the proxy is useful
-    /// without the transcript's provisional row, so `transcriptStreamingEnabled`
-    /// is a second flag. The two are coupled only in the direction that keeps
-    /// them coherent — turning streaming on turns this on, turning this off
-    /// turns streaming off — and the coupling lives in the `ConfigStore`
-    /// setters, not here.
-    ///
-    /// The gate covers *spawning* only, like `ptyHolderEnabled`: a session's
-    /// base URL is read once at start, so flipping this never reroutes a
-    /// running session.
-    ///
-    /// **Resolved, not stored**, like `ptyHolderEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
-    /// toggle, so this property is
-    /// `model_proxy_enabled ?? Config.modelProxyDefault`. NULL means "never
-    /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
-    /// explicit gesture and is honored forever.
-    public var modelProxyEnabled: Bool
     /// Whether Claude sessions spawn with the session mod's
     /// `transcript-stream` feature, and the transcript shows the provisional
     /// rows it writes until the JSONL rows with the same `uuid`s land.
     ///
     /// It ships OFF, and it depends on no other flag.
     ///
-    /// **Resolved, not stored**, same shape as `modelProxyEnabled`:
+    /// **Resolved, not stored**, like `ptyHolderEnabled`: the backing column
+    /// carries no SQL default and stays NULL until somebody touches the
+    /// toggle, so this property is
     /// `transcript_streaming_enabled ?? Config.transcriptStreamingDefault`.
     public var transcriptStreamingEnabled: Bool
-    /// The loopback port this TBD home's model proxy binds, or nil if none has
-    /// been minted.
-    ///
-    /// **Identity, not a preference**, which is why it has no shipped default,
-    /// for the same reason as `holderOwnerToken`: nil genuinely means "not yet
-    /// minted", and any literal the code could fall back to would be a port
-    /// some unrelated process may already hold. The kernel picks the first one
-    /// — the proxy binds port zero and reports what it got — and
-    /// `ConfigStore.ensureModelProxyPort(minting:)` persists it with the
-    /// conditional UPDATE that keeps two daemons starting at once from minting
-    /// two. `setModelProxyPort(_:)` overwrites it, which is what the
-    /// address-in-use re-mint needs.
-    public var modelProxyPort: Int?
     /// Gate for profile balancing across multiple Claude accounts (design
     /// 2026-09-05 §6). When enabled, new sessions land on the eligible profile
     /// with the most room, adjusted for live session count.
@@ -1890,18 +1846,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose is NULL and follows this constant, and every stored mode is an
     /// explicit choice that a default change leaves alone.
     public static let updateModeDefault: UpdateMode = .off
-    /// The shipped default for `modelProxyEnabled`, and the single place it
-    /// lives. The proxy ships off; graduation — after a soak in which no routed
-    /// session lost a turn to the proxy, and no proxy outlived the daemon that
-    /// spawned it without being adopted or reaped — is a change to this
+    /// The shipped default for `transcriptStreamingEnabled`, and the single
+    /// place it lives. Streaming ships off. Graduation is a change to this
     /// constant, with no forcing `UPDATE` migration and every explicit opt-out
     /// left alone.
-    public static let modelProxyDefault = false
-    /// The shipped default for `transcriptStreamingEnabled`, and the single
-    /// place it lives. Streaming ships off and graduates *after* the proxy: a
-    /// provisional row is worth nothing until the thing that feeds it is
-    /// trusted. Graduation is a change to this constant, with no forcing
-    /// `UPDATE` migration and every explicit opt-out left alone.
     public static let transcriptStreamingDefault = false
     /// The shipped default for `profileBalancingEnabled`, and the single place
     /// it lives. Profile balancing ships off; graduation — after a soak in which
@@ -1968,9 +1916,7 @@ public struct Config: Codable, Sendable, Equatable {
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
-                modelProxyEnabled: Bool = Config.modelProxyDefault,
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
-                modelProxyPort: Int? = nil,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
                 prPollScheduleEnabled: Bool = Config.prPollScheduleDefault,
                 programStatusEnabled: Bool = Config.programStatusEnabledDefault,
@@ -2012,9 +1958,7 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
         self.updateMode = updateMode
-        self.modelProxyEnabled = modelProxyEnabled
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
-        self.modelProxyPort = modelProxyPort
         self.profileBalancingEnabled = profileBalancingEnabled
         self.prPollScheduleEnabled = prPollScheduleEnabled
         self.programStatusEnabled = programStatusEnabled
@@ -2125,20 +2069,12 @@ public struct Config: Codable, Sendable, Equatable {
         // whole decode and losing every other field.
         updateMode = (try? c.decode(UpdateMode.self, forKey: .updateMode))
             ?? Config.updateModeDefault
-        // And once more, for the model proxy's gate and the provisional row's:
-        // absent means the sender knew nothing about the flag, which is the
-        // NULL column's situation — follow the shipped default, never a
-        // hardcoded `false`.
-        modelProxyEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .modelProxyEnabled)
-            ?? Config.modelProxyDefault
+        // And once more, for the provisional row's flag: absent means the
+        // sender knew nothing about the flag, which is the NULL column's
+        // situation — follow the shipped default, never a hardcoded `false`.
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault
-        // Absent means the sender knew nothing about the port — the same state
-        // as an unminted column. Like `holderOwnerToken` there is no shipped
-        // default to fall through to; see the property's note.
-        modelProxyPort = try c.decodeIfPresent(Int.self, forKey: .modelProxyPort)
         // Same tri-state for profile balancing: absent means the sender knew
         // nothing about the flag, which is the NULL column's situation — follow
         // the shipped default rather than hardcoding `false`.

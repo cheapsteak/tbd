@@ -43,14 +43,6 @@ private final class PluginSyncRecorder: @unchecked Sendable {
         #expect(SessionModFeature.enabled(in: config) == [.composerDraft])
     }
 
-    /// The proxy flag plays no part.
-    @Test func theProxyFlagDoesNotGateTheFeature() {
-        var config = Config()
-        config.transcriptStreamingEnabled = true
-        config.modelProxyEnabled = false
-        #expect(SessionModFeature.enabled(in: config).contains(.transcriptStream))
-    }
-
     @Test func theShippedConfigSpawnsNoTranscriptStream() {
         #expect(!SessionModFeature.enabled(in: Config()).contains(.transcriptStream))
     }

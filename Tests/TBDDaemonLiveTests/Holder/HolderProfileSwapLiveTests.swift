@@ -505,16 +505,6 @@ struct HolderProfileSwapLiveTests {
                 "a failed wake lost the conversation the next wake has to resume")
         #expect(after.holderPID == nil && after.childPID == nil,
                 "a failed wake recorded processes nothing started")
-        // Routing, as far as this fixture can see it. Its router carries no
-        // model proxy supervisor, so the arm's attachment is `.unproxied`: no
-        // route is minted and there is no route file to linger. The row's
-        // stream path is therefore nil on both paths and this assertion is a
-        // floor rather than a discriminator — it says only that a wake which
-        // started nothing left no stream file pointing at it. A test that
-        // watched a real route being retired would need a supervisor, which is
-        // the proxy suites' subject rather than this one's.
-        #expect(after.transcriptStreamPath == nil,
-                "a wake that started nothing stamped a transcript stream path")
 
         // The park is real, so the pre-swap generation is really gone.
         let goneSignal = kill(oldChild, 0)

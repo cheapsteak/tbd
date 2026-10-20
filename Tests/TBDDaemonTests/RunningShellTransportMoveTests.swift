@@ -334,7 +334,6 @@ struct RunningShellTransportMoveTests {
         #expect(after.activityState == .unknown,
                 "the killed process's activity state outlived it")
         #expect(after.claudeSessionID == nil)
-        #expect(after.transcriptStreamPath == nil)
         #expect(after.pendingSessionIncarnationID == nil)
     }
 

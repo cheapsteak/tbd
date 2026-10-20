@@ -36,7 +36,7 @@ RELEASE_ALREADY_CURRENT=6
 # its own Bundle.main, and its bundles sit beside it. Bringing TBDApp into the
 # asset needs the resource lookups made relocatable first.
 # shellcheck disable=SC2034 # read by update.sh and scripts/ci/package-release.sh
-RELEASE_PRODUCTS=(TBDDaemon TBDCLI TBDHolder TBDPeerHelper TBDModelProxy)
+RELEASE_PRODUCTS=(TBDDaemon TBDCLI TBDHolder TBDPeerHelper)
 # shellcheck disable=SC2034 # read by update.sh
 RELEASE_LOCAL_PRODUCTS=(TBDApp)
 

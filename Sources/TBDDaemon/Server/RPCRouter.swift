@@ -332,16 +332,6 @@ public final class RPCRouter: Sendable {
     /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md, "Presence".
     nonisolated(unsafe) var sessionModPluginSync: (@Sendable ([SessionModFeature]) -> Void)?
 
-    /// The daemon's `ModelProxySupervisor`, set by `Daemon` after construction
-    /// from the same value the lifecycle and the hibernation coordinator hold.
-    /// Two things read it: `daemon.capabilities`, which reports whether this
-    /// daemon can route at all, and the terminal teardown path, which retires
-    /// the route of a row it is about to delete. `nil` in mock mode and in tests
-    /// that never exercise the proxy — capabilities then answer "unsupported,
-    /// no port, no version", which is the honest reading of a daemon that
-    /// cannot route.
-    nonisolated(unsafe) var modelProxySupervisor: (any ModelProxySupervising)?
-
     /// How the swap paths build the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
     /// `SessionRecaptureScheduler(db:tmux:)`. The mirror of
@@ -1165,8 +1155,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetUpdateMode(request.paramsData)
             case RPCMethod.configSetPtyHolderEnabled:
                 return try await handleConfigSetPtyHolderEnabled(request.paramsData)
-            case RPCMethod.configSetModelProxyEnabled:
-                return try await handleConfigSetModelProxyEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptStreamingEnabled:
                 return try await handleConfigSetTranscriptStreamingEnabled(request.paramsData)
             case RPCMethod.peerStatus:
@@ -1262,26 +1250,15 @@ public final class RPCRouter: Sendable {
         // Assigned rather than passed: this initializer's argument list is at
         // the Swift type-checker's expression budget — adding to it produces
         // "unable to type-check this expression in reasonable time" — so the
-        // model-proxy fields are set after construction instead.
-        result.modelProxyEnabled = config.modelProxyEnabled
+        // newer fields are set after construction instead.
         result.transcriptStreamingEnabled = config.transcriptStreamingEnabled
-        // One actor hop for all three, so a port and a version cannot come
-        // from either side of a proxy replacement. With no supervisor wired
-        // they keep their initializer defaults — false, nil, nil — which is the
-        // honest answer for a daemon that cannot route a session, and what
-        // Settings greys the toggle out on.
-        let proxy = await modelProxySupervisor?.capabilitySnapshot()
-            ?? ModelProxyCapabilitySnapshot.none
-        result.modelProxySupported = proxy.supported
-        result.modelProxyPort = proxy.port
-        result.modelProxyVersion = proxy.version
         // Assigned rather than passed, for the same budget reason. The
         // watch-mode controls need all three holder terms to reach the verdict
         // the daemon's own refusal will, and this is the one neither the flag
         // nor `ptyHolderSupported` implies.
         result.ptyHolderSessionsLive = try await db.terminals.hasLiveHolderSession()
-        // Assigned rather than passed, for the same budget reason as the
-        // model-proxy fields above: the load-balancing soak gate.
+        // Assigned rather than passed, for the same budget reason: the
+        // load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
         result.programStatusEnabled = config.programStatusEnabled

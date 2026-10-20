@@ -161,28 +161,6 @@ struct OrphanProcessCollectorTests {
             "/Users/Jane Roe/tbd/worktrees/TBDApp/node server.js"))
     }
 
-    /// The model proxy outlives the daemon at `ppid == 1` and is adopted by the
-    /// next one, so one spawned before its cwd was pinned to `/` sits in the
-    /// launching worktree's cwd. Its lifecycle is the proxy supervisor's, so the
-    /// sweep protects it by name — while holders stay reachable when orphaned.
-    @Test("the model proxy is protected by name; a holder is not")
-    func modelProxyIsProtectedButHoldersAreNot() {
-        #expect(OrphanProcessCollector.isTBDBinary(
-            "/acme/.build/release/TBDModelProxy --port 0 --home /h"))
-        #expect(!OrphanProcessCollector.isTBDBinary(
-            "/acme/.build/release/TBDHolder --session \(UUID().uuidString)"))
-
-        let processes = [
-            entry(pid: 60, command: "/acme/.build/release/TBDModelProxy --port 0"),
-            entry(pid: 61, command: "/acme/.build/release/TBDHolder --session \(UUID().uuidString)"),
-        ]
-        let found = collector().candidates(
-            processes: processes,
-            cwdByPID: [60: dead, 61: dead], cwdsCapturedAt: Date(timeIntervalSince1970: 1_000_000),
-            roots: roots(), ourUID: getuid(), ourPID: 12_345, graceSeconds: 3600)
-        #expect(found.map(\.pid) == [61], "only the session-less holder is reapable")
-    }
-
     /// The cwd map and the `ps` snapshot are two readings joined by pid alone,
     /// and macOS recycles pids. A process younger than the gap between them
     /// cannot be the one lsof saw.

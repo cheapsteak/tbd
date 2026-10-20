@@ -370,13 +370,6 @@ public actor HibernationCoordinator {
     /// a screen.
     var holderRegistry: HolderRegistry?
 
-    /// The daemon's `ModelProxySupervisor`, wired post-construction by
-    /// `Daemon.swift` beside `holderRegistry`. A wake is a spawn, so it takes
-    /// the same route branch the create path does; a park is the end of a
-    /// process, so it retires the route that process was launched on. `nil`
-    /// leaves both a no-op.
-    var modelProxySupervisor: (any ModelProxyRouting)?
-
     /// Answers a holder-backed session's screen, for the park's pending-input
     /// rail to judge. A **test seam only** — production leaves it nil and
     /// `holderScreenReading` falls through to the registry's own reader, which
@@ -524,14 +517,6 @@ public actor HibernationCoordinator {
     /// must share the one actor that holds the daemon's readers.
     func setHolderRegistry(_ registry: HolderRegistry?) {
         holderRegistry = registry
-    }
-
-    /// Wire the model proxy supervisor. Set once by `Daemon.swift` after
-    /// construction, beside the registry and from the same value the lifecycle
-    /// and the RPC router hold — one supervisor per daemon, because two would
-    /// each mint routes the other's proxy has never heard of.
-    func setModelProxySupervisor(_ supervisor: (any ModelProxyRouting)?) {
-        modelProxySupervisor = supervisor
     }
 
     /// Replace the holder liveness check. Tests only — see `holderProcessIsLive`.
@@ -894,9 +879,6 @@ public actor HibernationCoordinator {
     /// instead, and a pane running something other than its own shell is left
     /// alone and named.
     ///
-    /// **No model-proxy route is minted.** A shell has none at its create path,
-    /// so there is nothing to attach and nothing to retire.
-    ///
     /// Every failure lands the session in one of two states and no third: the
     /// row untouched with its program still running, or the row untouched with
     /// its window dead — the ordinary window-died state the app's recovery
@@ -1034,8 +1016,8 @@ public actor HibernationCoordinator {
                 WorktreeLifecycle.holderLaunch(
                     shellCommand: defaultShell,
                     env: launchEnv,
-                    // Nothing sensitive to carry: a shell has no model-proxy
-                    // route, no profile and no resume argv.
+                    // Nothing sensitive to carry: a shell has no profile and
+                    // no resume argv.
                     sensitiveEnv: [:],
                     workingDirectory: worktree.path,
                     cols: TmuxManager.defaultCols,
@@ -2032,37 +2014,6 @@ public actor HibernationCoordinator {
             projectsRoot: claudeProjectsRoot(profileConfigDirPath: profileConfigDir),
             storedTranscriptPath: terminal.transcriptPath
         )
-        // **The routing decision, before the command is composed.** A wake is a
-        // spawn, so it takes the same route branch the create path does — and
-        // for the same reason it takes it *here*:
-        // `ClaudeSpawnCommandBuilder.build` re-exports the profile's routing
-        // keys inline into the command string, and an inline
-        // `export ANTHROPIC_BASE_URL=…` runs after the process environment and
-        // would send the woken session straight past its route.
-        //
-        // It deliberately does NOT retire whatever route the row still holds
-        // first. A row reaches a parked state through `park` or through
-        // reconcile, and both retire on the way in; what is left is a crash
-        // between a spawn and its park, and dropping a route by terminal id
-        // here would sometimes drop the LIVE one instead —
-        // `adoptLiveHolderInsteadOfRespawning` below can find a running session
-        // whose route is the row's. Residue from a crash is the `OrphanGC`
-        // leg's, which is the standing guarantee for exactly this shape of
-        // leftover.
-        //
-        // The same five steps the create path takes, through the same function:
-        // the gate on transport, config and registry, then one `attach` whose
-        // nine arguments must be the nine the create path passes.
-        let attachment = await ModelProxyRouteAttachment.attachIfRoutable(
-            terminalID: terminal.id,
-            isHolderSpawn: terminal.transport == .holder,
-            config: config,
-            profileKind: resolvedProfile?.kind,
-            profileBaseURL: resolvedProfile?.baseURL,
-            envOverrides: mergedEnvOverrides,
-            overlayPath: overlayPath,
-            holderEnvironment: holderRegistry?.environment,
-            supervisor: modelProxySupervisor)
         // Reserved here; confirmed only once the wake has launched a session
         // under it — even when a later step fails, since that session carries
         // the name — and released on every other outcome.
@@ -2081,11 +2032,7 @@ public actor HibernationCoordinator {
             initialPrompt: initialPrompt,
             profileSecret: resolvedProfile?.secret,
             profileKind: resolvedProfile?.kind,
-            // The route's own URL on a routed wake, exactly as on the create
-            // path: the builder's inline export runs after the shell's rc
-            // files, which is what keeps a `.zshrc` that sets
-            // `ANTHROPIC_BASE_URL` from taking this session off its route.
-            profileBaseURL: attachment.builderBaseURL(profile: resolvedProfile?.baseURL),
+            profileBaseURL: resolvedProfile?.baseURL,
             profileModel: resolvedProfile?.model,
             profileAwsRegion: resolvedProfile?.awsRegion,
             profileAwsProfile: resolvedProfile?.awsProfile,
@@ -2103,10 +2050,9 @@ public actor HibernationCoordinator {
             "TBD_WORKTREE_ID": worktree.id.uuidString,
             "TBD_TERMINAL_ID": terminal.id.uuidString,
         ]
-        // The attachment's environment is the free-form overrides plus the
-        // route; the builder's auth env layers on top. Through the attachment's
-        // own method, so this merge and the create path's are one expression.
-        let sensitiveEnv = attachment.launchEnvironment(mergingBuilder: spawn.sensitiveEnv)
+        // The free-form overrides, with the builder's auth env layered on top
+        // so auth wins — the same merge the create path makes.
+        let sensitiveEnv = mergedEnvOverrides.merging(spawn.sensitiveEnv) { _, builder in builder }
 
         // The transports diverge again, and for the last time. Everything above
         // — profile, env, overlay, trust seed, transcript sync, the resume
@@ -2121,10 +2067,7 @@ public actor HibernationCoordinator {
                 expectedReplacementState: expectedReplacementState,
                 spawnCommand: spawn.command,
                 env: env,
-                // The routing decision, now carrying the environment this wake
-                // will actually launch with, so the method that can refuse to
-                // spawn holds both the env and the token it would have to undo.
-                attachment: attachment.withEnvironment(sensitiveEnv),
+                sensitiveEnv: sensitiveEnv,
                 cols: cols,
                 rows: rows,
                 spawnTitle: spawnTitle)
