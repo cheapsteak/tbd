@@ -197,7 +197,7 @@ public final class SocketServer: Sendable {
     /// ownership of the *file*: because NIO did not open the path, it will not
     /// unlink the path when the channel closes, and `stop()` decides that
     /// instead.
-    private static func bindListeningSocket(at path: String) throws -> Int32 {
+    static func bindListeningSocket(at path: String) throws -> Int32 {
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = Array(path.utf8)
