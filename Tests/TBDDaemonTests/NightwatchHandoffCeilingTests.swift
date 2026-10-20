@@ -49,8 +49,12 @@ struct NightwatchHandoffCeilingTests {
 
     /// Runs the driver with `TBD_HOME` in the child's environment — the
     /// injection seam, so no test in this process mutates its own environment.
+    /// `incarnationID` is the child's `TBD_TERMINAL_INCARNATION_ID`, the
+    /// process's own incarnation; nil removes it, so a run from inside a TBD
+    /// terminal does not leak the runner's.
     private func ask(
-        handoffPath: String, sessionKey: String, tbdHome: String, claudeSessionID: String? = nil
+        handoffPath: String, sessionKey: String, tbdHome: String, claudeSessionID: String? = nil,
+        incarnationID: String? = nil
     ) throws -> Answer {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -58,6 +62,7 @@ struct NightwatchHandoffCeilingTests {
             + (claudeSessionID.map { [$0] } ?? [])
         var env = ProcessInfo.processInfo.environment
         env["TBD_HOME"] = tbdHome
+        env["TBD_TERMINAL_INCARNATION_ID"] = incarnationID
         proc.environment = env
         let out = Pipe(), err = Pipe()
         proc.standardOutput = out
@@ -112,11 +117,13 @@ struct NightwatchHandoffCeilingTests {
         return file
     }
 
-    private func usageBody(window: Any) throws -> String {
-        let data = try JSONSerialization.data(withJSONObject: [
+    private func usageBody(window: Any, incarnationID: String? = nil) throws -> String {
+        var record: [String: Any] = [
             "schemaVersion": 1, "claudeSessionID": "S", "measuredAt": 0,
             "context": ["window": window] as [String: Any], "rateLimits": [] as [Any]
-        ] as [String: Any])
+        ]
+        record["incarnationID"] = incarnationID
+        let data = try JSONSerialization.data(withJSONObject: record)
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -201,12 +208,13 @@ struct NightwatchHandoffCeilingTests {
     func usagePathAgrees() throws {
         let (home, handoff) = try fixture()
         defer { try? FileManager.default.removeItem(at: home) }
-        let sessionID = UUID().uuidString
-        let file = try publishUsage(try usageBody(window: 200_000),
+        let sessionID = UUID().uuidString, incarnation = UUID().uuidString
+        let file = try publishUsage(try usageBody(window: 200_000, incarnationID: incarnation),
                                     claudeSessionID: sessionID, home: home)
 
         let answer = try ask(handoffPath: handoff, sessionKey: UUID().uuidString,
-                             tbdHome: home.path, claudeSessionID: sessionID)
+                             tbdHome: home.path, claudeSessionID: sessionID,
+                             incarnationID: incarnation)
 
         #expect(answer.usagePath == file.path,
                 "handoff.py looks for usage.json somewhere TBDConstants does not put it")
@@ -222,15 +230,49 @@ struct NightwatchHandoffCeilingTests {
         let (home, handoff) = try fixture()
         defer { try? FileManager.default.removeItem(at: home) }
         let key = UUID().uuidString, sessionID = UUID().uuidString
+        let incarnation = UUID()
         try publish(window: 1_000_000, forKey: key, home: home)
-        _ = try publishUsage(try usageBody(window: 200_000), claudeSessionID: sessionID, home: home)
+        _ = try publishUsage(try usageBody(window: 200_000, incarnationID: incarnation.uuidString),
+                             claudeSessionID: sessionID, home: home)
 
+        // Swift writes UUIDs upper-case; the comparison is by value, not text.
         let answer = try ask(handoffPath: handoff, sessionKey: key, tbdHome: home.path,
-                             claudeSessionID: sessionID)
+                             claudeSessionID: sessionID,
+                             incarnationID: incarnation.uuidString.lowercased())
 
         #expect(answer.ceiling == 150_000, "the capture's window beat the usage file's")
         #expect(answer.provenance.contains("OBSERVED") && answer.provenance.contains("usage file"),
                 "the ceiling does not name the usage file as its source: \(answer.provenance)")
+    }
+
+    /// A wake or a profile swap starts a new process under the same Claude
+    /// session ID, so a usage file an earlier process wrote — on another
+    /// model, or before the `usage` feature was turned off and this process
+    /// got a tee instead — sits at the same path. Only a file naming this
+    /// process's own incarnation may beat the capture.
+    @Test("A usage file from another process gives way to the capture", arguments: [
+        "another incarnation", "no incarnation in the file", "no incarnation in the environment"
+    ])
+    func foreignUsageGivesWayToCapture(shape: String) throws {
+        let (home, handoff) = try fixture()
+        defer { try? FileManager.default.removeItem(at: home) }
+        let key = UUID().uuidString, sessionID = UUID().uuidString
+        let own = UUID().uuidString
+        try publish(window: 1_000_000, forKey: key, home: home)
+        let (written, inEnvironment): (String?, String?) = switch shape {
+        case "another incarnation": (UUID().uuidString, own)
+        case "no incarnation in the file": (nil, own)
+        default: (own, nil)
+        }
+        _ = try publishUsage(try usageBody(window: 200_000, incarnationID: written),
+                             claudeSessionID: sessionID, home: home)
+
+        let answer = try ask(handoffPath: handoff, sessionKey: key, tbdHome: home.path,
+                             claudeSessionID: sessionID, incarnationID: inEnvironment)
+
+        #expect(answer.ceiling == 750_000, "with \(shape), the usage file beat the capture")
+        #expect(answer.provenance.contains("statusline capture"),
+                "the ceiling does not name the capture: \(answer.provenance)")
     }
 
     /// A torn write (the mod's file API has no rename), a boolean, a zero and

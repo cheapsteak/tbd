@@ -99,6 +99,12 @@ import TBDShared
             return
         }
         #expect(why.contains("has not fired yet"))
+        // A desk spawned with the session mod's `usage` feature has no tee and
+        // can still land here (its spawn record could not vouch for it), and
+        // the row cannot say which spawn this was — so the reason must not
+        // assert that a tee exists.
+        #expect(!why.contains("tee is installed"))
+        #expect(why.contains("if this spawn installed one"))
     }
 
     @Test func noTranscriptAndNoCaptureLeavesBothHalvesHonestlyEmpty() {

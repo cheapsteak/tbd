@@ -125,6 +125,11 @@ struct SessionStateFactGatherer {
     /// gets a `.codex` row wearing a desk role and no tee — and reporting "the
     /// tee is installed but has not fired yet" for it would be a false statement
     /// about a session that will never produce a capture.
+    ///
+    /// A Claude desk whose spawn carried the session mod's `usage` feature has
+    /// no tee either, and reaches the tee path when its spawn record cannot
+    /// vouch for it. The row does not record which spawn it came from, so it
+    /// still reads `.installed`, and that case's wording does not claim a tee.
     private func teeStatus(for terminal: Terminal) -> ContextLoadReader.TeeStatus {
         guard terminal.watchDeskRole != nil else { return .notADesk }
         return terminal.kind == .claude ? .installed : .deskWithoutTee

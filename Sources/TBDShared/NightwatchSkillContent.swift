@@ -1296,6 +1296,7 @@ import pathlib
 import subprocess
 import sys
 import time
+import uuid
 
 QUEUE = pathlib.Path(__file__).resolve().parent.parent / "queue"
 LATEST = QUEUE / "HANDOFF-LATEST.md"
@@ -1400,14 +1401,47 @@ def usage_path(claude_session_id):
     return os.path.join(root, "sessions", claude_session_id, "usage.json")
 
 
+def _parse_uuid(text):
+    """A UUID in its canonical hyphenated form, or None.
+
+    Stricter than `uuid.UUID`, which also takes braces, a `urn:uuid:` prefix
+    and bare hex: Swift's `UUID(uuidString:)` takes only the hyphenated form,
+    and the two sides must agree on what counts as an incarnation ID. Case is
+    ignored, as it is there.
+    """
+    if not isinstance(text, str) or len(text) != 36:
+        return None
+    if any(text[i] != "-" for i in (8, 13, 18, 23)):
+        return None
+    try:
+        return uuid.UUID(text)
+    except ValueError:
+        return None
+
+
+def own_incarnation():
+    """This process's terminal incarnation, from `TBD_TERMINAL_INCARNATION_ID`.
+
+    TBD plants it on every spawn that loads the session mod, and this script
+    runs as a child of that Claude Code process, so it inherits it. None when
+    it is unset or not a UUID.
+    """
+    return _parse_uuid(os.environ.get("TBD_TERMINAL_INCARNATION_ID"))
+
+
 def usage_window(claude_session_id):
     """The context window the session mod recorded for this session, or None.
 
     The session mod reads `$.session.usage()` inside Claude Code and writes the
-    window it reports. No liveness check: the file was written by this very
-    process. No incarnation check either: `/clear` moves the session to a new
-    ID and leaves this file behind, but does not change the window, so the
-    figure is still the right denominator for a ceiling.
+    window it reports. The file is read only when its `incarnationID` names
+    this process's own incarnation (`own_incarnation`). A wake or a profile
+    swap starts a new process under the SAME session ID, so the file on disk
+    can be one an earlier process wrote — on another model, or before the
+    `usage` feature was turned off and the new process got a statusline tee
+    instead. Its window describes that process, and letting it beat a fresh
+    capture would hold this one to the wrong ceiling. So an unset
+    `TBD_TERMINAL_INCARNATION_ID`, a file with no `incarnationID`, and a file
+    naming another incarnation are all "not observed", and the capture serves.
 
     The mod's file API has no rename, so a reader can meet a torn write. That,
     a missing file, malformed JSON and a window that is absent, zero, negative,
@@ -1417,12 +1451,17 @@ def usage_window(claude_session_id):
     path = usage_path(claude_session_id)
     if path is None:
         return None
+    own = own_incarnation()
+    if own is None:
+        return None
     try:
         with open(path, "rb") as fh:
             payload = json.load(fh)
     except (OSError, ValueError):
         return None
     if not isinstance(payload, dict):
+        return None
+    if _parse_uuid(payload.get("incarnationID")) != own:
         return None
     context = payload.get("context")
     if not isinstance(context, dict):
@@ -1836,6 +1875,11 @@ def selftest():
     home = tempfile.mkdtemp(prefix="handoff-selftest-")
     prior_home = os.environ.get("TBD_HOME")
     os.environ["TBD_HOME"] = home
+    # This process's incarnation, likewise pinned, so the usage cases below
+    # never depend on whether the selftest runs inside a desk.
+    own = "0b5e1c2a-7d4f-4e3a-9c1b-2f6a8d9e0c11"
+    prior_incarnation = os.environ.get("TBD_TERMINAL_INCARNATION_ID")
+    os.environ["TBD_TERMINAL_INCARNATION_ID"] = own
 
     def publish_capture(payload, terminal_id="T"):
         """Put a statusline payload where the tee would have put it."""
@@ -1904,10 +1948,12 @@ def selftest():
             fh.write(payload)
         return path
 
-    def usage_payload(size):
-        return json.dumps({"schemaVersion": 1, "claudeSessionID": "S-1",
-                           "measuredAt": 0, "context": {"window": size},
-                           "rateLimits": []})
+    def usage_payload(size, incarnation=own):
+        record = {"schemaVersion": 1, "claudeSessionID": "S-1",
+                  "measuredAt": 0, "context": {"window": size}, "rateLimits": []}
+        if incarnation is not None:
+            record["incarnationID"] = incarnation
+        return json.dumps(record)
 
     check("the usage path is TBD_HOME/sessions/<claudeSessionID>/usage.json",
           usage_path("S-1"), os.path.join(home, "sessions", "S-1", "usage.json"))
@@ -1927,6 +1973,33 @@ def selftest():
            and "usage file" in resolve_ceiling("T", None, "S-1")[1]), True)
     check("an unsafe session ID never reads a usage file",
           resolve_ceiling("T", None, "../sessions/S-1")[0], 750_000)
+
+    # THE USAGE FILE MUST BE THIS PROCESS'S OWN. A wake or a swap keeps the
+    # session ID, so a file an earlier process wrote — say on a 1M model, before
+    # the usage feature was turned off and this process got a tee on a 200k
+    # one — sits at the same path. Only a file naming this incarnation wins.
+    publish_usage(usage_payload(200_000, own.upper()))
+    check("a usage file naming this incarnation wins, in either case",
+          resolve_ceiling("T", None, "S-1")[0], 150_000)
+    capture_wins = (750_000, "75% of this session's OBSERVED 1,000,000-token window, "
+                             "from its statusline capture")
+    for label, incarnation in (
+        ("another incarnation", "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"),
+        ("no incarnation", None),
+        ("an incarnation that is not a UUID", "not-a-uuid"),
+        ("a non-canonical spelling of this incarnation", "{" + own + "}"),
+    ):
+        publish_usage(usage_payload(200_000, incarnation))
+        check(f"a usage file naming {label} gives way to the capture",
+              resolve_ceiling("T", None, "S-1"), capture_wins)
+    publish_usage(usage_payload(200_000))
+    del os.environ["TBD_TERMINAL_INCARNATION_ID"]
+    check("with no TBD_TERMINAL_INCARNATION_ID the usage file gives way to the capture",
+          resolve_ceiling("T", None, "S-1"), capture_wins)
+    os.environ["TBD_TERMINAL_INCARNATION_ID"] = "garbage"
+    check("an unparseable TBD_TERMINAL_INCARNATION_ID reads as unset",
+          resolve_ceiling("T", None, "S-1"), capture_wins)
+    os.environ["TBD_TERMINAL_INCARNATION_ID"] = own
 
     # Every unreadable usage shape is "not observed" and falls through to the
     # capture — never a zero window, never an exception. The mod's file API has
@@ -2068,6 +2141,10 @@ def selftest():
         os.environ.pop("TBD_HOME", None)
     else:
         os.environ["TBD_HOME"] = prior_home
+    if prior_incarnation is None:
+        os.environ.pop("TBD_TERMINAL_INCARNATION_ID", None)
+    else:
+        os.environ["TBD_TERMINAL_INCARNATION_ID"] = prior_incarnation
     print(f"selftest: {n}/{n} handoff ceiling scenarios passed")
 
 

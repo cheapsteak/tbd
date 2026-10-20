@@ -43,12 +43,17 @@ import TBDShared
 struct ContextLoadReader {
     /// Whether this session has a statusline tee — and when it does not, why
     /// not. Three shapes, because the `why` of an unknown window has to tell
-    /// them apart and two of them are easy to conflate. Consulted only for a
-    /// session spawned without the session mod's `usage` feature: a desk
-    /// spawned with it has no tee, and its reading never reaches this path.
+    /// them apart and two of them are easy to conflate. Consulted only on the
+    /// tee path — a `.legacy` usage liveness — which a desk spawned with the
+    /// session mod's `usage` feature normally never reaches.
     enum TeeStatus: Sendable, Equatable {
-        /// A Claude desk session: the tee is installed and may simply not have
-        /// fired yet.
+        /// A Claude desk session. Its spawn usually installed the tee, which
+        /// may simply not have fired yet — but not always: a desk spawned
+        /// with the session mod's `usage` feature has no tee, and reaches the
+        /// tee path anyway when its spawn record cannot vouch for it (a
+        /// `/clear` whose new `spawn.json` could not be written reads
+        /// `.legacy`). The row does not record which spawn this was, so the
+        /// `why` worded from this case must not assert the tee exists.
         case installed
         /// A desk session whose agent is not the one the tee installs on. The
         /// tee lives in the Claude spawn path, so a desk created on a
@@ -221,7 +226,9 @@ struct ContextLoadReader {
     private func unknownWindowReason(_ tee: TeeStatus) -> String {
         switch tee {
         case .installed:
-            return "the statusline tee is installed for this desk session but has not fired yet"
+            return "nothing has reported this desk session's resolved context window yet: its "
+                + "statusline tee, if this spawn installed one, has not fired yet, and no "
+                + "session mod usage file is confirmed for it"
         case .deskWithoutTee:
             return "this desk session does not run the agent the statusline tee installs on, so "
                 + "nothing will report its resolved context window"
