@@ -600,6 +600,82 @@ import TBDShared
         #expect(load.used == ObservedFact(value: 80_000, source: .transcriptTail, observedAt: Self.transcriptDate))
     }
 
+    /// A parked or hibernated process stops heartbeating, but the file it
+    /// wrote under its own incarnation is still its last reading: paired, and
+    /// stamped with when it was measured.
+    @Test func aStaleHeartbeatStillReadsTheLiveIncarnationsOwnFile() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeTranscript(tokens: 90_000, timestamp: Self.transcriptStamp)
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+        let live = UUID()
+        let usagePath = try writeUsage(Self.usageJSON(incarnationID: live.uuidString), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath, usageIncarnationID: live,
+            usageLiveness: .unknown(.staleHeartbeat),
+            transcriptPath: scratch.transcriptPath, tee: .installed)
+
+        #expect(load.used == ObservedFact(value: 50_000, source: .sessionMod, observedAt: Self.usageMeasuredAt))
+        #expect(load.window == .observed(
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
+        #expect(load.isPairedReading)
+    }
+
+    /// The stale-heartbeat allowance rests on the incarnation match alone, so
+    /// without one — a file from an earlier process, no live incarnation to
+    /// compare against, or a torn file — it is the liveness answer's unknown.
+    @Test func aStaleHeartbeatWithoutItsOwnFileIsAnUnknownWindow() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        try scratch.writeTranscript(tokens: 90_000, timestamp: Self.transcriptStamp)
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+        let live = UUID()
+        let full = Self.usageJSON(incarnationID: live.uuidString)
+        let cases: [(json: String, incarnation: UUID?)] = [
+            (Self.usageJSON(incarnationID: UUID().uuidString), live),
+            (full, nil),
+            (String(full.prefix(full.count / 2)), live),
+            (Self.usageJSON(window: "0", incarnationID: live.uuidString), live),
+        ]
+        for (json, incarnation) in cases {
+            let usagePath = try writeUsage(json, in: scratch)
+            let load = ContextLoadReader().read(
+                capturePath: scratch.capturePath, usagePath: usagePath, usageIncarnationID: incarnation,
+                usageLiveness: .unknown(.staleHeartbeat),
+                transcriptPath: scratch.transcriptPath, tee: .installed)
+            guard case .unknown(let why) = load.window else {
+                Issue.record("expected an unknown window, got \(load.window) for \(json)")
+                continue
+            }
+            #expect(why.contains(SessionModLiveness.UnknownReason.staleHeartbeat.rawValue))
+            #expect(load.used?.source == .transcriptTail)
+        }
+    }
+
+    /// Only a stale heartbeat vouches for the file by incarnation. Every other
+    /// unknown reason leaves the process unvouched for, so even a file naming
+    /// the live incarnation is not read.
+    @Test(arguments: [
+        SessionModLiveness.UnknownReason.noAliveFile, .otherIncarnation, .featureNotRunning, .unreadableFile,
+    ])
+    func otherUnknownReasonsDoNotReadTheUsageFile(reason: SessionModLiveness.UnknownReason) throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        let live = UUID()
+        let usagePath = try writeUsage(Self.usageJSON(incarnationID: live.uuidString), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath, usageIncarnationID: live,
+            usageLiveness: .unknown(reason), transcriptPath: nil, tee: .installed)
+
+        guard case .unknown(let why) = load.window else {
+            Issue.record("reason \(reason.rawValue) read the usage file as \(load.window)")
+            return
+        }
+        #expect(why.contains(reason.rawValue))
+    }
+
     /// A spawn made without `usage` keeps today's tee path, whatever a usage
     /// file on disk says.
     @Test func aLegacySpawnReadsTheTeeCaptureAndIgnoresAUsageFile() throws {
@@ -662,6 +738,14 @@ import TBDShared
         respawned.sessionIncarnationID = UUID()
         #expect(gatherer.contextLoad(for: respawned).window == .observed(
             ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: Self.captureModified)))
+
+        // The same session parked: its heartbeat is older than the staleness
+        // bound, and its own file still serves.
+        let parked = SessionStateFactGatherer(
+            now: { pinned.addingTimeInterval(SessionModLiveness.staleAfter + 60) },
+            capturePath: { _ in capturePath }, sessionsDir: sessionsDir)
+        #expect(parked.contextLoad(for: claude).window == .observed(
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
 
         // A Codex row never reads the mod's file: it is legacy, and takes the
         // tee path (the injected capture path serves every row).

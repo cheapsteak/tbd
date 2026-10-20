@@ -150,7 +150,11 @@ not yet written.
 1. **`usage.json`**, when `SessionModLiveness` answers `confirmed` for `usage`
    and the file parses with a valid window. Window, tokens and percent were
    measured together, so the reading is paired. Its source is a new
-   `FactSource.sessionMod`, and its observed-at is `measuredAt`.
+   `FactSource.sessionMod`, and its observed-at is `measuredAt`. A parked or
+   hibernated process stops heartbeating, so liveness answers `unknown` with a
+   stale heartbeat; the file is still read then, when its `incarnationID`
+   names the live incarnation. It is that process's own last reading, and
+   `measuredAt` carries its age. No other `unknown` reason reads the file.
 2. **The tee capture**, when liveness answers `legacy` — a spawn made without
    `usage`. Unchanged from today.
 3. **The transcript tail** for tokens, with the window `unknown`. The `why`
@@ -204,7 +208,9 @@ session-mod design already keeps compiled — and the flag.
   lists `usage` in `TBD_MOD_FEATURES` and `spawn.json` — on a fresh spawn, a
   wake, and an in-place profile swap.
 - `ContextLoadReader`: confirmed with a valid file gives a paired `.observed`
-  window sourced `sessionMod`; confirmed with a torn file falls back; unknown
+  window sourced `sessionMod`; confirmed with a torn file falls back; a stale
+  heartbeat with a file naming the live incarnation gives the same paired
+  reading, and with any other file gives `unknown`; every other unknown
   liveness gives `unknown` with its `why`; legacy reads the tee capture.
 - A zero, negative or boolean window is refused by both the Swift and the
   Python reader.

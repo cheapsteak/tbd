@@ -27,12 +27,16 @@ import TBDShared
 ///    so the reading is paired. The file must name the live incarnation: the
 ///    new process's heartbeat can land before its first usage write, and a
 ///    file an earlier process left behind describes that process.
-/// 2. **Spawned with `usage`, but the mod is not confirmed, or its file is
-///    missing, torn or carries no valid window.** The numerator comes from the
+/// 2. **Spawned with `usage`, and the mod's heartbeat has gone stale.** A
+///    parked or hibernated process stops heartbeating, but a file naming the
+///    live incarnation is still that process's own last reading, read as in
+///    case 1; its `measuredAt` says how old it is. Without such a file, case 3.
+/// 3. **Spawned with `usage`, but the mod is not confirmed, or its file is
+///    missing, torn, another incarnation's or carries no valid window.** The numerator comes from the
 ///    transcript tail and the window is `unknown`. A tee capture left on disk
 ///    by an earlier life of the session is deliberately not consulted: it
 ///    describes a process this one may not be.
-/// 3. **Spawned without `usage`.** The tee path, unchanged: prefer the
+/// 4. **Spawned without `usage`.** The tee path, unchanged: prefer the
 ///    captured JSON's own paired reading — Claude Code computed numerator,
 ///    denominator and percentage at one instant from one source, and taking
 ///    both halves from it is the only way to report a fraction that was ever
@@ -81,12 +85,14 @@ struct ContextLoadReader {
     ///   - capturePath: the statusline tee's capture file for this session.
     ///     Passed explicitly rather than derived so the reader is hermetic.
     ///   - usagePath: the session mod's `usage.json` for this session, when the
-    ///     session has a directory. Read only when `usageLiveness` is
-    ///     `.confirmed`.
+    ///     session has a directory. Read when `usageLiveness` is `.confirmed`,
+    ///     or `.unknown(.staleHeartbeat)` with a file naming
+    ///     `usageIncarnationID`.
     ///   - usageIncarnationID: the session's live incarnation. When given, a
     ///     usage file naming any other incarnation — or none — was written by
     ///     an earlier process of the same Claude session and is not read. The
-    ///     gatherer always passes it; nil skips the check.
+    ///     gatherer always passes it; nil skips the check on a confirmed
+    ///     session, and leaves a stale-heartbeat session's file unread.
     ///   - usageLiveness: `SessionModLiveness` for the `usage` feature. `.legacy`
     ///     — a spawn made without the feature, and the default — keeps the tee
     ///     path; any other answer means the spawn chose the mod's file over
@@ -110,6 +116,15 @@ struct ContextLoadReader {
         case .legacy:
             return readFromTee(capturePath: capturePath, transcriptPath: transcriptPath, tee: tee)
         case .unknown(let reason):
+            // A parked or hibernated process stops heartbeating, but the file
+            // it wrote is still this process's last reading: same incarnation,
+            // just older, and `measuredAt` carries its age. Every other reason
+            // leaves the process unvouched for, so its file is not read.
+            if reason == .staleHeartbeat, let live = usageIncarnationID,
+               let load = readOwnUsage(usagePath: usagePath, liveIncarnationID: live,
+                                       transcriptPath: transcriptPath) {
+                return load
+            }
             return ContextLoad(
                 used: transcriptUsed(transcriptPath: transcriptPath),
                 window: .unknown(
@@ -153,16 +168,43 @@ struct ContextLoadReader {
         case .record(let decoded):
             record = decoded
         }
-        // Compared as `SessionModLiveness.sameIncarnation` does: parsed, so
-        // the UUID's case does not matter.
-        if let live = liveIncarnationID, record.incarnationID.flatMap(UUID.init(uuidString:)) != live {
+        if let live = liveIncarnationID, !Self.isOwn(record, live: live) {
             return unobserved("the session mod's usage file for this session is from an earlier "
                 + "process of it, and this process has not written its own yet")
         }
-        guard let size = record.validWindow else {
+        guard let load = usageLoad(from: record, transcriptPath: transcriptPath) else {
             return unobserved("the session mod's usage file for this session carries no valid "
                 + "context.window")
         }
+        return load
+    }
+
+    /// A session whose heartbeat has gone stale — parked, hibernated, or
+    /// exited — read only when its `usage.json` names the live incarnation and
+    /// carries a valid window. nil for anything else: missing, torn, another
+    /// incarnation's, or no window. The caller then reports the liveness
+    /// answer's own `unknown`.
+    private func readOwnUsage(
+        usagePath: String?, liveIncarnationID: UUID, transcriptPath: String?
+    ) -> ContextLoad? {
+        guard let usagePath, !usagePath.isEmpty,
+              case .record(let record) = SessionModFiles.read(
+                SessionModFiles.UsageRecord.self, at: URL(fileURLWithPath: usagePath)),
+              Self.isOwn(record, live: liveIncarnationID) else {
+            return nil
+        }
+        return usageLoad(from: record, transcriptPath: transcriptPath)
+    }
+
+    /// Compared as `SessionModLiveness.sameIncarnation` does: parsed, so the
+    /// UUID's case does not matter. A record naming no incarnation names none.
+    private static func isOwn(_ record: SessionModFiles.UsageRecord, live: UUID) -> Bool {
+        record.incarnationID.flatMap(UUID.init(uuidString:)) == live
+    }
+
+    /// The load a usage record reports, or nil when it carries no valid window.
+    private func usageLoad(from record: SessionModFiles.UsageRecord, transcriptPath: String?) -> ContextLoad? {
+        guard let size = record.validWindow else { return nil }
         let observedAt = Date(timeIntervalSince1970: Double(record.measuredAt) / 1000)
         let window = ContextWindow.observed(
             ObservedFact(value: size, source: .sessionMod, observedAt: observedAt))
