@@ -2456,13 +2456,13 @@ public final class Daemon: Sendable {
             await http.stop()
         }
 
-        // Settle the open transcript prompts only now, after the socket has
-        // closed every `prompt.await` connection. Resolving them first would
-        // tell each waiting hook "resolved elsewhere" and it would exit for
-        // good; a hook that instead sees its connection drop reconnects to the
-        // next daemon and registers again, keeping its prompt answerable.
-        // This releases whatever the closes did not reach — chiefly a
-        // `prompt.answer` still waiting for a delivery ack.
+        // Settle the open transcript prompts only now, after the servers have
+        // stopped. Resolving them first would answer each held wait request
+        // "resolved" and the session mod would stop waiting on that dialog;
+        // a mod that instead sees its connection drop re-posts its open
+        // dialogs to the next daemon, keeping them answerable. This releases
+        // whatever the closes did not reach — chiefly a `prompt.answer` still
+        // waiting for a receipt.
         if let router = self.router {
             await router.pendingQuestions.resolveAll()
         }

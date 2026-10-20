@@ -84,29 +84,25 @@ struct PendingPromptExpirySweepTests {
         #expect(await reaped.ids.isEmpty)
     }
 
-    @Test("the sweep also resolves a prompt no hook has attached to for an hour")
-    func sweepOnceAlsoReapsDetachedPrompts() async {
+    @Test("the sweep reaps captures only and leaves an open prompt alone, however old")
+    func sweepOnceLeavesOpenPromptsAlone() async {
         let dates = TestDateSource()
         let store = PendingPromptStore(now: dates.provider, clock: EventDrivenTestClock())
         let terminalID = UUID()
-        let input = #"{"command":"ls"}"#
-        _ = await store.register(PromptRegisterParams(
-            terminalID: terminalID, sessionID: "s1", toolName: "Bash", toolInputJSON: input,
-            suggestionsJSON: nil, inputHash: PromptInputHash.of(toolInputJSON: input)))
+        await store.open(
+            terminalID: terminalID, sessionID: "s1", toolUseID: "toolu_1", toolName: "Bash",
+            toolInputJSON: #"{"command":"ls"}"#, suggestionsJSON: nil)
         let reaped = ReapedTerminals()
         let sweep = PendingPromptExpirySweep(
             store: store,
             now: dates.provider,
             onReap: { await reaped.record($0) })
 
-        await sweep.sweepOnce()
-        #expect(await reaped.ids.isEmpty, "a freshly registered prompt is not detached long enough")
-
-        dates.advance(by: 3600)
+        dates.advance(by: 7200)
         await sweep.sweepOnce()
 
-        #expect(await reaped.ids == [terminalID])
-        #expect(await store.prompts(forTerminal: terminalID).isEmpty)
+        #expect(await reaped.ids.isEmpty)
+        #expect(await store.prompts(forTerminal: terminalID).map(\.id) == ["toolu_1"])
     }
 
     @Test("gcExpired names every terminal that lost an entry")

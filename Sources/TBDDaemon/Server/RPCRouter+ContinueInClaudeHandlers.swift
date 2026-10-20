@@ -374,8 +374,7 @@ extension RPCRouter {
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
             watchDeskRole: source.watchDeskRole,
             worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir,
-            promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault)
+            profileConfigDir: profileConfigDir)
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,

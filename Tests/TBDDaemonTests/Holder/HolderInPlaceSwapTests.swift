@@ -540,8 +540,7 @@ struct HolderInPlaceSwapTests {
             repoSettingsJSON: nil,
             watchDeskRole: nil,
             worktreePath: nil,
-            profileConfigDir: nil,
-            promptAnswerHooks: false)
+            profileConfigDir: nil)
     }
 
     /// With the flag on, a holder wake — the in-place swap's wake included —

@@ -252,8 +252,7 @@ extension TBDHomeSerialized {
             repoSettingsJSON: nil,
             watchDeskRole: role,
             worktreePath: nil,
-            profileConfigDir: nil,
-            promptAnswerHooks: false)
+            profileConfigDir: nil)
     }
 
     /// Writes `bytes` where the session's per-session overlay lives, standing

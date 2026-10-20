@@ -8,15 +8,22 @@ import TBDShared
 ///   keyed on `(terminalID, toolUseID)`. The app's `AskUserQuestionMerger`
 ///   drops one once its `tool_use_id` reaches the JSONL — see
 ///   `RPCRouter+TerminalHandlers.swift`.
-/// - **Prompts** – dialogs a `PermissionRequest` hook registered so the app
-///   can answer them from the transcript, each with the hook's waiting
-///   `prompt.await` continuation
-///   (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`).
+/// - **Prompts** – dialogs the session's TBD mod reported open so the app can
+///   answer them from the transcript
+///   (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`), keyed on
+///   `(terminalID, toolUseID)`: the prompt id is the dialog's tool call id.
+///   The mod drives each one through four inputs:
+///   - **open** – the dialog appeared (or the mod re-posts it after a
+///     reconnect, which refreshes the same prompt);
+///   - **wait** – the mod's held request for an answer, repeated while the
+///     dialog stays open;
+///   - **receipt** – the mod returned TBD's decision to Claude Code;
+///   - **closed** – the terminal answered first.
 ///
-/// Memory-only; a daemon restart wipes the store. It creates no durable
-/// resource: Claude Code owns the waiting hook process, and every record here
-/// resolves on its own (an answer, the tool finishing, supersession, the hook
-/// going away, the terminal ending, or the detached sweep).
+/// Memory-only; a daemon restart wipes the store, and the mod re-posts its
+/// open dialogs. It creates no durable resource: Claude Code owns the dialog,
+/// and every record here resolves on its own (a receipt, a close, the terminal
+/// or session ending, the mod going quiet, or shutdown).
 ///
 /// Not to be confused with `PendingPromptCoordinator`, which parks a
 /// worktree's queued first message.
@@ -41,52 +48,50 @@ public actor PendingPromptStore {
 
     /// Why a prompt ended, for the log and for tests.
     public enum Resolution: String, Sendable, Equatable {
-        /// The app's answer reached the hook (or the hook vanished mid-delivery).
+        /// The mod's receipt: TBD's decision reached Claude Code (or no
+        /// receipt came back in time after the hand-over).
         case answered
-        /// `PostToolUse`/`PostToolUseFailure` for its `tool_use_id`: the
-        /// terminal won.
-        case toolFinished
-        /// A new `prompt.register` in the same session: one dialog at a time.
-        case superseded
-        /// The waiting hook's connection closed (No or Escape SIGTERMs it).
-        case hookClosed
-        /// The terminal or session ended.
+        /// The mod's close: the terminal answered first.
+        case answeredInTerminal
+        /// The terminal ended.
         case terminalGone
-        /// No hook attached for `PendingPromptExpirySweep.maxDetached`.
-        case detachedTimeout
+        /// The terminal's Claude session ended.
+        case sessionEnded
+        /// The terminal's mod stopped polling.
+        case modDisconnected
         /// The daemon is stopping.
         case daemonShutdown
     }
 
-    public enum RegisterOutcome: Sendable, Equatable {
-        /// `toolUseID` is the pairing the prompt holds, so the hook can hand
-        /// it back as `knownToolUseID` if it has to register again after a
-        /// daemon restart.
-        case registered(promptID: String, toolUseID: String?)
-    }
-
     public enum AnswerOutcome: Sendable, Equatable {
-        /// The hook acknowledged that it has the decision.
+        /// The mod's receipt arrived: the decision reached Claude Code.
         case delivered
-        /// Unknown id, a different terminal, already answered, or the hook
-        /// reported it never got the decision: the terminal is in charge.
+        /// Unknown id, a different terminal, already answered, or the
+        /// terminal answered first: the terminal is in charge.
         case alreadyResolved
-        /// The decision went to the hook but no acknowledgement came back
-        /// within the ack timeout: it may or may not have reached Claude. The
-        /// prompt is resolved either way, so a retry reads `.alreadyResolved`.
+        /// The decision went to the mod but no receipt came back within the
+        /// ack timeout: it may or may not have reached Claude. The prompt is
+        /// resolved either way, so a retry reads `.alreadyResolved`.
         case deliveryUnconfirmed
-        /// No waiter attached right now (a daemon restart window). Retryable;
-        /// the prompt stays open.
+        /// No wait request picked the decision up within the pickup timeout.
+        /// The decision is withdrawn and the prompt stays open, so the caller
+        /// may retry.
         case hookDetached
         /// The answer does not fit the prompt; the prompt stays open.
         case invalid(PromptAnswerValidation)
     }
 
-    /// How long a `pre` note may trail its register and still attach.
-    static let lateNoteWindow = Duration.seconds(5)
-    /// Notes kept per session. A session has at most a handful of tool calls
-    /// in flight; the cap only bounds a session whose posts never arrive.
-    static let maxNotesPerSession = 16
+    /// What one wait request gets back.
+    public enum WaitResult: Sendable, Equatable {
+        /// TBD's decision: the `decision` object as one JSON string
+        /// (`PromptDecisionEncoder.decisionJSON`).
+        case decision(String)
+        /// Nothing yet: the hold elapsed, or a newer wait request replaced
+        /// this one. The mod asks again while the dialog is open.
+        case pending
+        /// The prompt is unknown or has resolved: stop waiting.
+        case resolved
+    }
 
     private static let log = Logger(subsystem: "com.tbd.daemon", category: "pendingPrompt")
 
@@ -96,58 +101,54 @@ public actor PendingPromptStore {
 
     // MARK: Prompts
 
-    /// A `PreToolUse` note: the tool call a later register pairs with.
-    private struct Note {
-        let toolUseID: String
-        let toolName: String
-        let inputHash: String?
-        let at: Date
-    }
-
+    /// A held wait request.
     private struct Waiter {
         let token: UUID
-        let continuation: CheckedContinuation<PromptAwaitResult, Never>
+        let continuation: CheckedContinuation<WaitResult, Never>
+        /// Returns `.pending` once the hold elapses.
+        let holdTimer: Task<Void, Never>
+    }
+
+    /// What an `answer` call parked on the prompt is told.
+    private enum AnswerSignal {
+        /// A wait request took the held decision.
+        case pickedUp
+        /// The phase's timeout elapsed first.
+        case timedOut
+        /// The prompt ended.
+        case resolved(Resolution)
+    }
+
+    /// The one answer a prompt accepts, while it is in flight.
+    private struct PendingAnswer {
+        /// Names this answer's waits, so a stale timer or signal cannot touch
+        /// a later one.
+        let token: UUID
+        let decisionJSON: String
+        /// A wait request has the decision; the answer waits for a receipt.
+        var handedOver: Bool
+        /// The parked `answer` call, while it is parked.
+        var continuation: CheckedContinuation<AnswerSignal, Never>?
+        /// Names the current park, so the pickup park's timer cannot end the
+        /// receipt park that follows it.
+        var parkID: UUID?
     }
 
     private struct PromptRecord {
         var payload: PendingPromptPayload
-        let terminalID: UUID
-        let sessionID: String
-        let inputHash: String
-        /// Distinguishes this record from a later one reusing its id, so a
-        /// stale late-note timer cannot close a newer record's window.
+        var sessionID: String
+        /// Distinguishes this record from a later one under the same key, so
+        /// an `answer` that outlived its prompt cannot act on a newer one.
         let generation: UUID
         var waiter: Waiter?
-        /// Set while no hook is attached; the detached sweep reads it.
-        var detachedSince: Date?
-        /// The answer went to the waiter; the record waits for its ack.
-        var answered: Bool
-        /// Open while an unpaired prompt may still adopt a trailing note.
-        var lateNoteWindowOpen: Bool
-        var lateNoteTimer: Task<Void, Never>?
+        var pendingAnswer: PendingAnswer?
     }
 
-    /// The scope a dialog lives in: one Claude session in one terminal. Two
-    /// terminals can share a session id (`--resume` without
-    /// `--fork-session`), and each still shows its own dialogs, so neither
-    /// may supersede or pair with the other's.
-    private struct SessionKey: Hashable {
-        let terminalID: UUID
-        let sessionID: String
-    }
-
-    private var promptRecords: [String: PromptRecord] = [:]
-    /// One open prompt per session in a terminal.
-    private var openPromptBySession: [SessionKey: String] = [:]
-    /// Newest last.
-    private var notes: [SessionKey: [Note]] = [:]
-    /// `answer` calls parked until the hook acknowledges delivery, by token.
-    /// `nil` means the ack timed out.
-    private var ackWaiters: [UUID: CheckedContinuation<Bool?, Never>] = [:]
-    /// Tokens whose answer was handed over but whose ack waiter is not yet
-    /// installed; an ack arriving in that gap lands in `earlyAcks`.
-    private var awaitingAck: Set<UUID> = []
-    private var earlyAcks: [UUID: Bool] = [:]
+    private var promptRecords: [Key: PromptRecord] = [:]
+    /// Signals that reached a pending answer between its two parks (after a
+    /// pickup, before it parked for the receipt), by answer token. The parked
+    /// call collects its own entry, so none outlives its `answer`.
+    private var earlySignals: [UUID: AnswerSignal] = [:]
 
     /// Per-terminal mutation counter. Monotonic within one daemon run, and
     /// only ever compared against another revision for the SAME terminal —
@@ -189,15 +190,15 @@ public actor PendingPromptStore {
         bumpRevision(terminalID)
     }
 
-    /// Drops everything the terminal holds: its captures, its open prompts
-    /// (resolved `.terminalGone`, so each waiting hook exits silently) and its
-    /// notes. Every lifecycle site that ends a terminal already calls this.
+    /// Drops everything the terminal holds: its captures and its open prompts
+    /// (resolved `.terminalGone`, so each held wait request returns
+    /// `.resolved`). Every lifecycle site that ends a terminal already calls
+    /// this.
     public func clear(terminalID: UUID) {
         pending = pending.filter { $0.key.terminalID != terminalID }
-        for (id, record) in promptRecords where record.terminalID == terminalID {
-            resolve(id, .terminalGone, bump: false)
+        for key in promptRecords.keys where key.terminalID == terminalID {
+            resolve(key, .terminalGone, bump: false)
         }
-        notes = notes.filter { $0.key.terminalID != terminalID }
         bumpRevision(terminalID)
     }
 
@@ -210,8 +211,9 @@ public actor PendingPromptStore {
 
     /// The terminal's open prompts, oldest first.
     public func prompts(forTerminal terminalID: UUID) -> [PendingPromptPayload] {
-        promptRecords.values
-            .filter { $0.terminalID == terminalID }
+        promptRecords
+            .filter { $0.key.terminalID == terminalID }
+            .values
             .map(\.payload)
             .sorted { ($0.createdAt, $0.id) < ($1.createdAt, $1.id) }
     }
@@ -249,260 +251,165 @@ public actor PendingPromptStore {
         return reaped
     }
 
-    // MARK: - Notes
+    // MARK: - Open
 
-    /// Records a `PreToolUse` note, or applies a `PostToolUse` /
-    /// `PostToolUseFailure` one. Returns the terminals whose prompt set
-    /// changed.
+    /// Records a dialog the mod reported open. Returns the terminals whose
+    /// prompt set changed.
     ///
-    /// - `pre`: kept for a later register to pair with — unless the session's
-    ///   open prompt is still unpaired, registered within the last
-    ///   `lateNoteWindow`, and shows the same tool and input, in which case
-    ///   the note attaches to it at once (the note lost the race to the
-    ///   register).
-    /// - `post`: the tool call finished, so the terminal answered: any prompt
-    ///   still open for that `tool_use_id` resolves `.toolFinished`. So does
-    ///   the session's open prompt when it is unpaired (no `tool_use_id`, as
-    ///   after a daemon restart) and shows the same tool and input hash —
-    ///   otherwise nothing would close it until its hook went away.
+    /// `kind` is `.question` for `AskUserQuestion`, `.permission` otherwise.
+    /// A repeat for the same `(terminalID, toolUseID)` is the same prompt
+    /// re-posted after a reconnect: it refreshes the payload and keeps
+    /// `createdAt`, any held wait request and any answer in flight. The same
+    /// `toolUseID` under another terminal is a separate prompt — two
+    /// terminals resumed into one session stay apart because the address is
+    /// the terminal.
     @discardableResult
-    func note(terminalID: UUID, sessionID: String, phase: PromptNotePhase,
-              toolUseID: String, toolName: String, inputHash: String?) -> Set<UUID> {
-        let scope = SessionKey(terminalID: terminalID, sessionID: sessionID)
-        switch phase {
-        case .pre:
-            if let openID = openPromptBySession[scope],
-               var record = promptRecords[openID],
-               record.payload.toolUseID == nil,
-               record.lateNoteWindowOpen,
-               record.payload.toolName == toolName,
-               inputHash == record.inputHash {
-                record.payload = record.payload.with(toolUseID: toolUseID)
-                record.lateNoteWindowOpen = false
-                record.lateNoteTimer?.cancel()
-                record.lateNoteTimer = nil
-                promptRecords[openID] = record
-                bumpRevision(record.terminalID)
-                Self.log.debug(
-                    "late note attached prompt=\(openID, privacy: .public) toolUseID=\(toolUseID, privacy: .public)")
-                return [record.terminalID]
-            }
-            var list = (notes[scope] ?? []).filter { $0.toolUseID != toolUseID }
-            list.append(Note(toolUseID: toolUseID, toolName: toolName,
-                             inputHash: inputHash, at: now()))
-            if list.count > Self.maxNotesPerSession {
-                list.removeFirst(list.count - Self.maxNotesPerSession)
-            }
-            notes[scope] = list
-            return []
-        case .post:
-            if let list = notes[scope] {
-                let kept = list.filter { $0.toolUseID != toolUseID }
-                notes[scope] = kept.isEmpty ? nil : kept
-            }
-            var changed: Set<UUID> = []
-            for (id, record) in promptRecords where record.payload.toolUseID == toolUseID {
-                if let terminal = resolve(id, .toolFinished) { changed.insert(terminal) }
-            }
-            if let inputHash,
-               let openID = openPromptBySession[scope],
-               let record = promptRecords[openID],
-               record.payload.toolUseID == nil,
-               record.payload.toolName == toolName,
-               record.inputHash == inputHash,
-               let terminal = resolve(openID, .toolFinished) {
-                changed.insert(terminal)
-            }
-            return changed
-        }
-    }
-
-    // MARK: - Register
-
-    /// Records an open dialog for a `PermissionRequest` hook.
-    ///
-    /// - A register in a session whose open prompt has a different id
-    ///   supersedes it: a session shows one dialog at a time. The scope is
-    ///   the session in this terminal, so a second terminal resumed into the
-    ///   same session id never supersedes the first's dialog.
-    /// - A register naming an id this store still holds for the same terminal
-    ///   and session (the hook reconnected) refreshes that record and keeps it
-    ///   open. A held id from another terminal or session is not this hook's
-    ///   prompt: the register gets a fresh id and never touches that record.
-    /// - Otherwise the prompt pairs with a note from the same session,
-    ///   terminal and tool: the newest with an equal input hash, else the newest. An
-    ///   unpaired prompt gets a fresh UUID and a `nil` `tool_use_id`, and may
-    ///   still adopt a note arriving within `lateNoteWindow`. A re-register
-    ///   after a daemon restart keeps its id (`knownPromptID`) but has no
-    ///   note left to pair with.
-    func register(_ params: PromptRegisterParams) -> (outcome: RegisterOutcome, changed: Set<UUID>) {
-        var changed: Set<UUID> = []
-        let scope = SessionKey(terminalID: params.terminalID, sessionID: params.sessionID)
-        if let openID = openPromptBySession[scope], openID != params.knownPromptID,
-           let terminal = resolve(openID, .superseded) {
-            changed.insert(terminal)
-        }
-
-        let kind: PendingPromptKind = params.toolName == "AskUserQuestion" ? .question : .permission
-
-        if let knownID = params.knownPromptID, var existing = promptRecords[knownID],
-           existing.terminalID == params.terminalID, existing.sessionID == params.sessionID {
-            existing.payload = PendingPromptPayload(
-                id: knownID, kind: kind,
-                toolUseID: existing.payload.toolUseID ?? params.knownToolUseID,
-                toolName: params.toolName,
-                toolInputJSON: params.toolInputJSON,
-                suggestionsJSON: params.suggestionsJSON,
-                createdAt: existing.payload.createdAt)
-            promptRecords[knownID] = existing
-            openPromptBySession[scope] = knownID
-            bumpRevision(existing.terminalID)
-            changed.insert(existing.terminalID)
-            Self.log.debug("prompt re-registered id=\(knownID, privacy: .public)")
-            return (.registered(promptID: knownID, toolUseID: existing.payload.toolUseID), changed)
-        }
-
-        let isReRegister = params.knownPromptID != nil
-        let toolUseID = params.knownToolUseID
-            ?? (isReRegister ? nil : takeNote(scope: scope,
-                                              toolName: params.toolName,
-                                              inputHash: params.inputHash))
-        // A known id the store already holds reaches here only when it belongs
-        // to another terminal or session; reusing it would overwrite that record.
-        let id = params.knownPromptID.flatMap { promptRecords[$0] == nil ? $0 : nil } ?? UUID().uuidString
-        let stamp = now()
-        let generation = UUID()
-        let opensLateWindow = toolUseID == nil && !isReRegister
-        var record = PromptRecord(
-            payload: PendingPromptPayload(
-                id: id, kind: kind, toolUseID: toolUseID,
-                toolName: params.toolName,
-                toolInputJSON: params.toolInputJSON,
-                suggestionsJSON: params.suggestionsJSON,
-                createdAt: stamp),
-            terminalID: params.terminalID,
-            sessionID: params.sessionID,
-            inputHash: params.inputHash,
-            generation: generation,
-            waiter: nil,
-            detachedSince: stamp,
-            answered: false,
-            lateNoteWindowOpen: opensLateWindow,
-            lateNoteTimer: nil)
-        if opensLateWindow {
-            record.lateNoteTimer = Task { [weak self, clock] in
-                do { try await clock.sleep(for: Self.lateNoteWindow) } catch { return }
-                await self?.closeLateNoteWindow(promptID: id, generation: generation)
-            }
-        }
-        promptRecords[id] = record
-        openPromptBySession[scope] = id
-        bumpRevision(params.terminalID)
-        changed.insert(params.terminalID)
-        Self.log.debug(
-            "prompt registered id=\(id, privacy: .public) kind=\(kind.rawValue, privacy: .public) paired=\(toolUseID != nil, privacy: .public)")
-        return (.registered(promptID: id, toolUseID: toolUseID), changed)
-    }
-
-    /// The note in the session that this register pairs with, removed so no
-    /// second register can take it: the newest one for `toolName` whose input
-    /// hash matches, else the session's only note for `toolName`. With no
-    /// hash match and several notes for the tool, recency cannot say which
-    /// call the dialog belongs to, so the prompt stays unpaired rather than
-    /// bind to the wrong tool call.
-    private func takeNote(scope: SessionKey, toolName: String, inputHash: String) -> String? {
-        guard var list = notes[scope] else { return nil }
-        let index: Int
-        if let matched = list.lastIndex(where: { $0.toolName == toolName && $0.inputHash == inputHash }) {
-            index = matched
+    public func open(terminalID: UUID, sessionID: String, toolUseID: String, toolName: String,
+                     toolInputJSON: String, suggestionsJSON: String?) -> Set<UUID> {
+        let key = Key(terminalID: terminalID, toolUseID: toolUseID)
+        let kind: PendingPromptKind = toolName == "AskUserQuestion" ? .question : .permission
+        let existing = promptRecords[key]
+        let payload = PendingPromptPayload(
+            id: toolUseID, kind: kind, toolUseID: toolUseID, toolName: toolName,
+            toolInputJSON: toolInputJSON, suggestionsJSON: suggestionsJSON,
+            createdAt: existing?.payload.createdAt ?? now())
+        if var record = existing {
+            record.payload = payload
+            record.sessionID = sessionID
+            promptRecords[key] = record
         } else {
-            let candidates = list.indices.filter { list[$0].toolName == toolName }
-            guard candidates.count == 1, let only = candidates.first else { return nil }
-            index = only
+            promptRecords[key] = PromptRecord(
+                payload: payload, sessionID: sessionID, generation: UUID(),
+                waiter: nil, pendingAnswer: nil)
         }
-        let note = list.remove(at: index)
-        notes[scope] = list.isEmpty ? nil : list
-        return note.toolUseID
+        bumpRevision(terminalID)
+        Self.log.debug(
+            "prompt opened id=\(toolUseID, privacy: .public) kind=\(kind.rawValue, privacy: .public) session=\(sessionID, privacy: .public) repeat=\(existing != nil, privacy: .public)")
+        return [terminalID]
     }
 
-    private func closeLateNoteWindow(promptID: String, generation: UUID) {
-        guard var record = promptRecords[promptID], record.generation == generation else { return }
-        record.lateNoteWindowOpen = false
-        record.lateNoteTimer = nil
-        promptRecords[promptID] = record
-    }
+    // MARK: - Wait
 
-    // MARK: - Await
-
-    /// Suspends until the prompt resolves. `token` names this waiter so a
-    /// closed connection cancels only itself. An unknown or already-answered
-    /// id answers `.resolvedElsewhere` at once. A waiter already attached to
-    /// the same prompt (a stale one from before a reconnect) is released with
-    /// `.resolvedElsewhere`.
+    /// The mod's held request for an answer.
     ///
-    /// `connectionClosed` closes the race between a waiter attaching and its
-    /// connection closing. The socket marks the connection closed before it
-    /// calls `waiterClosed(token:)`, and this reads the mark in the same actor
-    /// turn that attaches the waiter: a close that `waiterClosed` ran too early
-    /// to see is seen here instead, and the prompt resolves `.hookClosed`.
-    func awaitResolution(
-        promptID: String, token: UUID,
-        connectionClosed: @escaping @Sendable () -> Bool = { false }
-    ) async -> PromptAwaitResult {
-        guard let record = promptRecords[promptID], !record.answered else { return .resolvedElsewhere }
-        return await withCheckedContinuation { (continuation: CheckedContinuation<PromptAwaitResult, Never>) in
-            guard var current = promptRecords[promptID], current.generation == record.generation, !current.answered else {
-                continuation.resume(returning: .resolvedElsewhere)
+    /// - An unknown or resolved prompt returns `.resolved` at once.
+    /// - An answer already in flight returns its decision at once, and the
+    ///   record counts as handed over. That includes a decision handed to an
+    ///   earlier request whose connection dropped before it was written: the
+    ///   same decision again is harmless, and the receipt settles it.
+    /// - Otherwise the request attaches as the prompt's waiter, replacing an
+    ///   older one (which gets `.pending`), and returns `.pending` once `hold`
+    ///   elapses with no answer.
+    ///
+    /// `token` names this request, so `waiterGone(token:)` detaches only it.
+    public func waitForAnswer(terminalID: UUID, toolUseID: String, token: UUID,
+                              hold: Duration) async -> WaitResult {
+        let key = Key(terminalID: terminalID, toolUseID: toolUseID)
+        guard let record = promptRecords[key] else { return .resolved }
+        if let decision = takeDecision(key) { return .decision(decision) }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<WaitResult, Never>) in
+            guard var current = promptRecords[key], current.generation == record.generation else {
+                continuation.resume(returning: .resolved)
                 return
             }
-            if connectionClosed() {
-                resolve(promptID, .hookClosed)
-                continuation.resume(returning: .resolvedElsewhere)
+            if let decision = takeDecision(key) {
+                continuation.resume(returning: .decision(decision))
                 return
             }
-            current.waiter?.continuation.resume(returning: .resolvedElsewhere)
-            current.waiter = Waiter(token: token, continuation: continuation)
-            current.detachedSince = nil
-            promptRecords[promptID] = current
+            if let old = current.waiter {
+                old.holdTimer.cancel()
+                old.continuation.resume(returning: .pending)
+            }
+            let holdTimer = Task { [weak self, clock] in
+                do { try await clock.sleep(for: hold) } catch { return }
+                await self?.holdElapsed(key: key, token: token)
+            }
+            current.waiter = Waiter(token: token, continuation: continuation, holdTimer: holdTimer)
+            promptRecords[key] = current
         }
     }
 
-    /// The waiter's connection closed. An attached, unanswered waiter means
-    /// the hook was killed (No or Escape in the terminal), so its prompt
-    /// resolves `.hookClosed`. Harmless for a token that is no longer
-    /// attached — a delivered answer, or a waiter a reconnect replaced.
-    ///
-    /// A pending delivery ack is deliberately left alone: the write's own
-    /// completion reports it through `acknowledgeDelivery`, and the two
-    /// notifications reach this actor in no fixed order.
+    /// The wait request's connection went away (the mod aborted its fetch).
+    /// Detaches that waiter and never resolves the prompt: the next wait
+    /// request or a close decides. Harmless for a token no longer attached.
+    public func waiterGone(token: UUID) {
+        guard let key = promptRecords.first(where: { $0.value.waiter?.token == token })?.key else { return }
+        detachWaiter(key, returning: .pending)
+    }
+
+    private func holdElapsed(key: Key, token: UUID) {
+        guard promptRecords[key]?.waiter?.token == token else { return }
+        detachWaiter(key, returning: .pending)
+    }
+
+    private func detachWaiter(_ key: Key, returning result: WaitResult) {
+        guard var record = promptRecords[key], let waiter = record.waiter else { return }
+        record.waiter = nil
+        promptRecords[key] = record
+        waiter.holdTimer.cancel()
+        waiter.continuation.resume(returning: result)
+    }
+
+    /// The decision of the answer in flight, marking it handed over and
+    /// telling an `answer` parked for pickup. Nil with no answer in flight.
+    private func takeDecision(_ key: Key) -> String? {
+        guard var record = promptRecords[key], var answer = record.pendingAnswer else { return nil }
+        let pickupWaiter = answer.handedOver ? nil : answer.continuation
+        answer.handedOver = true
+        if pickupWaiter != nil { answer.continuation = nil }
+        record.pendingAnswer = answer
+        promptRecords[key] = record
+        pickupWaiter?.resume(returning: .pickedUp)
+        return answer.decisionJSON
+    }
+
+    // MARK: - Receipt and close
+
+    /// The mod returned TBD's decision to Claude Code: an answer waiting for
+    /// its receipt reads `.delivered`, and the prompt resolves `.answered`.
+    /// Returns the terminals whose prompt set changed.
     @discardableResult
-    func waiterClosed(token: UUID) -> Set<UUID> {
-        guard let match = promptRecords.first(where: { $0.value.waiter?.token == token && !$0.value.answered }),
-              let terminal = resolve(match.key, .hookClosed) else {
-            return []
-        }
+    public func receipt(terminalID: UUID, toolUseID: String) -> Set<UUID> {
+        resolveOne(Key(terminalID: terminalID, toolUseID: toolUseID), .answered)
+    }
+
+    /// The terminal answered first: the prompt resolves `.answeredInTerminal`,
+    /// and an answer waiting for its receipt reads `.alreadyResolved`.
+    /// Returns the terminals whose prompt set changed.
+    @discardableResult
+    public func closed(terminalID: UUID, toolUseID: String) -> Set<UUID> {
+        resolveOne(Key(terminalID: terminalID, toolUseID: toolUseID), .answeredInTerminal)
+    }
+
+    private func resolveOne(_ key: Key, _ resolution: Resolution) -> Set<UUID> {
+        guard let terminal = resolve(key, resolution) else { return [] }
         return [terminal]
     }
 
     // MARK: - Answer
 
-    /// Hands `answer` to the prompt's waiting hook and returns once the hook
-    /// acknowledges delivery (`acknowledgeDelivery`), or `ackTimeout` passes.
+    /// Hands `answer` to the prompt's dialog and returns once the outcome is
+    /// known.
     ///
-    /// The second answer to a prompt, an answer naming another terminal, and
-    /// an answer the hook reports it never got all read `.alreadyResolved`.
-    /// No acknowledgement within `ackTimeout` reads `.deliveryUnconfirmed`:
-    /// the decision may have reached Claude. With no waiter attached the
-    /// prompt stays open and the answer is `.hookDetached`, which the caller
-    /// may retry.
+    /// A prompt takes one answer. The second answer to a prompt, and an
+    /// answer naming another terminal, read `.alreadyResolved`. With a wait
+    /// request attached the decision goes to it at once; otherwise it is held
+    /// for the next wait request within `pickupTimeout`, and withdrawn after
+    /// that with `.hookDetached` (the prompt stays open, so the caller may
+    /// retry). Once handed over, the answer waits `ackTimeout` for the mod:
+    /// a receipt reads `.delivered`, a close `.alreadyResolved`, and neither
+    /// `.deliveryUnconfirmed` — the decision may have reached Claude — with
+    /// the prompt resolved.
     func answer(terminalID: UUID, promptID: String, answer: PromptAnswer,
-                ackTimeout: Duration = .seconds(5)) async -> (outcome: AnswerOutcome, changed: Set<UUID>) {
-        guard var record = promptRecords[promptID], record.terminalID == terminalID, !record.answered else {
+                ackTimeout: Duration = .seconds(5),
+                pickupTimeout: Duration = .seconds(60)) async -> (outcome: AnswerOutcome, changed: Set<UUID>) {
+        let key = Key(terminalID: terminalID, toolUseID: promptID)
+        guard var record = promptRecords[key], record.pendingAnswer == nil else {
             return (.alreadyResolved, [])
         }
-        let hookOutput: String
+        let decisionJSON: String
         do {
-            hookOutput = try PromptDecisionEncoder.hookOutput(
+            decisionJSON = try PromptDecisionEncoder.decisionJSON(
                 answer: answer, kind: record.payload.kind,
                 toolInputJSON: record.payload.toolInputJSON,
                 suggestionsJSON: record.payload.suggestionsJSON)
@@ -515,155 +422,158 @@ public actor PendingPromptStore {
                 "prompt answer failed to encode id=\(promptID, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return (.invalid(.kindMismatch), [])
         }
-        guard let waiter = record.waiter else { return (.hookDetached, []) }
 
-        record.answered = true
-        record.waiter = nil
-        promptRecords[promptID] = record
-        awaitingAck.insert(waiter.token)
-        waiter.continuation.resume(returning: .answered(hookOutput: hookOutput))
+        let answerToken = UUID()
+        let generation = record.generation
+        record.pendingAnswer = PendingAnswer(
+            token: answerToken, decisionJSON: decisionJSON, handedOver: false,
+            continuation: nil, parkID: nil)
+        promptRecords[key] = record
 
-        let ack = await waitForAck(token: waiter.token, timeout: ackTimeout)
-        let delivered = ack == true
-
-        var changed: Set<UUID> = []
-        if let current = promptRecords[promptID], current.generation == record.generation,
-           let terminal = resolve(promptID, delivered ? .answered : .hookClosed) {
-            changed.insert(terminal)
-        }
-        switch ack {
-        case .some(true): return (.delivered, changed)
-        case .some(false): return (.alreadyResolved, changed)
-        case .none: return (.deliveryUnconfirmed, changed)
-        }
-    }
-
-    /// The hook side reports whether the answer reached the hook. Ignored for
-    /// a token no `answer` is waiting on.
-    func acknowledgeDelivery(token: UUID, delivered: Bool) {
-        settleAck(token: token, delivered: delivered)
-    }
-
-    /// The hook's ack, or nil when none arrived within `timeout`.
-    private func waitForAck(token: UUID, timeout: Duration) async -> Bool? {
-        if let early = earlyAcks.removeValue(forKey: token) {
-            awaitingAck.remove(token)
-            return early
-        }
-        let timer = Task { [weak self, clock] in
-            do { try await clock.sleep(for: timeout) } catch { return }
-            await self?.ackTimedOut(token: token)
-        }
-        let delivered = await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
-            if let early = earlyAcks.removeValue(forKey: token) {
-                awaitingAck.remove(token)
-                continuation.resume(returning: early)
-            } else {
-                ackWaiters[token] = continuation
+        if let waiter = record.waiter {
+            _ = takeDecision(key)
+            promptRecords[key]?.waiter = nil
+            waiter.holdTimer.cancel()
+            waiter.continuation.resume(returning: .decision(decisionJSON))
+        } else {
+            switch await parkAnswer(key: key, answerToken: answerToken, timeout: pickupTimeout) {
+            case .pickedUp:
+                break
+            case .timedOut:
+                // `answerTimedOut` withdrew the decision; the prompt stays open.
+                return (.hookDetached, [])
+            case .resolved(let resolution):
+                return (resolution == .answered ? .delivered : .alreadyResolved, [terminalID])
             }
         }
+
+        switch await parkAnswer(key: key, answerToken: answerToken, timeout: ackTimeout) {
+        case .resolved(.answered):
+            return (.delivered, [terminalID])
+        case .resolved:
+            return (.alreadyResolved, [terminalID])
+        case .timedOut, .pickedUp:
+            // `.pickedUp` is only ever sent before the hand-over; it cannot
+            // reach this park, and is handled like the timeout it would be.
+            if promptRecords[key]?.generation == generation {
+                promptRecords[key]?.pendingAnswer = nil
+                resolve(key, .answered)
+            }
+            return (.deliveryUnconfirmed, [terminalID])
+        }
+    }
+
+    /// Parks the answer until a signal for `answerToken` arrives or `timeout`
+    /// elapses.
+    private func parkAnswer(key: Key, answerToken: UUID, timeout: Duration) async -> AnswerSignal {
+        if let early = earlySignals.removeValue(forKey: answerToken) { return early }
+        let parkID = UUID()
+        let timer = Task { [weak self, clock] in
+            do { try await clock.sleep(for: timeout) } catch { return }
+            await self?.answerTimedOut(key: key, parkID: parkID)
+        }
+        let signal = await withCheckedContinuation { (continuation: CheckedContinuation<AnswerSignal, Never>) in
+            if let early = earlySignals.removeValue(forKey: answerToken) {
+                continuation.resume(returning: early)
+                return
+            }
+            guard var record = promptRecords[key], var answer = record.pendingAnswer,
+                  answer.token == answerToken else {
+                // Unreachable: whatever removed the answer stashed a signal
+                // for it first. Read as the terminal being in charge.
+                continuation.resume(returning: .resolved(.answeredInTerminal))
+                return
+            }
+            answer.continuation = continuation
+            answer.parkID = parkID
+            record.pendingAnswer = answer
+            promptRecords[key] = record
+        }
         timer.cancel()
-        return delivered
+        return signal
     }
 
-    private func ackTimedOut(token: UUID) {
-        guard let continuation = ackWaiters.removeValue(forKey: token) else { return }
-        awaitingAck.remove(token)
-        continuation.resume(returning: nil)
+    /// The parked answer's timeout. Before the hand-over the decision is
+    /// withdrawn here, in the same actor turn, so no wait request can take
+    /// it after the answer has been told `.hookDetached`.
+    private func answerTimedOut(key: Key, parkID: UUID) {
+        guard var record = promptRecords[key], let answer = record.pendingAnswer,
+              answer.parkID == parkID, let continuation = answer.continuation else { return }
+        record.pendingAnswer = nil
+        promptRecords[key] = record
+        continuation.resume(returning: .timedOut)
     }
 
-    private func settleAck(token: UUID, delivered: Bool) {
-        if let continuation = ackWaiters.removeValue(forKey: token) {
-            awaitingAck.remove(token)
-            continuation.resume(returning: delivered)
-        } else if awaitingAck.contains(token) {
-            earlyAcks[token] = delivered
+    /// Delivers `signal` to the answer: to its parked call, or into
+    /// `earlySignals` when it is between parks.
+    private func signal(_ answer: PendingAnswer, _ signal: AnswerSignal) {
+        if let continuation = answer.continuation {
+            continuation.resume(returning: signal)
+        } else {
+            earlySignals[answer.token] = signal
         }
     }
 
-    // MARK: - Sweeps and shutdown
+    // MARK: - Bulk resolution and shutdown
 
-    /// Resolves every prompt that has had no hook attached for `maxDetached`
-    /// as of `now`, and drops notes older than that. Returns the terminals
-    /// whose prompt set changed.
+    /// Resolves every open prompt of the terminal with `resolution`, leaving
+    /// its captures alone. Returns the terminals whose prompt set changed.
     @discardableResult
-    func sweepDetachedPrompts(now: Date, maxDetached: Duration) -> Set<UUID> {
-        let cutoff = now.addingTimeInterval(-Self.seconds(maxDetached))
+    public func resolvePrompts(terminalID: UUID, _ resolution: Resolution) -> Set<UUID> {
         var changed: Set<UUID> = []
-        for (id, record) in promptRecords where !record.answered && record.waiter == nil {
-            guard let since = record.detachedSince, since <= cutoff else { continue }
-            if let terminal = resolve(id, .detachedTimeout) { changed.insert(terminal) }
-        }
-        for (scope, list) in notes {
-            let kept = list.filter { $0.at > cutoff }
-            notes[scope] = kept.isEmpty ? nil : kept
+        for key in promptRecords.keys where key.terminalID == terminalID {
+            if let terminal = resolve(key, resolution) { changed.insert(terminal) }
         }
         return changed
     }
 
-    /// Daemon shutdown: every waiter gets `.resolvedElsewhere` and every
-    /// pending delivery reads as not delivered.
+    /// The terminals holding at least one open prompt.
+    public func terminalsWithOpenPrompts() -> Set<UUID> {
+        Set(promptRecords.keys.map(\.terminalID))
+    }
+
+    /// Daemon shutdown: every held wait request gets `.resolved` and every
+    /// answer in flight reads `.alreadyResolved`.
     @discardableResult
     func resolveAll() -> Set<UUID> {
         var changed: Set<UUID> = []
-        for id in Array(promptRecords.keys) {
-            if let terminal = resolve(id, .daemonShutdown) { changed.insert(terminal) }
-        }
-        for token in Array(ackWaiters.keys) {
-            settleAck(token: token, delivered: false)
+        for key in Array(promptRecords.keys) {
+            if let terminal = resolve(key, .daemonShutdown) { changed.insert(terminal) }
         }
         return changed
     }
 
     // MARK: - Diagnostics (tests and logs)
 
-    /// Whether a hook is attached to the prompt right now.
-    func isWaiterAttached(promptID: String) -> Bool {
-        promptRecords[promptID]?.waiter != nil
-    }
-
-    /// The terminal an open prompt belongs to, or nil once it has resolved.
-    func terminalID(ofPrompt promptID: String) -> UUID? {
-        promptRecords[promptID]?.terminalID
-    }
-
-    /// Whether the unpaired prompt may still adopt a trailing note.
-    func isLateNoteWindowOpen(promptID: String) -> Bool {
-        promptRecords[promptID]?.lateNoteWindowOpen ?? false
+    /// Whether a wait request is held on the prompt right now.
+    func isWaiterAttached(terminalID: UUID, toolUseID: String) -> Bool {
+        promptRecords[Key(terminalID: terminalID, toolUseID: toolUseID)]?.waiter != nil
     }
 
     // MARK: - Resolution
 
-    /// Removes the prompt, releases its waiter with `.resolvedElsewhere`, and
-    /// returns its terminal — or nil when the store no longer holds it. Every
-    /// path that ends a prompt comes through here, so no continuation leaks
-    /// and none resumes twice.
+    /// Removes the prompt, releases its waiter with `.resolved`, tells an
+    /// answer in flight how it ended, and returns its terminal — or nil when
+    /// the store no longer holds it. Every path that ends a prompt comes
+    /// through here, so no continuation leaks and none resumes twice.
     @discardableResult
-    private func resolve(_ promptID: String, _ resolution: Resolution, bump: Bool = true) -> UUID? {
-        guard let record = promptRecords.removeValue(forKey: promptID) else { return nil }
-        let scope = SessionKey(terminalID: record.terminalID, sessionID: record.sessionID)
-        if openPromptBySession[scope] == promptID {
-            openPromptBySession.removeValue(forKey: scope)
+    private func resolve(_ key: Key, _ resolution: Resolution, bump: Bool = true) -> UUID? {
+        guard let record = promptRecords.removeValue(forKey: key) else { return nil }
+        if let waiter = record.waiter {
+            waiter.holdTimer.cancel()
+            waiter.continuation.resume(returning: .resolved)
         }
-        record.lateNoteTimer?.cancel()
-        record.waiter?.continuation.resume(returning: .resolvedElsewhere)
-        if bump { bumpRevision(record.terminalID) }
+        if let answer = record.pendingAnswer {
+            signal(answer, .resolved(resolution))
+        }
+        if bump { bumpRevision(key.terminalID) }
         Self.log.debug(
-            "prompt resolved id=\(promptID, privacy: .public) resolution=\(resolution.rawValue, privacy: .public)")
-        return record.terminalID
+            "prompt resolved id=\(key.toolUseID, privacy: .public) resolution=\(resolution.rawValue, privacy: .public)")
+        return key.terminalID
     }
 
     private static func seconds(_ duration: Duration) -> TimeInterval {
         TimeInterval(duration.components.seconds)
             + TimeInterval(duration.components.attoseconds) / 1e18
-    }
-}
-
-private extension PendingPromptPayload {
-    func with(toolUseID: String) -> PendingPromptPayload {
-        PendingPromptPayload(
-            id: id, kind: kind, toolUseID: toolUseID, toolName: toolName,
-            toolInputJSON: toolInputJSON, suggestionsJSON: suggestionsJSON,
-            createdAt: createdAt)
     }
 }

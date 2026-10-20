@@ -240,20 +240,9 @@ public enum RPCMethod {
     /// Every terminal's current program-status snapshot (main entry and task
     /// entries). Empty while `program_status_enabled` is off.
     public static let terminalProgramStatusList = "terminal.programStatusList"
-    /// Answering prompts from the transcript
-    /// (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`).
-    /// `prompt.note` – a `PreToolUse`/`PostToolUse` hook records a tool call.
-    public static let promptNote = "prompt.note"
-    /// `prompt.register` – a `PermissionRequest` hook registers its open dialog.
-    public static let promptRegister = "prompt.register"
-    /// `prompt.await` – the hook's long-poll until the dialog resolves. Served
-    /// only on the daemon socket, around the RPC concurrency limiter.
-    public static let promptAwait = "prompt.await"
-    /// `prompt.answer` – the app answers a local prompt.
+    /// `prompt.answer` – the app answers a local prompt
+    /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`).
     public static let promptAnswer = "prompt.answer"
-    /// `prompt.ack` – the hook reports that it printed (or failed to print)
-    /// the decision a `prompt.await` reply handed it.
-    public static let promptAck = "prompt.ack"
     public static let appSetForegroundState = "app.setForegroundState"
     public static let repoRelocate = "repo.relocate"
     public static let repoRename = "repo.rename"
@@ -5174,129 +5163,13 @@ public struct TerminalProgramStatusListResult: Codable, Sendable {
 // MARK: - Prompt Params
 //
 // Answering prompts from the transcript
-// (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`). A "prompt" here
+// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`). A "prompt" here
 // is an open Claude Code dialog, unrelated to `PendingPromptCoordinator`'s
 // queued first message.
 
-/// Which hook a `prompt.note` comes from.
-public enum PromptNotePhase: String, Codable, Sendable {
-    /// `PreToolUse`: a tool call is about to run or ask.
-    case pre
-    /// `PostToolUse` / `PostToolUseFailure`: the call finished, so any prompt
-    /// still open for it was answered in the terminal.
-    case post
-}
-
-/// Params for `prompt.note`. Returns `.ok()` and never a decision.
-public struct PromptNoteParams: Codable, Sendable {
-    public let terminalID: UUID
-    public let sessionID: String
-    public let phase: PromptNotePhase
-    public let toolUseID: String
-    public let toolName: String
-    /// `PromptInputHash.of(toolName:toolInput:)` of `tool_input` (`questions`
-    /// alone for `AskUserQuestion`). On `post` it lets the daemon close
-    /// an unpaired prompt showing the same call; nil when the payload had no
-    /// `tool_input`.
-    public let inputHash: String?
-    public init(terminalID: UUID, sessionID: String, phase: PromptNotePhase,
-                toolUseID: String, toolName: String, inputHash: String?) {
-        self.terminalID = terminalID
-        self.sessionID = sessionID
-        self.phase = phase
-        self.toolUseID = toolUseID
-        self.toolName = toolName
-        self.inputHash = inputHash
-    }
-}
-
-/// Params for `prompt.register`, sent by the `PermissionRequest` hook.
-public struct PromptRegisterParams: Codable, Sendable {
-    public let terminalID: UUID
-    public let sessionID: String
-    public let toolName: String
-    public let toolInputJSON: String
-    public let suggestionsJSON: String?
-    /// `PromptInputHash.of(toolName:toolInput:)` of `tool_input`, matched
-    /// against `prompt.note`.
-    public let inputHash: String
-    /// Set on a re-register after a reconnect, so the prompt keeps its id and
-    /// pairing.
-    public let knownPromptID: String?
-    public let knownToolUseID: String?
-    public init(terminalID: UUID, sessionID: String, toolName: String, toolInputJSON: String,
-                suggestionsJSON: String?, inputHash: String,
-                knownPromptID: String? = nil, knownToolUseID: String? = nil) {
-        self.terminalID = terminalID
-        self.sessionID = sessionID
-        self.toolName = toolName
-        self.toolInputJSON = toolInputJSON
-        self.suggestionsJSON = suggestionsJSON
-        self.inputHash = inputHash
-        self.knownPromptID = knownPromptID
-        self.knownToolUseID = knownToolUseID
-    }
-}
-
-/// Result of `prompt.register`.
-public enum PromptRegisterResult: Codable, Sendable, Equatable {
-    /// `{"registered":{"promptID":"…","toolUseID":"…"}}`. `toolUseID` is the
-    /// tool call the daemon paired the prompt with, absent while unpaired;
-    /// the hook sends it back as `knownToolUseID` when it registers again
-    /// after a reconnect, so a restarted daemon keeps the pairing. A reply
-    /// without it (an older daemon) decodes with `toolUseID` nil.
-    case registered(promptID: String, toolUseID: String? = nil)
-    /// The flag is off: the hook exits silently at once and the terminal
-    /// stays in charge.
-    case disabled
-}
-
-/// Params for `prompt.await`.
-public struct PromptAwaitParams: Codable, Sendable {
-    public let promptID: String
-    public init(promptID: String) { self.promptID = promptID }
-}
-
-/// Result of `prompt.await`.
-public enum PromptAwaitResult: Codable, Sendable, Equatable {
-    /// The app answered: the hook prints `hookOutput` verbatim and exits 0.
-    case answered(hookOutput: String)
-    /// The prompt resolved some other way: the hook prints nothing.
-    case resolvedElsewhere
-}
-
-/// The reply `prompt.await` sends on the daemon socket.
-///
-/// With `.answered` it carries `deliveryToken`. The hook prints the decision
-/// to stdout and then calls `prompt.ack` with that token: `delivered: true`
-/// once the decision is printed, `false` when printing failed. `prompt.answer`
-/// waits for that ack (5 s) before it reports `delivered`; no ack reads as
-/// `already_resolved`. `deliveryToken` is nil with `.resolvedElsewhere`, which
-/// needs no ack.
-public struct PromptAwaitReply: Codable, Sendable, Equatable {
-    public let result: PromptAwaitResult
-    public let deliveryToken: UUID?
-    public init(result: PromptAwaitResult, deliveryToken: UUID?) {
-        self.result = result
-        self.deliveryToken = deliveryToken
-    }
-}
-
-/// Params for `prompt.ack`. Returns `.ok()`; an unknown or late token is
-/// ignored.
-public struct PromptAckParams: Codable, Sendable {
-    /// The `deliveryToken` from the `prompt.await` reply.
-    public let token: UUID
-    /// Whether the decision reached the hook's stdout.
-    public let delivered: Bool
-    public init(token: UUID, delivered: Bool) {
-        self.token = token
-        self.delivered = delivered
-    }
-}
-
-/// Params for `prompt.answer`. The result is a `PromptAnswerResult`; a hook
-/// that is reconnecting is a retryable RPC error rather than an outcome.
+/// Params for `prompt.answer`. The result is a `PromptAnswerResult`; an answer
+/// no waiting dialog picked up in time is a retryable RPC error rather than an
+/// outcome.
 public struct PromptAnswerParams: Codable, Sendable {
     public let terminalID: UUID
     public let promptID: String

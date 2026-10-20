@@ -466,8 +466,7 @@ extension RPCRouter {
                 // Per-spawn fragment applies to FRESH spawns only; a
                 // resume must not reapply it. Hooks overlay still resolves
                 // for resumes — only extraSettingsJSON goes nil.
-                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil,
-                promptAnswerHooks: createConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
               )
             : nil
 
@@ -1240,8 +1239,7 @@ extension RPCRouter {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    promptAnswerHooks: reviveConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
@@ -2705,8 +2703,7 @@ extension RPCRouter {
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
             watchDeskRole: swapDeskRole,
             worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir,
-            promptAnswerHooks: swapConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+            profileConfigDir: profileConfigDir
         )
 
         // The session name is the swapped tab's: the new tab on a fork, the
