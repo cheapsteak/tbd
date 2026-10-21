@@ -133,10 +133,19 @@ plans its overlay up front: it computes the `--settings` path its command
 names, without writing anything. Every desk gets a per-session overlay file
 whether or not it carries the tee, so that path does not depend on the
 features. Once `prepare` has run, immediately before the process launches, the
-spawn writes the overlay from the features `prepare` returned and, when it
-installs no tee, deletes the session's statusline capture. A spawn that does
-not launch therefore leaves the overlay and capture of the process the row
-still names exactly as they were.
+spawn writes the overlay from the features `prepare` returned. A spawn that
+never reaches its launch — one that stops before that step — therefore leaves
+the overlay and capture of the process the row still names exactly as they
+were.
+
+Every launch of a Claude spawn deletes the session's previous statusline
+capture when its overlay is resolved, desk or not, tee or not. That resolution
+is the one step every launch passes through: a fresh spawn resolves its
+overlay directly, and a replacement spawn resolves it in the step just before
+launch described above. The new process republishes its own capture when its
+tee fires, and an old capture must never speak for a new process: a tee desk
+swapped from a 1M-token profile to a 200k one would otherwise report 1M until
+its first statusline render.
 
 The model proxy's routing decision, which comes before the command, asks
 whether the overlay sets `ANTHROPIC_BASE_URL`; a replacement spawn answers from
@@ -145,9 +154,8 @@ the spawn falls back to the shared global overlay, as every spawn's overlay
 resolution does, and launches with its command's `--settings` repointed there
 (or dropped, when the global overlay is missing too). The process then runs
 without a tee and with only TBD's hooks, never against a missing file or one
-an earlier process left. Because it has no tee, the session's statusline
-capture is deleted too, as for any spawn that installs none: an earlier
-process's capture would otherwise be read as this one's window.
+an earlier process left. Its statusline capture is gone as for every launch,
+so an earlier process's capture is not read as this one's window.
 
 A reader trusts `usage.json` only when its `incarnationID` names the live
 incarnation; a file left by an earlier process of the same session reads as
@@ -160,24 +168,23 @@ not yet written.
 1. **`usage.json`**, when `SessionModLiveness` answers `confirmed` for `usage`
    and the file parses with a valid window. Window, tokens and percent were
    measured together, so the reading is paired. Its source is a new
-   `FactSource.sessionMod`, and its observed-at is `measuredAt`. A live
-   process whose heartbeat has gone stale gets `unknown` with a stale
-   heartbeat; its file is still read when its `incarnationID` names the row's
-   incarnation, and no other `unknown` reason reads it. A parked or hibernated
-   row is judged differently, because parking replaces the agent with an
-   inert shell and gives the row a new incarnation that belongs to the shell,
-   which never runs the mod. For such a row the incarnation that counts is the
-   one in `spawn.json`, the last process that ran the mod: when that record
-   lists `usage`, the file is read if its `incarnationID` names that
-   incarnation, whatever the heartbeat says, and the window is otherwise
-   `unknown`. When the record does not list `usage`, the row is `legacy`, as
-   a live one would be. Either way the reading is that process's own, and
-   `measuredAt` carries its age.
+   `FactSource.sessionMod`, and its observed-at is `measuredAt`. The file is
+   read only under that `confirmed` answer, and only when its `incarnationID`
+   names the row's live incarnation; every `unknown` answer, a stale heartbeat
+   included, reads the window as `unknown`. A parked row whose session's
+   `spawn.json` lists `usage` reads the window as `unknown` with a `why` saying
+   the session is parked and no process is reporting its window, and takes its
+   numerator from the transcript. Parking replaces the agent with an inert
+   shell that never runs the mod, and `spawn.json` is shared by every spawn of
+   the session and overwritten by each, so it cannot say which process wrote a
+   usage file still on disk. Nothing reads a parked session's window: the
+   desk's handoff runs only in a live process. A parked row whose spawn did not
+   list `usage` is `legacy` and reads the tee capture.
 2. **The tee capture**, when liveness answers `legacy` — a spawn made without
    `usage`. Unchanged from today.
 3. **The transcript tail** for tokens, with the window `unknown`. The `why`
-   names the case: `usage` was spawned but the mod has not confirmed this
-   process; the usage file is missing or unreadable; or neither source applies
+   names the case: the session is parked; `usage` was spawned but the mod has
+   not confirmed this process; the usage file is missing or unreadable; or neither source applies
    to this session.
 
 The reader's input changes from the desk role to the spawn's source: whether
@@ -225,19 +232,20 @@ session-mod design already keeps compiled — and the flag.
 - Flag on: a desk spawn installs no tee, keeps the person's `statusLine`, and
   lists `usage` in `TBD_MOD_FEATURES` and `spawn.json` — on a fresh spawn, a
   wake, and an in-place profile swap.
-- `ContextLoadReader`: confirmed with a valid file gives a paired `.observed`
-  window sourced `sessionMod`; confirmed with a torn file falls back; a stale
-  heartbeat with a file naming the live incarnation gives the same paired
-  reading, and with any other file gives `unknown`; every other unknown
-  liveness gives `unknown` with its `why`; legacy reads the tee capture. A
-  row parked through the production park write reads the file its
-  `spawn.json` incarnation wrote, however old the heartbeat, refuses any
-  other incarnation's, and reads the tee when its spawn lacked `usage`.
+- `ContextLoadReader`: confirmed with a valid file naming the live
+  incarnation gives a paired `.observed` window sourced `sessionMod`;
+  confirmed with a torn file or another incarnation's falls back; every
+  unknown liveness, a stale heartbeat included, gives `unknown` with its
+  `why`; legacy reads the tee capture. A row parked through the production
+  park write whose spawn listed `usage` reads `unknown` saying it is parked,
+  even beside a usage file and a capture, and reads the tee when its spawn
+  lacked `usage`.
 - Replacement spawns: planning the overlay writes nothing and deletes nothing;
   a wake that launches nothing and an in-place swap that fails before its
-  launch leave the overlay and capture untouched; a per-session write that
-  fails at launch repoints the command to the global overlay and deletes the
-  statusline capture.
+  launch leave the overlay and capture untouched; a tee desk's relaunch
+  deletes the previous capture; a per-session write that fails at launch
+  repoints the command to the global overlay and deletes the statusline
+  capture.
 - A zero, negative or boolean window is refused by both the Swift and the
   Python reader.
 
