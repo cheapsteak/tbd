@@ -2007,12 +2007,12 @@ def selftest():
     full = usage_payload(200_000)
     for label, payload in (
         ("a truncated usage file", full[: len(full) // 2]),
-        ("a boolean window", json.dumps({"context": {"window": True}})),
+        ("a boolean window", json.dumps({"incarnationID": own, "context": {"window": True}})),
         ("a zero window", usage_payload(0)),
         ("a negative window", usage_payload(-1)),
         ("a fractional window", usage_payload(1.5)),
-        ("a missing window", json.dumps({"context": {"tokens": 5}})),
-        ("a missing context", json.dumps({"rateLimits": []})),
+        ("a missing window", json.dumps({"incarnationID": own, "context": {"tokens": 5}})),
+        ("a missing context", json.dumps({"incarnationID": own, "rateLimits": []})),
         ("a usage file that is not an object", json.dumps([1, 2, 3])),
     ):
         publish_usage(payload)
