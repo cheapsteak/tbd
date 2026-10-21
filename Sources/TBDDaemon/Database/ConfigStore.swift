@@ -22,6 +22,8 @@ private let configLogger = Logger(subsystem: "com.tbd.daemon", category: "config
 /// do `remote.transcriptSync`, the remote transcript pane and the remote
 /// composer, so nothing reads either column.
 ///
+/// `model_proxy_enabled` and `model_proxy_port` are unused; nothing reads them.
+///
 /// Every one of these columns stays in the schema because a landed migration is
 /// never edited and GRDB ignores columns a record does not name.
 struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
@@ -130,29 +132,12 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// through `Config.gcRetainedTranscriptsEnabledDefault`, never through
     /// `?? false`.
     var gc_retained_transcripts_enabled: Bool?
-    /// Gate for routing pty-holder sessions through the TBD model proxy.
-    /// **Genuinely tri-state**, same shape as `gc_retained_transcripts_enabled`:
-    /// the `20260907215724_config_model_proxy` migration carries no SQL default, so
-    /// `nil` here means "never chose" rather than "off". Resolve it through
-    /// `Config.modelProxyDefault`, never through `?? false`.
-    var model_proxy_enabled: Bool?
     /// Gate for the transcript's provisional assistant row. **Genuinely
-    /// tri-state**, same shape as `model_proxy_enabled`: the
+    /// tri-state**, same shape as `gc_retained_transcripts_enabled`: the
     /// `20260907215725_config_transcript_streaming` migration carries no SQL
     /// default, so `nil` here means "never chose" rather than "off". Resolve it
     /// through `Config.transcriptStreamingDefault`, never through `?? false`.
-    ///
-    /// Resolving it is not the whole answer: streaming needs the proxy, so what
-    /// callers act on is `Config.transcriptStreamingEffective`, the conjunction
-    /// with `modelProxyEnabled`.
     var transcript_streaming_enabled: Bool?
-    /// The loopback port this TBD home's model proxy binds, or nil if none has
-    /// been minted. **Not a flag**, exactly like `holder_owner_token`: NULL
-    /// means "not yet minted", and the mint is the conditional UPDATE in
-    /// `ensureModelProxyPort` rather than a resolved default — the kernel picks
-    /// the first port, and there is no literal the shipped code could fall back
-    /// to that would not collide with whatever already holds it.
-    var model_proxy_port: Int?
     /// Gate for profile balancing across multiple Claude accounts. When enabled,
     /// new sessions land on the eligible profile with the most room, adjusted for
     /// live session count (design 2026-09-05 §6). **Genuinely tri-state**, same
@@ -260,14 +245,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter gcRetainedTranscriptsDefault: and truly the last, for
     ///   `gc_retained_transcripts_enabled` — the retained-transcript GC leg's
     ///   soak gate.
-    /// - Parameter modelProxyDefault: same shape once more, for
-    ///   `model_proxy_enabled` — the gate on routing a session's Messages API
-    ///   traffic through the loopback model proxy.
     /// - Parameter transcriptStreamingDefault: and its companion, for
     ///   `transcript_streaming_enabled` — the gate on the transcript's
-    ///   provisional assistant row. Resolved here on its own; what callers act
-    ///   on is `Config.transcriptStreamingEffective`, its conjunction with the
-    ///   proxy flag.
+    ///   provisional assistant rows, which the session mod's
+    ///   `transcript-stream` feature feeds.
     /// - Parameter updateModeDefault: and truly, finally the last, for
     ///   `update_mode` — the only one of these that is not a Bool, so the
     ///   parameter proves both properties at once: a NULL row follows a changed
@@ -302,7 +283,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         ptyHolderDefault: Bool = Config.ptyHolderDefault,
         remoteDeleteDefault: Bool = Config.remoteDeleteEnabledDefault,
         gcRetainedTranscriptsDefault: Bool = Config.gcRetainedTranscriptsEnabledDefault,
-        modelProxyDefault: Bool = Config.modelProxyDefault,
         transcriptStreamingDefault: Bool = Config.transcriptStreamingDefault,
         updateModeDefault: UpdateMode = Config.updateModeDefault,
         profileBalancingDefault: Bool = Config.profileBalancingEnabledDefault,
@@ -317,9 +297,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
         // budget ("unable to type-check this expression in reasonable time")
-        // when the model-proxy fields were passed inline with the rest. The
-        // three resolutions below are the same `?? default` shape as every
-        // argument above; only where they are written changed.
+        // with every field passed inline. The resolutions below are the same
+        // `?? default` shape as every argument above; only where they are
+        // written changed.
         var config = Config(
             defaultProfileID: default_profile_id.flatMap(UUID.init(uuidString:)),
             primaryAgentPreference: primary_agent_preference
@@ -400,20 +380,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // real state and has no default to resolve to.
             holderOwnerToken: holder_owner_token
         )
-        // And once more, for the model proxy's gate — NOT `?? false`.
-        config.modelProxyEnabled = model_proxy_enabled ?? modelProxyDefault
         // Clone-backed checkout gate — NOT `?? false`.
         config.cloneCheckoutEnabled = clone_checkout_enabled ?? cloneCheckoutDefault
-        // And its companion, for the provisional transcript row's gate — NOT
-        // `?? false`. Resolved on its own here; the conjunction with the proxy
-        // flag lives in `Config.transcriptStreamingEffective`, so a
-        // hand-edited row with streaming on and the proxy off is still
-        // readable as the two separate choices it records.
+        // And the provisional transcript rows' gate — NOT `?? false`.
         config.transcriptStreamingEnabled =
             transcript_streaming_enabled ?? transcriptStreamingDefault
-        // Passed straight through, NULL included: "not yet minted" is a real
-        // state and has no default to resolve to.
-        config.modelProxyPort = model_proxy_port
         // Passed straight through as well: `Config.profileBalancingPolicy`
         // resolves NULL, and a hand-edited out-of-range value, to the shipped
         // thresholds in one place.
@@ -432,7 +403,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         config.remoteTranscriptLiveSyncEnabled =
             remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
         // Program Status Protocol gate — NOT `?? false`. Assigned after
-        // construction, like the proxy fields above, to keep the initializer
+        // construction, like the fields around it, to keep the initializer
         // call inside the type-checker's budget.
         config.programStatusEnabled = program_status_enabled ?? programStatusDefault
         return config
@@ -444,17 +415,11 @@ public enum ConfigStoreError: LocalizedError, Equatable {
     /// The conditional mint ran and the row still holds no usable token — the
     /// singleton row is missing, or something wrote an empty value over it.
     case holderOwnerTokenUnavailable
-    /// The conditional mint ran and the row still holds no usable port — the
-    /// singleton row is missing, or something wrote a non-positive value over
-    /// it.
-    case modelProxyPortUnavailable
 
     public var errorDescription: String? {
         switch self {
         case .holderOwnerTokenUnavailable:
             return "the config row holds no holder owner token and one could not be minted"
-        case .modelProxyPortUnavailable:
-            return "the config row holds no model proxy port and one could not be minted"
         }
     }
 }
@@ -1076,117 +1041,17 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the model-proxy gate (default OFF, soaking) — whether new
-    /// pty-holder sessions are routed through the loopback proxy.
-    ///
-    /// **Turning it off also turns streaming off**, in the same transaction.
-    /// The provisional transcript row reads a file only the proxy writes, so a
-    /// user who switches the proxy off has switched streaming off whether or
-    /// not they know the second flag exists; leaving streaming set to `1` would
-    /// silently re-arm it the next time the proxy came back on. The reverse
-    /// coupling lives in `setTranscriptStreamingEnabled`.
-    ///
-    /// The proxy column is written on every call. The streaming column is
-    /// written only when the proxy is turned off — that is the one gesture
-    /// here that lifts streaming out of NULL, and it does so as a deliberate
-    /// side effect: the effective value readers see is the conjunction of the
-    /// two columns (`Config.transcriptStreamingEffective`), so streaming must
-    /// never be left holding a stale `1` once the proxy it depends on is off.
-    /// Turning the proxy back **on** leaves streaming untouched — see
-    /// `turningTheProxyOnLeavesStreamingAlone`. Applies to sessions started
-    /// after the change: a session's `ANTHROPIC_BASE_URL` is fixed in its
-    /// environment at spawn.
-    public func setModelProxyEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET model_proxy_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-            if !enabled {
-                try db.execute(
-                    sql: "UPDATE config SET transcript_streaming_enabled = 0 WHERE id = ?",
-                    arguments: [Self.singletonID]
-                )
-            }
-        }
-    }
-
     /// Persist the transcript-streaming gate (default OFF, soaking) — whether
-    /// the transcript renders a provisional assistant row from the proxy's
-    /// stream file.
+    /// sessions spawn with the session mod's `transcript-stream` feature, and
+    /// the transcript shows the provisional rows it feeds.
     ///
-    /// **Turning it on also turns the proxy on**, in the same transaction: the
-    /// file it reads does not exist without the proxy, so asking for streaming
-    /// is asking for both. The reverse coupling lives in
-    /// `setModelProxyEnabled`, and together they are what keeps the pair
-    /// coherent for anyone using the toggles — readers still resolve through
-    /// `Config.transcriptStreamingEffective`, because a hand-edited row can
-    /// hold a combination no gesture here can produce.
+    /// Applies to sessions started after the change: the feature list is fixed
+    /// in a session's environment at spawn.
     public func setTranscriptStreamingEnabled(_ enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET transcript_streaming_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
-            )
-            if enabled {
-                try db.execute(
-                    sql: "UPDATE config SET model_proxy_enabled = 1 WHERE id = ?",
-                    arguments: [Self.singletonID]
-                )
-            }
-        }
-    }
-
-    /// Return this TBD home's model-proxy port, persisting `candidate` only if
-    /// none has been minted yet.
-    ///
-    /// The `ensureHolderOwnerToken` shape, and for the same reason: two daemons
-    /// starting at once on one `TBD_HOME` must agree on one port, so the
-    /// decision is made by SQLite rather than by the caller. `WHERE
-    /// model_proxy_port IS NULL` means the second writer's UPDATE matches no
-    /// row, and the read-back inside the same transaction returns whichever
-    /// port actually landed.
-    ///
-    /// A non-positive stored value is treated as unminted: zero is the *ask*
-    /// the proxy is spawned with, never an answer, and a hand-edited or
-    /// half-written negative is not a port anything could bind.
-    ///
-    /// - Returns: the port now stored, which may not be `candidate`.
-    /// - Throws: if the row cannot be written or read — including the case
-    ///   where no singleton row exists at all, which no migrated database has.
-    public func ensureModelProxyPort(minting candidate: Int) async throws -> Int {
-        try await writer.write { db in
-            try db.execute(
-                sql: """
-                    UPDATE config SET model_proxy_port = ?
-                     WHERE id = ? AND (model_proxy_port IS NULL OR model_proxy_port <= 0)
-                    """,
-                arguments: [candidate, Self.singletonID]
-            )
-            let stored = try Int.fetchOne(
-                db,
-                sql: "SELECT model_proxy_port FROM config WHERE id = ?",
-                arguments: [Self.singletonID]
-            )
-            guard let stored, stored > 0 else {
-                throw ConfigStoreError.modelProxyPortUnavailable
-            }
-            return stored
-        }
-    }
-
-    /// Overwrite this TBD home's model-proxy port unconditionally.
-    ///
-    /// The re-mint path: an unrelated process took the stored port while TBD
-    /// was stopped, the daemon's status probe found no TBD proxy answering
-    /// there, and the kernel handed out a fresh one. Unconditional where
-    /// `ensureModelProxyPort` is conditional, because here the stored value is
-    /// known to be wrong rather than possibly already right.
-    public func setModelProxyPort(_ port: Int) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET model_proxy_port = ? WHERE id = ?",
-                arguments: [port, Self.singletonID]
             )
         }
     }

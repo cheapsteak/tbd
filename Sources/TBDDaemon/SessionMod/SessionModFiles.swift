@@ -1,5 +1,6 @@
 import Foundation
 import os
+import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "composer-draft")
 
@@ -7,7 +8,7 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "composer-dra
 /// share under `<sessionsDir>/<claudeSessionID>/`.
 public enum SessionModFiles {
     public static let spawnFileName = "spawn.json"
-    public static let aliveFileName = "alive.json"
+    public static let aliveFileName = SessionModSessionFiles.aliveFileName
     public static let composerDraftFileName = "composer-draft.json"
     public static let composerDraftUnrestoredFileName = "composer-draft.unrestored"
     public static let usageFileName = "usage.json"
@@ -30,25 +31,9 @@ public enum SessionModFiles {
         }
     }
 
-    /// Written by the mod as a heartbeat.
-    public struct AliveRecord: Codable, Equatable, Sendable {
-        public var schemaVersion: Int
-        public var sessionId: String
-        public var incarnationId: String
-        public var modVersion: Int
-        public var features: [String]
-        public var heartbeatAtMs: Int64
-
-        public init(schemaVersion: Int = 1, sessionId: String, incarnationId: String,
-                    modVersion: Int = 1, features: [String], heartbeatAtMs: Int64) {
-            self.schemaVersion = schemaVersion
-            self.sessionId = sessionId
-            self.incarnationId = incarnationId
-            self.modVersion = modVersion
-            self.features = features
-            self.heartbeatAtMs = heartbeatAtMs
-        }
-    }
+    /// Written by the mod as a heartbeat. Shared with the app, which reads it
+    /// to retire a stale session's provisional transcript rows.
+    public typealias AliveRecord = SessionModSessionFiles.AliveRecord
 
     /// Written by the mod whenever the composer box changes.
     public struct ComposerDraftRecord: Codable, Equatable, Sendable {
@@ -149,17 +134,12 @@ public enum SessionModFiles {
 
     /// A session ID becomes a path component only when it is a plain token.
     public static func isSafeSessionID(_ id: String) -> Bool {
-        guard (1...128).contains(id.utf8.count) else { return false }
-        return id.utf8.allSatisfy { byte in
-            (byte >= 0x30 && byte <= 0x39) || (byte >= 0x41 && byte <= 0x5A)
-                || (byte >= 0x61 && byte <= 0x7A) || byte == 0x5F || byte == 0x2D
-        }
+        SessionModSessionFiles.isSafeSessionID(id)
     }
 
     /// The session's directory, or nil when the ID is not safe to use as a path.
     public static func directory(sessionsDir: URL, claudeSessionID: String) -> URL? {
-        guard isSafeSessionID(claudeSessionID) else { return nil }
-        return sessionsDir.appendingPathComponent(claudeSessionID, isDirectory: true)
+        SessionModSessionFiles.directory(sessionsDir: sessionsDir, claudeSessionID: claudeSessionID)
     }
 
     /// Reads and decodes one JSON file. Unknown fields are ignored; a missing

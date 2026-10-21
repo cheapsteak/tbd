@@ -5,7 +5,8 @@ import TBDShared
 
 private let decodeLogger = Logger(subsystem: "com.tbd.daemon", category: "database.decode")
 
-/// GRDB Record type for the `terminal` table.
+/// GRDB Record type for the `terminal` table. The unused
+/// `transcript_stream_path` column is not named here; GRDB ignores it.
 struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     static let databaseTableName = "terminal"
 
@@ -67,11 +68,6 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// never been through a park/wake cycle, where `createdAt` is still the
     /// right identity anchor — see `Terminal.holderChildStartedAt`.
     var holder_child_started_at: Date?
-    /// Absolute path of the model proxy's transcript stream file for this
-    /// session. NULL on every row spawned without a proxy route, which is
-    /// every row written before the column existed — see
-    /// `Terminal.transcriptStreamPath`.
-    var transcript_stream_path: String?
 
     /// The declared dev server this tab runs — see `Terminal.serverName`.
     var server_name: String?
@@ -109,7 +105,6 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.holder_pid = terminal.holderPID
         self.child_pid = terminal.childPID
         self.holder_child_started_at = terminal.holderChildStartedAt
-        self.transcript_stream_path = terminal.transcriptStreamPath
         self.server_name = terminal.serverName
     }
 
@@ -161,8 +156,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             transport: transport.flatMap(TerminalTransport.init(rawValue:)) ?? .tmux,
             holderPID: holder_pid,
             childPID: child_pid,
-            holderChildStartedAt: holder_child_started_at,
-            transcriptStreamPath: transcript_stream_path
+            holderChildStartedAt: holder_child_started_at
         )
         model.serverName = server_name
         return model
@@ -317,10 +311,6 @@ struct TerminalReplacementSnapshot: Sendable {
     let kind: TerminalKind?
     let claudeSessionID: String?
     let transcriptPath: String?
-    /// The proxy route the observed process was launched on. Stamped at spawn
-    /// and never changed, so a mismatch here says the row's session was
-    /// replaced under the caller — exactly what the rest of the snapshot says.
-    let transcriptStreamPath: String?
     let profileID: UUID?
     let suspendedAt: Date?
     let hibernatedAt: Date?
@@ -331,7 +321,6 @@ struct TerminalReplacementSnapshot: Sendable {
         kind = terminal.kind
         claudeSessionID = terminal.claudeSessionID
         transcriptPath = terminal.transcriptPath
-        transcriptStreamPath = terminal.transcriptStreamPath
         profileID = terminal.profileID
         suspendedAt = terminal.suspendedAt
         hibernatedAt = terminal.hibernatedAt
@@ -343,7 +332,6 @@ struct TerminalReplacementSnapshot: Sendable {
             && record.kind == kind?.rawValue
             && record.claudeSessionID == claudeSessionID
             && record.transcriptPath == transcriptPath
-            && record.transcript_stream_path == transcriptStreamPath
             && record.profile_id == profileID?.uuidString
             && record.suspendedAt == suspendedAt
             && record.hibernatedAt == hibernatedAt
@@ -355,7 +343,6 @@ struct TerminalReplacementSnapshot: Sendable {
             && terminal.kind == kind
             && terminal.claudeSessionID == claudeSessionID
             && terminal.transcriptPath == transcriptPath
-            && terminal.transcriptStreamPath == transcriptStreamPath
             && terminal.profileID == profileID
             && terminal.suspendedAt == suspendedAt
             && terminal.hibernatedAt == hibernatedAt
@@ -471,13 +458,6 @@ private func resetAgentProcessLifecycle(
     let incarnationID = UUID()
     record.claudeSessionID = sessionID
     record.transcriptPath = transcriptPath
-    // The proxy route is stamped per PROCESS, not per session: it names the
-    // stream file the job about to be replaced was launched against, and the
-    // replacement gets a route of its own or none at all. Leaving it would
-    // point the app's tail at a file the retired route's proxy has unlinked,
-    // and would make every `TerminalReplacementSnapshot` taken afterwards
-    // compare against a path no live process is writing.
-    record.transcript_stream_path = nil
     record.sessionOrderObservedAt = nil
     record.codexTranscriptBoundaryOffset = nil
     record.sessionIncarnationID = incarnationID.uuidString
@@ -764,14 +744,6 @@ public struct TerminalStore: Sendable {
         holderPID: Int32? = nil,
         childPID: Int32? = nil,
         holderChildStartedAt: Date? = nil,
-        // The model proxy stream file this row's session was launched
-        // against, or nil for an unproxied spawn. Taken at creation rather than
-        // written by a follow-up `UPDATE` because
-        // `TerminalReplacementSnapshot` compares this column: a row that exists
-        // for even one `await` without it can be snapshotted by a concurrent
-        // caller, and the stamp that arrives afterwards then makes every
-        // replacement that snapshot authorized reject.
-        transcriptStreamPath: String? = nil,
         serverName: String? = nil,
         sessionIncarnationID: UUID? = nil
     ) async throws -> Terminal {
@@ -792,7 +764,6 @@ public struct TerminalStore: Sendable {
         )
         // Assigned rather than passed: `Terminal`'s memberwise initializer is
         // already at the Swift type-checker's expression budget here.
-        terminal.transcriptStreamPath = transcriptStreamPath
         terminal.serverName = serverName
         terminal.sessionIncarnationID = sessionIncarnationID
         let record = TerminalRecord(from: terminal)
@@ -831,37 +802,6 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Whether any session that was spawned through the model proxy is still
-    /// alive.
-    ///
-    /// The one question the supervisor's drain asks the database, and it asks
-    /// it once, at daemon start with `model_proxy_enabled` off: a proxy is kept
-    /// alive for sessions that are already routed through it, and an install
-    /// that has none must run nothing at all (spec, "Supervisor" → Gate).
-    ///
-    /// "Routed" is `transcriptStreamPath`, which is stamped at spawn and
-    /// cleared when the process it named is replaced, so a row still carrying
-    /// one names a job whose `ANTHROPIC_BASE_URL` points at the proxy. "Alive"
-    /// is the negation of `Terminal.isExitStamped` rather than a second
-    /// spelling of it in SQL: a parked session is woken by a gesture and its
-    /// next turn goes through the proxy, so only a row whose agent process has
-    /// actually left is finished with the port.
-    ///
-    /// Filtered in SQL and judged in Swift on purpose. The filter is the cheap,
-    /// unambiguous half — one indexed-in-practice column, and every install
-    /// that never enabled the proxy answers it with an empty set — while the
-    /// judgment is the model's own property, so it cannot drift from the one
-    /// every other reader uses.
-    public func hasLiveRoutedSession() async throws -> Bool {
-        try await writer.read { db in
-            try TerminalRecord
-                .filter(Column("transcript_stream_path") != nil)
-                .fetchAll(db)
-                .compactMap { $0.toModel() }
-                .contains { !$0.isExitStamped }
-        }
-    }
-
     /// Whether any session on the pty-holder transport is still alive.
     ///
     /// The second term of `NightwatchHolderGate.watchModesBlocked`, and the one
@@ -870,7 +810,6 @@ public struct TerminalStore: Sendable {
     /// adopted several, so "no holder can be started" is not "no holder is
     /// running".
     ///
-    /// Same shape as `hasLiveRoutedSession` above, for the same reasons.
     /// Filtered in SQL on the one unambiguous column — every install that never
     /// ran a holder answers with an empty set — and judged in Swift by
     /// `Terminal.isExitStamped`, so liveness cannot drift from the spelling
@@ -2406,29 +2345,6 @@ public struct TerminalStore: Sendable {
             record.child_pid = childPID
             record.holder_child_started_at = startedAt
             try record.update(db)
-        }
-    }
-
-    /// Record — or clear — the model proxy stream file this terminal's session
-    /// was launched against.
-    ///
-    /// Written once, at spawn, right after the row exists and before the app is
-    /// told about it; `nil` clears the route when a session is spawned without
-    /// one. A single-column `UPDATE` rather than a read-modify-write of the
-    /// whole record on purpose: spawn runs concurrently with the first hooks
-    /// from the process it just started, and rewriting every column here would
-    /// let this write reinstate the session and activity columns those hooks
-    /// had already moved.
-    ///
-    /// A row that has since vanished is a no-op, matching `setProfileID`: the
-    /// terminal this route belonged to is gone, and so is anything that could
-    /// read the route.
-    public func setTranscriptStreamPath(terminalID: UUID, path: String?) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE terminal SET transcript_stream_path = ? WHERE id = ?",
-                arguments: [path, terminalID.uuidString]
-            )
         }
     }
 

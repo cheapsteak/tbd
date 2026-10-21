@@ -277,7 +277,6 @@ struct GeneralSettingsTab: View {
                     .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 controlModeToggle
                 ptyHolderToggle
-                modelProxyToggle
                 transcriptStreamingToggle
                 transcriptPromptAnswerToggle
                 composerDraftToggle
@@ -401,42 +400,18 @@ struct GeneralSettingsTab: View {
         }
     }
 
-    /// Model-proxy opt-in. Reads the persisted flag from `daemon.capabilities`
-    /// and writes via `config.setModelProxyEnabled`. Stays enabled even when
-    /// the daemon reports `modelProxySupported == false`: turning the flag OFF
-    /// has to remain possible on a daemon that cannot start the proxy, which is
-    /// exactly the daemon an operator most wants to stop routing through.
-    @ViewBuilder
-    private var modelProxyToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Route new sessions through the TBD model proxy", isOn: Binding(
-            get: { capabilities?.modelProxyEnabled ?? false },
-            set: { newValue in Task { await appState.setModelProxyEnabled(newValue) } }
-        ))
-        .help(AppState.modelProxyHelp)
-    }
-
-    /// Transcript-streaming opt-in, sitting under the proxy it depends on.
-    /// Reads the persisted flag from `daemon.capabilities` and writes via
-    /// `config.setTranscriptStreamingEnabled` — one write: turning this on also
-    /// turns the proxy on, and the daemon owns that coupling. Disabled with an
-    /// explanation when the daemon could not start a proxy, since the stream
-    /// file this renders is written by nothing else.
+    /// Transcript-streaming opt-in. Reads the persisted flag from
+    /// `daemon.capabilities` and writes via `config.setTranscriptStreamingEnabled`.
+    /// The stream comes from the session mod's `transcript-stream` feature, on
+    /// both terminal transports.
     @ViewBuilder
     private var transcriptStreamingToggle: some View {
         let capabilities = appState.daemonCapabilities
-        let supported = capabilities?.modelProxySupported ?? false
         Toggle("Stream assistant text into the transcript", isOn: Binding(
             get: { capabilities?.transcriptStreamingEnabled ?? false },
             set: { newValue in Task { await appState.setTranscriptStreamingEnabled(newValue) } }
         ))
         .help(AppState.transcriptStreamingHelp)
-        .disabled(!supported)
-        if !supported {
-            Text(AppState.transcriptStreamingUnsupportedCaption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
     }
 
     /// Ask for a first message when creating a worktree. Reads the persisted

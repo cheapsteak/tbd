@@ -56,10 +56,10 @@ struct TranscriptRenderNode: Identifiable, Equatable {
     /// corrects it.
     let contentVersion: UInt64
 
-    /// True for the model-proxy stream's provisional assistant row — the one
-    /// row in the list whose text is still arriving and which the transcript
-    /// JSONL has not confirmed. The bubble draws a trailing cursor for it and
-    /// nothing else changes.
+    /// True for a row the session mod streamed and the transcript JSONL has
+    /// not confirmed yet: a provisional assistant bubble (whose text carries
+    /// the ▍ cursor while it streams, see `ProvisionalRowComposer`) or a
+    /// provisional thinking summary.
     ///
     /// Derived from the item id's `stream:` prefix by
     /// `transcriptRenderNodes(from:)`, so no extra state has to be threaded
@@ -110,6 +110,10 @@ struct TranscriptRenderNode: Identifiable, Equatable {
                       inputTruncatedTo: Int?, result: ToolResult?, timestamp: Date?)
         case activityGroupSummary(ActivityGroupSummary)
         case subagentSummary(parentItemID: String, count: Int, agentType: String?)
+        /// A thinking summary the session mod streamed, shown until the JSONL
+        /// confirms it. Settled thinking stays hidden; only a provisional
+        /// `.thinking` item becomes this node.
+        case thinking(id: String, text: String)
 
         /// Hand-written structural `==` replaces the compiler-synthesized
         /// `__derived_enum_equals` that appeared high in the issue #129 freeze.
@@ -135,6 +139,8 @@ struct TranscriptRenderNode: Identifiable, Equatable {
             case (.subagentSummary(let lp, let lc, let la),
                   .subagentSummary(let rp, let rc, let ra)):
                 return lp == rp && lc == rc && la == ra
+            case (.thinking(let li, let lt), .thinking(let ri, let rt)):
+                return li == ri && lt == rt
             default:
                 return false
             }
@@ -171,20 +177,21 @@ nonisolated func transcriptRenderNodes(
     var out: [TranscriptRenderNode] = []
     out.reserveCapacity(items.count)
     for item in items {
-        if isHiddenInTranscript(item), pendingPrompts[item.id] == nil { continue }
+        // The `stream:` prefix is what marks a row provisional; see
+        // `ProvisionalRowComposer.idPrefix`. A provisional thinking summary is
+        // the one hidden kind that shows.
+        let isProvisional = ProvisionalRowComposer.isProvisional(itemID: item.id)
+        if isHiddenInTranscript(item), pendingPrompts[item.id] == nil, !isProvisional { continue }
 
         let badge: TokenUsage? = (item.id == latestUsageItemID) ? item.usage : nil
 
         switch item {
         case .userPrompt, .assistantText, .peerMessage:
-            // The `stream:` prefix is what marks a row provisional; see
-            // `ProvisionalRowComposer.idPrefix`. Only a chat bubble can carry
-            // it — the composer only ever appends `.assistantText`.
             out.append(TranscriptRenderNode(
                 id: item.id,
                 kind: .chatBubble(item),
                 badgeUsage: badge,
-                isProvisional: ProvisionalRowComposer.isProvisional(itemID: item.id)))
+                isProvisional: isProvisional))
 
         case .systemReminder(let id, let kind, let text, let ts, let source, let truncatedTo):
             if kind == .skillBody {
@@ -215,8 +222,15 @@ nonisolated func transcriptRenderNodes(
                 pendingPrompt: pendingPrompts[id]
             ))
 
+        case .thinking(let id, let text, _) where isProvisional:
+            out.append(TranscriptRenderNode(
+                id: id,
+                kind: .thinking(id: id, text: text),
+                badgeUsage: nil,
+                isProvisional: true))
+
         case .thinking, .slashCommand:
-            // .thinking is filtered earlier by isHiddenInTranscript;
+            // Settled .thinking is filtered earlier by isHiddenInTranscript;
             // .slashCommand reaches here (TranscriptParser folds it into
             // .userPrompt in practice, so this branch is effectively dead).
             // Both are dropped from the render list.

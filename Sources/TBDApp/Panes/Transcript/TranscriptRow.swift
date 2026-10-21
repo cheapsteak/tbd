@@ -97,6 +97,8 @@ struct TranscriptRow: View {
             // enum case is retained for Codable/source compatibility but is
             // never produced by `transcriptRenderNodes(from:)`.
             EmptyView()
+        case .thinking(let id, let text):
+            ThinkingRow(id: id, text: text, timestamp: nil, isProvisional: node.isProvisional)
         }
     }
 

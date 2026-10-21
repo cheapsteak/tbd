@@ -244,13 +244,12 @@ extension TBDHomeSerialized {
     // MARK: - A replacement spawn's overlay is written at launch
 
     private func replacementOverlay(
-        sessionKey: String, role: WatchDeskRole?, fallbackModels: [String]? = nil,
-        repoSettingsJSON: String? = nil
+        sessionKey: String, role: WatchDeskRole?, fallbackModels: [String]? = nil
     ) -> ReplacementSpawnOverlay {
         ReplacementSpawnOverlay.plan(
             fallbackModels: fallbackModels,
             sessionKey: sessionKey,
-            repoSettingsJSON: repoSettingsJSON,
+            repoSettingsJSON: nil,
             watchDeskRole: role,
             worktreePath: nil,
             profileConfigDir: nil,
@@ -395,28 +394,6 @@ extension TBDHomeSerialized {
 
         #expect(try Data(contentsOf: URL(fileURLWithPath: overlay.path))
                 == (try ClaudeHookOverlay.generateBody(fallbackModels: models)))
-    }
-
-    /// The model proxy decides before the launch whether the overlay will set
-    /// `ANTHROPIC_BASE_URL`, so the answer comes from the planned body — not
-    /// from a file that does not exist yet, or that holds another process's.
-    @Test func theRoutingQuestionIsAnsweredFromThePlanNotTheFile() throws {
-        let scratch = Scratch()
-        defer { scratch.cleanUp() }
-        let key = UUID().uuidString
-        let setsURL = #"{"env":{"ANTHROPIC_BASE_URL":"https://proxy.acme.test"}}"#
-        _ = try seedOverlay(sessionKey: key, Data(setsURL.utf8))
-
-        let plain = replacementOverlay(sessionKey: key, role: .readOnlyCoordinator)
-        #expect(!plain.setsEnv("ANTHROPIC_BASE_URL"),
-                "the routing question read the running process's overlay")
-
-        let other = UUID().uuidString
-        let routed = replacementOverlay(
-            sessionKey: other, role: nil, repoSettingsJSON: setsURL)
-        #expect(routed.setsEnv("ANTHROPIC_BASE_URL"))
-        #expect(!FileManager.default.fileExists(atPath: routed.path),
-                "answering the routing question wrote the overlay")
     }
 
     /// When the per-session write fails at launch, `resolveOverlayPath` falls

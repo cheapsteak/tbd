@@ -387,8 +387,7 @@ struct TableTranscriptView: NSViewRepresentable {
             let key = ComposedKey(id: node.id, version: node.contentVersion)
             if let cached = composedCache[key] { return cached }
             let composed = TranscriptBubbleGeometry.composedBlocks(
-                for: item, badgeUsage: node.badgeUsage, linkResolver: context.linkResolver,
-                isProvisional: node.isProvisional)
+                for: item, badgeUsage: node.badgeUsage, linkResolver: context.linkResolver)
             composedCache[key] = composed
             return composed
         }
@@ -1066,6 +1065,8 @@ struct TableTranscriptView: NSViewRepresentable {
                 return activityRowHeight(style: .chrome)
             case .subagentSummary:
                 return activityRowHeight(style: .plainSummary)
+            case .thinking:
+                return activityRowHeight(style: .chrome)
             case .toolCall(_, let name, let inputJSON, _, _, _):
                 // AskUserQuestion is the one toolCall that stays a hosted SwiftUI
                 // card (its activity presentation is nil); every other toolCall is

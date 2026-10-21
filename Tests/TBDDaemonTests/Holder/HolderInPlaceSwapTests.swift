@@ -439,7 +439,7 @@ struct HolderInPlaceSwapTests {
             expectedReplacementState: TerminalReplacementSnapshot(terminal: rehomed),
             spawnCommand: "claude --resume \(Self.sessionID)",
             env: ["TBD_TERMINAL_ID": rehomed.id.uuidString],
-            attachment: .unproxied([:]),
+            sensitiveEnv: [:],
             cols: 80,
             rows: 24,
             overlay: Self.plainOverlay(rehomed))
@@ -483,7 +483,7 @@ struct HolderInPlaceSwapTests {
             expectedReplacementState: TerminalReplacementSnapshot(terminal: terminal),
             spawnCommand: "claude --resume \(Self.sessionID)",
             env: ["TBD_TERMINAL_ID": terminal.id.uuidString],
-            attachment: .unproxied([:]),
+            sensitiveEnv: [:],
             cols: 80,
             rows: 24,
             spawnTitle: spawnTitle,
@@ -525,7 +525,7 @@ struct HolderInPlaceSwapTests {
             expectedReplacementState: TerminalReplacementSnapshot(terminal: terminal),
             spawnCommand: "claude --resume \(sessionID)",
             env: ["TBD_TERMINAL_ID": terminal.id.uuidString],
-            attachment: .unproxied([:]),
+            sensitiveEnv: [:],
             cols: 80,
             rows: 24,
             overlay: plainOverlay(terminal))

@@ -643,28 +643,6 @@ public enum ClaudeHookOverlay {
         return extraSettings
     }
 
-    /// Whether the per-session overlay these inputs produce sets `key` in its
-    /// top-level `env` object — `overlaySetsEnv` asked of a body built in
-    /// memory, for a spawn that writes its overlay only at launch but must
-    /// make its routing decision first. The statusline is left out of the
-    /// body: it never touches `env`.
-    static func perSessionOverlaySetsEnv(
-        _ key: String,
-        fallbackModels: [String]?,
-        repoSettingsJSON: String?,
-        extraSettingsJSON: String?,
-        promptAnswerHooks: Bool
-    ) -> Bool {
-        guard let data = try? generateBody(
-                fallbackModels: fallbackModels,
-                extraSettings: mergedExtraSettings(
-                    repoSettingsJSON: repoSettingsJSON, extraSettingsJSON: extraSettingsJSON),
-                promptAnswerHooks: promptAnswerHooks),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let env = root["env"] as? [String: Any] else { return false }
-        return env[key] != nil
-    }
-
     /// Whether a desk spawn whose session mod is `sessionMod` installs the
     /// statusline tee: only when the spawn does not carry `usage`. A spawn
     /// carrying `usage` reports its window through the mod's `usage.json`, so
@@ -768,40 +746,13 @@ public enum ClaudeHookOverlay {
     public static func overlayExists() -> Bool {
         FileManager.default.fileExists(atPath: overlayPath)
     }
-
-    /// Whether the settings file this spawn will run with sets `key` in its
-    /// top-level `env` object.
-    ///
-    /// Asked of the **resolved** overlay — the exact path handed to
-    /// `--settings`, fragments already deep-merged — rather than of the repo
-    /// fragment or the per-spawn fragment separately, because a key may come
-    /// from either and what decides the session is the merged file.
-    ///
-    /// It exists for one caller: the model proxy has to know whether the user's
-    /// own settings will override the `ANTHROPIC_BASE_URL` it is about to put
-    /// in the process environment (Claude Code applies `settings.json`'s `env`
-    /// after the environment it inherits), and route a session it cannot
-    /// actually route.
-    ///
-    /// A pure read. A nil path, a file that is not there, bytes that are not
-    /// JSON, and a document with no `env` object all answer false — the same
-    /// answer, because none of them is a setting that would win, and none of
-    /// them is a reason to refuse a spawn.
-    static func overlaySetsEnv(_ key: String, overlayPath: String?) -> Bool {
-        guard let overlayPath,
-              let data = FileManager.default.contents(atPath: overlayPath),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let env = root["env"] as? [String: Any] else { return false }
-        return env[key] != nil
-    }
 }
 
 /// The overlay of a spawn that replaces a process in an existing row — a wake,
 /// an in-place profile swap, Continue in Claude — planned before the spawn
 /// knows which session-mod features it carries, and written only at launch.
 ///
-/// Those spawns compose their command, and the model proxy makes its routing
-/// decision, before the row mints the incarnation `SessionModSpawn.prepare`
+/// Those spawns compose their command before the row mints the incarnation `SessionModSpawn.prepare`
 /// writes into `spawn.json`, so `prepare` can only run just before launch —
 /// and some of them never launch: a wake that adopts a holder still running
 /// starts nothing, and a swap can fail before its replacement starts. So
@@ -880,22 +831,6 @@ struct ReplacementSpawnOverlay: Sendable {
         return { candidate in
             candidate == planned || FileManager.default.fileExists(atPath: candidate)
         }
-    }
-
-    /// Whether the overlay this spawn will run with sets `key` in its `env` —
-    /// what the model proxy asks before composing the command. Answered from
-    /// the planned body rather than from the file, which `settle` has not
-    /// written yet and which may still hold an earlier process's overlay.
-    func setsEnv(_ key: String) -> Bool {
-        guard isPerSession else {
-            return ClaudeHookOverlay.overlaySetsEnv(key, overlayPath: path)
-        }
-        return ClaudeHookOverlay.perSessionOverlaySetsEnv(
-            key,
-            fallbackModels: fallbackModels,
-            repoSettingsJSON: repoSettingsJSON,
-            extraSettingsJSON: nil,
-            promptAnswerHooks: promptAnswerHooks)
     }
 
     /// Writes the overlay for the session mod this spawn was actually given,

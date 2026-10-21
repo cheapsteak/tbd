@@ -57,11 +57,20 @@ true, Y breaks". -->
 
 <!-- ═══════════════════════ FEATURE ═══════════════════════ -->
 
+## User story
+
+<!-- Required for feature PRs: replace this comment with prose. One
+sentence in either form:
+  As a <who>, I want <what>, so that <why>.
+  When <situation>, I want to <motivation>, so I can <outcome>.
+Titles typed fix, docs, chore, test, ci, build or revert are exempt. -->
+
 ## Summary
 
-<!-- The job to be done: who this is for, what they can do now that they
-couldn't, and why it matters. Pragmatics and semantics, minimal syntax and
-jargon — explain it the way you'd explain it to a user, not a compiler. -->
+<!-- Why it matters: what someone can do now that they couldn't, and the
+context a reviewer needs to see the change's value. Pragmatics and semantics,
+minimal syntax and jargon — explain it the way you'd explain it to a user, not
+a compiler. -->
 
 ## Why this shape
 
@@ -71,8 +80,22 @@ shipped without a spec, say here why it didn't need one. -->
 
 ## What this PR does
 
-<!-- The implementation at survey altitude: what got added or changed, where.
-Bullets are fine. -->
+<!-- How the user story is achieved, at survey altitude. One bullet per part of
+the change, named for what it does rather than where it lives: a **bold lead
+term** – what it does and who sees it. Name files only to anchor a bullet,
+never to lead one. A reader who never opens the diff should come away knowing
+how the change works.
+
+Do — named for what it does:
+- **CI check** – fails a feature PR whose description has no filled
+  User story section. Either story form passes.
+- **Agent warning** – a guardrail warns at `gh pr create` when the story is
+  missing. It never blocks, and it shares the CI check's code, so the two
+  always agree.
+
+Don't — a file list:
+- `.github/workflows/pr-user-story.yml`: new job on `pull_request`.
+- `.claude/hooks/guardrails/rules/pr_user_story.py`: new guardrail rule. -->
 
 ## Flag & rollout
 

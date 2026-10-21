@@ -147,12 +147,10 @@ tee fires, and an old capture must never speak for a new process: a tee desk
 swapped from a 1M-token profile to a 200k one would otherwise report 1M until
 its first statusline render.
 
-The model proxy's routing decision, which comes before the command, asks
-whether the overlay sets `ANTHROPIC_BASE_URL`; a replacement spawn answers from
-the planned body, not from the file. If the per-session write fails at launch,
-the spawn falls back to the shared global overlay, as every spawn's overlay
-resolution does, and launches with its command's `--settings` repointed there
-(or dropped, when the global overlay is missing too). The process then runs
+If the per-session write fails at launch, the spawn falls back to the shared
+global overlay, as every spawn's overlay resolution does, and launches with its
+command's `--settings` repointed there (or dropped, when the global overlay is
+missing too). The process then runs
 without a tee and with only TBD's hooks, never against a missing file or one
 an earlier process left. Its statusline capture is gone as for every launch,
 so an earlier process's capture is not read as this one's window.

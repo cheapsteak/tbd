@@ -500,17 +500,10 @@ public enum RPCMethod {
     /// opt-in. Reading needs no method of its own: `config.get` already carries
     /// the resolved value.
     public static let configSetPtyHolderEnabled = "config.setPtyHolderEnabled"
-    /// The model-proxy gate (`model_proxy_enabled`) — whether a new pty-holder
-    /// session's Messages API traffic is routed through the loopback proxy.
-    /// Reading needs no method of its own: `config.get` carries the resolved
-    /// value and `daemon.capabilities` carries it beside the supported/port
-    /// facts that explain a greyed-out toggle.
-    public static let configSetModelProxyEnabled = "config.setModelProxyEnabled"
     /// The transcript-streaming gate (`transcript_streaming_enabled`) — whether
-    /// the transcript renders a provisional assistant row from the proxy's
-    /// stream file. Coupled to `configSetModelProxyEnabled`: streaming on turns
-    /// the proxy on, and the proxy off turns streaming off. Reading needs no
-    /// method of its own, for the same reason.
+    /// the transcript renders a provisional assistant row while the model
+    /// streams. Reading needs no method of its own: `config.get` carries the
+    /// resolved value and `daemon.capabilities` carries it too.
     public static let configSetTranscriptStreamingEnabled =
         "config.setTranscriptStreamingEnabled"
     /// The update mode (`update_mode`) — `off`, `check` or `auto`. The one
@@ -2320,29 +2313,11 @@ public struct ConfigSetPtyHolderEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setModelProxyEnabled` — the model-proxy gate (default OFF
-/// during soak), which decides whether a *new* pty-holder session is spawned
-/// with its Messages API base URL pointed at the loopback proxy. Writing either
-/// value is the explicit gesture that lifts the column out of its NULL "never
-/// chose" state, so an operator who turns the feature off stays off when the
-/// shipped default graduates.
-///
-/// Turning it off also writes `transcript_streaming_enabled` off — the daemon
-/// does that in one transaction, because the provisional transcript row reads a
-/// file only the proxy writes.
-public struct ConfigSetModelProxyEnabledParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setTranscriptStreamingEnabled` — the transcript-streaming
 /// gate (default OFF during soak), which decides whether the transcript renders
-/// a provisional assistant row from the proxy's stream file. Writing either
-/// value is the explicit gesture that lifts the column out of its NULL "never
-/// chose" state.
-///
-/// Turning it on also writes `model_proxy_enabled` on — the file it reads does
-/// not exist without the proxy, so asking for streaming is asking for both.
+/// a provisional assistant row while the model streams. Writing either value
+/// is the explicit gesture that lifts the column out of its NULL "never chose"
+/// state.
 ///
 /// Named without the method's trailing `Enabled`: the symmetrical
 /// `ConfigSetTranscriptStreamingEnabledParams` is 41 characters and SwiftLint's
@@ -4378,64 +4353,34 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// sessions.
     ///
     /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `modelProxyEnabled` gives. Absent on the wire
-    /// reads false, like `ptyHolderSupported`: a daemon that never sent it is
-    /// one that has no holder path to report.
+    /// the type-checker reason `profileBalancingEnabled` gives. Absent on the
+    /// wire reads false, like `ptyHolderSupported`: a daemon that never sent it
+    /// is one that has no holder path to report.
     public var ptyHolderSessionsLive: Bool = false
-    /// Whether the model-proxy gate (`model_proxy_enabled`) is set. Default OFF
-    /// while it soaks. Read at spawn time, so the Settings toggle reads it back
-    /// from here rather than from a local guess — and a session already running
-    /// keeps the base URL fixed in its environment either way.
-    ///
-    /// `var` rather than `let` deliberately: this type's memberwise initializer
-    /// is at the type-checker's expression budget, so a caller may have to
-    /// construct with the older arguments and assign the newer fields after.
-    public var modelProxyEnabled: Bool
-    /// Whether this daemon could actually route a session through a proxy — a
-    /// live supervisor with a bound port. Computed daemon-side, exactly as
-    /// `ptyHolderSupported` is, so the app never probes loopback itself.
-    ///
-    /// With the flag on and this false, every spawn proceeds unproxied — so
-    /// Settings disables the streaming toggle and says why rather than offering
-    /// a switch that would change nothing.
-    public var modelProxySupported: Bool
-    /// The loopback port the proxy is listening on, or nil when there is none.
-    /// Diagnostic: it is what Settings shows so an operator can curl the
-    /// proxy's own `/tbd/status` without going into `~/tbd/state.db`.
-    public var modelProxyPort: Int?
-    /// The running proxy's build version, or nil when there is none. The
-    /// supervisor retires a proxy whose version differs from the daemon's own
-    /// binary, so a value here that disagrees with the app's version is the
-    /// visible form of "a retire is due".
-    public var modelProxyVersion: String?
-    /// Whether transcript streaming is effective — the *conjunction* of
-    /// `transcript_streaming_enabled` and `model_proxy_enabled`, resolved
-    /// daemon-side. A hand-edited row holding streaming on with the proxy off
-    /// streams nothing, and this field says so rather than making the app
-    /// re-derive the pair.
+    /// Whether transcript streaming is on (`transcript_streaming_enabled`),
+    /// resolved daemon-side through `Config.transcriptStreamingDefault`.
     public var transcriptStreamingEnabled: Bool
     /// Whether the profile balancing gate is currently set (design 2026-09-05
     /// §6). Default OFF while it soaks. Resolved through
     /// `Config.profileBalancingEnabledDefault`, so an install that never touched
     /// the toggle reports whatever the shipped default currently is.
     ///
-    /// `var` rather than `let` for the same reason as `modelProxyEnabled`: this
-    /// type's memberwise initializer is at the type-checker's expression
-    /// budget, so callers construct with the older arguments and assign this
-    /// after.
+    /// `var` rather than `let` deliberately: this type's memberwise initializer
+    /// is at the type-checker's expression budget, so callers construct with
+    /// the older arguments and assign this after.
     public var profileBalancingEnabled: Bool
     /// Whether schedule-based PR polling is on (`pr_poll_schedule_enabled`).
     /// Default OFF while it soaks. Resolved through `Config.prPollScheduleDefault`.
     ///
     /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `modelProxyEnabled` gives.
+    /// the type-checker reason `profileBalancingEnabled` gives.
     public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
     /// Whether the Program Status Protocol is on (`program_status_enabled`).
     /// Default OFF while it soaks. Resolved through
     /// `Config.programStatusEnabledDefault`.
     ///
     /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `modelProxyEnabled` gives.
+    /// the type-checker reason `profileBalancingEnabled` gives.
     public var programStatusEnabled: Bool = Config.programStatusEnabledDefault
     /// Whether answering prompts from the transcript is on
     /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
@@ -4452,7 +4397,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Balancing's usage ceiling and maximum reading age as stored, nil when
     /// never set, so the app runs the picker under the daemon's thresholds.
     /// Assigned after construction, for the type-checker reason
-    /// `modelProxyEnabled` gives. `profileBalancingPolicy` resolves them.
+    /// `profileBalancingEnabled` gives. `profileBalancingPolicy` resolves them.
     public var profileBalancingUsageCeilingPercent: Int?
     public var profileBalancingMaxReadingAgeSeconds: Int?
 
@@ -4467,7 +4412,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Resolved through `Config.remoteTranscriptLiveSyncEnabledDefault`.
     ///
     /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `modelProxyEnabled` gives.
+    /// the type-checker reason `profileBalancingEnabled` gives.
     public var remoteTranscriptLiveSyncEnabled: Bool = Config.remoteTranscriptLiveSyncEnabledDefault
 
     public init(controlModeEnabled: Bool,
@@ -4487,10 +4432,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 updateMode: UpdateMode = Config.updateModeDefault,
                 ptyHolderEnabled: Bool = false,
                 ptyHolderSupported: Bool = false,
-                modelProxyEnabled: Bool = Config.modelProxyDefault,
-                modelProxySupported: Bool = false,
-                modelProxyPort: Int? = nil,
-                modelProxyVersion: String? = nil,
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault) {
         self.controlModeEnabled = controlModeEnabled
@@ -4510,10 +4451,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.updateMode = updateMode
         self.ptyHolderEnabled = ptyHolderEnabled
         self.ptyHolderSupported = ptyHolderSupported
-        self.modelProxyEnabled = modelProxyEnabled
-        self.modelProxySupported = modelProxySupported
-        self.modelProxyPort = modelProxyPort
-        self.modelProxyVersion = modelProxyVersion
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
         self.profileBalancingEnabled = profileBalancingEnabled
     }
@@ -4578,18 +4515,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .ptyHolderSupported) ?? false
         ptyHolderSessionsLive = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSessionsLive) ?? false
-        // New fields for the model proxy. A daemon that does not send
-        // `modelProxyEnabled` runs no proxy at all, so fall through to the
-        // shipped defaults rather than assuming the route is live. `supported`,
-        // `port` and `version` are facts about THIS daemon's running proxy, so
-        // absent values are honestly false/nil — which greys the toggles out on
-        // an older daemon instead of offering switches it would ignore.
-        modelProxyEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .modelProxyEnabled) ?? Config.modelProxyDefault
-        modelProxySupported = try c.decodeIfPresent(
-            Bool.self, forKey: .modelProxySupported) ?? false
-        modelProxyPort = try c.decodeIfPresent(Int.self, forKey: .modelProxyPort)
-        modelProxyVersion = try c.decodeIfPresent(String.self, forKey: .modelProxyVersion)
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault

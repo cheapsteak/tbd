@@ -232,9 +232,7 @@ extension WorktreeLifecycle {
                 claudeSessionID: nil,
                 profileID: nil,
                 kind: .shell,
-                transport: transport,
-                attachment: nil,
-                modelProxySupervisor: modelProxySupervisor)
+                transport: transport)
             // Kill the untracked initial window that new-session created, but skip
             // if a restarted tmux server reused the window ID for the replacement
             // we just created (ABA scenario: the fresh window and the old ID are
@@ -452,8 +450,7 @@ extension WorktreeLifecycle {
                 // The terminal row went with the worktree, so nothing can read
                 // the pids back any more — this is the last moment either can
                 // be named, and the descriptor phase 2b returned is where they
-                // are. A hook tab is never routed through the model proxy, so
-                // there is no route to retire here.
+                // are.
                 await abandonHookHolder(
                     terminalID: preSession.terminalID,
                     holderPID: preSession.holderPID,
@@ -591,11 +588,9 @@ extension WorktreeLifecycle {
     /// which is a strictly safer place to take it from than the alternative of
     /// giving up on a teardown whose whole purpose is reclamation. The two
     /// halves then differ only in where the pids are read from — both reclaim
-    /// through `abandonHookHolder`, and neither retires a model-proxy route,
-    /// because a hook tab is spawned with no attachment (`attachment: nil` at
-    /// both hook-tab spawn sites) and so is never routed. A row-backed *agent*
-    /// tab would not be safe to tear down this way, which is why this
-    /// reasoning is local to hook tabs.
+    /// through `abandonHookHolder`. A row-backed *agent* tab would not be safe
+    /// to tear down this way, which is why this reasoning is local to hook
+    /// tabs.
     func closeHookTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
         await closeHookTerminal(
             worktree: worktree,
@@ -664,11 +659,9 @@ extension WorktreeLifecycle {
             // rendezvous files would outlive the row that is their only record.
             //
             // Reclaimed through `abandonHookHolder` on both halves, not
-            // through `disposeHolder`: a hook tab is spawned with
-            // `attachment: nil`, so it is never routed through the model proxy
-            // and there is no route for the row-shaped teardown to retire —
-            // what is left of it is an unverified kill by recorded pid, which
-            // is exactly what a hook tab must not do (see
+            // through `disposeHolder`: the row-shaped teardown is an
+            // unverified kill by recorded pid, which is exactly what a hook
+            // tab must not do (see
             // `HolderRegistry.abandonVerifiedJob`). The row is still the better
             // source for the pids while it can be read.
             if let terminal {

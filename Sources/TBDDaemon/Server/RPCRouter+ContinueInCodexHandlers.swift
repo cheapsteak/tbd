@@ -117,9 +117,7 @@ extension RPCRouter {
             executablePath: preparation.executablePath,
             profileFlag: profileFlag)
 
-        // The transport gate, the same one every other spawn path asks. Codex
-        // is never routed through the model proxy, so there is no attachment
-        // to decide before the command above was composed.
+        // The transport gate, the same one every other spawn path asks.
         let transport = TerminalSpawnTransport.decide(config: config, registry: holderRegistry)
 
         // The import above created Codex state but touched no session; the
@@ -151,9 +149,7 @@ extension RPCRouter {
                     claudeSessionID: nil,
                     profileID: nil,
                     kind: .codex,
-                    transport: transport,
-                    attachment: nil,
-                    modelProxySupervisor: modelProxySupervisor)
+                    transport: transport)
             }
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")

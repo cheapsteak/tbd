@@ -194,16 +194,6 @@ public struct WorktreeLifecycle: Sendable {
     /// exactly as it did before dev servers existed.
     var devServerOperations: DevServerOperations?
 
-    /// The daemon's `ModelProxySupervisor`, wired post-construction by
-    /// `Daemon.swift` the way `holderRegistry` is. `nil` in mock mode and in
-    /// every test that does not exercise the proxy, where a holder spawn simply
-    /// gets no route and runs against the model API directly.
-    ///
-    /// Held as `any ModelProxyRouting` rather than as the actor so the spawn
-    /// decision can be pinned without a proxy process; the concrete supervisor
-    /// conforms, so `Daemon.swift` assigns it unchanged.
-    var modelProxySupervisor: (any ModelProxyRouting)?
-
     /// How the create path builds the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
     /// `SessionRecaptureScheduler(db:tmux:)`.
@@ -482,39 +472,22 @@ public struct WorktreeLifecycle: Sendable {
     /// history call `recordHolderClosedTerminal` first, because the capture
     /// reads the daemon's reader and this disposal releases it.
     func disposeHolder(for terminal: Terminal) async -> String? {
-        await Self.disposeHolder(
-            for: terminal, registry: holderRegistry, config: db.config,
-            supervisor: modelProxySupervisor)
+        await Self.disposeHolder(for: terminal, registry: holderRegistry)
     }
 
     /// The teardown itself, once, for both owners of a holder-backed row.
     ///
     /// `RPCRouter+TerminalHandlers` tears down the same rows through the same
-    /// steps, and the two copies of this method were maintained by hand — both
-    /// gained the route retirement in the same change, which is precisely the
-    /// edit that could have reached only one of them. A teardown step added to
-    /// one and not the other leaks whatever that step reclaims, silently and
-    /// only on half the paths.
+    /// steps, so the two share this one copy: a teardown step added to one and
+    /// not the other would leak whatever that step reclaims, silently and only
+    /// on half the paths.
     ///
     /// Static, and given everything it needs, because the two callers share no
-    /// type: what they have in common is a row, a registry, a database and a
-    /// supervisor.
+    /// type: what they have in common is a row and a registry.
     static func disposeHolder(
         for terminal: Terminal,
-        registry: HolderRegistry?,
-        config: ConfigStore,
-        supervisor: (any ModelProxyRouting)?
+        registry: HolderRegistry?
     ) async -> String? {
-        // Before the registry check: the row is about to be deleted, so this is
-        // the last moment anything can name its route, and a daemon with no
-        // registry is exactly the one whose routes nothing else would ever
-        // find. The lookup itself is skipped only when the row was provably
-        // never routed — see `ModelProxyRouteAttachment.retire`.
-        await ModelProxyRouteAttachment.retire(
-            terminalID: terminal.id,
-            streamPath: terminal.transcriptStreamPath,
-            proxyEnabled: (try? await config.get())?.modelProxyEnabled ?? true,
-            supervisor: supervisor)
         guard let registry else {
             return "terminal \(terminal.id) runs on the holder transport but this daemon has "
                 + "no holder registry, so its holder and job were left running"

@@ -1888,9 +1888,9 @@ final class AppState {
     /// Published so the Settings control-mode toggle re-renders after
     /// `setControlModeEnabled` refreshes it.
     var daemonCapabilities: DaemonCapabilitiesResult?
-    /// Whether the daemon reports transcript streaming as effective — the
-    /// conjunction of `transcript_streaming_enabled` and `model_proxy_enabled`,
-    /// already resolved daemon-side, so the app never re-derives the pair.
+    /// Whether the daemon reports transcript streaming as on — the resolved
+    /// `transcript_streaming_enabled` flag, which spawns sessions with the
+    /// session mod's `transcript-stream` feature.
     ///
     /// False until capabilities have been fetched, which is the conservative
     /// reading: a pane that registers no stream file renders exactly what it
@@ -2076,18 +2076,8 @@ final class AppState {
             try await daemonClient.remoteTranscriptLoadEarlier(
                 provider: selection.provider, sessionID: selection.sessionID)
         }
-    /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
-    /// for the same reason as `controlModeSetter`.
-    @ObservationIgnored
-    lazy var modelProxyFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in
-            try await daemonClient.setModelProxyEnabled(enabled: enabled)
-        }
     /// How `setTranscriptStreamingEnabled` persists the streaming gate —
-    /// injectable for the same reason as `controlModeSetter`. Separate from
-    /// `modelProxyFlagSetter` even though the two flags are coupled: the
-    /// coupling is the daemon's, and an app that wrote both would be guessing
-    /// at a rule it does not own.
+    /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored
     lazy var transcriptStreamingFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in

@@ -27,6 +27,14 @@ import {
   sessionStart as composerDraftSessionStart,
 } from './features/composer-draft.tsx'
 import {
+  FEATURE as TRANSCRIPT_STREAM,
+  sessionAppend as transcriptStreamSessionAppend,
+  transcriptStream,
+  turnComplete as transcriptStreamTurnComplete,
+  turnStart as transcriptStreamTurnStart,
+  turnStep as transcriptStreamTurnStep,
+} from './features/transcript-stream.ts'
+import {
   FEATURE as USAGE,
   measured as usageMeasured,
   sessionStart as usageSessionStart,
@@ -109,6 +117,42 @@ export const register: Register = on => {
 
   on('prompt.change', async ($, e, next) => promptChange($, await readSessionEnv($), e, next))
     .catch(($, e, next) => next(e))
+
+  // The model's answer, chunk by chunk. Every chunk goes on at once; a
+  // feature that fails mid-stream leaves the rest of the stream to pass.
+  on('turn.step', async function* ($, e, next) {
+    const env = await readSessionEnv($)
+    if (env === null || !env.features.has(TRANSCRIPT_STREAM)) {
+      return yield* next(e)
+    }
+    return yield* transcriptStreamTurnStep(transcriptStream($), e, next)
+  }).catch(async function* ($, e, next) {
+    return yield* next(e)
+  })
+
+  on('session.append', async ($, e, next) => {
+    const env = await readSessionEnv($)
+    if (env === null || !env.features.has(TRANSCRIPT_STREAM)) {
+      return next(e)
+    }
+    return transcriptStreamSessionAppend(transcriptStream($), e, next)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.start', async ($, e, next) => {
+    const env = await readSessionEnv($)
+    if (env === null || !env.features.has(TRANSCRIPT_STREAM)) {
+      return next(e)
+    }
+    return transcriptStreamTurnStart(transcriptStream($), e, next)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.complete', async ($, e, next) => {
+    const env = await readSessionEnv($)
+    if (env === null || !env.features.has(TRANSCRIPT_STREAM)) {
+      return next(e)
+    }
+    return transcriptStreamTurnComplete(transcriptStream($), e, next)
+  }).catch(($, e, next) => next(e))
 
   // The band above the prompt yields to a survey. A feature that draws there
   // wraps what is drawn beneath it, and a second one would wrap the first.
