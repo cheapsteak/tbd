@@ -93,8 +93,8 @@ struct ContextLoadReader {
     ///     `.confirmed`.
     ///   - usageIncarnationID: the session's live incarnation. When given, a
     ///     usage file naming any other incarnation — or none — was written by
-    ///     an earlier process of the same Claude session and is not read. The
-    ///     gatherer always passes it; nil skips the check.
+    ///     an earlier process of the same Claude session and is not read. A nil
+    ///     live incarnation is unknown, so no file is accepted.
     ///   - usageLiveness: `SessionModLiveness` for the `usage` feature. `.legacy`
     ///     — a spawn made without the feature, and the default — keeps the tee
     ///     path; any other answer means the spawn chose the mod's file over
@@ -174,7 +174,9 @@ struct ContextLoadReader {
         }
         // Compared as `SessionModLiveness.sameIncarnation` does: parsed, so
         // the UUID's case does not matter.
-        if let live = liveIncarnationID, record.incarnationID.flatMap(UUID.init(uuidString:)) != live {
+        // A missing live incarnation reads as unknown, never as a match.
+        guard let live = liveIncarnationID,
+              record.incarnationID.flatMap(UUID.init(uuidString:)) == live else {
             return unobserved("the session mod's usage file for this session is from an earlier "
                 + "process of it, and this process has not written its own yet")
         }

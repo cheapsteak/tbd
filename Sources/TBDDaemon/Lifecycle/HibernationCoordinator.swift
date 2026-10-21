@@ -2007,9 +2007,8 @@ public actor HibernationCoordinator {
             // side to be wrong on, and it is only safe because the staleness is
             // closed independently: `ClaudeHookOverlay.resolveOverlayPath`,
             // which the launch's settle runs, deletes the session's capture
-            // whenever it writes an overlay WITHOUT a tee, so a session that is
-            // not (re)installing one cannot read a capture from a previous
-            // life. An ordinary terminal has nil here and gets a byte-identical
+            // on every call (every launch), so a session that is not
+            // (re)installing a tee cannot read a capture from a previous life. An ordinary terminal has nil here and gets a byte-identical
             // overlay.
             //
             // A desk whose resume carries the session mod's `usage` installs no

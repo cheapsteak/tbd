@@ -125,7 +125,10 @@ struct SessionStateFactGatherer {
     /// as `.parked` instead, and the reader neither reads the usage file nor
     /// the capture: no process is reporting its window, and the shared,
     /// overwritten `spawn.json` cannot say whose file is on disk. A parked row
-    /// whose spawn did not list `usage` keeps the tee path.
+    /// whose spawn did not list `usage` keeps the tee path. A parked row whose
+    /// mod still confirms against its live incarnation (a wake whose
+    /// `clearHibernated` failed) reports its window as a live row does, and a
+    /// parked row with an unreadable spawn record is `.parked` too.
     private func usageSource(for terminal: Terminal) -> UsageSource {
         guard terminal.kind == .claude, let id = terminal.claudeSessionID,
               let dir = SessionModFiles.directory(sessionsDir: sessionsDir, claudeSessionID: id) else {
@@ -133,15 +136,26 @@ struct SessionStateFactGatherer {
         }
         let spawn = SessionModFiles.read(
             SessionModFiles.SpawnRecord.self, at: dir.appendingPathComponent(SessionModFiles.spawnFileName))
-        if terminal.isParked, case .record(let record) = spawn,
-           record.features.contains(SessionModFeature.usage.rawValue) {
-            return .parked
-        }
         let liveness = SessionModLiveness.evaluate(
             feature: .usage, spawn: spawn,
             alive: SessionModFiles.read(
                 SessionModFiles.AliveRecord.self, at: dir.appendingPathComponent(SessionModFiles.aliveFileName)),
             liveIncarnationID: terminal.sessionIncarnationID, now: now())
+        // A woken process whose `clearHibernated` failed still reads parked, but
+        // its mod confirms against the row's live incarnation: report its window.
+        if terminal.isParked {
+            if case .confirmed = liveness {} else {
+                switch spawn {
+                case .record(let record):
+                    if record.features.contains(SessionModFeature.usage.rawValue) { return .parked }
+                case .unreadable:
+                    // The spawn cannot say it did not run `usage`.
+                    return .parked
+                case .missing:
+                    break
+                }
+            }
+        }
         return .spawn(path: dir.appendingPathComponent(SessionModFiles.usageFileName).path, liveness: liveness)
     }
 

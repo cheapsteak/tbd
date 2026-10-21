@@ -418,6 +418,7 @@ import TBDShared
 
     // MARK: - The session mod's usage file
 
+    private static let liveIncarnation = UUID()
     private static let usageMeasuredAtMs: Int64 = 1_770_000_000_000
     private static var usageMeasuredAt: Date {
         Date(timeIntervalSince1970: Double(usageMeasuredAtMs) / 1000)
@@ -426,7 +427,8 @@ import TBDShared
     /// The shape `SessionMod/hooks/features/usage.ts` writes, with the window
     /// spelled as a raw JSON literal so a test can hand it a malformed one.
     private static func usageJSON(
-        window: String = "200000", tokens: Int? = 50_000, incarnationID: String = "i"
+        window: String = "200000", tokens: Int? = 50_000,
+        incarnationID: String = ContextLoadReaderTests.liveIncarnation.uuidString
     ) -> String {
         let tokensField = tokens.map { #","tokens":\#($0),"percent":25"# } ?? ""
         return """
@@ -451,7 +453,8 @@ import TBDShared
         let usagePath = try writeUsage(Self.usageJSON(), in: scratch)
 
         let load = ContextLoadReader().read(
-            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .confirmed,
+            capturePath: scratch.capturePath, usagePath: usagePath, usageIncarnationID: Self.liveIncarnation,
+            usageLiveness: .confirmed,
             transcriptPath: scratch.transcriptPath, tee: .notADesk)
 
         let used = try #require(load.used)
@@ -473,7 +476,8 @@ import TBDShared
         let usagePath = try writeUsage(Self.usageJSON(tokens: nil), in: scratch)
 
         let load = ContextLoadReader().read(
-            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .confirmed,
+            capturePath: scratch.capturePath, usagePath: usagePath, usageIncarnationID: Self.liveIncarnation,
+            usageLiveness: .confirmed,
             transcriptPath: scratch.transcriptPath, tee: .notADesk)
 
         #expect(load.window == .observed(
@@ -494,7 +498,8 @@ import TBDShared
         let usagePath = try writeUsage(String(full.prefix(full.count / 2)), in: scratch)
 
         let load = ContextLoadReader().read(
-            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .confirmed,
+            capturePath: scratch.capturePath, usagePath: usagePath, usageIncarnationID: Self.liveIncarnation,
+            usageLiveness: .confirmed,
             transcriptPath: scratch.transcriptPath, tee: .notADesk)
 
         guard case .unknown(let why) = load.window else {
@@ -534,7 +539,8 @@ import TBDShared
         let usagePath = try writeUsage(Self.usageJSON(window: literal), in: scratch)
 
         let load = ContextLoadReader().read(
-            capturePath: scratch.capturePath, usagePath: usagePath, usageLiveness: .confirmed,
+            capturePath: scratch.capturePath, usagePath: usagePath, usageIncarnationID: Self.liveIncarnation,
+            usageLiveness: .confirmed,
             transcriptPath: scratch.transcriptPath, tee: .notADesk)
 
         guard case .unknown = load.window else {
@@ -780,6 +786,47 @@ import TBDShared
         }
         #expect(why.contains("parked"))
         #expect(load.used == ObservedFact(value: 90_000, source: .transcriptTail, observedAt: Self.transcriptDate))
+    }
+
+    /// A woken process whose `clearHibernated` failed still has a parked row,
+    /// but its mod confirms against the row's live incarnation and has written
+    /// its own usage file: the window is that file's, not "parked".
+    @Test func aParkedRowWithConfirmedLivenessReadsItsOwnUsageFile() async throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        let sessionsDir = scratch.root.appendingPathComponent("sessions", isDirectory: true)
+        let heartbeatAt = Date(timeIntervalSince1970: 1_770_000_010)
+        let incarnation = UUID()
+        let parked = try await parkedDesk(
+            features: ["usage"], incarnation: incarnation, sessionsDir: sessionsDir,
+            heartbeatAt: heartbeatAt)
+        try scratch.writeTranscript(tokens: 90_000, timestamp: Self.transcriptStamp)
+        let capturePath = scratch.capturePath
+        var row = parked
+        row.transcriptPath = scratch.transcriptPath
+        row.sessionIncarnationID = incarnation
+
+        let gatherer = SessionStateFactGatherer(
+            now: { heartbeatAt }, capturePath: { _ in capturePath }, sessionsDir: sessionsDir)
+        let load = gatherer.contextLoad(for: row)
+        #expect(load.window == .observed(
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
+    }
+
+    /// A missing live incarnation is unknown, so a confirmed read accepts no file.
+    @Test func aMissingLiveIncarnationAcceptsNoUsageFile() throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        let usagePath = try writeUsage(Self.usageJSON(), in: scratch)
+
+        let load = ContextLoadReader().read(
+            capturePath: scratch.capturePath, usagePath: usagePath, usageIncarnationID: nil,
+            usageLiveness: .confirmed, transcriptPath: nil, tee: .notADesk)
+
+        guard case .unknown = load.window else {
+            Issue.record("a nil live incarnation accepted a usage file: \(load.window)")
+            return
+        }
     }
 
     /// A parked session whose last spawn ran without `usage` is legacy, as a
