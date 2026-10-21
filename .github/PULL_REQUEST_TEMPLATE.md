@@ -80,8 +80,11 @@ shipped without a spec, say here why it didn't need one. -->
 
 ## What this PR does
 
-<!-- The implementation at survey altitude: what got added or changed, where.
-Bullets are fine. -->
+<!-- How the user story is achieved, at survey altitude. One bullet per part of
+the change, named for what it does rather than where it lives: a **bold lead
+term** – what it does and who sees it. Name files only to anchor a bullet,
+never to lead one. A reader who never opens the diff should come away knowing
+how the change works. -->
 
 ## Flag & rollout
 
