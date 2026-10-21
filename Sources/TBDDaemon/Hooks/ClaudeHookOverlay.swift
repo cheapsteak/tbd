@@ -516,6 +516,12 @@ public enum ClaudeHookOverlay {
     /// never depends on its features: a replacement spawn names that path in
     /// its command before it knows them and writes the file only at launch
     /// (`ReplacementSpawnOverlay`). The parameter has no effect on a nil role.
+    ///
+    /// Every call deletes the session's previous statusline capture, tee or
+    /// not and whether or not the write succeeds: this is where every Claude
+    /// launch's overlay is finalized, and the process about to launch
+    /// republishes its own capture, so call it only for a spawn that is
+    /// launching.
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,
@@ -527,28 +533,28 @@ public enum ClaudeHookOverlay {
         profileConfigDir: String? = nil,
         promptAnswerHooks: Bool = false
     ) -> String {
-        let installsTee = watchDeskRole != nil && statuslineTee
-        // A session that is not installing a tee must not be able to read one's
-        // leftovers. The capture path is keyed by the session, and several
-        // spawn paths reuse a session key across lives (a wake reuses the whole
-        // terminal row), so a capture published before this spawn would be read
-        // by `ContextLoadReader` and reported as an `.observed` window with
-        // `isPairedReading == true` — a stale denominator wearing a fresh
-        // session's clothes, which is the one failure the whole context-load
-        // path exists to avoid.
+        // An old capture must never speak for a new process. The capture path
+        // is keyed by the session, and several spawn paths reuse a session key
+        // across lives (a wake reuses the whole terminal row), so a capture
+        // published before this launch would be read by `ContextLoadReader`
+        // as an `.observed` window with `isPairedReading == true` — a stale
+        // denominator wearing a fresh process's clothes, which is the one
+        // failure the whole context-load path exists to avoid. That holds
+        // whether or not this launch installs a tee: a tee desk swapped from a
+        // 1M profile to a 200k one would otherwise report 1M until its first
+        // statusline render, and a launch whose tee is lost to a failed
+        // overlay write would report it indefinitely. The new process
+        // republishes its own capture when its tee fires.
         //
-        // Deleting it here rather than trusting the tee to be reinstalled is
-        // what makes that structural: every Claude spawn resolves an overlay,
-        // so every life of a session passes through this line, and the file
-        // simply is not there for a non-desk session to misread. It runs before
-        // the shared-overlay early return below, because a session with no
+        // Every Claude launch's overlay is finalized here — fresh spawns call
+        // this directly, replacement spawns through
+        // `ReplacementSpawnOverlay.settle` just before launch — so every life
+        // of a session passes through this one line. It runs before the
+        // shared-overlay early return below, because a session with no
         // fragments and no fallback models takes that return and still needs
-        // the capture gone. A desk whose spawn carries `usage` installs no tee
-        // either, and is in the same position: a capture from a life that had
-        // one would otherwise sit beside the usage file it no longer describes.
-        if !installsTee {
-            StatuslineTee.removeCapture(sessionKey: sessionKey)
-        }
+        // the capture gone.
+        StatuslineTee.removeCapture(sessionKey: sessionKey)
+        let installsTee = watchDeskRole != nil && statuslineTee
         guard needsPerSessionOverlay(
             fallbackModels: fallbackModels,
             repoSettingsJSON: repoSettingsJSON,
@@ -594,14 +600,6 @@ public enum ClaudeHookOverlay {
             logger.error(
                 "Failed to write per-session Claude overlay at \(path, privacy: .public); falling back to global overlay: \(error.localizedDescription, privacy: .public)"
             )
-            // The global overlay carries no tee, so this launch runs without
-            // one even when it planned to install it — and a capture an
-            // earlier life published would otherwise be read as this one's
-            // window, the stale paired reading the removal above exists to
-            // prevent. Whenever no tee ends up installed, no capture remains.
-            if installsTee {
-                StatuslineTee.removeCapture(sessionKey: sessionKey)
-            }
             return overlayPath
         }
     }
@@ -811,12 +809,13 @@ public enum ClaudeHookOverlay {
 /// path the command names, which never depends on the features (every desk
 /// gets a per-session file, tee or not), and `settle(carrying:command:)` —
 /// called with the context `prepare` returned, immediately before the launch
-/// — writes the file from those features and, for a session installing no
-/// tee, deletes its statusline capture. A spawn that does not launch leaves
+/// — writes the file from those features and deletes the session's previous
+/// statusline capture, as every launch's overlay resolution does. A spawn
+/// that stops before `settle` — one that never reaches its launch — leaves
 /// the overlay and the capture of whatever process the row still names
-/// exactly as they were, and the tee decision always follows the features
-/// the launched process was really given, which is what the readers of its
-/// `spawn.json` assume.
+/// exactly as they were, and the tee
+/// decision always follows the features the launched process was really
+/// given, which is what the readers of its `spawn.json` assume.
 ///
 /// The command must name a file that exists when the process starts. Until
 /// `settle`, a per-session `path` may not exist yet, so the command is built

@@ -2745,10 +2745,10 @@ extension RPCRouter {
         // route can be honoured at all).
         //
         // The overlay is only planned here (`ReplacementSpawnOverlay`): every
-        // arm writes it — and, for a session installing no tee, deletes the
-        // row's statusline capture — immediately before its launch, from the
-        // session-mod features `SessionModSpawn.prepare` gave that launch. A
-        // swap that fails before it launches anything leaves the running
+        // arm writes it — and deletes the row's previous statusline capture —
+        // immediately before its launch, from the session-mod features
+        // `SessionModSpawn.prepare` gave that launch. A swap that fails before
+        // it reaches its launch leaves the running
         // process's overlay and capture untouched. Only an in-place swap has a
         // desk role, and a desk carrying `usage` installs no statusline tee.
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)

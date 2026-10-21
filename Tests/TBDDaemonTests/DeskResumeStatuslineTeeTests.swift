@@ -19,9 +19,9 @@ import TestSupport
 /// no lease. But `release`/`revoke` NULL that column for the whole worktree, and
 /// a hibernated desk is exactly what makes `DeskSessionManager` revoke, so the
 /// role is not durable in every direction. The staleness is closed regardless:
-/// writing an overlay **without** a tee deletes the session's capture, so a
-/// session that is not (re)installing one has nothing left to misread. A wake
-/// writes its overlay only when it launches, so one that launches nothing
+/// every launch's overlay resolution deletes the session's capture, tee or not,
+/// so the new process has nothing left to misread until it publishes its own. A
+/// wake writes its overlay only when it launches, so one that launches nothing
 /// leaves the overlay and capture alone.
 ///
 /// Nested under `TBDHomeSerialized`: the per-session overlay and the capture
@@ -457,8 +457,8 @@ extension TBDHomeSerialized {
     // MARK: - The invariant that does not depend on the tee coming back
 
     /// The more important half of the fix, and the one that holds even when the
-    /// role does not survive: a session writing an overlay **without** a tee
-    /// cannot read a capture published in a previous life.
+    /// role does not survive: a launch — with or without a tee — cannot read a
+    /// capture published in a previous life.
     ///
     /// A wake reuses the terminal row and therefore the capture path, so
     /// without this the reader would find a months-old payload, take its
@@ -494,7 +494,10 @@ extension TBDHomeSerialized {
         #expect(!load.isPairedReading)
     }
 
-    @Test func aSpawnThatInstallsTheTeeKeepsTheSessionsCapture() throws {
+    /// A tee desk relaunched on a different profile would otherwise report the
+    /// old process's window — 1M where the new one runs at 200k — until its
+    /// first statusline render. The new tee republishes its own.
+    @Test func aSpawnThatInstallsTheTeeStillDeletesTheCaptureFromThePreviousLife() throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let sessionKey = UUID().uuidString
@@ -509,9 +512,8 @@ extension TBDHomeSerialized {
             fallbackModels: nil, sessionKey: sessionKey,
             watchDeskRole: .readOnlyCoordinator, worktreePath: nil)
 
-        // The tee is about to republish over it, and until it does the desk's
-        // own previous reading is the best anyone has.
-        #expect(FileManager.default.fileExists(atPath: capturePath))
+        #expect(!FileManager.default.fileExists(atPath: capturePath),
+                "a launch that installs the tee kept an earlier process's capture")
     }
 
     // MARK: - Known limitation, pinned rather than papered over

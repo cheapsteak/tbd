@@ -63,8 +63,10 @@ enum StatuslineTee {
         return "sh \(script) \(capture) \(delegate)"
     }
 
-    /// Remove one session's capture file. Best-effort, like
-    /// `ClaudeHookOverlay.removePerSessionOverlay`, which calls this.
+    /// Remove one session's capture file. Best-effort. Called on teardown by
+    /// `ClaudeHookOverlay.removePerSessionOverlay`, and on every Claude launch
+    /// by `ClaudeHookOverlay.resolveOverlayPath`, so a capture an earlier
+    /// process published never speaks for the one launching.
     static func removeCapture(sessionKey: String) {
         try? FileManager.default.removeItem(atPath: capturePath(sessionKey: sessionKey))
     }

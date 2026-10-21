@@ -347,7 +347,10 @@ extension TBDHomeSerialized {
         #expect(!FileManager.default.fileExists(atPath: capturePath))
     }
 
-    @Test func settlingADeskLaunchedWithoutUsageKeepsTheCapture() throws {
+    /// A tee desk's relaunch still drops the previous process's capture: its
+    /// window may differ (a swap to a smaller profile), and the new tee
+    /// republishes its own when it fires.
+    @Test func settlingADeskLaunchedWithTheTeeDeletesTheOldCapture() throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let key = UUID().uuidString
@@ -357,7 +360,8 @@ extension TBDHomeSerialized {
         _ = overlay.settle(carrying: sessionMod([.composerDraft]), command: Self.command)
 
         #expect(try statusLine(inOverlayAt: overlay.path) != nil)
-        #expect(FileManager.default.fileExists(atPath: capturePath))
+        #expect(!FileManager.default.fileExists(atPath: capturePath),
+                "a tee desk's relaunch kept an earlier process's capture")
     }
 
     @Test func settlingANonDeskOverlayNeverInstallsATee() throws {
@@ -442,7 +446,8 @@ extension TBDHomeSerialized {
 
     /// A desk that planned a tee but launches on the global overlay runs
     /// without one, so the capture an earlier process published must not
-    /// survive to be read as this process's window.
+    /// survive to be read as this process's window — the removal must not
+    /// depend on the write succeeding.
     @Test func aFailedWriteAtLaunchDropsTheCaptureOfADeskThatPlannedATee() throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
