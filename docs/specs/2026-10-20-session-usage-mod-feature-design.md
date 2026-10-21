@@ -241,6 +241,21 @@ Soak with `session_mod_usage_enabled` on. Evidence to collect: `session.states`
 reports `sessionMod`-sourced windows for non-desk sessions, and desks relay at
 three quarters of their observed window rather than at the fallback.
 
+**Accepted risk: a desk whose mod never runs has no window source.** A desk
+spawned with `usage` gets no tee, so when the mod does not run in that process
+— a Claude Code too old for mods, plugins disabled by managed settings, a
+module that fails at load, or a write to the sessions directory that fails —
+nothing reports its window. `session.states` says `unknown`, and `handoff.py`
+uses its 600,000-token fallback, which a 200k desk never reaches, so such a
+desk can run past its real ceiling. Measured with the fake model API: a
+`claude-sonnet-4-5` session with the mod loaded gave a 150,000-token ceiling
+from its usage file; the same session without the mod gave the 600,000
+fallback. The risk is accepted rather than designed out, because every cause
+breaks the mod for every session at once, the flag ships off, and the soak
+watches for exactly this: a desk whose `session.states` window stays
+`unknown`. A lower fallback for spawns that listed `usage`, or keeping the tee
+as a backup, are the remedies should the soak show it happening.
+
 Graduation sets `Config.sessionModUsageDefault` to `true`. A follow-up change
 then deletes `StatuslineTee`, `OperatorStatuslineResolver`, the capture path
 constants, the capture arm of the orphan sweep, the tee arm of both readers,
