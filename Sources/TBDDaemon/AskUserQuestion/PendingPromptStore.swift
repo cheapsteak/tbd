@@ -14,7 +14,7 @@ import TBDShared
 ///   `(terminalID, toolUseID)`: the prompt id is the dialog's tool call id.
 ///   The mod drives each one through four inputs:
 ///   - **open** – the dialog appeared (or the mod re-posts it after a
-///     reconnect, which refreshes the same prompt);
+///     reconnect, which keeps the same prompt: the first payload wins);
 ///   - **wait** – the mod's held request for an answer, repeated while the
 ///     dialog stays open;
 ///   - **receipt** – the mod returned TBD's decision to Claude Code;
@@ -260,24 +260,45 @@ public actor PendingPromptStore {
 
     // MARK: - Open
 
-    /// Records a dialog the mod reported open. Returns the terminals whose
-    /// prompt set changed.
+    /// What an `open` did.
+    public enum OpenOutcome: Sendable, Equatable {
+        /// Recorded, or re-posted unchanged. Carries the terminals whose
+        /// prompt set changed.
+        case opened(Set<UUID>)
+        /// A repeat whose tool name, input or suggestions differ from the
+        /// prompt already open under that id. Nothing changed.
+        case conflict
+    }
+
+    /// Records a dialog the mod reported open.
     ///
     /// `kind` is `.question` for `AskUserQuestion`, `.permission` otherwise.
     /// `sessionID` is informational (the log); the mod may omit it.
     /// A repeat for the same `(terminalID, toolUseID)` is the same prompt
-    /// re-posted after a reconnect: it refreshes the payload and keeps
-    /// `createdAt`, any held wait request and any answer in flight. Every
-    /// open, repeat or not, restarts the prompt's idle measure. The same
-    /// `toolUseID` under another terminal is a separate prompt — two
-    /// terminals resumed into one session stay apart because the address is
-    /// the terminal.
+    /// re-posted after a reconnect: it keeps `createdAt`, any held wait
+    /// request and any answer in flight. The first payload wins: a repeat
+    /// whose tool name, input or suggestions differ is refused as
+    /// `.conflict` and leaves the prompt untouched, so a process that holds
+    /// the session's token cannot change what an open card shows (the mod
+    /// re-posts the very body it first sent). Inputs arrive canonical — the
+    /// route re-serializes them with sorted keys — so comparing the strings
+    /// compares the JSON values. Every accepted open, repeat or not,
+    /// restarts the prompt's idle measure. The same `toolUseID` under
+    /// another terminal is a separate prompt — two terminals resumed into
+    /// one session stay apart because the address is the terminal.
     @discardableResult
     public func open(terminalID: UUID, sessionID: String?, toolUseID: String, toolName: String,
-                     toolInputJSON: String, suggestionsJSON: String?) -> Set<UUID> {
+                     toolInputJSON: String, suggestionsJSON: String?) -> OpenOutcome {
         let key = Key(terminalID: terminalID, toolUseID: toolUseID)
         let kind: PendingPromptKind = toolName == "AskUserQuestion" ? .question : .permission
         let existing = promptRecords[key]
+        if let current = existing?.payload,
+           current.toolName != toolName || current.toolInputJSON != toolInputJSON
+            || current.suggestionsJSON != suggestionsJSON {
+            Self.log.warning(
+                "prompt open refused: a repeat changed the payload id=\(toolUseID, privacy: .public) terminal=\(terminalID.uuidString, privacy: .public) tool=\(toolName, privacy: .public) storedTool=\(current.toolName, privacy: .public)")
+            return .conflict
+        }
         let payload = PendingPromptPayload(
             id: toolUseID, kind: kind, toolUseID: toolUseID, toolName: toolName,
             toolInputJSON: toolInputJSON, suggestionsJSON: suggestionsJSON,
@@ -295,7 +316,7 @@ public actor PendingPromptStore {
         bumpRevision(terminalID)
         Self.log.debug(
             "prompt opened id=\(toolUseID, privacy: .public) kind=\(kind.rawValue, privacy: .public) session=\(sessionID ?? "-", privacy: .public) repeat=\(existing != nil, privacy: .public)")
-        return [terminalID]
+        return .opened([terminalID])
     }
 
     // MARK: - Wait

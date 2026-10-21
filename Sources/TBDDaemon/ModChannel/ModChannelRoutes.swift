@@ -30,7 +30,8 @@ struct ModChannelResponse: Sendable, Equatable {
 ///
 /// - `GET /v1/poll?after=<n>` → `{"items":[Item]}`
 /// - `POST /v1/prompts/open` → `{}`, or 409 `{"error":"disabled"}` with the
-///   feature off
+///   feature off, or 409 `{"error":"payload differs"}` for a repeat whose
+///   payload differs from the open prompt's (the first payload wins)
 /// - `GET /v1/prompts/<toolUseID>/answer` → `{"state":"decision","decision":{…}}`,
 ///   `{"state":"pending"}` or `{"state":"resolved"}`
 /// - `POST /v1/prompts/<toolUseID>/receipt` → `{}`
@@ -200,11 +201,18 @@ struct ModChannelRoutes: Sendable {
             guard let encoded = Self.canonicalJSON(suggestions) else { return Self.error(400, "bad request") }
             suggestionsJSON = encoded
         }
-        let changed = await store.open(
+        let outcome = await store.open(
             terminalID: terminalID, sessionID: sessionID, toolUseID: toolUseID, toolName: toolName,
             toolInputJSON: toolInputJSON, suggestionsJSON: suggestionsJSON)
-        await broadcastIfChanged(changed)
-        return Self.emptyObject
+        switch outcome {
+        case .opened(let changed):
+            await broadcastIfChanged(changed)
+            return Self.emptyObject
+        case .conflict:
+            // The store logged it. The mod takes any 4xx as final and does
+            // not retry.
+            return Self.error(409, "payload differs")
+        }
     }
 
     private func answer(terminalID: UUID, toolUseID: String, requestToken: UUID) async -> ModChannelResponse {

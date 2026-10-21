@@ -35,9 +35,14 @@ struct PendingPromptResolutionTests {
         session: String = "s1", tool: String = "Bash",
         input: String = PendingPromptResolutionTests.bashInput, suggestions: String? = nil
     ) async -> Set<UUID> {
-        await store.open(
+        let outcome = await store.open(
             terminalID: terminal, sessionID: session, toolUseID: toolUseID, toolName: tool,
             toolInputJSON: input, suggestionsJSON: suggestions)
+        guard case .opened(let changed) = outcome else {
+            Issue.record("open of \(toolUseID) was refused as a conflict")
+            return []
+        }
+        return changed
     }
 
     /// Starts a wait request and returns once it is attached.
@@ -120,28 +125,71 @@ struct PendingPromptResolutionTests {
         #expect(await store.terminalsWithOpenPrompts() == [terminal])
     }
 
-    /// The mod re-posts its open dialogs after any reconnect: the repeat is
-    /// the same prompt, so its card keeps its place and its wait request
-    /// stays attached.
-    @Test func reopenKeepsCreatedAtAndWaiter() async {
+    /// The mod re-posts its open dialogs after any reconnect, with the very
+    /// body it first sent: the repeat is the same prompt, so it succeeds, its
+    /// card keeps its place and payload, and its wait request stays attached.
+    @Test func reopenWithSamePayloadKeepsCreatedAtAndWaiter() async {
         let dates = TestDateSource()
         let store = makeStore(dates: dates)
         let terminal = UUID()
         let opened = dates.now
-        await open(store, terminal: terminal)
+        await open(store, terminal: terminal, suggestions: #"[{"type":"addRules"}]"#)
+        let first = await store.prompts(forTerminal: terminal)
         let waiter = await attachWaiter(store, terminal: terminal)
         let revision = await store.snapshot(forTerminal: terminal).revision
 
         dates.advance(by: 30)
-        let changed = await open(store, terminal: terminal, input: #"{"command":"ls -la"}"#)
+        let outcome = await store.open(
+            terminalID: terminal, sessionID: "s1", toolUseID: "toolu_1", toolName: "Bash",
+            toolInputJSON: Self.bashInput, suggestionsJSON: #"[{"type":"addRules"}]"#)
 
-        #expect(changed == [terminal])
+        #expect(outcome == .opened([terminal]))
         let prompts = await store.prompts(forTerminal: terminal)
         #expect(prompts.count == 1)
+        #expect(prompts == first, "an identical repeat leaves the prompt as it was")
         #expect(prompts.first?.createdAt == opened)
-        #expect(prompts.first?.toolInputJSON == #"{"command":"ls -la"}"#, "the repeat refreshes the payload")
         #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1"))
         #expect(await store.snapshot(forTerminal: terminal).revision > revision)
+
+        await store.resolveAll()
+        #expect(await waiter.value == .resolved)
+    }
+
+    /// The first payload wins. A process that holds the session's token
+    /// cannot re-open a pending dialog's id with a harmless-looking input (or
+    /// another tool name, or other suggestions) so that an Allow on the card
+    /// reaches the real dialog: the repeat is refused, the prompt is left
+    /// exactly as first reported, and no revision is published.
+    @Test func reopenWithDifferentPayloadIsRefusedAndChangesNothing() async {
+        let dates = TestDateSource()
+        let store = makeStore(dates: dates)
+        let terminal = UUID()
+        let dangerous = #"{"command":"rm -rf ~"}"#
+        await open(store, terminal: terminal, input: dangerous)
+        let first = await store.prompts(forTerminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
+        let revision = await store.snapshot(forTerminal: terminal).revision
+
+        dates.advance(by: 30)
+        let differentInput = await store.open(
+            terminalID: terminal, sessionID: "s1", toolUseID: "toolu_1", toolName: "Bash",
+            toolInputJSON: Self.bashInput, suggestionsJSON: nil)
+        let differentTool = await store.open(
+            terminalID: terminal, sessionID: "s1", toolUseID: "toolu_1", toolName: "Read",
+            toolInputJSON: dangerous, suggestionsJSON: nil)
+        let differentSuggestions = await store.open(
+            terminalID: terminal, sessionID: "s1", toolUseID: "toolu_1", toolName: "Bash",
+            toolInputJSON: dangerous, suggestionsJSON: #"[{"type":"addRules"}]"#)
+
+        #expect(differentInput == .conflict)
+        #expect(differentTool == .conflict)
+        #expect(differentSuggestions == .conflict)
+        let prompts = await store.prompts(forTerminal: terminal)
+        #expect(prompts == first, "a refused repeat leaves the first payload in place")
+        #expect(prompts.first?.toolInputJSON == dangerous)
+        #expect(await store.snapshot(forTerminal: terminal).revision == revision,
+                "a refused repeat publishes nothing")
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1"))
 
         await store.resolveAll()
         #expect(await waiter.value == .resolved)

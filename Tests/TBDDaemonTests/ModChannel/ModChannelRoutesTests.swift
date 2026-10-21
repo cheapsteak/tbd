@@ -258,6 +258,56 @@ struct ModChannelRoutesTests {
         #expect(await h.store.prompts(forTerminal: h.terminal).map(\.id) == ["toolu_1"])
     }
 
+    /// The mod re-posts the very body it first sent after a reconnect, and
+    /// the store compares the canonical form, so the same JSON value with its
+    /// keys in another order or other spacing is the same payload.
+    @Test func repeatOpenWithSamePayloadSucceeds() async {
+        let h = makeHarness()
+        let first = await h.routes.handle(
+            h.request("POST", "/v1/prompts/open", body: Self.openBody()), token: UUID())
+        #expect(first.status == 200)
+        let stored = await h.store.prompts(forTerminal: h.terminal)
+
+        let template = h.request("POST", "/v1/prompts/open")
+        let reorderedBody = """
+            {"suggestions": null, "toolInput": {"description": "list", "command": "ls"},
+             "toolName": "Bash", "sessionID": "s1", "toolUseID": "toolu_1"}
+            """
+        let reordered = ModChannelRequest(
+            method: template.method, path: template.path, query: template.query,
+            headers: template.headers, body: Data(reorderedBody.utf8))
+        let repeated = await h.routes.handle(reordered, token: UUID())
+
+        #expect(repeated.status == 200)
+        #expect(Self.json(repeated) == [:])
+        #expect(await h.store.prompts(forTerminal: h.terminal) == stored)
+        #expect(await h.broadcasts.sets == [[h.terminal], [h.terminal]])
+    }
+
+    /// The first payload wins: a repeat open for a pending dialog's id with a
+    /// different input is a 409, the card keeps what it first showed, and
+    /// nothing is broadcast.
+    @Test func repeatOpenWithDifferentPayloadIs409() async {
+        let h = makeHarness()
+        var dangerous = Self.openBody()
+        dangerous["toolInput"] = ["command": "rm -rf ~", "description": "clean up"]
+        let first = await h.routes.handle(
+            h.request("POST", "/v1/prompts/open", body: dangerous), token: UUID())
+        #expect(first.status == 200)
+        let stored = await h.store.prompts(forTerminal: h.terminal)
+        #expect(await h.broadcasts.sets == [[h.terminal]])
+
+        let swapped = await h.routes.handle(
+            h.request("POST", "/v1/prompts/open", body: Self.openBody()), token: UUID())
+
+        #expect(swapped.status == 409)
+        #expect(Self.json(swapped) == ["error": "payload differs"])
+        let prompts = await h.store.prompts(forTerminal: h.terminal)
+        #expect(prompts == stored)
+        #expect(prompts.first?.toolInputJSON == #"{"command":"rm -rf ~","description":"clean up"}"#)
+        #expect(await h.broadcasts.sets == [[h.terminal]], "a refused repeat broadcasts nothing")
+    }
+
     @Test func answerHoldsThenReportsPending() async throws {
         let h = makeHarness()
         await h.store.open(
