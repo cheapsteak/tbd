@@ -48,6 +48,15 @@ relying on them.
   once. A terminal No or Escape aborts `next.signal` at once. A terminal Yes
   does not abort it; the hook's later answer is ignored and does not leak to the
   next dialog.
+- **After a terminal No or Escape, every `$` call the hook makes fails.**
+  Claude Code aborts the hook's dispatch, and each later `$` call from that
+  hook, a `$.http.fetch` included, fails with "The operation was aborted"
+  before it reaches the socket. The same holds when an `AskUserQuestion`
+  dialog is Escaped. Work the module roots in a `$.clock.after` timer is not
+  tied to any hook's dispatch: the poll loop, started that way, kept polling
+  through 106 idle seconds. The design relies on that for the terminal's
+  **closed** report, which the module sends from a timer of its own (see
+  "Mod to daemon: reports").
 - **The permission payload has no tool call id,** but `tool.call`'s `e.input`
   equals its `tool_input` exactly, so a mod pairs the two in-process. Parallel
   calls with different inputs paired correctly; calls with identical inputs are
@@ -143,10 +152,16 @@ crashed, or spawned without the mod — is known before a send through
 
 Reports are short `POST` requests on the same socket: a dialog opened, a dialog
 closed and by whom, and receipts for items the mod acted on. A hook waits for
-the daemon's reply to a receipt or close before it returns, so neither is
-dropped with the hook; the wait is one local round trip, and a `$` call in
-flight stops the hook's clock. A failed report is logged at debug level and
-otherwise ignored. A dialog's own wait (below) is also a request on this
+the daemon's reply to a receipt before it returns, so none is dropped with the
+hook; the wait is one local round trip, and a `$` call in flight stops the
+hook's clock. A receipt is sent only on paths the terminal has not aborted. A
+**closed** report is sent from the module's outbox instead: a
+`$.clock.after(0, …)` timer the module schedules, so a terminal No or Escape,
+which aborts the hook and every `$` call it makes afterwards, cannot cancel
+it. The outbox retries a failed attempt (no reply, or a 5xx) after 1, 2, 5 and
+5 seconds, five attempts in all, and drops the report once an attempt reaches
+the daemon or the attempts run out. Failed reports are logged at debug level
+and otherwise ignored. A dialog's own wait (below) is also a request on this
 socket.
 
 ### Liveness
@@ -194,7 +209,7 @@ the RPCs today.
    is the hook's own time, so after five failures in a row, or once the
    hook's remaining budget falls below 2 seconds, the dialog is left to the
    terminal. A hook that ran short of budget leaves its card up, and the mod
-   posts **closed** when the tool call ends.
+   sends **closed** from its outbox when the tool call ends.
 4. On an answer it returns the decision and posts a **receipt**:
    - `allow` returns `{ behavior: 'allow' }`;
    - `allowAlways` returns `allow` with the suggested rule as
@@ -203,9 +218,10 @@ the RPCs today.
      "The user declined this from TBD." It never sets `interrupt`.
 5. When the terminal answers first:
    - No or Escape aborts `next.signal`; the hook catches the aborted request,
-     posts **closed** with `by: terminal`, and returns.
+     queues **closed** with `by: terminal`, and returns. The module's outbox
+     timer sends it, since the aborted hook's own `$` calls would fail.
    - Yes is seen when the tool finishes and `tool.call`'s `next(e)` settles;
-     the mod then posts **closed** with `by: terminal`.
+     the mod then sends **closed** with `by: terminal` from its outbox.
 
 Until the tool finishes, a card answered Yes in the terminal stays up. A click
 on it is harmless: the hook's late answer is ignored and the card reports
@@ -229,8 +245,9 @@ Claude Code.
    again before each retry, until `p` settles; a card that outlives a daemon
    restart can therefore still be answered. Once `p` is open, any failure on
    TBD's side returns `p`'s own result, never a second `next(e)`.
-3. If `p` settles first, the terminal answered; the mod posts **closed** with
-   `by: terminal` and returns `p`'s result.
+3. If `p` settles first, the terminal answered; the mod queues **closed** with
+   `by: terminal` and returns `p`'s result. The module's outbox timer sends
+   it: an Escape aborts the hook, and with it the hook's own `$` calls.
 
 The existing `AskUserQuestion` pre and post hooks that render a question early
 in the pane are separate and stay.
@@ -333,10 +350,11 @@ session the mod feature.
     while open ones resolve.
 - **Mod (`claude plugin test`, handlers exported as named functions):** pairing
   by exact input and `agent_id`; the allow, allow-always and deny decisions;
-  the abort path posting **closed**; the question race in both directions;
-  re-post after reconnect; backoff; a question's waits retried across a daemon
-  restart until its dialog settles; receipts and closes awaited before the
-  hook returns.
+  the abort path and an Escaped question sending **closed** from the outbox's
+  timer while the hook's own `$` calls fail; the question race in both
+  directions; re-post after reconnect; backoff; the outbox's retries and its
+  give-up; a question's waits retried across a daemon restart until its
+  dialog settles; receipts awaited before the hook returns.
 - **Live, before merge:** a zero-token run with `claude-stub` against a fake
   daemon that answers a question and a permission dialog, and checks the
   terminal can still answer each. Manual, not CI.

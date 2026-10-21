@@ -15,8 +15,10 @@
 // mod tells the daemon which it was (a receipt for TBD's, `closed` for the
 // terminal's). Every way out of a hook withdraws its dialog's entry, except a
 // permission hook that ran short of budget: its entry stands until the call
-// ends, and tool.call then posts `closed`. Receipts and closes are awaited, so
-// none is dropped when the hook returns.
+// ends, and tool.call then sends `closed`. Receipts are awaited, so none is
+// dropped when the hook returns. `closed` goes out from the channel's outbox
+// (queueReport), a timer of the module's own: a terminal No or Escape aborts
+// the hook, and with it every `$` call the hook makes afterwards.
 import type {
   ClassicEventOf,
   ClassicResultOf,
@@ -33,6 +35,7 @@ import {
   POLL_BACKOFF_MS,
   isRecord,
   isReportStanding,
+  queueReport,
   request,
   standReport,
   standingReportBody,
@@ -144,10 +147,15 @@ export async function toolCalled(
       // neither, and the daemon reports the answer unconfirmed.
       if (result !== undefined) {
         const wasDenied = 'deny' in result || result.isError === true
-        await postReport($, env, wasDenied ? 'receipt' : 'closed', toolUseId)
+        if (wasDenied) {
+          await postReport($, env, toolUseId)
+        } else {
+          queueClosed($, env, toolUseId)
+        }
       }
     } else if (withdrawReport(toolUseId)) {
-      await postReport($, env, 'closed', toolUseId)
+      // The terminal answered: a question Escaped there aborts this hook too.
+      queueClosed($, env, toolUseId)
     }
   }
 }
@@ -215,7 +223,7 @@ async function raceDialog(
   )
   const first = await Promise.race([dialogSettled, answered])
   if (first.kind === 'terminal') {
-    // The finally in toolCalled posts `closed`.
+    // The finally in toolCalled sends `closed`.
     return first.result
   }
 
@@ -231,7 +239,7 @@ async function raceDialog(
       !isDialogSettled()
     ) {
       withdrawReport(toolUseId)
-      await postReport($, env, 'receipt', toolUseId)
+      await postReport($, env, toolUseId)
       return { result: { questions: updatedInput.questions, answers: updatedInput.answers } } as ToolCallResult
     }
     $.ui.log(`prompt-answer: question ${toolUseId} got no usable answer`, { to: 'debug' })
@@ -242,7 +250,7 @@ async function raceDialog(
     withdrawReport(toolUseId)
   }
   // TBD's side ended without an answer: the terminal keeps the dialog, and the
-  // finally posts `closed` once it settles while the card still stands.
+  // finally sends `closed` once it settles while the card still stands.
   return dialog
 }
 
@@ -289,23 +297,25 @@ export async function permissionRequested(
       } else {
         // An allow and a terminal Yes end alike (the tool runs), so the
         // receipt goes at once.
-        await postReport($, env, 'receipt', toolUseId)
+        await postReport($, env, toolUseId)
       }
       return { decision }
     }
     $.ui.log(`prompt-answer: dialog ${toolUseId} got an unusable decision`, { to: 'debug' })
-    await postReport($, env, 'closed', toolUseId)
+    queueClosed($, env, toolUseId)
     return next(e)
   }
   // The hook's budget ran low: the dialog stays the terminal's, and its card
-  // stays standing so toolCalled posts `closed` once the call ends.
+  // stays standing so toolCalled sends `closed` once the call ends.
   if (outcome.kind === 'outOfBudget') {
     return next(e)
   }
   // The terminal answered (No or Escape abort the hook), the daemon resolved
   // the prompt, or it could not be reached: the dialog stays the terminal's.
+  // After an abort this hook's own `$` calls fail, so the close goes out from
+  // the outbox's timer.
   if (withdrawReport(toolUseId) && outcome.kind !== 'resolved') {
-    await postReport($, env, 'closed', toolUseId)
+    queueClosed($, env, toolUseId)
   }
   return next(e)
 }
@@ -474,14 +484,23 @@ function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T | nul
 }
 
 /**
- * Posts `receipt` or `closed` for a dialog and waits for the daemon's reply,
+ * Posts `receipt` for a dialog TBD answered and waits for the daemon's reply,
  * so the post is not dropped when the hook returns. One local round trip; a
- * `$` call in flight stops the hook's clock. A failure is logged at debug by
- * `request` and otherwise ignored: never rejects.
+ * `$` call in flight stops the hook's clock. It runs only on paths the
+ * terminal has not aborted. A failure is logged at debug by `request` and
+ * otherwise ignored: never rejects.
  */
-async function postReport($: EngineInterface, env: ChannelEnv, report: 'receipt' | 'closed', toolUseId: string): Promise<void> {
-  const body = report === 'closed' ? { by: 'terminal' } : {}
-  await request($, env, 'POST', `/v1/prompts/${encodeURIComponent(toolUseId)}/${report}`, body)
+async function postReport($: EngineInterface, env: ChannelEnv, toolUseId: string): Promise<void> {
+  await request($, env, 'POST', `/v1/prompts/${encodeURIComponent(toolUseId)}/receipt`, {})
+}
+
+/**
+ * Tells the daemon the terminal answered a dialog. Sent from the channel's
+ * outbox, not awaited: the hook may already be aborted, and its own `$` calls
+ * with it.
+ */
+function queueClosed($: EngineInterface, env: ChannelEnv, toolUseId: string): void {
+  queueReport($, env, `/v1/prompts/${encodeURIComponent(toolUseId)}/closed`, { by: 'terminal' })
 }
 
 // MARK: - Pairing keys

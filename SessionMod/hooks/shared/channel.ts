@@ -9,7 +9,9 @@
 //
 // Reports that stand while something stays open (an open dialog) are kept
 // here too, so the poll loop can post them again once it reaches the daemon
-// after losing it: a restarted daemon holds nothing in memory.
+// after losing it: a restarted daemon holds nothing in memory. Reports that
+// must not die with the hook that made them go out through a small outbox
+// rooted in a timer (queueReport).
 import type { EngineInterface, HttpInit } from 'claude-code'
 
 import { describe } from './session.ts'
@@ -23,6 +25,11 @@ export type ChannelItem = { seq: number; kind: string; body: unknown }
 
 /** Waits after the first, second, third and every later failed poll in a row. */
 export const POLL_BACKOFF_MS: readonly number[] = [1_000, 2_000, 5_000, 10_000]
+
+/** Waits after a queued report's first, second and every later failed attempt. */
+export const REPORT_BACKOFF_MS: readonly number[] = [1_000, 2_000, 5_000]
+/** Attempts a queued report gets, the first included, before it is dropped. */
+export const REPORT_ATTEMPTS = 5
 
 let channelEnv: Promise<ChannelEnv | null> | undefined
 
@@ -166,6 +173,42 @@ function pollItems(reply: ChannelReply | null): ChannelItem[] | null {
     }
   }
   return items.sort((a, b) => a.seq - b.seq)
+}
+
+/**
+ * Posts `body` to `path` from a timer rather than from the caller. A terminal
+ * No or Escape aborts the hook's dispatch, and every `$` call the hook makes
+ * after that fails before it reaches the socket; a timer the module schedules
+ * is not tied to that dispatch (startPolling roots its loop the same way). A
+ * failed attempt (no reply, or a 5xx) is retried after REPORT_BACKOFF_MS, up
+ * to REPORT_ATTEMPTS in all; the report is dropped once one attempt reaches
+ * the daemon or the attempts run out. Logs at debug only. Returns at once.
+ */
+export function queueReport($: EngineInterface, env: ChannelEnv, path: string, body: unknown): void {
+  $.clock.after(0, () => void sendQueuedReport($, env, path, body))
+}
+
+async function sendQueuedReport($: EngineInterface, env: ChannelEnv, path: string, body: unknown): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    const reply = await request($, env, 'POST', path, body)
+    if (reply !== null && reply.status < 500) {
+      if (reply.status !== 200) {
+        $.ui.log(`session mod channel: ${routeName(path)} was refused (${reply.status})`, { to: 'debug' })
+      }
+      return
+    }
+    if (attempt >= REPORT_ATTEMPTS) {
+      $.ui.log(`session mod channel: dropped ${routeName(path)} after ${attempt} attempts`, { to: 'debug' })
+      return
+    }
+    const delay = REPORT_BACKOFF_MS[Math.min(attempt - 1, REPORT_BACKOFF_MS.length - 1)] ?? 5_000
+    try {
+      await $.clock.sleep(delay)
+    } catch (error) {
+      $.ui.log(`session mod channel: dropped ${routeName(path)}: ${describe(error)}`, { to: 'debug' })
+      return
+    }
+  }
 }
 
 /** Keeps `body` to post to `path` again whenever the poll loop reconnects, until withdrawn. */

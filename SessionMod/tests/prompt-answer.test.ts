@@ -182,6 +182,8 @@ test('denyAfterTerminalYesPostsClosedNotReceipt', async () => {
   expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
 
   await finish(call, TOOL_RESULT)
+  // `closed` goes out from the outbox's timer.
+  await fake.advance(0)
 
   expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
   expect(sentTo(fake, 'POST', closedPath('toolu_1')).map(request => request.body)).toEqual([{ by: 'terminal' }])
@@ -194,6 +196,7 @@ test('denyTakingEffectPostsReceiptAfterToolDenied', async () => {
     expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
 
     await finish(call, ended)
+    await fake.advance(0)
 
     expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toHaveLength(1)
     expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
@@ -216,6 +219,7 @@ test('failedWaitStopsRetryingWhenBudgetRunsLow', async () => {
   // terminal took the dialog.
   expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
   await finish(call)
+  await fake.advance(0)
   expect(sentTo(fake, 'POST', closedPath('toolu_1')).map(request => request.body)).toEqual([{ by: 'terminal' }])
 })
 
@@ -240,28 +244,10 @@ test('receiptIsAwaitedBeforeTheHookReturns', async () => {
   await finish(call)
 })
 
-test('closedIsAwaitedBeforeTheToolCallReturns', async () => {
-  const fake = fakeChannel()
-  fake.replies.set(`POST ${closedPath('toolu_q')}`, 'hold')
-  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
-  await flush()
-  let returned = false
-  void call.done.then(() => {
-    returned = true
-  })
-  call.tool.settle(TOOL_RESULT)
-  await flush()
-
-  expect(fake.heldCount('POST', closedPath('toolu_q'))).toBe(1)
-  expect(returned).toBe(false)
-
-  // A failed close is swallowed: the call still returns the dialog's result.
-  await fake.answer('POST', closedPath('toolu_q'), 'fail')
-  expect(await call.done).toEqual(TOOL_RESULT)
-  await fake.answer('GET', answerPath('toolu_q'), { status: 200, json: { state: 'resolved' } })
-})
-
-test('abortPostsClosedAndPassesOn', async () => {
+// No or Escape in the terminal aborts the hook's dispatch, and every `$` call
+// the hook makes afterwards fails before it reaches the socket. The close goes
+// out from the outbox's timer instead.
+test('abortedPermissionQueuesClosedOnTimer', async () => {
   const fake = fakeChannel()
   const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
   await flush()
@@ -270,18 +256,47 @@ test('abortPostsClosedAndPassesOn', async () => {
   await flush()
   expect(fake.heldCount('GET', answerPath('toolu_1'))).toBe(1)
 
-  // No or Escape in the terminal abandons the hook's dispatch.
+  fake.abortHookCalls()
   dialog.below.abort()
 
   expect(await dialog.done).toEqual(PASSED)
   expect(dialog.below.calls()).toBe(1)
   await flush()
+  // Nothing was posted from inside the aborted hook.
+  expect(fake.refused).toEqual([])
+  expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
+
+  await fake.advance(0)
   expect(sentTo(fake, 'POST', closedPath('toolu_1')).map(request => request.body)).toEqual([{ by: 'terminal' }])
   expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
 
   // The refused tool's end posts no second close.
   await finish(call, { deny: 'refused' })
+  await fake.advance(0)
   expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toHaveLength(1)
+})
+
+test('escapedQuestionQueuesClosedOnTimer', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  expect(fake.heldCount('GET', answerPath('toolu_q'))).toBe(1)
+
+  // Escape settles the dialog and aborts the hook.
+  const escaped = { result: 'The user declined to answer.', isError: true }
+  fake.abortHookCalls()
+  call.tool.abort()
+  call.tool.settle(escaped)
+
+  // The call returns without waiting on a post.
+  expect(await call.done).toEqual(escaped)
+  await flush()
+  expect(fake.refused).toEqual([])
+  expect(sentTo(fake, 'POST', closedPath('toolu_q'))).toEqual([])
+
+  await fake.advance(0)
+  expect(sentTo(fake, 'POST', closedPath('toolu_q')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+  expect(sentTo(fake, 'POST', receiptPath('toolu_q'))).toEqual([])
 })
 
 test('disabledOpenPassesOn', async () => {
@@ -361,7 +376,7 @@ test('questionAnsweredInTerminalPostsClosed', async () => {
   call.tool.settle(answeredHere)
 
   expect(await call.done).toEqual(answeredHere)
-  await flush()
+  await fake.advance(0)
   expect(sentTo(fake, 'POST', closedPath('toolu_q')).map(request => request.body)).toEqual([{ by: 'terminal' }])
   expect(sentTo(fake, 'POST', receiptPath('toolu_q'))).toEqual([])
 

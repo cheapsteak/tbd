@@ -67,6 +67,14 @@ export type FakeChannel = {
   heldCount: (method: string, path: string) => number
   /** Moves the clock on, running each wait due on the way in order. */
   advance: (ms: number) => Promise<void>
+  /**
+   * Acts out a terminal No or Escape: from here on a fetch fails with "The
+   * operation was aborted" before it is sent, as the hook's own calls do,
+   * unless a timer's callback makes it (the calls a timer makes as it runs).
+   */
+  abortHookCalls: () => void
+  /** The fetches abortHookCalls refused, in order; never in `sent`. */
+  refused: Sent[]
 }
 
 /** Lets every promise chain already under way run out. */
@@ -84,7 +92,10 @@ export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLE
   const replies = new Map<string, Scripted>()
   const held: Held[] = []
   const waits: Wait[] = []
+  const refused: Sent[] = []
   let now = 0
+  let isHookAborted = false
+  let isTimerRunning = false
 
   function respond(reply: Reply, resolve: (value: unknown) => void, reject: (error: Error) => void): void {
     if (reply === 'fail') {
@@ -132,7 +143,15 @@ export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLE
           )
         }),
       after: (ms: number, run: () => void) => {
-        const wait = addWait(ms, run, () => {})
+        const timed = (): void => {
+          isTimerRunning = true
+          try {
+            run()
+          } finally {
+            isTimerRunning = false
+          }
+        }
+        const wait = addWait(ms, timed, () => {})
         return {
           cancel: () => {
             wait.isDone = true
@@ -152,6 +171,11 @@ export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLE
             headers: { ...(init?.headers ?? {}) },
             socketPath: init?.socketPath,
             body: init?.body === undefined ? undefined : JSON.parse(init.body),
+          }
+          if (isHookAborted && !isTimerRunning) {
+            refused.push(request)
+            reject(new Error('The operation was aborted'))
+            return
           }
           sent.push(request)
           const known = replies.get(`${method} ${path}`)
@@ -202,6 +226,10 @@ export function fakeChannel(variables: Record<string, string> = CHANNEL_VARIABLE
       now = target
       await flush()
     },
+    abortHookCalls: () => {
+      isHookAborted = true
+    },
+    refused,
   }
 }
 

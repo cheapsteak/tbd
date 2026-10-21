@@ -3,7 +3,7 @@
 // running holds only that test's stand-in.
 import { expect, test } from 'claude-code/testing'
 
-import { readChannelEnv, request, standReport, startPolling, withdrawReport } from '../hooks/shared/channel.ts'
+import { queueReport, readChannelEnv, request, standReport, startPolling, withdrawReport } from '../hooks/shared/channel.ts'
 import { CHANNEL, CHANNEL_VARIABLES, fakeChannel, flush, sentTo } from './fake-channel.ts'
 
 const POLL_FROM_ZERO = '/v1/poll?after=0'
@@ -63,6 +63,46 @@ test('pollBacksOffOneTwoFiveTen', async () => {
   // Failures log at debug level only: nothing reaches the transcript.
   expect(fake.logs.length).toBeGreaterThan(0)
   expect(fake.logOptions).toHaveLength(fake.logs.length)
+  for (const options of fake.logOptions) {
+    expect(options).toEqual({ to: 'debug' })
+  }
+})
+
+test('queuedReportRetriesThenGivesUp', async () => {
+  const fake = fakeChannel()
+  const path = '/v1/prompts/toolu_1/closed'
+  fake.replies.set(`POST ${path}`, 'fail')
+
+  queueReport(fake.engine, CHANNEL, path, { by: 'terminal' })
+  // Nothing goes out until the timer runs.
+  expect(sentTo(fake, 'POST', path)).toEqual([])
+  await fake.advance(0)
+  expect(sentTo(fake, 'POST', path)).toHaveLength(1)
+
+  // Retried after 1, 2, 5 and 5 s: five attempts in all, then dropped.
+  for (const [index, delay] of [1_000, 2_000, 5_000, 5_000].entries()) {
+    await fake.advance(delay - 1)
+    expect(sentTo(fake, 'POST', path)).toHaveLength(index + 1)
+    await fake.advance(1)
+    expect(sentTo(fake, 'POST', path)).toHaveLength(index + 2)
+  }
+  await fake.advance(60_000)
+  expect(sentTo(fake, 'POST', path)).toHaveLength(5)
+  expect(sentTo(fake, 'POST', path).map(request => request.body)).toEqual(Array(5).fill({ by: 'terminal' }))
+
+  // A daemon error is retried too; the first attempt that reaches the daemon
+  // ends the report.
+  const other = '/v1/prompts/toolu_2/closed'
+  fake.replies.set(`POST ${other}`, { status: 503, json: { error: 'unavailable' } })
+  queueReport(fake.engine, CHANNEL, other, { by: 'terminal' })
+  await fake.advance(0)
+  fake.replies.set(`POST ${other}`, { status: 200, json: {} })
+  await fake.advance(1_000)
+  await fake.advance(60_000)
+  expect(sentTo(fake, 'POST', other)).toHaveLength(2)
+
+  // Failures log at debug level only.
+  expect(fake.logs.length).toBeGreaterThan(0)
   for (const options of fake.logOptions) {
     expect(options).toEqual({ to: 'debug' })
   }
