@@ -40,10 +40,14 @@ these steps in order.
   source worktree, else that worktree's `origin`, else whatever `--remote` you
   pass.
 - **Fetches and detaches onto `origin/main`.** If the fetched copy of
-  `scripts/update.sh`, or of either library it sources, differs from the one
-  running, the fetched script takes over with the same arguments. That is how
-  the procedure updates itself, and an environment marker holds it to a single
-  hop.
+  `scripts/update.sh`, or of any library it sources (`restart-bundle-lib.sh`,
+  `restart-environment-lib.sh`, `restart-build-lib.sh` and
+  `update-release-lib.sh`), differs from the copy that was running before the
+  fetch, the fetched script takes over with the same arguments. The running
+  copies are kept aside before the fetch because on an installation that has
+  updated before, the script runs from the update clone itself, and the fetch
+  rewrites those very files in place. That is how the procedure updates
+  itself, and an environment marker holds it to a single hop.
 - **Builds** the same products `scripts/restart.sh` builds — `TBDDaemon`,
   `TBDApp`, `TBDCLI`, `TBDHolder` and `TBDPeerHelper` — through
   `scripts/swift-safe`, with the same shared module cache. With the update

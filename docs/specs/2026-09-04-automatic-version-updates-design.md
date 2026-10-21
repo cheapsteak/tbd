@@ -197,10 +197,13 @@ arguments, and inherits the user's environment. The script is the procedure:
    must be safe to `checkout --detach` at any time. Its `origin` is the
    upstream URL resolved as in §5.
 2. **Fetch and check out** `origin/main` detached. If the fetched
-   `scripts/update.sh`, or either library it sources, differs from the running
-   copy, re-exec the fetched script with the same arguments (guarded by an
-   environment marker so it happens once). This is how the procedure itself
-   updates.
+   `scripts/update.sh`, or any of the libraries it sources, differs from the
+   copy that was running before the fetch, re-exec the fetched script with the
+   same arguments (guarded by an environment marker so it happens once). The
+   running copies are snapshotted before the fetch, not read back after it:
+   `tbd update` runs the script out of the daemon's source worktree, which
+   after the first update is the update clone itself, so the checkout
+   rewrites those files in place. This is how the procedure itself updates.
 3. **Stamp** `TBDBuildIdentity.json` into `.build/<config>/` (commit, branch,
    time, worktree, dirty) and **build** every product in `RUNTIME_PRODUCTS`
    (`scripts/restart-bundle-lib.sh`, the list `restart.sh` builds from too:
