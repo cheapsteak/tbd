@@ -14,10 +14,11 @@ private let sessionStateLog = Logger(subsystem: "com.tbd.daemon", category: "ses
 /// terminal it performs **a handful of small or byte-bounded file reads** (the
 /// transcript tail, once for the rate-limit classification and once inside
 /// `ContextLoadReader`; for a Claude session with a session directory, its
-/// `spawn.json`, `alive.json` and — when the mod is confirmed running —
-/// `usage.json`; and on the tee path, the statusline capture when one exists) and
-/// **zero** subprocesses, tmux calls, pane reads and model calls. That is the
-/// property that lets the whole fleet be asked about every cycle.
+/// `spawn.json`, `alive.json` and — when the mod is confirmed running, or
+/// its process stopped heartbeating or was parked — `usage.json`; and on the
+/// tee path, the statusline capture when one exists) and **zero**
+/// subprocesses, tmux calls, pane reads and model calls. That is the property
+/// that lets the whole fleet be asked about every cycle.
 /// Not `Sendable`, and it does not need to be: one gatherer is built inside a
 /// single `session.states` pass and never crosses an isolation boundary.
 struct SessionStateFactGatherer {
@@ -91,32 +92,60 @@ struct SessionStateFactGatherer {
         return contextLoadReader.read(
             capturePath: capturePath(terminal.id.uuidString),
             usagePath: usage.path,
-            usageIncarnationID: terminal.sessionIncarnationID,
+            usageIncarnationID: usage.incarnationID,
             usageLiveness: usage.liveness,
+            usageParked: usage.parked,
             transcriptPath: terminal.transcriptPath,
             tee: teeStatus(for: terminal))
     }
 
     /// Whether this session was spawned to record its usage through the
-    /// session mod, and where that file lives.
+    /// session mod, where that file lives, and which incarnation's file
+    /// speaks for it.
     ///
-    /// Liveness is evaluated against the row's live incarnation, as
+    /// A live row's liveness is evaluated against its own incarnation, as
     /// `ComposerDraftStatus` does, so a `spawn.json` left by an earlier life of
     /// the session reads `.legacy` rather than vouching for this one. The mod
     /// loads into Claude Code only, so every other kind is `.legacy` — and so
     /// is a row with no session ID, or one unsafe to use as a path, which has
     /// no directory to read.
+    ///
+    /// A parked row is different. Parking replaces the agent with an inert
+    /// shell and gives the row a new incarnation that belongs to that shell,
+    /// which never runs the mod and never writes a `spawn.json`. So the row's
+    /// incarnation cannot vouch for anything, and the last Claude process to
+    /// run in the session is the one `spawn.json` names. When that record
+    /// lists `usage`, its incarnation is the one the usage file must name;
+    /// when it does not, the session was spawned without the feature and is
+    /// `.legacy`, as a live one would be.
     private func usageSource(
         for terminal: Terminal
-    ) -> (path: String?, liveness: SessionModLiveness) {
+    ) -> (path: String?, incarnationID: UUID?, liveness: SessionModLiveness, parked: Bool) {
         guard terminal.kind == .claude, let id = terminal.claudeSessionID,
               let dir = SessionModFiles.directory(sessionsDir: sessionsDir, claudeSessionID: id) else {
-            return (nil, .legacy)
+            return (nil, terminal.sessionIncarnationID, .legacy, false)
         }
+        let path = dir.appendingPathComponent(SessionModFiles.usageFileName).path
+        let spawn = SessionModFiles.read(
+            SessionModFiles.SpawnRecord.self, at: dir.appendingPathComponent(SessionModFiles.spawnFileName))
+        let parkedIncarnation = terminal.isParked ? Self.usageSpawnIncarnation(spawn) : nil
+        let incarnationID = parkedIncarnation ?? terminal.sessionIncarnationID
         let liveness = SessionModLiveness.evaluate(
-            feature: .usage, sessionsDir: sessionsDir, claudeSessionID: id,
-            liveIncarnationID: terminal.sessionIncarnationID, now: now())
-        return (dir.appendingPathComponent(SessionModFiles.usageFileName).path, liveness)
+            feature: .usage, spawn: spawn,
+            alive: SessionModFiles.read(
+                SessionModFiles.AliveRecord.self, at: dir.appendingPathComponent(SessionModFiles.aliveFileName)),
+            liveIncarnationID: incarnationID, now: now())
+        return (path, incarnationID, liveness, parkedIncarnation != nil)
+    }
+
+    /// The incarnation a spawn record names, when that spawn ran the `usage`
+    /// feature.
+    private static func usageSpawnIncarnation(
+        _ spawn: SessionModFiles.ReadResult<SessionModFiles.SpawnRecord>
+    ) -> UUID? {
+        guard case .record(let record) = spawn,
+              record.features.contains(SessionModFeature.usage.rawValue) else { return nil }
+        return UUID(uuidString: record.incarnationId)
     }
 
     /// The desk role brands the ROW; the tee installs on the Claude spawn path

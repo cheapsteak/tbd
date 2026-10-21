@@ -739,12 +739,14 @@ import TBDShared
         #expect(gatherer.contextLoad(for: respawned).window == .observed(
             ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: Self.captureModified)))
 
-        // The same session parked: its heartbeat is older than the staleness
-        // bound, and its own file still serves.
-        let parked = SessionStateFactGatherer(
+        // The same live session whose heartbeat is older than the staleness
+        // bound: the row still carries the incarnation that wrote the file,
+        // so its own file still serves. (A parked row does not carry it — see
+        // the parked tests below.)
+        let stale = SessionStateFactGatherer(
             now: { pinned.addingTimeInterval(SessionModLiveness.staleAfter + 60) },
             capturePath: { _ in capturePath }, sessionsDir: sessionsDir)
-        #expect(parked.contextLoad(for: claude).window == .observed(
+        #expect(stale.contextLoad(for: claude).window == .observed(
             ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
 
         // A Codex row never reads the mod's file: it is legacy, and takes the
@@ -752,6 +754,110 @@ import TBDShared
         var codex = claude
         codex.kind = .codex
         #expect(gatherer.contextLoad(for: codex).window == .observed(
+            ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: Self.captureModified)))
+    }
+
+    // MARK: - A parked session
+
+    /// A Claude desk whose spawn record names `incarnation` with `features`,
+    /// whose mod heartbeat and usage file were written by that incarnation,
+    /// and which is then parked through `TerminalStore.setHibernated` — the
+    /// production park write, which gives the row a fresh incarnation for the
+    /// inert shell. Returns the parked row as the store reads it back.
+    private func parkedDesk(
+        features: [String], incarnation: UUID, sessionsDir: URL, heartbeatAt: Date
+    ) async throws -> Terminal {
+        let sessionID = "sess-parked"
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: sessionID, incarnationId: incarnation.uuidString,
+                  spawnedAtMs: Self.usageMeasuredAtMs, features: features),
+            sessionsDir: sessionsDir)
+        let directory = SessionModFiles.directory(sessionsDir: sessionsDir, claudeSessionID: sessionID)
+        let dir = try #require(directory)
+        try JSONEncoder().encode(SessionModFiles.AliveRecord(
+            sessionId: sessionID, incarnationId: incarnation.uuidString, features: features,
+            heartbeatAtMs: Int64(heartbeatAt.timeIntervalSince1970 * 1000)))
+            .write(to: dir.appendingPathComponent(SessionModFiles.aliveFileName))
+        try Data(Self.usageJSON(incarnationID: incarnation.uuidString).utf8)
+            .write(to: dir.appendingPathComponent(SessionModFiles.usageFileName))
+
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/ctx-repo-\(UUID().uuidString)", displayName: "R", defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "w", branch: "b",
+            path: "/tmp/ctx-wt-\(UUID().uuidString)", tmuxServer: "tbd-ctx")
+        let created = try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            claudeSessionID: sessionID, kind: .claude, watchDeskRole: .readOnlyCoordinator,
+            sessionIncarnationID: incarnation)
+        try await db.terminals.setHibernated(id: created.id, sessionID: sessionID)
+        let fetched = try await db.terminals.get(id: created.id)
+        let parked = try #require(fetched)
+        // The premise the parked rule exists for: the row no longer names the
+        // incarnation that wrote the files.
+        #expect(parked.isParked)
+        #expect(parked.sessionIncarnationID != incarnation)
+        return parked
+    }
+
+    /// Parking gives the row the inert shell's incarnation, so neither the
+    /// row's incarnation nor the heartbeat can vouch for the usage file. The
+    /// spawn record can: it names the last process that ran `usage`, and a
+    /// file naming that incarnation is that process's own reading — however
+    /// old the heartbeat, with `measuredAt` as its age.
+    @Test func aParkedSessionReadsTheUsageFileItsSpawnRecordNames() async throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        let sessionsDir = scratch.root.appendingPathComponent("sessions", isDirectory: true)
+        let heartbeatAt = Date(timeIntervalSince1970: 1_770_000_010)
+        let incarnation = UUID()
+        let parked = try await parkedDesk(
+            features: ["usage"], incarnation: incarnation, sessionsDir: sessionsDir,
+            heartbeatAt: heartbeatAt)
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+        let capturePath = scratch.capturePath
+
+        // A day after the last heartbeat: the age is ignored.
+        let gatherer = SessionStateFactGatherer(
+            now: { heartbeatAt.addingTimeInterval(86_400) },
+            capturePath: { _ in capturePath }, sessionsDir: sessionsDir)
+        let load = gatherer.contextLoad(for: parked)
+        #expect(load.window == .observed(
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: Self.usageMeasuredAt)))
+        #expect(load.used == ObservedFact(value: 50_000, source: .sessionMod, observedAt: Self.usageMeasuredAt))
+        #expect(load.isPairedReading)
+
+        // A usage file from any other incarnation — the shell's included — is
+        // not that process's reading, and the stale tee capture is not read.
+        let directory = SessionModFiles.directory(sessionsDir: sessionsDir, claudeSessionID: "sess-parked")
+        let dir = try #require(directory)
+        let shellIncarnation = try #require(parked.sessionIncarnationID)
+        try Data(Self.usageJSON(incarnationID: shellIncarnation.uuidString).utf8)
+            .write(to: dir.appendingPathComponent(SessionModFiles.usageFileName))
+        guard case .unknown(let why) = gatherer.contextLoad(for: parked).window else {
+            Issue.record("a parked session read another incarnation's usage file")
+            return
+        }
+        #expect(why.contains("parked"))
+    }
+
+    /// A parked session whose last spawn ran without `usage` is legacy, as a
+    /// live one would be, and keeps the tee path.
+    @Test func aParkedSessionSpawnedWithoutUsageReadsTheTee() async throws {
+        let scratch = try Scratch()
+        defer { scratch.cleanUp() }
+        let sessionsDir = scratch.root.appendingPathComponent("sessions", isDirectory: true)
+        let heartbeatAt = Date(timeIntervalSince1970: 1_770_000_010)
+        let parked = try await parkedDesk(
+            features: [], incarnation: UUID(), sessionsDir: sessionsDir, heartbeatAt: heartbeatAt)
+        try scratch.writeCapture(Self.fullCapture(), modified: Self.captureModified)
+        let capturePath = scratch.capturePath
+
+        let gatherer = SessionStateFactGatherer(
+            now: { heartbeatAt.addingTimeInterval(86_400) },
+            capturePath: { _ in capturePath }, sessionsDir: sessionsDir)
+        #expect(gatherer.contextLoad(for: parked).window == .observed(
             ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: Self.captureModified)))
     }
 }
