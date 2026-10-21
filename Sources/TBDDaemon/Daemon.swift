@@ -223,6 +223,14 @@ public final class Daemon: Sendable {
     /// Timer that expires stranded `AskUserQuestion` captures (step
     /// 11a-questions). `nil` in mock mode.
     nonisolated(unsafe) var pendingPromptExpirySweep: PendingPromptExpirySweep?
+    /// The session-mod channel's listener on `~/tbd/mod.sock` (step
+    /// 11a-mod-channel). `nil` in mock mode, and when the channel key could
+    /// not be loaded or the socket could not be bound — the feature then
+    /// degrades to answering in the terminal.
+    nonisolated(unsafe) var modChannelServer: ModChannelServer?
+    /// Clears open prompts no wait request has held for a minute. `nil`
+    /// whenever `modChannelServer` is.
+    nonisolated(unsafe) var modDisconnectSweep: ModDisconnectSweep?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
     /// Hourly orphan-maintenance task (orphan GC + scratch terminal
     /// reconciliation). `nil` in mock mode. See `orphanGC` for the actor it
@@ -1797,6 +1805,15 @@ public final class Daemon: Sendable {
             self.pendingPromptExpirySweep = questionSweep
             await questionSweep.start()
 
+            // 11a-mod-channel. Serve the session-mod channel on `mod.sock`:
+            // the session mods' polls and prompt reports, and the disconnect
+            // sweep that clears a terminal's prompts once its mod stops
+            // polling. After the RPC socket bind for the same reason as the
+            // sweep above. Neither a missing key nor a failed bind stops the
+            // daemon: without the channel, dialogs are answered in the
+            // terminal, as with the feature off.
+            await startModChannel(router: rpcRouter)
+
             // 11a-shadow. Reclaim the durable artifacts of shadow peers — a
             // helper process, the socket it bound, and the record it published
             // into the registry every Claude Code session on this machine
@@ -2361,6 +2378,9 @@ public final class Daemon: Sendable {
         if let questionSweep = pendingPromptExpirySweep {
             await questionSweep.stop()
         }
+        if let modSweep = modDisconnectSweep {
+            await modSweep.stop()
+        }
 
         // Cancel the deferred remote-backends boot task BEFORE tearing down
         // the manager, and AWAIT it here rather than merely signalling it
@@ -2455,14 +2475,17 @@ public final class Daemon: Sendable {
         if let http = httpServer {
             await http.stop()
         }
+        if let modServer = modChannelServer {
+            await modServer.stop()
+        }
 
-        // Settle the open transcript prompts only now, after the socket has
-        // closed every `prompt.await` connection. Resolving them first would
-        // tell each waiting hook "resolved elsewhere" and it would exit for
-        // good; a hook that instead sees its connection drop reconnects to the
-        // next daemon and registers again, keeping its prompt answerable.
-        // This releases whatever the closes did not reach — chiefly a
-        // `prompt.answer` still waiting for a delivery ack.
+        // Settle the open transcript prompts only now, after the servers have
+        // stopped. Resolving them first would answer each held wait request
+        // "resolved" and the session mod would stop waiting on that dialog;
+        // a mod that instead sees its connection drop re-posts its open
+        // dialogs to the next daemon, keeping them answerable. This releases
+        // whatever the closes did not reach — chiefly a `prompt.answer` still
+        // waiting for a receipt.
         if let router = self.router {
             await router.pendingQuestions.resolveAll()
         }

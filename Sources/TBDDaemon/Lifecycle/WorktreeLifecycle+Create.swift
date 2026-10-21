@@ -1639,8 +1639,7 @@ extension WorktreeLifecycle {
                 worktreePath: worktreePath,
                 // The same config dir this spawn runs with, so the tee
                 // delegates to the user-scope statusline THIS session reads.
-                profileConfigDir: profileConfigDir,
-                promptAnswerHooks: config.transcriptPromptAnswerEnabled
+                profileConfigDir: profileConfigDir
             )
             let spawnTitle = await ClaudeSessionTitle.forSpawn(
                 db: db, store: sessionTitles,
@@ -1929,8 +1928,7 @@ extension WorktreeLifecycle {
                     settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                         fallbackModels: resolvedProfile?.fallbackModels,
                         sessionKey: plannedID.uuidString,
-                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                        promptAnswerHooks: config.transcriptPromptAnswerEnabled
+                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
                     envSettingOverrides: claudeEnvOverrides,

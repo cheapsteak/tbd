@@ -49,6 +49,20 @@ public final class StateSubscriptionManager: @unchecked Sendable {
         broadcast(delta: .modelProfileUsageUpdated(usage))
     }
 
+    /// Send a delta to one subscriber only — a new subscriber's catch-up, which
+    /// the others already have. A no-op for an id no longer subscribed; a
+    /// callback returning `false` is removed, as in `broadcast`.
+    public func send(delta: StateDelta, to id: SubscriberID) {
+        guard let data = try? JSONEncoder().encode(delta) else { return }
+        lock.lock()
+        let callback = subscribers[id]
+        lock.unlock()
+        guard let callback, !callback(data) else { return }
+        lock.lock()
+        subscribers.removeValue(forKey: id)
+        lock.unlock()
+    }
+
     /// Broadcast a delta event to all subscribers.
     ///
     /// Encodes the delta as JSON and sends it to each subscriber callback.

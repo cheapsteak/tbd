@@ -466,8 +466,7 @@ extension RPCRouter {
                 // Per-spawn fragment applies to FRESH spawns only; a
                 // resume must not reapply it. Hooks overlay still resolves
                 // for resumes — only extraSettingsJSON goes nil.
-                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil,
-                promptAnswerHooks: createConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
               )
             : nil
 
@@ -1240,8 +1239,7 @@ extension RPCRouter {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                    promptAnswerHooks: reviveConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
@@ -2705,8 +2703,7 @@ extension RPCRouter {
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
             watchDeskRole: swapDeskRole,
             worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir,
-            promptAnswerHooks: swapConfig?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+            profileConfigDir: profileConfigDir
         )
 
         // The session name is the swapped tab's: the new tab on a fork, the
@@ -6011,6 +6008,12 @@ extension RPCRouter {
     /// PR #821, "Not-running delivery").
     func handleTerminalSessionEnded(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEndedParams.self, from: paramsData)
+        // Whatever the reason, the session that opened this terminal's prompts
+        // is over, and its dialogs with it: clear them before the park guard,
+        // which returns early for reasons that do not park.
+        let resolvedPrompts = await pendingQuestions.resolvePrompts(
+            terminalID: params.terminalID, .sessionEnded)
+        await broadcastPendingPrompts(terminals: resolvedPrompts)
         await claudeDelegationTracker.clear(
             terminalID: params.terminalID,
             sessionIncarnationID: params.sessionIncarnationID)

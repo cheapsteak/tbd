@@ -4,20 +4,21 @@ import Testing
 @testable import TBDDaemonLib
 import TBDShared
 
-/// Tier 1 — `PendingPromptStore`'s open prompts: pairing a `PermissionRequest`
-/// register with its `PreToolUse` note, and every way a prompt resolves
-/// (`docs/specs/2026-10-09-transcript-prompt-answer-design.md`, "Daemon:
-/// `PendingPromptStore`"). Each store takes an `EventDrivenTestClock` so neither the 5 s
-/// late-note window nor the 5 s delivery-ack timeout can fire on wall time;
-/// the tests that cross them advance the clock explicitly.
+/// Tier 1 — `PendingPromptStore`'s open prompts as the session mod drives
+/// them: open, wait, receipt and close, keyed by `(terminal, tool call id)`,
+/// and every way a prompt resolves
+/// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`, "Daemon: the
+/// store"). Each store takes an `EventDrivenTestClock`, so neither a wait's
+/// hold, the 60 s pickup window nor the 5 s receipt timeout can fire on wall
+/// time; the tests that cross them advance the clock explicitly.
 @Suite(.clockDriven)
 struct PendingPromptResolutionTests {
 
     static let bashInput = #"{"command":"ls"}"#
-    static let otherBashInput = #"{"command":"rm -rf build"}"#
     static let questionInput = #"""
     {"questions":[{"question":"Pick one","header":"Choice","multiSelect":false,"options":[{"label":"A"},{"label":"B"}]}]}
     """#
+    static let allow = PromptAnswer.permission(decision: .allow, message: nil)
 
     // MARK: Helpers
 
@@ -28,667 +29,605 @@ struct PendingPromptResolutionTests {
         PendingPromptStore(now: dates.provider, clock: clock)
     }
 
-    private func params(
-        terminal: UUID, session: String, tool: String = "Bash", input: String = PendingPromptResolutionTests.bashInput,
-        suggestions: String? = nil, knownPromptID: String? = nil, knownToolUseID: String? = nil
-    ) -> PromptRegisterParams {
-        PromptRegisterParams(
-            terminalID: terminal, sessionID: session, toolName: tool, toolInputJSON: input,
-            suggestionsJSON: suggestions, inputHash: PromptInputHash.of(toolName: tool, toolInputJSON: input),
-            knownPromptID: knownPromptID, knownToolUseID: knownToolUseID)
-    }
-
-    private func preNote(
-        _ store: PendingPromptStore, terminal: UUID, session: String, toolUseID: String,
-        tool: String = "Bash", input: String = PendingPromptResolutionTests.bashInput
+    @discardableResult
+    private func open(
+        _ store: PendingPromptStore, terminal: UUID, toolUseID: String = "toolu_1",
+        session: String = "s1", tool: String = "Bash",
+        input: String = PendingPromptResolutionTests.bashInput, suggestions: String? = nil
     ) async -> Set<UUID> {
-        await store.note(
-            terminalID: terminal, sessionID: session, phase: .pre, toolUseID: toolUseID,
-            toolName: tool, inputHash: PromptInputHash.of(toolName: tool, toolInputJSON: input))
-    }
-
-    private func register(
-        _ store: PendingPromptStore, _ params: PromptRegisterParams
-    ) async -> (id: String, changed: Set<UUID>) {
-        let result = await store.register(params)
-        switch result.outcome {
-        case .registered(let id, _): return (id, result.changed)
+        let outcome = await store.open(
+            terminalID: terminal, sessionID: session, toolUseID: toolUseID, toolName: tool,
+            toolInputJSON: input, suggestionsJSON: suggestions)
+        guard case .opened(let changed) = outcome else {
+            Issue.record("open of \(toolUseID) was refused as a conflict")
+            return []
         }
+        return changed
     }
 
-    private func payload(_ store: PendingPromptStore, terminal: UUID, id: String) async -> PendingPromptPayload? {
-        await store.prompts(forTerminal: terminal).first { $0.id == id }
-    }
-
-    /// Starts a hook's `prompt.await` and returns once it is attached.
+    /// Starts a wait request and returns once it is attached.
     private func attachWaiter(
-        _ store: PendingPromptStore, id: String, token: UUID = UUID(),
+        _ store: PendingPromptStore, terminal: UUID, toolUseID: String = "toolu_1",
+        token: UUID = UUID(), hold: Duration = .seconds(25),
         sourceLocation: SourceLocation = #_sourceLocation
-    ) async -> Task<PromptAwaitResult, Never> {
-        let waiter = Task { await store.awaitResolution(promptID: id, token: token) }
+    ) async -> Task<PendingPromptStore.WaitResult, Never> {
+        let waiter = Task {
+            await store.waitForAnswer(terminalID: terminal, toolUseID: toolUseID, token: token, hold: hold)
+        }
         let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await store.isWaiterAttached(promptID: id)
+            await store.isWaiterAttached(terminalID: terminal, toolUseID: toolUseID)
         }
         if outcome == .timedOut {
-            Issue.record("the waiter for \(id) never attached", sourceLocation: sourceLocation)
+            Issue.record("the waiter for \(toolUseID) never attached", sourceLocation: sourceLocation)
         }
         return waiter
     }
 
-    // MARK: Pairing
-
-    /// No note carries this input, but the session has exactly one note for
-    /// the tool, so the register pairs with it — never with a newer note of
-    /// another tool.
-    @Test func registerFallsBackToTheOnlyNoteForTheTool() async {
-        let store = makeStore()
-        let terminal = UUID()
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_bash",
-                          input: Self.otherBashInput)
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_read",
-                          tool: "Read", input: #"{"file_path":"/tmp/x"}"#)
-
-        let (id, changed) = await register(store, params(
-            terminal: terminal, session: "s1", input: #"{"command":"whoami"}"#))
-
-        #expect(changed == [terminal])
-        let prompt = await payload(store, terminal: terminal, id: id)
-        #expect(prompt?.toolUseID == "toolu_bash")
-        #expect(prompt?.kind == .permission)
+    /// Takes the held decision with a wait request and then delivers a receipt,
+    /// all in one turn on the store's executor: a held decision returns without
+    /// suspending, so a parked `answer` cannot resume between the two.
+    private func pickUpThenReceipt(
+        _ store: isolated PendingPromptStore, terminal: UUID, toolUseID: String = "toolu_1"
+    ) async -> PendingPromptStore.WaitResult {
+        let picked = await store.waitForAnswer(
+            terminalID: terminal, toolUseID: toolUseID, token: UUID(), hold: .seconds(25))
+        _ = store.receipt(terminalID: terminal, toolUseID: toolUseID)
+        return picked
     }
 
-    /// No note carries this input and two notes share the tool: recency
-    /// cannot say which call the dialog shows, so the prompt stays unpaired
-    /// and both notes stay for registers that do match.
-    @Test func registerWithTwoSameToolNotesAndNoHashMatchStaysUnpaired() async {
-        let store = makeStore()
-        let terminal = UUID()
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_old",
-                          input: Self.otherBashInput)
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_new",
-                          input: #"{"command":"pwd"}"#)
-
-        let (id, _) = await register(store, params(
-            terminal: terminal, session: "s1", input: #"{"command":"whoami"}"#))
-        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
-
-        let matched = await register(store, params(terminal: terminal, session: "s1", input: Self.otherBashInput))
-        #expect(await payload(store, terminal: terminal, id: matched.id)?.toolUseID == "toolu_old")
+    /// As `pickUpThenReceipt`, but the terminal closes the prompt instead.
+    private func pickUpThenClosed(
+        _ store: isolated PendingPromptStore, terminal: UUID, toolUseID: String = "toolu_1"
+    ) async -> PendingPromptStore.WaitResult {
+        let picked = await store.waitForAnswer(
+            terminalID: terminal, toolUseID: toolUseID, token: UUID(), hold: .seconds(25))
+        _ = store.closed(terminalID: terminal, toolUseID: toolUseID)
+        return picked
     }
 
-    @Test func pairsOnInputHashBeforeRecency() async {
-        let store = makeStore()
-        let terminal = UUID()
-        // Two Bash calls in one assistant message: both notes land before the
-        // first dialog opens.
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_first",
-                          input: Self.bashInput)
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_second",
-                          input: Self.otherBashInput)
-
-        let first = await register(store, params(terminal: terminal, session: "s1", input: Self.bashInput))
-        #expect(await payload(store, terminal: terminal, id: first.id)?.toolUseID == "toolu_first",
-                "the dialog showing the first call's input binds to the first call, not the newest note")
-
-        let second = await register(store, params(terminal: terminal, session: "s1", input: Self.otherBashInput))
-        #expect(await payload(store, terminal: terminal, id: second.id)?.toolUseID == "toolu_second")
+    private func decision(
+        _ answer: PromptAnswer = PendingPromptResolutionTests.allow,
+        input: String = PendingPromptResolutionTests.bashInput
+    ) throws -> String {
+        try PromptDecisionEncoder.decisionJSON(
+            answer: answer, kind: .permission, toolInputJSON: input, suggestionsJSON: nil)
     }
 
-    @Test func notesNeverCrossSessions() async {
-        let store = makeStore()
-        let terminalA = UUID()
-        let terminalB = UUID()
-        let terminalC = UUID()
-        _ = await preNote(store, terminal: terminalA, session: "sA", toolUseID: "toolu_A")
-        _ = await preNote(store, terminal: terminalB, session: "sB", toolUseID: "toolu_B")
-
-        async let registeredA = register(store, params(terminal: terminalA, session: "sA"))
-        async let registeredB = register(store, params(terminal: terminalB, session: "sB"))
-        async let registeredC = register(store, params(terminal: terminalC, session: "sC"))
-        let (a, b, c) = await (registeredA, registeredB, registeredC)
-
-        #expect(await payload(store, terminal: terminalA, id: a.id)?.toolUseID == "toolu_A")
-        #expect(await payload(store, terminal: terminalB, id: b.id)?.toolUseID == "toolu_B")
-        let unpaired = await payload(store, terminal: terminalC, id: c.id)
-        #expect(unpaired != nil)
-        #expect(unpaired?.toolUseID == nil, "a session with no note of its own must not borrow another's")
+    private func openIDs(_ store: PendingPromptStore, _ terminal: UUID) async -> [String] {
+        await store.prompts(forTerminal: terminal).map(\.id)
     }
 
-    @Test func unpairedPromptGetsFreshIDAndNilToolUseID() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let (id, _) = await register(store, params(
-            terminal: terminal, session: "s1", tool: "AskUserQuestion", input: Self.questionInput))
+    // MARK: Open
 
-        #expect(UUID(uuidString: id) != nil, "an unpaired prompt gets a fresh UUID id: \(id)")
-        let prompt = await payload(store, terminal: terminal, id: id)
-        #expect(prompt?.toolUseID == nil)
-        #expect(prompt?.kind == .question)
-    }
-
-    @Test func lateNoteAttachesToUnpairedPrompt() async {
-        let store = makeStore()
+    @Test func openPublishesPromptKeyedByToolUseID() async {
+        let dates = TestDateSource()
+        let store = makeStore(dates: dates)
         let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
         let before = await store.snapshot(forTerminal: terminal).revision
-        #expect(await store.isLateNoteWindowOpen(promptID: id))
 
-        let changed = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_late")
+        let changed = await open(store, terminal: terminal, toolUseID: "toolu_bash",
+                                 suggestions: #"[{"type":"addRules"}]"#)
+        await open(store, terminal: terminal, toolUseID: "toolu_q",
+                   tool: "AskUserQuestion", input: Self.questionInput)
 
-        #expect(changed == [terminal], "an attached late note changes the set and must be broadcast")
-        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == "toolu_late")
+        #expect(changed == [terminal])
+        let prompts = await store.prompts(forTerminal: terminal)
+        #expect(prompts.map(\.id) == ["toolu_bash", "toolu_q"])
+        let bash = prompts.first
+        #expect(bash?.toolUseID == "toolu_bash", "the id and the tool call id are the same value")
+        #expect(bash?.kind == .permission)
+        #expect(bash?.toolName == "Bash")
+        #expect(bash?.toolInputJSON == Self.bashInput)
+        #expect(bash?.suggestionsJSON == #"[{"type":"addRules"}]"#)
+        #expect(bash?.createdAt == dates.now)
+        #expect(prompts.last?.kind == .question)
         #expect(await store.snapshot(forTerminal: terminal).revision > before)
-        #expect(await store.isLateNoteWindowOpen(promptID: id) == false)
+        #expect(await store.terminalsWithOpenPrompts() == [terminal])
     }
 
-    @Test func lateNoteAfterFiveSecondsDoesNotAttach() async throws {
-        let clock = EventDrivenTestClock()
-        let store = makeStore(clock: clock)
+    /// The mod re-posts its open dialogs after any reconnect, with the very
+    /// body it first sent: the repeat is the same prompt, so it succeeds, its
+    /// card keeps its place and payload, and its wait request stays attached.
+    @Test func reopenWithSamePayloadKeepsCreatedAtAndWaiter() async {
+        let dates = TestDateSource()
+        let store = makeStore(dates: dates)
         let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        #expect(await store.isLateNoteWindowOpen(promptID: id))
+        let opened = dates.now
+        await open(store, terminal: terminal, suggestions: #"[{"type":"addRules"}]"#)
+        let first = await store.prompts(forTerminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
+        let revision = await store.snapshot(forTerminal: terminal).revision
 
-        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
-        let closed = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            await store.isLateNoteWindowOpen(promptID: id) == false
-        }
-        if closed == .timedOut { Issue.record("the late-note window never closed after 5 s") }
+        dates.advance(by: 30)
+        let outcome = await store.open(
+            terminalID: terminal, sessionID: "s1", toolUseID: "toolu_1", toolName: "Bash",
+            toolInputJSON: Self.bashInput, suggestionsJSON: #"[{"type":"addRules"}]"#)
 
-        let changed = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_late")
-        #expect(changed.isEmpty)
-        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
+        #expect(outcome == .opened([terminal]))
+        let prompts = await store.prompts(forTerminal: terminal)
+        #expect(prompts.count == 1)
+        #expect(prompts == first, "an identical repeat leaves the prompt as it was")
+        #expect(prompts.first?.createdAt == opened)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1"))
+        #expect(await store.snapshot(forTerminal: terminal).revision > revision)
+
+        await store.resolveAll()
+        #expect(await waiter.value == .resolved)
     }
 
-    @Test func reRegisterAfterRestartKeepsIDWithoutToolUseID() async {
-        // A fresh store stands in for a restarted daemon: no notes survive.
-        let store = makeStore()
+    /// The first payload wins. A process that holds the session's token
+    /// cannot re-open a pending dialog's id with a harmless-looking input (or
+    /// another tool name, or other suggestions) so that an Allow on the card
+    /// reaches the real dialog: the repeat is refused, the prompt is left
+    /// exactly as first reported, and no revision is published.
+    @Test func reopenWithDifferentPayloadIsRefusedAndChangesNothing() async {
+        let dates = TestDateSource()
+        let store = makeStore(dates: dates)
         let terminal = UUID()
-        let (id, _) = await register(store, params(
-            terminal: terminal, session: "s1", knownPromptID: "prompt-before-restart"))
+        let dangerous = #"{"command":"rm -rf ~"}"#
+        await open(store, terminal: terminal, input: dangerous)
+        let first = await store.prompts(forTerminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
+        let revision = await store.snapshot(forTerminal: terminal).revision
 
-        #expect(id == "prompt-before-restart")
-        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
-        #expect(await store.isLateNoteWindowOpen(promptID: id) == false)
-    }
+        dates.advance(by: 30)
+        let differentInput = await store.open(
+            terminalID: terminal, sessionID: "s1", toolUseID: "toolu_1", toolName: "Bash",
+            toolInputJSON: Self.bashInput, suggestionsJSON: nil)
+        let differentTool = await store.open(
+            terminalID: terminal, sessionID: "s1", toolUseID: "toolu_1", toolName: "Read",
+            toolInputJSON: dangerous, suggestionsJSON: nil)
+        let differentSuggestions = await store.open(
+            terminalID: terminal, sessionID: "s1", toolUseID: "toolu_1", toolName: "Bash",
+            toolInputJSON: dangerous, suggestionsJSON: #"[{"type":"addRules"}]"#)
 
-    @Test func registerReplyCarriesThePairing() async {
-        let store = makeStore()
-        let terminal = UUID()
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_1")
-        let result = await store.register(params(terminal: terminal, session: "s1"))
-        let id: String
-        let toolUseID: String?
-        switch result.outcome {
-        case .registered(let promptID, let pairedToolUseID):
-            id = promptID
-            toolUseID = pairedToolUseID
-        }
-        #expect(toolUseID == "toolu_1", "the hook needs the pairing to hand back after a restart")
+        #expect(differentInput == .conflict)
+        #expect(differentTool == .conflict)
+        #expect(differentSuggestions == .conflict)
+        let prompts = await store.prompts(forTerminal: terminal)
+        #expect(prompts == first, "a refused repeat leaves the first payload in place")
+        #expect(prompts.first?.toolInputJSON == dangerous)
+        #expect(await store.snapshot(forTerminal: terminal).revision == revision,
+                "a refused repeat publishes nothing")
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1"))
 
-        // A fresh store stands in for the restarted daemon: the hook's
-        // re-register hands the pairing back and the prompt keeps it.
-        let restarted = makeStore()
-        let again = await restarted.register(params(
-            terminal: terminal, session: "s1", knownPromptID: id, knownToolUseID: toolUseID))
-        #expect(again.outcome == .registered(promptID: id, toolUseID: "toolu_1"))
-        #expect(await payload(restarted, terminal: terminal, id: id)?.toolUseID == "toolu_1")
-    }
-
-    @Test func postNoteClosesAnUnpairedPromptByInputHash() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let (id, _) = await register(store, params(
-            terminal: terminal, session: "s1", knownPromptID: "prompt-before-restart"))
-        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
-        let waiter = await attachWaiter(store, id: id)
-
-        let changed = await store.note(
-            terminalID: terminal, sessionID: "s1", phase: .post, toolUseID: "toolu_unknown",
-            toolName: "Bash", inputHash: PromptInputHash.of(toolInputJSON: Self.bashInput))
-
-        #expect(changed == [terminal])
-        #expect(await waiter.value == .resolvedElsewhere)
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
-    }
-
-    /// A question's `PostToolUse` input carries the merged `answers` beside
-    /// `questions`; the hash covers `questions` alone, so the post still
-    /// closes the unpaired question the terminal answered.
-    @Test func postNoteWithAnswersClosesAnUnpairedQuestion() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let (id, _) = await register(store, params(
-            terminal: terminal, session: "s1", tool: "AskUserQuestion", input: Self.questionInput,
-            knownPromptID: "question-before-restart"))
-        #expect(await payload(store, terminal: terminal, id: id)?.toolUseID == nil)
-        let waiter = await attachWaiter(store, id: id)
-
-        let answeredInput = #"""
-        {"answers":{"Pick one":"A"},"questions":[{"question":"Pick one","header":"Choice","multiSelect":false,"options":[{"label":"A"},{"label":"B"}]}]}
-        """#
-        let changed = await store.note(
-            terminalID: terminal, sessionID: "s1", phase: .post, toolUseID: "toolu_unknown",
-            toolName: "AskUserQuestion",
-            inputHash: PromptInputHash.of(toolName: "AskUserQuestion", toolInputJSON: answeredInput))
-
-        #expect(changed == [terminal])
-        #expect(await waiter.value == .resolvedElsewhere)
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
-    }
-
-    @Test func postNoteForAnotherInputLeavesAnUnpairedPromptOpen() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let (id, _) = await register(store, params(
-            terminal: terminal, session: "s1", knownPromptID: "prompt-before-restart"))
-
-        let changed = await store.note(
-            terminalID: terminal, sessionID: "s1", phase: .post, toolUseID: "toolu_other",
-            toolName: "Bash", inputHash: PromptInputHash.of(toolInputJSON: Self.otherBashInput))
-
-        #expect(changed.isEmpty)
-        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [id])
+        await store.resolveAll()
+        #expect(await waiter.value == .resolved)
     }
 
     // MARK: Answering
 
-    @Test func answerDeliversDecisionToWaiter() async throws {
+    @Test func answerWithWaiterThenReceiptIsDelivered() async throws {
         let store = makeStore()
         let terminal = UUID()
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_1")
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let token = UUID()
-        let waiter = await attachWaiter(store, id: id, token: token)
-
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
         let answer = PromptAnswer.permission(decision: .deny, message: "not now")
-        let answering = Task { await store.answer(terminalID: terminal, promptID: id, answer: answer) }
-        let awaited = await waiter.value
-        let expected = try PromptDecisionEncoder.hookOutput(
-            answer: answer, kind: .permission, toolInputJSON: Self.bashInput, suggestionsJSON: nil)
-        #expect(awaited == .answered(hookOutput: expected))
 
-        await store.acknowledgeDelivery(token: token, delivered: true)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: answer) }
+        #expect(await waiter.value == .decision(try decision(answer)))
+
+        let receipted = await store.receipt(terminalID: terminal, toolUseID: "toolu_1")
         let result = await answering.value
 
+        #expect(receipted == [terminal])
         #expect(result.outcome == .delivered)
         #expect(result.changed == [terminal])
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
+        #expect(await openIDs(store, terminal).isEmpty)
     }
 
-    @Test func failedDeliveryAnswersAlreadyResolved() async {
+    /// Review Focus 1: the terminal's No races TBD's Allow. The mod aborts
+    /// mid-answer and posts closed in place of a receipt, so the answer must
+    /// read already-resolved, never delivered.
+    @Test func answerThenClosedIsAlreadyResolved() async throws {
         let store = makeStore()
         let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let token = UUID()
-        let waiter = await attachWaiter(store, id: id, token: token)
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
 
-        let answering = Task {
-            await store.answer(terminalID: terminal, promptID: id,
-                               answer: .permission(decision: .allow, message: nil))
-        }
-        _ = await waiter.value
-        await store.acknowledgeDelivery(token: token, delivered: false)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        #expect(await waiter.value == .decision(try decision()))
 
-        #expect(await answering.value.outcome == .alreadyResolved,
-                "a hook that never got the payload leaves the terminal in charge")
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
+        let closed = await store.closed(terminalID: terminal, toolUseID: "toolu_1")
+        let result = await answering.value
+
+        #expect(closed == [terminal])
+        #expect(result.outcome == .alreadyResolved)
+        #expect(await openIDs(store, terminal).isEmpty)
+        // A receipt arriving after the close finds nothing to settle.
+        #expect(await store.receipt(terminalID: terminal, toolUseID: "toolu_1").isEmpty)
     }
 
-    @Test func secondAnswerIsAlreadyResolved() async {
+    @Test func answerWithoutReceiptIsUnknownAfterFiveSeconds() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
+
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        _ = await waiter.value
+        // The hand-over cancelled the wait's hold, so the receipt timer is
+        // the only sleeper.
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
+        let result = await answering.value
+
+        #expect(result.outcome == .deliveryUnconfirmed, "no receipt within 5 s may still mean Claude had it")
+        #expect(result.changed == [terminal])
+        #expect(await openIDs(store, terminal).isEmpty)
+
+        let retry = await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow)
+        #expect(retry.outcome == .alreadyResolved, "the timed-out prompt is resolved, so a retry cannot answer twice")
+    }
+
+    /// A second answer racing the first one's receipt timeout must come back
+    /// too: the timeout ends the prompt in its own actor turn, so the second
+    /// answer finds it answered or gone and never parks on it.
+    @Test func secondAnswerAfterReceiptTimeoutReturns() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
+
+        let first = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        _ = await waiter.value
+        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
+        let second = await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow)
+
+        #expect(second.outcome == .alreadyResolved)
+        #expect(await first.value.outcome == .deliveryUnconfirmed)
+        #expect(await openIDs(store, terminal).isEmpty)
+    }
+
+    /// A receipt landing after a wait request took the held decision but
+    /// before the answer parks for its receipt still settles it as delivered.
+    /// `pickUpThenReceipt` runs both on the store's executor, so the answer cannot
+    /// resume in between.
+    @Test func receiptBetweenPickupAndReceiptParkIsDelivered() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        try await clock.requireSleeperArmed()
+
+        let picked = await pickUpThenReceipt(store, terminal: terminal)
+
+        #expect(picked == .decision(try decision()))
+        #expect(await answering.value.outcome == .delivered)
+        #expect(await openIDs(store, terminal).isEmpty)
+    }
+
+    /// The same gap with a close instead: the terminal answered first.
+    @Test func closedBetweenPickupAndReceiptParkIsAlreadyResolved() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        try await clock.requireSleeperArmed()
+
+        let picked = await pickUpThenClosed(store, terminal: terminal)
+
+        #expect(picked == .decision(try decision()))
+        #expect(await answering.value.outcome == .alreadyResolved)
+        #expect(await openIDs(store, terminal).isEmpty)
+    }
+
+    /// No wait request is attached when the answer arrives (the mod is
+    /// between polls): the decision is held, and the next wait request
+    /// within the pickup window takes it at once.
+    @Test func answerHeldUntilNextWaitPicksItUp() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        // The pickup window's timer is armed, so the decision is held.
+        try await clock.requireSleeperArmed()
+
+        let picked = await store.waitForAnswer(
+            terminalID: terminal, toolUseID: "toolu_1", token: UUID(), hold: .seconds(25))
+        #expect(picked == .decision(try decision()))
+
+        await store.receipt(terminalID: terminal, toolUseID: "toolu_1")
+        #expect(await answering.value.outcome == .delivered)
+        #expect(await openIDs(store, terminal).isEmpty)
+    }
+
+    @Test func answerWithdrawnAfterSixtySecondsIsHookDetached() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        try await clock.requireAdvanceWhenArmed(by: .seconds(60))
+        let result = await answering.value
+
+        #expect(result.outcome == .hookDetached)
+        #expect(result.changed.isEmpty)
+        #expect(await openIDs(store, terminal) == ["toolu_1"], "a withdrawn answer is retryable, so the prompt stays open")
+
+        // The withdrawn decision is gone: the next wait request holds and
+        // comes back empty.
+        let waiter = await attachWaiter(store, terminal: terminal)
+        try await clock.requireAdvanceWhenArmed(by: .seconds(25))
+        #expect(await waiter.value == .pending)
+    }
+
+    @Test func secondAnswerIsAlreadyResolved() async throws {
         let store = makeStore()
         let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let token = UUID()
-        let waiter = await attachWaiter(store, id: id, token: token)
-        let allow = PromptAnswer.permission(decision: .allow, message: nil)
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
 
-        let first = Task { await store.answer(terminalID: terminal, promptID: id, answer: allow) }
+        let first = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
         _ = await waiter.value
 
-        // While the first answer waits for its ack…
-        let racing = await store.answer(terminalID: terminal, promptID: id, answer: allow)
+        // While the first answer waits for its receipt…
+        let racing = await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow)
         #expect(racing.outcome == .alreadyResolved)
         #expect(racing.changed.isEmpty)
 
-        await store.acknowledgeDelivery(token: token, delivered: true)
+        await store.receipt(terminalID: terminal, toolUseID: "toolu_1")
         #expect(await first.value.outcome == .delivered)
 
         // …and after it was delivered.
-        let late = await store.answer(terminalID: terminal, promptID: id, answer: allow)
+        let late = await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow)
         #expect(late.outcome == .alreadyResolved)
     }
 
-    @Test func answerForAnotherTerminalIsAlreadyResolved() async {
+    @Test func answerFromOtherTerminalIsAlreadyResolved() async {
         let store = makeStore()
         let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let waiter = await attachWaiter(store, id: id)
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
 
-        let result = await store.answer(terminalID: UUID(), promptID: id,
-                                        answer: .permission(decision: .allow, message: nil))
+        let result = await store.answer(terminalID: UUID(), promptID: "toolu_1", answer: Self.allow)
 
         #expect(result.outcome == .alreadyResolved)
-        #expect(await store.isWaiterAttached(promptID: id), "a misaddressed answer must not touch the prompt")
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1"),
+                "a misaddressed answer must not touch the prompt")
         await store.resolveAll()
-        #expect(await waiter.value == .resolvedElsewhere)
-    }
-
-    @Test func answerWithNoAttachedWaiterIsHookDetached() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let allow = PromptAnswer.permission(decision: .allow, message: nil)
-
-        let detached = await store.answer(terminalID: terminal, promptID: id, answer: allow)
-        #expect(detached.outcome == .hookDetached)
-        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [id],
-                "a detached answer is retryable, so the prompt stays open")
-
-        // The retry, once the hook has reattached, goes through.
-        let token = UUID()
-        let waiter = await attachWaiter(store, id: id, token: token)
-        let retry = Task { await store.answer(terminalID: terminal, promptID: id, answer: allow) }
-        guard case .answered = await waiter.value else {
-            Issue.record("the retried answer never reached the reattached waiter")
-            return
-        }
-        await store.acknowledgeDelivery(token: token, delivered: true)
-        #expect(await retry.value.outcome == .delivered)
+        #expect(await waiter.value == .resolved)
     }
 
     @Test func invalidAnswerLeavesPromptOpen() async {
         let store = makeStore()
         let terminal = UUID()
-        let (id, _) = await register(store, params(
-            terminal: terminal, session: "s1", tool: "AskUserQuestion", input: Self.questionInput))
-        let waiter = await attachWaiter(store, id: id)
+        await open(store, terminal: terminal, tool: "AskUserQuestion", input: Self.questionInput)
+        let waiter = await attachWaiter(store, terminal: terminal)
 
-        let wrongKind = await store.answer(terminalID: terminal, promptID: id,
-                                           answer: .permission(decision: .allow, message: nil))
+        let wrongKind = await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow)
         #expect(wrongKind.outcome == .invalid(.kindMismatch))
-        let missing = await store.answer(terminalID: terminal, promptID: id,
+        let missing = await store.answer(terminalID: terminal, promptID: "toolu_1",
                                          answer: .question(answers: [:]))
         #expect(missing.outcome == .invalid(.missingAnswer(question: "Pick one")))
 
-        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [id])
-        #expect(await store.isWaiterAttached(promptID: id), "an invalid answer must not consume the waiter")
+        #expect(await openIDs(store, terminal) == ["toolu_1"])
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1"),
+                "an invalid answer must not consume the waiter")
         await store.resolveAll()
-        #expect(await waiter.value == .resolvedElsewhere)
+        #expect(await waiter.value == .resolved)
     }
 
-    @Test func ackTimeoutAnswersDeliveryUnconfirmed() async throws {
+    // MARK: Waiting
+
+    @Test func waitReturnsPendingAfterHold() async throws {
         let clock = EventDrivenTestClock()
         let store = makeStore(clock: clock)
         let terminal = UUID()
-        // Paired, so no late-note timer shares the clock with the ack timer.
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_1")
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        #expect(await store.isLateNoteWindowOpen(promptID: id) == false)
-        let waiter = await attachWaiter(store, id: id)
+        await open(store, terminal: terminal)
 
-        let answering = Task {
-            await store.answer(terminalID: terminal, promptID: id,
-                               answer: .permission(decision: .allow, message: nil))
-        }
-        _ = await waiter.value
-        try await clock.requireAdvanceWhenArmed(by: .seconds(5))
-        let result = await answering.value
+        let waiter = await attachWaiter(store, terminal: terminal, hold: .seconds(25))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(25))
 
-        #expect(result.outcome == .deliveryUnconfirmed, "no ack within 5 s may still mean the hook had it")
-        #expect(result.changed == [terminal])
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
-
-        let retry = await store.answer(terminalID: terminal, promptID: id,
-                                       answer: .permission(decision: .allow, message: nil))
-        #expect(retry.outcome == .alreadyResolved, "the timed-out prompt is resolved, so a retry cannot answer twice")
+        #expect(await waiter.value == .pending)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1") == false)
+        #expect(await openIDs(store, terminal) == ["toolu_1"], "an empty hold never resolves the prompt")
     }
 
-    // MARK: Other resolutions
-
-    @Test func postNoteResolvesWithToolFinished() async {
+    @Test func newerWaitReplacesAnOlderOne() async throws {
         let store = makeStore()
         let terminal = UUID()
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_1")
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let waiter = await attachWaiter(store, id: id)
-
-        let changed = await store.note(terminalID: terminal, sessionID: "s1", phase: .post,
-                                       toolUseID: "toolu_1", toolName: "Bash", inputHash: nil)
-
-        #expect(changed == [terminal])
-        #expect(await waiter.value == .resolvedElsewhere)
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
-    }
-
-    @Test func postNoteForAnotherCallLeavesPromptOpen() async {
-        let store = makeStore()
-        let terminal = UUID()
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_1")
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-
-        let changed = await store.note(terminalID: terminal, sessionID: "s1", phase: .post,
-                                       toolUseID: "toolu_other", toolName: "Bash", inputHash: nil)
-
-        #expect(changed.isEmpty)
-        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [id])
-    }
-
-    @Test func newRegisterInSessionSupersedesOld() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let old = await register(store, params(terminal: terminal, session: "s1"))
-        let oldWaiter = await attachWaiter(store, id: old.id)
-
-        let new = await register(store, params(terminal: terminal, session: "s1", input: Self.otherBashInput))
-
-        #expect(new.id != old.id)
-        #expect(new.changed == [terminal])
-        #expect(await oldWaiter.value == .resolvedElsewhere)
-        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [new.id])
-    }
-
-    /// Two terminals sharing one session id (`--resume` without
-    /// `--fork-session`) each show their own dialog: a register in one never
-    /// supersedes the other's, and neither pairs with the other's note.
-    @Test func terminalsSharingASessionIDStayApart() async {
-        let store = makeStore()
-        let terminalA = UUID()
-        let terminalB = UUID()
-        _ = await preNote(store, terminal: terminalA, session: "shared", toolUseID: "toolu_A")
-
-        let a = await register(store, params(terminal: terminalA, session: "shared"))
-        let waiterA = await attachWaiter(store, id: a.id)
-        let b = await register(store, params(terminal: terminalB, session: "shared"))
-
-        #expect(b.changed == [terminalB], "terminal A's prompt must not be superseded")
-        #expect(await store.prompts(forTerminal: terminalA).map(\.id) == [a.id])
-        #expect(await payload(store, terminal: terminalA, id: a.id)?.toolUseID == "toolu_A")
-        #expect(await payload(store, terminal: terminalB, id: b.id)?.toolUseID == nil)
-
-        // B's post for its own call leaves A's open prompt alone.
-        let changed = await store.note(
-            terminalID: terminalB, sessionID: "shared", phase: .post, toolUseID: "toolu_B",
-            toolName: "Bash", inputHash: PromptInputHash.of(toolName: "Bash", toolInputJSON: Self.bashInput))
-        #expect(changed == [terminalB])
-        #expect(await store.prompts(forTerminal: terminalA).map(\.id) == [a.id])
-        #expect(await store.prompts(forTerminal: terminalB).isEmpty)
-        await store.clear(terminalID: terminalA)
-        _ = await waiterA.value
-    }
-
-    @Test func registerInAnotherSessionDoesNotSupersede() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let first = await register(store, params(terminal: terminal, session: "s1"))
-        let second = await register(store, params(terminal: terminal, session: "s2"))
-
-        #expect(Set(await store.prompts(forTerminal: terminal).map(\.id)) == [first.id, second.id])
-    }
-
-    @Test func reRegisterWithSameIDKeepsPromptOpen() async {
-        let store = makeStore()
-        let terminal = UUID()
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_1")
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let before = await store.snapshot(forTerminal: terminal).revision
-
-        let again = await register(store, params(terminal: terminal, session: "s1", knownPromptID: id))
-
-        #expect(again.id == id)
-        #expect(again.changed == [terminal])
-        let prompts = await store.prompts(forTerminal: terminal)
-        #expect(prompts.map(\.id) == [id], "a reconnect must never resolve its own prompt")
-        #expect(prompts.first?.toolUseID == "toolu_1", "a reconnect keeps the pairing it had")
-        #expect(await store.snapshot(forTerminal: terminal).revision > before)
-    }
-
-    @Test func reRegisterWithAnotherTerminalsIDIsAFreshRegister() async {
-        let store = makeStore()
-        let owner = UUID()
-        let stranger = UUID()
-        let (id, _) = await register(store, params(terminal: owner, session: "s1"))
-        let waiter = await attachWaiter(store, id: id)
-        let before = await store.snapshot(forTerminal: owner).revision
-
-        let foreign = await register(store, params(
-            terminal: stranger, session: "s1", input: Self.otherBashInput, knownPromptID: id))
-
-        #expect(foreign.id != id, "another terminal's prompt id is not this hook's to reclaim")
-        #expect(foreign.changed == [stranger])
-        let ownerPrompts = await store.prompts(forTerminal: owner)
-        #expect(ownerPrompts.map(\.id) == [id])
-        #expect(ownerPrompts.first?.toolInputJSON == Self.bashInput, "the original prompt is not refreshed")
-        #expect(await store.snapshot(forTerminal: owner).revision == before)
-        #expect(await store.terminalID(ofPrompt: id) == owner)
-        #expect(await store.isWaiterAttached(promptID: id), "the original waiter stays attached")
-        #expect(await store.prompts(forTerminal: stranger).map(\.id) == [foreign.id])
-
-        await store.resolveAll()
-        #expect(await waiter.value == .resolvedElsewhere)
-    }
-
-    @Test func closedWaiterResolvesWithHookClosed() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let token = UUID()
-        let waiter = await attachWaiter(store, id: id, token: token)
-
-        #expect(await store.waiterClosed(token: UUID()).isEmpty, "an unknown token closes nothing")
-        let changed = await store.waiterClosed(token: token)
-
-        #expect(changed == [terminal])
-        #expect(await waiter.value == .resolvedElsewhere)
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
-    }
-
-    @Test func staleWaiterIsReleasedWhenANewOneAttaches() async {
-        let store = makeStore()
-        let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
+        await open(store, terminal: terminal)
         let staleToken = UUID()
-        let stale = await attachWaiter(store, id: id, token: staleToken)
+        let stale = await attachWaiter(store, terminal: terminal, token: staleToken)
 
         let freshToken = UUID()
-        let fresh = Task { await store.awaitResolution(promptID: id, token: freshToken) }
-        // The stale waiter is released only once the fresh one has attached.
-        #expect(await stale.value == .resolvedElsewhere)
-
-        #expect(await store.waiterClosed(token: staleToken).isEmpty,
-                "the stale connection closing must not resolve a prompt another waiter now holds")
-        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [id])
-
-        let answering = Task {
-            await store.answer(terminalID: terminal, promptID: id,
-                               answer: .permission(decision: .allow, message: nil))
+        let fresh = Task {
+            await store.waitForAnswer(terminalID: terminal, toolUseID: "toolu_1", token: freshToken, hold: .seconds(25))
         }
-        guard case .answered = await fresh.value else {
-            Issue.record("the answer did not reach the fresh waiter")
-            return
-        }
-        await store.acknowledgeDelivery(token: freshToken, delivered: true)
+        #expect(await stale.value == .pending)
+
+        // The stale request's token no longer detaches anything.
+        await store.waiterGone(token: staleToken)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1"))
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        #expect(await fresh.value == .decision(try decision()))
+        await store.receipt(terminalID: terminal, toolUseID: "toolu_1")
         #expect(await answering.value.outcome == .delivered)
     }
 
-    @Test func clearTerminalResolvesItsPrompts() async {
+    /// Review Focus 3: the mod aborted its fetch. The waiter detaches and the
+    /// prompt stays open; the next wait request takes the answer.
+    @Test func waiterGoneDoesNotResolve() async throws {
         let store = makeStore()
-        let gone = UUID()
-        let kept = UUID()
-        _ = await preNote(store, terminal: gone, session: "sGone", toolUseID: "toolu_gone_spare",
-                          tool: "Write", input: #"{"file_path":"/tmp/y"}"#)
-        let goneID = await register(store, params(terminal: gone, session: "sGone")).id
-        let keptID = await register(store, params(terminal: kept, session: "sKept")).id
-        let goneWaiter = await attachWaiter(store, id: goneID)
-        let keptWaiter = await attachWaiter(store, id: keptID)
-
-        await store.clear(terminalID: gone)
-
-        #expect(await goneWaiter.value == .resolvedElsewhere)
-        #expect(await store.prompts(forTerminal: gone).isEmpty)
-        #expect(await store.prompts(forTerminal: kept).map(\.id) == [keptID])
-
-        // The terminal's notes went with it.
-        let after = await register(store, params(
-            terminal: gone, session: "sGone", tool: "Write", input: #"{"file_path":"/tmp/y"}"#))
-        #expect(await payload(store, terminal: gone, id: after.id)?.toolUseID == nil)
-
-        await store.resolveAll()
-        #expect(await keptWaiter.value == .resolvedElsewhere)
-    }
-
-    @Test func detachedSweepResolvesAfterAnHour() async {
-        let dates = TestDateSource()
-        let store = makeStore(dates: dates)
         let terminal = UUID()
-        let start = dates.now
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
+        await open(store, terminal: terminal)
+        let token = UUID()
+        let gone = await attachWaiter(store, terminal: terminal, token: token)
 
-        let early = await store.sweepDetachedPrompts(
-            now: start.addingTimeInterval(3599), maxDetached: .seconds(3600))
-        #expect(early.isEmpty)
-        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [id])
+        await store.waiterGone(token: token)
 
-        let due = await store.sweepDetachedPrompts(
-            now: start.addingTimeInterval(3600), maxDetached: .seconds(3600))
-        #expect(due == [terminal])
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
+        #expect(await gone.value == .pending)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1") == false)
+        #expect(await openIDs(store, terminal) == ["toolu_1"])
+
+        let next = await attachWaiter(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        #expect(await next.value == .decision(try decision()))
+        await store.receipt(terminalID: terminal, toolUseID: "toolu_1")
+        #expect(await answering.value.outcome == .delivered)
     }
 
-    @Test func attachedPromptSurvivesTheSweep() async {
-        let dates = TestDateSource()
-        let store = makeStore(dates: dates)
+    /// The server cancels a wait request whose connection closed. Cancelling
+    /// the awaiting task detaches the waiter with `.pending` and leaves the
+    /// prompt open, like `waiterGone`.
+    @Test func waitReleasedWhenTaskCancelled() async throws {
+        let store = makeStore()
         let terminal = UUID()
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
-        let waiter = await attachWaiter(store, id: id)
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
 
-        let swept = await store.sweepDetachedPrompts(
-            now: dates.now.addingTimeInterval(7200), maxDetached: .seconds(3600))
+        waiter.cancel()
 
-        #expect(swept.isEmpty)
-        #expect(await store.prompts(forTerminal: terminal).map(\.id) == [id])
-        await store.resolveAll()
-        #expect(await waiter.value == .resolvedElsewhere)
+        #expect(await waiter.value == .pending)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1") == false)
+        #expect(await openIDs(store, terminal) == ["toolu_1"], "a cancelled wait never resolves the prompt")
+
+        let next = await attachWaiter(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        #expect(await next.value == .decision(try decision()))
+        await store.receipt(terminalID: terminal, toolUseID: "toolu_1")
+        #expect(await answering.value.outcome == .delivered)
     }
 
-    @Test func resolveAllReleasesEveryWaiter() async {
+    /// A wait request cancelled before it reaches the store — its connection
+    /// closed while it was still authenticating — never attaches, and does
+    /// not take a decision nobody would receive.
+    @Test func waitCancelledBeforeAttachingTakesNothing() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        // The answer is parked for pickup once its timeout is armed.
+        try await clock.requireSleeperArmed()
+
+        let cancelled = Task { () -> PendingPromptStore.WaitResult in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await store.waitForAnswer(
+                terminalID: terminal, toolUseID: "toolu_1", token: UUID(), hold: .seconds(25))
+        }
+        #expect(await cancelled.value == .pending)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1") == false)
+
+        // The decision is still there for the next request.
+        let picked = await pickUpThenReceipt(store, terminal: terminal)
+        #expect(picked == .decision(try decision()))
+        #expect(await answering.value.outcome == .delivered)
+    }
+
+    @Test func waitOnClosedPromptIsResolved() async {
+        let store = makeStore()
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
+
+        #expect(await store.closed(terminalID: terminal, toolUseID: "toolu_1") == [terminal])
+        #expect(await waiter.value == .resolved, "a held request ends when the terminal answers")
+        #expect(await store.waitForAnswer(
+            terminalID: terminal, toolUseID: "toolu_1", token: UUID(), hold: .seconds(25)) == .resolved)
+        #expect(await store.waitForAnswer(
+            terminalID: terminal, toolUseID: "toolu_never", token: UUID(), hold: .seconds(25)) == .resolved)
+    }
+
+    // MARK: Terminals stay apart
+
+    /// Review Focus 5: two terminals resumed into one Claude session each
+    /// open a dialog for the same tool call and input. They are two prompts,
+    /// and an answer for one never reaches the other.
+    @Test func sameToolUseInputInTwoTerminalsStaysApart() async throws {
         let store = makeStore()
         let a = UUID()
         let b = UUID()
-        let idA = await register(store, params(terminal: a, session: "sA")).id
-        let idB = await register(store, params(terminal: b, session: "sB")).id
-        let waiterA = await attachWaiter(store, id: idA)
-        let waiterB = await attachWaiter(store, id: idB)
+        await open(store, terminal: a, session: "shared")
+        await open(store, terminal: b, session: "shared")
+        #expect(await openIDs(store, a) == ["toolu_1"])
+        #expect(await openIDs(store, b) == ["toolu_1"])
+        let waiterA = await attachWaiter(store, terminal: a)
+        let waiterB = await attachWaiter(store, terminal: b)
+
+        let answering = Task { await store.answer(terminalID: a, promptID: "toolu_1", answer: Self.allow) }
+        #expect(await waiterA.value == .decision(try decision()))
+        #expect(await store.isWaiterAttached(terminalID: b, toolUseID: "toolu_1"),
+                "terminal B's request must not see terminal A's answer")
+
+        // B's receipt or close never settles A's answer either.
+        #expect(await store.closed(terminalID: b, toolUseID: "toolu_1") == [b])
+        #expect(await waiterB.value == .resolved)
+        await store.receipt(terminalID: a, toolUseID: "toolu_1")
+        #expect(await answering.value.outcome == .delivered)
+        #expect(await store.terminalsWithOpenPrompts().isEmpty)
+    }
+
+    // MARK: Bulk resolution
+
+    @Test func resolvePromptsKeepsCaptures() async {
+        let store = makeStore()
+        let terminal = UUID()
+        let other = UUID()
+        await store.set(terminalID: terminal, PendingAskUserQuestion(
+            toolUseID: "toolu_capture", inputJSON: "{}", timestamp: Date(timeIntervalSince1970: 1)))
+        await open(store, terminal: terminal)
+        await open(store, terminal: terminal, toolUseID: "toolu_2")
+        await open(store, terminal: other)
+        let waiter = await attachWaiter(store, terminal: terminal)
+
+        let changed = await store.resolvePrompts(terminalID: terminal, .sessionEnded)
+
+        #expect(changed == [terminal])
+        #expect(await waiter.value == .resolved)
+        #expect(await openIDs(store, terminal).isEmpty)
+        #expect(await store.entries(forTerminal: terminal).map(\.toolUseID) == ["toolu_capture"])
+        #expect(await openIDs(store, other) == ["toolu_1"])
+        #expect(await store.terminalsWithOpenPrompts() == [other])
+        #expect(await store.resolvePrompts(terminalID: terminal, .modDisconnected).isEmpty)
+    }
+
+    @Test func clearTerminalResolvesItsPromptsAndCaptures() async {
+        let store = makeStore()
+        let gone = UUID()
+        let kept = UUID()
+        await store.set(terminalID: gone, PendingAskUserQuestion(
+            toolUseID: "toolu_capture", inputJSON: "{}", timestamp: Date(timeIntervalSince1970: 1)))
+        await open(store, terminal: gone)
+        await open(store, terminal: kept)
+        let goneWaiter = await attachWaiter(store, terminal: gone)
+        let keptWaiter = await attachWaiter(store, terminal: kept)
+
+        await store.clear(terminalID: gone)
+
+        #expect(await goneWaiter.value == .resolved)
+        #expect(await openIDs(store, gone).isEmpty)
+        #expect(await store.entries(forTerminal: gone).isEmpty)
+        #expect(await openIDs(store, kept) == ["toolu_1"])
+        await store.resolveAll()
+        #expect(await keptWaiter.value == .resolved)
+    }
+
+    @Test func resolveAllReleasesWaitersAndAcks() async throws {
+        let store = makeStore()
+        let waiting = UUID()
+        let answered = UUID()
+        await open(store, terminal: waiting)
+        await open(store, terminal: answered)
+        let held = await attachWaiter(store, terminal: waiting)
+        let handedOver = await attachWaiter(store, terminal: answered)
+        let answering = Task { await store.answer(terminalID: answered, promptID: "toolu_1", answer: Self.allow) }
+        _ = await handedOver.value
 
         let changed = await store.resolveAll()
 
-        #expect(changed == [a, b])
-        #expect(await waiterA.value == .resolvedElsewhere)
-        #expect(await waiterB.value == .resolvedElsewhere)
-    }
-
-    @Test func awaitOnUnknownPromptReturnsAtOnce() async {
-        let store = makeStore()
-        #expect(await store.awaitResolution(promptID: "nope", token: UUID()) == .resolvedElsewhere)
+        #expect(changed == [waiting, answered])
+        #expect(await held.value == .resolved)
+        #expect(await answering.value.outcome == .alreadyResolved,
+                "an answer waiting for its receipt at shutdown leaves the terminal in charge")
+        #expect(await store.terminalsWithOpenPrompts().isEmpty)
     }
 
     // MARK: Revision and broadcast
@@ -698,22 +637,20 @@ struct PendingPromptResolutionTests {
         let terminal = UUID()
         var seen: [UInt64] = []
 
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
+        await open(store, terminal: terminal)
         seen.append(await store.snapshot(forTerminal: terminal).revision)
-
-        _ = await preNote(store, terminal: terminal, session: "s1", toolUseID: "toolu_late")
+        await open(store, terminal: terminal)
         seen.append(await store.snapshot(forTerminal: terminal).revision)
-
-        _ = await register(store, params(terminal: terminal, session: "s1", knownPromptID: id))
+        await open(store, terminal: terminal, toolUseID: "toolu_2")
         seen.append(await store.snapshot(forTerminal: terminal).revision)
-
-        _ = await store.note(terminalID: terminal, sessionID: "s1", phase: .post,
-                             toolUseID: "toolu_late", toolName: "Bash", inputHash: nil)
+        await store.closed(terminalID: terminal, toolUseID: "toolu_1")
+        seen.append(await store.snapshot(forTerminal: terminal).revision)
+        await store.receipt(terminalID: terminal, toolUseID: "toolu_2")
         seen.append(await store.snapshot(forTerminal: terminal).revision)
 
         #expect(seen == seen.sorted(), "revisions must never go backwards: \(seen)")
         #expect(Set(seen).count == seen.count, "every mutation is a distinct revision: \(seen)")
-        #expect(await store.prompts(forTerminal: terminal).isEmpty)
+        #expect(await openIDs(store, terminal).isEmpty)
     }
 
     @Test func broadcastCarriesCapturesAndPrompts() async {
@@ -729,7 +666,7 @@ struct PendingPromptResolutionTests {
         let terminal = UUID()
         await store.set(terminalID: terminal, PendingAskUserQuestion(
             toolUseID: "toolu_capture", inputJSON: "{}", timestamp: Date(timeIntervalSince1970: 1)))
-        let (id, _) = await register(store, params(terminal: terminal, session: "s1"))
+        await open(store, terminal: terminal)
 
         await subs.broadcastPendingPrompts(terminalID: terminal, from: store)
 
@@ -747,7 +684,7 @@ struct PendingPromptResolutionTests {
         let delta = promptDeltas.first
         #expect(delta?.terminalID == terminal)
         #expect(delta?.captures.map(\.toolUseID) == ["toolu_capture"])
-        #expect(delta?.prompts.map(\.id) == [id])
+        #expect(delta?.prompts.map(\.id) == ["toolu_1"])
         #expect(delta?.revision == (await store.snapshot(forTerminal: terminal)).revision)
     }
 }

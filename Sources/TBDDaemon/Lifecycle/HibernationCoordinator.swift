@@ -1999,8 +1999,7 @@ public actor HibernationCoordinator {
             worktreePath: worktree.path,
             // The same config dir the resume below runs with, so the tee
             // delegates to the user-scope statusline THIS session reads.
-            profileConfigDir: profileConfigDir,
-            promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault
+            profileConfigDir: profileConfigDir
         )
         // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
         // isolated profile dir (never seeded before) doesn't re-prompt — the
