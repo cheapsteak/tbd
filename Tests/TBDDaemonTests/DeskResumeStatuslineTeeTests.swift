@@ -435,9 +435,10 @@ extension TBDHomeSerialized {
         let primary = try #require(
             try await db.terminals.list(worktreeID: worktree.id).first(where: { $0.kind == .claude }))
         let sessionID = try #require(primary.claudeSessionID)
-        let launch = try #require(recorded.snapshot().last(where: {
+        let newWindow = recorded.snapshot().last(where: {
             $0.contains("new-window") && ($0.last?.contains(primary.id.uuidString) ?? false)
-        }).map(tmuxEnvironmentFlags))
+        })
+        let launch = try #require(newWindow.map(tmuxEnvironmentFlags))
         if recordWritable {
             #expect(statusLine(inOverlayFor: primary.id.uuidString) == nil,
                     "a fresh desk carrying usage still had its statusLine taken over")
