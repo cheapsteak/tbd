@@ -113,12 +113,17 @@ restart with no database change. A process outside the session, running as
 the same user, cannot learn a session's token without deliberately reading the
 key file, which is the same trust boundary that protects `state.db`. The
 session's own descendants do inherit `TBD_MOD_TOKEN` with the rest of its
-environment: a command the Bash tool runs, an MCP server. Such a process can
-forge the session's **opened**, **receipt** and **closed** reports, or take a
-decision meant for one of its dialogs, so the harm is denial of service: a
-card that vanishes, or an answer that never reaches the dialog. It cannot
-answer a dialog, because answers come only from the app through
-`prompt.answer`, and the terminal can still answer every dialog.
+environment: a command the Bash tool runs, an MCP server. Such a process:
+
+- **can** forge **closed** or **receipt**, which dismisses or hides a card, or
+  take a decision meant for one of the session's dialogs, so the answer never
+  reaches it: denial of service;
+- **can** open cards for tool use ids that have no dialog;
+- **cannot** change what an open card shows: the first payload wins, and a
+  repeat **opened** whose tool name, input or suggestions differ is refused
+  with a 409 and leaves the card as first reported;
+- **cannot** answer a dialog, because answers come only from the app through
+  `prompt.answer`, and the terminal can still answer every dialog.
 
 A request for a terminal whose row holds a different incarnation is refused,
 so a process that outlived its row cannot receive what its successor should.
@@ -272,7 +277,9 @@ in the pane are separate and stay.
   An answer sent with no receipt within 5 seconds reports `unknown`, as today.
 - **Re-post after restart.** The mod keeps its open dialogs in memory and
   posts each again as **opened** after any reconnect, so the cards return
-  after a daemon restart. The store treats a repeat as the same prompt.
+  after a daemon restart. The store treats a repeat as the same prompt. The
+  re-post is the body first sent, so its payload is the same; a repeat whose
+  payload differs is refused with a 409, which the mod treats as final.
 - **Clearing.** The store records, per prompt, when a wait request last
   attached to it or left it, starting from its **opened** (a repeat
   **opened** restarts the measure). Every 15 seconds a disconnect sweep clears
