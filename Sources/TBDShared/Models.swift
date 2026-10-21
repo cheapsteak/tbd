@@ -1729,6 +1729,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// `composer_draft_enabled ?? Config.composerDraftDefault`. Assigned after
     /// construction by the daemon, like `transcriptPromptAnswerEnabled`.
     public var composerDraftEnabled: Bool = Config.composerDraftDefault
+    /// Session usage recorded through the session mod: each Claude session's
+    /// context window, rate limits and cost, written to its session folder.
+    /// Resolved as `session_mod_usage_enabled ?? Config.sessionModUsageDefault`.
+    /// Assigned after construction by the daemon, like `composerDraftEnabled`.
+    public var sessionModUsageEnabled: Bool = Config.sessionModUsageDefault
     /// Clone-backed worktree checkout: populate a fresh worktree by APFS-cloning
     /// a per-repo template checkout instead of writing every tracked file.
     /// Resolved as `clone_checkout_enabled ?? Config.cloneCheckoutDefault`.
@@ -1864,6 +1869,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// lives. Ships off; graduation is a change to this constant, with no
     /// forcing `UPDATE` migration and every explicit opt-out left alone.
     public static let composerDraftDefault = false
+    /// The shipped default for `sessionModUsageEnabled`, and the single place
+    /// it lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let sessionModUsageDefault = false
     /// The shipped default for `remoteTranscriptLiveSyncEnabled`, and the
     /// single place it lives. Ships off; graduation is a change to this
     /// constant, with no forcing `UPDATE` migration and every explicit opt-out
@@ -2082,6 +2091,8 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
+        sessionModUsageEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         cloneCheckoutEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .cloneCheckoutEnabled) ?? Config.cloneCheckoutDefault
         // Absent means never set, the NULL column's situation; the policy

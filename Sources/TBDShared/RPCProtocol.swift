@@ -380,6 +380,11 @@ public enum RPCMethod {
     /// through the session mod. Reading needs no method of its own:
     /// `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetComposerDraftEnabled = "config.setComposerDraftEnabled"
+    /// The session usage gate (`session_mod_usage_enabled`): whether Claude
+    /// sessions started from now on record their context window, rate limits
+    /// and cost through the session mod. Reading needs no method of its own:
+    /// `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetSessionModUsageEnabled = "config.setSessionModUsageEnabled"
     /// The live remote transcript sync gate
     /// (`remote_transcript_live_sync_enabled`). Takes effect on the next sync —
     /// the daemon reads it fresh at every decision — and turning it off drops
@@ -3976,6 +3981,15 @@ public struct ConfigSetComposerDraftEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setSessionModUsageEnabled` — the gate for recording a
+/// Claude session's context window, rate limits and cost through the session
+/// mod (default OFF during soak). Design:
+/// `docs/specs/2026-10-20-session-usage-mod-feature-design.md`.
+public struct ConfigSetSessionModUsageEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setRemoteTranscriptLiveSyncEnabled` — the gate for
 /// tail-first loading, earlier-history loading and hint-driven background
 /// sync of remote session transcripts (default OFF during soak). Design:
@@ -4376,6 +4390,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// (`composer_draft_enabled`). Default OFF while it soaks. Resolved
     /// through `Config.composerDraftDefault`.
     public var composerDraftEnabled: Bool = Config.composerDraftDefault
+    /// Whether session usage recording is on (`session_mod_usage_enabled`).
+    /// Default OFF while it soaks. Resolved through
+    /// `Config.sessionModUsageDefault`.
+    public var sessionModUsageEnabled: Bool = Config.sessionModUsageDefault
     /// Balancing's usage ceiling and maximum reading age as stored, nil when
     /// never set, so the app runs the picker under the daemon's thresholds.
     /// Assigned after construction, for the type-checker reason
@@ -4518,6 +4536,8 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
+        sessionModUsageEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingUsageCeilingPercent)

@@ -1953,7 +1953,15 @@ public actor HibernationCoordinator {
             profile: resolvedProfile?.envOverrides
         )
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
-        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
+        // Planned, not written: the incarnation `SessionModSpawn.prepare`
+        // writes into `spawn.json` is minted only at launch, long after the
+        // command below is composed, and a wake that adopts a holder still
+        // running launches nothing at all. Each launch writes the overlay from
+        // what `prepare` returned (`ReplacementSpawnOverlay.settle`), so a desk
+        // whose spawn carries `usage` installs no tee and one without it does,
+        // and an adopting wake leaves the running process's overlay and
+        // capture alone.
+        let overlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString,
             // Repo fragment is file-backed config, read fresh — reapplied on wake.
@@ -1979,11 +1987,14 @@ public actor HibernationCoordinator {
             // scope they can write — in ordinary sessions that merely happen to
             // sit in a desk's worktree. Reporting no denominator is the right
             // side to be wrong on, and it is only safe because the staleness is
-            // closed independently: `ClaudeHookOverlay.resolveOverlayPath`
-            // deletes the session's capture whenever it resolves an overlay
-            // WITHOUT a tee, so a session that is not (re)installing one cannot
-            // read a capture from a previous life. An ordinary terminal has nil
-            // here and gets a byte-identical overlay.
+            // closed independently: `ClaudeHookOverlay.resolveOverlayPath`,
+            // which the launch's settle runs, deletes the session's capture
+            // on every call (every launch), so a session that is not
+            // (re)installing a tee cannot read a capture from a previous life. An ordinary terminal has nil here and gets a byte-identical
+            // overlay.
+            //
+            // A desk whose resume carries the session mod's `usage` installs no
+            // tee: the mod reports its window instead.
             watchDeskRole: terminal.watchDeskRole,
             worktreePath: worktree.path,
             // The same config dir the resume below runs with, so the tee
@@ -2039,10 +2050,12 @@ public actor HibernationCoordinator {
             profileConfigDir: profileConfigDir,
             cmd: nil,
             shellFallback: defaultShell,
-            settingsOverlayPath: overlayPath,
+            settingsOverlayPath: overlay.path,
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: claudeEnvOverrides,
-            sessionName: spawnTitle.name
+            sessionName: spawnTitle.name,
+            // The overlay is written at launch, so its path counts as present.
+            fileExists: overlay.commandFileExists
         )
         // Inject TBD_WORKTREE_ID + TBD_TERMINAL_ID so notifications and the
         // SessionStart hook attribute to this terminal after the resume rollover.
@@ -2070,7 +2083,8 @@ public actor HibernationCoordinator {
                 sensitiveEnv: sensitiveEnv,
                 cols: cols,
                 rows: rows,
-                spawnTitle: spawnTitle)
+                spawnTitle: spawnTitle,
+                overlay: overlay)
         }
 
         // The window/pane the rest of wake must reference: the original ones
@@ -2108,7 +2122,8 @@ public actor HibernationCoordinator {
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     cols: cols,
-                    rows: rows
+                    rows: rows,
+                    overlay: overlay
                 )
             }
         } catch {
@@ -2189,7 +2204,10 @@ public actor HibernationCoordinator {
         env: [String: String],
         sensitiveEnv: [String: String],
         cols: Int?,
-        rows: Int?
+        rows: Int?,
+        // The overlay `spawnCommand` was composed with, written by each launch
+        // below from the session mod that launch is actually given.
+        overlay: ReplacementSpawnOverlay
     ) async -> WakeTmuxOutcome {
         // Post-reboot a fresh tmux server reissues window ids from @1 again,
         // so a stale parked row's window id can equal a window that ANOTHER
@@ -2237,11 +2255,12 @@ public actor HibernationCoordinator {
                     config: try? await db.config.get(),
                     claudeSessionID: claudeSessionID, incarnationID: incarnationID,
                     sessionsDir: sessionsDir, now: now())
+                let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
                     cwd: worktree.localPath,
-                    shellCommand: spawnCommand,
+                    shellCommand: launchCommand,
                     env: replacementEnv,
                     sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
                     cols: cols,
@@ -2356,12 +2375,13 @@ public actor HibernationCoordinator {
                     config: try? await db.config.get(),
                     claudeSessionID: claudeSessionID, incarnationID: incarnationID,
                     sessionsDir: sessionsDir, now: now())
+                let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
                 do {
                     try await tmux.respawnWindow(
                         server: server,
                         windowID: window.windowID,
                         cwd: worktree.localPath,
-                        shellCommand: spawnCommand,
+                        shellCommand: launchCommand,
                         env: replacementEnv,
                         sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
                         cols: resolvedCols,

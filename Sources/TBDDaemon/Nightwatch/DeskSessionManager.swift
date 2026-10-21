@@ -1443,11 +1443,14 @@ public actor DeskSessionManager: DeskSessionManaging {
                 preSessionTerminalID: nil,
                 // Marks the spawn as a desk session, which is what installs the
                 // statusline tee — a desk's context-recycling thresholds are
-                // fractions of its effective window, and the tee is the only
-                // source that reports one. Fleet sessions never get it: TBD's
-                // per-session settings outrank the operator's own statusline in
-                // every scope they can write. `.readOnlyCoordinator` is the role
-                // a desk terminal holds before any judge lease exists.
+                // fractions of its effective window, and the tee reports one
+                // for a spawn without the session mod's `usage` feature (a
+                // spawn carrying it reports the window through `usage.json`
+                // and keeps the person's own statusline). Fleet sessions never
+                // get the tee: TBD's per-session settings outrank the
+                // operator's own statusline in every scope they can write.
+                // `.readOnlyCoordinator` is the role a desk terminal holds
+                // before any judge lease exists.
                 watchDeskRole: .readOnlyCoordinator
             )
         } catch {

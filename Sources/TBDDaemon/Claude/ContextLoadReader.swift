@@ -2,7 +2,7 @@ import Foundation
 import TBDShared
 
 /// Reads one session's `ContextLoad` — how full its context window is — from
-/// the two machine sources that can speak to it.
+/// the machine sources that can speak to it.
 ///
 /// **There is no compiled model→window table here, and there must never be
 /// one.** The effective window is a session fact, not a model fact: Claude Code
@@ -15,22 +15,53 @@ import TBDShared
 /// exactly where being wrong costs a session. Where nothing observed the
 /// window, this reader says `unknown` and says why.
 ///
-/// Two paths, in preference order:
+/// Claude Code tells a third party the window it resolved on two surfaces:
+/// `$.session.usage()` and `session.measure`, which the session mod's `usage`
+/// feature records to `usage.json`, and the statusline command's stdin JSON,
+/// which the statusline tee captures on desk sessions spawned without that
+/// feature. Which one a session has is decided at spawn, so the reader asks
+/// the spawn rather than trying each in turn:
 ///
-/// 1. **The statusline tee fired.** Prefer the captured JSON's own paired
-///    reading — Claude Code computed numerator, denominator and percentage at
-///    one instant from one source, and taking both halves from it is the only
-///    way to report a fraction that was ever simultaneously true.
-/// 2. **It did not** — every non-desk session, and a desk whose statusline has
-///    not run yet. The numerator comes from the transcript tail; the
-///    denominator is `unknown`, with a `why` naming which case it is.
+/// 1. **Spawned with `usage`, and the mod is confirmed running.** Take the
+///    file's window, and its tokens when it carries them — measured together,
+///    so the reading is paired. The file must name the live incarnation: the
+///    new process's heartbeat can land before its first usage write, and a
+///    file an earlier process left behind describes that process.
+/// 2. **Spawned with `usage`, but the mod is not confirmed — a stale
+///    heartbeat included — or its file is missing, torn, another
+///    incarnation's or carries no valid window.** The numerator comes from the
+///    transcript tail and the window is `unknown`. A tee capture left on disk
+///    by an earlier life of the session is deliberately not consulted: it
+///    describes a process this one may not be.
+/// 3. **Parked, and its last spawn ran `usage`** (`readParked`). Parking
+///    replaces the agent with an inert shell, so no process is reporting a
+///    window, and the session's shared `spawn.json` cannot say which earlier
+///    process a usage file on disk belongs to. The window is `unknown` and
+///    the numerator comes from the transcript tail. Nothing consumes a parked
+///    session's window — the desk's handoff reads its own file in a live
+///    process — so nothing is lost by not guessing.
+/// 4. **Spawned without `usage`.** The tee path, unchanged: prefer the
+///    captured JSON's own paired reading — Claude Code computed numerator,
+///    denominator and percentage at one instant from one source, and taking
+///    both halves from it is the only way to report a fraction that was ever
+///    simultaneously true. When the tee has not fired — every non-desk
+///    session, and a desk whose statusline has not run yet — the numerator
+///    comes from the transcript tail and the denominator is `unknown`, with a
+///    `why` naming which case it is.
 struct ContextLoadReader {
     /// Whether this session has a statusline tee — and when it does not, why
     /// not. Three shapes, because the `why` of an unknown window has to tell
-    /// them apart and two of them are easy to conflate.
+    /// them apart and two of them are easy to conflate. Consulted only on the
+    /// tee path — a `.legacy` usage liveness — which a desk spawned with the
+    /// session mod's `usage` feature normally never reaches.
     enum TeeStatus: Sendable, Equatable {
-        /// A Claude desk session: the tee is installed and may simply not have
-        /// fired yet.
+        /// A Claude desk session. Its spawn usually installed the tee, which
+        /// may simply not have fired yet — but not always: a desk spawned
+        /// with the session mod's `usage` feature has no tee, and reaches the
+        /// tee path anyway when its spawn record cannot vouch for it (a
+        /// `/clear` whose new `spawn.json` could not be written reads
+        /// `.legacy`). The row does not record which spawn this was, so the
+        /// `why` worded from this case must not assert the tee exists.
         case installed
         /// A desk session whose agent is not the one the tee installs on. The
         /// tee lives in the Claude spawn path, so a desk created on a
@@ -57,17 +88,120 @@ struct ContextLoadReader {
     /// - Parameters:
     ///   - capturePath: the statusline tee's capture file for this session.
     ///     Passed explicitly rather than derived so the reader is hermetic.
+    ///   - usagePath: the session mod's `usage.json` for this session, when the
+    ///     session has a directory. Read only when `usageLiveness` is
+    ///     `.confirmed`.
+    ///   - usageIncarnationID: the session's live incarnation. When given, a
+    ///     usage file naming any other incarnation — or none — was written by
+    ///     an earlier process of the same Claude session and is not read. A nil
+    ///     live incarnation is unknown, so no file is accepted.
+    ///   - usageLiveness: `SessionModLiveness` for the `usage` feature. `.legacy`
+    ///     — a spawn made without the feature, and the default — keeps the tee
+    ///     path; any other answer means the spawn chose the mod's file over
+    ///     the tee, so the capture is never read.
     ///   - transcriptPath: the session's transcript JSONL, when TBD knows one.
     ///   - tee: whether the statusline tee was installed for this session, and
-    ///     if not, why not. Only used to word the `why` of an unknown window —
-    ///     a desk whose statusline has not run yet is a different situation
-    ///     from a desk that will never have one and from a fleet session that
-    ///     was never going to, and a reader deserves to be told which.
+    ///     if not, why not. Only used to word the `why` of an unknown window on
+    ///     the tee path — a desk whose statusline has not run yet is a different
+    ///     situation from a desk that will never have one and from a fleet
+    ///     session that was never going to, and a reader deserves to be told
+    ///     which.
     func read(
         capturePath: String,
+        usagePath: String? = nil,
+        usageIncarnationID: UUID? = nil,
+        usageLiveness: SessionModLiveness = .legacy,
         transcriptPath: String?,
         tee: TeeStatus
     ) -> ContextLoad {
+        switch usageLiveness {
+        case .legacy:
+            return readFromTee(capturePath: capturePath, transcriptPath: transcriptPath, tee: tee)
+        case .unknown(let reason):
+            return ContextLoad(
+                used: transcriptUsed(transcriptPath: transcriptPath),
+                window: .unknown(
+                    why: "this session was spawned to record its usage through the session mod, "
+                        + "but the mod is not confirmed running in it (\(reason.rawValue)), so "
+                        + "nothing has reported its resolved context window"))
+        case .confirmed:
+            return readFromUsage(
+                usagePath: usagePath, liveIncarnationID: usageIncarnationID,
+                transcriptPath: transcriptPath)
+        }
+    }
+
+    /// A parked session whose last spawn ran `usage` — case 3 above. No
+    /// process is reporting its window, so the window is `unknown` and the
+    /// numerator comes from the transcript tail; neither the usage file nor
+    /// the tee capture is read.
+    func readParked(transcriptPath: String?) -> ContextLoad {
+        ContextLoad(
+            used: transcriptUsed(transcriptPath: transcriptPath),
+            window: .unknown(
+                why: "this session is parked, so no process is reporting its context window"))
+    }
+
+    // MARK: - The session mod's usage file
+
+    /// A confirmed session's `usage.json`. Every way the file can fail to
+    /// carry a window — missing, torn mid-write (`$.fs` has no rename),
+    /// malformed, or a window that is zero, negative or a boolean — reads as
+    /// "not observed", never as zero: the window is `unknown` with a `why`
+    /// naming the file, and the numerator falls back to the transcript tail.
+    /// So does a file from another incarnation: liveness confirms the mod is
+    /// running in this process, not that this process has written yet.
+    private func readFromUsage(
+        usagePath: String?, liveIncarnationID: UUID?, transcriptPath: String?
+    ) -> ContextLoad {
+        func unobserved(_ why: String) -> ContextLoad {
+            ContextLoad(used: transcriptUsed(transcriptPath: transcriptPath), window: .unknown(why: why))
+        }
+        guard let usagePath, !usagePath.isEmpty else {
+            return unobserved("the session mod is recording this session's usage, but TBD has no "
+                + "session directory to read its usage file from")
+        }
+        let record: SessionModFiles.UsageRecord
+        switch SessionModFiles.read(SessionModFiles.UsageRecord.self, at: URL(fileURLWithPath: usagePath)) {
+        case .missing:
+            return unobserved("the session mod is recording this session's usage, but its usage "
+                + "file has not been written yet")
+        case .unreadable:
+            return unobserved("the session mod's usage file for this session is unreadable — torn "
+                + "mid-write or malformed — so it reports no context window")
+        case .record(let decoded):
+            record = decoded
+        }
+        // Compared as `SessionModLiveness.sameIncarnation` does: parsed, so
+        // the UUID's case does not matter.
+        // A missing live incarnation reads as unknown, never as a match.
+        guard let live = liveIncarnationID,
+              record.incarnationID.flatMap(UUID.init(uuidString:)) == live else {
+            return unobserved("the session mod's usage file for this session is from an earlier "
+                + "process of it, and this process has not written its own yet")
+        }
+        guard let size = record.validWindow else {
+            return unobserved("the session mod's usage file for this session carries no valid "
+                + "context.window")
+        }
+        let observedAt = Date(timeIntervalSince1970: Double(record.measuredAt) / 1000)
+        let window = ContextWindow.observed(
+            ObservedFact(value: size, source: .sessionMod, observedAt: observedAt))
+        // `tokens` is absent at the `session.start` baseline, before any
+        // response reported a fill. The window is still good, so the numerator
+        // falls back to the transcript tail — an unpaired reading, which
+        // `ContextLoad.isPairedReading` reports as such.
+        guard let tokens = record.context.tokens, tokens >= 0 else {
+            return ContextLoad(used: transcriptUsed(transcriptPath: transcriptPath), window: window)
+        }
+        return ContextLoad(
+            used: ObservedFact(value: tokens, source: .sessionMod, observedAt: observedAt),
+            window: window)
+    }
+
+    // MARK: - The statusline tee
+
+    private func readFromTee(capturePath: String, transcriptPath: String?, tee: TeeStatus) -> ContextLoad {
         guard let capture = readCapture(atPath: capturePath) else {
             return ContextLoad(
                 used: transcriptUsed(transcriptPath: transcriptPath),
@@ -113,7 +247,9 @@ struct ContextLoadReader {
     private func unknownWindowReason(_ tee: TeeStatus) -> String {
         switch tee {
         case .installed:
-            return "the statusline tee is installed for this desk session but has not fired yet"
+            return "nothing has reported this desk session's resolved context window yet: its "
+                + "statusline tee, if this spawn installed one, has not fired yet, and no "
+                + "session mod usage file is confirmed for it"
         case .deskWithoutTee:
             return "this desk session does not run the agent the statusline tee installs on, so "
                 + "nothing will report its resolved context window"

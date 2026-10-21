@@ -1605,6 +1605,21 @@ extension WorktreeLifecycle {
                     storedTranscriptPath: nil
                 )
             }
+            // The session mod, for every Claude primary but a carryover. A
+            // fresh session's id is minted above and a restored one's is the
+            // id `--resume` names, so either's spawn record can be written
+            // now. A carryover forks (`--fork-session`), and its id exists
+            // only once it has launched, so it stays legacy — which the
+            // recapture below, scheduled with no incarnation, relies on.
+            // Prepared before the overlay resolves, because whether this
+            // spawn carries `usage` decides whether a desk installs the
+            // statusline tee.
+            let sessionMod = carryover == nil
+                ? SessionModSpawn.prepare(
+                    config: config, claudeSessionID: sessionUUID,
+                    incarnationID: nil, sessionsDir: sessionsDir, now: now())
+                : nil
+            primarySessionIncarnationID = sessionMod?.incarnationID
             let primaryOverlayPath = ClaudeHookOverlay.resolveOverlayPath(
                 fallbackModels: resolvedProfile?.fallbackModels,
                 sessionKey: plannedTerminalID1.uuidString,
@@ -1618,6 +1633,9 @@ extension WorktreeLifecycle {
                 extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
                 // Desk sessions only — see the parameter's doc comment.
                 watchDeskRole: watchDeskRole,
+                // A spawn carrying `usage` reports its figures through the
+                // mod, so a desk keeps the person's own status line.
+                statuslineTee: ClaudeHookOverlay.installsStatuslineTee(carrying: sessionMod),
                 worktreePath: worktreePath,
                 // The same config dir this spawn runs with, so the tee
                 // delegates to the user-scope statusline THIS session reads.
@@ -1629,18 +1647,6 @@ extension WorktreeLifecycle {
                 worktreeID: worktreeID, displayName: worktree.displayName,
                 terminalID: plannedTerminalID1)
             primarySpawnTitle = spawnTitle
-            // The session mod, for every Claude primary but a carryover. A
-            // fresh session's id is minted above and a restored one's is the
-            // id `--resume` names, so either's spawn record can be written
-            // now. A carryover forks (`--fork-session`), and its id exists
-            // only once it has launched, so it stays legacy — which the
-            // recapture below, scheduled with no incarnation, relies on.
-            let sessionMod = carryover == nil
-                ? SessionModSpawn.prepare(
-                    config: config, claudeSessionID: sessionUUID,
-                    incarnationID: nil, sessionsDir: sessionsDir, now: now())
-                : nil
-            primarySessionIncarnationID = sessionMod?.incarnationID
             let spawn = ClaudeSpawnCommandBuilder.build(
                 resumeID: isResume ? sessionUUID : nil,
                 forkSession: carryover != nil,

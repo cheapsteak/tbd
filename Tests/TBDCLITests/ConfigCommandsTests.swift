@@ -195,6 +195,32 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("composer-draft: on"))
     }
 
+    // MARK: - session-usage: the soak switch for recording session usage
+
+    @Test func sessionUsageDescribesBothStates() {
+        let on = ConfigSet.confirmation(key: "session-usage", value: .on)
+        let off = ConfigSet.confirmation(key: "session-usage", value: .off)
+        #expect(on.hasPrefix("Set session-usage to on."))
+        #expect(off.hasPrefix("Set session-usage to off."))
+        #expect(on != off)
+    }
+
+    @Test func sessionUsageIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("session-usage"))
+        #expect(try ConfigSet.parseOnOff("on", key: "session-usage") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "session-usage") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "session-usage")
+        }
+    }
+
+    @Test func configGetPrintsSessionUsageInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("session-usage: off"))
+        config.sessionModUsageEnabled = true
+        #expect(ConfigGet.render(config).contains("session-usage: on"))
+    }
+
     // MARK: - clone-checkout: the soak switch for clone-backed worktree checkout
 
     @Test func cloneCheckoutDescribesBothStates() {

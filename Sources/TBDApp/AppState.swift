@@ -1911,6 +1911,11 @@ final class AppState {
     var composerDraftEnabled: Bool {
         daemonCapabilities?.composerDraftEnabled ?? false
     }
+    /// Whether session usage is recorded, as the daemon reports it. False
+    /// until capabilities have been fetched.
+    var sessionModUsageEnabled: Bool {
+        daemonCapabilities?.sessionModUsageEnabled ?? false
+    }
     /// How `loadModelProfiles()` fetches its config-bearing response.
     /// Injectable because `DaemonClient` is concrete, matching the other
     /// settings seams below.
@@ -2112,6 +2117,10 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var composerDraftFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setComposerDraft(enabled: enabled) }
+    /// How `setSessionModUsageEnabled` persists the session usage gate —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var sessionModUsageFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setSessionModUsage(enabled: enabled) }
     /// How `setRemoteTranscriptLiveSyncEnabled` persists the live remote
     /// transcript sync gate — injectable for the same reason as
     /// `controlModeSetter`.

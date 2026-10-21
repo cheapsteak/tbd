@@ -1110,7 +1110,8 @@ extension HibernationCoordinator {
         sensitiveEnv: [String: String],
         cols: Int?,
         rows: Int?,
-        spawnTitle: ClaudeSpawnTitle? = nil
+        spawnTitle: ClaudeSpawnTitle? = nil,
+        overlay: ReplacementSpawnOverlay
     ) async -> WakeResult {
         guard !hibernatesInFlight.contains(terminal.id),
               !wakesInFlight.contains(terminal.id) else {
@@ -1144,7 +1145,8 @@ extension HibernationCoordinator {
             sensitiveEnv: sensitiveEnv,
             cols: cols,
             rows: rows,
-            spawnTitle: spawnTitle)
+            spawnTitle: spawnTitle,
+            overlay: overlay)
     }
 
     /// The mutate half of a holder wake: spawn a fresh holder running the
@@ -1186,7 +1188,15 @@ extension HibernationCoordinator {
         sensitiveEnv: [String: String],
         cols: Int?,
         rows: Int?,
-        spawnTitle: ClaudeSpawnTitle? = nil
+        spawnTitle: ClaudeSpawnTitle? = nil,
+        // The overlay `spawnCommand` was composed with, planned before this
+        // spawn's session-mod features were known: written from the context
+        // `SessionModSpawn.prepare` returns, just before the launch, and never
+        // by a wake that adopts a live holder instead. Required, as
+        // `wakeTmux`'s is: the command already names a per-session file that
+        // only `settle` writes, so a caller must not be able to launch it
+        // without settling.
+        overlay: ReplacementSpawnOverlay
     ) async -> WakeResult {
         // Every refusal below goes through this rather than returning
         // `.respawnFailed` directly, because each one is a spawn that did not
@@ -1255,13 +1265,17 @@ extension HibernationCoordinator {
             config: try? await db.config.get(),
             claudeSessionID: sessionID, incarnationID: incarnationID,
             sessionsDir: sessionsDir, now: now())
+        // Written here and not when the overlay was planned: the adopting
+        // branch above launches nothing, and must leave the running process's
+        // overlay and statusline capture as they are.
+        let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
 
         let handle: HolderHandle
         do {
             handle = try await registry.spawn(
                 terminalID: terminal.id,
                 launch: WorktreeLifecycle.holderLaunch(
-                    shellCommand: spawnCommand,
+                    shellCommand: launchCommand,
                     env: replacementEnv,
                     // `sensitiveEnv` is the job's process environment:
                     // `holderLaunch` inlines `env` as `export K='v';` in front

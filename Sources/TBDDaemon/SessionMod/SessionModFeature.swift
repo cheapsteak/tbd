@@ -9,6 +9,7 @@ public enum SessionModFeature: String, Codable, Sendable, CaseIterable {
     /// transcript pane's provisional rows.
     /// Design: docs/specs/2026-10-20-transcript-stream-mod-design.md.
     case transcriptStream = "transcript-stream"
+    case usage
 
     /// The features enabled by `config`, in `allCases` order.
     public static func enabled(in config: Config) -> [SessionModFeature] {
@@ -16,6 +17,7 @@ public enum SessionModFeature: String, Codable, Sendable, CaseIterable {
             switch feature {
             case .composerDraft: config.composerDraftEnabled
             case .transcriptStream: config.transcriptStreamingEnabled
+            case .usage: config.sessionModUsageEnabled
             }
         }
     }

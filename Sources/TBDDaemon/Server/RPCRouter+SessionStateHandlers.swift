@@ -11,9 +11,11 @@ private let sessionStateLog = Logger(subsystem: "com.tbd.daemon", category: "ses
 ///
 /// Separated from the handler so the whole fact-gathering pass is a value with
 /// injectable seams — and so the cost model is legible in one place. Per
-/// terminal it performs **at most two byte-bounded file reads** (the transcript
-/// tail, once for the rate-limit classification and once inside
-/// `ContextLoadReader`, plus the statusline capture when one exists) and
+/// terminal it performs **a handful of small or byte-bounded file reads** (the
+/// transcript tail, once for the rate-limit classification and once inside
+/// `ContextLoadReader`; for a Claude session with a session directory, its
+/// `spawn.json`, `alive.json` and — when the mod is confirmed running —
+/// `usage.json`; and on the tee path, the statusline capture when one exists) and
 /// **zero** subprocesses, tmux calls, pane reads and model calls. That is the
 /// property that lets the whole fleet be asked about every cycle.
 /// Not `Sendable`, and it does not need to be: one gatherer is built inside a
@@ -30,6 +32,10 @@ struct SessionStateFactGatherer {
     /// Resolves a session's statusline capture path. Injected so a test can
     /// point it at a temp dir without reaching for `TBD_HOME`.
     var capturePath: @Sendable (String) -> String = { StatuslineTee.capturePath(sessionKey: $0) }
+    /// The session mod's sessions root, where each Claude session's
+    /// `spawn.json`, `alive.json` and `usage.json` live. Injected for the same
+    /// reason as `capturePath`.
+    var sessionsDir: URL = TBDConstants.sessionsDir()
 
     /// Written out rather than left memberwise so the injected date seam
     /// reaches the collaborator that has one of its own.
@@ -46,12 +52,14 @@ struct SessionStateFactGatherer {
         now: @escaping @Sendable () -> Date = { Date() },
         capturePath: @escaping @Sendable (String) -> String = {
             StatuslineTee.capturePath(sessionKey: $0)
-        }
+        },
+        sessionsDir: URL = TBDConstants.sessionsDir()
     ) {
         self.tailWindowBytes = tailWindowBytes
         self.contextLoadReader = contextLoadReader ?? ContextLoadReader(now: now)
         self.now = now
         self.capturePath = capturePath
+        self.sessionsDir = sessionsDir
     }
 
     /// - Parameter programStatus: the terminal's OSC 7501 snapshot, read by
@@ -79,10 +87,76 @@ struct SessionStateFactGatherer {
     }
 
     func contextLoad(for terminal: Terminal) -> ContextLoad {
-        contextLoadReader.read(
-            capturePath: capturePath(terminal.id.uuidString),
-            transcriptPath: terminal.transcriptPath,
-            tee: teeStatus(for: terminal))
+        switch usageSource(for: terminal) {
+        case .parked:
+            return contextLoadReader.readParked(transcriptPath: terminal.transcriptPath)
+        case .spawn(let path, let liveness):
+            return contextLoadReader.read(
+                capturePath: capturePath(terminal.id.uuidString),
+                usagePath: path,
+                usageIncarnationID: terminal.sessionIncarnationID,
+                usageLiveness: liveness,
+                transcriptPath: terminal.transcriptPath,
+                tee: teeStatus(for: terminal))
+        }
+    }
+
+    private enum UsageSource {
+        /// Parked, and the session's last spawn ran `usage`.
+        case parked
+        /// Where the usage file lives, and the `usage` liveness for the row's
+        /// own incarnation.
+        case spawn(path: String?, liveness: SessionModLiveness)
+    }
+
+    /// Whether this session was spawned to record its usage through the
+    /// session mod, and where that file lives.
+    ///
+    /// Liveness is evaluated against the row's live incarnation, as
+    /// `ComposerDraftStatus` does, so a `spawn.json` left by an earlier life of
+    /// the session reads `.legacy` rather than vouching for this one. The mod
+    /// loads into Claude Code only, so every other kind is `.legacy` — and so
+    /// is a row with no session ID, or one unsafe to use as a path, which has
+    /// no directory to read.
+    ///
+    /// A parked row carries the inert shell's incarnation, so that check would
+    /// read it `.legacy` and send it to a tee capture its spawn never wrote.
+    /// When the session's spawn record lists `usage`, a parked row is reported
+    /// as `.parked` instead, and the reader neither reads the usage file nor
+    /// the capture: no process is reporting its window, and the shared,
+    /// overwritten `spawn.json` cannot say whose file is on disk. A parked row
+    /// whose spawn did not list `usage` keeps the tee path. A parked row whose
+    /// mod still confirms against its live incarnation (a wake whose
+    /// `clearHibernated` failed) reports its window as a live row does, and a
+    /// parked row with an unreadable spawn record is `.parked` too.
+    private func usageSource(for terminal: Terminal) -> UsageSource {
+        guard terminal.kind == .claude, let id = terminal.claudeSessionID,
+              let dir = SessionModFiles.directory(sessionsDir: sessionsDir, claudeSessionID: id) else {
+            return .spawn(path: nil, liveness: .legacy)
+        }
+        let spawn = SessionModFiles.read(
+            SessionModFiles.SpawnRecord.self, at: dir.appendingPathComponent(SessionModFiles.spawnFileName))
+        let liveness = SessionModLiveness.evaluate(
+            feature: .usage, spawn: spawn,
+            alive: SessionModFiles.read(
+                SessionModFiles.AliveRecord.self, at: dir.appendingPathComponent(SessionModFiles.aliveFileName)),
+            liveIncarnationID: terminal.sessionIncarnationID, now: now())
+        // A woken process whose `clearHibernated` failed still reads parked, but
+        // its mod confirms against the row's live incarnation: report its window.
+        if terminal.isParked {
+            if case .confirmed = liveness {} else {
+                switch spawn {
+                case .record(let record):
+                    if record.features.contains(SessionModFeature.usage.rawValue) { return .parked }
+                case .unreadable:
+                    // The spawn cannot say it did not run `usage`.
+                    return .parked
+                case .missing:
+                    break
+                }
+            }
+        }
+        return .spawn(path: dir.appendingPathComponent(SessionModFiles.usageFileName).path, liveness: liveness)
     }
 
     /// The desk role brands the ROW; the tee installs on the Claude spawn path
@@ -91,6 +165,11 @@ struct SessionStateFactGatherer {
     /// gets a `.codex` row wearing a desk role and no tee — and reporting "the
     /// tee is installed but has not fired yet" for it would be a false statement
     /// about a session that will never produce a capture.
+    ///
+    /// A Claude desk whose spawn carried the session mod's `usage` feature has
+    /// no tee either, and reaches the tee path when its spawn record cannot
+    /// vouch for it. The row does not record which spawn it came from, so it
+    /// still reads `.installed`, and that case's wording does not claim a tee.
     private func teeStatus(for terminal: Terminal) -> ContextLoadReader.TeeStatus {
         guard terminal.watchDeskRole != nil else { return .notADesk }
         return terminal.kind == .claude ? .installed : .deskWithoutTee

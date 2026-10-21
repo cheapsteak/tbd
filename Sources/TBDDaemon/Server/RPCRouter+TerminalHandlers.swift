@@ -2686,14 +2686,20 @@ extension RPCRouter {
             profileConfigDir: await configDirManager.resolveConfigDir(for: resolved))
 
         // Resolved here, after the actuation is open and the transcript carry
-        // and trust seed have both succeeded — not earlier, because both calls
-        // below have real side effects: the config-dir lookup creates the
-        // profile's OAuth dir, and the overlay resolution writes an overlay
-        // file and (for a roleless session) deletes the row's statusline
-        // capture. Neither should fire for a swap `beginActuation` goes on to
-        // reject. Both arms need them.
+        // and trust seed have both succeeded — not earlier, because the
+        // config-dir lookup has a real side effect: it creates the profile's
+        // OAuth dir, which should not happen for a swap `beginActuation` goes
+        // on to reject. Both arms need it.
+        //
+        // The overlay is only planned here (`ReplacementSpawnOverlay`): every
+        // arm writes it — and deletes the row's previous statusline capture —
+        // immediately before its launch, from the session-mod features
+        // `SessionModSpawn.prepare` gave that launch. A swap that fails before
+        // it reaches its launch leaves the running process's overlay and
+        // capture untouched. Only an in-place swap has a desk role, and a desk
+        // carrying `usage` installs no statusline tee.
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
-        let overlayPath = ClaudeHookOverlay.resolveOverlayPath(
+        let overlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolved?.fallbackModels,
             sessionKey: plannedTerminalID.uuidString,
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
@@ -2733,7 +2739,7 @@ extension RPCRouter {
         // The spawn every arm runs, composed once from the plan.
         let spawn = swapSpawn(
             plan: plan, mode: mode, resolved: resolved,
-            overlayPath: overlayPath, profileConfigDir: profileConfigDir,
+            overlay: overlay, profileConfigDir: profileConfigDir,
             worktree: worktree, repo: repo, swapConfig: swapConfig,
             claudeEnvOverrides: claudeEnvOverrides,
             sessionName: swapSessionName,
@@ -2759,10 +2765,13 @@ extension RPCRouter {
         do {
             switch mode {
             case .fork:
+                // The fork's new tab is a fresh session under a new terminal
+                // id, so no running process shares its overlay; written here,
+                // from the session mod it was prepared with above.
                 response = try await forkSwapNewTab(
                     worktree: worktree.worktree,
                     plannedTerminalID: plannedTerminalID,
-                    spawnCommand: spawn.command,
+                    spawnCommand: overlay.settle(carrying: forkSessionMod, command: spawn.command),
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     storedSessionID: storedSessionID,
@@ -2786,7 +2795,8 @@ extension RPCRouter {
                     cols: resolvedCols,
                     rows: resolvedRows,
                     resumeProjectsRoot: resumeProjectsRoot,
-                    spawnTitle: swapSpawnTitle)
+                    spawnTitle: swapSpawnTitle,
+                    overlay: overlay)
                 response = outcome.response
                 respawnFailure = outcome.failure
 
@@ -2815,7 +2825,8 @@ extension RPCRouter {
                         newProfileID: resolved?.profileID,
                         scheduleRecapture: scheduleRecapture,
                         cols: resolvedCols,
-                        rows: resolvedRows
+                        rows: resolvedRows,
+                        overlay: overlay
                     )
                 }
                 response = outcome.response
@@ -2929,7 +2940,7 @@ extension RPCRouter {
         plan: SwapSpawnPlan,
         mode: TerminalSwapMode,
         resolved: ResolvedModelProfile?,
-        overlayPath: String?,
+        overlay: ReplacementSpawnOverlay,
         profileConfigDir: String?,
         worktree: LocalWorktree,
         repo: Repo?,
@@ -2956,11 +2967,12 @@ extension RPCRouter {
                 profileConfigDir: profileConfigDir,
                 cmd: nil,
                 shellFallback: "",
-                settingsOverlayPath: overlayPath,
+                settingsOverlayPath: overlay.path,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: sessionName,
-                sessionModEnvironment: sessionModEnvironment
+                sessionModEnvironment: sessionModEnvironment,
+                fileExists: overlay.commandFileExists
             )
         case .fresh(let newSessionID):
             logger.debug("swap: blank session — spawning fresh \(newSessionID, privacy: .public)")
@@ -2981,11 +2993,12 @@ extension RPCRouter {
                 profileConfigDir: profileConfigDir,
                 cmd: nil,
                 shellFallback: "",
-                settingsOverlayPath: overlayPath,
+                settingsOverlayPath: overlay.path,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: sessionName,
-                sessionModEnvironment: sessionModEnvironment
+                sessionModEnvironment: sessionModEnvironment,
+                fileExists: overlay.commandFileExists
             )
         }
     }
@@ -3072,7 +3085,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         resumeProjectsRoot: URL?,
-        spawnTitle: ClaudeSpawnTitle?
+        spawnTitle: ClaudeSpawnTitle?,
+        overlay: ReplacementSpawnOverlay
     ) async throws -> (response: RPCResponse, failure: String?) {
         // THE CLAIM, ahead of the park and released after the wake.
         //
@@ -3110,7 +3124,8 @@ extension RPCRouter {
                 cols: cols,
                 rows: rows,
                 resumeProjectsRoot: resumeProjectsRoot,
-                spawnTitle: spawnTitle)
+                spawnTitle: spawnTitle,
+                overlay: overlay)
             await hibernationCoordinator.releaseSwap(terminalID: oldTerminal.id)
             return outcome
         } catch {
@@ -3133,7 +3148,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         resumeProjectsRoot: URL?,
-        spawnTitle: ClaudeSpawnTitle?
+        spawnTitle: ClaudeSpawnTitle?,
+        overlay: ReplacementSpawnOverlay
     ) async throws -> (response: RPCResponse, failure: String?) {
         // 1. PARK, through the coordinator's own holder park under the
         //    `.profileSwap` policy: the ladder and its rollback unchanged, the
@@ -3235,7 +3251,8 @@ extension RPCRouter {
             sensitiveEnv: sensitiveEnv,
             cols: cols,
             rows: rows,
-            spawnTitle: spawnTitle)
+            spawnTitle: spawnTitle,
+            overlay: overlay)
 
         guard let updated = try await db.terminals.get(id: target.id) else {
             return (RPCResponse(error: "Terminal vanished after swap"), nil)
@@ -3406,7 +3423,10 @@ extension RPCRouter {
         newProfileID: UUID?,
         scheduleRecapture: Bool,
         cols: Int,
-        rows: Int
+        rows: Int,
+        // The overlay `spawnCommand` was composed with, written below from
+        // the session mod this launch is actually given.
+        overlay: ReplacementSpawnOverlay
     ) async throws -> (response: RPCResponse, respawnError: String?) {
         let server = worktree.tmuxServer
         let paneID = oldTerminal.tmuxPaneID
@@ -3480,6 +3500,7 @@ extension RPCRouter {
             config: try? await db.config.get(),
             claudeSessionID: storedSessionID, incarnationID: incarnationID,
             sessionsDir: sessionsDir, now: now())
+        let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.
@@ -3488,7 +3509,7 @@ extension RPCRouter {
                 server: server,
                 windowID: windowID,
                 cwd: worktree.localPath,
-                shellCommand: spawnCommand,
+                shellCommand: launchCommand,
                 env: replacementEnv,
                 sensitiveEnv: sensitiveEnv.addingSessionMod(sessionMod),
                 cols: cols,

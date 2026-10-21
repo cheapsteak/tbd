@@ -280,6 +280,7 @@ struct GeneralSettingsTab: View {
                 transcriptStreamingToggle
                 transcriptPromptAnswerToggle
                 composerDraftToggle
+                sessionModUsageToggle
                 hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
@@ -531,6 +532,23 @@ struct GeneralSettingsTab: View {
         + "when a hibernated session wakes. If TBD can't confirm a draft is saved, such as one holding a "
         + "large paste, automatic hibernation skips the session and hibernating it yourself asks first. "
         + "Applies to sessions started after you turn it on."
+
+    /// Record each Claude session's context window, rate limits and cost
+    /// through the session mod. Reads `daemon.capabilities`, writes
+    /// `config.setSessionModUsageEnabled`. Off by default (soaking). New
+    /// sessions pick it up.
+    @ViewBuilder
+    private var sessionModUsageToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Record session usage", isOn: Binding(
+            get: { capabilities?.sessionModUsageEnabled ?? Config.sessionModUsageDefault },
+            set: { newValue in Task { await appState.setSessionModUsageEnabled(newValue) } }
+        ))
+        .help(Self.sessionModUsageHelp)
+    }
+
+    static let sessionModUsageHelp = "Saves each Claude session's context window, rate limits and cost "
+        + "to its session folder. Desk sessions stop wrapping your status line."
 
     /// Schedule-based PR polling. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,
