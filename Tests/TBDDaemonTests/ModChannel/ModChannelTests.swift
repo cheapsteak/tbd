@@ -162,6 +162,38 @@ struct ModChannelTests {
         #expect(await !channel.isPollAttached(terminalID: terminal))
     }
 
+    /// The server cancels a poll whose connection closed. Cancelling the
+    /// awaiting task releases the held poll with `[]`, and a later item is
+    /// still delivered to the next poll.
+    @Test func pollReleasedWhenTaskCancelled() async {
+        let channel = ModChannel(now: Self.epoch, clock: EventDrivenTestClock())
+        let terminal = UUID()
+        let poll = await attachPoll(channel, terminal: terminal)
+
+        poll.cancel()
+
+        #expect(await poll.value == [])
+        #expect(await !channel.isPollAttached(terminalID: terminal))
+        await channel.enqueue(terminalID: terminal, kind: "message", body: "{}") {}
+        #expect(await channel.poll(terminalID: terminal, after: 0, token: UUID()).map(\.seq) == [1])
+    }
+
+    /// A poll cancelled before it reaches the channel — its connection closed
+    /// while it was still authenticating — returns `[]` without ever being
+    /// held, so no continuation is left parked.
+    @Test func pollCancelledBeforeHoldingIsNeverHeld() async {
+        let channel = ModChannel(now: Self.epoch, clock: EventDrivenTestClock())
+        let terminal = UUID()
+        let poll = Task { () -> [ModChannel.Item] in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await channel.poll(terminalID: terminal, after: 0, token: UUID())
+        }
+
+        #expect(await poll.value == [])
+        #expect(await !channel.isPollAttached(terminalID: terminal))
+        #expect(await channel.lastPollAt(terminalID: terminal) != nil, "the poll did reach the channel")
+    }
+
     @Test func newerPollReleasesOlderOne() async {
         let channel = ModChannel(now: Self.epoch, clock: EventDrivenTestClock())
         let terminal = UUID()

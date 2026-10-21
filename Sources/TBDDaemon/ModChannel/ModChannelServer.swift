@@ -12,9 +12,15 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "modChannel")
 /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`, "Listener").
 ///
 /// Deliberately thin: it buffers a request, hands it to ``ModChannelRoutes``,
-/// writes the reply with `Connection: close` and closes. A request whose
-/// connection closes before its reply — a held poll or answer wait the mod
-/// aborted — is released through ``ModChannelRoutes/requestAbandoned(token:)``.
+/// writes the reply with `Connection: close` and closes. A held poll or
+/// answer wait whose connection closes before its reply — the mod aborted its
+/// fetch — is released by cancelling the task handling it, which works whether
+/// or not the request has attached yet (it may still be authenticating).
+///
+/// NIO's HTTP pipelining assistance is off on purpose: while a response is
+/// pending it stops reading the socket, so a client's close would go unseen
+/// until the held reply was written — up to the full hold, and forever under
+/// a clock that never advances. Reading on is what lets the close arrive.
 ///
 /// The socket file follows `SocketServer`'s ownership rules: a stale file is
 /// removed before binding, the socket is bound here and handed to NIO (so
@@ -52,7 +58,8 @@ final class ModChannelServer: Sendable {
         let bootstrap = ServerBootstrap(group: group)
             .childChannelInitializer { channel in
                 channel.eventLoop.makeCompletedFuture {
-                    try channel.pipeline.syncOperations.configureHTTPServerPipeline()
+                    try channel.pipeline.syncOperations.configureHTTPServerPipeline(
+                        withPipeliningAssistance: false)
                     try channel.pipeline.syncOperations.addHandler(ModChannelHTTPHandler(routes: routes))
                 }
             }
@@ -147,12 +154,22 @@ private final class ModChannelHTTPHandler: ChannelInboundHandler, @unchecked Sen
     /// The token of the request being handled, from dispatch until its reply
     /// is written. Set means a connection close abandons that request.
     private var inFlightToken: UUID?
+    /// A request has been answered or handed to the routes. Set, the
+    /// connection takes no further request.
+    private var dispatched = false
+    /// The task answering a held poll or answer wait, while it is in flight.
+    /// Cancelled when the connection closes, which releases the hold.
+    private var holdingTask: Task<Void, Never>?
 
     init(routes: ModChannelRoutes) {
         self.routes = routes
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        // One request per connection: every response carries
+        // `Connection: close`, so anything pipelined behind the first
+        // request is ignored and goes with the close.
+        guard !dispatched else { return }
         switch unwrapInboundIn(data) {
         case .head(let requestHead):
             head = requestHead
@@ -171,11 +188,9 @@ private final class ModChannelHTTPHandler: ChannelInboundHandler, @unchecked Sen
             }
             body.append(contentsOf: buffer.readableBytesView)
         case .end:
-            // One request per connection: every response carries
-            // `Connection: close`, so a second request pipelined behind the
-            // first is ignored and goes with the close.
-            guard let requestHead = head, inFlightToken == nil else { return }
+            guard let requestHead = head else { return }
             head = nil
+            dispatched = true
             if tooLarge {
                 Self.writeResponse(
                     context: context, ModChannelRoutes.error(413, "payload too large"))
@@ -203,26 +218,30 @@ private final class ModChannelHTTPHandler: ChannelInboundHandler, @unchecked Sen
             let routes = self.routes
             let wrapped = ModChannelSendableContext(context: context)
             let eventLoop = context.eventLoop
-            Task {
+            let task = Task {
                 let response = await routes.handle(request, token: token)
                 eventLoop.execute {
                     // Still the request in flight: the connection did not close.
                     guard self.inFlightToken == token else { return }
                     self.inFlightToken = nil
+                    self.holdingTask = nil
                     let context = wrapped.context
                     guard context.channel.isActive else { return }
                     Self.writeResponse(context: context, response)
                 }
             }
+            if ModChannelRoutes.holdsConnection(method: request.method, path: request.path) {
+                holdingTask = task
+            }
         }
     }
 
     func channelInactive(context: ChannelHandlerContext) {
-        if let token = inFlightToken {
-            inFlightToken = nil
-            let routes = self.routes
-            Task { await routes.requestAbandoned(token: token) }
-        }
+        inFlightToken = nil
+        // Runs the hold's cancellation handlers here, on the event loop; each
+        // only schedules its release, so nothing blocks.
+        holdingTask?.cancel()
+        holdingTask = nil
         context.fireChannelInactive()
     }
 

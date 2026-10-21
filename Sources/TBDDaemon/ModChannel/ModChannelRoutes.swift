@@ -73,9 +73,9 @@ struct ModChannelRoutes: Sendable {
         case closed(toolUseID: String)
     }
 
-    /// Answers one request. `token` names the request, so a held poll or
-    /// answer wait can be released by ``requestAbandoned(token:)`` when its
-    /// connection closes.
+    /// Answers one request. `token` names the request's held poll or answer
+    /// wait. Cancelling the calling task releases that hold, including one
+    /// the request has not reached yet (see ``holdsConnection(method:path:)``).
     func handle(_ request: ModChannelRequest, token requestToken: UUID) async -> ModChannelResponse {
         guard let route = Self.route(method: request.method, path: request.path) else {
             return Self.error(404, "not found")
@@ -99,12 +99,16 @@ struct ModChannelRoutes: Sendable {
         }
     }
 
-    /// The request's connection closed before it was answered: release a poll
-    /// or answer wait it holds. Never resolves a prompt; harmless for a token
-    /// that holds nothing.
-    func requestAbandoned(token requestToken: UUID) async {
-        await channel.pollGone(token: requestToken)
-        await store.waiterGone(token: requestToken)
+    /// Whether the request is a held poll or answer wait, which keeps its
+    /// connection open until its reply. The server cancels such a request when its
+    /// connection closes, which releases the hold whether or not it has
+    /// attached yet. Every other route mutates the store and runs to
+    /// completion even when its reply can no longer be delivered.
+    static func holdsConnection(method: String, path: String) -> Bool {
+        switch route(method: method, path: path) {
+        case .poll, .answer: return true
+        case .open, .receipt, .closed, nil: return false
+        }
     }
 
     // MARK: - Routing and auth

@@ -426,6 +426,54 @@ struct PendingPromptResolutionTests {
         #expect(await answering.value.outcome == .delivered)
     }
 
+    /// The server cancels a wait request whose connection closed. Cancelling
+    /// the awaiting task detaches the waiter with `.pending` and leaves the
+    /// prompt open, like `waiterGone`.
+    @Test func waitReleasedWhenTaskCancelled() async throws {
+        let store = makeStore()
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let waiter = await attachWaiter(store, terminal: terminal)
+
+        waiter.cancel()
+
+        #expect(await waiter.value == .pending)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1") == false)
+        #expect(await openIDs(store, terminal) == ["toolu_1"], "a cancelled wait never resolves the prompt")
+
+        let next = await attachWaiter(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        #expect(await next.value == .decision(try decision()))
+        await store.receipt(terminalID: terminal, toolUseID: "toolu_1")
+        #expect(await answering.value.outcome == .delivered)
+    }
+
+    /// A wait request cancelled before it reaches the store — its connection
+    /// closed while it was still authenticating — never attaches, and does
+    /// not take a decision nobody would receive.
+    @Test func waitCancelledBeforeAttachingTakesNothing() async throws {
+        let clock = EventDrivenTestClock()
+        let store = makeStore(clock: clock)
+        let terminal = UUID()
+        await open(store, terminal: terminal)
+        let answering = Task { await store.answer(terminalID: terminal, promptID: "toolu_1", answer: Self.allow) }
+        // The answer is parked for pickup once its timeout is armed.
+        try await clock.requireSleeperArmed()
+
+        let cancelled = Task { () -> PendingPromptStore.WaitResult in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await store.waitForAnswer(
+                terminalID: terminal, toolUseID: "toolu_1", token: UUID(), hold: .seconds(25))
+        }
+        #expect(await cancelled.value == .pending)
+        #expect(await store.isWaiterAttached(terminalID: terminal, toolUseID: "toolu_1") == false)
+
+        // The decision is still there for the next request.
+        let picked = await pickUpThenReceipt(store, terminal: terminal)
+        #expect(picked == .decision(try decision()))
+        #expect(await answering.value.outcome == .delivered)
+    }
+
     @Test func waitOnClosedPromptIsResolved() async {
         let store = makeStore()
         let terminal = UUID()

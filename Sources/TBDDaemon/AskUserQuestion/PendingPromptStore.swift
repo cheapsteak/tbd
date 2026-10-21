@@ -312,6 +312,10 @@ public actor PendingPromptStore {
     ///   elapses with no answer.
     ///
     /// `token` names this request, so `waiterGone(token:)` detaches only it.
+    /// Cancelling the calling task detaches it too, returning `.pending`
+    /// whether the cancellation lands before the request attaches or while it
+    /// is attached, and never resolves the prompt. A request cancelled before
+    /// it attaches takes no decision, so the decision stays for the next one.
     /// Every request, and every way one ends, stamps the prompt's
     /// `lastWaitAt`, so the idle sweep spares a prompt the mod is still
     /// waiting on.
@@ -320,33 +324,49 @@ public actor PendingPromptStore {
         let key = Key(terminalID: terminalID, toolUseID: toolUseID)
         guard let record = promptRecords[key] else { return .resolved }
         stampWait(key)
+        // The request's connection already closed: nobody would receive a
+        // decision, so leave it for the next request.
+        if Task.isCancelled { return .pending }
         if let decision = takeDecision(key) { return .decision(decision) }
-        return await withCheckedContinuation { (continuation: CheckedContinuation<WaitResult, Never>) in
-            guard var current = promptRecords[key], current.generation == record.generation else {
-                continuation.resume(returning: .resolved)
-                return
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<WaitResult, Never>) in
+                guard var current = promptRecords[key], current.generation == record.generation else {
+                    continuation.resume(returning: .resolved)
+                    return
+                }
+                // Checked on the actor, before attaching: a cancellation whose
+                // handler ran earlier found no waiter to detach, so it is
+                // honoured here; one that lands after this finds the waiter
+                // attached and detaches it through `waiterGone`.
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: .pending)
+                    return
+                }
+                if let decision = takeDecision(key) {
+                    continuation.resume(returning: .decision(decision))
+                    return
+                }
+                current.lastWaitAt = now()
+                if let old = current.waiter {
+                    old.holdTimer.cancel()
+                    old.continuation.resume(returning: .pending)
+                }
+                let holdTimer = Task { [weak self, clock] in
+                    do { try await clock.sleep(for: hold) } catch { return }
+                    await self?.holdElapsed(key: key, token: token)
+                }
+                current.waiter = Waiter(token: token, continuation: continuation, holdTimer: holdTimer)
+                promptRecords[key] = current
             }
-            if let decision = takeDecision(key) {
-                continuation.resume(returning: .decision(decision))
-                return
-            }
-            current.lastWaitAt = now()
-            if let old = current.waiter {
-                old.holdTimer.cancel()
-                old.continuation.resume(returning: .pending)
-            }
-            let holdTimer = Task { [weak self, clock] in
-                do { try await clock.sleep(for: hold) } catch { return }
-                await self?.holdElapsed(key: key, token: token)
-            }
-            current.waiter = Waiter(token: token, continuation: continuation, holdTimer: holdTimer)
-            promptRecords[key] = current
+        } onCancel: {
+            Task { await self.waiterGone(token: token) }
         }
     }
 
-    /// The wait request's connection went away (the mod aborted its fetch).
-    /// Detaches that waiter and never resolves the prompt: the next wait
-    /// request or a close decides. Harmless for a token no longer attached.
+    /// The wait request's connection went away (the mod aborted its fetch),
+    /// or its task was cancelled. Detaches that waiter and never resolves the
+    /// prompt: the next wait request or a close decides. Harmless for a token
+    /// no longer attached.
     public func waiterGone(token: UUID) {
         guard let key = promptRecords.first(where: { $0.value.waiter?.token == token })?.key else { return }
         detachWaiter(key, returning: .pending)

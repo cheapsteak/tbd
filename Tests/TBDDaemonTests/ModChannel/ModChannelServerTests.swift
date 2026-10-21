@@ -30,7 +30,49 @@ struct ModChannelServerTests {
         }
     }
 
-    private func startServer() async throws -> Harness {
+    /// Holds `incarnationOf` — the auth step's one await — until released,
+    /// and records whether the request's task was cancelled while held. Lock
+    /// based so the cancellation handler records synchronously, on the thread
+    /// that cancels.
+    private final class AuthGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entered = false
+        private var cancelled = false
+        private var released = false
+        private var waiter: CheckedContinuation<Void, Never>?
+
+        var hasEntered: Bool { lock.withLock { entered } }
+        var sawCancellation: Bool { lock.withLock { cancelled } }
+
+        /// Waits for `release()` even when cancelled, so the request goes on
+        /// to its route with its task already cancelled.
+        func wait() async {
+            lock.withLock { entered = true }
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    let resumeNow = lock.withLock { () -> Bool in
+                        if released { return true }
+                        waiter = continuation
+                        return false
+                    }
+                    if resumeNow { continuation.resume() }
+                }
+            } onCancel: {
+                lock.withLock { cancelled = true }
+            }
+        }
+
+        func release() {
+            let parked = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                released = true
+                defer { waiter = nil }
+                return waiter
+            }
+            parked?.resume()
+        }
+    }
+
+    private func startServer(authGate: AuthGate? = nil) async throws -> Harness {
         // Short on purpose: sun_path caps the whole path near 104 bytes.
         let root = fencedScratchRoot(prefix: "mods")
         let socketPath = "\(root)/m.sock"
@@ -42,7 +84,10 @@ struct ModChannelServerTests {
         let incarnation = UUID()
         let routes = ModChannelRoutes(
             channel: channel, store: store, token: token,
-            incarnationOf: { $0 == terminal ? incarnation : nil },
+            incarnationOf: { id in
+                await authGate?.wait()
+                return id == terminal ? incarnation : nil
+            },
             promptAnswerEnabled: { true },
             broadcast: { _ in })
         let server = ModChannelServer(socketPath: socketPath, routes: routes)
@@ -60,8 +105,10 @@ struct ModChannelServerTests {
 
     /// Starts a server, runs `body`, and stops the server and removes its
     /// root whether `body` returns or throws (a failed `#require` included).
-    private func withServer(_ body: (Harness) async throws -> Void) async throws {
-        let h = try await startServer()
+    private func withServer(
+        authGate: AuthGate? = nil, _ body: (Harness) async throws -> Void
+    ) async throws {
+        let h = try await startServer(authGate: authGate)
         do {
             try await body(h)
         } catch {
@@ -113,7 +160,9 @@ struct ModChannelServerTests {
 
     /// Review Focus 3: the mod aborts its fetch while the poll is held. The
     /// connection's close releases the held poll rather than leaving it to
-    /// its 25 s hold.
+    /// its 25 s hold — which, on this clock, never elapses. That needs the
+    /// server to keep reading the socket while the reply is pending, or it
+    /// never sees the close.
     @Test func closingClientReleasesPoll() async throws {
         try await withServer { h in
             let fd = try connectUnix(h.socketPath)
@@ -122,13 +171,41 @@ struct ModChannelServerTests {
             let attached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
                 await h.channel.isPollAttached(terminalID: h.terminal)
             }
-            #expect(attached == .satisfied)
+            try #require(attached == .satisfied, "the poll never attached")
 
             close(fd)
             let released = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
                 await !h.channel.isPollAttached(terminalID: h.terminal)
             }
-            #expect(released == .satisfied)
+            #expect(released == .satisfied, "the closed connection's poll is still held")
+        }
+    }
+
+    /// The close lands before the poll attaches, while the request is still
+    /// authenticating. The request's task is cancelled, so when auth finishes
+    /// the poll returns at once instead of attaching with nobody to answer.
+    @Test func closingClientBeforePollAttachesHoldsNothing() async throws {
+        let gate = AuthGate()
+        // Whatever happens below, never leave the request parked in auth.
+        defer { gate.release() }
+        try await withServer(authGate: gate) { h in
+            let fd = try connectUnix(h.socketPath)
+            try writeAll(fd, h.pollRequest())
+
+            let inAuth = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { gate.hasEntered }
+            try #require(inAuth == .satisfied, "the request never reached auth")
+
+            close(fd)
+            let cancelled = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { gate.sawCancellation }
+            try #require(cancelled == .satisfied, "closing the connection did not cancel the request")
+
+            gate.release()
+            let reached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+                await h.channel.lastPollAt(terminalID: h.terminal) != nil
+            }
+            try #require(reached == .satisfied, "the poll never reached the channel")
+            #expect(await !h.channel.isPollAttached(terminalID: h.terminal),
+                    "a poll whose connection already closed was held")
         }
     }
 

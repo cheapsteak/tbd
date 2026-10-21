@@ -120,6 +120,10 @@ actor ModChannel {
     /// newer poll for the same terminal releases an older held one with `[]`.
     ///
     /// `token` names this request, so `pollGone(token:)` releases only it.
+    /// Cancelling the calling task releases the poll with `[]` too, whether
+    /// the cancellation lands before the poll is held or while it is: the
+    /// server cancels a request whose connection closed, which may happen
+    /// before the request has reached this method at all.
     func poll(terminalID: UUID, after: UInt64, token: UUID,
               hold: Duration = .seconds(25)) async -> [Item] {
         var state = terminals[terminalID] ?? TerminalState(lastSeq: seqBase)
@@ -142,30 +146,49 @@ actor ModChannel {
         let ready = takeOutbox(terminalID)
         if !ready.isEmpty { return ready }
 
-        return await withCheckedContinuation { (continuation: CheckedContinuation<[Item], Never>) in
-            // Re-checked inside the continuation so nothing that ran between
-            // the read above and here can be missed.
-            let late = takeOutbox(terminalID)
-            guard late.isEmpty else {
-                continuation.resume(returning: late)
-                return
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<[Item], Never>) in
+                // Re-checked inside the continuation so nothing that ran
+                // between the read above and here can be missed.
+                let late = takeOutbox(terminalID)
+                guard late.isEmpty else {
+                    continuation.resume(returning: late)
+                    return
+                }
+                // Checked on the actor, before parking: a cancellation whose
+                // handler ran earlier found nothing to release, so it is
+                // honoured here; one that lands after this finds the poll
+                // parked and releases it through `pollGone`.
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: [])
+                    return
+                }
+                park(terminalID: terminalID, token: token, hold: hold, continuation: continuation)
             }
-            var current = terminals[terminalID] ?? TerminalState(lastSeq: seqBase)
-            if let other = current.waiter {
-                other.holdTimer.cancel()
-                other.continuation.resume(returning: [])
-            }
-            let holdTimer = Task { [weak self, clock] in
-                do { try await clock.sleep(for: hold) } catch { return }
-                await self?.releasePoll(terminalID: terminalID, token: token)
-            }
-            current.waiter = PollWaiter(token: token, continuation: continuation, holdTimer: holdTimer)
-            terminals[terminalID] = current
+        } onCancel: {
+            Task { await self.pollGone(token: token) }
         }
     }
 
-    /// The poll's connection went away. Releases that poll with `[]`; harmless
-    /// for a token no longer held.
+    /// Holds `continuation` as the terminal's poll, releasing any other held
+    /// one with `[]`, and arms its hold timer.
+    private func park(terminalID: UUID, token: UUID, hold: Duration,
+                      continuation: CheckedContinuation<[Item], Never>) {
+        var current = terminals[terminalID] ?? TerminalState(lastSeq: seqBase)
+        if let other = current.waiter {
+            other.holdTimer.cancel()
+            other.continuation.resume(returning: [])
+        }
+        let holdTimer = Task { [weak self, clock] in
+            do { try await clock.sleep(for: hold) } catch { return }
+            await self?.releasePoll(terminalID: terminalID, token: token)
+        }
+        current.waiter = PollWaiter(token: token, continuation: continuation, holdTimer: holdTimer)
+        terminals[terminalID] = current
+    }
+
+    /// Releases the poll `token` names with `[]`; harmless for a token no
+    /// longer held. A cancelled poll comes through here.
     func pollGone(token: UUID) {
         guard let terminalID = terminals.first(where: { $0.value.waiter?.token == token })?.key else {
             return
