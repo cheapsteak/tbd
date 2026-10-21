@@ -37,7 +37,7 @@ export function usageRecord(ctx: SessionContext, figures: UsageFigures, now: num
       ...(tokens === undefined ? {} : { tokens }),
       ...(percent === undefined ? {} : { percent }),
     },
-    rateLimits: figures.rateLimits.map(({ kind, percentUsed, resetsAt }) => ({
+    rateLimits: (Array.isArray(figures.rateLimits) ? figures.rateLimits : []).map(({ kind, percentUsed, resetsAt }) => ({
       kind,
       percentUsed,
       ...(resetsAt === undefined ? {} : { resetsAt }),
@@ -51,6 +51,12 @@ function log($: EngineInterface, text: string): void {
 }
 
 async function record($: EngineInterface, ctx: SessionContext, figures: UsageFigures): Promise<void> {
+  // Figures without a context object carry no window, so the previous record
+  // stays: it is still the latest valid reading.
+  if (typeof figures.context !== 'object' || figures.context === null) {
+    log($, 'skipped figures without a context')
+    return
+  }
   await writeJSON($, `${ctx.dir}/${USAGE_FILE}`, usageRecord(ctx, figures, await $.clock.now()))
 }
 

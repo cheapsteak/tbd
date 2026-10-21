@@ -90,6 +90,28 @@ test('aFigureTheMeasurementLacksIsLeftOutNotZeroed', async ($, on) => {
   expect(usage !== undefined && 'cost' in usage).toBe(false)
 })
 
+test('aMeasurementWithoutAContextLeavesThePreviousRecord', async ($, on) => {
+  const w = world(on, FEATURES_ON)
+
+  await $.session.measure(MEASURED)
+  const withoutContext = { rateLimits: [], changed: ['rateLimits'] } as unknown as SessionMeasureInput
+  await $.session.measure(withoutContext)
+
+  expect(usageRecords(w).map(usage => usage.context)).toEqual([MEASURED.context])
+  expect(w.logs).toContain('usage: skipped figures without a context')
+})
+
+test('aMeasurementWithoutRateLimitsRecordsNone', async ($, on) => {
+  const w = world(on, FEATURES_ON)
+
+  const withoutRateLimits = { context: { window: 200_000 }, changed: ['context'] } as unknown as SessionMeasureInput
+  await $.session.measure(withoutRateLimits)
+
+  const [usage] = usageRecords(w)
+  expect(usage?.context).toEqual({ window: 200_000 })
+  expect(usage?.rateLimits).toEqual([])
+})
+
 test('sessionStartWritesABaselineWithTheWindow', async ($, on) => {
   const w = world(on, FEATURES_ON)
 
