@@ -162,7 +162,7 @@ struct SessionModUsageFlagTests {
 
     @Test func usageRawValue() {
         #expect(SessionModFeature.usage.rawValue == "usage")
-        #expect(SessionModFeature.allCases == [.composerDraft, .transcriptStream, .usage])
+        #expect(SessionModFeature.allCases == [.composerDraft, .transcriptStream, .usage, .promptAnswer])
     }
 
     @Test func enabledListsOnlyUsageWhenOnlyUsageIsOn() {

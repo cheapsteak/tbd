@@ -113,6 +113,11 @@ export const register: Register = on => {
         await usageSessionStart($, ctx)
       }
     }
+    const channel = await promptAnswerChannel($)
+    if (channel !== null && !isPolling) {
+      isPolling = true
+      startPolling($, channel)
+    }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -120,11 +125,6 @@ export const register: Register = on => {
     const ctx = await resolveContext($)
     if (ctx !== null && ctx.features.has(USAGE)) {
       await usageMeasured($, ctx, e)
-    }
-    const channel = await promptAnswerChannel($)
-    if (channel !== null && !isPolling) {
-      isPolling = true
-      startPolling($, channel)
     }
     return next(e)
   }).catch(($, e, next) => next(e))

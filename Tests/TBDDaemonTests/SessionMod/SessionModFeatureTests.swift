@@ -29,4 +29,14 @@ struct SessionModFeatureTests {
         config.transcriptPromptAnswerEnabled = true
         #expect(SessionModFeature.enabled(in: config) == [.composerDraft, .promptAnswer])
     }
+
+    @Test func everyFeatureOnFollowsAllCasesOrder() {
+        var config = Config()
+        config.composerDraftEnabled = true
+        config.transcriptStreamingEnabled = true
+        config.sessionModUsageEnabled = true
+        config.transcriptPromptAnswerEnabled = true
+        #expect(SessionModFeature.enabled(in: config)
+            == [.composerDraft, .transcriptStream, .usage, .promptAnswer])
+    }
 }
