@@ -1148,7 +1148,7 @@ extension HibernationCoordinator {
         cols: Int?,
         rows: Int?,
         spawnTitle: ClaudeSpawnTitle? = nil,
-        overlay: ReplacementSpawnOverlay? = nil
+        overlay: ReplacementSpawnOverlay
     ) async -> WakeResult {
         guard !hibernatesInFlight.contains(terminal.id),
               !wakesInFlight.contains(terminal.id) else {
@@ -1234,11 +1234,14 @@ extension HibernationCoordinator {
         cols: Int?,
         rows: Int?,
         spawnTitle: ClaudeSpawnTitle? = nil,
-        // The overlay `spawnCommand` was composed with, when it was planned
-        // before this spawn's session-mod features were known: written from
-        // the context `SessionModSpawn.prepare` returns, just before the
-        // launch, and never by a wake that adopts a live holder instead.
-        overlay: ReplacementSpawnOverlay? = nil
+        // The overlay `spawnCommand` was composed with, planned before this
+        // spawn's session-mod features were known: written from the context
+        // `SessionModSpawn.prepare` returns, just before the launch, and never
+        // by a wake that adopts a live holder instead. Required, as
+        // `wakeTmux`'s is: the command already names a per-session file that
+        // only `settle` writes, so a caller must not be able to launch it
+        // without settling.
+        overlay: ReplacementSpawnOverlay
     ) async -> WakeResult {
         // Every refusal below goes through this rather than returning
         // `.respawnFailed` directly, because each one is a spawn that did not
@@ -1321,7 +1324,7 @@ extension HibernationCoordinator {
         // Written here and not when the overlay was planned: the adopting
         // branch above launches nothing, and must leave the running process's
         // overlay and statusline capture as they are.
-        let launchCommand = overlay?.settle(carrying: sessionMod, command: spawnCommand) ?? spawnCommand
+        let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
 
         let handle: HolderHandle
         do {

@@ -441,7 +441,8 @@ struct HolderInPlaceSwapTests {
             env: ["TBD_TERMINAL_ID": rehomed.id.uuidString],
             attachment: .unproxied([:]),
             cols: 80,
-            rows: 24)
+            rows: 24,
+            overlay: Self.plainOverlay(rehomed))
 
         guard case .respawnFailed(let reason) = result else {
             Issue.record("expected .respawnFailed from a daemon that cannot spawn, got \(result)")
@@ -485,7 +486,8 @@ struct HolderInPlaceSwapTests {
             attachment: .unproxied([:]),
             cols: 80,
             rows: 24,
-            spawnTitle: spawnTitle)
+            spawnTitle: spawnTitle,
+            overlay: Self.plainOverlay(terminal))
 
         guard case .respawnFailed = result else {
             Issue.record("expected .respawnFailed from a daemon that cannot spawn, got \(result)")
@@ -525,7 +527,21 @@ struct HolderInPlaceSwapTests {
             env: ["TBD_TERMINAL_ID": terminal.id.uuidString],
             attachment: .unproxied([:]),
             cols: 80,
-            rows: 24)
+            rows: 24,
+            overlay: plainOverlay(terminal))
+    }
+
+    /// The overlay a non-desk row with no fallback models or fragments plans:
+    /// the shared global file, which `settle` never writes.
+    private static func plainOverlay(_ terminal: Terminal) -> ReplacementSpawnOverlay {
+        ReplacementSpawnOverlay.plan(
+            fallbackModels: nil,
+            sessionKey: terminal.id.uuidString,
+            repoSettingsJSON: nil,
+            watchDeskRole: nil,
+            worktreePath: nil,
+            profileConfigDir: nil,
+            promptAnswerHooks: false)
     }
 
     /// With the flag on, a holder wake — the in-place swap's wake included —
