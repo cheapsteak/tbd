@@ -30,8 +30,11 @@ export const NOTICE_MS = 3_000
 /** The plugin's own name, as a `plugin` origin names the plugin that filled. */
 const PLUGIN = 'tbd'
 
+/** Between two drafts in composer-draft.unrestored. */
+const UNRESTORED_SEPARATOR = '\n\n--- unrestored draft ---\n\n'
+
 const restoredIncarnation = { plugin: 'tbd', key: 'composerDraftRestoredIncarnation' } as const
-const noticeVisible = { plugin: 'tbd', key: 'composerDraftNoticeVisible' } as const
+const notice = { plugin: 'tbd', key: 'composerDraftNotice' } as const
 const restorableMark = { plugin: 'tbd', key: 'composerDraftRestorable' } as const
 
 type AbovePromptEvent = Frozen<RenderInput<'AbovePrompt'>>
@@ -221,7 +224,7 @@ async function readSavedDraft($: EngineInterface, ctx: SessionContext): Promise<
  * Fills the saved draft into the empty box, retrying every RESTORE_RETRY_MS
  * while the box refuses it (not mounted yet, or under a dialog). When the
  * person's own text reaches the box first, the box is left alone and the
- * draft goes to composer-draft.unrestored. Each outcome is recorded in
+ * draft is added to composer-draft.unrestored. Each outcome is recorded in
  * composer-draft.restore.json. Resolves after one attempt and never rejects;
  * the retries run on timers.
  */
@@ -229,10 +232,9 @@ export async function restoreDraft($: EngineInterface, ctx: SessionContext, draf
   try {
     const box = await $.prompt.read()
     if (box.text !== '') {
-      await $.fs.write(`${ctx.dir}/composer-draft.unrestored`, draft.text)
+      await keepUnrestored($, ctx, draft.text)
       await $.state.set(restoredIncarnation, ctx.incarnationId)
       restoring = false
-      log($, 'box was not empty, saved the draft to composer-draft.unrestored')
       await recordRestore($, ctx, 'unrestored')
       return
     }
@@ -246,7 +248,7 @@ export async function restoreDraft($: EngineInterface, ctx: SessionContext, draf
     }
     await $.state.set(restoredIncarnation, ctx.incarnationId)
     restoring = false
-    await $.state.set(noticeVisible, true)
+    await $.state.set(notice, draft.restorable ? 'restored' : 'restoredWithoutPaste')
     $.clock.after(NOTICE_MS, () => void hideNotice($))
     log($, 'restored')
     await recordRestore($, ctx, 'restored')
@@ -254,6 +256,27 @@ export async function restoreDraft($: EngineInterface, ctx: SessionContext, draf
     restoring = false
     log($, `restore failed: ${describe(error)}`)
   }
+}
+
+/**
+ * Adds a draft to composer-draft.unrestored: as the whole text when there is
+ * no file, else after the drafts already there and UNRESTORED_SEPARATOR, so a
+ * later rescue never replaces an earlier one. A file that is there but cannot
+ * be read is left alone, since writing it would drop the drafts it holds.
+ */
+async function keepUnrestored($: EngineInterface, ctx: SessionContext, text: string): Promise<void> {
+  const path = `${ctx.dir}/composer-draft.unrestored`
+  let kept: string | undefined
+  if (await $.fs.exists(path)) {
+    try {
+      kept = await $.fs.read(path)
+    } catch (error) {
+      log($, `could not read composer-draft.unrestored, left it alone and dropped the draft: ${describe(error)}`)
+      return
+    }
+  }
+  await $.fs.write(path, kept === undefined ? text : `${kept}${UNRESTORED_SEPARATOR}${text}`)
+  log($, 'box was not empty, saved the draft to composer-draft.unrestored')
 }
 
 /**
@@ -276,7 +299,7 @@ async function recordRestore($: EngineInterface, ctx: SessionContext, outcome: '
 
 async function hideNotice($: EngineInterface): Promise<void> {
   try {
-    await $.state.set(noticeVisible, false)
+    await $.state.set(notice, 'hidden')
   } catch (error) {
     log($, `could not hide the notice: ${describe(error)}`)
   }
@@ -293,8 +316,9 @@ function log($: EngineInterface, text: string): void {
 export async function sessionStart($: EngineInterface, ctx: SessionContext): Promise<void> {
   try {
     // A notice still up was raised by an earlier load, whose timer went with it.
-    if ((await $.state.get(noticeVisible)).value === true) {
-      await $.state.set(noticeVisible, false)
+    const shown = (await $.state.get(notice)).value
+    if (shown !== undefined && shown !== 'hidden') {
+      await $.state.set(notice, 'hidden')
     }
     // A reload fires session.start again in the same process; the draft is
     // already in the box there.
@@ -387,23 +411,30 @@ function markAfterChange(box: PromptBox, origin: Frozen<PromptChangeOrigin>): bo
   }
 }
 
-/** Draws the restore notice above what is drawn beneath, while it is visible. */
+/**
+ * Draws the restore notice above what is drawn beneath, while it is visible.
+ * A draft marked not restorable came back as its text alone, without the
+ * pasted content (a collapsed paste, an image) its placeholders stand for,
+ * and the notice says so.
+ */
 export async function abovePrompt(
   $: EngineInterface,
   e: AbovePromptEvent,
   below: () => Promise<RenderElement>,
 ): Promise<RenderElement> {
-  const isVisible = await $.state.get(noticeVisible).then(
-    read => read.value === true,
-    () => false,
+  const shown = await $.state.get(notice).then(
+    read => read.value ?? 'hidden',
+    () => 'hidden',
   )
-  if (!isVisible) {
+  if (shown === 'hidden') {
     return below()
   }
   const { Box, Text } = $.ui.resolve(e)
   return (
     <Box flexDirection="column">
-      <Text dimColor>Restored your unsent draft</Text>
+      <Text dimColor>
+        {shown === 'restored' ? 'Restored your unsent draft' : 'Restored your unsent draft, but not its pasted content'}
+      </Text>
       {await below()}
     </Box>
   )
@@ -1135,8 +1166,12 @@ declare module 'claude-code' {
     tbd: {
       /** The incarnation whose composer-draft restore is settled in this process. */
       composerDraftRestoredIncarnation: string
-      /** Whether the band above the prompt shows the restore notice. */
-      composerDraftNoticeVisible: boolean
+      /**
+       * The restore notice the band above the prompt shows: `restored` for a
+       * draft whose text held all of it, `restoredWithoutPaste` for a draft
+       * marked not restorable, `hidden` for none.
+       */
+      composerDraftNotice: 'hidden' | 'restored' | 'restoredWithoutPaste'
       /**
        * Whether the box's text holds all of the draft: false once a change the
        * mod cannot read (a collapsed paste, an image) left the box non-empty,
