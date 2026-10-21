@@ -334,7 +334,7 @@ extension TBDHomeSerialized {
         #expect(statusLineCommand(forSessionKey: fixture.terminal.id.uuidString) == nil,
                 "an in-place swap on a desk carrying usage still took over its statusLine")
         let launch = try #require(
-            commands.values.last { $0.contains("respawn-window") }.map(tmuxEnvironmentFlags))
+            commands.values.last(where: { $0.contains("respawn-window") }).map(tmuxEnvironmentFlags))
         #expect(launch[SessionModSpawn.featuresVariable] == "usage")
         let sessionID = try #require(after.claudeSessionID)
         let record = try #require(readSpawnRecord(sessionsDir: sessions, sessionID: sessionID))
@@ -362,7 +362,7 @@ extension TBDHomeSerialized {
             "an in-place swap on a desk spawned without the mod lost its tee")
         #expect(command.contains(StatuslineTee.scriptPath))
         let launch = try #require(
-            commands.values.last { $0.contains("respawn-window") }.map(tmuxEnvironmentFlags))
+            commands.values.last(where: { $0.contains("respawn-window") }).map(tmuxEnvironmentFlags))
         #expect(launch[SessionModSpawn.featuresVariable] == nil)
     }
 
@@ -450,7 +450,7 @@ extension TBDHomeSerialized {
         #expect(response.error == nil, "swap errored: \(response.error ?? "")")
 
         let terminals = try await fixture.db.terminals.list(worktreeID: fixture.terminal.worktreeID)
-        let forked = try #require(terminals.first { $0.id != fixture.terminal.id },
+        let forked = try #require(terminals.first(where: { $0.id != fixture.terminal.id }),
                                   "a fork swap created no new terminal")
         #expect(forked.watchDeskRole == nil)
         #expect(statusLineCommand(forSessionKey: forked.id.uuidString) == nil)

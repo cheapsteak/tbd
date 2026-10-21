@@ -193,7 +193,7 @@ extension TBDHomeSerialized {
             preSessionTerminalID: nil, watchDeskRole: .readOnlyCoordinator)
 
         let terminals = try await db.terminals.list(worktreeID: worktree.id)
-        let primary = try #require(terminals.first { $0.kind == .claude })
+        let primary = try #require(terminals.first(where: { $0.kind == .claude }))
         #expect(primary.watchDeskRole == .readOnlyCoordinator,
                 "the desk spawn path did not write its role to the row it created")
 
@@ -433,11 +433,11 @@ extension TBDHomeSerialized {
             preSessionTerminalID: nil, watchDeskRole: .readOnlyCoordinator)
 
         let primary = try #require(
-            try await db.terminals.list(worktreeID: worktree.id).first { $0.kind == .claude })
+            try await db.terminals.list(worktreeID: worktree.id).first(where: { $0.kind == .claude }))
         let sessionID = try #require(primary.claudeSessionID)
-        let launch = try #require(recorded.snapshot().last {
+        let launch = try #require(recorded.snapshot().last(where: {
             $0.contains("new-window") && ($0.last?.contains(primary.id.uuidString) ?? false)
-        }.map(tmuxEnvironmentFlags))
+        }).map(tmuxEnvironmentFlags))
         if recordWritable {
             #expect(statusLine(inOverlayFor: primary.id.uuidString) == nil,
                     "a fresh desk carrying usage still had its statusLine taken over")
