@@ -59,8 +59,8 @@ true, Y breaks". -->
 
 ## User story
 
-<!-- Required: the `PR user story` check fails a feature PR without prose
-here. One sentence in either form:
+<!-- Required for feature PRs: replace this comment with prose. One
+sentence in either form:
   As a <who>, I want <what>, so that <why>.
   When <situation>, I want to <motivation>, so I can <outcome>.
 Titles typed fix, docs, chore, test, ci, build or revert are exempt. -->
