@@ -389,15 +389,17 @@ release_lock() {
 PREBUILT_RECONCILE_LINK=""
 PREBUILT_START_LIVE=""
 
-# Every exit from a run that took the lock: reconcile the prebuilt trees, then
-# drop the lock. Whatever branch the run left by — a dry run, a failed build, a
-# failed handover, a verification failure, a completed install — nothing it
-# downloaded outlives it unless it is now what .build/release points at.
+# Every exit from a run that took the lock: reconcile the prebuilt trees,
+# remove the copy of the running scripts, then drop the lock. Whatever branch
+# the run left by — a dry run, a failed build, a failed handover, a
+# verification failure, a completed install — nothing it downloaded outlives it
+# unless it is now what .build/release points at.
 on_update_exit() {
     if [ -n "$PREBUILT_RECONCILE_LINK" ]; then
         reconcile_prebuilt "$PREBUILT_HOME" "$PREBUILT_RECONCILE_LINK" "$PREBUILT_START_LIVE" \
             || log "WARNING: could not reconcile $PREBUILT_HOME"
     fi
+    remove_running_snapshot
     release_lock
 }
 
@@ -518,6 +520,44 @@ fetch_latest() {
 
 # MARK: - Self re-exec
 
+# This script and the libraries it sources, directly or through another
+# library: the files whose fetched copy, differing from the running one, hands
+# the run over to the fetched script.
+REEXEC_SCRIPTS=(update.sh restart-bundle-lib.sh restart-environment-lib.sh restart-build-lib.sh update-release-lib.sh)
+
+# A private copy of REEXEC_SCRIPTS as this run loaded them. Empty until
+# snapshot_running_scripts makes it.
+RUNNING_SNAPSHOT=""
+
+# Copy REEXEC_SCRIPTS out of the tree this run loaded them from, before the
+# fetch can rewrite them. On any installation that has updated before, that
+# tree is the update clone itself — the running daemon was built there — and
+# fetch_latest checks the clone out in place: from then on the files there are
+# the fetched ones, and comparing against them compares the fetched copy with
+# itself.
+#
+# Under $TMPDIR, never ~/tbd, and removed on every way out: by on_update_exit,
+# or by maybe_reexec on its way into the fetched script, which clears that trap.
+snapshot_running_scripts() {
+    local name
+    RUNNING_SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/tbd-update-running.XXXXXX")" \
+        || { log_error "could not make a directory for a copy of the running scripts"; return 1; }
+    for name in "${REEXEC_SCRIPTS[@]}"; do
+        # A file this tree lacks stays absent, which should_reexec reads as
+        # nothing to compare.
+        [ -f "$UPDATE_SCRIPT_DIR/$name" ] || continue
+        cp "$UPDATE_SCRIPT_DIR/$name" "$RUNNING_SNAPSHOT/$name" \
+            || { log_error "could not copy the running $name"; return 1; }
+    done
+}
+
+remove_running_snapshot() {
+    if [ -n "$RUNNING_SNAPSHOT" ]; then
+        rm -rf "$RUNNING_SNAPSHOT"
+        RUNNING_SNAPSHOT=""
+    fi
+}
+
 # The procedure updates itself: when the fetched copy of this script differs
 # from the one running, hand over to the fetched one. The env marker keeps it
 # to a single hop, so a script that keeps differing (a checkout the fetch
@@ -533,18 +573,22 @@ should_reexec() {
 
 maybe_reexec() {
     # The libraries this script sources count as much as the script: main
-    # reads them from the RUNNING tree, so a change that lands only in one of
-    # them — the product list in restart-bundle-lib.sh, say — would otherwise
-    # run the old copy against the new sources with nothing to trigger the hop.
+    # read them before the fetch, so a change that lands only in one of them —
+    # the product list in restart-bundle-lib.sh, say — would otherwise run the
+    # old copy against the new sources with nothing to trigger the hop. Each
+    # fetched file is compared with the copy of what was running, not with the
+    # file it was loaded from, which the fetch may have just rewritten.
     local name
-    for name in update.sh restart-bundle-lib.sh restart-environment-lib.sh restart-build-lib.sh update-release-lib.sh; do
-        if should_reexec "$UPDATE_SRC/scripts/$name" "$UPDATE_SCRIPT_DIR/$name"; then
+    for name in "${REEXEC_SCRIPTS[@]}"; do
+        if should_reexec "$UPDATE_SRC/scripts/$name" "$RUNNING_SNAPSHOT/$name"; then
             log "re-exec: the fetched $name differs from the running one"
             # Carry the lock across. `exec` replaces the image but keeps the
             # pid, so the file already names the process that is about to run;
             # clearing the trap stops the outgoing image from deleting it on
-            # the way out.
+            # the way out. With the trap gone, removing the copy of the running
+            # scripts falls to this image; the fetched script makes its own.
             trap - EXIT
+            remove_running_snapshot
             TBD_UPDATE_REEXEC=1 exec bash "$UPDATE_SRC/scripts/update.sh" "$@"
         fi
     done
@@ -1309,6 +1353,12 @@ main() {
     log "update remote: $remote_url"
 
     ensure_clone "$remote_url" || return 1
+    # Copied here, just before the fetch, rather than where main sources the
+    # scripts: from here on on_update_exit is armed to remove the copy, and
+    # nothing in between rewrites those files. This run's first checkout of
+    # the clone is fetch_latest's, and another run checks it out only under
+    # the lock, which this run took a moment after sourcing.
+    snapshot_running_scripts || return 1
     fetch_latest || return 1
     maybe_reexec "$@"
 

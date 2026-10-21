@@ -258,6 +258,16 @@ EOF
 # reads $? for the status.
 run_update() {
     local case_dir="$1"; shift
+    run_update_from "$case_dir" "$SCRIPT" "$@"
+}
+
+# run_update with the update.sh at <script> instead of this checkout's — the
+# update clone's own copy, say, which is the one `tbd update` runs on an
+# installation that has updated before.
+#
+#   run_update_from <case_dir> <script> [args...]
+run_update_from() {
+    local case_dir="$1" script="$2"; shift 2
     env \
         HOME="$case_dir/home" \
         TBD_HOME="$case_dir/home/tbd" \
@@ -266,7 +276,7 @@ run_update() {
         FAKE_ENV_LOG="$case_dir/build-env.log" \
         FAKE_OPEN_LOG="$case_dir/open.log" \
         PATH="$case_dir/bin:$PATH" \
-        bash "$SCRIPT" "$@" 2>&1
+        bash "$script" "$@" 2>&1
 }
 
 # A case directory with a home, a stub PATH, a fixture remote and a daemon
@@ -878,6 +888,45 @@ test_reexec_when_only_a_sourced_library_differs() {
         "installing nothing" "$out"
     assert_eq "the hop happens once" "1" \
         "$(printf "%s" "$out" | grep -c "re-exec: the fetched")"
+}
+
+# The layout `tbd update` runs in on an installation that has updated before:
+# the daemon was built in the update clone, so the update.sh it runs, and the
+# libraries that script sources, are the clone's own files, which the fetch
+# then checks out at the new main in place.
+test_reexec_when_the_script_runs_from_the_update_clone() {
+    local case_dir clone out leftover
+    case_dir="$(mkcase reexec-clone-case)"
+    clone="$case_dir/home/tbd/updates/src"
+    # The clone as an earlier update left it: detached at the remote's head,
+    # and the source worktree of the daemon that update installed.
+    git clone -q --no-checkout "$case_dir/remote" "$clone"
+    git -C "$clone" checkout -q --detach origin/main
+    cat > "$case_dir/state/status.json" << EOF
+{
+  "executablePath": "$clone/.build/release/TBDDaemon",
+  "buildIdentity": {
+    "commit": "$(git -C "$clone" rev-parse HEAD)",
+    "sourceWorktree": "$clone"
+  }
+}
+EOF
+    # Upstream moves on in a library only.
+    printf "\n# a newer library\n" >> "$case_dir/remote/scripts/restart-bundle-lib.sh"
+    git -C "$case_dir/remote" commit -q -am "library only"
+
+    # A TMPDIR of the case's own, so whatever the run leaves there is visible.
+    mkdir -p "$case_dir/tmp"
+    out="$(TMPDIR="$case_dir/tmp" \
+        run_update_from "$case_dir" "$clone/scripts/update.sh" --dry-run --no-wake)"
+    assert_contains "a library change re-execs when the script runs from the clone" \
+        "re-exec: the fetched restart-bundle-lib.sh differs" "$out"
+    assert_contains "and the fetched script completes the dry run" \
+        "installing nothing" "$out"
+    assert_eq "the hop happens once" "1" \
+        "$(printf "%s" "$out" | grep -c "re-exec: the fetched")"
+    leftover="$(find "$case_dir/tmp" -name 'tbd-update-running.*' 2>/dev/null)"
+    assert_eq "neither image leaves its copy of the running scripts behind" "" "$leftover"
 }
 
 # MARK: - --check
@@ -2527,6 +2576,7 @@ test_json_field_reads_nested_paths
 test_reexec_predicate
 test_reexec_happens_once_and_passes_arguments
 test_reexec_when_only_a_sourced_library_differs
+test_reexec_when_the_script_runs_from_the_update_clone
 test_check_reports_without_changing_anything
 test_check_fallback_decides_ancestry_like_the_daemon
 test_dry_run_builds_but_installs_nothing
