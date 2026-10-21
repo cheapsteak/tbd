@@ -440,6 +440,24 @@ extension TBDHomeSerialized {
         }
     }
 
+    /// A desk that planned a tee but launches on the global overlay runs
+    /// without one, so the capture an earlier process published must not
+    /// survive to be read as this process's window.
+    @Test func aFailedWriteAtLaunchDropsTheCaptureOfADeskThatPlannedATee() throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let key = UUID().uuidString
+        let capturePath = try seedCapture(sessionKey: key)
+        let overlay = replacementOverlay(sessionKey: key, role: .readOnlyCoordinator)
+        try FileManager.default.createDirectory(
+            atPath: overlay.path, withIntermediateDirectories: true)
+
+        _ = overlay.settle(carrying: nil, command: commandNaming(overlay.path))
+
+        #expect(!FileManager.default.fileExists(atPath: capturePath),
+                "a launch without a tee kept an earlier process's capture")
+    }
+
     @Test func repointingFollowsTheBuildersRuleForAMissingFile() {
         let from = "/runtime/claude-overlay-session-x.json"
         let to = "/runtime/claude-overlay.json"

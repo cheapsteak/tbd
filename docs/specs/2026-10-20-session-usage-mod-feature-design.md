@@ -145,7 +145,9 @@ the spawn falls back to the shared global overlay, as every spawn's overlay
 resolution does, and launches with its command's `--settings` repointed there
 (or dropped, when the global overlay is missing too). The process then runs
 without a tee and with only TBD's hooks, never against a missing file or one
-an earlier process left.
+an earlier process left. Because it has no tee, the session's statusline
+capture is deleted too, as for any spawn that installs none: an earlier
+process's capture would otherwise be read as this one's window.
 
 A reader trusts `usage.json` only when its `incarnationID` names the live
 incarnation; a file left by an earlier process of the same session reads as
@@ -158,11 +160,19 @@ not yet written.
 1. **`usage.json`**, when `SessionModLiveness` answers `confirmed` for `usage`
    and the file parses with a valid window. Window, tokens and percent were
    measured together, so the reading is paired. Its source is a new
-   `FactSource.sessionMod`, and its observed-at is `measuredAt`. A parked or
-   hibernated process stops heartbeating, so liveness answers `unknown` with a
-   stale heartbeat; the file is still read then, when its `incarnationID`
-   names the live incarnation. It is that process's own last reading, and
-   `measuredAt` carries its age. No other `unknown` reason reads the file.
+   `FactSource.sessionMod`, and its observed-at is `measuredAt`. A live
+   process whose heartbeat has gone stale gets `unknown` with a stale
+   heartbeat; its file is still read when its `incarnationID` names the row's
+   incarnation, and no other `unknown` reason reads it. A parked or hibernated
+   row is judged differently, because parking replaces the agent with an
+   inert shell and gives the row a new incarnation that belongs to the shell,
+   which never runs the mod. For such a row the incarnation that counts is the
+   one in `spawn.json`, the last process that ran the mod: when that record
+   lists `usage`, the file is read if its `incarnationID` names that
+   incarnation, whatever the heartbeat says, and the window is otherwise
+   `unknown`. When the record does not list `usage`, the row is `legacy`, as
+   a live one would be. Either way the reading is that process's own, and
+   `measuredAt` carries its age.
 2. **The tee capture**, when liveness answers `legacy` — a spawn made without
    `usage`. Unchanged from today.
 3. **The transcript tail** for tokens, with the window `unknown`. The `why`
@@ -219,11 +229,15 @@ session-mod design already keeps compiled — and the flag.
   window sourced `sessionMod`; confirmed with a torn file falls back; a stale
   heartbeat with a file naming the live incarnation gives the same paired
   reading, and with any other file gives `unknown`; every other unknown
-  liveness gives `unknown` with its `why`; legacy reads the tee capture.
+  liveness gives `unknown` with its `why`; legacy reads the tee capture. A
+  row parked through the production park write reads the file its
+  `spawn.json` incarnation wrote, however old the heartbeat, refuses any
+  other incarnation's, and reads the tee when its spawn lacked `usage`.
 - Replacement spawns: planning the overlay writes nothing and deletes nothing;
   a wake that launches nothing and an in-place swap that fails before its
   launch leave the overlay and capture untouched; a per-session write that
-  fails at launch repoints the command to the global overlay.
+  fails at launch repoints the command to the global overlay and deletes the
+  statusline capture.
 - A zero, negative or boolean window is refused by both the Swift and the
   Python reader.
 

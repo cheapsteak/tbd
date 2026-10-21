@@ -594,6 +594,14 @@ public enum ClaudeHookOverlay {
             logger.error(
                 "Failed to write per-session Claude overlay at \(path, privacy: .public); falling back to global overlay: \(error.localizedDescription, privacy: .public)"
             )
+            // The global overlay carries no tee, so this launch runs without
+            // one even when it planned to install it — and a capture an
+            // earlier life published would otherwise be read as this one's
+            // window, the stale paired reading the removal above exists to
+            // prevent. Whenever no tee ends up installed, no capture remains.
+            if installsTee {
+                StatuslineTee.removeCapture(sessionKey: sessionKey)
+            }
             return overlayPath
         }
     }
