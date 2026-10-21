@@ -27,19 +27,19 @@ import TBDShared
 ///    so the reading is paired. The file must name the live incarnation: the
 ///    new process's heartbeat can land before its first usage write, and a
 ///    file an earlier process left behind describes that process.
-/// 2. **Spawned with `usage`, and the process has stopped heartbeating.** A
-///    live row whose mod heartbeat has gone stale still has its own last
-///    reading in a file naming the row's incarnation, read as in case 1. A
-///    parked or hibernated row no longer carries its agent's incarnation —
-///    parking gives the row a new one for the inert shell — so for it the
-///    file must name the incarnation in `spawn.json`, the last process that
-///    ran the mod, and the heartbeat is not consulted at all. Either way
-///    `measuredAt` says how old the reading is. Without such a file, case 3.
-/// 3. **Spawned with `usage`, but the mod is not confirmed, or its file is
-///    missing, torn, another incarnation's or carries no valid window.** The numerator comes from the
+/// 2. **Spawned with `usage`, but the mod is not confirmed — a stale
+///    heartbeat included — or its file is missing, torn, another
+///    incarnation's or carries no valid window.** The numerator comes from the
 ///    transcript tail and the window is `unknown`. A tee capture left on disk
 ///    by an earlier life of the session is deliberately not consulted: it
 ///    describes a process this one may not be.
+/// 3. **Parked, and its last spawn ran `usage`** (`readParked`). Parking
+///    replaces the agent with an inert shell, so no process is reporting a
+///    window, and the session's shared `spawn.json` cannot say which earlier
+///    process a usage file on disk belongs to. The window is `unknown` and
+///    the numerator comes from the transcript tail. Nothing consumes a parked
+///    session's window — the desk's handoff reads its own file in a live
+///    process — so nothing is lost by not guessing.
 /// 4. **Spawned without `usage`.** The tee path, unchanged: prefer the
 ///    captured JSON's own paired reading — Claude Code computed numerator,
 ///    denominator and percentage at one instant from one source, and taking
@@ -89,21 +89,12 @@ struct ContextLoadReader {
     ///   - capturePath: the statusline tee's capture file for this session.
     ///     Passed explicitly rather than derived so the reader is hermetic.
     ///   - usagePath: the session mod's `usage.json` for this session, when the
-    ///     session has a directory. Read when `usageLiveness` is `.confirmed`,
-    ///     or when it is any `.unknown` on a parked session or
-    ///     `.unknown(.staleHeartbeat)` on a live one, with a file naming
-    ///     `usageIncarnationID`.
-    ///   - usageIncarnationID: the incarnation whose file speaks for the
-    ///     session — a live row's own, or for a parked row the one its
-    ///     `spawn.json` names. When given, a usage file naming any other
-    ///     incarnation — or none — was written by another process of the same
-    ///     Claude session and is not read. The gatherer always passes it; nil
-    ///     skips the check on a confirmed session, and leaves an unconfirmed
-    ///     session's file unread.
-    ///   - usageParked: the session is parked and `usageIncarnationID` is the
-    ///     incarnation of the spawn that ran `usage`. The parked process
-    ///     heartbeats no more, so the liveness answer's reason does not matter:
-    ///     a file naming that incarnation was written by it.
+    ///     session has a directory. Read only when `usageLiveness` is
+    ///     `.confirmed`.
+    ///   - usageIncarnationID: the session's live incarnation. When given, a
+    ///     usage file naming any other incarnation — or none — was written by
+    ///     an earlier process of the same Claude session and is not read. The
+    ///     gatherer always passes it; nil skips the check.
     ///   - usageLiveness: `SessionModLiveness` for the `usage` feature. `.legacy`
     ///     — a spawn made without the feature, and the default — keeps the tee
     ///     path; any other answer means the spawn chose the mod's file over
@@ -120,7 +111,6 @@ struct ContextLoadReader {
         usagePath: String? = nil,
         usageIncarnationID: UUID? = nil,
         usageLiveness: SessionModLiveness = .legacy,
-        usageParked: Bool = false,
         transcriptPath: String?,
         tee: TeeStatus
     ) -> ContextLoad {
@@ -128,23 +118,6 @@ struct ContextLoadReader {
         case .legacy:
             return readFromTee(capturePath: capturePath, transcriptPath: transcriptPath, tee: tee)
         case .unknown(let reason):
-            // A process that stops heartbeating — a wedged live one, or a
-            // parked one that no longer runs — still wrote its file: same
-            // incarnation, just older, and `measuredAt` carries its age. On a
-            // live row every other reason leaves the process unvouched for, so
-            // its file is not read.
-            if reason == .staleHeartbeat || usageParked, let live = usageIncarnationID,
-               let load = readOwnUsage(usagePath: usagePath, liveIncarnationID: live,
-                                       transcriptPath: transcriptPath) {
-                return load
-            }
-            if usageParked {
-                return ContextLoad(
-                    used: transcriptUsed(transcriptPath: transcriptPath),
-                    window: .unknown(
-                        why: "this session is parked, and its last process ran the session mod's usage "
-                            + "feature but left no usage file of its own with a valid context window"))
-            }
             return ContextLoad(
                 used: transcriptUsed(transcriptPath: transcriptPath),
                 window: .unknown(
@@ -156,6 +129,17 @@ struct ContextLoadReader {
                 usagePath: usagePath, liveIncarnationID: usageIncarnationID,
                 transcriptPath: transcriptPath)
         }
+    }
+
+    /// A parked session whose last spawn ran `usage` — case 3 above. No
+    /// process is reporting its window, so the window is `unknown` and the
+    /// numerator comes from the transcript tail; neither the usage file nor
+    /// the tee capture is read.
+    func readParked(transcriptPath: String?) -> ContextLoad {
+        ContextLoad(
+            used: transcriptUsed(transcriptPath: transcriptPath),
+            window: .unknown(
+                why: "this session is parked, so no process is reporting its context window"))
     }
 
     // MARK: - The session mod's usage file
@@ -188,43 +172,16 @@ struct ContextLoadReader {
         case .record(let decoded):
             record = decoded
         }
-        if let live = liveIncarnationID, !Self.isOwn(record, live: live) {
+        // Compared as `SessionModLiveness.sameIncarnation` does: parsed, so
+        // the UUID's case does not matter.
+        if let live = liveIncarnationID, record.incarnationID.flatMap(UUID.init(uuidString:)) != live {
             return unobserved("the session mod's usage file for this session is from an earlier "
                 + "process of it, and this process has not written its own yet")
         }
-        guard let load = usageLoad(from: record, transcriptPath: transcriptPath) else {
+        guard let size = record.validWindow else {
             return unobserved("the session mod's usage file for this session carries no valid "
                 + "context.window")
         }
-        return load
-    }
-
-    /// A session whose process no longer heartbeats — a live row gone stale,
-    /// or a parked one — read only when its `usage.json` names the incarnation
-    /// that speaks for it and carries a valid window. nil for anything else: missing, torn, another
-    /// incarnation's, or no window. The caller then reports the liveness
-    /// answer's own `unknown`.
-    private func readOwnUsage(
-        usagePath: String?, liveIncarnationID: UUID, transcriptPath: String?
-    ) -> ContextLoad? {
-        guard let usagePath, !usagePath.isEmpty,
-              case .record(let record) = SessionModFiles.read(
-                SessionModFiles.UsageRecord.self, at: URL(fileURLWithPath: usagePath)),
-              Self.isOwn(record, live: liveIncarnationID) else {
-            return nil
-        }
-        return usageLoad(from: record, transcriptPath: transcriptPath)
-    }
-
-    /// Compared as `SessionModLiveness.sameIncarnation` does: parsed, so the
-    /// UUID's case does not matter. A record naming no incarnation names none.
-    private static func isOwn(_ record: SessionModFiles.UsageRecord, live: UUID) -> Bool {
-        record.incarnationID.flatMap(UUID.init(uuidString:)) == live
-    }
-
-    /// The load a usage record reports, or nil when it carries no valid window.
-    private func usageLoad(from record: SessionModFiles.UsageRecord, transcriptPath: String?) -> ContextLoad? {
-        guard let size = record.validWindow else { return nil }
         let observedAt = Date(timeIntervalSince1970: Double(record.measuredAt) / 1000)
         let window = ContextWindow.observed(
             ObservedFact(value: size, source: .sessionMod, observedAt: observedAt))
