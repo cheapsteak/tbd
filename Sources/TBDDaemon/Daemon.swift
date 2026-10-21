@@ -1773,6 +1773,13 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-proxy-leftovers. Remove the `proxy` and `streams` directories
+            // the retired model proxy left in the TBD home. One-time, after the
+            // socket bind, and detached so its file removals never hold up
+            // the rest of startup.
+            let proxyLeftovers = ProxyLeftoverCleanup(baseDirectory: TBDConstants.configDir)
+            Task.detached(priority: .utility) { proxyLeftovers.run() }
+
             // 11a-questions. Expire stranded AskUserQuestion captures. This
             // ran as a side effect of `terminal.transcript` until the app
             // started reading transcripts itself; on that path the handler is
