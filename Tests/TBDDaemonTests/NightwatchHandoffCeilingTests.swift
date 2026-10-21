@@ -285,19 +285,22 @@ struct NightwatchHandoffCeilingTests {
         let (home, handoff) = try fixture()
         defer { try? FileManager.default.removeItem(at: home) }
         let key = UUID().uuidString, sessionID = UUID().uuidString
+        // Every body names the incarnation the child runs as, so the shape is
+        // what gets rejected, not a missing or foreign incarnation.
+        let own = UUID().uuidString
         try publish(window: 1_000_000, forKey: key, home: home)
-        let full = try usageBody(window: 200_000)
+        let full = try usageBody(window: 200_000, incarnationID: own)
         let body: String
         switch shape {
         case "torn": body = String(full.prefix(full.count / 2))
-        case "boolean": body = #"{"context":{"window":true}}"#
-        case "zero": body = try usageBody(window: 0)
-        default: body = #"{"context":{"tokens":5}}"#
+        case "boolean": body = #"{"incarnationID":"\#(own)","context":{"window":true}}"#
+        case "zero": body = try usageBody(window: 0, incarnationID: own)
+        default: body = #"{"incarnationID":"\#(own)","context":{"tokens":5}}"#
         }
         _ = try publishUsage(body, claudeSessionID: sessionID, home: home)
 
         let answer = try ask(handoffPath: handoff, sessionKey: key, tbdHome: home.path,
-                             claudeSessionID: sessionID)
+                             claudeSessionID: sessionID, incarnationID: own)
 
         #expect(answer.ceiling == 750_000, "a \(shape) usage file did not fall through to the capture")
         #expect(answer.provenance.contains("statusline capture"),
@@ -308,11 +311,12 @@ struct NightwatchHandoffCeilingTests {
     func neitherSourceFallsBack() throws {
         let (home, handoff) = try fixture()
         defer { try? FileManager.default.removeItem(at: home) }
-        let sessionID = UUID().uuidString
-        _ = try publishUsage(try usageBody(window: 0), claudeSessionID: sessionID, home: home)
+        let sessionID = UUID().uuidString, own = UUID().uuidString
+        _ = try publishUsage(try usageBody(window: 0, incarnationID: own),
+                             claudeSessionID: sessionID, home: home)
 
         let answer = try ask(handoffPath: handoff, sessionKey: UUID().uuidString,
-                             tbdHome: home.path, claudeSessionID: sessionID)
+                             tbdHome: home.path, claudeSessionID: sessionID, incarnationID: own)
 
         #expect(answer.ceiling == 600_000)
         #expect(answer.provenance.contains("NOT observed"))
