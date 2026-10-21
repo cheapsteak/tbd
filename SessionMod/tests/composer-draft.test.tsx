@@ -23,12 +23,17 @@ const BAND: RenderPropsOf['AbovePrompt'] = {
   view: {},
 }
 const NOTICE = { type: 'Text', text: 'Restored your unsent draft' }
+const PASTED = 'see [Pasted text #1 +50 lines]'
 
 type World = {
   /** composer-draft.json's text; undefined for no file. */
   file: string | undefined
   /** The file is there, but reading it fails. */
   readFails: boolean
+  /** composer-draft.unrestored's text; undefined for no file. */
+  unrestored: string | undefined
+  /** composer-draft.unrestored is there, but reading it fails. */
+  unrestoredReadFails: boolean
   /** The prompt box's text; a fill that lands replaces it. */
   box: string
   /** Answers for successive fills; `true` once they run out. */
@@ -44,6 +49,8 @@ type WorldOptions = {
   draft?: string
   file?: string
   readFails?: boolean
+  unrestored?: string
+  unrestoredReadFails?: boolean
   box?: string
   fillAnswers?: boolean[]
   slowDraftWrite?: boolean
@@ -52,14 +59,14 @@ type WorldOptions = {
 }
 
 /** composer-draft.json as the feature writes it for a draft. */
-function draftFile(text: string): string {
+function draftFile(text: string, restorable = true): string {
   return JSON.stringify({
     schemaVersion: 1,
     sessionId: SESSION_ID,
     hasDraft: true,
     text,
     cursor: text.length,
-    restorable: true,
+    restorable,
     savedAtMs: 500,
   })
 }
@@ -75,6 +82,8 @@ function world(on: On, options: WorldOptions = {}): World {
   const w: World = {
     file: options.draft === undefined ? options.file : draftFile(options.draft),
     readFails: options.readFails ?? false,
+    unrestored: options.unrestored,
+    unrestoredReadFails: options.unrestoredReadFails ?? false,
     box: options.box ?? '',
     fillAnswers: [...(options.fillAnswers ?? [])],
     writes: [],
@@ -90,12 +99,25 @@ function world(on: On, options: WorldOptions = {}): World {
     w.writes.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: e.path === DRAFT && (w.file !== undefined || w.readFails) }))
+  function fileAt(path: string): { text: string | undefined; readFails: boolean } {
+    if (path === DRAFT) {
+      return { text: w.file, readFails: w.readFails }
+    }
+    if (path === UNRESTORED) {
+      return { text: w.unrestored, readFails: w.unrestoredReadFails }
+    }
+    return { text: undefined, readFails: false }
+  }
+  on('fs.exists', ($, e) => {
+    const file = fileAt(e.path)
+    return { value: file.text !== undefined || file.readFails }
+  })
   on('fs.read', ($, e) => {
-    if (e.path === DRAFT && w.readFails) {
+    const file = fileAt(e.path)
+    if (file.readFails) {
       return { deny: `EACCES: ${e.path}` }
     }
-    return e.path === DRAFT && w.file !== undefined ? { value: w.file } : { deny: `ENOENT: ${e.path}` }
+    return file.text !== undefined ? { value: file.text } : { deny: `ENOENT: ${e.path}` }
   })
   on('prompt.read', () => ({ value: { text: w.box, cursor: w.box.length } }))
   on('prompt.fill', ($, e) => {
@@ -125,6 +147,10 @@ function draftRecords(w: World): Record<string, unknown>[] {
 
 function wroteUnrestored(w: World): boolean {
   return w.writes.some(write => write.path === UNRESTORED)
+}
+
+function unrestoredWrites(w: World): string[] {
+  return w.writes.filter(write => write.path === UNRESTORED).map(write => write.text)
 }
 
 function restoreRecords(w: World): Record<string, unknown>[] {
@@ -346,6 +372,56 @@ test('aNonEmptyBoxGetsUnrestoredInstead', async ($, on) => {
   expect(w.logs).toContain('composer-draft: box was not empty, saved the draft to composer-draft.unrestored')
 })
 
+// The common case keeps its plain shape: a first rescued draft is the file's
+// whole text, with no separator.
+test('aFirstUnrestoredDraftIsWrittenAsTheBareText', async ($, on) => {
+  const w = world(on, { draft: SAVED, box: 'typed meanwhile' })
+
+  await $.session.start(START)
+  await w.clock.settle()
+
+  expect(unrestoredWrites(w)).toEqual([SAVED])
+})
+
+// By the time a second draft is rescued, composer-draft.json holds the
+// person's newer text, so the file is the only copy of the first.
+test('aLaterUnrestoredDraftIsAppendedAfterTheOnesAlreadyKept', async ($, on) => {
+  const w = world(on, { draft: SAVED, box: 'typed meanwhile', unrestored: 'rescued earlier' })
+
+  await $.session.start(START)
+  await w.clock.settle()
+
+  expect(unrestoredWrites(w)).toEqual([`rescued earlier\n\n--- unrestored draft ---\n\n${SAVED}`])
+  expect(w.logs).toContain('composer-draft: box was not empty, saved the draft to composer-draft.unrestored')
+})
+
+// A write could only replace the drafts it may hold. The restore is still
+// settled and recorded, so it is not retried.
+test('anUnrestoredFileThatCannotBeReadIsLeftAlone', async ($, on) => {
+  const w = world(on, { draft: SAVED, box: 'typed meanwhile', unrestoredReadFails: true })
+
+  await $.session.start(START)
+  await w.clock.settle()
+
+  expect(wroteUnrestored(w)).toBe(false)
+  expect(
+    w.logs.some(line =>
+      line.startsWith('composer-draft: could not read composer-draft.unrestored, left it alone and dropped the draft'),
+    ),
+  ).toBe(true)
+  expect(restoreRecords(w)).toEqual([
+    { schemaVersion: 1, sessionId: SESSION_ID, incarnationId: INCARNATION, outcome: 'unrestored', atMs: 1_000 },
+  ])
+
+  await $.session.start(START)
+  await w.clock.settle()
+  await w.clock.advance(10 * RESTORE_RETRY_MS)
+
+  expect(wroteUnrestored(w)).toBe(false)
+  expect(w.fills).toEqual([])
+  expect(restoreRecords(w)).toHaveLength(1)
+})
+
 test('anUnrestoredDraftRecordsItsOutcome', async ($, on) => {
   const w = world(on, { draft: SAVED, box: 'typed meanwhile' })
 
@@ -411,6 +487,34 @@ test('noticeShowsThenHidesAfterThreeSeconds', async ($, on) => {
     expect(await band.find(NOTICE)).toBeUndefined()
     expect(await band.find({ type: 'Text', text: 'engine band' })).toBeDefined()
   }
+})
+
+test('aRestorableDraftsNoticeSaysItWasRestored', async ($, on) => {
+  const w = world(on, { draft: SAVED })
+  await $.session.start(START)
+  await w.clock.settle()
+
+  const band = await $.ui.mount({ plugin: 'tbd', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+
+  // `find` matches text by inclusion, so the whole text is compared.
+  expect((await band.find(NOTICE))?.text).toBe('Restored your unsent draft')
+})
+
+// A large paste or an image reaches the box as a placeholder the mod never
+// sees expanded. After a park the person overrode, the draft comes back as
+// that placeholder, and the notice says the pasted content did not.
+test('aDraftMarkedNotRestorableSaysItsPastedContentDidNotComeBack', async ($, on) => {
+  const w = world(on, { file: draftFile(PASTED, false) })
+  await $.session.start(START)
+  await w.clock.settle()
+
+  expect(w.fills).toEqual([{ text: PASTED, mode: 'replace', isFilled: true }])
+  const band = await $.ui.mount({ plugin: 'tbd', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  expect((await band.find(NOTICE))?.text).toBe('Restored your unsent draft, but not its pasted content')
+
+  await w.clock.advance(NOTICE_MS)
+  expect(await band.find(NOTICE)).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: 'engine band' })).toBeDefined()
 })
 
 test('theNoticeYieldsToASurvey', async ($, on) => {
