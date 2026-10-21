@@ -53,6 +53,24 @@ import Testing
         #expect(first.token(incarnationID: incarnation) == second.token(incarnationID: incarnation))
     }
 
+    /// A key that is already there is used as it is: never rewritten, so
+    /// tokens minted before a daemon restart still verify.
+    @Test func loadOrCreateKeepsAnExistingKey() throws {
+        let root = try Self.scratch()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("mod-key")
+        let key = SymmetricKey(size: .bits256)
+        let bytes = key.withUnsafeBytes { Data($0) }
+        #expect(FileManager.default.createFile(
+            atPath: url.path, contents: bytes, attributes: [.posixPermissions: 0o600]))
+
+        let loaded = try ModChannelToken.loadOrCreate(at: url)
+        let incarnation = UUID()
+        #expect(loaded.token(incarnationID: incarnation)
+            == ModChannelToken(key: key).token(incarnationID: incarnation))
+        #expect(FileManager.default.contents(atPath: url.path) == bytes)
+    }
+
     @Test func loadOrCreateReplacesWrongLengthKey() throws {
         let root = try Self.scratch()
         defer { try? FileManager.default.removeItem(at: root) }

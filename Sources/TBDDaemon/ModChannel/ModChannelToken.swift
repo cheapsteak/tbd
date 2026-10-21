@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import os
 import TBDShared
@@ -53,23 +54,72 @@ struct ModChannelToken: Sendable {
 
     /// Reads the 32-byte key at `url`, creating it (and its directory) with
     /// mode 0600 when absent. A file of any other length is replaced.
+    ///
+    /// The file is created with `O_CREAT | O_EXCL` and mode 0600 in the one
+    /// `open` call, so it is never readable by anyone else, not even for an
+    /// instant, and never written through a file someone else created. If the
+    /// file appears between the check and the create, the key it holds is used.
     static func loadOrCreate(at url: URL) throws -> ModChannelToken {
         let fileManager = FileManager.default
-        if let existing = fileManager.contents(atPath: url.path), existing.count == keyByteCount {
-            return ModChannelToken(key: SymmetricKey(data: existing))
+        if let existing = readKey(at: url) {
+            return ModChannelToken(key: existing)
         }
         try fileManager.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // A file here has the wrong length: replace it.
+        try? fileManager.removeItem(at: url)
         let fresh = SymmetricKey(size: .bits256)
         let bytes = fresh.withUnsafeBytes { Data($0) }
-        // Remove first so the file is created fresh with 0600, never briefly
-        // wider; the write is then a single create-with-attributes call.
-        try? fileManager.removeItem(at: url)
-        guard fileManager.createFile(
-            atPath: url.path, contents: bytes, attributes: [.posixPermissions: 0o600]) else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+        let descriptor = Darwin.open(url.path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else {
+            let code = errno
+            if code == EEXIST, let existing = readKey(at: url) {
+                return ModChannelToken(key: existing)
+            }
+            throw posixError(code, url)
+        }
+        do {
+            try writeAll(bytes, to: descriptor, url: url)
+            guard fsync(descriptor) == 0 else { throw posixError(errno, url) }
+        } catch {
+            close(descriptor)
+            unlink(url.path)
+            throw error
+        }
+        guard close(descriptor) == 0 else {
+            let code = errno
+            unlink(url.path)
+            throw posixError(code, url)
         }
         return ModChannelToken(key: fresh)
+    }
+
+    /// The key at `url` when the file holds exactly `keyByteCount` bytes.
+    private static func readKey(at url: URL) -> SymmetricKey? {
+        guard let data = FileManager.default.contents(atPath: url.path),
+              data.count == keyByteCount else { return nil }
+        return SymmetricKey(data: data)
+    }
+
+    private static func writeAll(_ bytes: Data, to descriptor: Int32, url: URL) throws {
+        try bytes.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            guard let base = buffer.baseAddress else { return }
+            var offset = 0
+            while offset < buffer.count {
+                let written = write(descriptor, base + offset, buffer.count - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    throw posixError(errno, url)
+                }
+                offset += written
+            }
+        }
+    }
+
+    private static func posixError(_ code: Int32, _ url: URL) -> Error {
+        NSError(
+            domain: NSPOSIXErrorDomain, code: Int(code),
+            userInfo: [NSFilePathErrorKey: url.path])
     }
 
     private func mac(_ incarnationID: UUID) -> HMAC<SHA256>.MAC {
