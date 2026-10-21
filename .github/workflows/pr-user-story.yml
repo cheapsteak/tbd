@@ -1,19 +1,30 @@
 name: PR User Story
 
-# Fails a feature PR whose description has no filled `## User story` section.
-# Titles with an exempt conventional-commit type (fix, docs, chore, test, ci,
-# build, revert) pass without one. Rule and rationale:
+# OFF: this check does not run on pull requests. The PR template asks for a
+# `## User story` section and the `pr-user-story` guardrail nudges at
+# `gh pr create`; the check is held back until field evidence shows feature PRs
+# ship without stories despite both. Rule, rationale and when to turn it on:
 # docs/specs/2026-10-20-pr-user-story-check-design.md.
 #
-# `pull_request`, not `pull_request_target`: the check needs nothing but the
-# event payload and a checkout of the PR's own script, so it never needs a
-# write token or secrets. `edited` is in the types so that fixing the title or
-# description re-runs it; `synchronize` keeps the result attached to the
-# newest head commit.
+# To turn it on, replace the `workflow_dispatch:` trigger below with
+#
+#   on:
+#     pull_request:
+#       branches: [main]
+#       types: [opened, edited, synchronize, reopened]
+#
+# and delete the job's `if:` line. A manual dispatch carries no PR payload, so
+# the `if:` skips the job cleanly instead of judging an empty title and body.
+#
+# When on, it fails a feature PR whose description has no filled
+# `## User story` section. Titles with an exempt conventional-commit type (fix,
+# docs, chore, test, ci, build, revert) pass without one. `pull_request`, not
+# `pull_request_target`: the check needs nothing but the event payload and a
+# checkout of the PR's own script, so it never needs a write token or secrets.
+# `edited` is in the types so that fixing the title or description re-runs it;
+# `synchronize` keeps the result attached to the newest head commit.
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -25,6 +36,7 @@ concurrency:
 jobs:
   user-story:
     name: PR user story
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -1,13 +1,12 @@
 """Guardrail: nudge toward a `## User story` section in the body of a new feature PR.
 
-The `pr-user-story` CI check fails a PR whose title is not exempt (fix, docs,
-chore, test, ci, build, revert) and whose description has no filled user-story
-section. This rule tells an agent so at `gh pr create` time, so the PR is right
-on the first push instead of red until someone edits the description. Design:
-docs/specs/2026-10-20-pr-user-story-check-design.md.
+The PR template requires a filled user-story section in every PR whose title
+is not exempt (fix, docs, chore, test, ci, build, revert). This rule tells an
+agent so at `gh pr create` time, so the description is right on the first
+push. Design: docs/specs/2026-10-20-pr-user-story-check-design.md.
 
-INFORMATIONAL ONLY: it never denies. The CI check is the enforcement; this is
-the early warning.
+INFORMATIONAL ONLY: it never denies. A `PR user story` CI check that fails such
+a PR exists but is off; the template and this nudge carry the rule.
 
 **One rule, two callers.** The exemption and section logic is not copied here:
 it is loaded by path from the CI script
@@ -17,7 +16,7 @@ opinion.
 
 **Command parsing is borrowed from `pr_worktree_link`**, which already
 tokenizes `gh pr create` with heredoc and `$(…)` handling and documents every
-defense. Only `gh` is considered — the CI check runs on GitHub PRs only.
+defense. Only `gh` is considered — the CI check is built for GitHub PRs only.
 
 What the rule reads, and how it fails:
 
@@ -135,8 +134,8 @@ class PRUserStoryRule(Rule):
             return Decision.info(
                 "[pr-user-story] "
                 + check.MESSAGE
-                + "\n\n(This is informational — nothing is blocked, but the "
-                "`PR user story` CI check fails the PR until the section is filled.)"
+                + "\n\n(This is informational — nothing is blocked. The PR "
+                "template requires this section for feature PRs.)"
             )
         return None
 

@@ -9,7 +9,7 @@ Two callers share this module, so the rule is defined once:
 
 - the `pr-user-story` workflow, which runs `main()` with the title and body in
   the `PR_TITLE` and `PR_BODY` environment variables and fails the check on a
-  non-zero exit;
+  non-zero exit (the workflow is currently off: it is not triggered on PRs);
 - the `pr-user-story` guardrail (`.claude/hooks/guardrails/rules/`), which loads
   this file by path and calls `check()` on the title and body a `gh pr create`
   is about to send.
