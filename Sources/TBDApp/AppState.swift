@@ -4544,6 +4544,57 @@ final class AppState {
         stored ?? shippedDefault
     }
 
+    /// UserDefaults key for handing the mouse to programs that ask for it.
+    /// When on, a holder-transport panel turns SwiftTerm's mouse reporting on,
+    /// so a program that has enabled a mouse mode — fullscreen Claude, vim
+    /// with `mouse=a`, htop — receives plain clicks and drags and does its own
+    /// selection, the way iTerm2 behaves; Option- and Shift-drag still run
+    /// TBD's selection. Off by default: it changes where existing input goes
+    /// — a plain drag over a mouse-mode program stops selecting in TBD — which
+    /// is exactly the category that ships default-off and soaks first. See
+    /// `docs/specs/2026-10-22-forward-mouse-to-apps-design.md`.
+    ///
+    /// App-side `UserDefaults` rather than a daemon `config` column because
+    /// the decision runs per mouse event inside the app, with no daemon
+    /// participation — the same placement as `useMetalTerminalRendererKey`,
+    /// and on the same store as it: the Settings toggle binds `@AppStorage`,
+    /// which always targets `UserDefaults.standard`, so every reader must land
+    /// on `.standard` too or the writer and the readers drift apart and the
+    /// toggle stops doing anything. Reads go through
+    /// `forwardMouseToAppsEnabled(defaults:)` — never `bool(forKey:)` — so
+    /// "nobody has chosen" stays distinguishable from an explicit `false`.
+    static let forwardMouseToAppsKey = "forwardMouseToAppsEnabled"
+
+    /// The one default for `forwardMouseToAppsKey`, for the reason spelled out
+    /// on `enableTranscriptDefault`. Off until the soak checklist in the spec
+    /// passes; graduation is a one-line change here, which reaches everyone
+    /// who never touched the toggle while preserving every deliberate opt-out.
+    static let forwardMouseToAppsDefault = false
+
+    /// Whether terminals should hand the mouse to programs that ask for it.
+    /// Three-state read: an unset key takes the shipped default, and an
+    /// explicit `false` survives a change to that constant.
+    ///
+    /// The terminal representables observe the same key through
+    /// `@AppStorage`, so a change in Settings reaches every open terminal
+    /// through `updateNSView`, without reopening it.
+    static func forwardMouseToAppsEnabled(defaults: UserDefaults = .standard) -> Bool {
+        forwardMouseToAppsEnabled(stored: defaults.object(forKey: forwardMouseToAppsKey) as? Bool)
+    }
+
+    /// The three-state decision on its own, with the shipped default injected.
+    ///
+    /// Split out so a test can prove the property that makes graduation safe:
+    /// `nil` — nobody chose — follows `shippedDefault`, while an explicit
+    /// `false` holds against a `shippedDefault` of `true`. Reading through
+    /// `bool(forKey:)` instead would collapse those two into one.
+    static func forwardMouseToAppsEnabled(
+        stored: Bool?,
+        shippedDefault: Bool = forwardMouseToAppsDefault
+    ) -> Bool {
+        stored ?? shippedDefault
+    }
+
     /// UserDefaults key for showing the sidebar's Scratch section (repo-less
     /// scratch spaces). Default on.
     static let showScratchSectionKey = "showScratchSection"

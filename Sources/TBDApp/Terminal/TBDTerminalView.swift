@@ -816,6 +816,11 @@ class TBDTerminalView: TerminalView {
     /// single left click reaches the remote session twice. Callers with
     /// `allowMouseReporting == true` (e.g. `RemoteAttachTerminalView`) rely on
     /// SwiftTerm as the sole forwarder, so the passthrough must stand down.
+    /// A `TerminalPanelView` panel is on either side: reporting is off, and
+    /// this passthrough forwards, except on a holder panel with "Send clicks
+    /// and drags to apps that use the mouse" on, where reporting follows the
+    /// toggle (`TerminalPanelRepresentable.reportsMouseToApps`) and SwiftTerm
+    /// forwards instead.
     nonisolated static func clickPassthroughActive(allowMouseReporting: Bool) -> Bool {
         !allowMouseReporting
     }
@@ -828,12 +833,13 @@ class TBDTerminalView: TerminalView {
         //
         // This won't produce duplicate events either way: the guard above
         // means exactly one of us is live. When `allowMouseReporting` is
-        // false (e.g. `TerminalPanelView`), SwiftTerm's mouseDown/mouseUp
-        // only handle local text selection — they never forward to the pty —
-        // so we are the sole path that sends mouse events to tmux. When
-        // `allowMouseReporting` is true (e.g. `RemoteAttachTerminalView`),
-        // SwiftTerm's native reporting is the sole forwarder and we stand
-        // down via the guard above.
+        // false (a `TerminalPanelView` tmux panel, or a holder panel with the
+        // toggle off), SwiftTerm's mouseDown/mouseUp only handle local text
+        // selection — they never forward to the pty — so we are the sole
+        // path that sends mouse events to the session. When
+        // `allowMouseReporting` is true (`RemoteAttachTerminalView`, or a
+        // holder panel with the toggle on), SwiftTerm's native reporting is
+        // the sole forwarder and we stand down via the guard above.
         guard !didDrag else { return }
 
         // Cell math stays OUTSIDE the lock (view API — see lock discipline
