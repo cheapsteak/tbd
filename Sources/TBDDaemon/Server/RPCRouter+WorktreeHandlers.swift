@@ -25,7 +25,10 @@ extension RPCRouter {
             callerWorktreeID: params.callerWorktreeID,
             suppressAutoParent: params.suppressAutoParent ?? false,
             useExistingBranch: useExistingBranch,
-            prNumber: params.prNumber
+            prNumber: params.prNumber,
+            // The parent is disarmed below, once start admission has let the
+            // create through; a held create leaves the parent as it was.
+            disarmParent: false
         )
 
         // Reads precede the row; the row precedes the acts. This lookup is a
@@ -59,14 +62,25 @@ extension RPCRouter {
 
         // Start admission: this create ends in the primary agent's spawn. The
         // phase-1 `.creating` row is the only thing written so far, and a hold
-        // removes it so nothing of the create remains.
+        // removes it so nothing of the create remains. The parent's
+        // auto-archive setting is not touched until the gate has passed.
         let configuredPrimary = (try? await db.config.get())?.primaryAgentPreference
         let primaryAgent = StartAdmissionAgent(
             params.primaryAgentPreference ?? configuredPrimary ?? .defaultValue)
         if let held = await holdStartIfDenied(
             actuationID, actor: actor, agent: primaryAgent, worktreeID: pending.id) {
-            try? await db.worktrees.delete(id: pending.id)
-            return held
+            var leftovers: [String] = []
+            do {
+                try await db.worktrees.delete(id: pending.id)
+            } catch {
+                logger.error("held worktree.create left the creating row \(pending.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                leftovers.append("worktree row \(pending.id.uuidString)")
+            }
+            return Self.heldResponse(held.error ?? "", leftovers: leftovers)
+        }
+
+        if let parentID = pending.parentWorktreeID {
+            await lifecycle.disarmAutoArchive(parentID: parentID)
         }
 
         // Arm the per-worktree auto-archive-on-merge override when the spawn

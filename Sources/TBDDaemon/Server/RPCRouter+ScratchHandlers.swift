@@ -70,9 +70,20 @@ extension RPCRouter {
             agent: StartAdmissionAgent(
                 (try? await db.config.get())?.primaryAgentPreference ?? .defaultValue),
             worktreeID: wt.id) {
-            try? await db.worktrees.delete(id: wt.id)
-            try? fm.removeItem(at: dir)
-            return held
+            var leftovers: [String] = []
+            do {
+                try await db.worktrees.delete(id: wt.id)
+            } catch {
+                scratchLogger.error("scratch.create: held create left worktree row \(wt.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                leftovers.append("worktree row \(wt.id.uuidString)")
+            }
+            do {
+                try fm.removeItem(at: dir)
+            } catch {
+                scratchLogger.error("scratch.create: held create left folder \(dir.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                leftovers.append("folder \(dir.path)")
+            }
+            return Self.heldResponse(held.error ?? "", leftovers: leftovers)
         }
 
         // Spawn the default primary agent terminal (Claude/Codex/shell per the
