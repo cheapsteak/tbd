@@ -4560,9 +4560,13 @@ final class AppState {
     /// and on the same store as it: the Settings toggle binds `@AppStorage`,
     /// which always targets `UserDefaults.standard`, so every reader must land
     /// on `.standard` too or the writer and the readers drift apart and the
-    /// toggle stops doing anything. Reads go through
-    /// `forwardMouseToAppsEnabled(defaults:)` — never `bool(forKey:)` — so
-    /// "nobody has chosen" stays distinguishable from an explicit `false`.
+    /// toggle stops doing anything. Production reads the key through
+    /// `@AppStorage` wrappers of its own — both terminal representables and
+    /// `TerminalSettingsView` — each defaulting to `forwardMouseToAppsDefault`,
+    /// so "nobody has chosen" stays distinguishable from an explicit `false`.
+    /// `forwardMouseToAppsEnabled(defaults:)` is the same read for a caller
+    /// outside SwiftUI and for the tests that pin that three-state property;
+    /// never read the key with `bool(forKey:)`, which collapses the two.
     static let forwardMouseToAppsKey = "forwardMouseToAppsEnabled"
 
     /// The one default for `forwardMouseToAppsKey`, for the reason spelled out
@@ -4575,9 +4579,11 @@ final class AppState {
     /// Three-state read: an unset key takes the shipped default, and an
     /// explicit `false` survives a change to that constant.
     ///
-    /// The terminal representables observe the same key through
-    /// `@AppStorage`, so a change in Settings reaches every open terminal
-    /// through `updateNSView`, without reopening it.
+    /// No terminal calls this. The terminal representables observe the same
+    /// key through `@AppStorage`, with the same default, so a change in
+    /// Settings reaches every open terminal through `updateNSView`, without
+    /// reopening it. This is that read for a caller outside SwiftUI, and the
+    /// one the tests use to pin the three-state property.
     static func forwardMouseToAppsEnabled(defaults: UserDefaults = .standard) -> Bool {
         forwardMouseToAppsEnabled(stored: defaults.object(forKey: forwardMouseToAppsKey) as? Bool)
     }

@@ -387,8 +387,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     var parkedNoticeMessage: String? = nil
     var shouldSuppressEvents: @MainActor () -> Bool = { false }
     /// Observed rather than read once, so flipping the Settings toggle
-    /// re-runs `updateNSView` and reaches every open terminal. Same key and
-    /// store as `AppState.forwardMouseToAppsEnabled(defaults:)`.
+    /// re-runs `updateNSView` and reaches every open terminal. This wrapper is
+    /// the panel's read of the flag: same key, store and default as
+    /// `AppState.forwardMouseToAppsEnabled(defaults:)`, which is the same
+    /// three-state read for code outside SwiftUI.
     @AppStorage(AppState.forwardMouseToAppsKey) private var forwardMouseToApps: Bool =
         AppState.forwardMouseToAppsDefault
 
