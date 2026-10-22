@@ -18,6 +18,12 @@ final class FakeProcessPriority: ProcessPriority, @unchecked Sendable {
     private var table: [pid_t: Proc] = [:]
     private var lowered: [pid_t] = []
     private var restored: [pid_t] = []
+    private var beforeLowering: (@Sendable (pid_t) -> Void)?
+
+    /// Runs just before each lower, so a test can look at what is on disk then.
+    func onLower(_ body: @escaping @Sendable (pid_t) -> Void) {
+        lock.withLock { beforeLowering = body }
+    }
 
     func add(_ pid: pid_t, parent: pid_t, start: Int64 = 1_000, priority: Int32 = 20) {
         lock.withLock { table[pid] = Proc(parent: parent, startMicros: start, priority: priority) }
@@ -38,7 +44,8 @@ final class FakeProcessPriority: ProcessPriority, @unchecked Sendable {
     func basePriority(of pid: pid_t) -> Int32? { lock.withLock { table[pid]?.priority } }
 
     func lowerToBackground(_ pid: pid_t) -> Bool {
-        lock.withLock {
+        lock.withLock { beforeLowering }?(pid)
+        return lock.withLock {
             guard table[pid] != nil else { return false }
             table[pid]?.priority = 4
             lowered.append(pid)
@@ -304,6 +311,38 @@ struct AgentBackgroundControllerTests {
 
         #expect(Set(fake.restoredPIDs) == [100, 101])
         #expect(fake.priority(of: 102) == 20)
+    }
+
+    @Test func aDaemonThatDiesWhileLoweringLeavesARecordTheNextOneRestores() async throws {
+        let fake = makeTable()
+        let path = statePath()
+        let leftBehind = statePath()
+        let date = MovableDate(epoch)
+        // The file as it stood just before 102 was lowered: what a daemon that
+        // died at that moment would leave.
+        fake.onLower { pid in
+            if pid == 102 { try? FileManager.default.copyItem(atPath: path, toPath: leftBehind) }
+        }
+        try await makeController(fake, roots: [100], path: path, date: date).on(for: .seconds(600))
+
+        date.advance(by: 700)
+        let next = makeController(fake, roots: [100], path: leftBehind, date: date)
+        await next.recoverOnStart()
+
+        #expect(Set(fake.restoredPIDs) == [100, 101, 102])
+    }
+
+    @Test func aRecordThatCannotBeWrittenLowersNothing() async throws {
+        let fake = makeTable()
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-no-such-directory-\(UUID().uuidString)")
+            .appendingPathComponent("agent-background.json").path
+        let controller = makeController(fake, roots: [100], path: path, date: MovableDate(epoch))
+
+        let result = try await controller.on(for: .seconds(600))
+
+        #expect(fake.loweredPIDs.isEmpty)
+        #expect(result.loweredCount == 0)
     }
 
     @Test func aCorruptFileRestoresNothingAndIsDeleted() async throws {

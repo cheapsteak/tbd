@@ -131,29 +131,50 @@ actor AgentBackgroundController {
         // Forget records whose process is gone or is now somebody else's.
         let before = current.lowered.count
         current.lowered.removeAll { priority.startTimeMicros(of: $0.pid) != $0.startMicros }
-        var changed = current.lowered.count != before
+        let changed = current.lowered.count != before
         var recorded = Set(current.lowered.map(\.pid))
 
+        var candidates: [Record] = []
         for root in roots {
             for pid in priority.subtree(of: root) where !recorded.contains(pid) {
                 guard let start = priority.startTimeMicros(of: pid),
                       priority.isBackground(pid) == false
                 else { continue }
-                if priority.lowerToBackground(pid) {
-                    current.lowered.append(Record(pid: pid, startMicros: start))
-                    recorded.insert(pid)
-                    changed = true
-                } else {
-                    backgroundLogger.error("could not lower pid \(pid, privacy: .public)")
-                }
+                candidates.append(Record(pid: pid, startMicros: start))
+                recorded.insert(pid)
             }
         }
-        state = current
-        if changed {
-            persist()
-            backgroundLogger.info(
-                "lowered \(current.lowered.count, privacy: .public) agent processes")
+        guard !candidates.isEmpty else {
+            state = current
+            if changed { persist() }
+            return
         }
+
+        // Written down before lowered, so a daemon that dies in between leaves
+        // a record the next one restores rather than a lowered process nobody
+        // knows about. When the record cannot be written, nothing new is
+        // lowered this pass.
+        let known = current
+        current.lowered += candidates
+        state = current
+        guard persist() else {
+            backgroundLogger.error(
+                "lowered none of \(candidates.count, privacy: .public) new agent processes: their record could not be written")
+            state = known
+            return
+        }
+        var refused: Set<pid_t> = []
+        for record in candidates where !priority.lowerToBackground(record.pid) {
+            backgroundLogger.error("could not lower pid \(record.pid, privacy: .public)")
+            refused.insert(record.pid)
+        }
+        if !refused.isEmpty {
+            current.lowered.removeAll { refused.contains($0.pid) }
+            state = current
+            persist()
+        }
+        backgroundLogger.info(
+            "lowered \(current.lowered.count, privacy: .public) agent processes")
     }
 
     // MARK: - Lifecycle
@@ -216,14 +237,18 @@ actor AgentBackgroundController {
         removeFile()
     }
 
-    private func persist() {
-        guard let state else { return }
+    /// Writes the lease and its records. False when the file could not be written.
+    @discardableResult
+    private func persist() -> Bool {
+        guard let state else { return false }
         do {
             let data = try Self.encoder.encode(state)
             try data.write(to: URL(fileURLWithPath: statePath), options: .atomic)
+            return true
         } catch {
             backgroundLogger.error(
                 "could not write agent-background.json (\(type(of: error), privacy: .public))")
+            return false
         }
     }
 
