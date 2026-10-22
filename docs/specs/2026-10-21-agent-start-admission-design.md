@@ -34,8 +34,8 @@ An agent start is a request that would launch a Claude Code or Codex process on 
   `terminal.create` that resumes a session, whatever its type: that spawns Claude
 - `worktree.create` and `scratch.create`, whose primary terminal is an agent
 - `worktree.revive` and `worktree.reviveConversationFresh`
-- `terminal.wake`, `terminal.resume` and `worktree.resume`, for a terminal that is parked and
-  whose kind is `claude` or `codex`
+- `terminal.wake`, `terminal.resume` and `worktree.resume`, for a parked Claude terminal with
+  a session to resume
 - `terminal.continueInCodex`, `terminal.continueInClaude` and `terminal.swapProfile` when
   it starts a new session; `terminalHistory.revive` when it resumes a Claude session (every
   other kind of history entry reopens as a shell)
@@ -49,6 +49,7 @@ Not checked:
 - Shell terminals, hook terminals and dev-server tabs (`server.start`).
 - A wake of a terminal that is not parked. It starts nothing, and the wake path already
   answers it as a no-op.
+- A wake of a parked Codex terminal. The wake path refuses it and starts nothing.
 - `terminal.recreateWindow` for a Claude tab, which only parks it, and for a shell.
 - The moves in `terminal.migrateTransport` that start no agent: a parked row is only
   rewritten, and a running shell restarts as a shell.
@@ -177,7 +178,10 @@ process tree (the holder's child for a holder session, `#{pane_pid}` for a tmux 
 walks its descendants. Each process not already in the background is lowered and recorded
 as (PID, start time). A process already in the background is left alone and not recorded,
 so TBD never restores what someone else lowered. The holder and the tmux server are never
-lowered: they carry the terminal's input and output.
+lowered: they carry the terminal's input and output. Nor is the daemon: a daemon started
+from an agent pane and never re-parented sits in that pane's tree, so a walk that reaches
+it leaves out the daemon, its descendants and its ancestors. A holder tab's job below the
+daemon is still its own root and is lowered on its own walk.
 
 **While on:** a sweep every 60 seconds, on an injected clock, repeats the walk. It lowers
 any agent process that appeared since the last one, including the trees of agents started

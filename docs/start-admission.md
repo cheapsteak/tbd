@@ -60,6 +60,7 @@ again. A held transport move leaves the session running where it is and lists it
 `skipped: held: <reason>`.
 
 Also checked: recreating a Codex tab's window, and moving a running Claude session to the pty
-holder. Not checked: shell and dev-server tabs, a wake of a tab that is not parked, a move or
+holder. Not checked: shell and dev-server tabs, a wake of a tab that is not parked or is Codex's
+(the wake refuses it), a move or
 window recreate that starts no agent, remote sessions, and TBD's own daemon rails. The actor is self-declared,
 so this is a resource policy and not a security boundary.

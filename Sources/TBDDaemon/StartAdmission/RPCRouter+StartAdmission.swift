@@ -11,14 +11,13 @@ extension RPCRouter {
     ///
     /// Only a parked row can start anything: a wake of a live one is answered
     /// as a no-op and must stay that way. Of the parked rows, the wake path
-    /// resumes a Claude session when the tab is Claude's by kind (a nil kind
-    /// counts, as `Terminal.claudeResumeDecision` reads it) and has a session
-    /// to resume; a Codex tab is checked by its kind.
+    /// resumes a Claude session only, when the tab is Claude's by kind (a nil
+    /// kind counts, as `Terminal.claudeResumeDecision` reads it) and has a
+    /// session to resume. It refuses a parked Codex tab, so that wake starts
+    /// nothing and is not checked.
     static func startAdmissionAgent(forWaking terminal: Terminal) -> StartAdmissionAgent? {
-        guard terminal.isParked else { return nil }
-        if terminal.isCodexTerminal { return .codex }
-        if case .resume = terminal.claudeResumeDecision { return .claude }
-        return nil
+        guard terminal.isParked, case .resume = terminal.claudeResumeDecision else { return nil }
+        return .claude
     }
 
     /// Which agent a transport migration of this row would start again, or nil

@@ -319,7 +319,8 @@ struct StartAdmissionRouterTests {
         #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .claude, session: "s")) == .claude)
         // A row written before kinds were recorded, with a Claude session id.
         #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: nil, session: "s")) == .claude)
-        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .codex, session: "t")) == .codex)
+        // The wake path refuses a parked Codex tab, so its wake starts nothing.
+        #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .codex, session: "t")) == nil)
         // Nothing to resume, so the wake starts nothing; and a shell is no agent.
         #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .claude, session: nil)) == nil)
         #expect(RPCRouter.startAdmissionAgent(forWaking: row(kind: .shell, session: "s")) == nil)
