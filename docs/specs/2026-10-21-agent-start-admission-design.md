@@ -35,8 +35,9 @@ An agent start is a request that would launch a Claude Code or Codex process on 
 - `worktree.revive` and `worktree.reviveConversationFresh`
 - `terminal.wake`, `terminal.resume` and `worktree.resume`, for a terminal that is parked and
   whose kind is `claude` or `codex`
-- `terminal.continueInCodex`, `terminal.continueInClaude`, `terminalHistory.revive` and
-  `terminal.swapProfile`
+- `terminal.continueInCodex`, `terminal.continueInClaude` and `terminal.swapProfile` when
+  it starts a new session; `terminalHistory.revive` when it resumes a Claude session (every
+  other kind of history entry reopens as a shell)
 
 Not checked:
 
@@ -87,7 +88,10 @@ TBD keeps no queue of held starts. The caller already holds the request and deci
 ask again, which is exactly the "when" this design keeps out of the daemon.
 
 - The gate runs after the request's actuation row is written and before the first step that
-  changes anything, so a held create writes no terminal row, branch, worktree or window.
+  reaches git, tmux or a process, so a held create makes no terminal row, branch, worktree
+  or window. `worktree.create` and `scratch.create` write a `.creating` row (and, for a
+  scratch space, its folder) before their actuation row exists; a hold deletes them, the
+  same cleanup those handlers already do when the actuation row cannot be written.
 - The actuation record gets a `refused` outcome with the new reason `held`, carrying the
   hook's reason. The record can then answer "which starts did the gate stop?" without
   reading prose.
@@ -98,6 +102,9 @@ ask again, which is exactly the "when" this design keeps out of the daemon.
   (`start_held_reason`, `start_held_at`). The parked pane's notice then reads, for example,
   "Automatic wake held at 9:12: <reason>". The next successful wake clears both. A held
   create has no row to mark; its caller reports it.
+- `worktree.resume` asks once for each parked terminal it would wake. It wakes the admitted
+  ones, leaves the held ones parked with their reasons, and then fails with the first hold,
+  so a caller is never told a resume succeeded when part of it did not happen.
 
 ### The flag
 
@@ -116,7 +123,9 @@ Measured on macOS 26:
   disk I/O is throttled, and so are sockets it opens afterwards. Children it already has
   keep their priority. The `getpriority(2)` page says only the calling process may be
   named; on macOS 26 another process of the same user can be, as `taskpolicy -p` relies on.
-- A child started after the change inherits background priority.
+- A child started after the change inherits background priority, unless it sets its own: a
+  lowered Claude Code process's `caffeinate` child read 31 while another child it started in
+  the same turn read 4. The sweep below lowers such a process at its next pass.
 - `setpriority(PRIO_DARWIN_PROCESS, pid, 0)` (what `taskpolicy -B -p PID` does) restores
   that one process. Its children keep whatever they have.
 - The state reads back from the process's base priority (`proc_pidinfo`,
@@ -149,20 +158,26 @@ any agent process that appeared since the last one, including the trees of agent
 or woken during the lease. With start admission on and a policy that holds starts during a
 call, few such agents appear.
 
+Each sweep also drops records whose process has exited or whose PID now names a process with
+another start time, so the record stays as long as the set of live lowered processes.
+
 **Off, or the lease ends without renewal:** TBD restores each recorded process whose start
 time still matches, then clears the record. A process that started during the lease and
 inherited background priority keeps it until it exits: a build an agent started during a
 call finishes at background priority, which is what the call wanted.
 
 A terminal at background priority still takes input and shows output; it is slower to
-compute, not stopped.
+compute, not stopped. Checked once by hand: a real Claude Code TUI against the fake model API
+(`scripts/claude-stub.py`), its whole tree lowered to 4, took a typed prompt, rendered the full
+answer, and returned to its old priority on restore.
 
 ### Restarts
 
 The lease's end and the record live in one file, `~/tbd/agent-background.json`, rewritten
 in place. At daemon start an expired lease restores its recorded processes and deletes the
-file; a live one is kept and swept. One file, overwritten, cannot accumulate. If the daemon
-never comes back, the lowered processes stay lowered until they exit.
+file; a live one is kept and swept. A daemon that shuts down leaves the file and restores
+nothing, so the lease outlives a restart. One file, overwritten, cannot accumulate. If the
+daemon never comes back, the lowered processes stay lowered until they exit.
 
 ### The flag
 

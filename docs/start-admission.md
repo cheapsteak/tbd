@@ -18,13 +18,12 @@ or the file is absent, every start proceeds. The file must be executable.
 
 TBD runs it with a 10 second limit, the daemon's own environment, and:
 
-| Variable | Value |
-| --- | --- |
-| `TBD_START_KIND` | `create` or `wake` |
-| `TBD_AGENT` | `claude` or `codex` |
-| `TBD_ACTOR` | who asked: `session`, `anonymous`, `supervisor`, or a kind a newer client declared |
-| `TBD_WORKTREE_ID` | the worktree the start belongs to |
-| `TBD_TERMINAL_ID` | the terminal, when the start names one |
+- **`TBD_START_KIND`** – `create` or `wake`.
+- **`TBD_AGENT`** – `claude` or `codex`.
+- **`TBD_ACTOR`** – who asked: `session`, `anonymous`, `supervisor`, or a kind a newer client
+  declared.
+- **`TBD_WORKTREE_ID`** – the worktree the start belongs to.
+- **`TBD_TERMINAL_ID`** – the terminal, when the start names one.
 
 Exit 0 admits the start. Any other exit holds it, and the reason is the first non-empty line of
 stdout (cut to 200 characters), or `start-admission exited N`. A timeout, a signal or a file that
