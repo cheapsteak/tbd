@@ -15,6 +15,7 @@ struct TBDCommand: AsyncParsableCommand {
             WorktreeCommand.self,
             ScratchCommand.self,
             ConfigCommand.self,
+            AgentsCommand.self,
             ProfileCommand.self,
             TerminalCommand.self,
             ServerCommand.self,

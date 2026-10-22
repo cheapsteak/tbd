@@ -380,6 +380,11 @@ public enum RPCMethod {
     /// The the start admission gate (`start_admission_enabled`). Reading needs no method of its
     /// own: `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetStartAdmissionEnabled = "config.setStartAdmissionEnabled"
+    /// Turns agent background priority on (with a lease), off, or reports it.
+    /// Not an actuation row: it changes no session's input, pty or lifecycle,
+    /// and its effect lives in `agent-background.json`. Design:
+    /// docs/specs/2026-10-21-agent-start-admission-design.md, "Background priority".
+    public static let agentsBackground = "agents.background"
     /// The session usage gate (`session_mod_usage_enabled`): whether Claude
     /// sessions started from now on record their context window, rate limits
     /// and cost through the session mod. Reading needs no method of its own:
@@ -3985,6 +3990,42 @@ public struct ConfigSetComposerDraftEnabledParams: Codable, Sendable {
 public struct ConfigSetStartAdmissionEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// What `agents.background` does.
+public enum AgentBackgroundAction: String, Codable, Sendable {
+    case on
+    case off
+    case status
+}
+
+/// Params for `agents.background`. `durationSeconds` is required for `on`
+/// (at most `AgentBackgroundLimits.maximumLeaseSeconds`) and ignored otherwise.
+public struct AgentsBackgroundParams: Codable, Sendable {
+    public var action: AgentBackgroundAction
+    public var durationSeconds: Int?
+    public init(action: AgentBackgroundAction, durationSeconds: Int? = nil) {
+        self.action = action
+        self.durationSeconds = durationSeconds
+    }
+}
+
+/// The longest lease `agents.background` accepts.
+public enum AgentBackgroundLimits {
+    public static let maximumLeaseSeconds = 2 * 60 * 60
+}
+
+/// Result of `agents.background`: whether a lease is active, when it ends, and
+/// how many processes TBD has lowered and not yet restored.
+public struct AgentsBackgroundResult: Codable, Sendable, Equatable {
+    public var active: Bool
+    public var leaseEndsAt: Date?
+    public var loweredCount: Int
+    public init(active: Bool, leaseEndsAt: Date? = nil, loweredCount: Int = 0) {
+        self.active = active
+        self.leaseEndsAt = leaseEndsAt
+        self.loweredCount = loweredCount
+    }
 }
 
 /// Params for `config.setAgentBackgroundEnabled` — the agent background priority command (default OFF).

@@ -196,6 +196,20 @@ public enum TBDConstants {
         hookPath(repoID: repoID, eventName: eventName, environment: ProcessInfo.processInfo.environment)
     }
 
+    /// The agent background priority lease and record
+    /// (docs/specs/2026-10-21-agent-start-admission-design.md, "Restarts"):
+    /// `<configDir>/agent-background.json`. One file, rewritten in place; owned by
+    /// `AgentBackgroundController`'s sweep and by daemon start.
+    public static func agentBackgroundStatePath(environment: [String: String]) -> String {
+        configDir(environment: environment)
+            .appendingPathComponent("agent-background.json")
+            .path
+    }
+
+    public static var agentBackgroundStatePath: String {
+        agentBackgroundStatePath(environment: ProcessInfo.processInfo.environment)
+    }
+
     /// The start-admission command (docs/specs/2026-10-21-agent-start-admission-design.md):
     /// `<configDir>/hooks/start-admission`. One file per machine, not per repo,
     /// because the question it answers is about the machine.

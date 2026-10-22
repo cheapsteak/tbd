@@ -338,6 +338,11 @@ public final class RPCRouter: Sendable {
     /// docs/specs/2026-10-21-agent-start-admission-design.md.
     nonisolated(unsafe) var startAdmission: any StartAdmissionEvaluating = StartAdmissionGate()
 
+    /// Holds agent process trees at background priority for a lease
+    /// (`agents.background`). Assigned by the daemon at startup; nil in a router
+    /// built without one, where the method answers that it is unavailable.
+    nonisolated(unsafe) var agentBackground: AgentBackgroundController?
+
     /// How the swap paths build the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
     /// `SessionRecaptureScheduler(db:tmux:)`. The mirror of
@@ -1091,6 +1096,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
             case RPCMethod.configSetComposerDraftEnabled:
                 return try await handleConfigSetComposerDraftEnabled(request.paramsData)
+            case RPCMethod.agentsBackground:
+                return try await handleAgentsBackground(request.paramsData)
             case RPCMethod.configSetStartAdmissionEnabled:
                 return try await handleConfigSetStartAdmissionEnabled(request.paramsData)
             case RPCMethod.configSetAgentBackgroundEnabled:
