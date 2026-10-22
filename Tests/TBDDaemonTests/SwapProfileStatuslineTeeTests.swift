@@ -138,6 +138,32 @@ extension TBDHomeSerialized {
         return await fixture.router.handle(request)
     }
 
+    /// Hold branch only: a swap that is not held waits on the injected clock for
+    /// Claude to leave, and the flag-off branch of the gate is covered for every
+    /// caller by `StartAdmissionRouterTests`.
+    @Test("start admission holds an in-place swap before the session is signalled")
+    func startAdmissionHoldsTheSwap() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let commands = FireRecorder<[String]>()
+        let fixture = try await makeFixture(
+            scratch, desk: false, withConversation: true,
+            recorder: { commands.record($0) })
+        let stub = StubAdmission(.hold(reason: "camera in use"))
+        fixture.router.startAdmission = stub
+        try await fixture.db.config.setStartAdmissionEnabled(true)
+
+        let response = try await swap(fixture, mode: .inPlace)
+
+        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
+        #expect(response.error == "camera in use")
+        #expect(stub.requests.map(\.kind) == [.create])
+        #expect(stub.requests.first?.terminalID == fixture.terminal.id)
+        #expect(fixture.signaller.terminatedProcessOnly.isEmpty)
+        #expect(!commands.values.contains { $0.contains("respawn-window") })
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
+    }
+
     private func statusLineCommand(forSessionKey key: String) -> String? {
         let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: key)
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),

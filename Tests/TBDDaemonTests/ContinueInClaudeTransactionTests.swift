@@ -221,6 +221,26 @@ struct ContinueInClaudeTransactionTests {
         #expect(replacement == updated)
     }
 
+    @Test("start admission holds the continuation before the source is replaced")
+    func startAdmissionHoldsTheContinuation() async throws {
+        let fixture = try await makeRPCFixture(ownsPane: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let stub = StubAdmission(.hold(reason: "camera in use"))
+        fixture.router.startAdmission = stub
+        try await fixture.db.config.setStartAdmissionEnabled(true)
+
+        let response = await continueRequest(fixture)
+
+        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
+        #expect(response.error == "camera in use")
+        #expect(stub.requests.map(\.kind) == [.create])
+        #expect(stub.requests.first?.agent == .claude)
+        #expect(stub.requests.first?.terminalID == fixture.terminal.id)
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+        // The Codex source is exactly as it was.
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
+    }
+
     /// The Claude destination launches under the pending incarnation that
     /// finalization promotes to the row. With the flag on, that launch carries
     /// the session mod and its spawn record — written before the launch —

@@ -6,7 +6,7 @@ import Testing
 
 /// Answers every start-admission question with a fixed verdict and records what
 /// it was asked, so router tests stub the command without writing a script.
-private final class StubAdmission: StartAdmissionEvaluating, @unchecked Sendable {
+final class StubAdmission: StartAdmissionEvaluating, @unchecked Sendable {
     private let lock = NSLock()
     private var verdict: StartAdmissionVerdict
     private var asked: [StartAdmissionRequest] = []
