@@ -36,15 +36,14 @@ import TBDShared
 /// `EventDrivenTestClock`, with the process table changing while the arbiter
 /// waits.
 ///
-/// Tier 1, with one exception. Every test but one touches no holder, no pty and
-/// no real process — the process table is scripted through
-/// `FakeProcessSignaller`, and time is virtual. The exception,
-/// `aSupersededConnectionsExitIsNotADisconnect`, is tier 2 by
-/// `Tests/CLAUDE.md`'s taxonomy: it uses real `socketpair`s, a real spawned
-/// receive `Thread`, and a bounded wall-clock wait. This is still its right
-/// home: tier 2 belongs in the fast parallel pass, and only tier 3 — an
-/// external process the test does not control — moves to
-/// `TBDDaemonLiveTests`.
+/// Tier 1, with one section of exceptions. Every test above "Which disconnect is a
+/// disconnect" touches no holder, no pty and no real process — the process
+/// table is scripted through `FakeProcessSignaller`, and time is virtual. The
+/// tests in that section are tier 2 by `Tests/CLAUDE.md`'s taxonomy: they use
+/// real `socketpair`s, real spawned receive `Thread`s, and bounded wall-clock
+/// waits. This is still their right home: tier 2 belongs in the fast parallel
+/// pass, and only tier 3 — an external process the test does not control —
+/// moves to `TBDDaemonLiveTests`.
 @Suite(.clockDriven) struct HolderAppLivenessTests {
 
     /// The executable the daemon recorded for the app when its sidecar
@@ -421,24 +420,20 @@ import TBDShared
     // MARK: - Which disconnect is a disconnect
 
     /// A reconnect tears the *old* socket down, so its receive thread exits
-    /// exactly as a dead app's does. That exit is not a disconnect: a newer
-    /// connection owns the sinks, and arbitrating on the superseded one would
-    /// ask "is the app alive?" about an app that has just proved it is by
-    /// connecting again.
-    @Test func aSupersededConnectionsExitIsNotADisconnect() async throws {
+    /// exactly as a dead app's does. When the app on the new connection is the
+    /// same one, that exit is not a disconnect: arbitrating it would ask "is
+    /// the app alive?" about an app that has just proved it is by connecting
+    /// again.
+    @Test func theSameAppReconnectingIsNotADisconnect() async throws {
         let (oldServerFD, oldClientFD) = try Self.socketPair()
         let (newServerFD, newClientFD) = try Self.socketPair()
         defer { Darwin.close(oldClientFD) }
 
-        let identities: [Int32: ProcessIdentity] = [
-            oldServerFD: ProcessIdentity(
-                pid: 11, startedAt: Date(timeIntervalSince1970: 10), commandLine: "old"),
-            newServerFD: ProcessIdentity(
-                pid: 22, startedAt: Date(timeIntervalSince1970: 20), commandLine: "new"),
-        ]
+        let app = ProcessIdentity(
+            pid: 11, startedAt: Date(timeIntervalSince1970: 10), commandLine: "app")
         let disconnects = DisconnectLog()
         let exits = DisconnectLog()
-        let server = FDVendingServer(peerIdentity: { identities[$0] })
+        let server = FDVendingServer(peerIdentity: { _ in app })
         await server.setOnClientDisconnect { disconnects.record($0) }
         await server.setOnReceiveLoopExit { exits.record(nil) }
 
@@ -452,11 +447,106 @@ import TBDShared
             app that is demonstrably alive — it is connected right now
             """)
 
-        // And the connection that IS current still reports its own drop, with
-        // the identity recorded for it rather than for its predecessor.
+        // And the connection that IS current still reports its own drop.
         Darwin.close(newClientFD)
         #expect(await waitUntil { disconnects.count == 1 }, "a live app's drop went unreported")
-        #expect(disconnects.all == [identities[newServerFD]])
+        #expect(disconnects.all == [app])
+
+        await server.stop()
+    }
+
+    /// **A different app taking the sidecar is the old app's departure.** Its
+    /// connection is torn down by the adoption rather than by its own exit, so
+    /// no receive loop of its will ever report it — and if it then dies, the
+    /// sessions it held stay claimed for the daemon's whole life. So the
+    /// adoption reports it, once, with the successor already recorded as the
+    /// connected app: the arbiter asking "is that same app connected again?"
+    /// must never be told yes about the app it is watching.
+    @Test func aDifferentAppTakingTheSidecarIsArbitratedAsTheOldAppsDeparture() async throws {
+        let (oldServerFD, oldClientFD) = try Self.socketPair()
+        let (newServerFD, newClientFD) = try Self.socketPair()
+        defer { Darwin.close(oldClientFD); Darwin.close(newClientFD) }
+
+        let oldApp = ProcessIdentity(
+            pid: 11, startedAt: Date(timeIntervalSince1970: 10), commandLine: "old")
+        let newApp = ProcessIdentity(
+            pid: 22, startedAt: Date(timeIntervalSince1970: 20), commandLine: "new")
+        let identities = [oldServerFD: oldApp, newServerFD: newApp]
+        let disconnects = DisconnectLog()
+        let exits = DisconnectLog()
+        let server = FDVendingServer(peerIdentity: { identities[$0] })
+        await server.setOnClientDisconnect { disconnects.record($0) }
+        await server.setOnReceiveLoopExit { exits.record(nil) }
+
+        await server.adoptConnection(fd: oldServerFD)
+        await server.adoptConnection(fd: newServerFD)
+
+        // Reported by the adoption itself, synchronously on the actor, so it is
+        // already in the log when the call returns.
+        #expect(disconnects.all == [oldApp], """
+            a different app took the sidecar and the app it replaced was never arbitrated, so if \
+            that app dies every session it held stays claimed for the daemon's whole life
+            """)
+        #expect(await server.currentClientIdentity() == newApp)
+
+        // The replaced connection's own exit adds nothing: one departure, one
+        // arbitration.
+        #expect(await waitUntil { exits.count == 1 }, "the superseded receive thread never exited")
+        #expect(disconnects.all == [oldApp], "the replaced app's departure was arbitrated twice")
+
+        await server.stop()
+    }
+
+    /// A replaced connection whose peer was never identified names no pid, and
+    /// no viewer claim names an unidentified app, so there is nothing an
+    /// arbitration could decide. It is not reported.
+    @Test func aReplacedConnectionThatWasNeverIdentifiedIsNotArbitrated() async throws {
+        let (oldServerFD, oldClientFD) = try Self.socketPair()
+        let (newServerFD, newClientFD) = try Self.socketPair()
+        defer { Darwin.close(oldClientFD); Darwin.close(newClientFD) }
+
+        let newApp = ProcessIdentity(
+            pid: 22, startedAt: Date(timeIntervalSince1970: 20), commandLine: "new")
+        // Only the new connection's peer can be identified.
+        let identities = [newServerFD: newApp]
+        let disconnects = DisconnectLog()
+        let exits = DisconnectLog()
+        let server = FDVendingServer(peerIdentity: { identities[$0] })
+        await server.setOnClientDisconnect { disconnects.record($0) }
+        await server.setOnReceiveLoopExit { exits.record(nil) }
+
+        await server.adoptConnection(fd: oldServerFD)
+        await server.adoptConnection(fd: newServerFD)
+        #expect(await waitUntil { exits.count == 1 }, "the superseded receive thread never exited")
+
+        #expect(disconnects.count == 0, "an unidentified connection's replacement was arbitrated")
+        #expect(await server.currentClientIdentity() == newApp)
+
+        await server.stop()
+    }
+
+    /// The other half of the nil decision: a successor the daemon could not
+    /// identify does not excuse the app it replaced. Whether that app is still
+    /// there is answered from its own identity, and an unidentified successor
+    /// can never be mistaken for it.
+    @Test func anUnidentifiedSuccessorStillHasTheReplacedAppArbitrated() async throws {
+        let (oldServerFD, oldClientFD) = try Self.socketPair()
+        let (newServerFD, newClientFD) = try Self.socketPair()
+        defer { Darwin.close(oldClientFD); Darwin.close(newClientFD) }
+
+        let oldApp = ProcessIdentity(
+            pid: 11, startedAt: Date(timeIntervalSince1970: 10), commandLine: "old")
+        // Only the old connection's peer can be identified.
+        let identities = [oldServerFD: oldApp]
+        let disconnects = DisconnectLog()
+        let server = FDVendingServer(peerIdentity: { identities[$0] })
+        await server.setOnClientDisconnect { disconnects.record($0) }
+
+        await server.adoptConnection(fd: oldServerFD)
+        await server.adoptConnection(fd: newServerFD)
+
+        #expect(disconnects.all == [oldApp])
+        #expect(await server.currentClientIdentity() == nil)
 
         await server.stop()
     }

@@ -178,10 +178,19 @@ actor FDVendingServer {
     /// process is still there. `SidecarDisconnectArbiter` is what answers, and
     /// only its verdict licenses taking any pty back.
     ///
-    /// Fired only for the connection that was still current when its receive
-    /// loop exited. A **superseded** connection's exit is the ordinary shape of
-    /// a reconnect — `adoptConnection` shut it down itself — and arbitrating on
-    /// it would ask whether an app that has just connected again is alive.
+    /// Fired from two places, and exactly once per departed connection:
+    ///
+    ///   - `receiveLoopExited`, for the connection that was still current when
+    ///     its receive loop exited. A **superseded** connection's exit is not
+    ///     reported there: `adoptConnection` shut it down itself, and has
+    ///     already decided whether its departure needs arbitrating.
+    ///   - `adoptConnection`, when the connection it replaces belonged to a
+    ///     **different** app. A reconnect by the same app is not a departure —
+    ///     arbitrating it would ask whether an app that has just connected
+    ///     again is alive — but a different app taking the sidecar is the old
+    ///     app's last word on this channel. If it then dies, no receive loop of
+    ///     its will ever report it, and the sessions it held would stay claimed
+    ///     for the daemon's whole life.
     var onClientDisconnect: (@Sendable (ProcessIdentity?) -> Void)?
 
     /// Test seam: invoked from `receiveLoopExited` (on the actor) AFTER `clientFD`
@@ -309,6 +318,11 @@ actor FDVendingServer {
     /// it in the caller. Replaces (and signals teardown of) any prior
     /// connection, then starts this connection's receive thread.
     func adoptConnection(fd: Int32) {
+        // Who the replaced connection belonged to, read before anything here
+        // overwrites it. Only a connection still current counts: one whose
+        // receive loop already exited has had its departure reported by
+        // `receiveLoopExited`, which cleared both fields.
+        let superseded = clientFD >= 0 ? clientIdentity : nil
         if clientFD >= 0 {
             shutdown(clientFD, SHUT_RDWR)   // wake the old reader; it will close its own fd
             clientFD = -1
@@ -338,6 +352,44 @@ actor FDVendingServer {
             injectionAckSink: onInjectionAck, screenReplySink: onScreenReply,
             connectionLostSink: onConnectionLost)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
+        reportSupersession(of: superseded)
+    }
+
+    /// Reports the app whose connection `adoptConnection` just replaced, when
+    /// that was a different app — see `onClientDisconnect` for why it must be
+    /// arbitrated at all.
+    ///
+    /// **After the new identity is recorded, never before.** The arbiter's
+    /// first question about a departed app is whether that same app is
+    /// connected again, and it asks it through `currentClientIdentity()`.
+    /// Recording the successor first means no answer to that question can
+    /// name the app being reported. It is also why this runs synchronously on
+    /// the actor: nothing awaiting the actor can interleave between the two.
+    ///
+    /// Three cases are deliberately not reported:
+    ///
+    ///   - **Nothing was replaced.** The previous connection had already gone,
+    ///     and `receiveLoopExited` reported it then.
+    ///   - **The same app reconnected.** Its identity is the successor's, so
+    ///     it is alive and connected; the next drop of *this* connection is
+    ///     arbitrated when it comes.
+    ///   - **The replaced connection was never identified.** There is no pid
+    ///     to ask about, and no viewer claim names an unidentified app — a
+    ///     descriptor vended over that connection was recorded without an
+    ///     owner, which no death can take back — so an arbitration could
+    ///     decide nothing.
+    ///
+    /// A successor that could not itself be identified does not stop the
+    /// report. Whether the old app is still there is a question the arbiter
+    /// answers from the old app's identity alone, and an unidentified
+    /// successor can never be mistaken for it.
+    private func reportSupersession(of superseded: ProcessIdentity?) {
+        guard let superseded, superseded != clientIdentity else { return }
+        logger.notice("""
+            a different app took the FD vending sidecar from app pid \
+            \(superseded.pid, privacy: .public); arbitrating that app as departed
+            """)
+        onClientDisconnect?(superseded)
     }
 
     /// Sole close path for a connection fd. Invoked (on the actor) by a receive
@@ -346,9 +398,12 @@ actor FDVendingServer {
     /// `send()` from writing a vend frame into a recycled fd number.
     func receiveLoopExited(fd: Int32) {
         // A newer adopt may own a different fd now, in which case this thread
-        // belongs to a superseded connection: its exit is a reconnect's
-        // ordinary teardown, not the app going away, and the identity in
-        // `clientIdentity` belongs to the connection that replaced it.
+        // belongs to a superseded connection: its exit is the teardown
+        // `adoptConnection` started, and the identity in `clientIdentity`
+        // belongs to the connection that replaced it. Whether that departure
+        // needed arbitrating was decided there — reported if a different app
+        // took the sidecar, not if the same one reconnected — so reporting it
+        // again here would arbitrate one departure twice.
         let wasCurrent = clientFD == fd
         var departed: ProcessIdentity?
         if wasCurrent {
