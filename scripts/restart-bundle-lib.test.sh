@@ -256,6 +256,8 @@ test_assemble_bundle_produces_a_launchable_bundle() {
 
     assert_file "the bundle has an Info.plist" "$bundle/Contents/Info.plist"
     assert_ok "the generated plist lints" plutil -lint "$bundle/Contents/Info.plist"
+    assert_ok "the bundle declares a microphone usage description" \
+        plutil -extract NSMicrophoneUsageDescription raw -o - "$bundle/Contents/Info.plist"
     assert_file "the bundle has an executable" "$bundle/Contents/MacOS/TBDApp"
     assert_file "the icon is copied in" "$bundle/Contents/Resources/AppIcon.icns"
     assert_file "the resource bundle is copied in" \
