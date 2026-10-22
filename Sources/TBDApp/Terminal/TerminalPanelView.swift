@@ -386,6 +386,44 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     var isSuspendedSnapshot: Bool = false
     var parkedNoticeMessage: String? = nil
     var shouldSuppressEvents: @MainActor () -> Bool = { false }
+    /// Observed rather than read once, so flipping the Settings toggle
+    /// re-runs `updateNSView` and reaches every open terminal. This wrapper is
+    /// the panel's read of the flag: same key, store and default as
+    /// `AppState.forwardMouseToAppsEnabled(defaults:)`, which is the same
+    /// three-state read for code outside SwiftUI.
+    @AppStorage(AppState.forwardMouseToAppsKey) private var forwardMouseToApps: Bool =
+        AppState.forwardMouseToAppsDefault
+
+    /// Whether a panel lets SwiftTerm report mouse events to the program: only
+    /// on the holder transport, and only with the toggle on.
+    ///
+    /// Tmux-backed panels stay off whatever the toggle says. The daemon runs
+    /// `set -g mouse on` on every tmux server, so tmux holds a mouse mode
+    /// permanently: with reporting on, every drag on every tmux panel — a
+    /// plain shell prompt included — would go to tmux instead of selecting
+    /// text in TBD. On the holder transport the mode SwiftTerm sees is the
+    /// program's own, so a plain shell — no mouse mode — keeps local
+    /// selection with the toggle on.
+    nonisolated static func reportsMouseToApps(
+        forwardMouseToApps: Bool, transport: TerminalTransport
+    ) -> Bool {
+        forwardMouseToApps && transport == .holder
+    }
+
+    /// Applies the mouse routing to `view`: reporting per
+    /// `reportsMouseToApps`, and the Option-drag bypass equal to the toggle.
+    /// Called from `makeNSView` and again from every `updateNSView`, because
+    /// both inputs can change under a live panel — the toggle from Settings,
+    /// and the transport once AppState loads a terminal row that
+    /// `panelTransport()` could not yet see (it falls back to `.tmux`).
+    @MainActor
+    static func applyMouseRouting(
+        to view: TBDTerminalView, forwardMouseToApps: Bool, transport: TerminalTransport
+    ) {
+        view.allowMouseReporting = reportsMouseToApps(
+            forwardMouseToApps: forwardMouseToApps, transport: transport)
+        view.optionBypassesMouseReporting = forwardMouseToApps
+    }
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -393,10 +431,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             font: appearance.font,
             appearance: appearance
         )
-
-        // Disable mouse reporting so click-drag selects text locally
-        // instead of forwarding mouse events to tmux
-        tv.allowMouseReporting = false
 
         // Experimental GPU draw path (default off — Settings → Terminal →
         // Experimental). Requested here rather than in `updateNSView` so a
@@ -434,6 +468,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.tmuxServer = tmuxServer
         context.coordinator.panelID = terminalID
         context.coordinator.appState = appState
+        // Mouse reporting stays off — click-drag selects locally — unless
+        // this is a holder panel with "Send clicks and drags to apps that use
+        // the mouse" on. Decided once the coordinator can resolve the panel's
+        // transport; re-applied in `updateNSView`.
+        Self.applyMouseRouting(
+            to: tv, forwardMouseToApps: forwardMouseToApps,
+            transport: context.coordinator.panelTransport())
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onMissingWindow = onMissingWindow
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
@@ -540,6 +581,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .isCodexTerminal == true
         nsView.programStatusGate.set(
             appState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
+        Self.applyMouseRouting(
+            to: nsView, forwardMouseToApps: forwardMouseToApps,
+            transport: context.coordinator.panelTransport())
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         // Re-assigned here as well as in `makeNSView`: the closure captures the
@@ -1963,15 +2007,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// control mode (`startControlModeClient`) — and each needs it for
         /// the same reason: they all render into the one `TBDTerminalView`,
         /// which keeps `allowMouseReporting` off so click-drag selects text
-        /// locally. A wheel event that reaches SwiftTerm's own `scrollWheel`
-        /// with reporting off is turned into Up/Down arrow keys whenever the
-        /// session is on the alternate screen — keystrokes the session never
-        /// asked for, landing on whatever is attached, including a composer
-        /// draft. So every wheel event over an attached terminal is claimed
-        /// here when mouse reporting is on, or when it's off and the buffer
-        /// is alternate; a wheel event over a mouse-reporting-off *normal*
-        /// buffer (an ordinary shell prompt, say) is deliberately left
-        /// unclaimed so SwiftTerm's own local scrollback still works. A claim
+        /// locally — except on a holder panel with "Send clicks and drags to
+        /// apps that use the mouse" on, where reporting follows the toggle
+        /// (`reportsMouseToApps`) and the wheel still stays on this monitor,
+        /// which claims every wheel event while a mouse mode is on, before
+        /// SwiftTerm's handler can see it. A wheel event that reaches
+        /// SwiftTerm's own `scrollWheel` with reporting off is turned into
+        /// Up/Down arrow keys whenever the session is on the alternate screen
+        /// — keystrokes the session never asked for, landing on whatever is
+        /// attached, including a composer draft. So every wheel event over an
+        /// attached terminal is claimed here when mouse reporting is on, or
+        /// when it's off and the buffer is alternate; a wheel event over a
+        /// mouse-reporting-off *normal* buffer (an ordinary shell prompt,
+        /// say) is deliberately left unclaimed so SwiftTerm's own local
+        /// scrollback still works. A claim
         /// that sends nothing is likewise unconditional once reporting is on:
         /// trackpads deliver such events (a few points of `scrollingDeltaY`,
         /// no whole cell), and an unclaimed one would fall through to the

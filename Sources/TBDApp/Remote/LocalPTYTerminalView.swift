@@ -57,6 +57,13 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
     /// typing to the remote session unseen. Nil — the remediation sheet, which
     /// is always visible while it runs — claims unconditionally.
     var onClaimFocus: (() -> Void)?
+    /// "Send clicks and drags to apps that use the mouse", observed so a
+    /// Settings change reaches an open terminal through `updateNSView`. This
+    /// view reports the mouse whatever the toggle says; the toggle adds only
+    /// the Option-drag bypass, so both terminal surfaces honor the same
+    /// modifiers.
+    @AppStorage(AppState.forwardMouseToAppsKey) private var forwardMouseToApps: Bool =
+        AppState.forwardMouseToAppsDefault
 
     func makeNSView(context: Context) -> TBDTerminalView {
         let tv = TBDTerminalView(
@@ -74,6 +81,9 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         // down whenever `allowMouseReporting` is true (see
         // `handleClickPassthrough`), so this doesn't double-forward.
         tv.allowMouseReporting = true
+        // Option-drag selects locally instead of reaching the app, as
+        // Shift-drag already does — the iTerm2 convention, under the toggle.
+        tv.optionBypassesMouseReporting = forwardMouseToApps
         // The GPU draw path applies to every terminal surface, not just the
         // tmux panes. Leaving this one out would silently mix renderers inside
         // a single A/B — a user evaluating the flag would open a remote-attach
@@ -99,7 +109,9 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
         return tv
     }
 
-    func updateNSView(_ nsView: TBDTerminalView, context: Context) {}
+    func updateNSView(_ nsView: TBDTerminalView, context: Context) {
+        nsView.optionBypassesMouseReporting = forwardMouseToApps
+    }
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
         coordinator.onViewDismantled?(nsView)

@@ -578,8 +578,11 @@ class TBDTerminalView: TerminalView {
     // and this one never sees it. A geometry-only monitor could not tell.
     //
     // Every override calls `super`, so SwiftTerm's selection, link and
-    // semantic-prompt handling still run — except for the whole of a press
-    // whose mouse-down TBD consumed (`pressBypassesSwiftTerm`).
+    // semantic-prompt handling still run, with two exceptions: the whole of a
+    // press whose mouse-down TBD consumed (`pressBypassesSwiftTerm`), and a
+    // Cmd press withheld from a program that holds the mouse
+    // (`commandPressWithheld`), whose mouse-down and drags SwiftTerm never
+    // sees and whose release it sees with reporting suppressed.
 
     /// The hosting panel's click routing, installed once its transport is
     /// live (`TerminalPanelRepresentable.Coordinator`). Called on every left
@@ -639,9 +642,12 @@ class TBDTerminalView: TerminalView {
     /// that is not key. The matching `mouseDown` is that activating click.
     private var activationClickEventNumber: Int?
 
-    // Track the mouse-down position to distinguish clicks from drags.
-    // Single clicks are forwarded to tmux for pane switching;
-    // click-drags are handled locally by SwiftTerm for text selection.
+    // Track the mouse-down position to distinguish clicks from drags. With
+    // reporting off, single clicks are forwarded to the session by the click
+    // passthrough (tmux pane switching, a mouse-mode program) and click-drags
+    // stay with SwiftTerm's local selection. With reporting on, SwiftTerm
+    // forwards both to a program that holds the mouse, and the drag check
+    // matters only to a withheld Cmd press: a Cmd-drag opens no link.
     private var mouseDownLocation: CGPoint = .zero
     private var didDrag: Bool = false
     private static let dragThreshold: CGFloat = 3.0
@@ -653,11 +659,21 @@ class TBDTerminalView: TerminalView {
     /// go before the button, the release would reach the pane as a plain
     /// click.
     private(set) var pressBypassesSwiftTerm = false
+    /// Set when a Cmd-modified press TBD did not consume lands while the
+    /// program holds the mouse (`programHoldsTheMouse`). Cmd is TBD's
+    /// modifier for opening paths and links, and SGR mouse encoding has no
+    /// bit for it, so the program would read the press as a plain click:
+    /// none of the press, its drags or its release reaches it. Unless the
+    /// press became a drag, SwiftTerm sees its release alone, with reporting
+    /// suppressed for that one call: it opens the link under the pointer, by
+    /// its own hit math, or does nothing.
+    private(set) var commandPressWithheld = false
 
     override func mouseDown(with event: NSEvent) {
         mouseDownLocation = convert(event.locationInWindow, from: nil)
         didDrag = false
         pressBypassesSwiftTerm = false
+        commandPressWithheld = false
         let isActivationClick = event.eventNumber == activationClickEventNumber
         activationClickEventNumber = nil
         if let claimFocus = onMouseDownClaimFocus, claimFocus() {
@@ -678,6 +694,13 @@ class TBDTerminalView: TerminalView {
             pressBypassesSwiftTerm = true
             return
         }
+        // A Cmd press TBD did not open never reaches a program holding the
+        // mouse — including a Cmd+click on an OSC 8 link, which opens on
+        // release.
+        if event.modifierFlags.contains(.command), programHoldsTheMouse() {
+            commandPressWithheld = true
+            return
+        }
         super.mouseDown(with: event)
     }
 
@@ -688,13 +711,37 @@ class TBDTerminalView: TerminalView {
         if sqrt(dx * dx + dy * dy) > Self.dragThreshold {
             didDrag = true
         }
-        guard !pressBypassesSwiftTerm else { return }
+        guard !pressBypassesSwiftTerm, !commandPressWithheld else { return }
         super.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
         guard !pressBypassesSwiftTerm else {
             pressBypassesSwiftTerm = false
+            return
+        }
+        if commandPressWithheld {
+            commandPressWithheld = false
+            // A Cmd-drag opens nothing. SwiftTerm cannot tell that one was a
+            // drag: it raises its own drag flag only in the mouse-dragged it
+            // was never handed, so it would open a link the drag ended on.
+            guard !didDrag else { return }
+            // SwiftTerm's mouse-up opens the link under the pointer, found with
+            // its own cell geometry and highlight mode, and returns; with no
+            // link it goes on to report the release, one the program never saw
+            // pressed. Reporting is off for this one synchronous call, so the
+            // release opens a link or does nothing. The rest of that mouse-up
+            // is resets for a press its mouse-down never began:
+            // `endPrimaryPointerPress` clears a press location already nil,
+            // the drag and force-click flags were never raised, and no press
+            // registered as semantic-prompt eligible. The click passthrough
+            // below reads `allowMouseReporting` too, so it must never run
+            // inside this window: a withheld press whose Cmd was let go first
+            // would go out as a plain click.
+            let reporting = allowMouseReporting
+            allowMouseReporting = false
+            defer { allowMouseReporting = reporting }
+            super.mouseUp(with: event)
             return
         }
         let location = convert(event.locationInWindow, from: nil)
@@ -704,6 +751,13 @@ class TBDTerminalView: TerminalView {
             handleClickPassthrough(at: location, modifiers: event.modifierFlags)
         }
         super.mouseUp(with: event)
+    }
+
+    /// Whether SwiftTerm would report a press to the program right now:
+    /// reporting is on, and the program has a mouse mode on. With reporting
+    /// off a press only ever reaches SwiftTerm's local selection.
+    private func programHoldsTheMouse() -> Bool {
+        allowMouseReporting && withTerminal { $0.mouseMode != .off }
     }
 
     /// Opens the file path or link under a Cmd+click. Returns true when it
@@ -816,6 +870,11 @@ class TBDTerminalView: TerminalView {
     /// single left click reaches the remote session twice. Callers with
     /// `allowMouseReporting == true` (e.g. `RemoteAttachTerminalView`) rely on
     /// SwiftTerm as the sole forwarder, so the passthrough must stand down.
+    /// A `TerminalPanelView` panel is on either side: reporting is off, and
+    /// this passthrough forwards, except on a holder panel with "Send clicks
+    /// and drags to apps that use the mouse" on, where reporting follows the
+    /// toggle (`TerminalPanelRepresentable.reportsMouseToApps`) and SwiftTerm
+    /// forwards instead.
     nonisolated static func clickPassthroughActive(allowMouseReporting: Bool) -> Bool {
         !allowMouseReporting
     }
@@ -828,12 +887,13 @@ class TBDTerminalView: TerminalView {
         //
         // This won't produce duplicate events either way: the guard above
         // means exactly one of us is live. When `allowMouseReporting` is
-        // false (e.g. `TerminalPanelView`), SwiftTerm's mouseDown/mouseUp
-        // only handle local text selection — they never forward to the pty —
-        // so we are the sole path that sends mouse events to tmux. When
-        // `allowMouseReporting` is true (e.g. `RemoteAttachTerminalView`),
-        // SwiftTerm's native reporting is the sole forwarder and we stand
-        // down via the guard above.
+        // false (a `TerminalPanelView` tmux panel, or a holder panel with the
+        // toggle off), SwiftTerm's mouseDown/mouseUp only handle local text
+        // selection — they never forward to the pty — so we are the sole
+        // path that sends mouse events to the session. When
+        // `allowMouseReporting` is true (`RemoteAttachTerminalView`, or a
+        // holder panel with the toggle on), SwiftTerm's native reporting is
+        // the sole forwarder and we stand down via the guard above.
         guard !didDrag else { return }
 
         // Cell math stays OUTSIDE the lock (view API — see lock discipline

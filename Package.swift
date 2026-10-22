@@ -51,11 +51,17 @@ let package = Package(
         // installed unconditionally and routed through a `public` (not
         // `open`) delegate method, so a subclass cannot suppress it. TBD
         // already surfaces working state in the sidebar and tab indicators.
-        // The pinned revision is upstream `9c2518e` plus two commits (branch
+        // The third fork commit is upstream PR #705 taken verbatim: a public
+        // `optionBypassesMouseReporting` that makes Option-drag skip mouse
+        // reporting the way Shift-drag does, which TBD turns on with "Send
+        // clicks and drags to apps that use the mouse"; verbatim, so a later
+        // sync with upstream applies cleanly whether or not #705 has merged.
+        // The pinned revision is upstream `9c2518e` plus four commits (branch
         // `tbd/public-with-terminal`): one making `withTerminal` public, one
-        // adding `showsProgressBar`. Once upstream merges equivalents, re-pin
-        // to upstream and delete the fork; once a tagged release contains
-        // them all, switch back to `from:`.
+        // adding `showsProgressBar`, #705, and a test pinning #705's
+        // behavior. Once upstream merges equivalents, re-pin to upstream and
+        // delete the fork; once a tagged release contains them all, switch
+        // back to `from:`.
         //
         // A frame loop that does not run on the main thread may never call
         // `viewWillDraw()`, which TBD's terminal diagnostics hook. Diagnostics
@@ -81,7 +87,7 @@ let package = Package(
         // revision reaps its own children, `ChildReaper` becomes a competing
         // waiter on a pid the OS may have recycled, which is worse than the
         // leak it fixes. Its doc comment names the exact lines to re-read.
-        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "6cfb57278b0bc1906040094576db95e3dbef1be2"),
+        .package(url: "https://github.com/cheapsteak/SwiftTerm", revision: "c6b544f84bf36fd81cd88bac356b27897fc6a2ab"),
         .package(url: "https://github.com/raspu/Highlightr", from: "2.2.1"),
         .package(url: "https://github.com/siteline/swiftui-introspect", from: "1.0.0"),
         .package(url: "https://github.com/gonzalezreal/swift-markdown-ui", from: "2.4.0"),
