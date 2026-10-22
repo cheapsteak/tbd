@@ -178,14 +178,23 @@ actor DaemonClient {
         return nil
     }
 
-    /// Launch the tbdd daemon as a background process.
-    private func launchDaemon(at path: String) {
+    /// Build the (unstarted) `Process` that launches the daemon.
+    ///
+    /// Deliberately sets no `qualityOfService`. On macOS a `Process` QoS is a
+    /// clamp every descendant inherits and cannot raise, so `.utility` here would
+    /// pin the daemon, every holder, every agent and every build they run to the
+    /// efficiency cores. Internal rather than private so a test can pin that.
+    nonisolated static func makeDaemonProcess(executablePath: String) -> Process {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        // Detach so the daemon outlives the app
-        process.qualityOfService = .utility
+        return process
+    }
+
+    /// Launch the tbdd daemon as a background process.
+    private func launchDaemon(at path: String) {
+        let process = Self.makeDaemonProcess(executablePath: path)
         do {
             try process.run()
             daemonClientLogger.info("Launched tbdd (pid: \(process.processIdentifier))")
