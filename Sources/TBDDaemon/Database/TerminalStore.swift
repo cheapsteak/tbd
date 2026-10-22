@@ -2195,14 +2195,26 @@ public struct TerminalStore: Sendable {
     /// Record that the start-admission command held a wake of this parked row.
     /// Both columns are written together. The next successful wake clears them
     /// (`clearHibernated`, which every wake path ends in).
-    public func setStartHeld(id: UUID, reason: String, at date: Date = Date()) async throws {
+    ///
+    /// The command can run for seconds, so the row may have changed since the
+    /// caller looked. The write happens only when the row is still parked and
+    /// its session incarnation is still `expectedIncarnationID`; a row that was
+    /// woken, or parked again under a new incarnation, gets no hold. Returns
+    /// whether the hold was written.
+    @discardableResult
+    public func setStartHeld(
+        id: UUID, reason: String, expectedIncarnationID: UUID?, at date: Date = Date()
+    ) async throws -> Bool {
         try await writer.write { db in
-            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
-                return
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
+                  record.hibernatedAt != nil || record.suspendedAt != nil,
+                  record.sessionIncarnationID == expectedIncarnationID?.uuidString else {
+                return false
             }
             record.start_held_reason = reason
             record.start_held_at = date
             try record.update(db)
+            return true
         }
     }
 

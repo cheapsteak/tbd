@@ -51,7 +51,8 @@ extension RPCRouter {
     /// A terminal that is missing, not parked, or not an agent tab is not
     /// checked, so the wake path answers it exactly as it did before. A held
     /// wake records the reason and the time on the row and publishes the row,
-    /// so the parked pane can say why it is still asleep.
+    /// so the parked pane can say why it is still asleep. If the row was woken or
+    /// re-parked while the command ran, nothing is written.
     func holdWakeIfDenied(
         _ actuationID: String, actor: ActuationActor?, terminalID: UUID
     ) async -> RPCResponse? {
@@ -65,8 +66,10 @@ extension RPCRouter {
         guard case .hold(let reason) = verdict else { return nil }
         await finishActuation(actuationID, .refused(.held), error: reason)
         do {
-            try await db.terminals.setStartHeld(id: terminalID, reason: reason, at: now())
-            if let held = try await db.terminals.get(id: terminalID) {
+            let wrote = try await db.terminals.setStartHeld(
+                id: terminalID, reason: reason,
+                expectedIncarnationID: terminal.sessionIncarnationID, at: now())
+            if wrote, let held = try await db.terminals.get(id: terminalID) {
                 subscriptions.broadcast(delta: .terminalReplaced(held))
             }
         } catch {
@@ -75,8 +78,11 @@ extension RPCRouter {
         return Self.heldResponse(reason)
     }
 
-    static func heldResponse(_ reason: String) -> RPCResponse {
-        RPCResponse(error: reason, code: RPCErrorCode.startHeld.rawValue)
+    static func heldResponse(_ reason: String, leftovers: [String] = []) -> RPCResponse {
+        let message = leftovers.isEmpty
+            ? reason
+            : "\(reason) (the start was held, but cleanup failed; remove by hand: \(leftovers.joined(separator: "; ")))"
+        return RPCResponse(error: message, code: RPCErrorCode.startHeld.rawValue)
     }
 
     /// The flag, read on every start so a change takes effect at the next one.
