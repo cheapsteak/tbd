@@ -493,6 +493,8 @@ private func resetRecreatedShellLifecycle(
     record.suspendedSnapshot = nil
     record.hibernatedAt = nil
     record.hibernateReason = nil
+    record.start_held_reason = nil
+    record.start_held_at = nil
     record.label = TerminalLabel.shell
     record.kind = TerminalKind.shell.rawValue
     return incarnationID
@@ -1163,6 +1165,8 @@ public struct TerminalStore: Sendable {
             record.suspendedSnapshot = nil
             record.hibernatedAt = nil
             record.hibernateReason = nil
+            record.start_held_reason = nil
+            record.start_held_at = nil
             record.activityState = TerminalActivityState.unknown.rawValue
             record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
             record.activityStateObservedAt = date
@@ -2193,8 +2197,10 @@ public struct TerminalStore: Sendable {
     }
 
     /// Record that the start-admission command held a wake of this parked row.
-    /// Both columns are written together. The next successful wake clears them
-    /// (`clearHibernated`, which every wake path ends in).
+    /// Both columns are written together. Every write that un-parks the row
+    /// clears them: a wake (`clearHibernated`, which every wake path ends in),
+    /// a hand-started session (`clearSessionExitStamp`), and a recreated shell
+    /// or Codex window. So a later park never shows an old hold.
     ///
     /// The command can run for seconds, so the row may have changed since the
     /// caller looked. The write happens only when the row is still parked and
@@ -2320,6 +2326,8 @@ public struct TerminalStore: Sendable {
             guard record.hibernateReason == HibernateReason.exited.rawValue else { return false }
             record.hibernatedAt = nil
             record.hibernateReason = nil
+            record.start_held_reason = nil
+            record.start_held_at = nil
             try record.update(db)
             return true
         }
