@@ -298,7 +298,7 @@ if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
         kill "$pid" 2>/dev/null && sleep 0.5 || true
     fi
     # Clean stale files
-    rm -f ~/tbd/sock ~/tbd/tbdd.pid ~/tbd/port
+    rm -f ~/tbd/sock ~/tbd/tbdd.pid ~/tbd/port ~/tbd/http-token
 
     # Preserve the previous daemon's log for post-mortem diagnostics — the
     # daemon does not persist os.Logger output, so this file is the only

@@ -156,9 +156,13 @@ struct ServerShutdownLatchTests {
         // fixed `SocketServer` would otherwise hand the hang straight on to:
         // `Daemon.stop()` stops the socket server and then this one.
         let portFilePath = "/tmp/tbd-httpshutdown-\(UUID().uuidString.prefix(8)).port"
-        defer { unlink(portFilePath) }
+        let tokenFilePath = "/tmp/tbd-httpshutdown-\(UUID().uuidString.prefix(8)).token"
+        defer {
+            unlink(portFilePath)
+            unlink(tokenFilePath)
+        }
 
-        let server = HTTPServer(router: try makeRouter(), portFilePath: portFilePath)
+        let server = HTTPServer(router: try makeRouter(), portFilePath: portFilePath, tokenFilePath: tokenFilePath)
         try await server.start()
         await server.stop()
 

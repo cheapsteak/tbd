@@ -132,6 +132,13 @@ public enum TBDConstants {
     }
     public static var portFilePath: String { portFilePath(environment: ProcessInfo.processInfo.environment) }
 
+    /// Per-daemon-start secret the HTTP RPC port requires in `X-TBD-Token`.
+    /// Owner-only (0600), rewritten on every start, removed on stop.
+    public static func httpTokenFilePath(environment: [String: String]) -> String {
+        configDir(environment: environment).appendingPathComponent("http-token").path
+    }
+    public static var httpTokenFilePath: String { httpTokenFilePath(environment: ProcessInfo.processInfo.environment) }
+
     public static func reposDir(environment: [String: String]) -> URL {
         configDir(environment: environment).appendingPathComponent("repos")
     }
