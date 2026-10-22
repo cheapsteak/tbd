@@ -178,6 +178,8 @@ struct ContinueInCodexRPCTests {
             #expect(stub.requests.map(\.kind) == [.create])
             #expect(stub.requests.first?.agent == .codex)
             #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+            // Neither the Codex launch preparation nor the import ran.
+            #expect(fixture.recorder.events.isEmpty)
             #expect(try await fixture.db.terminals.list(
                 worktreeID: fixture.worktree.id) == [source])
         } else {

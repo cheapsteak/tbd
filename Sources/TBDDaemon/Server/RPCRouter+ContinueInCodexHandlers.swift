@@ -77,30 +77,50 @@ extension RPCRouter {
                 "Worktree directory is missing on disk: \(worktree.path)")
         }
 
-        let preparation = try CodexLaunchPreparation.prepare(
-            executableResolver: codexExecutableResolver,
-            homeEnsurer: codexHomeEnsurer)
+        // The actuation row opens before the import, which is the first step
+        // that writes Codex state, so a held start leaves none behind. Every
+        // failure after this point closes the row.
+        let plannedTerminalID = UUID()
+        let actuationID = try await beginActuation(
+            .terminalContinueInCodex, actor: actor,
+            target: .local(worktree: worktree.id, terminal: plannedTerminalID),
+            agent: TerminalKind.codex.rawValue)
+
+        // Start admission: the spawn below launches Codex.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .codex,
+            worktreeID: worktree.id, terminalID: plannedTerminalID) {
+            return held
+        }
+
+        let preparation = try await actuating(actuationID) {
+            try CodexLaunchPreparation.prepare(
+                executableResolver: codexExecutableResolver,
+                homeEnsurer: codexHomeEnsurer)
+        }
         let profileFlag = codexProfileFlagResolver(preparation.executablePath)
 
-        let threadID = try await codexSessionImport(
-            preparation.executablePath,
-            preparation.codexHome,
-            transcriptPath,
-            worktree.path,
-            nil)
+        let threadID = try await actuating(actuationID) {
+            try await codexSessionImport(
+                preparation.executablePath,
+                preparation.codexHome,
+                transcriptPath,
+                worktree.path,
+                nil)
+        }
         guard !threadID.isEmpty else {
-            throw ContinueInCodexHandlerError.userFacing(
-                "Codex imported the session but returned an empty thread ID.")
+            let message = "Codex imported the session but returned an empty thread ID."
+            await finishActuation(actuationID, .transportFailed, error: message)
+            throw ContinueInCodexHandlerError.userFacing(message)
         }
 
         let repo: Repo?
         if let repoID = worktree.repoID {
-            repo = try await db.repos.get(id: repoID)
+            repo = try await actuating(actuationID) { try await db.repos.get(id: repoID) }
         } else {
             repo = nil
         }
         let config = try? await db.config.get()
-        let plannedTerminalID = UUID()
         let codexEnv: [String: String] = [
             "TBD_WORKTREE_ID": worktree.id.uuidString,
             "TBD_TERMINAL_ID": plannedTerminalID.uuidString,
@@ -119,20 +139,6 @@ extension RPCRouter {
 
         // The transport gate, the same one every other spawn path asks.
         let transport = TerminalSpawnTransport.decide(config: config, registry: holderRegistry)
-
-        // The import above created Codex state but touched no session; the
-        // spawn below is the actuation, so the row goes here.
-        let actuationID = try await beginActuation(
-            .terminalContinueInCodex, actor: actor,
-            target: .local(worktree: worktree.id, terminal: plannedTerminalID),
-            agent: TerminalKind.codex.rawValue)
-
-        // Start admission: the spawn below launches Codex.
-        if let held = await holdStartIfDenied(
-            actuationID, actor: actor, agent: .codex,
-            worktreeID: worktree.id, terminalID: plannedTerminalID) {
-            return held
-        }
 
         let terminal: Terminal
         do {
