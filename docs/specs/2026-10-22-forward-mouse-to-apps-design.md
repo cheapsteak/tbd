@@ -5,7 +5,7 @@
 When a program in a TBD terminal turns on mouse reporting, TBD should give
 that program the mouse, the way iTerm2 does. A plain click or drag reaches the
 program, and the program does its own selection and copy. Option-drag or
-Shift-drag bypasses the program and selects text in TBD, as today. The
+Shift-drag bypasses the program and selects text with TBD's own selection. The
 behavior applies to terminals on the pty-holder transport and leaves the
 scroll wheel on TBD's own path.
 
@@ -20,12 +20,12 @@ OSC 52 write. Measured against the real CLI through `scripts/claude-stub.py`:
 the drag produced 1,145 bytes of repaint and one OSC 52 write carrying the
 selected lines.
 
-TBD does not hand the mouse over. `TerminalPanelView` sets
-`allowMouseReporting = false` on every panel, so a drag over a fullscreen
-agent runs SwiftTerm's local selection and the agent never sees it. TBD then
-forwards two things by hand: single clicks (a synthesized press and release at
+A terminal that never reports the mouse runs SwiftTerm's local selection on a
+drag, so a fullscreen agent never sees it, and TBD must hand-forward two
+things: single clicks (a synthesized press and release at
 mouse-up, `TBDTerminalView.handleClickPassthrough`) and the scroll wheel (the
-panel's local monitor and `ScrollWheelAccumulator`). People who use iTerm2
+panel's local monitor and `ScrollWheelAccumulator`). Tmux panels still work
+this way, for the reason under "Which terminals". People who use iTerm2
 expect the opposite default: a plain drag belongs to the program, and a
 modifier gets the terminal's selection.
 
@@ -44,13 +44,13 @@ leaving the program a press with no release.
   `transport == .holder` set `allowMouseReporting = true`. SwiftTerm then
   reports clicks, drags and releases to the program whenever the program has
   turned a mouse mode on. When no mouse mode is on — a plain shell prompt —
-  SwiftTerm keeps doing local selection, so nothing changes there.
+  SwiftTerm keeps doing local selection, so a plain shell prompt selects in TBD.
 - **Tmux-backed panels** – keep `allowMouseReporting = false`. The daemon runs
   `set -g mouse on` on every tmux server (`TmuxManager.swift`), so tmux holds a
   mouse mode permanently. Handing it the mouse would turn every drag into tmux
   copy mode rather than reach the program inside, and that transport is being
   removed.
-- **Remote-attach terminals** – `LocalPTYTerminalView` already runs with
+- **Remote-attach terminals** – `LocalPTYTerminalView` runs with
   `allowMouseReporting = true`. It sets the Option bypass, so both terminal
   surfaces honor the same modifiers, and the Cmd rule in "What stays TBD's"
   applies to it. This terminal has no wheel
@@ -73,22 +73,23 @@ selection, and Cmd+C copies it.
 - **Shift** is SwiftTerm's existing bypass (`shiftBypassesMouseReportingLocked`),
   the xterm and kitty convention. It stands down when the program asks to
   receive Shift-modified events (`mouseShiftCapture`, XTSHIFTESCAPE), as it
-  does today.
+  does for any terminal.
 - **Option** is the iTerm2 convention. SwiftTerm gains it as a host setting,
   `optionBypassesMouseReporting`, off by default, checked in the same
   predicate as Shift. TBD turns it on in every terminal it mounts.
 
-A program loses Option- and Shift-modified mouse events. Each is already withheld by a widely used terminal — Option by iTerm2,
-Shift by xterm, kitty and SwiftTerm itself — so a program that depends on
-either already fails somewhere.
+A program loses Option- and Shift-modified mouse events. Each is already
+withheld by a widely used terminal — Option by iTerm2, Shift by xterm, kitty
+and SwiftTerm itself — so a program that depends on either already fails
+somewhere.
 
 **Known limit: the bypass is decided per event, not per gesture.** SwiftTerm
 reads the modifiers afresh on each press, drag and release. Letting go of
 Option or Shift before the mouse button sends the program a release it never
 saw pressed, plus the drag motion after the key came up under modes 1002 and
 1003. Pressing Option or Shift after a plain press leaves the program a press
-with no release. Closing it means latching the bypass decision at mouse-down; that is
-not yet done.
+with no release. It is to be closed by latching the bypass decision at
+mouse-down.
 
 ### What stays TBD's
 
@@ -130,7 +131,7 @@ program as a plain click — behavior this design leaves as it is.
 The wheel stays on TBD's monitor and `ScrollWheelAccumulator` on every
 transport. The monitor claims every wheel event while a mouse mode is on,
 and every one on the alternate screen while none is, so SwiftTerm's own
-`scrollWheel` never runs for those events. The monitor already does what
+`scrollWheel` never runs for those events. The monitor does what
 SwiftTerm's handler at the pinned revision does — accumulate
 `scrollingDeltaY` against the cell height and bank the remainder — and adds
 a bound on the report rate that the handler lacks (#1226). On the alternate
@@ -151,7 +152,7 @@ the theme's selection.
 
 ### No click reaches the program twice
 
-`TBDTerminalView.clickPassthroughActive(allowMouseReporting:)` already
+`TBDTerminalView.clickPassthroughActive(allowMouseReporting:)`
 returns false whenever reporting is on, so the hand-forwarding of single
 clicks stands down exactly when SwiftTerm starts reporting. One left click
 reaches the program once on either transport.
@@ -227,7 +228,7 @@ checklist covers them:
 - Cmd+click on a file path opens it once; Cmd+click on an OSC 8 link opens it
   once.
 - A single click in Claude's composer reaches Claude once.
-- In a plain shell tab, a drag selects as before.
+- In a plain shell tab, a drag selects in TBD.
 - In vim with `mouse=a`, a click moves the cursor and a drag makes a visual
   selection.
 - The wheel scrolls Claude's transcript at the same rate as in a tmux tab.
