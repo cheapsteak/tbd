@@ -975,11 +975,13 @@ struct ContinueInClaudeTransactionTests {
     private func waitForFreshClaudeSessionID(
         in recorder: CommandRecorder
     ) async -> String? {
-        for _ in 0..<2_000 {
-            if let sessionID = recorder.freshClaudeSessionID { return sessionID }
-            await Task.yield()
+        _ = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass,
+            pollInterval: .milliseconds(10)
+        ) {
+            recorder.freshClaudeSessionID != nil
         }
-        return nil
+        return recorder.freshClaudeSessionID
     }
 
     private func json(_ value: String) -> String {
