@@ -29,6 +29,10 @@ Exit 0 admits the start. Any other exit holds it, and the reason is the first no
 stdout (cut to 200 characters), or `start-admission exited N`. A timeout, a signal or a file that
 cannot run also holds, with a reason naming it: a gate that cannot decide holds.
 
+If TBD cannot read its own settings, or cannot read the terminal row a wake names, the start
+proceeds unchecked. The flag is off by default, so TBD never holds a start on a flag it cannot
+show you turned on.
+
 ```sh
 #!/bin/sh
 # Hold new agent starts while the machine is under heavy load.
@@ -44,7 +48,9 @@ fi
 - The `tbd` command prints `held: <reason>` on stderr and exits 75 (`EX_TEMPFAIL`). Ask again later;
   TBD keeps no queue.
 - The actuation record gets a `refused` outcome with reason `held`.
-- A held create writes no terminal, worktree, branch or window.
+- A held create writes no terminal, worktree, branch or window. If TBD cannot remove the
+  worktree row or scratch folder it made while deciding, the start is still held and the
+  message names what to remove by hand.
 - A held wake leaves the tab parked and notes the reason and time on it. The parked pane then reads
   "Automatic wake held at 9:12: <reason>". The next successful wake clears the note.
 

@@ -30,7 +30,8 @@ them when nobody renews.
 
 An agent start is a request that would launch a Claude Code or Codex process on this machine:
 
-- `terminal.create` with type `claude` or `codex` (fresh, resumed or forked)
+- `terminal.create` with type `claude` or `codex` (fresh, resumed or forked), and any
+  `terminal.create` that resumes a session, whatever its type: that spawns Claude
 - `worktree.create` and `scratch.create`, whose primary terminal is an agent
 - `worktree.revive` and `worktree.reviveConversationFresh`
 - `terminal.wake`, `terminal.resume` and `worktree.resume`, for a terminal that is parked and
@@ -81,6 +82,9 @@ file per machine, not per repo, because the question is about the machine.
   cut to 200 characters, or `start-admission exited N` when stdout has none.
 - No answer in 10 seconds, a signal, or a file that cannot run: the start is held with a
   reason naming that. A user who installed a gate wants it to hold when it cannot decide.
+- TBD cannot read its own settings, or cannot read the terminal row a wake names: the start
+  proceeds unchecked. The flag is off by default, so a start is never held on the strength of
+  a flag TBD cannot show the user turned on.
 
 ### What a hold does
 
@@ -91,7 +95,12 @@ ask again, which is exactly the "when" this design keeps out of the daemon.
   reaches git, tmux or a process, so a held create makes no terminal row, branch, worktree
   or window. `worktree.create` and `scratch.create` write a `.creating` row (and, for a
   scratch space, its folder) before their actuation row exists; a hold deletes them, the
-  same cleanup those handlers already do when the actuation row cannot be written.
+  same cleanup those handlers already do when the actuation row cannot be written. The
+  parent's auto-archive-on-merge setting is not changed until the gate has passed.
+  `terminal.continueInCodex` asks before it imports the Claude session into Codex, so a
+  held continuation leaves no Codex thread.
+- If that cleanup fails, TBD logs it and still answers `startHeld`. The message then names
+  what remains (the worktree row id, the scratch folder path) so the caller can remove it.
 - The actuation record gets a `refused` outcome with the new reason `held`, carrying the
   hook's reason. The record can then answer "which starts did the gate stop?" without
   reading prose.
@@ -101,7 +110,9 @@ ask again, which is exactly the "when" this design keeps out of the daemon.
 - A held wake also records the reason and the time on the terminal row
   (`start_held_reason`, `start_held_at`). The parked pane's notice then reads, for example,
   "Automatic wake held at 9:12: <reason>". The next successful wake clears both. A held
-  create has no row to mark; its caller reports it.
+  create has no row to mark; its caller reports it. The note is written only if the row is
+  still parked under the same session incarnation as when the command started; a row woken
+  or parked again while the command ran gets no note.
 - `worktree.resume` asks once for each parked terminal it would wake. It wakes the admitted
   ones, leaves the held ones parked with their reasons, and then fails with the first hold,
   so a caller is never told a resume succeeded when part of it did not happen.
