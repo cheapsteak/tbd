@@ -775,6 +775,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // nonisolated and must be able to remove a monitor the main-actor
         // teardown missed.
         nonisolated(unsafe) private var scrollMonitor: Any?
+        /// The scroll monitor's wheel arithmetic — the banked sub-cell
+        /// remainder and the report-rate bucket. Read and written only by the
+        /// monitor, on main; a fresh install starts it over.
+        private var wheelAccumulator = ScrollWheelAccumulator()
         private var fedPreparationMessages: Set<String> = []
         /// Set while this panel renders through the control-mode path (Phase 2
         /// FD vending). `cleanup()` uses these to pair the teardown correctly:
@@ -892,37 +896,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             tabCloseContext = context
             appState?.registerTerminalCloseContext(context, for: terminalID)
-        }
-
-        /// Whether the tmux-subprocess transport's scroll monitor claims a
-        /// wheel event over this terminal, and how many wheel reports it
-        /// forwards. A wheel event that passes through reaches SwiftTerm's
-        /// own `scrollWheel`, whose fallback (no mouse reporting) differs by
-        /// buffer: on the alternate screen it converts accumulated motion
-        /// into Up/Down arrow keys, which land on whatever is attached,
-        /// including a composer draft; on the normal screen it instead
-        /// scrolls SwiftTerm's own local scrollback, which is exactly what an
-        /// un-mouse-aware shell prompt needs. Claiming must tell those two
-        /// apart — claiming on the normal screen would silence scrollback for
-        /// every ordinary shell tab.
-        ///
-        /// Once reporting is on, buffer doesn't matter: always claim, and a
-        /// zero `deltaY` is still claimed and dropped (trackpads deliver
-        /// sub-line events whose `deltaY` is zero), while a non-zero delta
-        /// forwards one report per whole line, minimum one.
-        ///
-        /// Before reporting is on — at spawn, or any other moment it is
-        /// transiently off — claim and drop on the alternate screen (there is
-        /// no reporting session to forward to, and dropping is far less
-        /// surprising than turning a scroll into keystrokes), but pass
-        /// through unclaimed on the normal screen so SwiftTerm's native
-        /// scrollback keeps working.
-        nonisolated static func wheelReports(
-            deltaY: CGFloat, mouseReporting: Bool, alternateScreen: Bool
-        ) -> (claim: Bool, count: Int) {
-            guard mouseReporting else { return (claim: alternateScreen, count: 0) }
-            guard deltaY != 0 else { return (claim: true, count: 0) }
-            return (claim: true, count: max(1, Int(abs(deltaY))))
         }
 
         /// The notice to render *instead of* preparing a tmux view session, or
@@ -1998,16 +1971,24 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// here when mouse reporting is on, or when it's off and the buffer
         /// is alternate; a wheel event over a mouse-reporting-off *normal*
         /// buffer (an ordinary shell prompt, say) is deliberately left
-        /// unclaimed so SwiftTerm's own local scrollback still works. A zero
-        /// `deltaY` claim is likewise unconditional once reporting is on:
-        /// trackpads deliver such events (a few pixels of `scrollingDeltaY`,
-        /// no whole line), and an unclaimed one would fall through to the
+        /// unclaimed so SwiftTerm's own local scrollback still works. A claim
+        /// that sends nothing is likewise unconditional once reporting is on:
+        /// trackpads deliver such events (a few points of `scrollingDeltaY`,
+        /// no whole cell), and an unclaimed one would fall through to the
         /// arrow-key fallback, interleaving stray keys with the real wheel
-        /// reports. `Coordinator.wheelReports` decides claim and count; a
+        /// reports. `wheelAccumulator` decides claim and count — precise
+        /// deltas accumulate against the cell height with the remainder
+        /// banked, a classic notch is one report, and a token bucket bounds
+        /// the rate (see `ScrollWheelAccumulator` for why, #719); a
         /// zero-report claim drops the event. An in-bounds point with no grid
         /// cell (the sub-cell remainder strip at the view's bottom and right
         /// edges) is likewise claimed and dropped, since there is no cell to
         /// report at.
+        ///
+        /// The cell height comes from `TBDTerminalView.cellDimensions()`, the
+        /// font-metric mirror the grid math below already uses: SwiftTerm's
+        /// handler accumulates against its `cellDimension`, which is internal
+        /// to SwiftTerm.
         ///
         /// The reports leave through `term.sendEvent`, which is SwiftTerm's
         /// own mouse-reporting path: `Terminal` hands the bytes to the view,
@@ -2039,8 +2020,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 scrollMonitor = nil
             }
             let ref = WeakTerminalRef(terminalView)
+            wheelAccumulator = ScrollWheelAccumulator()
             scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-                let deltaY = event.deltaY
+                let precise = event.hasPreciseScrollingDeltas
+                let wheelEvent = ScrollWheelAccumulator.Event(
+                    deltaY: precise ? event.scrollingDeltaY : event.deltaY,
+                    precise: precise,
+                    phase: ScrollWheelAccumulator.Phase(
+                        phase: event.phase, momentumPhase: event.momentumPhase),
+                    timestamp: event.timestamp)
                 let location = event.locationInWindow
 
                 let consumed = MainActor.assumeIsolated { [weak self] in
@@ -2059,20 +2047,21 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     // block — the same calls, under the same lock, as
                     // SwiftTerm's own native mouse-reporting path.
                     let grid = tv.gridPosition(atWindowLocation: location)
+                    let cellHeight = tv.cellDimensions().height
 
-                    let isUp = deltaY > 0
                     return tv.withTerminal { term -> Bool in
-                        let wheel = Self.wheelReports(
-                            deltaY: deltaY,
+                        let wheel = self.wheelAccumulator.reports(
+                            for: wheelEvent,
+                            cellHeight: cellHeight,
                             mouseReporting: term.mouseMode != .off,
                             alternateScreen: term.isCurrentBufferAlternate)
                         guard wheel.claim else { return false }
-                        if let (col, row) = grid {
+                        if let (col, row) = grid, wheel.lines != 0 {
                             let buttonFlags = term.encodeButton(
-                                button: isUp ? 4 : 5,
+                                button: wheel.lines > 0 ? 4 : 5,
                                 release: false, shift: false, meta: false, control: false
                             )
-                            for _ in 0..<wheel.count {
+                            for _ in 0..<abs(wheel.lines) {
                                 term.sendEvent(buttonFlags: buttonFlags, x: col, y: row)
                             }
                         }
