@@ -16,7 +16,10 @@ struct AgentBackgroundRoots: Sendable {
         guard let terminals = try? await database.terminals.list() else { return [] }
         var roots: [pid_t] = []
         for terminal in terminals {
-            guard terminal.kind?.isAgentBearing == true, !terminal.isParked else { continue }
+            // A row with no recorded kind predates kinds and is Claude's, the
+            // same reading `isClaudeTab` gives it everywhere else.
+            guard terminal.isCodexTerminal || terminal.isClaudeTab, !terminal.isParked
+            else { continue }
             let root: pid_t?
             switch terminal.transport {
             case .holder:
