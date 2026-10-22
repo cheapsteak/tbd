@@ -238,7 +238,7 @@ struct TerminalSettingsView: View {
             } header: {
                 Text("Experimental")
             } footer: {
-                Text("All off by default — under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of either setting, turn it off and restart the app.")
+                Text("All off by default — under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane. To bail out of auto-resize or GPU rendering, turn it off and restart the app; the mouse setting applies immediately.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
