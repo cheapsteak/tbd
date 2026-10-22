@@ -43,10 +43,23 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
     var model: String?
 
+    @Option(name: .customLong("codex-disable"), help: "Codex feature to turn off for this terminal only, passed to Codex as --disable <feature> (repeatable; requires --type codex). Example: --codex-disable computer_use")
+    var codexDisable: [String] = []
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
     mutating func validate() throws {
+        if !codexDisable.isEmpty {
+            guard type == .codex else {
+                throw ValidationError(TerminalCreateParams.codexDisableRequiresCodexMessage)
+            }
+            do {
+                _ = try TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+            } catch {
+                throw ValidationError(error.localizedDescription)
+            }
+        }
         guard let model else { return }
         guard type == .codex else {
             throw ValidationError(TerminalCreateParams.modelRequiresCodexMessage)
@@ -60,9 +73,12 @@ struct TerminalCreate: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
 
+        let disabledFeatures: [String]? = try codexDisable.isEmpty
+            ? nil : TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings, model: model),
+            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings, model: model, codexDisabledFeatures: disabledFeatures),
             resultType: Terminal.self
         )
 

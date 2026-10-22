@@ -639,6 +639,10 @@ struct ModelProfileSpawnTests {
 
         #expect(recorder.shellBodies.contains(
             #"tbd -c 'model="acme-model"' --dangerously-bypass-approvals-and-sandbox"#))
+        // Recorded on the primary's row, so a relaunch in that tab keeps it.
+        let codexRow = try await db.terminals.list(worktreeID: wt.id)
+            .first { $0.kind == .codex }
+        #expect(codexRow?.codexLaunchOptions == CodexLaunchOptions(model: "acme-model"))
     }
 
     /// Without an override the Codex primary command carries no `-c` at all.
@@ -664,6 +668,10 @@ struct ModelProfileSpawnTests {
         #expect(recorder.shellBodies.contains(
             " tbd --dangerously-bypass-approvals-and-sandbox"))
         #expect(!recorder.shellBodies.contains("model="))
+        let codexRow = try await db.terminals.list(worktreeID: wt.id)
+            .first { $0.kind == .codex }
+        #expect(codexRow != nil)
+        #expect(codexRow?.codexLaunchOptions == nil)
     }
 
     /// The override is scoped to the Codex arm: a Claude primary ignores it
@@ -720,6 +728,118 @@ struct ModelProfileSpawnTests {
         #expect(response.error == TerminalCreateParams.modelRequiresCodexMessage)
         #expect(recorder.calls.isEmpty)
         #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+    }
+
+    @Test("terminal.create passes validated disabled features to Codex, de-duplicated in order")
+    func terminalCreatePassesDisabledFeatures() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .codex,
+                codexDisabledFeatures: ["computer_use", "apps", "computer_use"])))
+
+        #expect(response.success)
+        #expect(recorder.shellBodies.contains(
+            "tbd --disable 'computer_use' --disable 'apps' --dangerously-bypass-approvals-and-sandbox"))
+    }
+
+    @Test("terminal.create refuses disabled features for non-Codex terminals",
+          arguments: [TerminalCreateType?.none, .claude, .shell])
+    func terminalCreateRefusesDisabledFeaturesForNonCodex(type: TerminalCreateType?) async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: type, codexDisabledFeatures: ["computer_use"])))
+
+        #expect(!response.success)
+        #expect(response.error == TerminalCreateParams.codexDisableRequiresCodexMessage)
+        #expect(recorder.calls.isEmpty)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+    }
+
+    @Test("terminal.create refuses a malformed disabled feature name")
+    func terminalCreateRefusesMalformedDisabledFeature() async throws {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .codex, codexDisabledFeatures: ["x; rm -rf ~"])))
+
+        #expect(!response.success)
+        #expect(recorder.calls.isEmpty)
+        #expect(try await db.terminals.list(worktreeID: wt.id).isEmpty)
+    }
+
+    // MARK: - Recreate: Codex launch options (branch-test rule)
+
+    /// Create a Codex terminal over RPC, then recreate its window, and return
+    /// the recreate's Codex launch. Creation opens its window with
+    /// `new-window`, so the last `respawn-window` body is always the recreate.
+    private func createThenRecreateCodex(
+        model: String? = nil, disabledFeatures: [String]? = nil
+    ) async throws -> (relaunch: String, before: Terminal, after: Terminal) {
+        let (router, db, recorder) = makeFixture()
+        defer { Task { await cleanup(db) } }
+        let (_, wt) = try await seedRepoAndWorktree(db)
+        router.codexExecutableResolver = { "/opt/test/bin/codex" }
+        router.codexHomeEnsurer = {
+            FileManager.default.temporaryDirectory.appendingPathComponent(
+                "tbd-test-codex-home-\(UUID().uuidString)", isDirectory: true)
+        }
+
+        let created = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: wt.id, type: .codex, model: model,
+                codexDisabledFeatures: disabledFeatures)))
+        #expect(created.success, "create failed: \(created.error ?? "nil")")
+        let terminal = try created.decodeResult(Terminal.self)
+        let before = try #require(try await db.terminals.get(id: terminal.id))
+
+        let recreated = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id)))
+        #expect(recreated.success, "recreate failed: \(recreated.error ?? "nil")")
+        let relaunch = try #require(
+            recorder.calls.last { $0.contains("respawn-window") }?.last)
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        return (relaunch, before, after)
+    }
+
+    @Test("terminal.recreate relaunches Codex with the model and disabled features it was created with")
+    func terminalRecreateReappliesCodexLaunchOptions() async throws {
+        let (relaunch, before, after) = try await createThenRecreateCodex(
+            model: "acme-model", disabledFeatures: ["computer_use", "browser_use"])
+
+        let options = CodexLaunchOptions(
+            model: "acme-model", disabledFeatures: ["computer_use", "browser_use"])
+        #expect(before.codexLaunchOptions == options)
+        #expect(relaunch.contains(
+            #"tbd -c 'model="acme-model"' --disable 'computer_use' --disable 'browser_use' --dangerously-bypass-approvals-and-sandbox"#))
+        // Kept for the next relaunch as well.
+        #expect(after.codexLaunchOptions == options)
+    }
+
+    @Test("terminal.recreate relaunches a Codex terminal created without options with the default command")
+    func terminalRecreateWithoutCodexLaunchOptionsIsUnchanged() async throws {
+        let (relaunch, before, after) = try await createThenRecreateCodex()
+
+        #expect(before.codexLaunchOptions == nil)
+        #expect(relaunch.contains(" tbd --dangerously-bypass-approvals-and-sandbox"))
+        #expect(!relaunch.contains("model="))
+        #expect(!relaunch.contains("--disable"))
+        #expect(after.codexLaunchOptions == nil)
     }
 
     // MARK: - Spawn: Claude free-form env overrides (branch-test rule)
