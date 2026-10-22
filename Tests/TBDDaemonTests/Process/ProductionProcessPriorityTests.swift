@@ -13,7 +13,9 @@ struct ProductionProcessPriorityTests {
     @Test func aRealTreeIsLoweredReadBackAndRestored() async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 30 & sleep 30 & wait"]
+        // Sleeps far longer than any test pass, so a starved runner cannot see
+        // the tree exit before it is read. The defer kills it.
+        process.arguments = ["-c", "sleep 600 & sleep 600 & wait"]
         try process.run()
         let root = process.processIdentifier
         defer {
@@ -25,9 +27,10 @@ struct ProductionProcessPriorityTests {
         let seam = ProductionProcessPriority()
 
         // The shell forks its two sleeps just after it starts.
-        let forked = await pollUntilTrue(timeout: .seconds(10)) { seam.subtree(of: root).count == 3 }
-        #expect(forked == .satisfied)
+        let forked = await pollUntilTrue(timeout: .seconds(30)) { seam.subtree(of: root).count == 3 }
+        try #require(forked == .satisfied)
         let tree = seam.subtree(of: root)
+        try #require(tree.count == 3)
         #expect(tree.first == root)
 
         for pid in tree { #expect((seam.basePriority(of: pid) ?? 0) > ProductionProcessPriority.backgroundCeiling) }
