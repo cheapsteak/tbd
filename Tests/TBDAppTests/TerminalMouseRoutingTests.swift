@@ -80,7 +80,7 @@ struct TerminalMouseRoutingTests {
         private let suiteName: String
         private var scratchDirectories: [URL] = []
 
-        init() {
+        init(width: CGFloat = 600) {
             // Enough of an application for AppKit to have an app object;
             // `NSWindow` reaches for one.
             _ = NSApplication.shared
@@ -90,17 +90,17 @@ struct TerminalMouseRoutingTests {
             suiteName = "TBDAppTests.TerminalMouseRouting.\(UUID().uuidString)"
             defaults = UserDefaults(suiteName: suiteName)!
             view = TBDTerminalView(
-                frame: CGRect(x: 0, y: 0, width: 600, height: 300),
+                frame: CGRect(x: 0, y: 0, width: width, height: 300),
                 font: TBDTerminalView.defaultMonospaceFont,
                 appearance: AppearanceSettings(defaults: defaults))
 
             // Borderless, far off every plausible display, never ordered front
             // and never made key: the window exists so the view has one.
             window = NSWindow(
-                contentRect: NSRect(x: -20_000, y: -20_000, width: 600, height: 300),
+                contentRect: NSRect(x: -20_000, y: -20_000, width: width, height: 300),
                 styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
-            let ground = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+            let ground = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 300))
             ground.addSubview(view)
             window.contentView = ground
 
@@ -124,9 +124,33 @@ struct TerminalMouseRoutingTests {
         /// The URL every link fixture points at.
         static let linkURL = "https://example.com/acme"
 
-        /// An OSC 8 hyperlink over "open me" at the start of the first row.
-        func showOSC8Link() {
-            show("\u{1b}]8;;\(Self.linkURL)\u{1b}\\open me\u{1b}]8;;\u{1b}\\")
+        /// The text an OSC 8 link fixture shows.
+        static let linkText = "open me"
+
+        /// `linkText` as an OSC 8 hyperlink to `linkURL`.
+        static var osc8Link: String {
+            "\u{1b}]8;;\(linkURL)\u{1b}\\\(linkText)\u{1b}]8;;\u{1b}\\"
+        }
+
+        /// The OSC 8 link alone on the first row, starting at `column`.
+        func showOSC8Link(atColumn column: Int = 0) {
+            show("\u{1b}[1;\(column + 1)H\(Self.osc8Link)")
+        }
+
+        /// SwiftTerm's own cell width, the one its mouse-up hit-tests a
+        /// release against. SwiftTerm snaps the font's advance to device
+        /// pixels — `(advance * scale).rounded() / scale` in
+        /// `computeFontDimensions` — and TBD's `cellDimensions()` mirror does
+        /// not, so the two drift apart by a fraction of a cell per column.
+        /// SwiftTerm measured while the view had no window; setting the font
+        /// again has it measure against this window's scale, which is the
+        /// scale this snaps with.
+        func swiftTermCellWidth() -> CGFloat {
+            let font = view.font
+            view.font = font
+            let advance = font.advancement(forGlyph: font.glyph(withName: "W")).width
+            let scale = window.backingScaleFactor
+            return max(1, (advance * scale).rounded() / scale)
         }
 
         /// Routing on for a holder panel, a program holding the mouse, and a
@@ -251,6 +275,9 @@ struct TerminalMouseRoutingTests {
 
         TerminalPanelRepresentable.applyMouseRouting(
             to: fixture.view, forwardMouseToApps: forwardMouseToApps, transport: .holder)
+        // Which forwarder is live, so the toggle-on case cannot pass through
+        // the passthrough instead of SwiftTerm.
+        #expect(fixture.view.allowMouseReporting == forwardMouseToApps)
         fixture.programTakesTheMouse()
         await fixture.mainQueueTurn()
         fixture.recorder.sent.removeAll()
@@ -375,7 +402,7 @@ struct TerminalMouseRoutingTests {
 
     /// Letting Cmd go before the button means SwiftTerm opens nothing, so its
     /// mouse-up would go on to report a release the program never saw
-    /// pressed. The release is consumed instead.
+    /// pressed. Reporting is suppressed for that call, so it reports nothing.
     @Test("Cmd let go before the button on a link: no link, and no orphan release")
     func commandLetGoBeforeReleaseReportsNothing() async {
         let fixture = Fixture()
@@ -419,25 +446,104 @@ struct TerminalMouseRoutingTests {
         #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
     }
 
-    /// The release goes to SwiftTerm only when its mouse-up will open a link,
-    /// and that prediction holds for the default `.hoverWithModifier`
-    /// highlight mode alone. Under `.always` SwiftTerm opens no printed URL,
-    /// so handing it the release would report it; it is consumed instead.
-    @Test("under another link highlight mode the release is consumed, never reported")
-    func commandReleaseUnderAnotherHighlightModeIsConsumed() async {
+    /// SwiftTerm, not TBD, decides whether a withheld release opens a link,
+    /// so its highlight mode applies as it does with reporting off. Under
+    /// `.always` its `linkVisibleForClick` accepts explicit links only: an
+    /// OSC 8 link opens and a URL detected in the text does not. Either way
+    /// the release is never reported.
+    @Test("under the .always highlight mode a Cmd+click opens an OSC 8 link but not a printed URL, and reports nothing")
+    func highlightModeIsSwiftTermsToApply() async {
         let fixture = Fixture()
         defer { fixture.tearDown() }
         fixture.view.linkHighlightMode = .always
-        fixture.show("see \(Fixture.linkURL) now")
+        // "open me" on columns 0-6, the printed URL from column 12.
+        fixture.show("\(Fixture.osc8Link) see https://example.com/printed now")
         await fixture.takeTheMouse()
 
-        fixture.click(at: fixture.point(col: 8, row: 0), [.command])
+        fixture.click(at: fixture.point(col: 2, row: 0), [.command])
         await fixture.mainQueueTurn()
+        #expect(fixture.recorder.openedLinks == [Fixture.linkURL], "the OSC 8 link under .always")
+
+        fixture.click(at: fixture.point(col: 16, row: 0), [.command])
+        await fixture.mainQueueTurn()
+        #expect(fixture.recorder.openedLinks == [Fixture.linkURL], "the printed URL under .always")
 
         #expect(
             fixture.recorder.reports.isEmpty,
             "a release reached the program without its press: \(Self.readable(fixture.recorder.reports))")
         let controlClickReported = await fixture.controlClickIsReported()
         #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
+    }
+
+    /// SwiftTerm hit-tests a release against its own cells, snapped to device
+    /// pixels, and TBD's `cellDimensions()` mirror is not snapped: at the
+    /// default Monaco 12 on a 1x or 2x display a cell is 7 points to SwiftTerm
+    /// and about 7.2 to the mirror, so by column 100 the two disagree by close
+    /// to three cells. Each click lands at the center of a cell as SwiftTerm
+    /// counts them — the link's first and last characters, and one cell
+    /// beyond each end — so a decision made with TBD's cell math would leave
+    /// a highlighted link unopened, or hand SwiftTerm a release with no link
+    /// under it to report.
+    @Test("past column 100 a Cmd+click opens exactly the link SwiftTerm hit-tests, and reports nothing")
+    func commandClickFollowsSwiftTermsCellsAtHighColumns() async {
+        let fixture = Fixture(width: 1_000)
+        defer { fixture.tearDown() }
+        let cellWidth = fixture.swiftTermCellWidth()
+        let first = 100
+        let last = first + Fixture.linkText.count - 1
+        fixture.showOSC8Link(atColumn: first)
+        await fixture.takeTheMouse()
+        let firstRow = fixture.point(col: 0, row: 0).y
+
+        let clicks: [(col: Int, opens: Bool)] = [
+            (first, true), (last, true), (first - 1, false), (last + 1, false),
+        ]
+        for click in clicks {
+            let openedBefore = fixture.recorder.openedLinks.count
+            let point = CGPoint(x: cellWidth * (CGFloat(click.col) + 0.5), y: firstRow)
+            fixture.click(at: point, [.command])
+            await fixture.mainQueueTurn()
+            let opened = fixture.recorder.openedLinks.count - openedBefore
+            #expect(opened == (click.opens ? 1 : 0), "a Cmd+click at column \(click.col) opened \(opened) links")
+        }
+
+        #expect(fixture.recorder.openedLinks == [Fixture.linkURL, Fixture.linkURL])
+        #expect(
+            fixture.recorder.reports.isEmpty,
+            "a Cmd+click past column 100 reached the program: \(Self.readable(fixture.recorder.reports))")
+        let controlClickReported = await fixture.controlClickIsReported()
+        #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
+    }
+
+    /// The Cmd rule keys on reporting, not on the toggle, so it holds in a
+    /// remote-attach terminal, which reports the mouse whatever the toggle
+    /// says. Mounted the way `LocalPTYTerminalRepresentable` mounts one:
+    /// reporting set on directly, the toggle off and so no Option bypass, and
+    /// no panel click routing.
+    @Test("in a remote-attach terminal with the toggle off, a Cmd+click sends the program nothing")
+    func remoteAttachCommandClickReportsNothing() async {
+        let fixture = Fixture()
+        defer { fixture.tearDown() }
+        fixture.view.onMouseDownClaimFocus = nil
+        fixture.view.allowMouseReporting = true
+        fixture.view.optionBypassesMouseReporting = false
+        fixture.show("just some words")
+        fixture.programTakesTheMouse()
+        await fixture.mainQueueTurn()
+        fixture.recorder.sent.removeAll()
+
+        fixture.click(at: fixture.point(col: 2, row: 0), [.command])
+        await fixture.mainQueueTurn()
+        #expect(
+            fixture.recorder.reports.isEmpty,
+            "a Cmd+click in a remote-attach terminal reached the program: \(Self.readable(fixture.recorder.reports))")
+
+        fixture.click(at: fixture.point(col: 30, row: 3))
+        await fixture.mainQueueTurn()
+        let reports = fixture.recorder.reports
+        let shown = Self.readable(reports)
+        #expect(reports.filter(Self.isLeftPress).count == 1, "control presses sent: \(shown)")
+        #expect(reports.filter(Self.isLeftRelease).count == 1, "control releases sent: \(shown)")
+        #expect(reports.count == 2, "control reports sent: \(shown)")
     }
 }
