@@ -48,5 +48,7 @@ struct AgentsCommandsTests {
             == "Agent background priority: on for 2m 5s more, 7 processes lowered")
         #expect(backgroundSummary(AgentsBackgroundResult(active: false), now: now)
             == "Agent background priority: off")
+        #expect(backgroundSummary(AgentsBackgroundResult(active: false, loweredCount: 2), now: now)
+            == "Agent background priority: off, 2 processes not yet restored (retried every minute)")
     }
 }

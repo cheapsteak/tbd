@@ -18,6 +18,7 @@ final class FakeProcessPriority: ProcessPriority, @unchecked Sendable {
     private var table: [pid_t: Proc] = [:]
     private var lowered: [pid_t] = []
     private var restored: [pid_t] = []
+    private var restoreRefused: Set<pid_t> = []
     private var beforeLowering: (@Sendable (pid_t) -> Void)?
 
     /// Runs just before each lower, so a test can look at what is on disk then.
@@ -35,6 +36,13 @@ final class FakeProcessPriority: ProcessPriority, @unchecked Sendable {
     /// The pid is reissued to a different process, at normal priority.
     func recycle(_ pid: pid_t, start: Int64) {
         lock.withLock { table[pid]?.startMicros = start; table[pid]?.priority = 20 }
+    }
+
+    /// The kernel refuses (`refused: true`) or allows again a restore of `pid`.
+    func refuseRestore(_ pid: pid_t, refused: Bool = true) {
+        lock.withLock {
+            if refused { restoreRefused.insert(pid) } else { restoreRefused.remove(pid) }
+        }
     }
 
     func priority(of pid: pid_t) -> Int32? { lock.withLock { table[pid]?.priority } }
@@ -55,7 +63,7 @@ final class FakeProcessPriority: ProcessPriority, @unchecked Sendable {
 
     func restore(_ pid: pid_t) -> Bool {
         lock.withLock {
-            guard table[pid] != nil else { return false }
+            guard table[pid] != nil, !restoreRefused.contains(pid) else { return false }
             table[pid]?.priority = 20
             restored.append(pid)
             return true
@@ -229,6 +237,52 @@ struct AgentBackgroundControllerTests {
 
         #expect(!result.active)
         #expect(Set(fake.restoredPIDs) == [100, 101, 102])
+        #expect(!FileManager.default.fileExists(atPath: path))
+    }
+
+    @Test func aRefusedRestoreKeepsItsRecordAndTheNextSweepRetriesIt() async throws {
+        let fake = makeTable()
+        let path = statePath()
+        let date = MovableDate(epoch)
+        let controller = makeController(fake, roots: [100], path: path, date: date)
+        try await controller.on(for: .seconds(600))
+        fake.refuseRestore(101)
+
+        let off = await controller.off()
+
+        #expect(off == AgentsBackgroundResult(active: false, loweredCount: 1))
+        #expect(Set(fake.restoredPIDs) == [100, 102])
+        #expect(fake.priority(of: 101) == 4)
+        #expect(FileManager.default.fileExists(atPath: path), "the record is kept for the retry")
+
+        date.advance(by: 60)
+        await controller.sweep()
+        #expect(fake.priority(of: 101) == 4, "still refused: still recorded")
+        #expect(FileManager.default.fileExists(atPath: path))
+
+        fake.refuseRestore(101, refused: false)
+        date.advance(by: 60)
+        await controller.sweep()
+
+        #expect(fake.priority(of: 101) == 20)
+        #expect(await controller.status() == AgentsBackgroundResult(active: false))
+        #expect(!FileManager.default.fileExists(atPath: path))
+    }
+
+    @Test func aRefusedRestoreThatExitsLeavesNothingBehind() async throws {
+        let fake = makeTable()
+        let path = statePath()
+        let date = MovableDate(epoch)
+        let controller = makeController(fake, roots: [100], path: path, date: date)
+        try await controller.on(for: .seconds(600))
+        fake.refuseRestore(101)
+        await controller.off()
+
+        fake.remove(101)
+        date.advance(by: 60)
+        await controller.sweep()
+
+        #expect(await controller.status() == AgentsBackgroundResult(active: false))
         #expect(!FileManager.default.fileExists(atPath: path))
     }
 

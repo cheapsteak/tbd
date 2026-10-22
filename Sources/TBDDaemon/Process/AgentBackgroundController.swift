@@ -40,13 +40,15 @@ enum AgentBackgroundError: LocalizedError, Equatable, CustomStringConvertible {
 ///
 /// **What it restores.** Each recorded `(pid, start time)` whose current start
 /// time still equals the recorded one. A recycled pid, or one that exited, is
-/// skipped. A process that started during the lease and inherited background
+/// skipped. One whose restore is refused stays recorded and is retried at each
+/// sweep. A process that started during the lease and inherited background
 /// priority keeps it until it exits.
 ///
 /// **Reclaimer.** `agent-background.json` is one file, rewritten in place, owned
-/// by this actor: `sweep()` deletes it when the lease ends and `recoverOnStart()`
-/// deletes it when a daemon starts to find an expired or unreadable one. If the
-/// daemon never comes back the lowered processes stay lowered until they exit.
+/// by this actor: `sweep()` deletes it once the lease has ended and every record
+/// is restored, and `recoverOnStart()` does the same when a daemon starts to
+/// find an expired one, or deletes an unreadable one. If the daemon never comes
+/// back the lowered processes stay lowered until they exit.
 actor AgentBackgroundController {
     /// One lowered process.
     struct Record: Codable, Equatable, Sendable {
@@ -114,14 +116,20 @@ actor AgentBackgroundController {
         return status()
     }
 
+    /// Not active once the lease has ended, even while processes whose restore
+    /// was refused are still recorded for the next sweep to retry.
     func status() -> AgentsBackgroundResult {
         guard let state else { return AgentsBackgroundResult(active: false) }
+        guard now() < state.leaseEndsAt else {
+            return AgentsBackgroundResult(active: false, loweredCount: state.lowered.count)
+        }
         return AgentsBackgroundResult(
             active: true, leaseEndsAt: state.leaseEndsAt, loweredCount: state.lowered.count)
     }
 
-    /// One pass: end an expired lease, otherwise lower any agent process that
-    /// appeared since the last one. Does nothing without a lease.
+    /// One pass: end an expired lease (which retries any restore an earlier
+    /// pass was refused), otherwise lower any agent process that appeared since
+    /// the last one. Does nothing without a lease.
     func sweep() async {
         guard let leased = state else { return }
         if now() >= leased.leaseEndsAt {
@@ -248,14 +256,27 @@ actor AgentBackgroundController {
 
     // MARK: - Private
 
+    /// Restores every recorded process that is still the same process. One whose
+    /// restore is refused keeps its record, under a lease that has already
+    /// ended, so each sweep tries it again until it restores or exits; the file
+    /// is deleted only when nothing is left to restore.
     private func endLease() {
-        if let state {
-            var restored = 0
-            for record in state.lowered where priority.startTimeMicros(of: record.pid) == record.startMicros {
-                if priority.restore(record.pid) { restored += 1 }
-            }
-            backgroundLogger.info(
-                "restored \(restored, privacy: .public) of \(state.lowered.count, privacy: .public) agent processes")
+        guard let ended = state else {
+            removeFile()
+            return
+        }
+        var unrestored: [Record] = []
+        for record in ended.lowered where priority.startTimeMicros(of: record.pid) == record.startMicros {
+            if !priority.restore(record.pid) { unrestored.append(record) }
+        }
+        backgroundLogger.info(
+            "restored \(ended.lowered.count - unrestored.count, privacy: .public) of \(ended.lowered.count, privacy: .public) agent processes")
+        guard unrestored.isEmpty else {
+            backgroundLogger.error(
+                "could not restore \(unrestored.count, privacy: .public) agent processes; retrying at the next sweep")
+            state = State(leaseEndsAt: min(ended.leaseEndsAt, now()), lowered: unrestored)
+            persist()
+            return
         }
         state = nil
         removeFile()

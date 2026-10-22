@@ -31,7 +31,9 @@ func parseBackgroundLease(_ text: String) -> Int? {
 /// The one line `tbd agents background` prints.
 func backgroundSummary(_ result: AgentsBackgroundResult, now: Date = Date()) -> String {
     guard result.active, let ends = result.leaseEndsAt else {
-        return "Agent background priority: off"
+        guard result.loweredCount > 0 else { return "Agent background priority: off" }
+        return "Agent background priority: off, \(result.loweredCount) processes not yet restored "
+            + "(retried every minute)"
     }
     let remaining = max(0, Int(ends.timeIntervalSince(now)))
     return "Agent background priority: on for \(remaining / 60)m \(remaining % 60)s more, "
