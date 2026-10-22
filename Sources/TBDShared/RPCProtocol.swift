@@ -377,7 +377,7 @@ public enum RPCMethod {
     /// The the agent background priority command (`agent_background_enabled`). Reading needs no method of its
     /// own: `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetAgentBackgroundEnabled = "config.setAgentBackgroundEnabled"
-    /// The the start admission gate (`start_admission_enabled`). Reading needs no method of its
+    /// The start admission gate (`start_admission_enabled`). Reading needs no method of its
     /// own: `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetStartAdmissionEnabled = "config.setStartAdmissionEnabled"
     /// Turns agent background priority on (with a lease), off, or reports it.
