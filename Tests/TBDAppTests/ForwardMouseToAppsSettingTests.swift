@@ -54,4 +54,16 @@ struct ForwardMouseToAppsSettingTests {
         #expect(AppState.forwardMouseToAppsEnabled(stored: true, shippedDefault: false))
         #expect(!AppState.forwardMouseToAppsEnabled(stored: nil, shippedDefault: false))
     }
+
+    /// A SwiftUI view's `@AppStorage` cannot be inspected headlessly, so this
+    /// pins the copy the view renders (it reads these same statics) instead.
+    @Test("the Settings toggle uses the agreed title and subtitle")
+    func settingsToggleCopy() {
+        #expect(
+            TerminalSettingsView.forwardMouseToAppsTitle
+                == "Send clicks and drags to apps that use the mouse")
+        #expect(
+            TerminalSettingsView.forwardMouseToAppsSubtitle
+                == "Option- or Shift-drag still selects text in TBD.")
+    }
 }
