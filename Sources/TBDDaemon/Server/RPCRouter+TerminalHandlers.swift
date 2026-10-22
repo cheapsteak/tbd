@@ -199,6 +199,14 @@ extension RPCRouter {
         // spawn.
         let plannedTerminalID = UUID()
 
+        // Which agent this call spawns, decided once: the admission gate and the
+        // spawn below read the same answer. Codex wins; otherwise a Claude type
+        // or any resume of a session is Claude; everything else is a shell.
+        let isCodexType = params.type == .codex
+        let isClaudeType = !isCodexType
+            && (params.type == .claude || params.resumeSessionID != nil)
+        let startAgent: StartAdmissionAgent? = isCodexType ? .codex : (isClaudeType ? .claude : nil)
+
         // Request row before the first mutating step. `profile` is deliberately
         // absent: it is resolved further down, after the tmux server exists, and
         // reordering that resolution would move which failures happen before the
@@ -207,10 +215,10 @@ extension RPCRouter {
             .terminalCreate, actor: actor,
             target: .local(worktree: params.worktreeID, terminal: plannedTerminalID),
             prompt: params.prompt,
-            agent: (params.type ?? .shell).rawValue)
+            agent: startAgent?.rawValue ?? (params.type ?? .shell).rawValue)
 
         // Start admission: an agent start only. A shell tab starts no agent.
-        if let startAgent = params.type.flatMap({ StartAdmissionAgent(rawValue: $0.rawValue) }),
+        if let startAgent,
            let held = await holdStartIfDenied(
                actuationID, actor: actor, agent: startAgent,
                worktreeID: params.worktreeID, terminalID: plannedTerminalID) {
@@ -261,7 +269,7 @@ extension RPCRouter {
         // vars from SystemPromptBuilder.promptLayers; those describe TBD as
         // a Claude-centric host and would be misleading noise inside a
         // Codex pane.
-        if params.type == .codex {
+        if isCodexType {
             guard let codexPreparation else {
                 await finishActuation(
                     actuationID, .refused(.notEligible),
@@ -337,7 +345,6 @@ extension RPCRouter {
             return try RPCResponse(result: terminal)
         }
 
-        let isClaudeType = params.type == .claude || params.resumeSessionID != nil
         // Login sessions are always fresh Claude spawns pinned to a profile:
         // the whole point is capturing `/login` credentials into that
         // profile's isolated config dir.

@@ -170,6 +170,24 @@ struct StartAdmissionRouterTests {
         #expect(fixture.stub.requests.first?.agent == .claude)
     }
 
+    @Test("a resume with no type, or a shell type, is a Claude start and is held",
+          arguments: [nil, TerminalCreateType.shell])
+    func resumeWithoutClaudeTypeIsHeld(type: TerminalCreateType?) async throws {
+        let fixture = try await makeFixture()
+        let worktree = try await makeWorktree(in: fixture.db)
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalCreate,
+            params: TerminalCreateParams(
+                worktreeID: worktree.id, type: type, resumeSessionID: "session-9")))
+
+        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
+        #expect(fixture.stub.requests.map(\.agent) == [.claude])
+        #expect(try await fixture.db.terminals.list(worktreeID: worktree.id).isEmpty)
+        let spawn = try #require(try rows(at: fixture.logPath).first)
+        #expect(spawn["agent"] as? String == "claude")
+    }
+
     @Test("a shell terminal.create is never checked")
     func shellCreateIsNotChecked() async throws {
         let fixture = try await makeFixture()
