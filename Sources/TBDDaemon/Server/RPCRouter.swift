@@ -332,6 +332,12 @@ public final class RPCRouter: Sendable {
     /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md, "Presence".
     nonisolated(unsafe) var sessionModPluginSync: (@Sendable ([SessionModFeature]) -> Void)?
 
+    /// Answers "may this agent start now?" for the start-admission gate
+    /// (`start_admission_enabled`). Production runs the user's command; tests
+    /// assign a stub verdict. Design:
+    /// docs/specs/2026-10-21-agent-start-admission-design.md.
+    nonisolated(unsafe) var startAdmission: any StartAdmissionEvaluating = StartAdmissionGate()
+
     /// How the swap paths build the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
     /// `SessionRecaptureScheduler(db:tmux:)`. The mirror of
@@ -1085,6 +1091,10 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
             case RPCMethod.configSetComposerDraftEnabled:
                 return try await handleConfigSetComposerDraftEnabled(request.paramsData)
+            case RPCMethod.configSetStartAdmissionEnabled:
+                return try await handleConfigSetStartAdmissionEnabled(request.paramsData)
+            case RPCMethod.configSetAgentBackgroundEnabled:
+                return try await handleConfigSetAgentBackgroundEnabled(request.paramsData)
             case RPCMethod.configSetSessionModUsageEnabled:
                 return try await handleConfigSetSessionModUsageEnabled(request.paramsData)
             case RPCMethod.configSetRemoteTranscriptLiveSyncEnabled:
@@ -1255,6 +1265,8 @@ public final class RPCRouter: Sendable {
         result.programStatusEnabled = config.programStatusEnabled
         result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
         result.composerDraftEnabled = config.composerDraftEnabled
+        result.agentBackgroundEnabled = config.agentBackgroundEnabled
+        result.startAdmissionEnabled = config.startAdmissionEnabled
         result.sessionModUsageEnabled = config.sessionModUsageEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds

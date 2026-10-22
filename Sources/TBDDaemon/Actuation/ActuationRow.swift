@@ -153,6 +153,11 @@ enum RefusedReason: String, Codable, Sendable, CaseIterable {
     /// stale coordinate names a live stranger (issue #384); the record has to
     /// be able to say that is what happened.
     case targetMismatch = "target-mismatch"
+    /// The user's start-admission command said no to an agent start or wake
+    /// (docs/specs/2026-10-21-agent-start-admission-design.md). The request is
+    /// well formed and its target exists; a policy the user wrote declined it,
+    /// and the detail carries that command's reason. Nothing was started.
+    case held
 }
 
 /// The synchronous outcome of one act, as the daemon classifies it just before

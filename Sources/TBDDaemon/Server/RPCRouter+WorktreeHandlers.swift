@@ -57,6 +57,18 @@ extension RPCRouter {
             throw error
         }
 
+        // Start admission: this create ends in the primary agent's spawn. The
+        // phase-1 `.creating` row is the only thing written so far, and a hold
+        // removes it so nothing of the create remains.
+        let configuredPrimary = (try? await db.config.get())?.primaryAgentPreference
+        let primaryAgent = StartAdmissionAgent(
+            params.primaryAgentPreference ?? configuredPrimary ?? .defaultValue)
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: primaryAgent, worktreeID: pending.id) {
+            try? await db.worktrees.delete(id: pending.id)
+            return held
+        }
+
         // Arm the per-worktree auto-archive-on-merge override when the spawn
         // requested it. nil leaves the row following the global default.
         if let autoArchive = params.autoArchiveOnMerge {
@@ -556,6 +568,22 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
+        // Start admission: revive spawns the primary agent. Archived Claude
+        // sessions mean Claude; otherwise the configured preference decides,
+        // as the lifecycle's own resolution does.
+        let archivedSessions = (try? await db.worktrees.get(id: params.worktreeID))?
+            .archivedClaudeSessions ?? []
+        let reviveAgent: StartAdmissionAgent
+        if !archivedSessions.isEmpty || params.preferredSessionID != nil {
+            reviveAgent = .claude
+        } else {
+            reviveAgent = StartAdmissionAgent(
+                (try? await db.config.get())?.primaryAgentPreference ?? .defaultValue)
+        }
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: reviveAgent, worktreeID: params.worktreeID) {
+            return held
+        }
         // Non-blocking: when a preSession hook gates the primary terminals,
         // this returns promptly with the row in `.creating` (which is what
         // the app gates its pre-session UI on — beginReviveWorktree flips it
@@ -610,6 +638,12 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .worktreeReviveConversationFresh, actor: actor,
             target: ActuationTarget(worktree: params.archivedWorktreeID.uuidString))
+
+        // Start admission: this brings a Claude conversation back.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude, worktreeID: params.archivedWorktreeID) {
+            return held
+        }
 
         let lifecycle = self.lifecycle
         let outcome: (

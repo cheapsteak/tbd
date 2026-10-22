@@ -209,6 +209,14 @@ extension RPCRouter {
             prompt: params.prompt,
             agent: (params.type ?? .shell).rawValue)
 
+        // Start admission: an agent start only. A shell tab starts no agent.
+        if let startAgent = params.type.flatMap({ StartAdmissionAgent(rawValue: $0.rawValue) }),
+           let held = await holdStartIfDenied(
+               actuationID, actor: actor, agent: startAgent,
+               worktreeID: params.worktreeID, terminalID: plannedTerminalID) {
+            return held
+        }
+
         // Look up repo once for system prompt env vars and Claude session setup
         let repo: Repo?
         if let rid = worktree.repoID {
@@ -1179,6 +1187,13 @@ extension RPCRouter {
         // Claude-kind with a live session id → resume it. Mirrors the
         // archived-session restore spawn in WorktreeLifecycle+Create.
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {
+            // Start admission: only this branch launches an agent. Every
+            // other kind opens a shell.
+            if let held = await holdStartIfDenied(
+                actuationID, actor: actor, agent: .claude,
+                worktreeID: worktree.id, terminalID: plannedTerminalID) {
+                return held
+            }
             let repo: Repo?
             if let rid = worktree.repoID {
                 repo = try await actuating(actuationID) { try await db.repos.get(id: rid) }
@@ -2607,6 +2622,15 @@ extension RPCRouter {
                 terminal: mode == .fork ? plannedTerminalID : oldTerminal.id),
             agent: TerminalKind.claude.rawValue,
             profile: resolved?.profileID.uuidString)
+
+        // Start admission: this swap launches a replacement Claude. The fork
+        // refusal above and the cold re-home start nothing and are not checked.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude,
+            worktreeID: worktree.id,
+            terminalID: mode == .fork ? plannedTerminalID : oldTerminal.id) {
+            return held
+        }
 
         // Carry the session transcript into the DESTINATION config dir so the
         // forked `claude --resume <id>` finds the conversation. Only matters on

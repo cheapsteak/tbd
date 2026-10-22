@@ -127,6 +127,13 @@ extension RPCRouter {
             target: .local(worktree: worktree.id, terminal: plannedTerminalID),
             agent: TerminalKind.codex.rawValue)
 
+        // Start admission: the spawn below launches Codex.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .codex,
+            worktreeID: worktree.id, terminalID: plannedTerminalID) {
+            return held
+        }
+
         let terminal: Terminal
         do {
             terminal = try await tmux.withWorktreeServerLock(

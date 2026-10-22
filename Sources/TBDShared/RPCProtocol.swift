@@ -130,6 +130,11 @@ public enum RPCErrorCode: String, Sendable {
     /// saved. The app asks whether to hibernate anyway, and a yes reissues the
     /// park with `TerminalHibernateParams.overrideUnconfirmedDraft`.
     case composerDraftUnconfirmed
+    /// An agent start or wake was held by the user's start-admission command
+    /// (`~/tbd/hooks/start-admission`). The message is the command's reason.
+    /// Nothing was started and nothing is queued: the caller asks again when
+    /// it chooses to. `tbd` prints `held: <reason>` and exits 75.
+    case startHeld
 }
 
 // MARK: - RPC Method Names
@@ -369,6 +374,12 @@ public enum RPCMethod {
     /// through the session mod. Reading needs no method of its own:
     /// `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetComposerDraftEnabled = "config.setComposerDraftEnabled"
+    /// The the agent background priority command (`agent_background_enabled`). Reading needs no method of its
+    /// own: `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetAgentBackgroundEnabled = "config.setAgentBackgroundEnabled"
+    /// The the start admission gate (`start_admission_enabled`). Reading needs no method of its
+    /// own: `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetStartAdmissionEnabled = "config.setStartAdmissionEnabled"
     /// The session usage gate (`session_mod_usage_enabled`): whether Claude
     /// sessions started from now on record their context window, rate limits
     /// and cost through the session mod. Reading needs no method of its own:
@@ -3970,6 +3981,18 @@ public struct ConfigSetComposerDraftEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setStartAdmissionEnabled` — the start admission gate (default OFF).
+public struct ConfigSetStartAdmissionEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setAgentBackgroundEnabled` — the agent background priority command (default OFF).
+public struct ConfigSetAgentBackgroundEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// Params for `config.setSessionModUsageEnabled` — the gate for recording a
 /// Claude session's context window, rate limits and cost through the session
 /// mod (default OFF during soak). Design:
@@ -4379,6 +4402,12 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// (`composer_draft_enabled`). Default OFF while it soaks. Resolved
     /// through `Config.composerDraftDefault`.
     public var composerDraftEnabled: Bool = Config.composerDraftDefault
+    /// Whether the agent background priority command is on (`agent_background_enabled`). Default OFF.
+    /// Resolved through `Config.agentBackgroundDefault`.
+    public var agentBackgroundEnabled: Bool = Config.agentBackgroundDefault
+    /// Whether the start admission gate is on (`start_admission_enabled`). Default OFF.
+    /// Resolved through `Config.startAdmissionDefault`.
+    public var startAdmissionEnabled: Bool = Config.startAdmissionDefault
     /// Whether session usage recording is on (`session_mod_usage_enabled`).
     /// Default OFF while it soaks. Resolved through
     /// `Config.sessionModUsageDefault`.
@@ -4525,6 +4554,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
+        agentBackgroundEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .agentBackgroundEnabled) ?? Config.agentBackgroundDefault
+        startAdmissionEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .startAdmissionEnabled) ?? Config.startAdmissionDefault
         sessionModUsageEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.

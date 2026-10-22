@@ -181,6 +181,15 @@ extension RPCRouter {
             throw error
         }
 
+        // Start admission: the replacement launches Claude. Nothing has been
+        // replaced yet, so a hold only gives back the reserved session name.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude,
+            worktreeID: prepared.source.worktreeID, terminalID: prepared.source.id) {
+            await lifecycle.sessionTitles.release(prepared.claudeSpawnTitle)
+            return held
+        }
+
         let response: RPCResponse
         do {
             response = try await tmux.withWorktreeServerLock(

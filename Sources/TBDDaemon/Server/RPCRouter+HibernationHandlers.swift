@@ -138,6 +138,12 @@ extension RPCRouter {
             .terminalWake, actor: actor,
             target: await resolvedTerminalTarget(params.terminalID),
             prompt: params.prompt)
+        // Start admission: checked only when this wake would start an agent.
+        // A wake of a live terminal falls through to its no-op answer below.
+        if let held = await holdWakeIfDenied(
+            actuationID, actor: actor, terminalID: params.terminalID) {
+            return held
+        }
         let result = await hibernationCoordinator.wake(
             terminalID: params.terminalID, cols: params.cols, rows: params.rows,
             allowDefaultProfileFallback: params.fallbackToDefaultProfile ?? false,

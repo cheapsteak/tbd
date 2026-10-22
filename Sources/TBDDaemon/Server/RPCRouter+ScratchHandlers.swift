@@ -62,6 +62,19 @@ extension RPCRouter {
             .scratchCreate, actor: actor,
             target: ActuationTarget(worktree: wt.id.uuidString))
 
+        // Start admission: the spawn below launches the primary agent. A hold
+        // takes back the folder and row created above, so a held create
+        // leaves nothing behind (unlike a failed spawn, which keeps them).
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor,
+            agent: StartAdmissionAgent(
+                (try? await db.config.get())?.primaryAgentPreference ?? .defaultValue),
+            worktreeID: wt.id) {
+            try? await db.worktrees.delete(id: wt.id)
+            try? fm.removeItem(at: dir)
+            return held
+        }
+
         // Spawn the default primary agent terminal (Claude/Codex/shell per the
         // global primary-agent preference), mirroring what repo worktrees get on
         // creation. Best-effort: a spawn failure must not fail scratch creation —
