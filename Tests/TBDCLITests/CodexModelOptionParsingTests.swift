@@ -95,4 +95,15 @@ struct CodexModelOptionParsingTests {
             try TerminalCreateParams.normalizedCodexDisabledFeatures(["apps\n"])
         }
     }
+
+    @Test func terminalCreateResolvesRelativeCodexHomeBeforeRequest() throws {
+        let parsed = try TerminalCreate.parse(
+            ["wt", "--type", "codex", "--codex-home", "profiles/../guarded"])
+        #expect(TerminalCreate.normalizedCodexHomePath(
+            parsed.codexHome, currentDirectoryPath: "/synthetic/worktree")
+            == "/synthetic/worktree/guarded")
+        #expect(TerminalCreate.normalizedCodexHomePath(
+            "/synthetic/../guarded", currentDirectoryPath: "/synthetic/worktree")
+            == "/synthetic/../guarded")
+    }
 }

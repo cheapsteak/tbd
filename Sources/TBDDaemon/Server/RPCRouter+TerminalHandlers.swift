@@ -139,15 +139,38 @@ extension RPCRouter {
     }
 
     func handleTerminalCreate(
-        _ paramsData: Data, actor: ActuationActor? = nil
+        _ paramsData: Data, actor: ActuationActor? = nil,
+        requiresCodexHome: Bool = false
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalCreateParams.self, from: paramsData)
+
+        if requiresCodexHome || params.codexHome != nil, params.type != .codex {
+            return RPCResponse(error: TerminalCreateParams.codexHomeRequiresCodexMessage)
+        }
+        if requiresCodexHome, params.codexHome == nil {
+            return RPCResponse(error: "terminal.createGuardedCodex requires codexHome")
+        }
+        if !requiresCodexHome, params.codexHome != nil {
+            return RPCResponse(error: "codexHome requires terminal.createGuardedCodex")
+        }
 
         // A model override is a Codex launch argument. Refuse it for every
         // other kind rather than silently dropping it: Claude models come from
         // TBD model profiles, and a shell has no model.
         if params.model != nil, params.type != .codex {
             return RPCResponse(error: TerminalCreateParams.modelRequiresCodexMessage)
+        }
+        // Validate an explicit Codex home before creating any terminal, pane,
+        // server or actuation. The normal no-flag launch remains unchanged.
+        let guardedCodexHome: URL?
+        if let path = params.codexHome {
+            do {
+                guardedCodexHome = try GuardedCodexHome.validate(path)
+            } catch {
+                return RPCResponse(error: error.localizedDescription)
+            }
+        } else {
+            guardedCodexHome = nil
         }
 
         // Disabled features are likewise a Codex launch argument. Refuse them
@@ -166,6 +189,10 @@ extension RPCRouter {
             }
         } else {
             codexDisabledFeatures = []
+        }
+        if guardedCodexHome != nil,
+           let disabledHookFeature = codexDisabledFeatures.first(where: GuardedCodexHome.hookFeatureKeys.contains) {
+            return RPCResponse(error: "--codex-disable \(disabledHookFeature) would turn off the guard of a --codex-home terminal.")
         }
 
         // Look up the worktree to get tmux server and path
@@ -198,11 +225,15 @@ extension RPCRouter {
         // Resolve Codex before creating any tmux state. A GUI-launched daemon
         // can have a minimal PATH, and a resolution failure must not leave an
         // orphan window or terminal row behind.
-        let codexPreparation = params.type == .codex
-            ? try CodexLaunchPreparation.prepare(
+        let codexPreparation: CodexLaunchPreparation?
+        if params.type == .codex {
+            codexPreparation = try CodexLaunchPreparation.prepare(
+                guardedHome: guardedCodexHome?.path,
                 executableResolver: codexExecutableResolver,
-                homeEnsurer: codexHomeEnsurer)
-            : nil
+                sharedHomeEnsurer: codexHomeEnsurer)
+        } else {
+            codexPreparation = nil
+        }
 
         // Resolve initial size: caller-supplied → TmuxManager defaults to avoid
         // tmux's 80x24 default producing un-reflowable hard-wrapped scrollback.
@@ -301,16 +332,20 @@ extension RPCRouter {
             // agent. FORCED over user overrides (matching the claude path): an
             // agent tab runs a command and must never block on the interactive
             // update prompt. No profile is resolved for Codex, so that scope is nil.
-            let codexEnvOverrides = EnvOverrideResolver.merge(
+            let mergedCodexEnvOverrides = EnvOverrideResolver.merge(
                 global: createConfig?.envOverrides,
                 repo: repo?.envOverrides,
                 profile: nil
             ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
+            let codexEnvOverrides = GuardedCodexHome.forcingHome(
+                mergedCodexEnvOverrides, codexPreparation, guarded: guardedCodexHome != nil)
             let codexSpawnEnv = codexEnv
-            // The same model and features the command below is built from,
-            // recorded on the row so a relaunch of Codex in this tab keeps them.
+            // The same model, features and home the command below is built
+            // from, recorded on the row so a relaunch of Codex in this tab
+            // keeps them (and validates the home again).
             let codexLaunchOptions = CodexLaunchOptions.recorded(
-                model: params.model, disabledFeatures: codexDisabledFeatures)
+                model: params.model, disabledFeatures: codexDisabledFeatures,
+                codexHome: guardedCodexHome?.path)
             let terminal = try await actuating(actuationID) {
                 try await tmux.withWorktreeServerLock(
                     db: db, worktreeID: params.worktreeID,
@@ -1607,12 +1642,23 @@ extension RPCRouter {
         }
 
         // Resolve and prepare Codex before killing a recreatable pane. A bad
-        // executable override must leave the existing terminal untouched.
+        // executable override must leave the existing terminal untouched, and
+        // so must a dedicated home that no longer passes its guard check: the
+        // tab is refused rather than relaunched on the shared home.
+        let isCodexTab = terminal.kind == .codex || terminal.label == TerminalLabel.codex
+        let guardedCodexHome: String?
+        if isCodexTab {
+            guardedCodexHome = try await db.terminals
+                .codexLaunchOptionsForRelaunch(id: terminal.id)?.codexHome
+        } else {
+            guardedCodexHome = nil
+        }
         let codexPreparation: CodexLaunchPreparation?
-        if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
+        if isCodexTab {
             codexPreparation = try CodexLaunchPreparation.prepare(
+                guardedHome: guardedCodexHome,
                 executableResolver: codexExecutableResolver,
-                homeEnsurer: codexHomeEnsurer)
+                sharedHomeEnsurer: codexHomeEnsurer)
         } else {
             codexPreparation = nil
         }
@@ -1658,22 +1704,28 @@ extension RPCRouter {
             } else {
                 recreateRepo = nil
             }
-            let codexEnvOverrides = EnvOverrideResolver.merge(
-                global: recreateConfig?.envOverrides,
-                repo: recreateRepo?.envOverrides,
-                profile: nil
-            ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
+            let codexEnvOverrides = GuardedCodexHome.forcingHome(
+                EnvOverrideResolver.merge(
+                    global: recreateConfig?.envOverrides,
+                    repo: recreateRepo?.envOverrides,
+                    profile: nil
+                ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced },
+                codexPreparation, guarded: guardedCodexHome != nil)
             let updatedTerminal = try await actuating(actuationID) {
                 try await tmux.withWorktreeServerLock(
                     db: db, worktreeID: worktree.id,
                     allowedStatuses: [worktree.status]
                 ) { currentWorktree in
+                    // The home prepared above must still be this tab's.
+                    let currentHome = try await self.db.terminals
+                        .codexLaunchOptionsForRelaunch(id: terminal.id)?.codexHome
                     guard let currentTerminal = try await self.db.terminals.get(
                         id: terminal.id),
                           expectedReplacementState.matches(currentTerminal),
                           currentTerminal.kind == .codex
                             || currentTerminal.label == TerminalLabel.codex,
-                          !currentTerminal.isParked else {
+                          !currentTerminal.isParked,
+                          currentHome == guardedCodexHome else {
                         throw StaleTerminalReplacementError()
                     }
                     let expectedIncarnation = TerminalSessionIncarnation(
@@ -1743,7 +1795,8 @@ extension RPCRouter {
                             cwd: currentWorktree.path,
                             // Relaunch with the model and disabled features
                             // the tab was started with, read from the row
-                            // re-fetched under this lock.
+                            // re-fetched under this lock (its home is checked
+                            // against the prepared one above).
                             shellCommand: CodexSpawnCommandBuilder.command(
                                 executablePath: codexPreparation.executablePath,
                                 launchOptions: currentTerminal.codexLaunchOptions),

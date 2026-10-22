@@ -506,6 +506,46 @@ struct ContinueInClaudeTransactionTests {
             .codexLaunchOptions == Self.launchOptions)
     }
 
+    /// A dedicated Codex home carries the tab's guard; a Claude process
+    /// would not run under it, so the tab stays on Codex.
+    @Test("a Codex tab with a dedicated home is refused before anything changes")
+    func guardedHomeTabIsRefused() async throws {
+        let fixture = try await makeRPCFixture(
+            ownsPane: true,
+            codexLaunchOptions: CodexLaunchOptions(codexHome: "/synthetic/guarded-home"))
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let before = try #require(
+            try await fixture.db.terminals.get(id: fixture.terminal.id))
+        let response = await continueRequest(fixture)
+        #expect(!response.success)
+        #expect(response.error?.contains("dedicated Codex home") == true)
+        #expect(try await fixture.db.terminals.get(id: before.id) == before)
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+    }
+
+    /// Recovery relaunches Codex in the same tab, so a guarded row whose home
+    /// no longer passes its check stays pending instead of restoring Codex on
+    /// the shared home.
+    @Test("durable pending recovery leaves a guarded row pending when its home lost its guard")
+    func startupRecoveryRefusesUnguardedHome() async throws {
+        let fixture = try await makeRPCFixture(
+            ownsPane: true,
+            codexLaunchOptions: CodexLaunchOptions(codexHome: "/synthetic/missing-guarded-home"))
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let crashedDestinationToken = UUID()
+        _ = try #require(try await fixture.db.terminals.beginContinueInClaude(
+            id: fixture.terminal.id,
+            expectedState: TerminalContinueInClaudeSnapshot(terminal: fixture.terminal),
+            pendingIncarnationID: crashedDestinationToken))
+
+        await fixture.router.reconcilePendingContinueInClaude()
+
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+        let row = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(row.pendingSessionIncarnationID == crashedDestinationToken)
+        #expect(row.codexLaunchOptions?.codexHome == "/synthetic/missing-guarded-home")
+    }
+
     /// Once the tab runs Claude, the Codex options no longer describe it.
     @Test("RPC success clears the Codex launch options")
     func rpcSuccessClearsLaunchOptions() async throws {

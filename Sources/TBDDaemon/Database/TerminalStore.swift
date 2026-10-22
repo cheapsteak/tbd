@@ -177,6 +177,16 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 /// existing `try?` treatment: an unreadable provenance blob must degrade to
 /// "no provenance recorded" — which `Terminal.observedActivity` already reads
 /// as no fact — rather than take the whole row's decode with it.
+/// A recorded `codex_launch_options` value that no longer decodes. A relaunch
+/// refuses on it rather than guess whether it named a dedicated Codex home.
+public struct UnreadableCodexLaunchOptions: Error, LocalizedError, CustomStringConvertible {
+    public let terminalID: UUID
+    public var description: String {
+        "Terminal \(terminalID)'s recorded Codex launch options cannot be read, so Codex is not relaunched in it: they may name a dedicated Codex home."
+    }
+    public var errorDescription: String? { description }
+}
+
 enum FactColumnJSON {
     static func encode<T: Encodable>(_ value: T?) -> String? {
         guard let value else { return nil }
@@ -842,6 +852,23 @@ public struct TerminalStore: Sendable {
         try await writer.read { db in
             try TerminalRecord.fetchOne(db, key: id.uuidString)?.toModel()
         }
+    }
+
+    /// The Codex launch options a relaunch of this tab must honor, read
+    /// strictly. The row model degrades an unreadable value to "none", which
+    /// is unsafe here: the value may name a dedicated Codex home, and a
+    /// relaunch without it would run on the shared home with no guard. So a
+    /// recorded value that does not decode throws, and the relaunch refuses.
+    public func codexLaunchOptionsForRelaunch(id: UUID) async throws -> CodexLaunchOptions? {
+        let raw = try await writer.read { db in
+            try TerminalRecord.fetchOne(db, key: id.uuidString)?.codex_launch_options
+        }
+        guard let raw else { return nil }
+        guard let data = raw.data(using: .utf8),
+              let options = try? JSONDecoder().decode(CodexLaunchOptions.self, from: data) else {
+            throw UnreadableCodexLaunchOptions(terminalID: id)
+        }
+        return options
     }
 
     /// Delete a terminal by ID.

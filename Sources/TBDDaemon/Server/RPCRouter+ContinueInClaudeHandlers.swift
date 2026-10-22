@@ -233,6 +233,15 @@ extension RPCRouter {
                 "Continue in Claude requires an awake Codex terminal.",
                 code: .terminalSessionGone)
         }
+        // A dedicated Codex home carries this tab's guard, which a Claude
+        // process would not run under, so the tab stays on Codex. Read
+        // strictly: an unreadable record refuses here too.
+        let recordedCodexHome = try await db.terminals
+            .codexLaunchOptionsForRelaunch(id: source.id)?.codexHome
+        guard recordedCodexHome == nil else {
+            throw ContinueInClaudeError(
+                "Terminal \(source.id) runs Codex in a dedicated Codex home (--codex-home), whose guard a Claude tab would not keep. Its Codex session is unchanged.")
+        }
         guard source.pendingSessionIncarnationID == nil else {
             throw ContinueInClaudeError(
                 "Terminal \(source.id) already has a provider replacement pending.",
@@ -316,9 +325,12 @@ extension RPCRouter {
             rolloutPath: rolloutFingerprint.path,
             worktreePath: worktree.path)
 
+        // The rollback relaunches Codex in this tab, so it prepares the tab's
+        // own home (none is guarded here: such tabs were refused above).
         let codexPreparation = try CodexLaunchPreparation.prepare(
+            guardedHome: recordedCodexHome,
             executableResolver: codexExecutableResolver,
-            homeEnsurer: codexHomeEnsurer)
+            sharedHomeEnsurer: codexHomeEnsurer)
         let profileFlag = codexProfileFlagResolver(codexPreparation.executablePath)
 
         let repo: Repo? = if let repoID = worktree.repoID {
@@ -407,11 +419,13 @@ extension RPCRouter {
             "TBD_TERMINAL_ID": source.id.uuidString,
             "CODEX_HOME": codexPreparation.codexHome.path,
         ]
-        let codexSensitiveEnv = EnvOverrideResolver.merge(
-            global: config?.envOverrides,
-            repo: repo?.envOverrides,
-            profile: nil
-        ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
+        let codexSensitiveEnv = GuardedCodexHome.forcingHome(
+            EnvOverrideResolver.merge(
+                global: config?.envOverrides,
+                repo: repo?.envOverrides,
+                profile: nil
+            ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced },
+            codexPreparation, guarded: recordedCodexHome != nil)
         // The rollback relaunches Codex in this same tab, so it keeps the
         // model and disabled features the tab was started with.
         let codexCommand = CodexSpawnCommandBuilder.build(
@@ -632,9 +646,14 @@ extension RPCRouter {
             throw ContinueInClaudeError("Pending Codex recovery has no source identity.")
         }
         _ = try CodexRolloutFingerprint.read(path: sourceRolloutPath)
+        // A guarded row restores in its own home, or stays pending; so does a
+        // row whose recorded options cannot be read.
+        let recordedCodexHome = try await db.terminals
+            .codexLaunchOptionsForRelaunch(id: candidate.id)?.codexHome
         let codexPreparation = try CodexLaunchPreparation.prepare(
+            guardedHome: recordedCodexHome,
             executableResolver: codexExecutableResolver,
-            homeEnsurer: codexHomeEnsurer)
+            sharedHomeEnsurer: codexHomeEnsurer)
         // A pending row is still the Codex tab, so its recorded options are
         // the ones the restored Codex must keep.
         let command = CodexSpawnCommandBuilder.build(
@@ -660,11 +679,13 @@ extension RPCRouter {
             "TBD_TERMINAL_ID": candidate.id.uuidString,
             "CODEX_HOME": codexPreparation.codexHome.path,
         ]
-        let sensitiveEnv = EnvOverrideResolver.merge(
-            global: config?.envOverrides,
-            repo: repo?.envOverrides,
-            profile: nil
-        ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced }
+        let sensitiveEnv = GuardedCodexHome.forcingHome(
+            EnvOverrideResolver.merge(
+                global: config?.envOverrides,
+                repo: repo?.envOverrides,
+                profile: nil
+            ).merging(["DISABLE_AUTO_UPDATE": "true"]) { _, forced in forced },
+            codexPreparation, guarded: recordedCodexHome != nil)
 
         try await tmux.withWorktreeServerLock(
             db: db,

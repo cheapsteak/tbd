@@ -790,6 +790,9 @@ public final class RPCRouter: Sendable {
                 return try await handleWorktreeForget(request.paramsData, actor: request.actor)
             case RPCMethod.terminalCreate:
                 return try await handleTerminalCreate(request.paramsData, actor: request.actor)
+            case RPCMethod.terminalCreateGuardedCodex:
+                return try await handleTerminalCreate(
+                    request.paramsData, actor: request.actor, requiresCodexHome: true)
             case RPCMethod.serverList:
                 return try await handleServerList(request.paramsData)
             case RPCMethod.serverStart:
