@@ -1767,15 +1767,17 @@ public final class Daemon: Sendable {
 
             // 11a-agent-background. Agent background priority: restore or resume a
             // lease the last daemon left, then sweep every 60 s. Does nothing
-            // without a lease.
+            // without a lease. The router gets the controller only after
+            // `start()` has restored that lease, so an `agents.background on`
+            // cannot overwrite the saved state first.
             let backgroundPriority = ProductionProcessPriority()
             let backgroundRoots = AgentBackgroundRoots(
                 database: database, tmux: tmux, priority: backgroundPriority)
             let backgroundController = AgentBackgroundController(
                 priority: backgroundPriority, roots: { await backgroundRoots.resolve() })
             self.agentBackgroundController = backgroundController
-            rpcRouter.agentBackground = backgroundController
             await backgroundController.start()
+            rpcRouter.agentBackground = backgroundController
 
             // 11a-dev-servers. Start the monitor step 8f built and wired: its
             // initial read, the running-file directory watch and the 10 s
