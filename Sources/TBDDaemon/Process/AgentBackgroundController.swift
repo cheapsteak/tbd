@@ -32,9 +32,11 @@ enum AgentBackgroundError: LocalizedError, Equatable, CustomStringConvertible {
 /// **What it lowers.** The roots `rootsProvider` names (the job a holder tab
 /// runs, or a tmux pane's process) and everything below each. Never the holder
 /// or the tmux server: they carry the terminal's input and output, and a root's
-/// subtree does not contain its parent. A process already in the background is
-/// left alone and never recorded, so a restore never undoes someone else's
-/// choice.
+/// subtree does not contain its parent. Never the daemon either: one started
+/// from an agent tab's pane and never re-parented sits in that tab's tree, so a
+/// tree that reaches it leaves out the daemon, what it started and what it runs
+/// under. A process already in the background is left alone and never recorded,
+/// so a restore never undoes someone else's choice.
 ///
 /// **What it restores.** Each recorded `(pid, start time)` whose current start
 /// time still equals the recorded one. A recycled pid, or one that exited, is
@@ -64,6 +66,7 @@ actor AgentBackgroundController {
     private let now: @Sendable () -> Date
     private let sweepInterval: Duration
     private let clock: any Clock<Duration>
+    private let ownPID: pid_t
     private var state: State?
     private var loopTask: Task<Void, Never>?
 
@@ -73,7 +76,8 @@ actor AgentBackgroundController {
         statePath: String = TBDConstants.agentBackgroundStatePath,
         now: @escaping @Sendable () -> Date = { Date() },
         sweepInterval: Duration = .seconds(60),
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        ownPID: pid_t = getpid()
     ) {
         self.priority = priority
         self.rootsProvider = roots
@@ -81,6 +85,7 @@ actor AgentBackgroundController {
         self.now = now
         self.sweepInterval = sweepInterval
         self.clock = clock
+        self.ownPID = ownPID
     }
 
     // MARK: - Commands
@@ -136,7 +141,9 @@ actor AgentBackgroundController {
 
         var candidates: [Record] = []
         for root in roots {
-            for pid in priority.subtree(of: root) where !recorded.contains(pid) {
+            let tree = priority.subtree(of: root)
+            let spared = tree.contains(ownPID) ? daemonAndItsLine() : []
+            for pid in tree where !recorded.contains(pid) && !spared.contains(pid) {
                 guard let start = priority.startTimeMicros(of: pid),
                       priority.isBackground(pid) == false
                 else { continue }
@@ -175,6 +182,23 @@ actor AgentBackgroundController {
         }
         backgroundLogger.info(
             "lowered \(current.lowered.count, privacy: .public) agent processes")
+    }
+
+    /// The daemon, everything below it, and every process it runs under. A
+    /// holder tab's job below the daemon is still its own root, so it is
+    /// lowered on its own walk.
+    private func daemonAndItsLine() -> Set<pid_t> {
+        var spared = Set(priority.subtree(of: ownPID))
+        spared.insert(ownPID)
+        var pid = ownPID
+        // Bounded, so a pid table that loops cannot hang the sweep.
+        for _ in 0..<64 {
+            guard let parent = priority.parentPID(of: pid), parent > 1,
+                  spared.insert(parent).inserted
+            else { break }
+            pid = parent
+        }
+        return spared
     }
 
     // MARK: - Lifecycle

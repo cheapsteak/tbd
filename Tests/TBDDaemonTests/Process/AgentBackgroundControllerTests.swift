@@ -102,11 +102,12 @@ struct AgentBackgroundControllerTests {
     private func makeController(
         _ fake: FakeProcessPriority, roots: [pid_t], path: String, date: MovableDate,
         clock: any Clock<Duration> = ContinuousClock(),
+        ownPID: pid_t = 9_999,
         onRoots: @escaping @Sendable () -> Void = {}
     ) -> AgentBackgroundController {
         AgentBackgroundController(
             priority: fake, roots: { onRoots(); return roots }, statePath: path,
-            now: { date.date }, clock: clock)
+            now: { date.date }, clock: clock, ownPID: ownPID)
     }
 
     /// holder 50 (never a root) > job 100 > shell 101 > build 102, plus a second tab 200 > 201.
@@ -133,6 +134,25 @@ struct AgentBackgroundControllerTests {
         #expect(Set(fake.loweredPIDs) == [100, 101, 102, 200, 201])
         #expect(fake.priority(of: 50) == 20, "the holder carries input and output and stays put")
         #expect(result.leaseEndsAt == epoch.addingTimeInterval(600))
+    }
+
+    /// The daemon (150) was started from tab 100's shell and never re-parented.
+    /// It has its own holder (160), whose job 170 is a tab of its own.
+    @Test func aTreeThatReachesTheDaemonLeavesOutTheDaemonItsChildrenAndItsLine() async throws {
+        let fake = makeTable()
+        fake.add(150, parent: 101, start: 2_150)
+        fake.add(160, parent: 150, start: 2_160)
+        fake.add(170, parent: 160, start: 2_170)
+        fake.add(171, parent: 170, start: 2_171)
+        let controller = makeController(
+            fake, roots: [100, 170], path: statePath(), date: MovableDate(epoch), ownPID: 150)
+
+        try await controller.on(for: .seconds(600))
+
+        #expect(Set(fake.loweredPIDs) == [102, 170, 171])
+        for spared: pid_t in [100, 101, 150, 160] {
+            #expect(fake.priority(of: spared) == 20, "pid \(spared) is the daemon, its holder or its line")
+        }
     }
 
     @Test func aProcessAlreadyInTheBackgroundIsNeitherLoweredNorRestored() async throws {
@@ -382,7 +402,12 @@ struct AgentBackgroundControllerTests {
         try await clock.requireAdvanceWhenArmed(by: .seconds(60))
         _ = await swept.next()
 
-        #expect(fake.priority(of: 103) == 4)
+        // `onRoots` fires as the loop's sweep reads its roots, before it lowers
+        // anything, so the lowering is waited for rather than read at once.
+        let lowered = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            fake.priority(of: 103) == 4
+        }
+        #expect(lowered == .satisfied)
         await controller.stop()
     }
 }

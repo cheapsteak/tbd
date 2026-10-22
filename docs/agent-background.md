@@ -26,6 +26,8 @@ the flag off.
 
 For each agent (Claude Code or Codex) tab that is not parked, TBD finds the root of the tab's process
 tree and lowers that process and everything below it. It never lowers the holder or the tmux server.
+It never lowers the TBD daemon either: if the daemon was started from inside an agent tab, that tab's
+walk leaves out the daemon, everything below it and every process it runs under.
 A process already in the background is left alone, and TBD restores only what it lowered itself.
 
 While the lease is on, the daemon repeats the walk every 60 seconds, so agents started or woken
