@@ -1,0 +1,210 @@
+# Start admission and background priority for agent sessions
+
+TBD starts and wakes Claude Code and Codex sessions on request from other programs: a
+command typed in one TBD terminal that opens another, a script that runs `tbd terminal
+create` or `tbd terminal wake`, a supervisor that wakes sleeping tabs to deliver work. On a
+laptop that also carries its owner's video calls, those starts are the moments that can push
+memory and CPU past what the call needs. One case measured on a 12-core, 24 GiB machine:
+five agent sessions started in ten minutes took the one-minute load from 32 to 168 with swap
+full, and the camera stopped mid-call because its driver could not allocate frame buffers.
+
+This design adds two features, both off by default:
+
+1. **Start admission.** Before TBD starts or wakes an agent session that a program asked
+   for, it runs a command the user wrote. The command says yes or no; TBD holds a "no" and
+   says why. Starts the user makes in the TBD app are never held.
+2. **Background priority.** A command that moves every agent process tree TBD owns to
+   macOS background priority, and back, on a lease that ends by itself.
+
+TBD decides neither when the machine is full nor when a call is on. Those thresholds differ
+by machine and by person, which makes them a theory two reasonable projects would answer
+differently (`docs/theory-placement.md`). So the policy is the user's command, and the
+caller that turns background priority on owns the "when". TBD compiles only what it alone
+can do: the gate at its own start boundary, the classification of who asked, the timeout
+brake, the priority change on processes only it can identify, and the clock that restores
+them when nobody renews.
+
+## Start admission
+
+### Which starts
+
+An agent start is a request that would launch a Claude Code or Codex process on this machine:
+
+- `terminal.create` with type `claude` or `codex` (fresh, resumed or forked)
+- `worktree.create` and `scratch.create`, whose primary terminal is an agent
+- `worktree.revive` and `worktree.reviveConversationFresh`
+- `terminal.wake`, `terminal.resume` and `worktree.resume`, for a terminal that is parked and
+  whose kind is `claude` or `codex`
+- `terminal.continueInCodex`, `terminal.continueInClaude`, `terminalHistory.revive` and
+  `terminal.swapProfile`
+
+Not checked:
+
+- Shell terminals, hook terminals and dev-server tabs (`server.start`).
+- A wake of a terminal that is not parked. It starts nothing, and the wake path already
+  answers it as a no-op.
+- `terminal.recreateWindow` and `terminal.migrateTransport`. Both repair or move a session
+  the machine is already carrying, and a held repair leaves a broken tab.
+- Remote sessions. They run on another machine.
+
+### Who is checked
+
+Each request carries its `ActuationActor`. The gate checks every actor except two:
+
+- `app` is never checked. Everything the app sends follows something the person did in
+  it, including the wake that selecting a parked tab performs.
+- `daemon` is never checked. TBD's own rails (startup recovery of a half-created
+  worktree, transport migration) are out of scope for this version.
+
+So `session` (a `tbd` command run inside a TBD terminal, usually an agent), `anonymous` (a
+`tbd` command run outside TBD, usually a script or another tool's timer), the reserved
+`supervisor` kind, and any kind a newer client declares are all checked. The actor is
+self-declared, not authenticated (`ActuationActor.swift`). This is a resource policy, not a
+security boundary: a caller that claims to be the app defeats only its own user's policy.
+
+### The command
+
+`~/tbd/hooks/start-admission`, resolved through `TBDConstants` so it honors `TBD_HOME`. One
+file per machine, not per repo, because the question is about the machine.
+
+- The flag is off, or the file is absent: every start proceeds as before.
+- The file is present: TBD runs it through `runBoundedProcess` with a 10-second limit, its
+  own environment, and these variables added:
+  - `TBD_START_KIND` – `create` or `wake`
+  - `TBD_AGENT` – `claude` or `codex`
+  - `TBD_ACTOR` – the actor's kind
+  - `TBD_WORKTREE_ID` – the worktree the start belongs to
+  - `TBD_TERMINAL_ID` – the terminal, when the start names one
+- Exit 0: the start proceeds.
+- Any other exit: the start is held. The reason is the first non-empty line of stdout,
+  cut to 200 characters, or `start-admission exited N` when stdout has none.
+- No answer in 10 seconds, a signal, or a file that cannot run: the start is held with a
+  reason naming that. A user who installed a gate wants it to hold when it cannot decide.
+
+### What a hold does
+
+TBD keeps no queue of held starts. The caller already holds the request and decides when to
+ask again, which is exactly the "when" this design keeps out of the daemon.
+
+- The gate runs after the request's actuation row is written and before the first step that
+  changes anything, so a held create writes no terminal row, branch, worktree or window.
+- The actuation record gets a `refused` outcome with the new reason `held`, carrying the
+  hook's reason. The record can then answer "which starts did the gate stop?" without
+  reading prose.
+- The RPC fails with the new error code `startHeld`, and its message is the reason.
+- `tbd` prints `held: <reason>` on stderr and exits 75 (`EX_TEMPFAIL`, try again later), for
+  every command whose RPC came back `startHeld`.
+- A held wake also records the reason and the time on the terminal row
+  (`start_held_reason`, `start_held_at`). The parked pane's notice then reads, for example,
+  "Automatic wake held at 9:12: <reason>". The next successful wake clears both. A held
+  create has no row to mark; its caller reports it.
+
+### The flag
+
+`start_admission_enabled`, a `config` column with no SQL default, so NULL means nobody
+chose. `Config.startAdmissionDefault = false`. Set with `tbd config set start-admission
+on|off`, shown by `tbd config get`.
+
+## Background priority
+
+### What macOS does
+
+Measured on macOS 26:
+
+- `setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)` (what `taskpolicy -b -p PID`
+  does) moves that one process to background priority: its base priority drops to 4, its
+  disk I/O is throttled, and so are sockets it opens afterwards. Children it already has
+  keep their priority. The `getpriority(2)` page says only the calling process may be
+  named; on macOS 26 another process of the same user can be, as `taskpolicy -p` relies on.
+- A child started after the change inherits background priority.
+- `setpriority(PRIO_DARWIN_PROCESS, pid, 0)` (what `taskpolicy -B -p PID` does) restores
+  that one process. Its children keep whatever they have.
+- The state reads back from the process's base priority (`proc_pidinfo`,
+  `PROC_PIDTASKINFO`, `pti_priority`): 4 while in the background. `getpriority` cannot
+  read it for another process; it answers 0 either way.
+
+TBD calls `setpriority` and reads `proc_pidinfo` directly, without starting a process per
+PID.
+
+### The command
+
+- `tbd agents background on --for <duration>` – required duration, at most 2 hours, written
+  as `90s`, `10m` or `1h`. Calling it again renews the lease.
+- `tbd agents background off` – restores now.
+- `tbd agents background status [--json]` – whether a lease is active, when it ends, and how
+  many processes TBD lowered.
+
+One RPC, `agents.background`, carries all three. It is not an actuation row: it changes no
+session's input, pty or lifecycle, and its effect is recorded in its own state file instead.
+
+**On:** for each agent terminal that is not parked, TBD finds the root of the agent's
+process tree (the holder's child for a holder session, `#{pane_pid}` for a tmux pane) and
+walks its descendants. Each process not already in the background is lowered and recorded
+as (PID, start time). A process already in the background is left alone and not recorded,
+so TBD never restores what someone else lowered. The holder and the tmux server are never
+lowered: they carry the terminal's input and output.
+
+**While on:** a sweep every 60 seconds, on an injected clock, repeats the walk. It lowers
+any agent process that appeared since the last one, including the trees of agents started
+or woken during the lease. With start admission on and a policy that holds starts during a
+call, few such agents appear.
+
+**Off, or the lease ends without renewal:** TBD restores each recorded process whose start
+time still matches, then clears the record. A process that started during the lease and
+inherited background priority keeps it until it exits: a build an agent started during a
+call finishes at background priority, which is what the call wanted.
+
+A terminal at background priority still takes input and shows output; it is slower to
+compute, not stopped.
+
+### Restarts
+
+The lease's end and the record live in one file, `~/tbd/agent-background.json`, rewritten
+in place. At daemon start an expired lease restores its recorded processes and deletes the
+file; a live one is kept and swept. One file, overwritten, cannot accumulate. If the daemon
+never comes back, the lowered processes stay lowered until they exit.
+
+### The flag
+
+`agent_background_enabled`, the same three-state pattern. While it is off, `on` fails with
+a message naming the flag; `off` and `status` always work, so a user can restore after
+turning the flag off.
+
+## Testing
+
+- **The actor table** – each actor kind against each start kind, with the flag on and off.
+- **The command runner** – exit 0; exit 1 with a reason; exit 1 with no output; a timeout on
+  a test clock; a file that cannot run; a missing file.
+- **Hold paths** – a held create writes no row, branch or window; a held wake records its
+  reason, spawns nothing, and a later wake clears it; the CLI exits 75 and prints the reason.
+- **Background** – a real `sleep` tree lowered and restored, read back from base priority; a
+  process already in the background is neither recorded nor restored; lease expiry on a test
+  clock; the restart path from the file; a recycled PID (start time mismatch) left untouched.
+- **By hand, once** – one stub agent tab at background priority still takes input and shows
+  output.
+
+## Who reclaims what
+
+- The two terminal columns live and die with their row.
+- `agent-background.json` is one file, owned by the sweep and by daemon start.
+- Neither feature creates a branch, window, process or directory.
+
+## Not in this version
+
+- Checking TBD's own daemon rails.
+- A queue of held starts inside TBD, with retries.
+- Toggles in the app's settings; `tbd config set` sets both flags.
+
+## Rejected alternatives
+
+- **TBD retries held starts itself.** That compiles an answer to "when to try again", and
+  the callers that make these requests already queue them.
+- **TBD reads the camera, the microphone or a calendar.** That is one user's policy; the
+  admission command and the caller of background priority hold it.
+- **`renice` instead of background priority.** Nice changes CPU priority only. Background
+  priority is the macOS policy for work that must not compete with the person at the
+  machine, and it throttles I/O too.
+- **A per-repo admission hook.** Room on the machine does not depend on the repository.
+- **Lowering an agent at the moment it spawns.** It would add a step to every spawn path
+  for a gain of at most one sweep interval, during a lease in which an admission policy
+  usually holds new starts anyway.
