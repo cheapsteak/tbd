@@ -29,16 +29,11 @@ struct TmuxConfigurationPathPresentation: Equatable {
 }
 
 struct TerminalSettingsView: View {
-    static let forwardMouseToAppsTitle = "Send clicks and drags to apps that use the mouse"
-    static let forwardMouseToAppsSubtitle = "Option- or Shift-drag still selects text in TBD."
-
     @EnvironmentObject var appearance: AppearanceSettings
     @Environment(AppState.self) var appState
     @AppStorage(AppState.terminalAutoResizeKey) private var enableTerminalAutoResize: Bool = false
     @AppStorage(AppState.useMetalTerminalRendererKey) private var useMetalTerminalRenderer: Bool =
         AppState.useMetalTerminalRendererDefault
-    @AppStorage(AppState.forwardMouseToAppsKey) private var forwardMouseToApps: Bool =
-        AppState.forwardMouseToAppsDefault
 
     @StateObject private var editorVM = TerminalThemeEditorViewModel()
     @State private var showingSaveAsDialog = false
@@ -231,14 +226,10 @@ struct TerminalSettingsView: View {
                 Text("Takes effect for terminals opened after the change — restart the app to switch every open terminal at once.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Toggle(Self.forwardMouseToAppsTitle, isOn: $forwardMouseToApps)
-                Text(Self.forwardMouseToAppsSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             } header: {
                 Text("Experimental")
             } footer: {
-                Text("All off by default — under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane. To bail out of auto-resize or GPU rendering, turn it off and restart the app; the mouse setting applies immediately.")
+                Text("Both off by default — under active development. Auto-resize has known bugs around tmux \"window-size manual\" lock-in that can clip the bottom rows of a pane; to bail out of either setting, turn it off and restart the app.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

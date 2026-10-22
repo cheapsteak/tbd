@@ -6,8 +6,8 @@ When a program in a TBD terminal turns on mouse reporting, TBD should give
 that program the mouse, the way iTerm2 does. A plain click or drag reaches the
 program, and the program does its own selection and copy. Option-drag or
 Shift-drag bypasses the program and selects text in TBD, as today. The
-behavior ships behind a default-off Settings toggle, applies to terminals on
-the pty-holder transport, and leaves the scroll wheel on TBD's own path.
+behavior applies to terminals on the pty-holder transport and leaves the
+scroll wheel on TBD's own path.
 
 ## Why
 
@@ -31,14 +31,12 @@ modifier gets the terminal's selection.
 
 ## Behavior
 
-Everything below applies only while the toggle is on, with one exception.
-Remote-attach terminals report the mouse whatever the toggle says, so the
-rule that a Cmd press never reaches a program holding the mouse (see "What
-stays TBD's") applies there with the toggle off too. There it also closes an
-orphan press: left to itself, SwiftTerm reports the press of a Cmd+click on
-an OSC 8 link, opens the link on release and returns before reporting the
-release, leaving the program a press with no release. Apart from that rule,
-with the toggle off TBD behaves as it does without this design.
+Remote-attach terminals report the mouse on their own, so the rule that a Cmd
+press never reaches a program holding the mouse (see "What stays TBD's")
+applies there as well as in holder panels. There it also closes an orphan
+press: left to itself, SwiftTerm reports the press of a Cmd+click on an OSC 8
+link, opens the link on release and returns before reporting the release,
+leaving the program a press with no release.
 
 ### Which terminals
 
@@ -53,9 +51,9 @@ with the toggle off TBD behaves as it does without this design.
   copy mode rather than reach the program inside, and that transport is being
   removed.
 - **Remote-attach terminals** – `LocalPTYTerminalView` already runs with
-  `allowMouseReporting = true`. It gains the Option bypass under the same
-  toggle, so both terminal surfaces honor the same modifiers, and the Cmd rule
-  in "What stays TBD's" whatever the toggle says. This terminal has no wheel
+  `allowMouseReporting = true`. It sets the Option bypass, so both terminal
+  surfaces honor the same modifiers, and the Cmd rule in "What stays TBD's"
+  applies to it. This terminal has no wheel
   monitor, so its wheel goes through SwiftTerm's `scrollWheel`, and the bypass
   applies there too: an Option-modified wheel, like a Shift-modified one, over
   a program holding the mouse is not reported, and on the alternate screen
@@ -78,10 +76,9 @@ selection, and Cmd+C copies it.
   does today.
 - **Option** is the iTerm2 convention. SwiftTerm gains it as a host setting,
   `optionBypassesMouseReporting`, off by default, checked in the same
-  predicate as Shift. TBD turns it on with the toggle.
+  predicate as Shift. TBD turns it on in every terminal it mounts.
 
-A program loses Option- and Shift-modified mouse events while the toggle is
-on. Each is already withheld by a widely used terminal — Option by iTerm2,
+A program loses Option- and Shift-modified mouse events. Each is already withheld by a widely used terminal — Option by iTerm2,
 Shift by xterm, kitty and SwiftTerm itself — so a program that depends on
 either already fails somewhere.
 
@@ -90,8 +87,8 @@ reads the modifiers afresh on each press, drag and release. Letting go of
 Option or Shift before the mouse button sends the program a release it never
 saw pressed, plus the drag motion after the key came up under modes 1002 and
 1003. Pressing Option or Shift after a plain press leaves the program a press
-with no release. Closing it means latching the bypass decision at mouse-down,
-and it is to be closed before graduation.
+with no release. Closing it means latching the bypass decision at mouse-down; that is
+not yet done.
 
 ### What stays TBD's
 
@@ -130,8 +127,8 @@ program as a plain click — behavior this design leaves as it is.
 
 ### The scroll wheel
 
-The wheel stays on TBD's monitor and `ScrollWheelAccumulator` in both states
-of the toggle. The monitor claims every wheel event while a mouse mode is on,
+The wheel stays on TBD's monitor and `ScrollWheelAccumulator` on every
+transport. The monitor claims every wheel event while a mouse mode is on,
 and every one on the alternate screen while none is, so SwiftTerm's own
 `scrollWheel` never runs for those events. The monitor already does what
 SwiftTerm's handler at the pinned revision does — accumulate
@@ -140,7 +137,7 @@ a bound on the report rate that the handler lacks (#1226). On the alternate
 screen with no mouse mode on, it claims the event and drops it, where
 SwiftTerm's handler would turn the wheel into Up/Down arrow keys that land on
 whatever is attached, a composer draft included. Handing the wheel to
-SwiftTerm in one state of the toggle would add a second wheel path without
+SwiftTerm on one transport would add a second wheel path without
 the rate bound, and gain nothing.
 
 ### Copying
@@ -157,7 +154,7 @@ the theme's selection.
 `TBDTerminalView.clickPassthroughActive(allowMouseReporting:)` already
 returns false whenever reporting is on, so the hand-forwarding of single
 clicks stands down exactly when SwiftTerm starts reporting. One left click
-reaches the program once in either state.
+reaches the program once on either transport.
 
 ### Programs that take the mouse and do no selection
 
@@ -168,35 +165,14 @@ way.
 
 ## Mechanics
 
-### The toggle
-
-An app-only behavior, so it gates on a UserDefaults key, following
-`useMetalTerminalRenderer`:
-
-- **Key** – `forwardMouseToAppsEnabled`. Production reads it through
-  `@AppStorage` wrappers — both terminal representables and
-  `TerminalSettingsView` — each defaulting to `forwardMouseToAppsDefault`.
-  `AppState.forwardMouseToAppsEnabled(defaults:)`, which returns
-  `defaults.object(forKey:) as? Bool ?? forwardMouseToAppsDefault`, is the
-  same read for a caller outside SwiftUI and for the tests that pin its three
-  states. An absent key means nobody chose, so graduating is a one-line
-  change to the default constant and keeps every explicit opt-out.
-- **Store** – `UserDefaults.standard` on both the Settings writer and every
-  reader. The Settings toggle is an `@AppStorage`, which always targets
-  `.standard`.
-- **UI** – a toggle in Settings → Terminal → Experimental: "Send clicks and
-  drags to apps that use the mouse", with the subtitle "Option- or
-  Shift-drag still selects text in TBD."
-- **Live** – changing the toggle updates every open terminal without
-  reopening it. The toggle lives in the Settings window, so no press in a
-  terminal is in flight when it changes.
-
 ### The decision, as a pure function
 
-One function decides `allowMouseReporting` for a panel from the toggle and
-the panel's transport: true only when the toggle is on and the transport is
-`.holder`. A second decides `optionBypassesMouseReporting`: equal to the
-toggle. Both are pure, so every branch is a unit test.
+`TerminalPanelRepresentable.reportsMouseToApps(transport:)` decides
+`allowMouseReporting` for a panel from its transport: true only for
+`.holder`. `optionBypassesMouseReporting` is always true. `applyMouseRouting`
+writes both, from `makeNSView` and again from every `updateNSView`, because a
+panel built before its terminal row loaded reads `.tmux` at first. The
+decision is pure, so each branch is a unit test.
 
 ### SwiftTerm
 
@@ -219,23 +195,16 @@ in [`docs/theory-placement.md`](../theory-placement.md) sits on that path.
 
 - **SwiftTerm fork** – the bypass predicate for Shift with and without
   `mouseShiftCapture`, Option with the setting on and off, and no modifier.
-- **The decision functions** – `allowMouseReporting` for toggle on and off
-  across `.holder` and `.tmux`; `optionBypassesMouseReporting` for toggle on
-  and off.
-- **The flag reader** – an absent key reads the default; an explicit `false`
-  survives a change to the default constant; an explicit `true` reads true.
-  Through `AppState.forwardMouseToAppsEnabled(defaults:)` on a
-  `UserDefaults(suiteName:)` suite, never the real `.standard`. The
-  `@AppStorage` wrappers production reads through share its key and default
-  and cannot be inspected headlessly.
+- **The decision function** – `allowMouseReporting` for `.holder` and
+  `.tmux`.
 - **Re-applying the routing** – `applyMouseRouting`, called on one view with
-  each toggle state and transport in turn, rewrites `allowMouseReporting` and
-  `optionBypassesMouseReporting` each time. No test flips the key under an
-  open panel: the tests apply the routing directly, and the `@AppStorage` →
-  `updateNSView` path that carries a Settings change to an open terminal is
-  verified by hand (see the checklist below).
+  `.tmux`, `.holder` and `.tmux` in turn, rewrites `allowMouseReporting` each
+  time and leaves `optionBypassesMouseReporting` true throughout.
 - **The no-double-forward guarantee** – the existing
-  `clickPassthroughActive(allowMouseReporting:)` cases still hold.
+  `clickPassthroughActive(allowMouseReporting:)` cases still hold, and a
+  plain click over a program holding the mouse reaches it as one press and
+  one release on both transports: SwiftTerm forwards on holder, the
+  passthrough on tmux.
 - **Cmd stays TBD's** – with a program holding the mouse, a Cmd+click on an
   OSC 8 link, on a printed URL, on a path and on plain text, a Cmd-drag, and a
   Cmd+click whose Cmd is let go before the button each send the program no
@@ -243,13 +212,13 @@ in [`docs/theory-placement.md`](../theory-placement.md) sits on that path.
   with SwiftTerm's snapped cell width at a link's first and last characters
   open it, and clicks one cell beyond either end open nothing, with no report
   either way. Under the `.always` highlight mode an OSC 8 link opens and a
-  printed URL does not. A view mounted the way a remote-attach terminal is,
-  with the toggle off, withholds a Cmd+click too.
+  printed URL does not. A view mounted the way a remote-attach terminal is
+  withholds a Cmd+click too.
 - **The Claude side** – the stub probe that sends press, drag and release to
   the real CLI confirms the program selects and writes OSC 52.
 
-Real drags cannot be synthesized headlessly, so the soak adds a by-hand
-checklist, run with the toggle on:
+Real drags cannot be synthesized headlessly, so a by-hand verification
+checklist covers them:
 
 - In fullscreen Claude, a plain drag highlights in Claude's colors and the
   text pastes elsewhere.
@@ -261,25 +230,10 @@ checklist, run with the toggle on:
 - In a plain shell tab, a drag selects as before.
 - In vim with `mouse=a`, a click moves the cursor and a drag makes a visual
   selection.
-- The wheel scrolls Claude's transcript at the same rate as with the toggle
-  off.
-- Flip the toggle with a fullscreen Claude tab open, and the next drag
-  follows the new setting without reopening the tab.
+- The wheel scrolls Claude's transcript at the same rate as in a tmux tab.
 - Let go of Option, and separately of Shift, before the mouse button at the
   end of a bypass drag over fullscreen Claude, and note whether the program
   misbehaves — the known limit under "The bypass: Option and Shift".
-
-## Flag and rollout
-
-- **Flag** – `forwardMouseToAppsEnabled`, default off.
-- **Soak** – turn on Settings → Terminal → Experimental → "Send clicks and
-  drags to apps that use the mouse" and use it day to day, running the
-  checklist above once at the start.
-- **Graduation** – once the checklist passes, the per-event bypass limit is
-  closed, and day-to-day use turns up no double-forwarded clicks and no lost
-  selections, set `forwardMouseToAppsDefault` to true, and delete the flag in
-  a later change. The tmux branch of the decision goes when the tmux
-  transport does.
 
 ## Rejected alternatives
 
@@ -297,12 +251,12 @@ checklist, run with the toggle on:
   known limit under "The bypass: Option and Shift" — which latching the
   decision at mouse-down closes.
 - **Hand the wheel to SwiftTerm as well.** It would make TBD's monitor
-  unnecessary on a holder panel with the toggle on, and gain nothing. At the
+  unnecessary on a holder panel, and gain nothing. At the
   pinned revision SwiftTerm's live `scrollWheel` does the arithmetic
   `ScrollWheelAccumulator` does, without its rate bound, and turns the wheel
   into arrow keys on the alternate screen where the monitor drops it; the
-  monitor stays for the toggle-off state and tmux panels regardless. Handing
-  the wheel over in one state would add a second wheel path with no rate
+  monitor stays for tmux panels regardless. Handing
+  the wheel over on holder panels alone would add a second wheel path with no rate
   bound. Upstream bounds that handler's rate
   ([migueldeicaza/SwiftTerm#657](https://github.com/migueldeicaza/SwiftTerm/pull/657),
   `WheelReportBudget`); the fork does not carry it.
