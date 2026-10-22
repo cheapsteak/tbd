@@ -15,9 +15,12 @@ import Testing
 /// injection able to reach it, and every re-open refused.
 ///
 /// **Only a confirmed death licenses this.** The verdict itself is arbitrated
-/// in `HolderAppLivenessTests` (tier 1, scripted process table); everything
+/// in `HolderAppLivenessTests` (tier 1, scripted process table), and which
+/// app's claims a death selects is `HolderClaimOwnershipTests`'; everything
 /// here starts *after* that verdict and asks what the registry then does with
-/// a real pty, a real job, and a claim nobody is coming back for.
+/// a real pty, a real job, and a claim nobody is coming back for. Every viewer
+/// here is vended to `HandbackFixture.viewerApp`, and that is the app whose
+/// death each test reports.
 ///
 /// **Tier 3.** A real `TBDHolder`, a real pty, a real job.
 @Suite(.serialized)
@@ -54,7 +57,7 @@ struct HolderAppDeathSeizureTests {
         // close with the process, and no detach follows.
         viewer.close()
 
-        let reclaimed = await fixture.registry.reclaimSessionsFromADeadApp()
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
         #expect(reclaimed == [fixture.terminalID])
 
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil, """
@@ -93,13 +96,15 @@ struct HolderAppDeathSeizureTests {
         defer { fixture.tearDown() }
 
         let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        await fixture.registry.recordAttachRecipient(
+            HandbackFixture.viewerApp, terminalID: fixture.terminalID, generation: vend.generation)
         let held = try #require(await fixture.registry.reader(for: fixture.terminalID))
         await fixture.registry.cancelPendingAttach(
             terminalID: fixture.terminalID, generation: vend.generation, reason: .unacknowledged)
         #expect(await held.isDraining == false, "an unacknowledged attach leaves its reader suspended")
         Darwin.close(vend.ptyFD)
 
-        let reclaimed = await fixture.registry.reclaimSessionsFromADeadApp()
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
         #expect(reclaimed == [fixture.terminalID])
 
         let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
@@ -113,6 +118,46 @@ struct HolderAppDeathSeizureTests {
         try await resumed.write(Data("RESUMED-AFTER-DEATH\n".utf8))
         #expect(await pollUntil("the job's answer after the suspended reader resumed") {
             await resumed.renderScreen().contains("GOT:RESUMED-AFTER-DEATH")
+        })
+    }
+
+    /// An attach vended to an app that died before it could acknowledge — the
+    /// case an app killed straight after re-attaching its visible tab leaves.
+    /// The ack will never come now, so the death settles the attach as the
+    /// ready-timeout would and takes it back in the same pass. Left to the
+    /// timeout, it would become a claim after the take-back had finished
+    /// looking, and nothing would be left to clear it.
+    @Test func aDeadAppsUnacknowledgedAttachIsTakenBackWithoutWaitingForItsTimeout() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+
+        let vend = try await fixture.registry.beginAttach(terminalID: fixture.terminalID)
+        await fixture.registry.recordAttachRecipient(
+            HandbackFixture.viewerApp, terminalID: fixture.terminalID, generation: vend.generation)
+        let held = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        // The app dies holding the descriptor, and no ack follows.
+        Darwin.close(vend.ptyFD)
+
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
+        #expect(reclaimed == [fixture.terminalID], """
+            an attach vended to an app confirmed gone was left pending, so its ready-timeout turns \
+            it into a claim nothing will ever clear
+            """)
+        let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
+        #expect(resumed === held, "the take-back opened a second hand-over")
+        #expect(await resumed.isDraining, "the suspended reader was not put back on the pty")
+        #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil)
+
+        // The ready-timeout still fires, late, and finds nothing left to settle.
+        await fixture.registry.cancelPendingAttach(
+            terminalID: fixture.terminalID, generation: vend.generation, reason: .unacknowledged)
+        #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil, """
+            a late ready-timeout claimed a session the dead app's take-back had already returned
+            """)
+
+        try await resumed.write(Data("TAKEN-BACK-UNACKED\n".utf8))
+        #expect(await pollUntil("the job's answer after the unacknowledged attach was taken back") {
+            await resumed.renderScreen().contains("GOT:TAKEN-BACK-UNACKED")
         })
     }
 
@@ -182,7 +227,7 @@ struct HolderAppDeathSeizureTests {
                 sessionID: fixture.terminalID,
                 environment: HolderProcessFixture.environment(home: fixture.process.home)))
 
-        let reclaimed = await fixture.registry.reclaimSessionsFromADeadApp()
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
         #expect(reclaimed == [fixture.terminalID], """
             the seizure could not take the session back with the rendezvous socket gone, so it \
             still depends on a hand-over from the holder

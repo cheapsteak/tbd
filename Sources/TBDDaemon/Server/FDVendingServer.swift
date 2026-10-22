@@ -396,16 +396,33 @@ actor FDVendingServer {
     /// its fd number was closed and possibly recycled. The frame is encoded once
     /// up front because it depends only on `header`, not on the connection.
     func send(fd: Int32, header: Data) async throws {
+        _ = try await sendReportingRecipient(fd: fd, header: header)
+    }
+
+    /// `send(fd:header:)`, answering **who the descriptor went to**: the
+    /// identity recorded for the connection the frame was written on, or nil
+    /// when that peer could not be identified at adopt time.
+    ///
+    /// Read here, in the same isolated stretch as the write and with no
+    /// `await` between them, for the reason `sendFrame` reads its epoch here:
+    /// `adoptConnection` is isolated to this actor too, so no reconnect can
+    /// land between the two. An identity the caller looked up *before* the
+    /// send would be exactly that race — a reconnect in between hands the
+    /// descriptor to one app while the caller records another as holding it,
+    /// and a later verdict that the recorded app is dead would seize a pty the
+    /// other one is reading. The holder attach path records this answer as the
+    /// claim's owner; control mode has no use for it.
+    func sendReportingRecipient(fd: Int32, header: Data) async throws -> ProcessIdentity? {
         let frame = SidecarFrameCodec.encode(type: .fdVend, payload: header)
         for attempt in 0..<retryAttempts {
             if clientFD >= 0 {
                 try FDChannel.sendFD(fd, over: clientFD, frame: frame)
-                return
+                return clientIdentity
             }
             // No cancellation check, deliberately: `try?` swallows the
             // `CancellationError`, the remaining attempts then burn instantly
-            // and the loop throws `.notConnected` — the same outcome, which the
-            // sole caller already handles by undoing the attach. That
+            // and the loop throws `.notConnected` — the same outcome, which
+            // every caller already handles by undoing its attach. That
             // equivalence holds only because the post-wait step is a pure
             // re-check that either sends or gives up; it stops being safe if
             // this loop ever grows a side effect that must not run after

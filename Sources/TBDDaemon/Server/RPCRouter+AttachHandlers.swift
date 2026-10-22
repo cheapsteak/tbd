@@ -221,8 +221,9 @@ extension RPCRouter {
             return RPCResponse(error: "attach failed: \(error.localizedDescription)")
         }
 
+        let recipient: ProcessIdentity?
         do {
-            try await vending.send(fd: vend.ptyFD, header: header)
+            recipient = try await vending.sendReportingRecipient(fd: vend.ptyFD, header: header)
         } catch {
             Darwin.close(vend.ptyFD)
             await registry.cancelPendingAttach(
@@ -236,6 +237,14 @@ extension RPCRouter {
         }
         // The kernel duplicated the fd into the app's table; drop ours.
         Darwin.close(vend.ptyFD)
+        // Whose table, recorded against the attach before the response that
+        // lets the app acknowledge it: the claim this attach becomes is then
+        // owned by that app, and only that app's confirmed death takes it back.
+        // The identity is the one the send itself read for the connection it
+        // wrote on — see `sendReportingRecipient` for why no earlier lookup
+        // would do.
+        await registry.recordAttachRecipient(
+            recipient, terminalID: terminal.id, generation: vend.generation)
 
         // Same ready-timeout as control mode, pointed at this registry's own
         // cancel. It is generation-scoped, so a timer outliving the attach it

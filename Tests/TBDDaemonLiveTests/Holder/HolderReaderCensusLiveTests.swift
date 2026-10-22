@@ -99,7 +99,7 @@ struct HolderReaderCensusLiveTests {
         // detach follows.
         viewer.close()
 
-        let reclaimed = await fixture.registry.reclaimSessionsFromADeadApp()
+        let reclaimed = await fixture.registry.reclaimSessions(heldBy: HandbackFixture.viewerApp)
         #expect(reclaimed == [fixture.terminalID])
 
         #expect(await fixture.registry.ptyReader(for: fixture.terminalID) == .daemon)

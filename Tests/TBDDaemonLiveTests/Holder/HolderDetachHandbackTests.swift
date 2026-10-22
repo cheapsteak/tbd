@@ -316,11 +316,22 @@ struct HandbackFixture {
             reader: try await registry.adopt(terminal: row))
     }
 
+    /// The app every viewer this fixture plays is vended to. Scripted rather
+    /// than read off a socket: what the registry needs is a recorded owner for
+    /// each claim, so a confirmed death can name whose sessions it takes back.
+    static let viewerApp = ProcessIdentity(
+        pid: 4242, startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        commandLine: "/opt/acme/TBDApp")
+
     /// Runs the whole attach handshake and hands back a viewer holding the
     /// vended descriptor, with the daemon's preamble already on its screen —
-    /// which is what a real panel does before it acks.
+    /// which is what a real panel does before it acks. The delivery is
+    /// recorded against `viewerApp`, as the attach handler records it against
+    /// whichever app the sidecar wrote to.
     func attachAViewer() async throws -> Viewer {
         let vend = try await registry.beginAttach(terminalID: terminalID)
+        await registry.recordAttachRecipient(
+            Self.viewerApp, terminalID: terminalID, generation: vend.generation)
         let terminal = ViewerTerminal(columns: 80, rows: 24)
         terminal.feed(vend.snapshotPreamble)
         try await registry.confirmAttach(terminalID: terminalID, generation: vend.generation)
