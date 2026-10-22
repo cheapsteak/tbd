@@ -65,6 +65,23 @@ struct AgentBackgroundRouterTests {
         #expect(Set(fake.restoredPIDs) == [100, 101])
     }
 
+    @Test func turningTheFlagOffEndsALiveLeaseAndRestores() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setAgentBackgroundEnabled(true)
+        let fake = table()
+        let router = makeRouter(db, fake: fake)
+        let on = try await call(router, AgentsBackgroundParams(action: .on, durationSeconds: 60))
+        #expect(on.success)
+
+        let setOff = try await router.handleConfigSetAgentBackgroundEnabled(
+            JSONEncoder().encode(ConfigSetAgentBackgroundEnabledParams(enabled: false)))
+
+        #expect(setOff.success)
+        #expect(Set(fake.restoredPIDs) == [100, 101])
+        let status = try await call(router, AgentsBackgroundParams(action: .status))
+        #expect(try status.decodeResult(AgentsBackgroundResult.self).active == false)
+    }
+
     @Test func aLeaseOverTwoHoursIsAnErrorWithTheLimit() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setAgentBackgroundEnabled(true)

@@ -6,8 +6,8 @@ extension RPCRouter {
     /// `agents.background`: turn agent background priority on for a lease, off,
     /// or report it. Not an actuation row (it changes no session's input, pty or
     /// lifecycle); its effect lives in `agent-background.json`. `off` and
-    /// `status` work with the flag off, so a user can restore after turning it
-    /// off. Design: docs/specs/2026-10-21-agent-start-admission-design.md.
+    /// `status` work with the flag off; turning the flag off also runs `off`.
+    /// Design: docs/specs/2026-10-21-agent-start-admission-design.md.
     func handleAgentsBackground(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(AgentsBackgroundParams.self, from: paramsData)
         guard let controller = agentBackground else {

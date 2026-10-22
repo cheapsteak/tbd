@@ -566,10 +566,12 @@ extension RPCRouter {
     }
 
     /// Persist the the agent background priority command flag (default OFF). Read on every use, so a
-    /// change takes effect at the next request.
+    /// change takes effect at the next request. Turning it off also ends a live lease and restores
+    /// what it lowered, so the flag is an off switch and not only a gate on `on`.
     func handleConfigSetAgentBackgroundEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetAgentBackgroundEnabledParams.self, from: paramsData)
         try await db.config.setAgentBackgroundEnabled(params.enabled)
+        if !params.enabled { await agentBackground?.off() }
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }

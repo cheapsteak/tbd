@@ -192,7 +192,9 @@ Each sweep also drops records whose process has exited or whose PID now names a 
 another start time, so the record stays as long as the set of live lowered processes.
 
 **Off, or the lease ends without renewal:** TBD restores each recorded process whose start
-time still matches, then clears the record. A process that started during the lease and
+time still matches, then clears the record. A process whose restore the kernel refuses
+stays recorded, under the ended lease, and each sweep tries it again until it restores or
+exits; the file is deleted only when nothing is left. A process that started during the lease and
 inherited background priority keeps it until it exits: a build an agent started during a
 call finishes at background priority, which is what the call wanted.
 
@@ -212,8 +214,8 @@ daemon never comes back, the lowered processes stay lowered until they exit.
 ### The flag
 
 `agent_background_enabled`, the same three-state pattern. While it is off, `on` fails with
-a message naming the flag; `off` and `status` always work, so a user can restore after
-turning the flag off.
+a message naming the flag; `off` and `status` always work. Turning the flag off also runs
+`off`, so a live lease ends and its processes are restored at once.
 
 ## Testing
 

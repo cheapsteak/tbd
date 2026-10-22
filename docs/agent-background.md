@@ -19,8 +19,8 @@ tbd agents background off             # restore now
 tbd agents background status [--json] # active, when it ends, how many processes are lowered
 ```
 
-`on` fails while the flag is off. `off` and `status` always work, so you can restore after turning
-the flag off.
+`on` fails while the flag is off. `off` and `status` always work. Turning the flag off
+(`tbd config set agent-background off`) also ends a live lease and restores at once.
 
 ## What it touches
 
@@ -32,8 +32,9 @@ A process already in the background is left alone, and TBD restores only what it
 
 While the lease is on, the daemon repeats the walk every 60 seconds, so agents started or woken
 during the lease are lowered too. When the lease ends (or on `off`) TBD restores each recorded
-process that is still the same process. A process an agent started during the lease inherited
-background priority and keeps it until it exits.
+process that is still the same process. If macOS refuses a restore, that process stays recorded
+and the next sweep tries again; `status` shows it as not yet restored. A process an agent started
+during the lease inherited background priority and keeps it until it exits.
 
 The lease and the record of lowered processes live in `~/tbd/agent-background.json` (under
 `$TBD_HOME` when set). At daemon start an expired lease is restored and the file deleted; a live one
