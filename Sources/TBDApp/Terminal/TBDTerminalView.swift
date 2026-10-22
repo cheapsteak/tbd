@@ -653,11 +653,21 @@ class TBDTerminalView: TerminalView {
     /// go before the button, the release would reach the pane as a plain
     /// click.
     private(set) var pressBypassesSwiftTerm = false
+    /// Set when a Cmd-modified press TBD did not consume lands while the
+    /// program holds the mouse (`programHoldsTheMouse`). Cmd is TBD's
+    /// modifier for opening paths and links, and SGR mouse encoding has no
+    /// bit for it, so the program would read the press as a plain click:
+    /// none of the press, its drags or its release reaches it. SwiftTerm sees
+    /// the release alone, and only when its mouse-up will open a link there
+    /// (`withheldReleaseOpensLink`) — which it does before it would report
+    /// the release.
+    private(set) var commandPressWithheld = false
 
     override func mouseDown(with event: NSEvent) {
         mouseDownLocation = convert(event.locationInWindow, from: nil)
         didDrag = false
         pressBypassesSwiftTerm = false
+        commandPressWithheld = false
         let isActivationClick = event.eventNumber == activationClickEventNumber
         activationClickEventNumber = nil
         if let claimFocus = onMouseDownClaimFocus, claimFocus() {
@@ -678,6 +688,13 @@ class TBDTerminalView: TerminalView {
             pressBypassesSwiftTerm = true
             return
         }
+        // A Cmd press TBD did not open never reaches a program holding the
+        // mouse — including a Cmd+click on an OSC 8 link, which opens on
+        // release.
+        if event.modifierFlags.contains(.command), programHoldsTheMouse() {
+            commandPressWithheld = true
+            return
+        }
         super.mouseDown(with: event)
     }
 
@@ -688,13 +705,27 @@ class TBDTerminalView: TerminalView {
         if sqrt(dx * dx + dy * dy) > Self.dragThreshold {
             didDrag = true
         }
-        guard !pressBypassesSwiftTerm else { return }
+        guard !pressBypassesSwiftTerm, !commandPressWithheld else { return }
         super.mouseDragged(with: event)
     }
 
     override func mouseUp(with event: NSEvent) {
         guard !pressBypassesSwiftTerm else {
             pressBypassesSwiftTerm = false
+            return
+        }
+        if commandPressWithheld {
+            commandPressWithheld = false
+            // SwiftTerm's mouse-up either opens a link and returns, or goes on
+            // to report the release — one the program never saw pressed. So
+            // it gets the event only when it will open one. Everything else
+            // that mouse-up does for a press its mouse-down never began is a
+            // reset: `endPrimaryPointerPress` clears a press location that is
+            // already nil, and the drag and force-click flags it clears were
+            // never raised.
+            if withheldReleaseOpensLink(event) {
+                super.mouseUp(with: event)
+            }
             return
         }
         let location = convert(event.locationInWindow, from: nil)
@@ -704,6 +735,37 @@ class TBDTerminalView: TerminalView {
             handleClickPassthrough(at: location, modifiers: event.modifierFlags)
         }
         super.mouseUp(with: event)
+    }
+
+    /// Whether SwiftTerm would report a press to the program right now:
+    /// reporting is on, and the program has a mouse mode on. With reporting
+    /// off a press only ever reaches SwiftTerm's local selection.
+    private func programHoldsTheMouse() -> Bool {
+        allowMouseReporting && withTerminal { $0.mouseMode != .off }
+    }
+
+    /// Whether SwiftTerm's mouse-up, handed the release of a withheld Cmd
+    /// press, opens a link and returns before it reports the release.
+    ///
+    /// Mirrors SwiftTerm's conditions under its default `.hoverWithModifier`
+    /// highlight mode, which TBD never changes: no drag, Cmd still held at the
+    /// release, and a link under the pointer — an OSC 8 hyperlink, or one
+    /// SwiftTerm detects in the text, such as a printed URL. Under any other
+    /// highlight mode this answers false, so the release is consumed rather
+    /// than risk a report. The cell comes from `gridPosition`, TBD's mirror of
+    /// SwiftTerm's cell math; see `cellDimensions(for:)` for how far the two
+    /// can drift.
+    private func withheldReleaseOpensLink(_ event: NSEvent) -> Bool {
+        guard linkHighlightMode == .hoverWithModifier,
+              !didDrag,
+              event.modifierFlags.contains(.command),
+              let pos = gridPosition(atWindowLocation: event.locationInWindow)
+        else { return false }
+        return withTerminal { terminal in
+            terminal.link(
+                at: .screen(Position(col: pos.col, row: pos.row)),
+                mode: .explicitAndImplicit) != nil
+        }
     }
 
     /// Opens the file path or link under a Cmd+click. Returns true when it

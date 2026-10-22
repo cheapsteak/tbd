@@ -73,14 +73,24 @@ either already fails somewhere.
 
 ### What stays TBD's
 
-Each of these is decided before SwiftTerm consults `allowMouseReporting`, so
-the toggle does not touch it:
+A press with Cmd held belongs to TBD. Cmd is TBD's modifier for opening paths
+and links, and SGR mouse encoding has no bit for it, so a Cmd press forwarded
+to a program would reach it as a plain click. While a program holds the mouse
+— reporting on, and a mouse mode on — `TBDTerminalView.mouseDown` keeps every
+Cmd-modified press from SwiftTerm's reporting: no press, no drag motion and no
+release reaches the program. The rule lives in `TBDTerminalView`, so it holds
+for remote-attach terminals too. With reporting off, a Cmd press goes to
+SwiftTerm's local handling, which never reaches the program either.
 
-- **Cmd+click on a path or link** – `TBDTerminalView.mouseDown` consumes it
-  (`handleCommandClick`), and the press never reaches SwiftTerm.
-- **OSC 8 hyperlinks** – SwiftTerm's mouse-up resolves the link
-  (`linkForClick`) before it would report the release.
-- **The window-activating click** – consumed in `mouseDown`, as today.
+- **Cmd+click on a path** – `TBDTerminalView.mouseDown` opens it
+  (`handleCommandClick`) and consumes the press.
+- **Cmd+click on a link** – an OSC 8 hyperlink, or a URL SwiftTerm detects in
+  the text, opens on release. TBD hands the release to SwiftTerm only when
+  SwiftTerm's mouse-up will open a link there (`linkForClick`), which it does
+  before it would report the release. A Cmd release that opens nothing — Cmd
+  let go before the button, a drag, plain text — is consumed.
+- **The window-activating click** – consumed in `mouseDown`, unless it is a
+  Cmd+click on an OSC 8 link, which opens on release like any other.
 - **File drag-and-drop**, find, and paste – separate AppKit paths.
 
 ### The scroll wheel
@@ -176,6 +186,10 @@ in [`docs/theory-placement.md`](../theory-placement.md) sits on that path.
   `allowMouseReporting` and `optionBypassesMouseReporting`.
 - **The no-double-forward guarantee** – the existing
   `clickPassthroughActive(allowMouseReporting:)` cases still hold.
+- **Cmd stays TBD's** – with a program holding the mouse, a Cmd+click on an
+  OSC 8 link, on a printed URL, on a path and on plain text, a Cmd-drag, and a
+  Cmd+click whose Cmd is let go before the button each send the program no
+  report, while each link and path opens once.
 - **The Claude side** – the stub probe that sends press, drag and release to
   the real CLI confirms the program selects and writes OSC 52.
 

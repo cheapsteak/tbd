@@ -28,15 +28,19 @@ import TBDShared
 @Suite("Mouse routing: the toggle hands a holder panel's clicks to the program")
 struct TerminalMouseRoutingTests {
 
-    /// Records everything the view sends toward the session.
+    /// Records everything the view sends toward the session, and every link
+    /// SwiftTerm asks the host to open.
     private final class SendRecorder: TerminalViewDelegate {
         var sent: [[UInt8]] = []
+        var openedLinks: [String] = []
         func send(source: TerminalView, data: ArraySlice<UInt8>) { sent.append([UInt8](data)) }
         func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: TerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
         func scrolled(source: TerminalView, position: Double) {}
-        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {}
+        func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+            openedLinks.append(link)
+        }
         func clipboardCopy(source: TerminalView, content: Data) {}
         func rangeChanged(source: TerminalView, startY: Int, endY: Int) {}
         func bell(source: TerminalView) {}
@@ -106,9 +110,44 @@ struct TerminalMouseRoutingTests {
         }
 
         /// What a program sends to take the mouse: normal tracking (1000),
-        /// SGR encoding (1006).
-        func programTakesTheMouse() {
-            view.feed(text: "\u{1b}[?1000h\u{1b}[?1006h")
+        /// or button-event tracking (1002), which also reports drag motion;
+        /// SGR encoding (1006) either way.
+        func programTakesTheMouse(reportingDrags: Bool = false) {
+            view.feed(text: reportingDrags ? "\u{1b}[?1002h\u{1b}[?1006h" : "\u{1b}[?1000h\u{1b}[?1006h")
+        }
+
+        /// Clears the screen and writes `text` on the first row.
+        func show(_ text: String) {
+            view.feed(text: "\u{1b}[H\u{1b}[2J\(text)")
+        }
+
+        /// The URL every link fixture points at.
+        static let linkURL = "https://example.com/acme"
+
+        /// An OSC 8 hyperlink over "open me" at the start of the first row.
+        func showOSC8Link() {
+            show("\u{1b}]8;;\(Self.linkURL)\u{1b}\\open me\u{1b}]8;;\u{1b}\\")
+        }
+
+        /// Routing on for a holder panel, a program holding the mouse, and a
+        /// clean recorder — the state every Cmd test starts from.
+        func takeTheMouse(forwardMouseToApps: Bool = true, reportingDrags: Bool = false) async {
+            TerminalPanelRepresentable.applyMouseRouting(
+                to: view, forwardMouseToApps: forwardMouseToApps, transport: .holder)
+            programTakesTheMouse(reportingDrags: reportingDrags)
+            await mainQueueTurn()
+            recorder.sent.removeAll()
+        }
+
+        /// A plain click at a blank cell must reach the program as one press
+        /// and one release. Run after a zero-report assertion, it shows the
+        /// program held the mouse throughout, so "nothing reported" meant
+        /// "withheld" rather than "nothing could be".
+        func controlClickIsReported() async -> Bool {
+            let before = recorder.reports.count
+            click(at: point(col: 30, row: 3))
+            await mainQueueTurn()
+            return recorder.reports.count - before == 2
         }
 
         /// The center of a grid cell, in view coordinates.
@@ -260,5 +299,145 @@ struct TerminalMouseRoutingTests {
             fixture.recorder.reports.count == 2,
             "the control click was not reported, so the program never held the mouse: \(controlReports)")
         #expect(opened.count == 1)
+    }
+
+    // MARK: - Cmd belongs to TBD
+    //
+    // Cmd is TBD's modifier for opening paths and links, and SGR mouse
+    // encoding has no bit for it, so a Cmd press SwiftTerm reported would
+    // reach the program as a plain click. While a program holds the mouse, no
+    // part of a Cmd press — press, drag motion, release — is reported; a link
+    // under it still opens, on release.
+
+    /// SwiftTerm opens an OSC 8 link on mouse-up and returns before it would
+    /// report the release, so a press it had reported would be left without
+    /// one — a program can sit in a held-button state after the link opens.
+    /// With the toggle off reporting is off, nothing is withheld, and the link
+    /// opens through SwiftTerm's ordinary press and release.
+    @Test("a Cmd+click on an OSC 8 link opens it once and sends the program nothing", arguments: [true, false])
+    func commandClickOnOSC8LinkOpensItAndReportsNothing(forwardMouseToApps: Bool) async {
+        let fixture = Fixture()
+        defer { fixture.tearDown() }
+        fixture.showOSC8Link()
+        await fixture.takeTheMouse(forwardMouseToApps: forwardMouseToApps)
+
+        let point = fixture.point(col: 2, row: 0)
+        fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, [.command]))
+        #expect(fixture.view.commandPressWithheld == forwardMouseToApps)
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point, [.command]))
+        await fixture.mainQueueTurn()
+
+        #expect(fixture.recorder.openedLinks == [Fixture.linkURL])
+        #expect(
+            fixture.recorder.reports.isEmpty,
+            "the Cmd+click on an OSC 8 link reached the program: \(Self.readable(fixture.recorder.reports))")
+        let controlClickReported = await fixture.controlClickIsReported()
+        #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
+    }
+
+    /// The same open-on-release path covers a URL printed as plain text, which
+    /// SwiftTerm detects itself.
+    @Test("a Cmd+click on a printed URL opens it once and sends the program nothing")
+    func commandClickOnPrintedURLOpensItAndReportsNothing() async {
+        let fixture = Fixture()
+        defer { fixture.tearDown() }
+        fixture.show("see \(Fixture.linkURL) now")
+        await fixture.takeTheMouse()
+
+        fixture.click(at: fixture.point(col: 8, row: 0), [.command])
+        await fixture.mainQueueTurn()
+
+        #expect(fixture.recorder.openedLinks == [Fixture.linkURL])
+        #expect(
+            fixture.recorder.reports.isEmpty,
+            "the Cmd+click on a printed URL reached the program: \(Self.readable(fixture.recorder.reports))")
+        let controlClickReported = await fixture.controlClickIsReported()
+        #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
+    }
+
+    @Test("a Cmd+click on plain text opens nothing and sends the program nothing")
+    func commandClickOnPlainTextReportsNothing() async {
+        let fixture = Fixture()
+        defer { fixture.tearDown() }
+        fixture.show("just some words")
+        await fixture.takeTheMouse()
+
+        fixture.click(at: fixture.point(col: 2, row: 0), [.command])
+        await fixture.mainQueueTurn()
+
+        #expect(fixture.recorder.openedLinks.isEmpty)
+        #expect(
+            fixture.recorder.reports.isEmpty,
+            "the Cmd+click on plain text reached the program: \(Self.readable(fixture.recorder.reports))")
+        let controlClickReported = await fixture.controlClickIsReported()
+        #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
+    }
+
+    /// Letting Cmd go before the button means SwiftTerm opens nothing, so its
+    /// mouse-up would go on to report a release the program never saw
+    /// pressed. The release is consumed instead.
+    @Test("Cmd let go before the button on a link: no link, and no orphan release")
+    func commandLetGoBeforeReleaseReportsNothing() async {
+        let fixture = Fixture()
+        defer { fixture.tearDown() }
+        fixture.showOSC8Link()
+        await fixture.takeTheMouse()
+
+        let point = fixture.point(col: 2, row: 0)
+        fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, [.command]))
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point))
+        await fixture.mainQueueTurn()
+
+        #expect(fixture.recorder.openedLinks.isEmpty)
+        #expect(
+            fixture.recorder.reports.isEmpty,
+            "a release reached the program without its press: \(Self.readable(fixture.recorder.reports))")
+        let controlClickReported = await fixture.controlClickIsReported()
+        #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
+    }
+
+    /// Button-event tracking (1002) reports drag motion, so this is the case
+    /// where a reported Cmd press would also stream motion to the program.
+    @Test("a Cmd-drag sends the program no press, no motion and no release")
+    func commandDragReportsNothing() async {
+        let fixture = Fixture()
+        defer { fixture.tearDown() }
+        fixture.show("just some words")
+        await fixture.takeTheMouse(reportingDrags: true)
+
+        let start = fixture.point(col: 2, row: 0)
+        let end = fixture.point(col: 12, row: 0)
+        fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: start, [.command]))
+        fixture.view.mouseDragged(with: fixture.mouseEvent(.leftMouseDragged, at: end, [.command]))
+        fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: end, [.command]))
+        await fixture.mainQueueTurn()
+
+        #expect(
+            fixture.recorder.reports.isEmpty,
+            "the Cmd-drag reached the program: \(Self.readable(fixture.recorder.reports))")
+        let controlClickReported = await fixture.controlClickIsReported()
+        #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
+    }
+
+    /// The release goes to SwiftTerm only when its mouse-up will open a link,
+    /// and that prediction holds for the default `.hoverWithModifier`
+    /// highlight mode alone. Under `.always` SwiftTerm opens no printed URL,
+    /// so handing it the release would report it; it is consumed instead.
+    @Test("under another link highlight mode the release is consumed, never reported")
+    func commandReleaseUnderAnotherHighlightModeIsConsumed() async {
+        let fixture = Fixture()
+        defer { fixture.tearDown() }
+        fixture.view.linkHighlightMode = .always
+        fixture.show("see \(Fixture.linkURL) now")
+        await fixture.takeTheMouse()
+
+        fixture.click(at: fixture.point(col: 8, row: 0), [.command])
+        await fixture.mainQueueTurn()
+
+        #expect(
+            fixture.recorder.reports.isEmpty,
+            "a release reached the program without its press: \(Self.readable(fixture.recorder.reports))")
+        let controlClickReported = await fixture.controlClickIsReported()
+        #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
     }
 }
