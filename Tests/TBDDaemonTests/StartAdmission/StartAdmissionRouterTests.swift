@@ -342,7 +342,7 @@ struct StartAdmissionRouterTests {
         #expect(try await fixture.db.terminals.get(id: terminal.id)?.startHeldReason == Self.holdReason)
     }
 
-    @Test("worktree.resume holds each parked terminal and reports the hold")
+    @Test("worktree.resume asks once, holds every parked terminal and reports the hold")
     func heldWorktreeResume() async throws {
         let fixture = try await makeFixture()
         let worktree = try await makeWorktree(in: fixture.db)
@@ -360,7 +360,9 @@ struct StartAdmissionRouterTests {
             params: WorktreeResumeParams(worktreeID: worktree.id)))
 
         #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
-        #expect(fixture.stub.requests.count == 2)
+        // Asked before the first wake only: the second is held for the same
+        // reason without running the command again.
+        #expect(fixture.stub.requests.count == 1)
         for id in ids {
             let row = try #require(try await fixture.db.terminals.get(id: id))
             #expect(row.startHeldReason == Self.holdReason)
@@ -369,5 +371,153 @@ struct StartAdmissionRouterTests {
         let outcomes = try rows(at: fixture.logPath).filter { $0["kind"] as? String == "outcome" }
         #expect(outcomes.count == 2)
         #expect(outcomes.allSatisfy { $0["reason"] as? String == "held" })
+    }
+
+    // MARK: - Relaunches
+
+    /// The rows a transport migration parked, in order.
+    private final class ParkLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ids: [UUID] = []
+        func append(_ id: UUID) { lock.withLock { ids.append(id) } }
+        var parked: [UUID] { lock.withLock { ids } }
+    }
+
+    /// Replaces the migrator's operations: the park parks the row for real, so
+    /// an admitted move can finish, and records that it ran.
+    private func overrideMigrator(_ fixture: Fixture, parks: ParkLog) {
+        let db = fixture.db
+        fixture.router.transportMigratorOperationsOverride = TerminalTransportMigrator.Operations(
+            canSpawnHolder: { true },
+            park: { id in
+                parks.append(id)
+                try? await db.terminals.setHibernated(id: id, sessionID: "session-1", reason: .manual)
+                return .ok
+            },
+            wake: { _ in .ok(sessionIncarnationID: nil) },
+            paneBusyRefusal: { _ in nil },
+            retireWindow: { _ in },
+            moveRunningShell: { _ in .moved })
+    }
+
+    private func makeRunningClaude(
+        in db: TBDDatabase, worktree: Worktree, window: Int
+    ) async throws -> Terminal {
+        try await db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@\(window)", tmuxPaneID: "%\(window)",
+            label: TerminalLabel.claudeCode, claudeSessionID: "session-\(window)", kind: .claude)
+    }
+
+    @Test("a held transport move asks once and leaves every running Claude session where it is")
+    func heldTransportMove() async throws {
+        let fixture = try await makeFixture()
+        let parks = ParkLog()
+        overrideMigrator(fixture, parks: parks)
+        let worktree = try await makeWorktree(in: fixture.db)
+        let first = try await makeRunningClaude(in: fixture.db, worktree: worktree, window: 1)
+        let second = try await makeRunningClaude(in: fixture.db, worktree: worktree, window: 2)
+        // A parked row is only rewritten, which starts nothing, so it still moves.
+        let parked = try await makeParkedClaude(in: fixture.db, worktree: worktree)
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalMigrateTransport,
+            params: TerminalMigrateTransportParams(terminalID: nil)))
+        let result = try response.decodeResult(TerminalMigrateTransportResult.self)
+
+        #expect(fixture.stub.requests.count == 1)
+        #expect(fixture.stub.requests.first?.kind == .wake)
+        #expect(fixture.stub.requests.first?.agent == .claude)
+        #expect(parks.parked.isEmpty)
+        let held = Dictionary(uniqueKeysWithValues: result.skipped.map { ($0.terminalID, $0.reason) })
+        #expect(held == [first.id: "held: \(Self.holdReason)", second.id: "held: \(Self.holdReason)"])
+        #expect(result.migrated == [parked.id])
+        for id in [first.id, second.id] {
+            let row = try #require(try await fixture.db.terminals.get(id: id))
+            #expect(!row.isParked)
+            #expect(row.transport == .tmux)
+        }
+        let heldOutcomes = try rows(at: fixture.logPath)
+            .filter { $0["kind"] as? String == "outcome" && $0["reason"] as? String == "held" }
+        #expect(heldOutcomes.count == 2)
+    }
+
+    @Test("an admitted transport move asks before each relaunch, and the app's move is never asked",
+          arguments: [nil, ActuationActor.app])
+    func admittedTransportMove(actor: ActuationActor?) async throws {
+        let fixture = try await makeFixture(verdict: .admit)
+        let parks = ParkLog()
+        overrideMigrator(fixture, parks: parks)
+        let worktree = try await makeWorktree(in: fixture.db)
+        let first = try await makeRunningClaude(in: fixture.db, worktree: worktree, window: 1)
+        let second = try await makeRunningClaude(in: fixture.db, worktree: worktree, window: 2)
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalMigrateTransport,
+            params: TerminalMigrateTransportParams(terminalID: nil), actor: actor))
+        let result = try response.decodeResult(TerminalMigrateTransportResult.self)
+
+        #expect(fixture.stub.requests.count == (actor == nil ? 2 : 0))
+        #expect(Set(parks.parked) == [first.id, second.id])
+        #expect(Set(result.migrated) == [first.id, second.id])
+    }
+
+    @Test("which rows a transport move starts an agent for")
+    func migrationAgentClassification() {
+        func row(
+            kind: TerminalKind?, session: String?, parked: Bool = false,
+            transport: TerminalTransport = .tmux
+        ) -> Terminal {
+            Terminal(
+                worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                claudeSessionID: session, kind: kind,
+                hibernatedAt: parked ? Date() : nil, transport: transport)
+        }
+        #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .claude, session: "s")) == .claude)
+        #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: nil, session: "s")) == .claude)
+        // A parked row is only rewritten; a shell restarts as a shell.
+        #expect(RPCRouter.startAdmissionAgent(
+            forMigrating: row(kind: .claude, session: "s", parked: true)) == nil)
+        #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .shell, session: nil)) == nil)
+        #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .shell, session: "s")) == nil)
+        // The migrator skips these, so they start nothing.
+        #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .claude, session: nil)) == nil)
+        #expect(RPCRouter.startAdmissionAgent(forMigrating: row(kind: .codex, session: nil)) == nil)
+        #expect(RPCRouter.startAdmissionAgent(
+            forMigrating: row(kind: .claude, session: "s", transport: .holder)) == nil)
+    }
+
+    @Test("a held Codex window recreate leaves the tab as it was, and the app's is never asked",
+          arguments: [nil, ActuationActor.app])
+    func codexRecreate(actor: ActuationActor?) async throws {
+        let fixture = try await makeFixture()
+        fixture.router.codexExecutableResolver = { "/opt/test/bin/codex" }
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-start-admission-codex-\(UUID().uuidString)", isDirectory: true)
+        fixture.router.codexHomeEnsurer = { codexHome }
+        let worktree = try await makeWorktree(in: fixture.db)
+        let terminal = try await fixture.db.terminals.create(
+            worktreeID: worktree.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: TerminalLabel.codex, kind: .codex)
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalRecreateWindow,
+            params: TerminalRecreateWindowParams(terminalID: terminal.id), actor: actor))
+
+        guard actor == nil else {
+            #expect(response.errorCode != RPCErrorCode.startHeld.rawValue)
+            #expect(fixture.stub.requests.isEmpty)
+            return
+        }
+        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
+        #expect(response.error == Self.holdReason)
+        #expect(fixture.stub.requests.map(\.agent) == [.codex])
+        #expect(fixture.stub.requests.first?.kind == .wake)
+        #expect(fixture.stub.requests.first?.terminalID == terminal.id)
+        let row = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(row.tmuxWindowID == "@1")
+        #expect(row.tmuxPaneID == "%1")
+        let outcome = try #require(try rows(at: fixture.logPath).last)
+        #expect(outcome["result"] as? String == "refused")
+        #expect(outcome["reason"] as? String == "held")
     }
 }

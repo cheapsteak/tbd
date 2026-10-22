@@ -1628,6 +1628,14 @@ extension RPCRouter {
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
+            // Recreating a Codex window starts Codex again, so it asks start
+            // admission before the old window is touched. A held recreate
+            // leaves the tab as it was; the app's own recreate is never held.
+            if let held = await holdStartIfDenied(
+                actuationID, actor: actor, kind: .wake, agent: .codex,
+                worktreeID: worktree.id, terminalID: terminal.id) {
+                return held
+            }
             // Recreate as codex — preserve identity
             guard let codexPreparation else {
                 let message = "Codex launch preparation was unavailable"
@@ -2314,10 +2322,27 @@ extension RPCRouter {
         var skipped: [TerminalMigrationSkip] = []
         var refused: [TerminalMigrationSkip] = []
         var alreadyHolder: [UUID] = []
+        // Moving a running Claude session starts it again, so start admission
+        // asks before each such move, until the first hold; the moves after it
+        // are held for the same reason without asking again. A held session is
+        // left running where it is and reported as skipped.
+        var heldReason: String?
         for terminalID in terminalIDs {
             let actuationID = try await beginActuation(
                 .terminalMigrateTransport, actor: actor,
                 target: await resolvedTerminalTarget(terminalID))
+            if StartAdmissionActorRule.isChecked(actor),
+               let terminal = (try? await db.terminals.get(id: terminalID)) ?? nil,
+               let agent = Self.startAdmissionAgent(forMigrating: terminal),
+               let held = await holdStartIfDenied(
+                   actuationID, actor: actor, kind: .wake, agent: agent,
+                   worktreeID: terminal.worktreeID, terminalID: terminalID,
+                   earlierHold: heldReason) {
+                let reason = held.error ?? "start held"
+                heldReason = heldReason ?? reason
+                skipped.append(TerminalMigrationSkip(terminalID: terminalID, reason: "held: \(reason)"))
+                continue
+            }
             let outcome = await migrator.migrate(terminalID: terminalID)
             await publishIfMovedToHolder(terminalID: terminalID, outcome: outcome)
             await finishActuation(

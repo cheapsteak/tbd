@@ -39,14 +39,19 @@ An agent start is a request that would launch a Claude Code or Codex process on 
 - `terminal.continueInCodex`, `terminal.continueInClaude` and `terminal.swapProfile` when
   it starts a new session; `terminalHistory.revive` when it resumes a Claude session (every
   other kind of history entry reopens as a shell)
+- `terminal.recreateWindow` for a Codex tab, which starts Codex again in a new window
+- `terminal.migrateTransport` for each running Claude session with a conversation, which it
+  parks and wakes on the pty holder. With no terminal id it moves every session, so it can
+  start many agents in one call.
 
 Not checked:
 
 - Shell terminals, hook terminals and dev-server tabs (`server.start`).
 - A wake of a terminal that is not parked. It starts nothing, and the wake path already
   answers it as a no-op.
-- `terminal.recreateWindow` and `terminal.migrateTransport`. Both repair or move a session
-  the machine is already carrying, and a held repair leaves a broken tab.
+- `terminal.recreateWindow` for a Claude tab, which only parks it, and for a shell.
+- The moves in `terminal.migrateTransport` that start no agent: a parked row is only
+  rewritten, and a running shell restarts as a shell.
 - Remote sessions. They run on another machine.
 
 ### Who is checked
@@ -56,7 +61,8 @@ Each request carries its `ActuationActor`. The gate checks every actor except tw
 - `app` is never checked. Everything the app sends follows something the person did in
   it, including the wake that selecting a parked tab performs.
 - `daemon` is never checked. TBD's own rails (startup recovery of a half-created
-  worktree, transport migration) are out of scope for this version.
+  worktree, and any transport migration TBD starts itself) are out of scope for this
+  version.
 
 So `session` (a `tbd` command run inside a TBD terminal, usually an agent), `anonymous` (a
 `tbd` command run outside TBD, usually a script or another tool's timer), the reserved
@@ -113,9 +119,18 @@ ask again, which is exactly the "when" this design keeps out of the daemon.
   create has no row to mark; its caller reports it. The note is written only if the row is
   still parked under the same session incarnation as when the command started; a row woken
   or parked again while the command ran gets no note.
-- `worktree.resume` asks once for each parked terminal it would wake. It wakes the admitted
-  ones, leaves the held ones parked with their reasons, and then fails with the first hold,
-  so a caller is never told a resume succeeded when part of it did not happen.
+- A call that starts several agents (`worktree.resume`, `terminal.migrateTransport`) asks
+  before each start until the first hold. Every start after that in the same call is held
+  for the same reason without running the command again, so a slow command delays the call
+  once, not once per agent.
+- `worktree.resume` wakes the admitted terminals, leaves the held ones parked with their
+  reasons, and then fails with the first hold, so a caller is never told a resume succeeded
+  when part of it did not happen.
+- `terminal.migrateTransport` leaves a held session running where it is and lists it under
+  `skipped` with the reason `held: <reason>`. The call's report is its answer, so it does
+  not fail with `startHeld`.
+- A held `terminal.recreateWindow` leaves the Codex tab as it was. The app's own recreate is
+  never checked, so the person can always repair the tab.
 
 ### The flag
 

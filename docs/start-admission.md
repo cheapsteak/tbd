@@ -54,6 +54,12 @@ fi
 - A held wake leaves the tab parked and notes the reason and time on it. The parked pane then reads
   "Automatic wake held at 9:12: <reason>". The next successful wake clears the note.
 
-Not checked: shell and dev-server tabs, a wake of a tab that is not parked, `terminal.recreateWindow`,
-`terminal.migrateTransport`, remote sessions, and TBD's own daemon rails. The actor is self-declared,
+A call that starts several agents (`worktree.resume`, `tbd terminal migrate --all`)
+asks before each start until the first hold, then holds the rest for the same reason without asking
+again. A held transport move leaves the session running where it is and lists it as
+`skipped: held: <reason>`.
+
+Also checked: recreating a Codex tab's window, and moving a running Claude session to the pty
+holder. Not checked: shell and dev-server tabs, a wake of a tab that is not parked, a move or
+window recreate that starts no agent, remote sessions, and TBD's own daemon rails. The actor is self-declared,
 so this is a resource policy and not a security boundary.
