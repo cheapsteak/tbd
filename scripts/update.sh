@@ -733,20 +733,36 @@ restore_previous_bundle() {
     log "restored previous app bundle"
 }
 
+# True once a failed install_and_handover could not put the previous bundle
+# back, so $INSTALLED_BUNDLE may still be the new build, or nothing. main reads
+# it before relaunching the app it stopped: launched from there, that app would
+# drive the old daemon, or start the new one if none is running, which is the
+# mismatch the rollback exists to prevent.
+BUNDLE_RESTORE_FAILED=false
+
+# install_and_handover's rollback of the bundle: restore_previous_bundle, with
+# a failure recorded in BUNDLE_RESTORE_FAILED for main.
+roll_back_bundle() {
+    restore_previous_bundle "${1-}" || BUNDLE_RESTORE_FAILED=true
+}
+
 # Put the new bundle in place and move the fleet onto it, undoing the
 # installation if the successor daemon never arrives.
 #
 #   install_and_handover <bundle_dir> <installed_bundle> <new_daemon>
 #
 # Sets HANDOVER_STARTED to the moment the handover began, which is the cutoff
-# the wake sweep filters parked sessions against.
+# the wake sweep filters parked sessions against, and BUNDLE_RESTORE_FAILED
+# when a failure could not be rolled back.
 install_and_handover() {
     local bundle_dir="${1-}"
     local installed_bundle="${2-}"
     local new_daemon="${3-}"
+    BUNDLE_RESTORE_FAILED=false
 
     # Keeping the previous bundle: undone by moving it back, which is what the
-    # two failure paths below do.
+    # two failure paths below do. A failure here has moved nothing, so there
+    # is nothing to roll back.
     stash_installed_bundle "$installed_bundle" || return 1
 
     # Installing: the new bundle replaces the old one on disk. The RUNNING app
@@ -761,7 +777,7 @@ install_and_handover() {
     # underneath the new install.
     if ! install_app_bundle "$bundle_dir" "$installed_bundle"; then
         log_error "could not install to $installed_bundle"
-        restore_previous_bundle "$installed_bundle"
+        roll_back_bundle "$installed_bundle"
         return 1
     fi
 
@@ -769,10 +785,11 @@ install_and_handover() {
     # gone. Everything before it can still be put back, and a handover that
     # never completes does exactly that with the bundle, leaving the operator
     # on the build they started the day with rather than a new app driving an
-    # old daemon. The caller relaunches the app it stopped either way.
+    # old daemon. The caller relaunches the app it stopped once that worked,
+    # and leaves it stopped when it did not (BUNDLE_RESTORE_FAILED).
     HANDOVER_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if ! handover "$new_daemon"; then
-        restore_previous_bundle "$installed_bundle"
+        roll_back_bundle "$installed_bundle"
         return 1
     fi
 }
@@ -908,9 +925,10 @@ stop_handover_successor() {
 
 # True from the moment this run stops the app ahead of the handover until it
 # launches the app again. Every way out of the run that finds it still true
-# relaunches the app — see relaunch_stopped_app and on_update_exit — except an
-# exit while the installation is moving, which leaves it stopped and says so
-# (report_interrupted_install).
+# relaunches the app — see relaunch_stopped_app and on_update_exit — except
+# two that leave it stopped and say so (leave_app_stopped_for_recovery): an
+# exit while the installation is moving, and a failed handover whose rollback
+# did not complete.
 APP_RELAUNCH_PENDING=false
 
 # True while install_and_handover is moving the installation: from just before
@@ -988,21 +1006,43 @@ launch_installed_app() {
 }
 
 # Bring back an app this run stopped for a handover that did not complete. It
-# launches whatever the rollback left at $INSTALLED_BUNDLE, which is the
-# previous build when restore_previous_bundle succeeded.
+# launches whatever is at $INSTALLED_BUNDLE, so it is right only once the
+# rollback has put the previous build back there.
 #
 # The relaunch matters for more than the window on screen. A failed handover
 # can leave no daemon running at all — the successor stops its predecessor
 # before it reports itself, and is then stopped in turn — and an app that
 # finds no daemon socket starts one from its bundle's source worktree. That is
-# why main calls this only once .build/release names the build that was
-# running before the update, and why on_update_exit never calls it while
+# why main calls this only once both halves of the rollback have worked — the
+# previous bundle is back, and .build/release names the build that was
+# running before the update — and why on_update_exit never calls it while
 # INSTALL_IN_FLIGHT is set.
 relaunch_stopped_app() {
     [ "$APP_RELAUNCH_PENDING" = true ] || return 0
     APP_RELAUNCH_PENDING=false
     log "relaunching the app this run stopped before the handover"
     launch_installed_app
+}
+
+# Leave the app this run stopped where it is, and say how to recover. For a
+# run that ends with an installation it cannot vouch for, where the bundle at
+# $INSTALLED_BUNDLE and the daemon an app launched from it would reach, or
+# start, may be different builds: an exit while the installation is moving
+# (report_interrupted_install), and a failed handover whose rollback did not
+# complete (main). Each logs its own error before calling this.
+#
+# APP_RELAUNCH_PENDING comes down before INSTALL_IN_FLIGHT, so an exit between
+# the two still finds nothing to relaunch.
+leave_app_stopped_for_recovery() {
+    local was_stopped="$APP_RELAUNCH_PENDING"
+    APP_RELAUNCH_PENDING=false
+    INSTALL_IN_FLIGHT=false
+    if [ "$was_stopped" = true ]; then
+        log "the app was stopped for the handover and is not running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
+    fi
+    log "to recover: run 'tbd version' to see which build the daemon is running, then run 'tbd update' again"
+    log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build ($INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json names the bundle's commit)"
+    log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
 }
 
 # Report a run that ended while install_and_handover was moving the
@@ -1018,15 +1058,8 @@ relaunch_stopped_app() {
 # that reaches, or starts, whichever daemon it finds. So the run says what
 # happened and how to recover, and the operator chooses.
 report_interrupted_install() {
-    INSTALL_IN_FLIGHT=false
     log_error "the run was interrupted while installing and handing over; the installation may be part old build, part new"
-    if [ "$APP_RELAUNCH_PENDING" = true ]; then
-        APP_RELAUNCH_PENDING=false
-        log "the app was stopped for the handover and is not running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
-    fi
-    log "to recover: run 'tbd version' to see which build the daemon is running, then run 'tbd update' again"
-    log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build ($INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json names the bundle's commit)"
-    log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
+    leave_app_stopped_for_recovery
 }
 
 # The app restart, with its opt-out. Separate from restart_app so both branches
@@ -1644,16 +1677,25 @@ main() {
     # link was pointed at the download it goes back to exactly what it named;
     # before that (and on the local-build path) only a download it was taken
     # from needs putting back, since SwiftPM's own directory is SwiftPM's.
+    #
+    # Non-zero, with the failure logged, when the link could not be put back.
+    # It then still names the new build, and an app that finds no daemon
+    # starts one from it, so the failed-handover path relaunches nothing.
     put_release_link_back() {
         if [ "$release_link_moved" = true ]; then
             if [ -n "$previous_release_target" ]; then
-                point_release_link "$release_link" "$previous_release_target" \
-                    && log "pointed $release_link back at $previous_release_target"
-            else
-                rm -f "$release_link"
+                if ! point_release_link "$release_link" "$previous_release_target"; then
+                    log_error "could not point $release_link back at $previous_release_target"
+                    return 1
+                fi
+                log "pointed $release_link back at $previous_release_target"
+            elif ! rm -f "$release_link"; then
+                log_error "could not remove $release_link, which names the new build"
+                return 1
             fi
-        else
-            restore_release_link "$release_link" "$previous_release_target"
+        elif ! restore_release_link "$release_link" "$previous_release_target"; then
+            log_error "could not point $release_link back at $previous_release_target"
+            return 1
         fi
     }
 
@@ -1683,7 +1725,8 @@ main() {
     # installation moves. The app goes first, so that no viewer is attached
     # when the daemon changes hands (see stop_app_before_handover); from this
     # line on, every way out of the run launches it again, save an
-    # interruption while the installation is moving.
+    # interruption while the installation is moving and a failed handover
+    # whose rollback did not complete.
     stop_app_before_handover
 
     # install_and_handover says at each line what undoing that line costs.
@@ -1694,15 +1737,26 @@ main() {
     # and comes down once the run knows where it stands again.
     INSTALL_IN_FLIGHT=true
     if ! install_and_handover "$bundle_dir" "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon"; then
-        # The previous app bundle is back; put the daemon path back with it,
-        # so a reboot respawns the build that is still running. Then the app,
-        # in that order: an app that finds no daemon starts one from that path.
-        # The flag comes down between the two, so an exit before the path is
-        # back still leaves the app stopped rather than launching it against
-        # a path that names the new build.
-        put_release_link_back
-        INSTALL_IN_FLIGHT=false
-        relaunch_stopped_app
+        # install_and_handover has put the previous app bundle back, or set
+        # BUNDLE_RESTORE_FAILED. Put the daemon path back with it, so a reboot
+        # respawns the build that is still running. Then the app, in that
+        # order: an app that finds no daemon starts one from that path. The
+        # flag stays up until both halves are known to have worked, so an exit
+        # before then still leaves the app stopped rather than launching it
+        # against a bundle or a path that may name the new build.
+        local link_restored=true
+        put_release_link_back || link_restored=false
+        if [ "$BUNDLE_RESTORE_FAILED" = false ] && [ "$link_restored" = true ]; then
+            INSTALL_IN_FLIGHT=false
+            relaunch_stopped_app
+        else
+            # Half a rollback leaves what an interruption does: an app
+            # launched now could drive, or start, a daemon from another
+            # build. restore_previous_bundle and put_release_link_back have
+            # each logged which half failed.
+            log_error "the rollback of the failed install did not complete; the installed app and the daemon it would reach or start may be different builds"
+            leave_app_stopped_for_recovery
+        fi
         return 1
     fi
     INSTALL_IN_FLIGHT=false

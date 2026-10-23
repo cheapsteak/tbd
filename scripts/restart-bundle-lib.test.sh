@@ -567,7 +567,8 @@ EOF
 # Run stop_app_process against the stubs in <dir>, with the app in <state>
 # (`none` for no app) and any VAR=value knobs for the stubs, and print
 # "<outcome> rc=<status>". A one-second grace and a one-second wait after
-# SIGKILL keep the escalating cases short.
+# SIGKILL keep the escalating cases short; STOP_GRACE and STOP_KILL_WAIT
+# among the knobs replace them.
 #
 #   run_stop <dir> <state> [VAR=value ...]
 run_stop() {
@@ -577,7 +578,9 @@ run_stop() {
     rm -f "$STUB_APP"
     [ "$state" = none ] || printf '%s' "$state" > "$STUB_APP"
     env PATH="$dir:$PATH" "$@" bash -c \
-        'source "$1"; o="$(stop_app_process "/x/TBDApp" 1 1)"; printf "%s rc=%s" "$o" "$?"' \
+        'source "$1"
+        o="$(stop_app_process "/x/TBDApp" "${STOP_GRACE:-1}" "${STOP_KILL_WAIT:-1}")"
+        printf "%s rc=%s" "$o" "$?"' \
         _ "$HELPER"
 }
 
@@ -631,13 +634,38 @@ test_stop_waits_for_the_app_and_escalates() {
     unset STUB_LOG STUB_APP
 }
 
+# A wait of 0 seconds still asks pgrep. With no poll at all, the wait after
+# SIGKILL read "still matching" off its starting value, and an app that died
+# on SIGKILL was reported as surviving it.
+test_a_zero_second_wait_still_checks() {
+    local stubs outcome
+    stubs="$TEST_TMP/stubs-stop-zero"
+    mkstopstubs "$stubs"
+    export STUB_LOG="$TEST_TMP/stop-zero.log" STUB_APP="$TEST_TMP/stop-zero-app"
+
+    outcome="$(run_stop "$stubs" kill STOP_GRACE=1 STOP_KILL_WAIT=0)"
+    assert_eq "an app that exits on SIGKILL is killed even with no wait after it" \
+        "killed rc=0" "$outcome"
+    if [ "$(grep -n -- '-KILL' "$STUB_LOG" | head -1 | cut -d: -f1)" -lt \
+        "$(grep -n '^pgrep' "$STUB_LOG" | tail -1 | cut -d: -f1)" ]; then
+        pass "the zero-second wait after SIGKILL polls pgrep"
+    else
+        fail "the zero-second wait after SIGKILL polls pgrep: $(cat "$STUB_LOG")"
+    fi
+
+    rm -f "$STUB_APP"
+    unset STUB_LOG STUB_APP
+}
+
 # A failed pkill is not "nothing running", and a failed pgrep is no answer.
 # pkill exits 1 for a match it could not signal as well as for no match, and 2
 # or 3 on an error. Read as `none`, any of them hands a running app to the
 # caller as absent, and update.sh then hands the daemon over with the app
 # alive and owes it no relaunch. pgrep settles it instead: an app it still
-# finds is escalated like any other, nothing found is still `none`, and a pgrep
-# error, before the signal or during the wait, is `unknown` and fails rather
+# finds is escalated like any other, and nothing found is still `none`. A
+# pgrep error before the signal is no answer either way, so the stop goes on
+# through the wait and the SIGKILL; only a pgrep that still cannot answer at
+# the end of the wait after SIGKILL makes it `unknown`, which fails rather
 # than passing for `none` or `stopped`.
 test_stop_does_not_read_a_failure_as_no_app() {
     local stubs code outcome
@@ -661,7 +689,18 @@ test_stop_does_not_read_a_failure_as_no_app() {
     done
 
     outcome="$(run_stop "$stubs" term STUB_PKILL_TERM_EXIT=3 STUB_PGREP_EXIT=3)"
-    assert_eq "a failed pkill that pgrep cannot settle is unknown, and fails" \
+    if grep -q 'pkill -KILL -f \^/x/TBDApp\$' "$STUB_LOG"; then
+        pass "a failed pkill that pgrep cannot settle still escalates to SIGKILL"
+    else
+        fail "a failed pkill that pgrep cannot settle still escalates to SIGKILL: $(cat "$STUB_LOG")"
+    fi
+    if [ "$(grep -n -- '-KILL' "$STUB_LOG" | head -1 | cut -d: -f1)" -lt \
+        "$(grep -n '^pgrep' "$STUB_LOG" | tail -1 | cut -d: -f1)" ]; then
+        pass "a failed pkill that pgrep cannot settle waits after the SIGKILL"
+    else
+        fail "a failed pkill that pgrep cannot settle waits after the SIGKILL: $(cat "$STUB_LOG")"
+    fi
+    assert_eq "a failed pkill whose wait pgrep still cannot settle is unknown, and fails" \
         "unknown rc=1" "$outcome"
 
     outcome="$(run_stop "$stubs" term STUB_PGREP_EXIT=3)"
@@ -853,6 +892,7 @@ test_install_ignores_a_gnu_cp_first_on_path
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
 test_stop_waits_for_the_app_and_escalates
+test_a_zero_second_wait_still_checks
 test_stop_does_not_read_a_failure_as_no_app
 test_describe_app_stop_names_every_outcome
 test_runtime_products_are_executable_targets

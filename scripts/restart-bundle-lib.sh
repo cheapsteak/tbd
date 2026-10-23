@@ -408,13 +408,18 @@ escape_exec_pattern() {
 # whose process is still running activates that process instead of launching
 # a new one, so the relaunch is lost when it finishes exiting.
 #
+# Both waits are whole numbers of seconds (see _wait_for_no_match), and a
+# wait of 0 still checks once.
+#
 # Prints one word saying how it ended, for the caller to report:
 #   none      nothing matched, so nothing was signalled
-#   stopped   it exited on SIGTERM
-#   killed    it outlived the grace period and exited on SIGKILL
+#   stopped   nothing matching was left within the grace period after SIGTERM
+#   killed    something matching outlived the grace period and was gone after
+#             SIGKILL
 #   survived  something matching is still running after SIGKILL
-#   unknown   pgrep failed instead of answering, so whether anything matching
-#             is still running cannot be told
+#   unknown   pgrep failed at the end of the wait after SIGKILL instead of
+#             answering, so whether anything matching is still running cannot
+#             be told
 # Returns non-zero for `survived` and `unknown`: either way the app may still
 # be running.
 stop_app_process() {
@@ -434,24 +439,25 @@ stop_app_process() {
     # or 3 on an error that says nothing either way. Read as `none`, any of
     # those hands the caller a running app as absent, and an update then hands
     # the daemon over with it alive and owes it no relaunch. So pgrep decides,
-    # and only its own "no match" is `none`. An app it still finds goes on to
-    # the wait and the SIGKILL like any other: the SIGTERM may never have
-    # reached it, and the escalation is what finds out whether anything can.
+    # and only its own "no match" is `none`. Everything else goes on to the
+    # wait and the SIGKILL like an app that took the signal. An app pgrep
+    # still finds may never have received the SIGTERM, and the escalation is
+    # what finds out whether anything can stop it. A pgrep that errors instead
+    # of answering leaves the app possibly there, and stopping here would never
+    # signal one that is; going on costs nothing when it is not, since an app
+    # that is gone simply matches nothing. That case can end `stopped` or
+    # `killed` with nothing ever running, which the callers treat as an app
+    # that was: at worst a relaunch nobody needed, where `none` would risk
+    # never bringing back an app that was open. Only a wait that still gets
+    # no answer after SIGKILL is `unknown`.
     pkill -f "^${pattern}\$" 2>/dev/null || status=$?
     if [ "$status" -ne 0 ]; then
         status=0
         pgrep -f "^${pattern}\$" >/dev/null 2>&1 || status=$?
-        case "$status" in
-            0) ;;
-            1)
-                printf 'none\n'
-                return 0
-                ;;
-            *)
-                printf 'unknown\n'
-                return 1
-                ;;
-        esac
+        if [ "$status" -eq 1 ]; then
+            printf 'none\n'
+            return 0
+        fi
     fi
 
     status=0
@@ -510,8 +516,14 @@ describe_app_stop() {
 }
 
 # Wait up to <seconds> for no process's command line to be exactly <pattern>.
-# Polled in tenths of a second: the app usually exits within the first one,
-# and a whole-second poll would add that second to every restart.
+#
+#   _wait_for_no_match <pattern> <seconds>
+#
+# <seconds> is a whole number: it is multiplied in bash arithmetic, which has
+# no fractions. Polled in tenths of a second: the app usually exits within the
+# first one, and a whole-second poll would add that second to every restart.
+# The first poll comes before any sleep, so a wait of 0 still asks pgrep once
+# and answers from what it says rather than from no poll at all.
 #
 # Returns 0 once pgrep finds nothing, 1 if something still matched at the last
 # poll, and 2 if the last poll was a pgrep error. Only pgrep's own "no match"
@@ -520,15 +532,16 @@ describe_app_stop() {
 _wait_for_no_match() {
     local pattern="$1"
     local ticks=$(($2 * 10))
-    local status=0
-    while [ "$ticks" -gt 0 ]; do
-        sleep 0.1
-        ticks=$((ticks - 1))
+    local status
+    while :; do
         status=0
         pgrep -f "^${pattern}\$" >/dev/null 2>&1 || status=$?
         if [ "$status" -eq 1 ]; then
             return 0
         fi
+        [ "$ticks" -gt 0 ] || break
+        sleep 0.1
+        ticks=$((ticks - 1))
     done
     if [ "$status" -eq 0 ]; then
         return 1
