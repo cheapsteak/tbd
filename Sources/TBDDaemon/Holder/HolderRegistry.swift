@@ -2473,8 +2473,8 @@ actor HolderRegistry {
     /// **An ownerless claim is cleared by its viewer, its session or the
     /// daemon — never by a death.** It arises when the sidecar could not
     /// identify the peer a descriptor went to (`FDVendingServer` retries that
-    /// read before giving up, so a failure that passes in moments does not
-    /// leave one). Three things clear it: the viewer's own detach
+    /// read back to back before giving up, so a `ps` spawn refused once does
+    /// not leave one). Three things clear it: the viewer's own detach
     /// (`acceptHandback`), which proves the descriptor closed; the session's
     /// `release`; and a daemon restart, since claims live only in this
     /// registry's memory. A death cannot, because nothing here says whose

@@ -842,12 +842,11 @@ import TBDShared
 
         let newApp = ProcessIdentity(
             pid: 22, startedAt: Date(timeIntervalSince1970: 20), commandLine: "new")
-        // Only the new connection's peer can be identified. One read each: a
-        // retry could not change a scripted answer, and would only wait.
+        // Only the new connection's peer can be identified.
         let identities = [newServerFD: newApp]
         let disconnects = DisconnectLog()
         let exits = DisconnectLog()
-        let server = FDVendingServer(peerIdentity: { identities[$0] }, identityAttempts: 1)
+        let server = FDVendingServer(peerIdentity: { identities[$0] })
         await server.setOnClientDisconnect { disconnects.record($0) }
         await server.setOnReceiveLoopExit { exits.record(nil) }
 
@@ -872,11 +871,10 @@ import TBDShared
 
         let oldApp = ProcessIdentity(
             pid: 11, startedAt: Date(timeIntervalSince1970: 10), commandLine: "old")
-        // Only the old connection's peer can be identified. One read each: a
-        // retry could not change a scripted answer, and would only wait.
+        // Only the old connection's peer can be identified.
         let identities = [oldServerFD: oldApp]
         let disconnects = DisconnectLog()
-        let server = FDVendingServer(peerIdentity: { identities[$0] }, identityAttempts: 1)
+        let server = FDVendingServer(peerIdentity: { identities[$0] })
         await server.setOnClientDisconnect { disconnects.record($0) }
 
         await server.adoptConnection(fd: oldServerFD)

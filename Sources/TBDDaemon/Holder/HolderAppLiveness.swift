@@ -141,7 +141,14 @@ struct SidecarDisconnectRuling: Sendable, Equatable {
         /// one ceiling ago — and ends on nothing it read before this
         /// departure was reported.
         case absorbed
-        /// The task running the arbitration was cancelled. Its claims stand.
+        /// The task running the arbitration was cancelled while its watch
+        /// slept. Its claims stand.
+        ///
+        /// Production never ends this way: the daemon starts each arbitration
+        /// in an unstructured `Task` and never cancels it, so a watch runs
+        /// until one of the endings above ends it or the process exits.
+        /// Cancellation exists for tests, which end a watch once they have
+        /// observed what they came for.
         case abandoned
     }
 
