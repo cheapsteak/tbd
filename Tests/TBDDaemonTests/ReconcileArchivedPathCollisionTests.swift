@@ -10,7 +10,9 @@ import Testing
 /// across every row while reconcile's re-adopt pass only skips live rows, so
 /// the adoption insert threw out of `reconcile` and aborted the rest of the
 /// repo's pass (terminals, tmux, health) on every run until the directory
-/// went away.
+/// went away. Reconcile now reports unmanaged worktrees instead of adopting
+/// them, so the held path must stay a single archived row and the pass must
+/// still finish.
 ///
 /// Uses `createTestRepoResolvingSymlinks`: reconcile compares DB paths
 /// against `git worktree list`, which reports realpath()-resolved paths.
@@ -42,8 +44,8 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     )
     try await db.worktrees.archive(id: archived.id)
 
-    // A worktree recreated at that path, plus an ordinary stray beside it
-    // that the same pass must still adopt.
+    // A worktree recreated at that path, plus an ordinary stray beside it,
+    // which reconcile reports and does not adopt.
     try await shell("git worktree add -b helper-again '\(path)'", at: repoDir)
     let stray = (base as NSString).appendingPathComponent("stray")
     try await shell("git worktree add -b stray-branch '\(stray)'", at: repoDir)
@@ -58,7 +60,6 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
     #expect(atPath.first?.status == .archived)
     #expect(FileManager.default.fileExists(atPath: path), "reconcile never removes the directory")
 
-    let active = try await db.worktrees.list(repoID: repo.id, status: .active)
-    #expect(active.contains { $0.localPath == stray },
-            "the collision must not stop the rest of the pass")
+    let strayRows = try await db.worktrees.list().filter { $0.localPath == stray }
+    #expect(strayRows.isEmpty, "reconcile reports a plain worktree; it never adopts one")
 }
