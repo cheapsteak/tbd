@@ -11,7 +11,11 @@ import Foundation
 /// `public` only because it names a parameter of `RPCRouter`'s public
 /// initializer (the envelope-suppression seam). Its members stay internal:
 /// nothing outside this module constructs or reads one.
-public struct ProcessIdentity: Sendable, Equatable {
+///
+/// `Hashable` so `HolderRegistry` can remember the apps it has been told are
+/// confirmed gone. All three facts take part, so a later process that reuses
+/// a remembered pid hashes as the stranger it is.
+public struct ProcessIdentity: Sendable, Hashable {
     let pid: Int32
     /// When the process holding `pid` started, as read from the kernel at the
     /// moment this identity was recorded.

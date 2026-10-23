@@ -254,6 +254,8 @@ assemble_app_bundle "$REPO_ROOT" "$BUILD_DIR" "$PATH"
 INSTALLED_BUNDLE="/Applications/TBD.app"
 BUNDLED_EXEC_PATH="$INSTALLED_BUNDLE/Contents/MacOS/TBDApp"
 APP_EXEC_PATTERN=""
+# The unescaped path APP_EXEC_PATTERN matches, for the lines that report a stop.
+APP_EXEC_PATH=""
 
 # THIS worktree's bundle binary, resolved and escaped for end-anchored
 # pgrep/pkill. Needed on both paths: it's the launch target on the WIP path,
@@ -273,6 +275,7 @@ if [ "$install_to_applications" = true ]; then
     # recently won /Applications). Sibling worktrees launched from their own
     # .build/.../TBD.app would not match.
     APP_EXEC_PATTERN="$(escape_exec_pattern "$BUNDLED_EXEC_PATH")"
+    APP_EXEC_PATH="$BUNDLED_EXEC_PATH"
 else
     # WIP build: skip /Applications install, launch from .build/debug instead.
     # We launch via `open "$BUNDLE_DIR"` below, so the running process's
@@ -280,6 +283,7 @@ else
     # not the unwrapped swift-build output. Match pgrep/pkill against the
     # resolved bundle path so the end-anchored pattern actually hits.
     APP_EXEC_PATTERN="$WORKTREE_EXEC_PATTERN"
+    APP_EXEC_PATH="$WORKTREE_EXEC_PATH"
 fi
 
 # MARK: - Seed the tmux fallback
@@ -288,6 +292,91 @@ fi
 # the saved fallback unless a usable one is already saved. Runs on every path,
 # --daemon-only included: the next login relaunch needs the file regardless.
 seed_tmux_fallback "${TBD_HOME:-$HOME/tbd}"
+
+# MARK: - Stopping the app
+
+# How long the app gets to exit on SIGTERM before it is killed, in seconds.
+# The app is a viewer that holds no session, so it has nothing to finish; the
+# grace only spares it a SIGKILL while it tears down its windows.
+APP_STOP_GRACE=5
+
+# How the last stop_app_and_report call ended: one of stop_app_process's
+# outcome words.
+last_stop_outcome=none
+
+# True once the stop of the app at APP_EXEC_PATTERN found one: anything but
+# `none`, so an app that was, or (`unknown`) may have been, running there. The
+# EXIT trap goes by it, and only by it, because that is the app the trap
+# launches. The leftover WIP instance stop_apps also stops does not count:
+# with only that one running, a relaunch would open $INSTALLED_BUNDLE, which
+# nobody had open.
+app_was_stopped=false
+
+# Stop the app whose command line is exactly <pattern>, wait for it to exit,
+# and say how that went, naming <exec_path> where the line needs to say which
+# app. Never fails the restart: an app that survives SIGKILL, or that pgrep
+# cannot say is gone, is reported and the restart goes on. Nothing running
+# gets no line, because it is the usual answer for the leftover-WIP stop below
+# and would print on every restart.
+#
+#   stop_app_and_report <pattern> <exec_path>
+stop_app_and_report() {
+    last_stop_outcome="$(stop_app_process "$1" "$APP_STOP_GRACE")" || true
+    if [ "$last_stop_outcome" = none ]; then
+        return 0
+    fi
+    echo "  $(describe_app_stop "$last_stop_outcome" "$APP_STOP_GRACE" "$2")"
+}
+
+# Every app this restart replaces: the running TBDApp, and on a full install
+# also a leftover WIP instance launched from THIS worktree's own .build bundle
+# before the install, or two TBDApp processes survive. Matched end-anchored
+# against resolved exec paths, so this never touches swift build subprocesses,
+# editors, or sibling worktrees whose command line contains "TBDApp". On the
+# WIP path the two patterns are identical, so the second stop is skipped.
+stop_apps() {
+    stop_app_and_report "$APP_EXEC_PATTERN" "$APP_EXEC_PATH"
+    if [ "$last_stop_outcome" != none ]; then
+        app_was_stopped=true
+    fi
+    if [ "$install_to_applications" = true ] && [ -n "$WORKTREE_EXEC_PATTERN" ] \
+        && [ "$WORKTREE_EXEC_PATTERN" != "$APP_EXEC_PATTERN" ]; then
+        stop_app_and_report "$WORKTREE_EXEC_PATTERN" "$WORKTREE_EXEC_PATH"
+    fi
+}
+
+# When this run restarts both, the app goes before the daemon. An app still
+# running when the daemon restarts reconnects to the new daemon and
+# re-attaches the session it has on screen; the app restart below then kills
+# it, and the new daemon keeps that dead viewer's claim on the session's
+# terminal, refusing the relaunched app's attach.
+#
+# The EXIT trap is what keeps that from costing the app: if anything between
+# here and the launch below stops the script (set -e is on), the trap launches
+# it anyway, so a restart never ends with an app it stopped not started again.
+# It owes that only when the stop found the app the trap launches, the one at
+# $INSTALLED_BUNDLE (app_was_stopped). With none running there, the launch
+# below still starts one, as a full restart always has, but an exit before it
+# leaves the machine as the run found it rather than opening an app nobody
+# had open.
+app_relaunch_pending=false
+relaunch_app_on_exit() {
+    [ "$app_relaunch_pending" = true ] || return 0
+    app_relaunch_pending=false
+    echo "Relaunching the app stopped before the daemon restart..."
+    launch_app_bundle "$INSTALLED_BUNDLE" "$PATH" /tmp/tbdapp.log \
+        || echo "  ERROR: could not launch $INSTALLED_BUNDLE" >&2
+}
+app_stopped_early=false
+if [ "$app_only" = false ] && [ "$daemon_only" = false ] && [ "$install_to_applications" = true ]; then
+    trap relaunch_app_on_exit EXIT
+    echo "Stopping app before the daemon..."
+    stop_apps
+    app_stopped_early=true
+    if [ "$app_was_stopped" = true ]; then
+        app_relaunch_pending=true
+    fi
+fi
 
 # MARK: - Restart Daemon
 
@@ -323,20 +412,14 @@ fi
 # MARK: - Restart App
 
 if [ "$daemon_only" = false ]; then
-    echo "Stopping app..."
-    # Match end-anchored against the resolved exec path so we only ever
-    # affect THIS worktree's running TBDApp — never swift build subprocesses,
-    # editors, or sibling worktrees whose command line contains "TBDApp".
-    stop_app_process "$APP_EXEC_PATTERN"
-    # On a full install, also kill a leftover WIP instance launched from THIS
-    # worktree's own .build bundle (before the install), or two TBDApp
-    # processes survive. Still never touches sibling worktrees. On the WIP
-    # path the patterns are identical, so this is skipped — no double-kill.
-    if [ "$install_to_applications" = true ] && [ -n "$WORKTREE_EXEC_PATTERN" ] \
-        && [ "$WORKTREE_EXEC_PATTERN" != "$APP_EXEC_PATTERN" ]; then
-        stop_app_process "$WORKTREE_EXEC_PATTERN"
+    # Already stopped above when this run restarted the daemon too.
+    if [ "$app_stopped_early" = false ]; then
+        echo "Stopping app..."
+        stop_apps
     fi
 
+    # The launch below is the relaunch the EXIT trap was holding in reserve.
+    app_relaunch_pending=false
     echo "Starting app..."
     if [ "$install_to_applications" = true ]; then
         # Launch from /Applications (install-ready or --wip override)

@@ -68,12 +68,24 @@ these steps in order.
   that failed here left old binaries in place, and had the sidecar been
   written first, it would have named the commit that never actually built,
   with nothing to correct it until the clone's next successful build.
-- **Assembles, signs and installs** `/Applications/TBD.app`, using the same
-  code `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
+- **Assembles and signs** the new `TBD.app`, using the same code
+  `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
   carries the sidecar and a `SourceWorktreePath.txt` naming the update clone.
-  The bundle being replaced is moved to `~/tbd/updates/previous/TBD.app` first,
-  and stays there — it is what a failed handover puts back, and afterwards it
-  is the quickest way to return to the build you were on.
+- **Stops the app**, unless you pass `--no-app`, and waits for it to exit:
+  SIGTERM, five seconds, then SIGKILL, each outcome logged. Nothing before this
+  step touches the running installation, so a failed build, a dry run or a
+  failed signature leaves the app up. It goes before the daemon because an app
+  still running during the handover reconnects to the new daemon and
+  re-attaches the session it shows, and the new daemon keeps that claim after
+  the app is replaced, refusing the replacement's attach. From here on, every
+  way the run ends launches the app again, but two: an interruption while the
+  bundle is being installed and the daemon handed over, and a failed handover
+  whose rollback does not complete, both described under "Going back to the
+  previous build".
+- **Installs** `/Applications/TBD.app`. The bundle being replaced is moved to
+  `~/tbd/updates/previous/TBD.app` first, and stays there — it is what a failed
+  handover puts back, and afterwards it is the quickest way to return to the
+  build you were on.
 - **Hands the daemon over.** See below.
 - **Seeds the saved tmux fallback** on a manual run, with or without
   `--no-app`; an `--auto` run skips this step. When
@@ -84,8 +96,8 @@ these steps in order.
   `--auto` run's `PATH` is the daemon's plus fixed Homebrew directories, so a
   tmux it found would be a guess rather than your shell's choice. See
   [the design](specs/2026-09-22-tmux-fallback-install-seeding-design.md).
-- **Restarts the app**, unless you pass `--no-app`. The app is a viewer;
-  nothing in it holds a session.
+- **Launches the app** again, unless you pass `--no-app`. The app is a viewer;
+  nothing in it holds a session, so the seconds it is down cost no work.
 - **Wakes what the handover parked**, unless you pass `--no-wake`.
 - **Prints a summary and writes the log.**
 
@@ -217,7 +229,8 @@ build exists. `tbd update --check` writes it too.
 - `--from-release` — install the published build for this run; see "Where
   the binaries come from".
 - `--debug` — build the debug configuration instead of release.
-- `--no-app` — leave the running app alone; hand the daemon over anyway.
+- `--no-app` — leave the running app alone, neither stopping it for the
+  handover nor restarting it; hand the daemon over anyway.
 - `--no-wake` — install and hand over, but wake nothing.
 - `--wake-only` — wake every recovery-parked session against the running
   daemon, and do nothing else.
@@ -255,7 +268,9 @@ the order you would reach for them.
 
 - **From the kept bundle**, the fastest, because it needs no build. Every
   update moves the app bundle it is replacing to
-  `~/tbd/updates/previous/TBD.app` and leaves it there. Put it back with
+  `~/tbd/updates/previous/TBD.app` and leaves it there. An update that finds
+  nothing installed keeps nothing, and leaves a bundle an earlier update kept
+  where it is. Put it back with
   `rm -rf /Applications/TBD.app && /bin/cp -cR ~/tbd/updates/previous/TBD.app
   /Applications/TBD.app`, then relaunch. That bundle's
   `Contents/SourceWorktreePath.txt` names the tree the previous daemon came
@@ -274,9 +289,52 @@ the order you would reach for them.
 
 An update that gets as far as installing and then cannot bring the new daemon
 up performs the first of those itself: it moves the kept bundle back, tells
-LaunchServices about it, logs `restored previous app bundle`, and exits
-non-zero. That is the case the kept bundle exists for — a new app driving the
-old daemon is a state nobody should be left in.
+LaunchServices about it, logs `restored previous app bundle`, puts the update
+clone's `.build/release` link back the way the run found it, relaunches the
+app it stopped before the handover, and exits non-zero. That is the case the
+kept bundle exists for — a new app driving the old daemon is a state nobody
+should be left in. The relaunch also covers a handover that failed after the
+old daemon had already exited: an app that finds no daemon starts one.
+
+The relaunch waits on both halves of that rollback. When either fails — the
+run kept no bundle to move back because nothing was installed when it began,
+as on the first update, or the bundle or the `.build/release` link cannot be
+put back — the new build may still be what an app would launch, or what it
+would start a daemon from, so the run leaves the app it stopped not running.
+It logs which half failed, then an error saying the rollback of the failed
+install did not complete, and the recovery steps below.
+
+The rollback only ever moves back the bundle the same run kept. A bundle an
+earlier update left at `~/tbd/updates/previous/TBD.app` is not the build the
+run replaced, and installing it would put some older app in front of
+whichever daemon is left, so a run that kept nothing leaves it where it is and
+logs that it did not restore it. The new build stays in `/Applications`, as on
+the first update, so that it is there to open once it and the daemon are the
+same build.
+
+A run interrupted while it installs the bundle and hands the daemon over —
+Ctrl-C, a signal, or a step that exits — does not launch the app again
+either. At that point the run cannot tell which bundle is in `/Applications`
+or which daemon is serving, and putting the kept bundle back is no safer than
+relaunching, because the new daemon may already be up. So it leaves the app
+it stopped not running and logs an error saying the run was interrupted
+mid-handover and the app is not running.
+
+To recover from either:
+
+- **Check what is running.** `tbd version` names the daemon's commit, and
+  `/Applications/TBD.app/Contents/TBDBuildIdentity.json` names the bundle's.
+- **Run `tbd update` again.** A run that completes its handover leaves the
+  bundle and the daemon on the same build and launches the app at the end.
+- **Or open `/Applications/TBD.app` yourself** once it and the daemon are the
+  same build.
+- **Or go back** with the kept bundle at `~/tbd/updates/previous/TBD.app`,
+  as described above, if the run got far enough to keep one. A run that found
+  nothing installed kept none, and a bundle there is an earlier update's.
+
+An interruption before the install starts, or after the handover has
+completed, launches the app again as usual: before, nothing has moved; after,
+the bundle and the daemon are the same new build.
 
 Either way, run the script from the worktree you want installed — never an
 absolute path to another tree's copy — or you will build one tree and leave

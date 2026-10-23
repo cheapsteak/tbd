@@ -530,6 +530,211 @@ test_stop_and_launch_use_the_anchored_pattern() {
     unset STUB_LOG
 }
 
+# Stubs for the stop_app_process cases. They model one app whose answer to
+# each signal is the content of $STUB_APP: `term` exits on SIGTERM, `kill`
+# only on SIGKILL, `unkillable` on neither. No file, no app. Two knobs make the
+# tools fail the ways the real ones can. With $STUB_PKILL_TERM_EXIT set, the
+# SIGTERM pkill signals nothing and exits with it: 1 for a match it could not
+# signal, 2 or 3 for an error. The SIGKILL pkill still works, so a case can
+# show the escalation going ahead. With $STUB_PGREP_EXIT set, every pgrep
+# exits with it and answers nothing.
+mkstopstubs() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/pkill" << 'EOF'
+#!/bin/sh
+printf '%s\n' "pkill $*" >> "$STUB_LOG"
+if [ -n "${STUB_PKILL_TERM_EXIT-}" ] && [ "$1" != -KILL ]; then
+    exit "$STUB_PKILL_TERM_EXIT"
+fi
+[ -f "$STUB_APP" ] || exit 1
+case "$(cat "$STUB_APP")" in
+    term) rm -f "$STUB_APP" ;;
+    kill) [ "$1" = -KILL ] && rm -f "$STUB_APP" ;;
+esac
+exit 0
+EOF
+    cat > "$dir/pgrep" << 'EOF'
+#!/bin/sh
+printf '%s\n' "pgrep $*" >> "$STUB_LOG"
+[ -z "${STUB_PGREP_EXIT-}" ] || exit "$STUB_PGREP_EXIT"
+[ -f "$STUB_APP" ] || exit 1
+echo 4242
+EOF
+    chmod +x "$dir"/*
+}
+
+# Run stop_app_process against the stubs in <dir>, with the app in <state>
+# (`none` for no app) and any VAR=value knobs for the stubs, and print
+# "<outcome> rc=<status>". A one-second grace and a one-second wait after
+# SIGKILL keep the escalating cases short; STOP_GRACE and STOP_KILL_WAIT
+# among the knobs replace them.
+#
+#   run_stop <dir> <state> [VAR=value ...]
+run_stop() {
+    local dir="$1" state="$2"
+    shift 2
+    : > "$STUB_LOG"
+    rm -f "$STUB_APP"
+    [ "$state" = none ] || printf '%s' "$state" > "$STUB_APP"
+    env PATH="$dir:$PATH" "$@" bash -c \
+        'source "$1"
+        o="$(stop_app_process "/x/TBDApp" "${STOP_GRACE:-1}" "${STOP_KILL_WAIT:-1}")"
+        printf "%s rc=%s" "$o" "$?"' \
+        _ "$HELPER"
+}
+
+# stop_app_process returns only once nothing matching is left, escalating to
+# SIGKILL, and says which way it went.
+test_stop_waits_for_the_app_and_escalates() {
+    local stubs state outcome
+    stubs="$TEST_TMP/stubs-stop"
+    mkstopstubs "$stubs"
+    export STUB_LOG="$TEST_TMP/stop.log" STUB_APP="$TEST_TMP/stop-app"
+
+    for state in none term kill unkillable; do
+        outcome="$(run_stop "$stubs" "$state")"
+        case "$state" in
+            none)
+                assert_eq "nothing running: nothing to stop" "none rc=0" "$outcome"
+                # The one pgrep is the check that pkill's "no match" means
+                # nothing is running; a wait would poll again.
+                assert_eq "nothing running: one pgrep confirms it, and no wait" \
+                    "1" "$(grep -c '^pgrep' "$STUB_LOG")"
+                ;;
+            term)
+                assert_eq "an app that exits on SIGTERM is stopped" "stopped rc=0" "$outcome"
+                if grep -q -- '-KILL' "$STUB_LOG"; then
+                    fail "an app that exits on SIGTERM is never sent SIGKILL"
+                else
+                    pass "an app that exits on SIGTERM is never sent SIGKILL"
+                fi
+                ;;
+            kill)
+                assert_eq "an app that ignores SIGTERM is killed" "killed rc=0" "$outcome"
+                if grep -q 'pkill -KILL -f \^/x/TBDApp\$' "$STUB_LOG"; then
+                    pass "the escalation is anchored on the same pattern"
+                else
+                    fail "the escalation is anchored on the same pattern: $(cat "$STUB_LOG")"
+                fi
+                if [ "$(grep -n '^pgrep' "$STUB_LOG" | head -1 | cut -d: -f1)" -lt \
+                    "$(grep -n -- '-KILL' "$STUB_LOG" | head -1 | cut -d: -f1)" ]; then
+                    pass "SIGKILL comes only after waiting out the grace period"
+                else
+                    fail "SIGKILL comes only after waiting out the grace period: $(cat "$STUB_LOG")"
+                fi
+                ;;
+            unkillable)
+                assert_eq "an app still there after SIGKILL is reported, and fails" \
+                    "survived rc=1" "$outcome"
+                ;;
+        esac
+    done
+    rm -f "$STUB_APP"
+    unset STUB_LOG STUB_APP
+}
+
+# A wait of 0 seconds still asks pgrep. With no poll at all, the wait after
+# SIGKILL read "still matching" off its starting value, and an app that died
+# on SIGKILL was reported as surviving it.
+test_a_zero_second_wait_still_checks() {
+    local stubs outcome
+    stubs="$TEST_TMP/stubs-stop-zero"
+    mkstopstubs "$stubs"
+    export STUB_LOG="$TEST_TMP/stop-zero.log" STUB_APP="$TEST_TMP/stop-zero-app"
+
+    outcome="$(run_stop "$stubs" kill STOP_GRACE=1 STOP_KILL_WAIT=0)"
+    assert_eq "an app that exits on SIGKILL is killed even with no wait after it" \
+        "killed rc=0" "$outcome"
+    if [ "$(grep -n -- '-KILL' "$STUB_LOG" | head -1 | cut -d: -f1)" -lt \
+        "$(grep -n '^pgrep' "$STUB_LOG" | tail -1 | cut -d: -f1)" ]; then
+        pass "the zero-second wait after SIGKILL polls pgrep"
+    else
+        fail "the zero-second wait after SIGKILL polls pgrep: $(cat "$STUB_LOG")"
+    fi
+
+    rm -f "$STUB_APP"
+    unset STUB_LOG STUB_APP
+}
+
+# A failed pkill is not "nothing running", and a failed pgrep is no answer.
+# pkill exits 1 for a match it could not signal as well as for no match, and 2
+# or 3 on an error. Read as `none`, any of them hands a running app to the
+# caller as absent, and update.sh then hands the daemon over with the app
+# alive and owes it no relaunch. pgrep settles it instead: an app it still
+# finds is escalated like any other, and nothing found is still `none`. A
+# pgrep error before the signal is no answer either way, so the stop goes on
+# through the wait and the SIGKILL; only a pgrep that still cannot answer at
+# the end of the wait after SIGKILL makes it `unknown`, which fails rather
+# than passing for `none` or `stopped`.
+test_stop_does_not_read_a_failure_as_no_app() {
+    local stubs code outcome
+    stubs="$TEST_TMP/stubs-stop-failures"
+    mkstopstubs "$stubs"
+    export STUB_LOG="$TEST_TMP/stop-failures.log" STUB_APP="$TEST_TMP/stop-failures-app"
+
+    for code in 1 2 3; do
+        outcome="$(run_stop "$stubs" term STUB_PKILL_TERM_EXIT="$code")"
+        assert_eq "a running app the SIGTERM pkill failed on (exit $code) is not reported absent" \
+            "killed rc=0" "$outcome"
+        if grep -q 'pkill -KILL -f \^/x/TBDApp\$' "$STUB_LOG"; then
+            pass "a running app the SIGTERM pkill failed on (exit $code) is escalated to SIGKILL"
+        else
+            fail "a running app the SIGTERM pkill failed on (exit $code) is escalated to SIGKILL: $(cat "$STUB_LOG")"
+        fi
+
+        outcome="$(run_stop "$stubs" none STUB_PKILL_TERM_EXIT="$code")"
+        assert_eq "a failed pkill (exit $code) with nothing running is still none" \
+            "none rc=0" "$outcome"
+    done
+
+    outcome="$(run_stop "$stubs" term STUB_PKILL_TERM_EXIT=3 STUB_PGREP_EXIT=3)"
+    if grep -q 'pkill -KILL -f \^/x/TBDApp\$' "$STUB_LOG"; then
+        pass "a failed pkill that pgrep cannot settle still escalates to SIGKILL"
+    else
+        fail "a failed pkill that pgrep cannot settle still escalates to SIGKILL: $(cat "$STUB_LOG")"
+    fi
+    if [ "$(grep -n -- '-KILL' "$STUB_LOG" | head -1 | cut -d: -f1)" -lt \
+        "$(grep -n '^pgrep' "$STUB_LOG" | tail -1 | cut -d: -f1)" ]; then
+        pass "a failed pkill that pgrep cannot settle waits after the SIGKILL"
+    else
+        fail "a failed pkill that pgrep cannot settle waits after the SIGKILL: $(cat "$STUB_LOG")"
+    fi
+    assert_eq "a failed pkill whose wait pgrep still cannot settle is unknown, and fails" \
+        "unknown rc=1" "$outcome"
+
+    outcome="$(run_stop "$stubs" term STUB_PGREP_EXIT=3)"
+    assert_eq "an app whose exit pgrep cannot confirm is unknown, not stopped" \
+        "unknown rc=1" "$outcome"
+
+    rm -f "$STUB_APP"
+    unset STUB_LOG STUB_APP
+}
+
+# describe_app_stop is the one wording restart.sh and update.sh both report a
+# stop with, and update.test.sh matches some of these lines in update.log, so
+# each outcome's line is pinned here. The grace in the `killed` line is the
+# one passed in, never a constant, and an outcome stop_app_process never
+# prints does not pass for a known one.
+test_describe_app_stop_names_every_outcome() {
+    local app="/Applications/TBD.app"
+    assert_eq "nothing running names where it looked" \
+        "no app running from $app to stop" "$(describe_app_stop none 5 "$app")"
+    assert_eq "an app that exited on SIGTERM" \
+        "the app exited" "$(describe_app_stop stopped 5 "$app")"
+    assert_eq "an app killed after the grace states the grace it was given" \
+        "the app ignored SIGTERM for 7s and exited on SIGKILL" "$(describe_app_stop killed 7 "$app")"
+    assert_eq "an app that survived SIGKILL is a warning naming where it runs from" \
+        "WARNING: the app running from $app is still running after SIGKILL" \
+        "$(describe_app_stop survived 5 "$app")"
+    assert_eq "an app pgrep cannot account for is a warning naming where it looked" \
+        "WARNING: could not tell whether an app is still running from $app: pgrep failed" \
+        "$(describe_app_stop unknown 5 "$app")"
+    assert_eq "an unrecognised outcome is reported as such" \
+        "WARNING: stopping the app running from $app ended in an unrecognised way: [bogus]" \
+        "$(describe_app_stop bogus 5 "$app")"
+}
+
 test_runtime_products_are_executable_targets() {
     local product
     if [ "${#RUNTIME_PRODUCTS[@]}" -eq 0 ]; then
@@ -686,6 +891,10 @@ test_install_rejects_missing_arguments
 test_install_ignores_a_gnu_cp_first_on_path
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
+test_stop_waits_for_the_app_and_escalates
+test_a_zero_second_wait_still_checks
+test_stop_does_not_read_a_failure_as_no_app
+test_describe_app_stop_names_every_outcome
 test_runtime_products_are_executable_targets
 test_helper_refuses_direct_execution
 test_seed_writes_when_missing

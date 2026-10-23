@@ -193,6 +193,12 @@ EOF
 #   terminals-<id>.json   what `tbd terminal list <id> --json` prints
 #   wake-failures         terminal ids whose wake exits non-zero
 #   wake.log              every wake, appended, one id per line
+#
+# Beside it, stubs for open, pkill and pgrep that record their arguments and
+# never touch a real process. With FAKE_APP_STATE naming a file, that file is
+# a running app: pkill matches it and the app exits (the file goes), pgrep
+# reports it while the file exists, and open starts it (the file comes back).
+# Unset, nothing is ever running.
 mkstub_tbd() {
     local bin="$1"
     mkdir -p "$bin"
@@ -232,15 +238,24 @@ EOF
     cat > "$bin/open" << 'EOF'
 #!/bin/sh
 printf 'open %s\n' "$*" >> "${FAKE_OPEN_LOG:-/dev/null}"
+[ -z "${FAKE_APP_STATE-}" ] || : > "$FAKE_APP_STATE"
 EOF
     cat > "$bin/pkill" << 'EOF'
 #!/bin/sh
 printf 'pkill %s\n' "$*" >> "${FAKE_KILL_LOG:-/dev/null}"
+if [ -n "${FAKE_APP_STATE-}" ] && [ -f "$FAKE_APP_STATE" ]; then
+    rm -f "$FAKE_APP_STATE"
+    exit 0
+fi
 exit 1
 EOF
     cat > "$bin/pgrep" << 'EOF'
 #!/bin/sh
 printf 'pgrep %s\n' "$*" >> "${FAKE_KILL_LOG:-/dev/null}"
+if [ -n "${FAKE_APP_STATE-}" ] && [ -f "$FAKE_APP_STATE" ]; then
+    echo 4242
+    exit 0
+fi
 exit 1
 EOF
     cat > "$bin/codesign" << 'EOF'
@@ -2331,6 +2346,366 @@ test_local_build_takes_the_link_back_from_a_download() {
         point_release_link "$link" "$home/abc"
 }
 
+# MARK: - The app around the handover
+
+# Run update.sh's main, building locally from the fixture remote, through the
+# app stages. The handover is stubbed as in run_update_release, and records
+# itself into the same events file the open, pkill and pgrep stubs write, so
+# the order of the stop, the handover and the launch reads off one file.
+# INSTALLED_BUNDLE moves to a scratch path too, so the anchored pattern could
+# not name a real app even past the stubs.
+#
+#   run_update_around_handover <case_dir> [args...]
+#
+# Every run starts with the app running (<case>/app exists, per
+# FAKE_APP_STATE in mkstub_tbd) and an empty events file.
+# FAKE_HANDOVER_FAILS=1 fails the handover, with the rollback of the bundle
+# taken as done. FAKE_RESTORE_FAILS=1 beside it runs that rollback for real
+# (roll_back_bundle) with no bundle kept by this run, as on a first update, so
+# it fails and records that the way install_and_handover's failure path does.
+# FAKE_REAL_INSTALL=1 instead runs the real install_and_handover — keeping the
+# installed bundle, installing the new one, rolling back — with only the
+# handover itself faked, recorded and failing; the case must create
+# <case>/Applications for the install to land in.
+# FAKE_HANDOVER_EXITS=1 exits the whole run from inside it, the way a step
+# that calls `exit` or a signal does, so that only the exit trap is left to
+# decide about the app.
+# FAKE_EXITS_BEFORE_APP_STAGE=1 exits the run the same way after the handover
+# has completed, from the CLI refresh that runs just before the app stage.
+# FAKE_APP_STARTS_DURING_HANDOVER=1 brings an app up while the handover runs,
+# the way an operator opening it by hand would.
+run_update_around_handover() {
+    local case_dir="$1"; shift
+    : > "$case_dir/app"
+    : > "$case_dir/events.log"
+    env \
+        HOME="$case_dir/home" \
+        TBD_HOME="$case_dir/home/tbd" \
+        FAKE_TBD_STATE="$case_dir/state" \
+        FAKE_BUILD_LOG="$case_dir/build.log" \
+        FAKE_APP_STATE="$case_dir/app" \
+        FAKE_OPEN_LOG="$case_dir/events.log" \
+        FAKE_KILL_LOG="$case_dir/events.log" \
+        FAKE_EVENTS_LOG="$case_dir/events.log" \
+        FAKE_INSTALLED_BUNDLE="$case_dir/Applications/TBD.app" \
+        PATH="$case_dir/bin:$PATH" \
+        bash -c '
+            script="$1"; shift
+            # shellcheck source=/dev/null
+            source "$script"
+            INSTALLED_BUNDLE="$FAKE_INSTALLED_BUNDLE"
+            if [ "${FAKE_REAL_INSTALL:-0}" = 1 ]; then
+                handover() {
+                    printf "handover %s\n" "$1" >> "$FAKE_EVENTS_LOG"
+                    return 1
+                }
+            else
+                install_and_handover() {
+                    printf "handover %s\n" "$3" >> "$FAKE_EVENTS_LOG"
+                    [ "${FAKE_APP_STARTS_DURING_HANDOVER:-0}" = 1 ] && : > "$FAKE_APP_STATE"
+                    [ "${FAKE_HANDOVER_EXITS:-0}" = 1 ] && exit 3
+                    if [ "${FAKE_HANDOVER_FAILS:-0}" = 1 ]; then
+                        [ "${FAKE_RESTORE_FAILS:-0}" = 1 ] && roll_back_bundle "$INSTALLED_BUNDLE"
+                        return 1
+                    fi
+                    HANDOVER_STARTED=now
+                }
+            fi
+            refresh_installed_cli() {
+                if [ "${FAKE_EXITS_BEFORE_APP_STAGE:-0}" = 1 ]; then
+                    exit 4
+                fi
+            }
+            run_wake_stage() { WAKE_CANDIDATES=0; WAKE_WOKEN=0; WAKE_FAILED=0; }
+            set -uo pipefail
+            main "$@"
+        ' _ "$SCRIPT" "$@" 2>&1
+}
+
+# The number of the first line of <file> that starts with <prefix>, or nothing
+# when no line does.
+first_line_starting() {
+    grep -n -- "^$2" "$1" 2>/dev/null | head -1 | cut -d: -f1
+}
+
+# Pass when line <a> exists and comes before line <b>, which also exists.
+assert_before() {
+    if [ -n "$2" ] && [ -n "$3" ] && [ "$2" -lt "$3" ]; then
+        pass "$1"
+    else
+        fail "$1: expected line [$2] before line [$3]"
+    fi
+}
+
+# THE REGRESSION: the app used to be restarted only after the handover. The
+# old app, still running while the daemon changed hands, reconnected to the
+# successor and re-attached the session on screen half a second before the
+# restart killed it, and the successor kept that dead app's claim on the
+# terminal, refusing the new app's attach. The stop has to finish before the
+# handover starts and the launch has to follow it, for a run from the user's
+# shell and for the daemon's unattended --auto run alike.
+test_the_app_is_stopped_before_the_handover() {
+    local mode case_dir rc events log stop poll handover launch
+    for mode in manual auto; do
+        case_dir="$(mkcase "app-order-$mode")"
+        events="$case_dir/events.log"
+        if [ "$mode" = auto ]; then
+            run_update_around_handover "$case_dir" --auto >/dev/null; rc=$?
+        else
+            run_update_around_handover "$case_dir" >/dev/null; rc=$?
+        fi
+        assert_eq "an update that hands over succeeds ($mode)" "0" "$rc"
+        stop="$(first_line_starting "$events" "pkill -f ")"
+        poll="$(first_line_starting "$events" "pgrep -f ")"
+        handover="$(first_line_starting "$events" "handover ")"
+        launch="$(first_line_starting "$events" "open ")"
+        assert_before "the app is signalled before the handover starts ($mode)" "$stop" "$handover"
+        assert_before "the stop waits for the app to exit before the handover ($mode)" "$poll" "$handover"
+        assert_before "the app is launched after the handover ($mode)" "$handover" "$launch"
+        assert_eq "the app is launched once ($mode)" "1" "$(grep -c '^open ' "$events")"
+        if [ -f "$case_dir/app" ]; then
+            pass "the app is running when the update ends ($mode)"
+        else
+            fail "the app is running when the update ends ($mode)"
+        fi
+        log="$(cat "$case_dir/home/tbd/updates/update.log" 2>/dev/null)"
+        assert_contains "the stop before the handover is logged ($mode)" \
+            "stopping the app before the handover" "$log"
+        assert_contains "how the stop ended is logged ($mode)" "the app exited" "$log"
+        # The app stage stops the installed app again in case one came up
+        # since. Finding none is the expected answer there, and logging it
+        # read as if the stop before the handover had found nothing.
+        assert_not_contains "the app stage's empty second stop is not logged ($mode)" \
+            "no app running from" "$log"
+        assert_eq "the app's exit is logged once, by the stop before the handover ($mode)" \
+            "1" "$(grep -c 'the app exited' "$case_dir/home/tbd/updates/update.log")"
+    done
+}
+
+# The app stage's second stop still does its job: an app that came up while
+# the daemon changed hands is stopped, and its exit logged, before the launch,
+# so `open` starts the new bundle instead of activating the old process.
+test_an_app_started_during_the_handover_is_stopped_before_the_launch() {
+    local case_dir rc events log handover second_stop launch
+    case_dir="$(mkcase app-started-during-handover)"
+    events="$case_dir/events.log"
+    FAKE_APP_STARTS_DURING_HANDOVER=1 run_update_around_handover "$case_dir" >/dev/null; rc=$?
+    assert_eq "the update succeeds" "0" "$rc"
+    handover="$(first_line_starting "$events" "handover ")"
+    second_stop="$(grep -n '^pkill -f ' "$events" | sed -n 2p | cut -d: -f1)"
+    launch="$(first_line_starting "$events" "open ")"
+    assert_before "the app stage signals the app that came up during the handover" \
+        "$handover" "$second_stop"
+    assert_before "that app is stopped before the launch" "$second_stop" "$launch"
+    log="$case_dir/home/tbd/updates/update.log"
+    assert_eq "each stop that found an app logs its exit" "2" "$(grep -c 'the app exited' "$log")"
+    if [ -f "$case_dir/app" ]; then
+        pass "the app is running when the update ends"
+    else
+        fail "the app is running when the update ends"
+    fi
+}
+
+# Before the stop moved ahead of the handover, a handover that failed left the
+# old app running, and it reconnected to whichever daemon came back. Now the
+# run has stopped it, so the rollback has to bring it back, from the bundle the
+# rollback left installed.
+test_a_failed_handover_relaunches_the_stopped_app() {
+    local case_dir out rc events stop handover launch
+    case_dir="$(mkcase app-failed-handover)"
+    events="$case_dir/events.log"
+    out="$(FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "a failed handover fails the run" "1" "$rc"
+    stop="$(first_line_starting "$events" "pkill -f ")"
+    handover="$(first_line_starting "$events" "handover ")"
+    launch="$(first_line_starting "$events" "open ")"
+    assert_before "the app is stopped before the failed handover" "$stop" "$handover"
+    assert_before "the app is relaunched after the failed handover" "$handover" "$launch"
+    assert_contains "the relaunch is logged" \
+        "relaunching the app this run stopped before the handover" "$out"
+    assert_contains_literal "the relaunch opens the installed bundle" \
+        "$case_dir/Applications/TBD.app" "$(grep '^open ' "$events")"
+    assert_eq "the app is launched once, not again by the exit trap" "1" \
+        "$(grep -c '^open ' "$events")"
+    if [ -f "$case_dir/app" ]; then
+        pass "the app is running when a failed update ends"
+    else
+        fail "the app is running when a failed update ends"
+    fi
+}
+
+# The relaunch after a failed handover is right only when the rollback put the
+# previous bundle back. When it cannot — a first update keeps no bundle to
+# restore — the new build is still installed, and launching it would put the
+# new app in front of the old daemon, or start the new daemon if none is left:
+# the state the rollback exists to prevent. Main and the exit trap both leave
+# the app stopped, and the log says so and how to recover.
+test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped() {
+    local case_dir out rc events
+    case_dir="$(mkcase app-failed-restore)"
+    events="$case_dir/events.log"
+    out="$(FAKE_HANDOVER_FAILS=1 FAKE_RESTORE_FAILS=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "a failed handover fails the run" "1" "$rc"
+    assert_contains "the app was stopped before the handover" "^pkill -f " "$(cat "$events")"
+    assert_contains "the failed restore is logged" "no previous app bundle to restore" "$out"
+    assert_not_contains "no app is launched, by main or by the exit trap" "^open" "$(cat "$events")"
+    if [ -f "$case_dir/app" ]; then
+        fail "the app stays stopped when the rollback could not restore the bundle"
+    else
+        pass "the app stays stopped when the rollback could not restore the bundle"
+    fi
+    assert_not_contains "no relaunch is logged" \
+        "relaunching the app this run stopped before the handover" "$out"
+    assert_contains "the incomplete rollback is logged as an error" \
+        "ERROR: the rollback of the failed install did not complete" "$out"
+    assert_not_contains "a failed rollback is not reported as an interruption" \
+        "interrupted while installing" "$out"
+    assert_contains "the log says the app was stopped and is not running" \
+        "the app was stopped for the handover and is not running" "$out"
+    assert_contains "the recovery starts from tbd version" "run 'tbd version'" "$out"
+    assert_contains "the recovery offers another tbd update" "run 'tbd update' again" "$out"
+    assert_contains_literal "the recovery names the kept bundle" \
+        "$case_dir/home/tbd/updates/previous/TBD.app" "$out"
+    assert_contains "the error reaches update.log too" \
+        "ERROR: the rollback of the failed install did not complete" \
+        "$(cat "$case_dir/home/tbd/updates/update.log" 2>/dev/null)"
+}
+
+# THE REGRESSION: the rollback put back whatever sat at
+# ~/tbd/updates/previous/TBD.app, and a run that finds nothing installed keeps
+# nothing there, so a bundle an earlier update kept was still in place. A
+# failed handover then moved that older build into the installed path, called
+# the rollback done, and relaunched the app from it: the mismatch the rollback
+# exists to prevent. The real install_and_handover runs here, against a kept
+# bundle from an earlier update and nothing installed, and only a bundle this
+# run kept may go back, so nothing does: the new build stays installed, the
+# earlier bundle stays where it was, and the app stays stopped with the
+# recovery steps.
+test_a_failed_handover_never_restores_an_earlier_updates_bundle() {
+    local case_dir out rc events kept installed
+    case_dir="$(mkcase app-failed-handover-earlier-bundle)"
+    events="$case_dir/events.log"
+    kept="$case_dir/home/tbd/updates/previous/TBD.app"
+    installed="$case_dir/Applications/TBD.app"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$kept" "earlier-update" >/dev/null
+    out="$(FAKE_REAL_INSTALL=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "a failed handover fails the run" "1" "$rc"
+    assert_contains "the run found nothing installed to keep" \
+        "keeping no previous bundle" "$out"
+    assert_contains "the run installed and reached the handover" "^handover " "$(cat "$events")"
+    assert_eq "the earlier update's bundle stays where it was" "earlier-update" \
+        "$(cat "$kept/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_contains_literal "the installed bundle is still the new build" \
+        "updates/src" "$(cat "$installed/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_not_contains "nothing is reported restored" "restored previous app bundle" "$out"
+    assert_contains "the rollback says it had nothing to restore" \
+        "ERROR: no previous app bundle to restore" "$out"
+    assert_contains_literal "and why the earlier bundle was not used" \
+        "not restoring $kept: an earlier update kept it" "$out"
+    assert_contains "the app was stopped before the handover" "^pkill -f " "$(cat "$events")"
+    assert_not_contains "no app is launched, by main or by the exit trap" "^open" "$(cat "$events")"
+    if [ -f "$case_dir/app" ]; then
+        fail "the app stays stopped when the run kept no bundle to restore"
+    else
+        pass "the app stays stopped when the run kept no bundle to restore"
+    fi
+    assert_not_contains "no relaunch is logged" \
+        "relaunching the app this run stopped before the handover" "$out"
+    assert_contains "the incomplete rollback is logged as an error" \
+        "ERROR: the rollback of the failed install did not complete" "$out"
+    assert_contains "the log says the app was stopped and is not running" \
+        "the app was stopped for the handover and is not running" "$out"
+    assert_contains "the recovery starts from tbd version" "run 'tbd version'" "$out"
+    assert_contains "the recovery offers another tbd update" "run 'tbd update' again" "$out"
+}
+
+# A run that leaves by `exit` (or a signal) while the installation is moving
+# never reaches main's own rollback, and the exit trap cannot tell which
+# bundle is installed or which daemon is serving. Launching the app there
+# could pair a new app with an old daemon, the state the rollback exists to
+# prevent, so the trap leaves the app stopped and says how to recover.
+test_an_exit_mid_handover_leaves_the_app_stopped() {
+    local case_dir out rc events
+    case_dir="$(mkcase app-exit-mid-handover)"
+    events="$case_dir/events.log"
+    out="$(FAKE_HANDOVER_EXITS=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "the run exits with the status it left by" "3" "$rc"
+    assert_contains "the app was stopped before the handover" "^pkill -f " "$(cat "$events")"
+    assert_not_contains "the exit trap launches no app" "^open" "$(cat "$events")"
+    if [ -f "$case_dir/app" ]; then
+        fail "the app stays stopped when an update is interrupted mid-handover"
+    else
+        pass "the app stays stopped when an update is interrupted mid-handover"
+    fi
+    assert_not_contains "no relaunch is logged" \
+        "relaunching the app this run stopped before the handover" "$out"
+    assert_contains "the interruption is logged as an error" \
+        "ERROR: the run was interrupted while installing and handing over" "$out"
+    assert_contains "the log says the app was stopped and is not running" \
+        "the app was stopped for the handover and is not running" "$out"
+    assert_contains "the recovery starts from tbd version" "run 'tbd version'" "$out"
+    assert_contains "the recovery offers another tbd update" "run 'tbd update' again" "$out"
+    assert_contains_literal "the recovery names the kept bundle" \
+        "$case_dir/home/tbd/updates/previous/TBD.app" "$out"
+    assert_contains "the error reaches update.log too" \
+        "ERROR: the run was interrupted while installing and handing over" \
+        "$(cat "$case_dir/home/tbd/updates/update.log" 2>/dev/null)"
+}
+
+# Outside that window the exit trap still owes the app a relaunch. Once the
+# handover has completed, bundle and daemon are the same new build, so a run
+# that leaves by `exit` (or a signal) before its app stage brings the app back
+# from the trap.
+test_an_exit_after_the_handover_still_relaunches_the_app() {
+    local case_dir out rc events handover launch
+    case_dir="$(mkcase app-exit-after-handover)"
+    events="$case_dir/events.log"
+    out="$(FAKE_EXITS_BEFORE_APP_STAGE=1 run_update_around_handover "$case_dir")"; rc=$?
+    assert_eq "the run exits with the status it left by" "4" "$rc"
+    handover="$(first_line_starting "$events" "handover ")"
+    launch="$(first_line_starting "$events" "open ")"
+    assert_before "the exit trap relaunches the app after the completed handover" \
+        "$handover" "$launch"
+    assert_contains "the trap's relaunch is logged" \
+        "relaunching the app this run stopped before the handover" "$out"
+    assert_not_contains "a completed handover is not reported as interrupted" \
+        "interrupted while installing" "$out"
+    assert_eq "the trap launches it once" "1" "$(grep -c '^open ' "$events")"
+    if [ -f "$case_dir/app" ]; then
+        pass "the app is running when an update exits after its handover"
+    else
+        fail "the app is running when an update exits after its handover"
+    fi
+}
+
+# --no-app leaves the running app alone on both sides of the handover, and
+# whether or not the handover completes: an app that stays alive owns its
+# claims on the new daemon legitimately, and nothing that was never stopped
+# needs relaunching.
+test_no_app_never_stops_the_app() {
+    local case_dir out how events
+    case_dir="$(mkcase app-no-app)"
+    events="$case_dir/events.log"
+    for how in completes fails; do
+        if [ "$how" = fails ]; then
+            out="$(FAKE_HANDOVER_FAILS=1 run_update_around_handover "$case_dir" --no-app)"
+        else
+            out="$(run_update_around_handover "$case_dir" --no-app)"
+        fi
+        assert_contains "--no-app still hands over (handover $how)" "^handover " "$(cat "$events")"
+        assert_not_contains "--no-app signals no app (handover $how)" "^pkill" "$(cat "$events")"
+        assert_not_contains "--no-app launches no app (handover $how)" "^open" "$(cat "$events")"
+        if [ -f "$case_dir/app" ]; then
+            pass "--no-app leaves the app running (handover $how)"
+        else
+            fail "--no-app leaves the app running (handover $how)"
+        fi
+        assert_contains "--no-app says the app stays up (handover $how)" \
+            "the running app stays up through the handover" "$out"
+    done
+}
+
 # MARK: - Installing and handing over
 
 # A directory that looks enough like an assembled bundle for install and
@@ -2365,6 +2740,7 @@ run_install_and_handover() {
         install_and_handover "$case_root/new/TBD.app" \
             "$case_root/Applications/TBD.app" "$case_root/newdaemon"
         printf 'rc=%s\n' "$?"
+        printf 'bundle_restore_failed=%s\n' "$BUNDLE_RESTORE_FAILED"
     )
 }
 
@@ -2387,6 +2763,8 @@ test_a_failed_handover_restores_the_previous_bundle() {
     assert_contains "a handover that never completes fails the step" "rc=1" "$out"
     assert_contains "the failure says the previous bundle went back" \
         "restored previous app bundle" "$out"
+    assert_contains "a restore that worked records no failure for main" \
+        "bundle_restore_failed=false" "$out"
     assert_eq "the installed bundle is the one that was there before" \
         "old-worktree" \
         "$(cat "$root/Applications/TBD.app/Contents/SourceWorktreePath.txt")"
@@ -2434,6 +2812,30 @@ test_a_first_install_has_no_previous_bundle() {
     assert_contains "installing where nothing was installed still succeeds" "rc=0" "$out"
     assert_contains "and says there was nothing to keep" "keeping no previous bundle" "$out"
     assert_eq "the new bundle is what is installed" "new-clone" \
+        "$(cat "$root/Applications/TBD.app/Contents/SourceWorktreePath.txt")"
+}
+
+# A first install whose handover fails has no kept bundle to put back, so the
+# new build stays installed. install_and_handover records that for main, which
+# then leaves the app stopped instead of launching the new build against
+# whichever daemon is left.
+test_a_failed_first_install_records_that_nothing_was_restored() {
+    local root out
+    root="$TEST_TMP/handover-first-fails"
+    mkdir -p "$root/bin" "$root/Applications"
+    mkstub_tbd "$root/bin"
+    mkbundle "$root/new/TBD.app" "new-clone" >/dev/null
+    printf '#!/bin/sh\nexit 0\n' > "$root/newdaemon"
+    chmod +x "$root/newdaemon"
+
+    # The daemon never reports the new binary, so the handover times out.
+    out="$(run_install_and_handover "$root" "/somewhere/else/TBDDaemon" 1)"
+
+    assert_contains "a handover that never completes fails the step" "rc=1" "$out"
+    assert_contains "the failed restore is logged" "no previous app bundle to restore" "$out"
+    assert_contains "the failed restore is recorded for main" \
+        "bundle_restore_failed=true" "$out"
+    assert_eq "the new bundle is still what is installed" "new-clone" \
         "$(cat "$root/Applications/TBD.app/Contents/SourceWorktreePath.txt")"
 }
 
@@ -2605,9 +3007,18 @@ test_a_terminal_list_that_is_not_json_is_skipped_not_fatal
 test_summary_reports_the_move
 test_summary_survives_an_unknown_commit
 test_cli_refresh_only_touches_an_existing_install
+test_the_app_is_stopped_before_the_handover
+test_an_app_started_during_the_handover_is_stopped_before_the_launch
+test_a_failed_handover_relaunches_the_stopped_app
+test_a_failed_handover_whose_restore_fails_leaves_the_app_stopped
+test_a_failed_handover_never_restores_an_earlier_updates_bundle
+test_an_exit_mid_handover_leaves_the_app_stopped
+test_an_exit_after_the_handover_still_relaunches_the_app
+test_no_app_never_stops_the_app
 test_a_failed_handover_restores_the_previous_bundle
 test_a_completed_handover_keeps_the_previous_bundle
 test_a_first_install_has_no_previous_bundle
+test_a_failed_first_install_records_that_nothing_was_restored
 test_paths_match_resolves_symlinks
 test_handover_wait_gives_up
 test_a_timed_out_handover_stops_the_successor
