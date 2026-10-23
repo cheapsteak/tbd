@@ -437,6 +437,31 @@ stop_app_process() {
     return 1
 }
 
+# The line that reports how a stop_app_process call ended, for the caller to
+# print or log. One wording for every script that stops the app, so the same
+# outcome reads the same in a restart's output and an update's log.
+#
+#   describe_app_stop <outcome> <grace_seconds> <app>
+#
+# <grace_seconds> is the grace the stop was given, so the `killed` line states
+# the wait that actually ran. <app> names where the app runs from, a bundle or
+# an executable path, for the two lines that need it to be actionable. An
+# outcome stop_app_process never prints gets a line of its own rather than
+# borrowing another outcome's wording.
+describe_app_stop() {
+    local outcome="${1-}"
+    local grace="${2-}"
+    local app="${3-}"
+    case "$outcome" in
+        none) printf 'no app running from %s to stop\n' "$app" ;;
+        stopped) printf 'the app exited\n' ;;
+        killed) printf 'the app ignored SIGTERM for %ss and exited on SIGKILL\n' "$grace" ;;
+        survived) printf 'WARNING: the app running from %s is still running after SIGKILL\n' "$app" ;;
+        *) printf 'WARNING: stopping the app running from %s ended in an unrecognised way: [%s]\n' \
+            "$app" "$outcome" ;;
+    esac
+}
+
 # True once no process's command line is exactly <pattern>, checked for up to
 # <seconds>. Polled in tenths of a second: the app usually exits within the
 # first one, and a whole-second poll would add that second to every restart.

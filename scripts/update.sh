@@ -405,7 +405,14 @@ on_update_exit() {
     # Main relaunches the app itself on every return it expects. This catches
     # the ones it does not — an exit from inside a step, or a signal — so no
     # run ends with the app stopped for a handover and never started again.
-    relaunch_stopped_app || true
+    # Except while the installation is moving: an exit then leaves a state
+    # this run cannot name, and launching an app into it could pair a new app
+    # with an old daemon. That exit is reported instead.
+    if [ "$INSTALL_IN_FLIGHT" = true ]; then
+        report_interrupted_install
+    else
+        relaunch_stopped_app || true
+    fi
     if [ -n "$PREBUILT_RECONCILE_LINK" ]; then
         reconcile_prebuilt "$PREBUILT_HOME" "$PREBUILT_RECONCILE_LINK" "$PREBUILT_START_LIVE" \
             || log "WARNING: could not reconcile $PREBUILT_HOME"
@@ -901,25 +908,35 @@ stop_handover_successor() {
 
 # True from the moment this run stops the app ahead of the handover until it
 # launches the app again. Every way out of the run that finds it still true
-# relaunches the app: see relaunch_stopped_app and on_update_exit.
+# relaunches the app — see relaunch_stopped_app and on_update_exit — except an
+# exit while the installation is moving, which leaves it stopped and says so
+# (report_interrupted_install).
 APP_RELAUNCH_PENDING=false
 
-# How the last stop_installed_app ended: none, stopped, killed or survived.
+# True while install_and_handover is moving the installation: from just before
+# the installed bundle is moved aside until main knows where the run stands
+# again. Read by on_update_exit, which must not relaunch the app into a
+# half-moved installation.
+INSTALL_IN_FLIGHT=false
+
+# How the stop before the handover ended: none, stopped, killed or survived.
+# The second stop in restart_app keeps its outcome to itself, so this stays
+# the answer to whether an app was running when the run began to move things.
 APP_STOP_OUTCOME=none
 
-# Stop the app running from the installed bundle and wait until it has exited,
-# logging how that went. Non-zero only when it is still running after SIGKILL.
+# Stop the app running from the installed bundle and wait until it has exited.
+# Prints how that ended — none, stopped, killed or survived — and logs nothing,
+# so each caller decides which outcomes earn a line. Non-zero only when it is
+# still running after SIGKILL.
 stop_installed_app() {
-    local pattern status=0
+    local pattern
     pattern="$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")"
-    APP_STOP_OUTCOME="$(stop_app_process "$pattern" "$APP_STOP_GRACE")" || status=$?
-    case "$APP_STOP_OUTCOME" in
-        none) log "no app running from $INSTALLED_BUNDLE to stop" ;;
-        stopped) log "the app exited" ;;
-        killed) log "the app ignored SIGTERM for ${APP_STOP_GRACE}s and exited on SIGKILL" ;;
-        *) log "WARNING: the app running from $INSTALLED_BUNDLE is still running after SIGKILL" ;;
-    esac
-    return "$status"
+    stop_app_process "$pattern" "$APP_STOP_GRACE"
+}
+
+# Log how a stop_installed_app ended, in the wording restart.sh shares.
+log_app_stop() {
+    log "$(describe_app_stop "${1-}" "$APP_STOP_GRACE" "$INSTALLED_BUNDLE")"
 }
 
 # Stop the app before the daemon is handed over, unless --no-app.
@@ -939,7 +956,10 @@ stop_app_before_handover() {
         return 0
     fi
     log "stopping the app before the handover"
-    if ! stop_installed_app; then
+    local status=0
+    APP_STOP_OUTCOME="$(stop_installed_app)" || status=$?
+    log_app_stop "$APP_STOP_OUTCOME"
+    if [ "$status" -ne 0 ]; then
         log "WARNING: handing over anyway — the surviving app may re-attach to the new daemon"
     fi
     # Anything but `none` means an app was running, and the run owes the
@@ -975,12 +995,37 @@ launch_installed_app() {
 # before it reports itself, and is then stopped in turn — and an app that
 # finds no daemon socket starts one from its bundle's source worktree. That is
 # why main calls this only once .build/release names the build that was
-# running before the update.
+# running before the update, and why on_update_exit never calls it while
+# INSTALL_IN_FLIGHT is set.
 relaunch_stopped_app() {
     [ "$APP_RELAUNCH_PENDING" = true ] || return 0
     APP_RELAUNCH_PENDING=false
     log "relaunching the app this run stopped before the handover"
     launch_installed_app
+}
+
+# Report a run that ended while install_and_handover was moving the
+# installation, and leave the app this run stopped where it is.
+#
+# Relaunching would be a guess. The run left from somewhere between moving the
+# installed bundle aside and the successor daemon reporting itself, so
+# $INSTALLED_BUNDLE may hold the new build, the old one or nothing, and the
+# daemon may be the predecessor, the successor or neither. Rolling back from
+# here is no safer: with the successor possibly serving, putting the old
+# bundle back puts the old app in front of the new daemon, the mirror image of
+# the mismatch the rollback exists to prevent. An app launched into any of
+# that reaches, or starts, whichever daemon it finds. So the run says what
+# happened and how to recover, and the operator chooses.
+report_interrupted_install() {
+    INSTALL_IN_FLIGHT=false
+    log_error "the run was interrupted while installing and handing over; the installation may be part old build, part new"
+    if [ "$APP_RELAUNCH_PENDING" = true ]; then
+        APP_RELAUNCH_PENDING=false
+        log "the app was stopped for the handover and is not running; it is not relaunched, because which build it would start and which daemon it would reach are unknown"
+    fi
+    log "to recover: run 'tbd version' to see which build the daemon is running, then run 'tbd update' again"
+    log "or open $INSTALLED_BUNDLE yourself once it and the daemon are the same build ($INSTALLED_BUNDLE/Contents/TBDBuildIdentity.json names the bundle's commit)"
+    log "the bundle this run replaced, if there was one, is kept at $PREVIOUS_BUNDLE — see 'Going back to the previous build' in docs/updating.md"
 }
 
 # The app restart, with its opt-out. Separate from restart_app so both branches
@@ -1002,10 +1047,15 @@ run_app_stage() {
 }
 
 restart_app() {
+    local outcome
     log "restarting the app"
     # Normally there is nothing left to stop: stop_app_before_handover already
-    # did. This catches an app launched since, and waits for it to exit.
-    stop_installed_app || true
+    # did, and logged how. This catches an app launched since and waits for it
+    # to exit. Only a stop that found one is worth a line; "no app running"
+    # here is the expected answer, and logged it reads as if the stop before
+    # the handover had found nothing either.
+    outcome="$(stop_installed_app)" || true
+    [ "$outcome" = none ] || log_app_stop "$outcome"
     APP_RELAUNCH_PENDING=false
     launch_installed_app
 }
@@ -1631,18 +1681,30 @@ main() {
     # costs a wasted build and nothing else. From here the running
     # installation moves. The app goes first, so that no viewer is attached
     # when the daemon changes hands (see stop_app_before_handover); from this
-    # line on, every way out of the run launches it again.
+    # line on, every way out of the run launches it again, save an
+    # interruption while the installation is moving.
     stop_app_before_handover
 
     # install_and_handover says at each line what undoing that line costs.
+    # INSTALL_IN_FLIGHT covers the stretch where an exit it never returns from
+    # (a signal, or an `exit` inside it) would leave an installation this run
+    # cannot name: on_update_exit then reports it and leaves the app stopped
+    # rather than relaunching into it. It goes up before the first thing moves
+    # and comes down once the run knows where it stands again.
+    INSTALL_IN_FLIGHT=true
     if ! install_and_handover "$bundle_dir" "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon"; then
         # The previous app bundle is back; put the daemon path back with it,
         # so a reboot respawns the build that is still running. Then the app,
         # in that order: an app that finds no daemon starts one from that path.
+        # The flag comes down between the two, so an exit before the path is
+        # back still leaves the app stopped rather than launching it against
+        # a path that names the new build.
         put_release_link_back
+        INSTALL_IN_FLIGHT=false
         relaunch_stopped_app
         return 1
     fi
+    INSTALL_IN_FLIGHT=false
 
     # The install completed. The tree that was live when this run started is
     # now the rollback, paired with ~/tbd/updates/previous/TBD.app; the exit

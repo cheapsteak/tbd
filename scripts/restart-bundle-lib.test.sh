@@ -607,6 +607,27 @@ EOF
     unset STUB_LOG STUB_APP
 }
 
+# describe_app_stop is the one wording restart.sh and update.sh both report a
+# stop with, and update.test.sh matches some of these lines in update.log, so
+# each outcome's line is pinned here. The grace in the `killed` line is the
+# one passed in, never a constant, and an outcome stop_app_process never
+# prints does not pass for a known one.
+test_describe_app_stop_names_every_outcome() {
+    local app="/Applications/TBD.app"
+    assert_eq "nothing running names where it looked" \
+        "no app running from $app to stop" "$(describe_app_stop none 5 "$app")"
+    assert_eq "an app that exited on SIGTERM" \
+        "the app exited" "$(describe_app_stop stopped 5 "$app")"
+    assert_eq "an app killed after the grace states the grace it was given" \
+        "the app ignored SIGTERM for 7s and exited on SIGKILL" "$(describe_app_stop killed 7 "$app")"
+    assert_eq "an app that survived SIGKILL is a warning naming where it runs from" \
+        "WARNING: the app running from $app is still running after SIGKILL" \
+        "$(describe_app_stop survived 5 "$app")"
+    assert_eq "an unrecognised outcome is reported as such" \
+        "WARNING: stopping the app running from $app ended in an unrecognised way: [bogus]" \
+        "$(describe_app_stop bogus 5 "$app")"
+}
+
 test_runtime_products_are_executable_targets() {
     local product
     if [ "${#RUNTIME_PRODUCTS[@]}" -eq 0 ]; then
@@ -764,6 +785,7 @@ test_install_ignores_a_gnu_cp_first_on_path
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
 test_stop_waits_for_the_app_and_escalates
+test_describe_app_stop_names_every_outcome
 test_runtime_products_are_executable_targets
 test_helper_refuses_direct_execution
 test_seed_writes_when_missing
