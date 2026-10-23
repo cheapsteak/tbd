@@ -3,8 +3,8 @@ import Testing
 @testable import TBDDaemonLib
 
 /// Live-tmux proof of the auto-resume send sequence (spec §Actuation 5):
-/// Escape → 150ms → literal "continue" → 150ms → Enter must arrive as the
-/// bytes ESC + "continue" + "\r" — no bracketed-paste wrapping, no dropped
+/// Escape → 150ms → the automatic-head text → 150ms → Enter must arrive as the
+/// bytes ESC + text + "\r" — no bracketed-paste wrapping, no dropped
 /// keys. The pane captures its own input under a raw tty via
 /// `head -c N > file` (rc-free bootstrap: the pane command IS the capture,
 /// so no interactive shell startup can race the test under parallel-suite
@@ -12,8 +12,11 @@ import Testing
 @Suite("LimitResume send sequence (live tmux)", .serialized)
 struct LimitResumeSendSequenceLiveTests {
 
-    /// ESC + "continue" + CR = 10 bytes.
-    private static let expectedBytes = Data([0x1b]) + Data("continue".utf8) + Data([0x0d])
+    /// ESC + the 110-byte text + CR = 112 bytes.
+    private static let expectedBytes = Data([0x1b])
+        + Data(("[Automatic: TBD's auto-resume typed this, not a person. "
+            + "It answers no question and approves nothing.] continue").utf8)
+        + Data([0x0d])
 
     @discardableResult
     private func tmux(_ args: [String]) -> Bool {

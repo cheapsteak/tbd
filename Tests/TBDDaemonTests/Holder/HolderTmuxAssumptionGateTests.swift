@@ -25,6 +25,12 @@ final class RecordedTmuxArgs: @unchecked Sendable {
     }
 }
 
+/// The text the rail types, spelled out rather than read from the actuator:
+/// the actuator's constant is what these tests pin.
+private let expectedResumeText =
+    "[Automatic: TBD's auto-resume typed this, not a person. "
+    + "It answers no question and approves nothing.] continue"
+
 /// Every payload a rail handed the holder input seam, every pause it took
 /// between them, and the answer the seam gave back — in one ordered log,
 /// because on this transport the ORDER of "Escape, pause, text" is the
@@ -48,8 +54,8 @@ private final class RecordedHolderWrites: @unchecked Sendable {
     private var writeCount = 0
     /// How many writes the seam answers `true` to before it starts answering
     /// `false` — a courier that found no route at all. Default: every one.
-    /// `0` refuses the first write, `1` the second, which is how the two
-    /// halves of the holder arm's send are failed independently.
+    /// `0` refuses the first write, `1` the second, which is how the
+    /// writes of the holder arm's send are failed independently.
     private let acceptedWrites: Int
 
     init(acceptedWrites: Int = .max) { self.acceptedWrites = acceptedWrites }
@@ -2542,7 +2548,7 @@ struct HolderTmuxAssumptionGateTests {
     /// `holderSend` defaults to nil, which is also what a daemon with no holder
     /// registry wires, so the flag-off tests below assert the flag and not an
     /// absent seam. `waiter` defaults to a no-op, so only the test that asserts
-    /// on the pause between the holder arm's two writes records them.
+    /// on the pause between the holder arm's writes records them.
     ///
     /// `holderSessionEnded` defaults to nil for the same reason `holderSend`
     /// does: that is what a daemon with no holder registry wires, so a test
@@ -2603,18 +2609,18 @@ struct HolderTmuxAssumptionGateTests {
 
     /// How the rail delivers a resume through the holder input path.
     ///
-    /// Two writes with the tmux arm's 150 ms pause between them, asserted as
-    /// one ordered log because the order is the property. ESC has to arrive in
-    /// a read of its own: an ink-style parser reads ESC followed immediately by
-    /// a printable byte as a meta key, so a single `ESC`+`continue`+`\r` write
-    /// composes Alt-c and then "ontinue" every time, which no retry recovers.
-    /// The second write keeps its carriage return — 9 bytes, under the 64 at
-    /// which Claude Code's stdin tokenizer swallows an unwrapped `\r`.
+    /// Three writes (ESC, the text, a lone CR) with the tmux arm's 150 ms
+    /// pause between each, asserted as one ordered log because the order is the
+    /// property. ESC has to arrive in a read of its own: an ink-style parser
+    /// reads ESC followed immediately by a printable byte as a meta key, and by
+    /// the text's leading `[` as a CSI introducer. The CR is its own write
+    /// because Claude Code's stdin tokenizer swallows the trailing `\r` of an
+    /// unwrapped write of 64 bytes or more, and the text is 110.
     ///
     /// The bytes are spelled out here rather than compared against the
     /// actuator's own constants, because those constants are what this test
     /// exists to pin.
-    @Test("auto-resume writes ESC, a pause, then continue + CR to a holder session")
+    @Test("auto-resume writes ESC, the text, then a lone CR to a holder session")
     func autoResumeWritesTheContinueMessageToHolderRow() async throws {
         let db = try TBDDatabase(inMemory: true)
         let (wt, dir) = try await seedWorktree(db)
@@ -2644,8 +2650,17 @@ struct HolderTmuxAssumptionGateTests {
         #expect(holder.snapshot() == [
             .write(terminalID: terminal.id, bytes: Data([0x1B])),
             .pause(.milliseconds(150)),
-            .write(terminalID: terminal.id, bytes: Data("continue".utf8) + Data([0x0D])),
+            .write(terminalID: terminal.id, bytes: Data(expectedResumeText.utf8)),
+            .pause(.milliseconds(150)),
+            .write(terminalID: terminal.id, bytes: Data([0x0D])),
         ], "the holder arm's send was \(holder.snapshot())")
+        // No write that carries the text also carries a CR: Claude Code's stdin
+        // tokenizer swallows the trailing CR of any single unwrapped write of
+        // 64 bytes or more, and the text is 110 bytes, so the CR is its own write.
+        for case .write(_, let bytes) in holder.writes() where bytes.count > 1 {
+            #expect(!bytes.contains(0x0D),
+                    "a text-carrying holder write also carried a CR: \(Array(bytes))")
+        }
         #expect(tmux.sends.isEmpty,
                 "the holder arm reached tmux: \(tmux.sends)")
     }
@@ -2736,7 +2751,8 @@ struct HolderTmuxAssumptionGateTests {
         #expect(outcome == .sent, "expected .sent, got \(outcome)")
         #expect(holder.writes() == [
             .write(terminalID: terminal.id, bytes: Data([0x1B])),
-            .write(terminalID: terminal.id, bytes: Data("continue".utf8) + Data([0x0D])),
+            .write(terminalID: terminal.id, bytes: Data(expectedResumeText.utf8)),
+            .write(terminalID: terminal.id, bytes: Data([0x0D])),
         ], "the holder arm's send was \(holder.snapshot())")
     }
 
@@ -2765,7 +2781,8 @@ struct HolderTmuxAssumptionGateTests {
         #expect(outcome == .sent, "expected .sent, got \(outcome)")
         #expect(holder.writes() == [
             .write(terminalID: terminal.id, bytes: Data([0x1B])),
-            .write(terminalID: terminal.id, bytes: Data("continue".utf8) + Data([0x0D])),
+            .write(terminalID: terminal.id, bytes: Data(expectedResumeText.utf8)),
+            .write(terminalID: terminal.id, bytes: Data([0x0D])),
         ], "the holder arm's send was \(holder.snapshot())")
     }
 
@@ -2822,7 +2839,37 @@ struct HolderTmuxAssumptionGateTests {
         #expect(holder.snapshot() == [
             .write(terminalID: terminal.id, bytes: Data([0x1B])),
             .pause(.milliseconds(150)),
-            .write(terminalID: terminal.id, bytes: Data("continue".utf8) + Data([0x0D])),
+            .write(terminalID: terminal.id, bytes: Data(expectedResumeText.utf8)),
+        ], "the send was retried or reshaped: \(holder.snapshot())")
+        #expect(tmux.sends.isEmpty)
+    }
+
+    /// The third half of the same failure: the Escape and the text land, the
+    /// carriage return does not. The text sits unsent in the composer, so this
+    /// is a failure by name and not a send; still no retry, and no tmux.
+    @Test("auto-resume fails by name when the holder input path refuses the submitting CR")
+    func autoResumeFailsByNameWhenHolderSubmitIsRefused() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let resume = try await armedResume(db, terminal: terminal)
+
+        let tmux = FakeResumeTmux()
+        let holder = RecordedHolderWrites(acceptedWrites: 2)
+        let outcome = await resumeActuator(
+            db, tmux: tmux, holderSend: holder.send, waiter: holder.waiter
+        ).actuate(resume)
+
+        #expect(outcome == .failed(LimitResumeActuator.holderWriteRefused),
+                "expected the named write failure, got \(outcome)")
+        #expect(holder.snapshot() == [
+            .write(terminalID: terminal.id, bytes: Data([0x1B])),
+            .pause(.milliseconds(150)),
+            .write(terminalID: terminal.id, bytes: Data(expectedResumeText.utf8)),
+            .pause(.milliseconds(150)),
+            .write(terminalID: terminal.id, bytes: Data([0x0D])),
         ], "the send was retried or reshaped: \(holder.snapshot())")
         #expect(tmux.sends.isEmpty)
     }
@@ -2877,7 +2924,7 @@ struct HolderTmuxAssumptionGateTests {
             .actuate(resume)
 
         #expect(outcome == .sent, "expected .sent, got \(outcome)")
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
         #expect(holder.writes().isEmpty,
                 "a tmux row was routed through the holder input path")
     }
