@@ -556,6 +556,26 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the the start admission gate flag (default OFF). Read on every use, so a
+    /// change takes effect at the next request.
+    func handleConfigSetStartAdmissionEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetStartAdmissionEnabledParams.self, from: paramsData)
+        try await db.config.setStartAdmissionEnabled(params.enabled)
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
+    /// Persist the the agent background priority command flag (default OFF). Read on every use, so a
+    /// change takes effect at the next request. Turning it off also ends a live lease and restores
+    /// what it lowered, so the flag is an off switch and not only a gate on `on`.
+    func handleConfigSetAgentBackgroundEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(ConfigSetAgentBackgroundEnabledParams.self, from: paramsData)
+        try await db.config.setAgentBackgroundEnabled(params.enabled)
+        if !params.enabled { await agentBackground?.off() }
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the composer draft gate (default OFF, soaking). Sessions pick the
     /// feature up when they next start.
     /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md.

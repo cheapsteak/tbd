@@ -199,6 +199,14 @@ extension RPCRouter {
         // spawn.
         let plannedTerminalID = UUID()
 
+        // Which agent this call spawns, decided once: the admission gate and the
+        // spawn below read the same answer. Codex wins; otherwise a Claude type
+        // or any resume of a session is Claude; everything else is a shell.
+        let isCodexType = params.type == .codex
+        let isClaudeType = !isCodexType
+            && (params.type == .claude || params.resumeSessionID != nil)
+        let startAgent: StartAdmissionAgent? = isCodexType ? .codex : (isClaudeType ? .claude : nil)
+
         // Request row before the first mutating step. `profile` is deliberately
         // absent: it is resolved further down, after the tmux server exists, and
         // reordering that resolution would move which failures happen before the
@@ -207,7 +215,15 @@ extension RPCRouter {
             .terminalCreate, actor: actor,
             target: .local(worktree: params.worktreeID, terminal: plannedTerminalID),
             prompt: params.prompt,
-            agent: (params.type ?? .shell).rawValue)
+            agent: startAgent?.rawValue ?? (params.type ?? .shell).rawValue)
+
+        // Start admission: an agent start only. A shell tab starts no agent.
+        if let startAgent,
+           let held = await holdStartIfDenied(
+               actuationID, actor: actor, agent: startAgent,
+               worktreeID: params.worktreeID, terminalID: plannedTerminalID) {
+            return held
+        }
 
         // Look up repo once for system prompt env vars and Claude session setup
         let repo: Repo?
@@ -253,7 +269,7 @@ extension RPCRouter {
         // vars from SystemPromptBuilder.promptLayers; those describe TBD as
         // a Claude-centric host and would be misleading noise inside a
         // Codex pane.
-        if params.type == .codex {
+        if isCodexType {
             guard let codexPreparation else {
                 await finishActuation(
                     actuationID, .refused(.notEligible),
@@ -329,7 +345,6 @@ extension RPCRouter {
             return try RPCResponse(result: terminal)
         }
 
-        let isClaudeType = params.type == .claude || params.resumeSessionID != nil
         // Login sessions are always fresh Claude spawns pinned to a profile:
         // the whole point is capturing `/login` credentials into that
         // profile's isolated config dir.
@@ -1179,6 +1194,13 @@ extension RPCRouter {
         // Claude-kind with a live session id → resume it. Mirrors the
         // archived-session restore spawn in WorktreeLifecycle+Create.
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {
+            // Start admission: only this branch launches an agent. Every
+            // other kind opens a shell.
+            if let held = await holdStartIfDenied(
+                actuationID, actor: actor, agent: .claude,
+                worktreeID: worktree.id, terminalID: plannedTerminalID) {
+                return held
+            }
             let repo: Repo?
             if let rid = worktree.repoID {
                 repo = try await actuating(actuationID) { try await db.repos.get(id: rid) }
@@ -1606,6 +1628,14 @@ extension RPCRouter {
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
+            // Recreating a Codex window starts Codex again, so it asks start
+            // admission before the old window is touched. A held recreate
+            // leaves the tab as it was; the app's own recreate is never held.
+            if let held = await holdStartIfDenied(
+                actuationID, actor: actor, kind: .wake, agent: .codex,
+                worktreeID: worktree.id, terminalID: terminal.id) {
+                return held
+            }
             // Recreate as codex — preserve identity
             guard let codexPreparation else {
                 let message = "Codex launch preparation was unavailable"
@@ -2292,10 +2322,27 @@ extension RPCRouter {
         var skipped: [TerminalMigrationSkip] = []
         var refused: [TerminalMigrationSkip] = []
         var alreadyHolder: [UUID] = []
+        // Moving a running Claude session starts it again, so start admission
+        // asks before each such move, until the first hold; the moves after it
+        // are held for the same reason without asking again. A held session is
+        // left running where it is and reported as skipped.
+        var heldReason: String?
         for terminalID in terminalIDs {
             let actuationID = try await beginActuation(
                 .terminalMigrateTransport, actor: actor,
                 target: await resolvedTerminalTarget(terminalID))
+            if StartAdmissionActorRule.isChecked(actor),
+               let terminal = (try? await db.terminals.get(id: terminalID)) ?? nil,
+               let agent = Self.startAdmissionAgent(forMigrating: terminal),
+               let held = await holdStartIfDenied(
+                   actuationID, actor: actor, kind: .wake, agent: agent,
+                   worktreeID: terminal.worktreeID, terminalID: terminalID,
+                   earlierHold: heldReason) {
+                let reason = held.error ?? "start held"
+                heldReason = heldReason ?? reason
+                skipped.append(TerminalMigrationSkip(terminalID: terminalID, reason: "held: \(reason)"))
+                continue
+            }
             let outcome = await migrator.migrate(terminalID: terminalID)
             await publishIfMovedToHolder(terminalID: terminalID, outcome: outcome)
             await finishActuation(
@@ -2607,6 +2654,15 @@ extension RPCRouter {
                 terminal: mode == .fork ? plannedTerminalID : oldTerminal.id),
             agent: TerminalKind.claude.rawValue,
             profile: resolved?.profileID.uuidString)
+
+        // Start admission: this swap launches a replacement Claude. The fork
+        // refusal above and the cold re-home start nothing and are not checked.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude,
+            worktreeID: worktree.id,
+            terminalID: mode == .fork ? plannedTerminalID : oldTerminal.id) {
+            return held
+        }
 
         // Carry the session transcript into the DESTINATION config dir so the
         // forked `claude --resume <id>` finds the conversation. Only matters on

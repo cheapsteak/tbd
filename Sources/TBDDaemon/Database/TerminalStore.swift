@@ -72,6 +72,11 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// The declared dev server this tab runs — see `Terminal.serverName`.
     var server_name: String?
 
+    /// Why the last automatic wake was held, and when — see
+    /// `Terminal.startHeldReason`. Both NULL on a row no hold has touched.
+    var start_held_reason: String?
+    var start_held_at: Date?
+
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
         self.worktreeID = terminal.worktreeID.uuidString
@@ -106,6 +111,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.child_pid = terminal.childPID
         self.holder_child_started_at = terminal.holderChildStartedAt
         self.server_name = terminal.serverName
+        self.start_held_reason = terminal.startHeldReason
+        self.start_held_at = terminal.startHeldAt
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -159,6 +166,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             holderChildStartedAt: holder_child_started_at
         )
         model.serverName = server_name
+        model.startHeldReason = start_held_reason
+        model.startHeldAt = start_held_at
         return model
     }
 }
@@ -484,6 +493,8 @@ private func resetRecreatedShellLifecycle(
     record.suspendedSnapshot = nil
     record.hibernatedAt = nil
     record.hibernateReason = nil
+    record.start_held_reason = nil
+    record.start_held_at = nil
     record.label = TerminalLabel.shell
     record.kind = TerminalKind.shell.rawValue
     return incarnationID
@@ -1154,6 +1165,8 @@ public struct TerminalStore: Sendable {
             record.suspendedSnapshot = nil
             record.hibernatedAt = nil
             record.hibernateReason = nil
+            record.start_held_reason = nil
+            record.start_held_at = nil
             record.activityState = TerminalActivityState.unknown.rawValue
             record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
             record.activityStateObservedAt = date
@@ -2173,11 +2186,41 @@ public struct TerminalStore: Sendable {
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Terminal not found")
             }
+            record.start_held_reason = nil
+            record.start_held_at = nil
             record.hibernatedAt = nil
             record.suspendedAt = nil
             record.hibernateReason = nil
             record.pendingSessionIncarnationID = nil
             try record.update(db)
+        }
+    }
+
+    /// Record that the start-admission command held a wake of this parked row.
+    /// Both columns are written together. Every write that un-parks the row
+    /// clears them: a wake (`clearHibernated`, which every wake path ends in),
+    /// a hand-started session (`clearSessionExitStamp`), and a recreated shell
+    /// or Codex window. So a later park never shows an old hold.
+    ///
+    /// The command can run for seconds, so the row may have changed since the
+    /// caller looked. The write happens only when the row is still parked and
+    /// its session incarnation is still `expectedIncarnationID`; a row that was
+    /// woken, or parked again under a new incarnation, gets no hold. Returns
+    /// whether the hold was written.
+    @discardableResult
+    public func setStartHeld(
+        id: UUID, reason: String, expectedIncarnationID: UUID?, at date: Date = Date()
+    ) async throws -> Bool {
+        try await writer.write { db in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
+                  record.hibernatedAt != nil || record.suspendedAt != nil,
+                  record.sessionIncarnationID == expectedIncarnationID?.uuidString else {
+                return false
+            }
+            record.start_held_reason = reason
+            record.start_held_at = date
+            try record.update(db)
+            return true
         }
     }
 
@@ -2283,6 +2326,8 @@ public struct TerminalStore: Sendable {
             guard record.hibernateReason == HibernateReason.exited.rawValue else { return false }
             record.hibernatedAt = nil
             record.hibernateReason = nil
+            record.start_held_reason = nil
+            record.start_held_at = nil
             try record.update(db)
             return true
         }

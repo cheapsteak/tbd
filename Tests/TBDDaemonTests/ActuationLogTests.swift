@@ -215,7 +215,7 @@ struct ActuationLogTests {
     @Test("the refusal vocabulary is closed, and every name is query-shaped")
     func refusedReasonVocabulary() {
         #expect(Set(RefusedReason.allCases.map(\.rawValue))
-            == ["noop", "not-found", "not-eligible", "in-flight", "target-mismatch"])
+            == ["noop", "not-found", "not-eligible", "in-flight", "target-mismatch", "held"])
     }
 
     @Test("park and wake results classify onto the vocabulary, no-ops apart from declines")

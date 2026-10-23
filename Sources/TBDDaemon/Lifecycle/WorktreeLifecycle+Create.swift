@@ -65,7 +65,7 @@ extension WorktreeLifecycle {
     /// Phase 1: Synchronous-fast. Generates a name, inserts a DB row with
     /// `status = .creating`, and returns the worktree immediately.
     /// NO git operations happen here.
-    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil) async throws -> Worktree {
+    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, disarmParent: Bool = true) async throws -> Worktree {
         // 1. Fetch repo
         guard let repo = try await db.repos.get(id: repoID) else {
             throw WorktreeLifecycleError.repoNotFound(repoID)
@@ -81,12 +81,10 @@ extension WorktreeLifecycle {
         )
 
         // A worktree with active children isn't auto-archivable; disarm the parent.
-        if let parentID = resolvedParent {
-            do {
-                try await db.worktrees.setAutoArchiveOnMerge(id: parentID, value: false)
-            } catch {
-                logger.warning("failed to disarm auto-archive for \(parentID, privacy: .public): \(error, privacy: .public)")
-            }
+        // A caller that may still refuse the create passes `disarmParent: false`
+        // and calls `disarmAutoArchive(parentID:)` once the create is committed.
+        if disarmParent, let parentID = resolvedParent {
+            await disarmAutoArchive(parentID: parentID)
         }
 
         // 2. Generate name and construct path
@@ -164,6 +162,16 @@ extension WorktreeLifecycle {
         )
 
         return worktree
+    }
+
+    /// Turn off auto-archive-on-merge for a worktree that now has a child.
+    /// A failed write is logged and does not fail the create.
+    public func disarmAutoArchive(parentID: UUID) async {
+        do {
+            try await db.worktrees.setAutoArchiveOnMerge(id: parentID, value: false)
+        } catch {
+            logger.warning("failed to disarm auto-archive for \(parentID, privacy: .public): \(error, privacy: .public)")
+        }
     }
 
     /// Returns `<base>`, or `<base>-2`, `<base>-3`, … — the first folder name

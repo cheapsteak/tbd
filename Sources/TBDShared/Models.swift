@@ -755,6 +755,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// Stamped at spawn and never changed.
     public var serverName: String?
 
+    /// Why the last automatic wake of this parked tab was held by the user's
+    /// start-admission command, and when. Both are set together on a held wake
+    /// and cleared together by the next successful one. The parked pane's
+    /// notice shows them. Nil on a tab no hold has touched.
+    public var startHeldReason: String?
+    public var startHeldAt: Date?
+
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
     /// Nil whenever either provenance column is missing, deliberately: a bare
@@ -873,6 +880,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case awaitingInputReason, awaitingInputObservedAt
         case transport, holderPID, childPID, holderChildStartedAt
         case serverName
+        case startHeldReason, startHeldAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -928,6 +936,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
         holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
         serverName = try c.decodeIfPresent(String.self, forKey: .serverName)
+        startHeldReason = try c.decodeIfPresent(String.self, forKey: .startHeldReason)
+        startHeldAt = try c.decodeIfPresent(Date.self, forKey: .startHeldAt)
     }
 }
 
@@ -1729,6 +1739,14 @@ public struct Config: Codable, Sendable, Equatable {
     /// `composer_draft_enabled ?? Config.composerDraftDefault`. Assigned after
     /// construction by the daemon, like `transcriptPromptAnswerEnabled`.
     public var composerDraftEnabled: Bool = Config.composerDraftDefault
+    /// The agent background priority command (`agent_background_enabled`). Resolved as
+    /// `agent_background_enabled ?? Config.agentBackgroundDefault`. Assigned after construction by
+    /// the daemon, like `composerDraftEnabled`.
+    public var agentBackgroundEnabled: Bool = Config.agentBackgroundDefault
+    /// The start admission gate (`start_admission_enabled`). Resolved as
+    /// `start_admission_enabled ?? Config.startAdmissionDefault`. Assigned after construction by
+    /// the daemon, like `composerDraftEnabled`.
+    public var startAdmissionEnabled: Bool = Config.startAdmissionDefault
     /// Session usage recorded through the session mod: each Claude session's
     /// context window, rate limits and cost, written to its session folder.
     /// Resolved as `session_mod_usage_enabled ?? Config.sessionModUsageDefault`.
@@ -1869,6 +1887,14 @@ public struct Config: Codable, Sendable, Equatable {
     /// lives. Ships off; graduation is a change to this constant, with no
     /// forcing `UPDATE` migration and every explicit opt-out left alone.
     public static let composerDraftDefault = false
+    /// The shipped default for `agentBackgroundEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let agentBackgroundDefault = false
+    /// The shipped default for `startAdmissionEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let startAdmissionDefault = false
     /// The shipped default for `sessionModUsageEnabled`, and the single place
     /// it lives. Ships off; graduation is a change to this constant, with no
     /// forcing `UPDATE` migration and every explicit opt-out left alone.
@@ -2091,6 +2117,10 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
+        agentBackgroundEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .agentBackgroundEnabled) ?? Config.agentBackgroundDefault
+        startAdmissionEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .startAdmissionEnabled) ?? Config.startAdmissionDefault
         sessionModUsageEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         cloneCheckoutEnabled = try c.decodeIfPresent(

@@ -220,6 +220,10 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
+    /// Owns the agent background priority lease and its 60 s sweep. Stopped at
+    /// shutdown without restoring: the lease file survives and the next daemon
+    /// start restores or resumes it.
+    nonisolated(unsafe) var agentBackgroundController: AgentBackgroundController?
     /// Timer that expires stranded `AskUserQuestion` captures (step
     /// 11a-questions). `nil` in mock mode.
     nonisolated(unsafe) var pendingPromptExpirySweep: PendingPromptExpirySweep?
@@ -1773,6 +1777,20 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-agent-background. Agent background priority: restore or resume a
+            // lease the last daemon left, then sweep every 60 s. Does nothing
+            // without a lease. The router gets the controller only after
+            // `start()` has restored that lease, so an `agents.background on`
+            // cannot overwrite the saved state first.
+            let backgroundPriority = ProductionProcessPriority()
+            let backgroundRoots = AgentBackgroundRoots(
+                database: database, tmux: tmux, priority: backgroundPriority)
+            let backgroundController = AgentBackgroundController(
+                priority: backgroundPriority, roots: { await backgroundRoots.resolve() })
+            self.agentBackgroundController = backgroundController
+            await backgroundController.start()
+            rpcRouter.agentBackground = backgroundController
+
             // 11a-dev-servers. Start the monitor step 8f built and wired: its
             // initial read, the running-file directory watch and the 10 s
             // liveness recheck. Reads only. Started after the bind rather
@@ -2475,6 +2493,7 @@ public final class Daemon: Sendable {
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
         reaperTask?.cancel()
+        await agentBackgroundController?.stop()
         holderReaderCensusTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()

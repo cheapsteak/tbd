@@ -3575,6 +3575,10 @@ final class AppState {
             // semantics — reconnect backdrop, overwritten on the next park).
             terminals[delta.worktreeID]?[idx].hibernateReason = nil
             terminals[delta.worktreeID]?[idx].suspendedAt = nil
+            // A successful wake ends any held-wake note (the daemon's
+            // `clearHibernated` clears the same columns).
+            terminals[delta.worktreeID]?[idx].startHeldReason = nil
+            terminals[delta.worktreeID]?[idx].startHeldAt = nil
         }
     }
 

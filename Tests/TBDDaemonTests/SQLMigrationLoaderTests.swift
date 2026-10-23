@@ -524,6 +524,9 @@ import Testing
             "20261011235918_dev_server_columns",
             "20261019174758_config_composer_draft",
             "20261020170000_config_session_mod_usage",
+            "20261021120000_config_start_admission",
+            "20261021120100_config_agent_background",
+            "20261021120200_terminal_start_held",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)

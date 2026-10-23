@@ -26,6 +26,8 @@ struct ConfigGet: AsyncParsableCommand {
             "pr-poll-schedule: \(config.prPollScheduleEnabled ? "on" : "off")",
             "transcript-prompt-answer: \(config.transcriptPromptAnswerEnabled ? "on" : "off")",
             "composer-draft: \(config.composerDraftEnabled ? "on" : "off")",
+            "agent-background: \(config.agentBackgroundEnabled ? "on" : "off")",
+            "start-admission: \(config.startAdmissionEnabled ? "on" : "off")",
             "session-usage: \(config.sessionModUsageEnabled ? "on" : "off")",
             "clone-checkout: \(config.cloneCheckoutEnabled ? "on" : "off")",
         ].joined(separator: "\n")
@@ -55,18 +57,19 @@ struct ConfigSet: AsyncParsableCommand {
     static let onOffKeys = [
         "auto-archive-on-merge", "auto-hibernate-on-merge", "pr-poll-schedule",
         "transcript-prompt-answer", "composer-draft", "session-usage",
-        "clone-checkout",
+        "clone-checkout", "start-admission", "agent-background",
     ]
     static let modeKeys = ["update-mode"]
     static var allKeys: [String] { onOffKeys + modeKeys }
 
     @Argument(help: """
         Setting key (auto-archive-on-merge, auto-hibernate-on-merge, pr-poll-schedule, \
-        transcript-prompt-answer, composer-draft, session-usage, clone-checkout, update-mode)
+        transcript-prompt-answer, composer-draft, session-usage, clone-checkout, \
+        start-admission, agent-background, update-mode)
         """)
     var key: String
 
-    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer, composer-draft, session-usage and clone-checkout; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer, composer-draft, session-usage, clone-checkout, start-admission and agent-background; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -107,6 +110,19 @@ struct ConfigSet: AsyncParsableCommand {
             return "Set session-usage to off. Claude sessions started from now on record no "
                 + "usage, and desk sessions wrap your status line again. Sessions already "
                 + "running keep what they started with until they restart."
+        case ("start-admission", .on):
+            return "Set start-admission to on. Agent starts and wakes that a program asks for run "
+                + "~/tbd/hooks/start-admission first, and a nonzero exit holds the start. Starts you "
+                + "make in the app are never held. Takes effect now."
+        case ("start-admission", .off):
+            return "Set start-admission to off. Agent starts and wakes proceed without running "
+                + "the start-admission command. Takes effect now."
+        case ("agent-background", .on):
+            return "Set agent-background to on. tbd agents background on can lower agent "
+                + "process priority for a lease."
+        case ("agent-background", .off):
+            return "Set agent-background to off. tbd agents background on is refused; off and "
+                + "status still work."
         case ("clone-checkout", .on):
             return "Set clone-checkout to on. New worktrees are cloned from a per-repo template "
                 + "checkout where the volume supports it, so unchanged files share disk blocks. "
@@ -194,6 +210,18 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetSessionModUsageEnabled,
                 params: ConfigSetSessionModUsageEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "start-admission":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetStartAdmissionEnabled,
+                params: ConfigSetStartAdmissionEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "agent-background":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetAgentBackgroundEnabled,
+                params: ConfigSetAgentBackgroundEnabledParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "clone-checkout":
             let parsed = try Self.parseOnOff(value, key: key)

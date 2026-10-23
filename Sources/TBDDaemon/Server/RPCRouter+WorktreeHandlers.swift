@@ -25,7 +25,10 @@ extension RPCRouter {
             callerWorktreeID: params.callerWorktreeID,
             suppressAutoParent: params.suppressAutoParent ?? false,
             useExistingBranch: useExistingBranch,
-            prNumber: params.prNumber
+            prNumber: params.prNumber,
+            // The parent is disarmed below, once start admission has let the
+            // create through; a held create leaves the parent as it was.
+            disarmParent: false
         )
 
         // Reads precede the row; the row precedes the acts. This lookup is a
@@ -55,6 +58,29 @@ extension RPCRouter {
             // refused, so don't leave the `.creating` row orphaned forever.
             try? await db.worktrees.delete(id: pending.id)
             throw error
+        }
+
+        // Start admission: this create ends in the primary agent's spawn. The
+        // phase-1 `.creating` row is the only thing written so far, and a hold
+        // removes it so nothing of the create remains. The parent's
+        // auto-archive setting is not touched until the gate has passed.
+        let configuredPrimary = (try? await db.config.get())?.primaryAgentPreference
+        let primaryAgent = StartAdmissionAgent(
+            params.primaryAgentPreference ?? configuredPrimary ?? .defaultValue)
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: primaryAgent, worktreeID: pending.id) {
+            var leftovers: [String] = []
+            do {
+                try await db.worktrees.delete(id: pending.id)
+            } catch {
+                logger.error("held worktree.create left the creating row \(pending.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                leftovers.append("worktree row \(pending.id.uuidString)")
+            }
+            return Self.heldResponse(held.error ?? "", leftovers: leftovers)
+        }
+
+        if let parentID = pending.parentWorktreeID {
+            await lifecycle.disarmAutoArchive(parentID: parentID)
         }
 
         // Arm the per-worktree auto-archive-on-merge override when the spawn
@@ -556,6 +582,22 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
+        // Start admission: revive spawns the primary agent. Archived Claude
+        // sessions mean Claude; otherwise the configured preference decides,
+        // as the lifecycle's own resolution does.
+        let archivedSessions = (try? await db.worktrees.get(id: params.worktreeID))?
+            .archivedClaudeSessions ?? []
+        let reviveAgent: StartAdmissionAgent
+        if !archivedSessions.isEmpty || params.preferredSessionID != nil {
+            reviveAgent = .claude
+        } else {
+            reviveAgent = StartAdmissionAgent(
+                (try? await db.config.get())?.primaryAgentPreference ?? .defaultValue)
+        }
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: reviveAgent, worktreeID: params.worktreeID) {
+            return held
+        }
         // Non-blocking: when a preSession hook gates the primary terminals,
         // this returns promptly with the row in `.creating` (which is what
         // the app gates its pre-session UI on — beginReviveWorktree flips it
@@ -610,6 +652,12 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .worktreeReviveConversationFresh, actor: actor,
             target: ActuationTarget(worktree: params.archivedWorktreeID.uuidString))
+
+        // Start admission: this brings a Claude conversation back.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude, worktreeID: params.archivedWorktreeID) {
+            return held
+        }
 
         let lifecycle = self.lifecycle
         let outcome: (

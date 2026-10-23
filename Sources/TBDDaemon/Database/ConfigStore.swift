@@ -174,6 +174,14 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` means "never chose". Resolve it through
     /// `Config.composerDraftDefault`, never through `?? false`.
     var composer_draft_enabled: Bool?
+    /// Tri-state: the `config_agent_background` migration carries no SQL default,
+    /// so `nil` means "never chose". Resolve it through
+    /// `Config.agentBackgroundDefault`, never through `?? false`.
+    var agent_background_enabled: Bool?
+    /// Tri-state: the `config_start_admission` migration carries no SQL default,
+    /// so `nil` means "never chose". Resolve it through
+    /// `Config.startAdmissionDefault`, never through `?? false`.
+    var start_admission_enabled: Bool?
     /// Session usage recorded through the session mod. **Genuinely
     /// tri-state**: the `config_session_mod_usage` migration carries no SQL
     /// default, so `nil` means "never chose". Resolve it through
@@ -262,6 +270,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `transcript_prompt_answer_enabled`.
     /// - Parameter composerDraftDefault: same shape again, for
     ///   `composer_draft_enabled`.
+    /// - Parameter startAdmissionDefault: same shape again, for
+    ///   `start_admission_enabled`.
+    /// - Parameter agentBackgroundDefault: same shape again, for
+    ///   `agent_background_enabled`.
     /// - Parameter sessionModUsageDefault: same shape again, for
     ///   `session_mod_usage_enabled`.
     /// - Parameter remoteTranscriptLiveSyncDefault: same shape again, for
@@ -289,6 +301,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         prPollScheduleDefault: Bool = Config.prPollScheduleDefault,
         transcriptPromptAnswerDefault: Bool = Config.transcriptPromptAnswerDefault,
         composerDraftDefault: Bool = Config.composerDraftDefault,
+        agentBackgroundDefault: Bool = Config.agentBackgroundDefault,
+        startAdmissionDefault: Bool = Config.startAdmissionDefault,
         sessionModUsageDefault: Bool = Config.sessionModUsageDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         programStatusDefault: Bool = Config.programStatusEnabledDefault,
@@ -397,6 +411,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // like the fields around it, to keep the initializer call inside the
         // type-checker's budget.
         config.composerDraftEnabled = composer_draft_enabled ?? composerDraftDefault
+        config.agentBackgroundEnabled = agent_background_enabled ?? agentBackgroundDefault
+        config.startAdmissionEnabled = start_admission_enabled ?? startAdmissionDefault
         // Session usage gate — NOT `?? false`.
         config.sessionModUsageEnabled = session_mod_usage_enabled ?? sessionModUsageDefault
         // Live remote transcript sync gate — NOT `?? false`.
@@ -955,6 +971,28 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET composer_draft_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the the start admission gate flag. Written on every call, so either value
+    /// is the explicit gesture that lifts the column out of NULL.
+    public func setStartAdmissionEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET start_admission_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the the agent background priority command flag. Written on every call, so either value
+    /// is the explicit gesture that lifts the column out of NULL.
+    public func setAgentBackgroundEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET agent_background_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

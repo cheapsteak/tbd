@@ -83,7 +83,7 @@ enum TerminalPanePresentation {
         for terminal: Terminal, switching: SwitchingAccount?
     ) -> String? {
         guard terminal.isParked, switching == nil else { return nil }
-        return HibernatedBannerModel.message(for: terminal.hibernateReason)
+        return HibernatedBannerModel.message(for: terminal)
     }
 
     /// Whether the pane gets the full-surface click-to-wake layer. Never while

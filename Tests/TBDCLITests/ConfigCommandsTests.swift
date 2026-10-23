@@ -248,6 +248,38 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("clone-checkout: on"))
     }
 
+    // MARK: - start-admission and agent-background
+
+    @Test(arguments: ["start-admission", "agent-background"])
+    func admissionAndBackgroundAreOnOffKeys(key: String) throws {
+        #expect(ConfigSet.onOffKeys.contains(key))
+        #expect(ConfigSet.allKeys.contains(key))
+        #expect(try ConfigSet.parseOnOff("on", key: key) == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: key) == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: key)
+        }
+    }
+
+    @Test(arguments: ["start-admission", "agent-background"])
+    func admissionAndBackgroundDescribeBothStates(key: String) {
+        let on = ConfigSet.confirmation(key: key, value: .on)
+        let off = ConfigSet.confirmation(key: key, value: .off)
+        #expect(on.hasPrefix("Set \(key) to on."))
+        #expect(off.hasPrefix("Set \(key) to off."))
+        #expect(on != off)
+    }
+
+    @Test func configGetPrintsAdmissionAndBackgroundInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("start-admission: off"))
+        #expect(ConfigGet.render(config).contains("agent-background: off"))
+        config.startAdmissionEnabled = true
+        config.agentBackgroundEnabled = true
+        #expect(ConfigGet.render(config).contains("start-admission: on"))
+        #expect(ConfigGet.render(config).contains("agent-background: on"))
+    }
+
     // MARK: - No transport-shaped switch
 
     /// Hibernation takes one switch — `auto_hibernate_enabled` — for every
