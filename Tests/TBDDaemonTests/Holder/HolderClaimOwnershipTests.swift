@@ -20,8 +20,9 @@ import TBDShared
 /// no death at all — the fail-closed posture `.undetermined` takes.
 ///
 /// **No holder answers for any session here.** Every claim is bookkeeping
-/// alone, recorded through `recordViewerClaimForTesting`, so a take-back of
-/// one fails at the hand-over — nothing listens at the rendezvous path under a
+/// alone, recorded through `recordViewerClaimForTesting` — and every pending
+/// attach through `recordPendingAttachForTesting`, over a reader that never
+/// started — so a take-back of one fails at the hand-over — nothing listens at the rendezvous path under a
 /// `TBD_HOME` that does not exist — and drops the claim on its way out, which
 /// is `takeBackFromViewer`'s failure arm. A claim's absence afterwards is what
 /// "taken back" looks like in this suite. The resume itself, with a real
@@ -45,6 +46,36 @@ import TBDShared
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: ["TBD_HOME": "/nonexistent/acme-tbd-home"],
             listTerminals: { [] })
+    }
+
+    /// The reader a pending attach holds suspended, standing in: one that
+    /// never started and has no descriptor, since nothing here reads a pty.
+    private static func idleReader(for session: UUID) -> HolderReader {
+        HolderReader(
+            sessionID: session, ptyFD: -1, columns: 80, rows: 24, observedChildFromStart: true)
+    }
+
+    /// A process table in which the old app is running, as recorded.
+    private static func oldAppAlive() -> FakeProcessSignaller {
+        let signaller = FakeProcessSignaller()
+        signaller.startTimes[oldApp.pid] = oldApp.startedAt
+        signaller.cmdlines[oldApp.pid] = oldApp.commandLine
+        return signaller
+    }
+
+    /// The production arbiter's wiring against `registry`, with re-checks at
+    /// 250 ms and then every 500 ms.
+    private static func arbiter(
+        registry: HolderRegistry, signaller: FakeProcessSignaller,
+        sidecar: SidecarScript, clock: EventDrivenTestClock
+    ) -> SidecarDisconnectArbiter {
+        SidecarDisconnectArbiter(
+            liveness: AppLivenessArbiter(signaller: signaller),
+            reclaim: { await registry.reclaimSessions(heldBy: $0) },
+            sessionsHeld: { await registry.sessionsHeld(by: $0) },
+            connectedApp: { sidecar.connected },
+            recheckSchedule: .init(first: .milliseconds(250), ceiling: .milliseconds(500)),
+            clock: clock)
     }
 
     // MARK: - Scoped to the owner
@@ -125,6 +156,54 @@ import TBDShared
             session is held by a process that no longer exists
             """)
         #expect(await registry.viewerAttachmentOwner(for: live) == Self.newApp)
+        #expect(await registry.confirmedDeathPasses == 1, """
+            a delivery recorded late ran the death's whole pass again, announcing a second death \
+            for an app that died once
+            """)
+    }
+
+    /// **A late delivery takes back the one attach it names, and nothing
+    /// more.** The death was confirmed while the attach handler's record was
+    /// still in flight, so the death's pass could not know this attach was the
+    /// dead app's and rightly left it alone — it may as well have been the new
+    /// app's. When the record lands, the attach is settled out of pending and
+    /// taken back, so its ready-timeout finds nothing to turn into a claim. The
+    /// death is not acted on a second time: one death, one pass, one notice.
+    @Test func aLateDeliveryTakesBackTheOneAttachItNamesWithoutASecondDeathPass() async {
+        let registry = Self.registry()
+        let late = UUID()
+        let newSession = UUID()
+        await registry.recordPendingAttachForTesting(
+            terminalID: late, generation: 7, reader: Self.idleReader(for: late), recipient: nil)
+        await registry.recordViewerClaimForTesting(
+            terminalID: newSession, generation: 8, owner: Self.newApp)
+
+        await registry.reclaimSessions(heldBy: Self.oldApp)
+        #expect(await registry.confirmedDeathPasses == 1)
+        #expect(await registry.sessionsHeld(by: Self.oldApp) == 1, """
+            the death's pass took an attach whose recipient was not recorded yet — it may be on a \
+            pty a live app is reading
+            """)
+
+        await registry.recordAttachRecipient(Self.oldApp, terminalID: late, generation: 7)
+
+        #expect(await registry.sessionsHeld(by: Self.oldApp) == 0, """
+            the attach delivered to the dead app was left pending or claimed, so its session is \
+            held by a process that no longer exists
+            """)
+        #expect(await registry.viewerAttachment(for: late) == nil)
+        #expect(await registry.confirmedDeathPasses == 1, """
+            a delivery recorded late ran the death's whole pass again, announcing a second death \
+            for an app that died once
+            """)
+        #expect(await registry.viewerAttachmentOwner(for: newSession) == Self.newApp)
+
+        // Its ready-timeout fires late, and finds nothing left to settle.
+        await registry.cancelPendingAttach(
+            terminalID: late, generation: 7, reason: .unacknowledged)
+        #expect(await registry.viewerAttachment(for: late) == nil, """
+            a late ready-timeout claimed a session the dead app's take-back had already returned
+            """)
     }
 
     /// A recipient names one attach by its generation, and an attach that has
@@ -156,18 +235,11 @@ import TBDShared
         await registry.recordViewerClaimForTesting(
             terminalID: oldSession, generation: 1, owner: Self.oldApp)
 
-        let signaller = FakeProcessSignaller()
-        signaller.startTimes[Self.oldApp.pid] = Self.oldApp.startedAt
-        signaller.cmdlines[Self.oldApp.pid] = Self.oldApp.commandLine
+        let signaller = Self.oldAppAlive()
         let sidecar = SidecarScript()
         let clock = EventDrivenTestClock()
-        let arbiter = SidecarDisconnectArbiter(
-            liveness: AppLivenessArbiter(signaller: signaller),
-            reclaim: { await registry.reclaimSessions(heldBy: $0) },
-            sessionsHeld: { await registry.sessionsHeld(by: $0) },
-            connectedApp: { sidecar.connected },
-            recheckDelays: [.milliseconds(250), .milliseconds(500)],
-            clock: clock)
+        let arbiter = Self.arbiter(
+            registry: registry, signaller: signaller, sidecar: sidecar, clock: clock)
 
         let arbitration = Task { await arbiter.handleDisconnect(identity: Self.oldApp) }
         // Watching: the drop found the old app still running.
@@ -198,5 +270,85 @@ import TBDShared
                 on one pty
                 """)
         }
+    }
+
+    // MARK: - A delivery not yet attributed
+
+    /// An attach whose recipient is not recorded yet counts as held by every
+    /// app: its descriptor has left, and nothing here knows whose table it is
+    /// in. Once recorded, it counts for its recipient alone.
+    @Test func anAttachNotYetAttributedCountsForEveryAppUntilItIs() async {
+        let registry = Self.registry()
+        let session = UUID()
+        await registry.recordPendingAttachForTesting(
+            terminalID: session, generation: 4, reader: Self.idleReader(for: session),
+            recipient: nil)
+
+        #expect(await registry.sessionsHeld(by: Self.oldApp) == 1, """
+            an attach whose recipient is not recorded yet was counted as nobody's, so a departed \
+            app it was delivered to can be ruled to hold nothing
+            """)
+        #expect(await registry.sessionsHeld(by: Self.newApp) == 1)
+
+        await registry.recordAttachRecipient(Self.newApp, terminalID: session, generation: 4)
+
+        #expect(await registry.sessionsHeld(by: Self.oldApp) == 0)
+        #expect(await registry.sessionsHeld(by: Self.newApp) == 1)
+    }
+
+    /// **The race that count closes**, end to end. The old app re-attaches a
+    /// tab, the descriptor goes out over its connection, and the app is
+    /// killed: its departure is reported, and the arbiter's first look — the
+    /// app still exiting, so alive — lands inside the hop before the attach
+    /// handler records whose table the descriptor went to. Counted as nobody's,
+    /// that attach would end the watch on "holds nothing"; the record landing a
+    /// moment later would name an app that was never confirmed gone, and the
+    /// attach would time out into a claim held for the daemon's whole life by a
+    /// process that no longer exists. Counted as possibly the old app's, it
+    /// keeps the watch going — and once the record names the old app and the
+    /// old app is gone, the session comes back.
+    @Test func anAttachNotYetAttributedKeepsItsDepartedAppWatchedUntilItIsTakenBack() async throws {
+        let registry = Self.registry()
+        let session = UUID()
+        await registry.recordPendingAttachForTesting(
+            terminalID: session, generation: 4, reader: Self.idleReader(for: session),
+            recipient: nil)
+        let signaller = Self.oldAppAlive()
+        let clock = EventDrivenTestClock()
+        let arbiter = Self.arbiter(
+            registry: registry, signaller: signaller, sidecar: SidecarScript(), clock: clock)
+
+        let arbitration = Task { await arbiter.handleDisconnect(identity: Self.oldApp) }
+        // Watching rather than finished: the old app is still exiting, and the
+        // unattributed attach may be its.
+        try await clock.requireSleeperArmed()
+
+        // The attach handler's record lands, naming the old app. Not yet
+        // confirmed gone, so it is only recorded.
+        await registry.recordAttachRecipient(Self.oldApp, terminalID: session, generation: 4)
+        #expect(await registry.sessionsHeld(by: Self.oldApp) == 1)
+        // Then the old app finishes exiting. Written while the arbiter is
+        // parked, so nothing reads the table concurrently.
+        signaller.behaviors[Self.oldApp.pid] = .init(aliveInitially: false)
+        await clock.advance(by: .milliseconds(250))
+        let ruling = await arbitration.value
+
+        #expect(ruling.ending == .seized, """
+            the departed app was ruled to hold nothing while an attach vended to it was still \
+            unattributed, so nothing watched it into its death
+            """)
+        #expect(ruling.checks == 2)
+        #expect(await registry.sessionsHeld(by: Self.oldApp) == 0, """
+            the attach delivered to the dead app was left pending or claimed, so its session is \
+            held by a process that no longer exists
+            """)
+        #expect(await registry.viewerAttachment(for: session) == nil)
+
+        // Its ready-timeout fires late, and finds nothing left to settle.
+        await registry.cancelPendingAttach(
+            terminalID: session, generation: 4, reason: .unacknowledged)
+        #expect(await registry.viewerAttachment(for: session) == nil, """
+            a late ready-timeout claimed a session the dead app's take-back had already returned
+            """)
     }
 }

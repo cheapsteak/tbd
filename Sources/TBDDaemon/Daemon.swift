@@ -1683,13 +1683,16 @@ public final class Daemon: Sendable {
         // sessions that app was holding to daemon-read. Only *that* app's:
         // each claim records the app its descriptor was vended to, so a death
         // confirmed after a successor app has attached its own tabs leaves the
-        // successor's ptys alone. A verdict short of death is re-checked,
-        // because an app that is exiting closes its socket before it is gone.
+        // successor's ptys alone. A verdict short of death starts a watch that
+        // re-checks, because an app that is exiting closes its socket before
+        // it is gone, and an app that stays alive and disconnected is watched
+        // until it quits. One watch per app: a repeat departure joins it.
         //
         // Installed with the other sinks, before the sidecar listens, because a
         // connection captures them at adopt time. Dispatched into a `Task`: the
-        // sink runs on the vending actor, the verdict shells out to `ps`, and
-        // the re-checks can run for as long as the arbiter's schedule allows.
+        // sink runs on the vending actor, the verdict shells out to `ps`, and a
+        // watch lasts until its app is confirmed gone, connects again, or holds
+        // nothing.
         if let holderRegistry {
             let arbiter = SidecarDisconnectArbiter(
                 liveness: AppLivenessArbiter(signaller: ProductionProcessSignaller()),

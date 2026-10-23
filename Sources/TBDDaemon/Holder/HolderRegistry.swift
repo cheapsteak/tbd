@@ -270,6 +270,11 @@ actor HolderRegistry {
         /// The app the descriptor was delivered to, once the attach handler
         /// has said so (`recordAttachRecipient`). Carried into the claim this
         /// attach becomes, acknowledged or timed out — see `ViewerClaim`.
+        ///
+        /// Nil until that record lands, and for good when the sidecar never
+        /// identified its peer. Either way nothing here can say whose table
+        /// the descriptor is in, so `sessionsHeld(by:)` counts a nil recipient
+        /// for every app.
         var recipient: ProcessIdentity?
     }
 
@@ -326,9 +331,9 @@ actor HolderRegistry {
     /// Never live at the same time as this session's `pendingAttaches` entry —
     /// the invariant is stated in full there.
     private var viewerAttachments: [UUID: ViewerClaim] = [:]
-    /// Every app this registry has been told is confirmed gone, so that a
-    /// claim naming one of them *after* its take-back ran is taken back the
-    /// moment it names it.
+    /// Every app this registry has been told is confirmed gone, so that an
+    /// attach naming one of them *after* its take-back ran is taken back the
+    /// moment it names it — that attach alone (`recordAttachRecipient`).
     ///
     /// The recipient of a vend is recorded one actor hop after the descriptor
     /// left — `recordAttachRecipient` follows the sidecar send — and the
@@ -342,6 +347,14 @@ actor HolderRegistry {
     /// per app launch. An identity carries its start time, so a later process
     /// that reuses a remembered pid is a different entry, never a match.
     private var appsConfirmedGone: Set<ProcessIdentity> = []
+    /// How many confirmed deaths this registry has acted on: one per
+    /// `reclaimSessions(heldBy:)` pass.
+    ///
+    /// Test-facing. A delivery recorded after its recipient's death was acted
+    /// on takes back the one attach it names, and runs no second pass for a
+    /// death that happened once; this count is the instrument that tells the
+    /// two apart, since both leave the late attach taken back.
+    private(set) var confirmedDeathPasses = 0
     /// Mints attach generations. Monotonic for the daemon's life, so an ack or
     /// a cancel naming an older attach can always be told from one naming the
     /// current attach.
@@ -2120,6 +2133,21 @@ actor HolderRegistry {
         viewerAttachments[terminalID] = ViewerClaim(generation: generation, owner: owner)
     }
 
+    /// Records an attach as vended and not yet acknowledged, with no slot
+    /// behind it. Test-facing, and production never calls it — `beginAttach`
+    /// is the only real writer. It lets a tier-1 test state "this descriptor
+    /// went out and its recipient is (or is not yet) recorded" without a
+    /// holder or a pty; `reader` can be one that never started. Only for a
+    /// session with no viewer claim — the invariant on `pendingAttaches` is
+    /// the caller's to keep here.
+    func recordPendingAttachForTesting(
+        terminalID: UUID, generation: UInt64, reader: HolderReader,
+        recipient: ProcessIdentity?
+    ) {
+        pendingAttaches[terminalID] = PendingAttach(
+            generation: generation, reader: reader, recipient: recipient)
+    }
+
     /// Records which app a vended descriptor was delivered to.
     ///
     /// The attach handler calls this after the sidecar send, with the identity
@@ -2139,39 +2167,92 @@ actor HolderRegistry {
     /// cannot recover from.
     ///
     /// A recipient this registry has already been told is gone is taken back
-    /// at once: see `appsConfirmedGone` for the window that closes.
+    /// at once — see `appsConfirmedGone` for the window that closes — and
+    /// **only the one attach this call names is.** The death itself was acted
+    /// on when it was confirmed: that pass took back everything then recorded
+    /// against the app, and remembering it is what routes this late name here.
+    /// Running the pass again would announce a second death that never
+    /// happened, and would reach for claims of that app whose take-back may
+    /// still be in flight — each is held across its resume, by design — so a
+    /// second pass could start a second take-back of the same session beside
+    /// the first.
     func recordAttachRecipient(
         _ recipient: ProcessIdentity?, terminalID: UUID, generation: UInt64
     ) async {
         guard let recipient else { return }
-        if pendingAttaches[terminalID]?.generation == generation {
-            pendingAttaches[terminalID]?.recipient = recipient
+        let recipientIsGone = appsConfirmedGone.contains(recipient)
+        if var pending = pendingAttaches[terminalID], pending.generation == generation {
+            pending.recipient = recipient
+            if recipientIsGone {
+                // Its acknowledgement cannot come now, so it is settled the
+                // way the ready-timeout would settle it — the way the death's
+                // own pass settles every unacknowledged attach it finds — and
+                // the take-back below finds a claim to take.
+                settleAsUnacknowledged(terminalID: terminalID, pending: pending)
+            } else {
+                pendingAttaches[terminalID] = pending
+            }
         } else if viewerAttachments[terminalID]?.generation == generation {
             viewerAttachments[terminalID]?.owner = recipient
         } else {
             return
         }
-        guard appsConfirmedGone.contains(recipient) else { return }
+        guard recipientIsGone else { return }
         Self.logger.notice(
             """
             attach \(generation, privacy: .public) for session \
             \(terminalID.uuidString, privacy: .public) was delivered to app pid \
-            \(recipient.pid, privacy: .public), which was confirmed gone before the delivery was \
-            recorded; taking it back now
+            \(recipient.pid, privacy: .public), whose death was already confirmed and acted on \
+            before this delivery was recorded; taking back this one session, and only it
             """)
-        await reclaimSessions(heldBy: recipient)
+        do {
+            try await seizeFromDeadApp(terminalID: terminalID, generation: generation)
+            Self.logger.notice(
+                """
+                took session \(terminalID.uuidString, privacy: .public) back from attach \
+                \(generation, privacy: .public), delivered late to app pid \
+                \(recipient.pid, privacy: .public)
+                """)
+        } catch {
+            Self.logger.error(
+                """
+                could not take session \(terminalID.uuidString, privacy: .public) back from \
+                attach \(generation, privacy: .public), delivered late to dead app pid \
+                \(recipient.pid, privacy: .public): \(error.localizedDescription, privacy: .public)
+                """)
+        }
     }
 
-    /// How many sessions `app` holds a descriptor for: claims recorded against
-    /// it, plus attaches vended to it and not yet acknowledged.
+    /// How many sessions `app` holds a descriptor for, or may yet turn out
+    /// to: claims recorded against it, attaches vended to it and not yet
+    /// acknowledged, and **every attach whose recipient is not recorded yet.**
     ///
     /// The disconnect arbitration's stopping condition. An app holding nothing
     /// has nothing its death could license taking back, and it cannot come to
-    /// hold anything new without a sidecar connection — whose own disconnect
-    /// is arbitrated afresh.
+    /// hold anything new without a sidecar connection — whose own departure is
+    /// reported and arbitrated in its turn.
+    ///
+    /// The last term is what keeps that condition honest. The recipient of a
+    /// vend is recorded one actor hop after the descriptor left
+    /// (`recordAttachRecipient` follows the sidecar send), and the departure
+    /// that started an arbitration can be reported inside that hop: an app
+    /// killed straight after a re-attach leaves exactly that. Read as nobody's,
+    /// the attach would let the watch end on "holds nothing" while the app is
+    /// still exiting; the record would then name an app no watch is looking
+    /// at and that was never confirmed gone, and the attach would time out
+    /// into a claim held for the daemon's whole life by a process that no
+    /// longer exists. Counted for every app, it keeps each watch going until
+    /// the record lands and says whose it is.
+    ///
+    /// The cost is bounded by the attach itself. It counts this way from
+    /// `beginAttach` until the record that follows its send, a span the send's
+    /// own retry budget bounds. One whose peer was never identified records
+    /// nobody, and counts until it is acknowledged or its ready-timeout
+    /// settles it into an ownerless claim, which counts for no app. Meanwhile
+    /// a watch on some other app runs a check or two longer than it had to.
     func sessionsHeld(by app: ProcessIdentity) -> Int {
         viewerAttachments.values.filter { $0.owner == app }.count
-            + pendingAttaches.values.filter { $0.recipient == app }.count
+            + pendingAttaches.values.filter { $0.recipient == nil || $0.recipient == app }.count
     }
 
     // MARK: - Taking a session back from a viewer
@@ -2387,6 +2468,7 @@ actor HolderRegistry {
     @discardableResult
     func reclaimSessions(heldBy app: ProcessIdentity) async -> [UUID] {
         appsConfirmedGone.insert(app)
+        confirmedDeathPasses += 1
         let unacknowledged = pendingAttaches.filter { $0.value.recipient == app }
         for (terminalID, pending) in unacknowledged {
             settleAsUnacknowledged(terminalID: terminalID, pending: pending)

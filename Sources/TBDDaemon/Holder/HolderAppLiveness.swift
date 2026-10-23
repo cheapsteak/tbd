@@ -95,7 +95,7 @@ struct AppLivenessArbiter: Sendable {
     }
 }
 
-/// How one sidecar disconnect's arbitration ended, and what it ended on.
+/// How one sidecar departure's arbitration ended, and what it ended on.
 ///
 /// Returned rather than merely logged because it is the thing under test: "the
 /// daemon stayed off the descriptors" and "the daemon never noticed the drop"
@@ -108,31 +108,37 @@ struct SidecarDisconnectRuling: Sendable, Equatable {
         /// The same app is connected to the sidecar again. It is alive, and
         /// the next drop of that connection is arbitrated from the start.
         case reconnected
-        /// The app holds no session, so its death would license nothing.
+        /// The app holds no session and has none on its way to it, so its
+        /// death would license nothing.
         case holdsNothing
         /// The connection's peer was never identified. There is no process to
         /// ask about, and no viewer claim names an unidentified app.
         case unidentified
-        /// The re-check schedule ran out with the app still not confirmed
-        /// gone. Its claims stand.
-        case recheckBudgetSpent
+        /// The same app is already being watched, and that watch takes this
+        /// departure over: it starts its re-checks over from the front of its
+        /// schedule, and ends on nothing it read before this departure was
+        /// reported.
+        case absorbed
         /// The task running the arbitration was cancelled. Its claims stand.
         case abandoned
     }
 
     let ending: Ending
-    /// The last liveness verdict reached — the one the ending rests on.
-    let verdict: AppLivenessVerdict
-    /// How many liveness verdicts were reached, the first one included.
+    /// The last liveness verdict reached — the one the ending rests on. Nil
+    /// only for `.absorbed`, which leaves every verdict to the watch already
+    /// running.
+    let verdict: AppLivenessVerdict?
+    /// How many liveness verdicts were reached, the first one included. Zero
+    /// for `.absorbed`.
     let checks: Int
     /// The sessions taken back; empty unless `ending` is `.seized`.
     let reclaimed: [UUID]
 }
 
-/// The arbitration itself: what the daemon does when the app's sidecar
+/// The arbitration itself: what the daemon does when an app's sidecar
 /// connection goes away.
 ///
-/// It is a value with seams rather than a method on the daemon so that the
+/// It is an actor with seams rather than a method on the daemon so that the
 /// decision — which is the whole of this task — can be stated and tested
 /// without a pty, a holder, a process to kill, or a wall clock. `reclaim` is
 /// the action a confirmed death licenses, and nothing else in this type may
@@ -145,33 +151,67 @@ struct SidecarDisconnectRuling: Sendable, Equatable {
 /// first verdict is `.alive` — or `.undetermined`, when `ps` catches it
 /// mid-teardown. A verdict nobody asks again holds that app's sessions for the
 /// daemon's whole life: undrained, unwritable, and refused to every attach,
-/// a successor app's included. So a verdict short of death is re-checked on
-/// `recheckDelays` until one of these settles it:
+/// a successor app's included. So a verdict short of death starts a **watch**
+/// that re-checks on `recheckSchedule` until one of these ends it:
 ///
 ///   - **death is confirmed** — the sessions *that* app held, and only those,
 ///     are taken back (`HolderRegistry.reclaimSessions(heldBy:)` says why the
 ///     scoping is the whole safety of a late verdict);
 ///   - **the same app is connected again** — it is alive, and the next drop of
-///     that connection starts its own arbitration;
-///   - **the app holds nothing** — its claims were handed back, so its death
-///     would license nothing, and it cannot come to hold more without a
-///     connection whose own drop is arbitrated;
-///   - **the schedule runs out** — the claims stand, which is the fail-closed
-///     direction, and the ruling says so at error level.
+///     that connection is reported and arbitrated in its turn;
+///   - **the app holds nothing** — no claim names it and no vended attach can
+///     still turn out to be its (`HolderRegistry.sessionsHeld(by:)`), so its
+///     death would license nothing, and it cannot come to hold more without a
+///     connection whose own drop is reported.
+///
+/// **Nothing else ends a watch — time least of all.** An app can stay alive
+/// and disconnected for as long as it runs: two app instances take the
+/// sidecar from each other, or an app reconnects under an identity the daemon
+/// could not read. Its claims rightly stand while it lives, and the watch is
+/// what takes them back when it finally quits; a watch that gave up after a
+/// budget would leave them claimed for the daemon's whole life, with nothing
+/// left to arbitrate them. The schedule's ceiling bounds what a long watch
+/// costs instead.
+///
+/// **At most one watch per app.** A departure of an app that is already being
+/// watched is absorbed by that watch rather than starting a second beside it,
+/// which would double the `ps` load and race it to the same take-back. The
+/// absorbed departure is not lost: the watch answers it at its next re-check —
+/// at most one ceiling away — and starts its schedule over from the front, and
+/// it ends on a reconnect or on "holds nothing" only if no departure of that
+/// app was reported after it read the state that ending rests on (see
+/// `watch(_:)`).
 ///
 /// `.undetermined` is re-checked exactly as `.alive` is and never seizes: the
 /// failure direction on this path is always toward reading nothing until
 /// liveness says otherwise.
 ///
-/// Every ruling is logged at `.notice` or above, so it is persisted in the
-/// unified log. The verdict is the one fact a stalled session needs explained
-/// after the fact, and an info-level line is gone by the time anybody asks.
-struct SidecarDisconnectArbiter: Sendable {
+/// Every ruling is logged at `.notice`, so it is persisted in the unified log.
+/// The verdict is the one fact a stalled session needs explained after the
+/// fact, and an info-level line is gone by the time anybody asks.
+actor SidecarDisconnectArbiter {
     private static let logger = Logger(subsystem: "com.tbd.daemon", category: "holder")
 
-    /// The delays between re-checks of an app that was not confirmed gone at
-    /// its disconnect: doubling from 250 ms to a one-minute ceiling, then once
-    /// a minute, for an hour in all — 66 re-checks after the first verdict.
+    /// How a watch spaces its re-checks: doubling from `first` up to
+    /// `ceiling`, then once per `ceiling` for as long as the watch lasts.
+    /// There is no last delay; the arbiter's doc says why time ends nothing.
+    struct RecheckSchedule: Sendable, Equatable {
+        let first: Duration
+        let ceiling: Duration
+
+        init(first: Duration, ceiling: Duration) {
+            precondition(first > .zero, "a re-check schedule must wait between its checks")
+            self.first = first
+            self.ceiling = max(first, ceiling)
+        }
+
+        /// The delay that follows `previous`.
+        func delay(after previous: Duration) -> Duration {
+            min(previous * 2, ceiling)
+        }
+    }
+
+    /// Doubling from 250 ms to a one-minute ceiling, then once a minute.
     ///
     /// **The front of the schedule is for an app that is exiting.** It has
     /// already closed its descriptors — that is what the disconnect was — so
@@ -181,77 +221,61 @@ struct SidecarDisconnectArbiter: Sendable {
     ///
     /// **The back of it is for an app that is alive.** Each check runs `ps`
     /// twice (start time, then command line), so the interval backs off to one
-    /// check a minute, which stays cheap however long the watch lasts.
-    ///
-    /// **The hour bounds the watch, not its cost.** An alive app's sidecar
-    /// reconnects within seconds by design, and an app that hands its tabs back
-    /// holds nothing; either ends the watch long before the hour. An app that
-    /// has done neither for an hour is wedged rather than reconnecting, and its
-    /// claims then stand — fail-closed — with an error naming how many. The
-    /// bound exists so that every arbitration ends: each disconnect starts one,
-    /// and nothing else would stop it.
-    static let defaultRecheckDelays: [Duration] = doublingSchedule(
-        startingAt: .milliseconds(250), ceiling: .seconds(60), budget: .seconds(3600))
-
-    /// A schedule that doubles from `first` up to `ceiling` and stops before
-    /// the delays would add up to more than `budget`. Empty unless both are
-    /// positive: a delay that never grows the total would never reach the
-    /// budget either.
-    static func doublingSchedule(
-        startingAt first: Duration, ceiling: Duration, budget: Duration
-    ) -> [Duration] {
-        guard first > .zero, ceiling > .zero else { return [] }
-        var delays: [Duration] = []
-        var next = first
-        var total: Duration = .zero
-        while total + next <= budget {
-            delays.append(next)
-            total += next
-            next = min(next * 2, ceiling)
-        }
-        return delays
-    }
+    /// check a minute, which stays cheap however long the watch lasts — and a
+    /// watch on an app that stays alive and disconnected lasts until it quits.
+    /// The ceiling is also how long, at most, that app's death goes unnoticed.
+    static let defaultRecheckSchedule = RecheckSchedule(
+        first: .milliseconds(250), ceiling: .seconds(60))
 
     let liveness: AppLivenessArbiter
     /// Reverts the sessions `app` was holding — and only those — to
     /// daemon-read, and answers with the ones it took back. Called **only** on
     /// a confirmed death.
     let reclaim: @Sendable (ProcessIdentity) async -> [UUID]
-    /// How many sessions `app` holds a descriptor for. Zero ends the watch.
+    /// How many sessions `app` holds a descriptor for, or may yet turn out to
+    /// — `HolderRegistry.sessionsHeld(by:)` says which count. Zero ends the
+    /// watch.
     let sessionsHeld: @Sendable (ProcessIdentity) async -> Int
     /// The app connected to the sidecar right now, if any. The same identity
     /// here ends the watch: that app is alive, and connected again.
     let connectedApp: @Sendable () async -> ProcessIdentity?
-    /// See `defaultRecheckDelays`. Empty means a single verdict and no watch.
-    let recheckDelays: [Duration]
-    /// Delay seam: existential, not generic, so the arbiter stays a plain
-    /// `Sendable` value.
+    /// See `defaultRecheckSchedule`.
+    let recheckSchedule: RecheckSchedule
+    /// Delay seam: existential, not generic, so the arbiter's type carries no
+    /// clock parameter.
     private let clock: any Clock<Duration>
+
+    /// The apps being watched, and how many departures each has reported
+    /// since its watch began — the one that started it included.
+    ///
+    /// An entry is a watch's hold on its app: a departure that finds one is
+    /// absorbed, and the watch removes it on every way out, so the first
+    /// departure after a watch ends starts a new one. The count is how a watch
+    /// learns that a departure arrived while it was reading something else.
+    private var departuresReported: [ProcessIdentity: Int] = [:]
 
     init(
         liveness: AppLivenessArbiter,
         reclaim: @escaping @Sendable (ProcessIdentity) async -> [UUID],
         sessionsHeld: @escaping @Sendable (ProcessIdentity) async -> Int,
         connectedApp: @escaping @Sendable () async -> ProcessIdentity?,
-        recheckDelays: [Duration] = SidecarDisconnectArbiter.defaultRecheckDelays,
+        recheckSchedule: RecheckSchedule = SidecarDisconnectArbiter.defaultRecheckSchedule,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.liveness = liveness
         self.reclaim = reclaim
         self.sessionsHeld = sessionsHeld
         self.connectedApp = connectedApp
-        self.recheckDelays = recheckDelays
+        self.recheckSchedule = recheckSchedule
         self.clock = clock
     }
 
-    /// Arbitrates one disconnect, re-checking a verdict short of death until
-    /// something settles it, and answers how it ended.
+    /// Arbitrates one departure — a sidecar connection that dropped, or one a
+    /// different app took over — and answers how it ended.
     ///
-    /// The order inside each round is the argument. The verdict comes first,
-    /// so a death is acted on whatever else is true — and a dead app is
-    /// remembered by the reclaim even when it held nothing at that instant,
-    /// which is what catches a delivery to it recorded a moment later. Only a
-    /// verdict short of death goes on to ask whether the watch is still needed.
+    /// A departure of an app already being watched returns at once, as
+    /// `.absorbed`: the watch running for that app carries it. Any other
+    /// returns when its own watch ends.
     @discardableResult
     func handleDisconnect(identity: ProcessIdentity?) async -> SidecarDisconnectRuling {
         guard let identity else {
@@ -265,15 +289,79 @@ struct SidecarDisconnectArbiter: Sendable {
             return SidecarDisconnectRuling(
                 ending: .unidentified, verdict: verdict, checks: 1, reclaimed: [])
         }
-        var verdict = liveness.verdict(for: identity)
-        var checks = 1
-        var delays = recheckDelays.makeIterator()
+        if let reported = departuresReported[identity] {
+            departuresReported[identity] = reported + 1
+            Self.logger.notice(
+                """
+                app pid \(identity.pid, privacy: .public) left the sidecar again while its earlier \
+                departure is still being watched; that watch takes this one over and starts its \
+                re-checks over, rather than a second watch running beside it
+                """)
+            return SidecarDisconnectRuling(
+                ending: .absorbed, verdict: nil, checks: 0, reclaimed: [])
+        }
+        departuresReported[identity] = 1
+        return await watch(identity)
+    }
+
+    /// One app's watch: a verdict now, then re-checks on `recheckSchedule`
+    /// until a death, a reconnect, or holding nothing ends it.
+    ///
+    /// The order inside each round is the argument. The verdict comes first,
+    /// so a death is acted on whatever else is true — and a dead app is
+    /// remembered by the reclaim even when it held nothing at that instant,
+    /// which is what catches a delivery to it recorded a moment later. Only a
+    /// verdict short of death goes on to ask whether the watch is still needed.
+    ///
+    /// **Ending on a reconnect or on "holds nothing" is conditional.** Both
+    /// rest on state other actors own, read across suspensions, and a
+    /// departure of this app reported meanwhile — the connection it came back
+    /// on dropping, say, after it attached tabs over it — was absorbed on the
+    /// strength of this watch going on. So the round ends the watch only if
+    /// the departure count is still the one it read before asking anything,
+    /// compared with no suspension between the comparison and the entry's
+    /// removal; otherwise it runs again at once, on the state that departure
+    /// left. Ending on a death is unconditional: the take-back selects by
+    /// identity, so it covers every connection that app ever had.
+    private func watch(_ app: ProcessIdentity) async -> SidecarDisconnectRuling {
+        // Every way out ends the watch, so the next departure starts a new
+        // one. A `defer` runs at the return itself, with no suspension before
+        // it, so nothing can be absorbed into a watch that has decided to end.
+        defer { departuresReported[app] = nil }
+        var checks = 0
+        var departuresAnswered = 0
+        var delay = recheckSchedule.first
+        var announced = false
         while true {
+            // Read before anything this round decides on: a departure counted
+            // after this line is one the round cannot have seen.
+            let reported = departuresReported[app] ?? 0
+            if reported != departuresAnswered {
+                if departuresAnswered > 0 {
+                    Self.logger.debug(
+                        """
+                        app pid \(app.pid, privacy: .public) left the sidecar again during its \
+                        watch (\(reported, privacy: .public) departure(s) so far); re-checking \
+                        from the front of the schedule
+                        """)
+                }
+                departuresAnswered = reported
+                delay = recheckSchedule.first
+            }
+            let verdict = liveness.verdict(for: app)
+            checks += 1
+            if checks > 1 {
+                Self.logger.debug(
+                    """
+                    re-check \(checks, privacy: .public) of app pid \(app.pid, privacy: .public): \
+                    \(String(describing: verdict), privacy: .public)
+                    """)
+            }
             if verdict.licensesSeizure {
-                let reclaimed = await reclaim(identity)
+                let reclaimed = await reclaim(app)
                 Self.logger.notice(
                     """
-                    app pid \(identity.pid, privacy: .public) is confirmed gone \
+                    app pid \(app.pid, privacy: .public) is confirmed gone \
                     (\(String(describing: verdict), privacy: .public)) after \
                     \(checks, privacy: .public) check(s) since its sidecar connection dropped; \
                     took back \(reclaimed.count, privacy: .public) session(s) it held
@@ -281,22 +369,24 @@ struct SidecarDisconnectArbiter: Sendable {
                 return SidecarDisconnectRuling(
                     ending: .seized, verdict: verdict, checks: checks, reclaimed: reclaimed)
             }
-            let held = await sessionsHeld(identity)
-            if await connectedApp() == identity {
+            let held = await sessionsHeld(app)
+            let reconnected = await connectedApp() == app
+            if reconnected || held == 0 {
+                guard (departuresReported[app] ?? 0) == departuresAnswered else { continue }
+                if reconnected {
+                    Self.logger.notice(
+                        """
+                        app pid \(app.pid, privacy: .public) is connected to the sidecar again \
+                        (\(String(describing: verdict), privacy: .public) after \
+                        \(checks, privacy: .public) check(s)); its \(held, privacy: .public) \
+                        session(s) stay with it, and its next disconnect is arbitrated afresh
+                        """)
+                    return SidecarDisconnectRuling(
+                        ending: .reconnected, verdict: verdict, checks: checks, reclaimed: [])
+                }
                 Self.logger.notice(
                     """
-                    app pid \(identity.pid, privacy: .public) is connected to the sidecar again \
-                    (\(String(describing: verdict), privacy: .public) after \
-                    \(checks, privacy: .public) check(s)); its \(held, privacy: .public) \
-                    session(s) stay with it, and its next disconnect is arbitrated afresh
-                    """)
-                return SidecarDisconnectRuling(
-                    ending: .reconnected, verdict: verdict, checks: checks, reclaimed: [])
-            }
-            if held == 0 {
-                Self.logger.notice(
-                    """
-                    app pid \(identity.pid, privacy: .public) holds no session \
+                    app pid \(app.pid, privacy: .public) holds no session \
                     (\(String(describing: verdict), privacy: .public) after \
                     \(checks, privacy: .public) check(s)); nothing to take back, and nothing to \
                     watch it for
@@ -304,23 +394,12 @@ struct SidecarDisconnectArbiter: Sendable {
                 return SidecarDisconnectRuling(
                     ending: .holdsNothing, verdict: verdict, checks: checks, reclaimed: [])
             }
-            guard let delay = delays.next() else {
-                Self.logger.error(
-                    """
-                    app pid \(identity.pid, privacy: .public) is still not confirmed gone \
-                    (\(String(describing: verdict), privacy: .public)) after \
-                    \(checks, privacy: .public) check(s), and has not reconnected; its \
-                    \(held, privacy: .public) session(s) stay claimed and undrained until it \
-                    detaches them or its next disconnect is arbitrated
-                    """)
-                return SidecarDisconnectRuling(
-                    ending: .recheckBudgetSpent, verdict: verdict, checks: checks, reclaimed: [])
-            }
-            if checks == 1 {
+            if !announced {
+                announced = true
                 Self.logger.notice(
                     """
                     the app's sidecar connection dropped and app pid \
-                    \(identity.pid, privacy: .public) is \
+                    \(app.pid, privacy: .public) is \
                     \(String(describing: verdict), privacy: .public), holding \
                     \(held, privacy: .public) session(s); the daemon stays off those ptys and \
                     re-checks until it is confirmed gone, reconnects, or holds nothing
@@ -331,20 +410,14 @@ struct SidecarDisconnectArbiter: Sendable {
             } catch {
                 Self.logger.notice(
                     """
-                    the watch on app pid \(identity.pid, privacy: .public) was cancelled after \
+                    the watch on app pid \(app.pid, privacy: .public) was cancelled after \
                     \(checks, privacy: .public) check(s) (\(String(describing: verdict), privacy: .public)); \
                     its \(held, privacy: .public) session(s) stay claimed
                     """)
                 return SidecarDisconnectRuling(
                     ending: .abandoned, verdict: verdict, checks: checks, reclaimed: [])
             }
-            verdict = liveness.verdict(for: identity)
-            checks += 1
-            Self.logger.debug(
-                """
-                re-check \(checks, privacy: .public) of app pid \(identity.pid, privacy: .public): \
-                \(String(describing: verdict), privacy: .public)
-                """)
+            delay = recheckSchedule.delay(after: delay)
         }
     }
 }

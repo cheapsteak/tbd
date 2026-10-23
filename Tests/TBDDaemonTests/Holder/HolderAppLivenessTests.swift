@@ -31,10 +31,13 @@ import TBDShared
 /// **And one verdict is not the end of it.** An app closes its socket on its
 /// way out, before it has finished exiting, so the verdict at the instant of
 /// the drop can be `alive` for an app that is dying. A verdict short of death
-/// is re-checked until death is confirmed, the same app reconnects, or it holds
-/// nothing — and the `Re-checking` tests below drive that schedule on an
-/// `EventDrivenTestClock`, with the process table changing while the arbiter
-/// waits.
+/// starts a watch that re-checks until death is confirmed, the same app
+/// reconnects, or it holds nothing — never on a budget, because an app can
+/// stay alive and disconnected for as long as it runs — and at most one watch
+/// runs per app. The `Re-checking` and `One watch per app` tests below drive
+/// that schedule on an `EventDrivenTestClock`, with the process table changing
+/// while the arbiter waits. A test whose watch would not end on its own ends
+/// it by cancelling the task running it.
 ///
 /// Tier 1, with one section of exceptions. Every test above "Which disconnect is a
 /// disconnect" touches no holder, no pty and no real process — the process
@@ -76,13 +79,17 @@ import TBDShared
         return signaller
     }
 
-    /// With no re-check schedule unless a test passes one, so the tests about
-    /// a single verdict finish on it.
+    /// Re-checks at 250 ms and then every 500 ms, so a test steps the front
+    /// of a watch in one or two short advances.
+    private static let quickSchedule = SidecarDisconnectArbiter.RecheckSchedule(
+        first: .milliseconds(250), ceiling: .milliseconds(500))
+
     private static func arbiter(
         signaller: FakeProcessSignaller,
         spy: ReclaimSpy,
         sidecar: SidecarScript = SidecarScript(sessionsHeld: 1),
-        recheckDelays: [Duration] = [],
+        recheckSchedule: SidecarDisconnectArbiter.RecheckSchedule =
+            HolderAppLivenessTests.quickSchedule,
         clock: any Clock<Duration> = EventDrivenTestClock()
     ) -> SidecarDisconnectArbiter {
         SidecarDisconnectArbiter(
@@ -90,8 +97,22 @@ import TBDShared
             reclaim: { await spy.record($0) },
             sessionsHeld: { _ in sidecar.sessionsHeld },
             connectedApp: { sidecar.connected },
-            recheckDelays: recheckDelays,
+            recheckSchedule: recheckSchedule,
             clock: clock)
+    }
+
+    /// The ruling a drop reaches when its first verdict does not end the
+    /// arbitration: wait for the watch to park on its first re-check — proof
+    /// it decided to keep looking rather than act — then end it by
+    /// cancellation, which leaves every claim standing.
+    private static func firstVerdictOfAWatch(
+        on arbiter: SidecarDisconnectArbiter, clock: EventDrivenTestClock,
+        identity: ProcessIdentity
+    ) async throws -> SidecarDisconnectRuling {
+        let arbitration = Task { await arbiter.handleDisconnect(identity: identity) }
+        try await clock.requireSleeperArmed()
+        arbitration.cancel()
+        return await arbitration.value
     }
 
     // MARK: - Alive
@@ -105,17 +126,20 @@ import TBDShared
         let spy = ReclaimSpy()
         let clock = EventDrivenTestClock()
         let arbiter = Self.arbiter(
-            signaller: Self.aliveApp(startedAt: started), spy: spy,
-            recheckDelays: [.milliseconds(250)], clock: clock)
+            signaller: Self.aliveApp(startedAt: started), spy: spy, clock: clock)
 
         let arbitration = Task {
             await arbiter.handleDisconnect(identity: Self.recordedIdentity(startedAt: started))
         }
         try await clock.requireAdvanceWhenArmed(by: .milliseconds(250))
+        // Re-armed: the re-check found the app alive too, and the watch goes on.
+        try await clock.requireSleeperArmed()
+        #expect(await spy.calls.isEmpty, "the daemon seized on an alive re-check")
+        arbitration.cancel()
         let ruling = await arbitration.value
 
-        #expect(ruling.verdict == .alive)
-        #expect(ruling.ending == .recheckBudgetSpent)
+        #expect(ruling.verdict == AppLivenessVerdict.alive)
+        #expect(ruling.ending == .abandoned)
         #expect(ruling.checks == 2, "the live app was not re-checked once its schedule allowed")
         #expect(await spy.calls.isEmpty, """
             the daemon seized the ptys of an app that is still alive and still reading them — the \
@@ -135,12 +159,10 @@ import TBDShared
         let clock = EventDrivenTestClock()
         let app = Self.recordedIdentity(startedAt: Date(timeIntervalSince1970: 1))
 
-        let ruling = await Self.arbiter(
-            signaller: signaller, spy: spy,
-            recheckDelays: [.milliseconds(250)], clock: clock)
+        let ruling = await Self.arbiter(signaller: signaller, spy: spy, clock: clock)
             .handleDisconnect(identity: app)
 
-        #expect(ruling.verdict == .confirmedGone(reason: "process-gone"))
+        #expect(ruling.verdict == AppLivenessVerdict.confirmedGone(reason: "process-gone"))
         #expect(ruling.ending == .seized)
         #expect(ruling.checks == 1)
         #expect(!clock.hasSleeper, "a death confirmed at the drop was still waited on")
@@ -167,7 +189,7 @@ import TBDShared
         let ruling = await Self.arbiter(signaller: signaller, spy: spy)
             .handleDisconnect(identity: Self.recordedIdentity(startedAt: started))
 
-        #expect(ruling.verdict == .confirmedGone(reason: "pid-reused-executable"), """
+        #expect(ruling.verdict == AppLivenessVerdict.confirmedGone(reason: "pid-reused-executable"), """
             a stranger holding the app's old pid was read as the app still running, which stalls \
             every session that app was holding for as long as the stranger lives
             """)
@@ -188,7 +210,7 @@ import TBDShared
         let ruling = await Self.arbiter(signaller: signaller, spy: spy)
             .handleDisconnect(identity: Self.recordedIdentity(startedAt: recordedStart))
 
-        #expect(ruling.verdict == .confirmedGone(reason: "pid-reused-start-time"), """
+        #expect(ruling.verdict == AppLivenessVerdict.confirmedGone(reason: "pid-reused-start-time"), """
             a relaunched app reusing its predecessor's pid was read as the predecessor still \
             running
             """)
@@ -200,18 +222,20 @@ import TBDShared
 
     /// The kernel would not say when the process holding this pid started. That
     /// is not evidence of death, and this path may act on nothing less.
-    @Test func anUnreadableStartTimeIsNotDeath() async {
+    @Test func anUnreadableStartTimeIsNotDeath() async throws {
         let signaller = FakeProcessSignaller()
         signaller.cmdlines[Self.appPID] = Self.appExecutable
         // No `startTimes` entry: `ps` answered nothing parseable.
         let spy = ReclaimSpy()
+        let clock = EventDrivenTestClock()
 
-        let ruling = await Self.arbiter(signaller: signaller, spy: spy)
-            .handleDisconnect(
-                identity: Self.recordedIdentity(startedAt: Date(timeIntervalSince1970: 1)))
+        let ruling = try await Self.firstVerdictOfAWatch(
+            on: Self.arbiter(signaller: signaller, spy: spy, clock: clock), clock: clock,
+            identity: Self.recordedIdentity(startedAt: Date(timeIntervalSince1970: 1)))
 
-        #expect(ruling.verdict == .undetermined(reason: "start-time-unreadable"))
-        #expect(ruling.ending == .recheckBudgetSpent)
+        #expect(ruling.verdict == AppLivenessVerdict.undetermined(reason: "start-time-unreadable"))
+        #expect(ruling.ending == .abandoned)
+        #expect(ruling.checks == 1)
         #expect(await spy.calls.isEmpty, """
             an unreadable identity was treated as a confirmed death, so the daemon put itself on \
             descriptors an app may still be reading
@@ -221,18 +245,21 @@ import TBDShared
     /// An unreadable command line is the same class of non-answer, and takes
     /// the same direction — even though `commandLine` returning empty is what a
     /// pid that has just vanished looks like. "Probably gone" is not gone.
-    @Test func anUnreadableCommandLineIsNotDeath() async {
+    @Test func anUnreadableCommandLineIsNotDeath() async throws {
         let started = Date(timeIntervalSince1970: 1_700_000_000)
         let signaller = FakeProcessSignaller()
         signaller.startTimes[Self.appPID] = started
         // No `cmdlines` entry.
         let spy = ReclaimSpy()
+        let clock = EventDrivenTestClock()
 
-        let ruling = await Self.arbiter(signaller: signaller, spy: spy)
-            .handleDisconnect(identity: Self.recordedIdentity(startedAt: started))
+        let ruling = try await Self.firstVerdictOfAWatch(
+            on: Self.arbiter(signaller: signaller, spy: spy, clock: clock), clock: clock,
+            identity: Self.recordedIdentity(startedAt: started))
 
-        #expect(ruling.verdict == .undetermined(reason: "command-unreadable"))
-        #expect(ruling.ending == .recheckBudgetSpent)
+        #expect(ruling.verdict == AppLivenessVerdict.undetermined(reason: "command-unreadable"))
+        #expect(ruling.ending == .abandoned)
+        #expect(ruling.checks == 1)
         #expect(await spy.calls.isEmpty)
     }
 
@@ -246,11 +273,10 @@ import TBDShared
         let spy = ReclaimSpy()
         let clock = EventDrivenTestClock()
 
-        let ruling = await Self.arbiter(
-            signaller: signaller, spy: spy, recheckDelays: [.milliseconds(250)], clock: clock)
+        let ruling = await Self.arbiter(signaller: signaller, spy: spy, clock: clock)
             .handleDisconnect(identity: nil)
 
-        #expect(ruling.verdict == .undetermined(reason: "identity-unrecorded"))
+        #expect(ruling.verdict == AppLivenessVerdict.undetermined(reason: "identity-unrecorded"))
         #expect(ruling.ending == .unidentified)
         #expect(!clock.hasSleeper)
         #expect(await spy.calls.isEmpty)
@@ -269,9 +295,7 @@ import TBDShared
         let spy = ReclaimSpy()
         let clock = EventDrivenTestClock()
         let app = Self.recordedIdentity(startedAt: started)
-        let arbiter = Self.arbiter(
-            signaller: signaller, spy: spy,
-            recheckDelays: [.milliseconds(250), .milliseconds(500)], clock: clock)
+        let arbiter = Self.arbiter(signaller: signaller, spy: spy, clock: clock)
 
         let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
         // Parked on its first re-check: the drop found the app still running.
@@ -287,7 +311,7 @@ import TBDShared
             an app confirmed gone on a re-check kept its sessions claimed — every attach the next \
             app makes is refused for the daemon's whole life
             """)
-        #expect(ruling.verdict == .confirmedGone(reason: "process-gone"))
+        #expect(ruling.verdict == AppLivenessVerdict.confirmedGone(reason: "process-gone"))
         #expect(ruling.checks == 2)
         #expect(await spy.calls == [app])
     }
@@ -302,8 +326,7 @@ import TBDShared
         let sidecar = SidecarScript(sessionsHeld: 2)
         let app = Self.recordedIdentity(startedAt: started)
         let arbiter = Self.arbiter(
-            signaller: Self.aliveApp(startedAt: started), spy: spy, sidecar: sidecar,
-            recheckDelays: [.milliseconds(250), .milliseconds(500), .seconds(1)], clock: clock)
+            signaller: Self.aliveApp(startedAt: started), spy: spy, sidecar: sidecar, clock: clock)
 
         let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
         try await clock.requireSleeperArmed()
@@ -313,7 +336,7 @@ import TBDShared
         let ruling = await arbitration.value
 
         #expect(ruling.ending == .reconnected)
-        #expect(ruling.verdict == .alive)
+        #expect(ruling.verdict == AppLivenessVerdict.alive)
         #expect(ruling.checks == 2, "the watch went on past the check that saw the reconnect")
         #expect(!clock.hasSleeper, "the arbiter is still watching an app that is connected again")
         #expect(await spy.calls.isEmpty)
@@ -329,9 +352,7 @@ import TBDShared
         let clock = EventDrivenTestClock()
         let sidecar = SidecarScript(sessionsHeld: 1)
         let app = Self.recordedIdentity(startedAt: started)
-        let arbiter = Self.arbiter(
-            signaller: signaller, spy: spy, sidecar: sidecar,
-            recheckDelays: [.milliseconds(250), .milliseconds(500)], clock: clock)
+        let arbiter = Self.arbiter(signaller: signaller, spy: spy, sidecar: sidecar, clock: clock)
 
         let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
         try await clock.requireSleeperArmed()
@@ -361,9 +382,7 @@ import TBDShared
         let spy = ReclaimSpy()
         let clock = EventDrivenTestClock()
         let app = Self.recordedIdentity(startedAt: Date(timeIntervalSince1970: 1))
-        let arbiter = Self.arbiter(
-            signaller: signaller, spy: spy,
-            recheckDelays: [.milliseconds(250), .milliseconds(500), .seconds(1)], clock: clock)
+        let arbiter = Self.arbiter(signaller: signaller, spy: spy, clock: clock)
 
         let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
         try await clock.requireAdvanceWhenArmed(by: .milliseconds(250))
@@ -378,7 +397,7 @@ import TBDShared
         let ruling = await arbitration.value
 
         #expect(ruling.ending == .seized)
-        #expect(ruling.verdict == .confirmedGone(reason: "process-gone"))
+        #expect(ruling.verdict == AppLivenessVerdict.confirmedGone(reason: "process-gone"))
         #expect(ruling.checks == 3)
         #expect(await spy.calls == [app])
     }
@@ -392,8 +411,7 @@ import TBDShared
 
         let ruling = await Self.arbiter(
             signaller: Self.aliveApp(startedAt: started), spy: spy,
-            sidecar: SidecarScript(sessionsHeld: 0),
-            recheckDelays: [.milliseconds(250)], clock: clock)
+            sidecar: SidecarScript(sessionsHeld: 0), clock: clock)
             .handleDisconnect(identity: Self.recordedIdentity(startedAt: started))
 
         #expect(ruling.ending == .holdsNothing)
@@ -402,19 +420,166 @@ import TBDShared
         #expect(await spy.calls.isEmpty)
     }
 
+    /// **An app that stays alive and disconnected is watched until it quits.**
+    /// Two app instances taking the sidecar from each other leave exactly
+    /// this — a development build beside an installed one — and so does an
+    /// app that comes back under an identity the daemon could not read: the
+    /// app that lost the sidecar is alive, holds its tabs, and is not seen to
+    /// come back. Its claims rightly stand while it runs. When it finally
+    /// quits, an hour or a day later, the watch is what takes them back; a
+    /// watch that had given up on a budget would leave them claimed for the
+    /// daemon's whole life, with nothing left to arbitrate them.
+    ///
+    /// Paced so the hour is crossed in two re-checks. The schedule has no
+    /// budget, so its pacing changes only how many advances the hour takes.
+    @Test func anAppThatStaysAliveAndDisconnectedIsWatchedPastAnHourUntilItQuits() async throws {
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let signaller = Self.aliveApp(startedAt: started)
+        let spy = ReclaimSpy()
+        let clock = EventDrivenTestClock()
+        let app = Self.recordedIdentity(startedAt: started)
+        let arbiter = Self.arbiter(
+            signaller: signaller, spy: spy,
+            recheckSchedule: .init(first: .seconds(1200), ceiling: .seconds(2400)), clock: clock)
+        let watchBegan = clock.now
+
+        let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
+        try await clock.requireAdvanceWhenArmed(by: .seconds(1200))
+        try await clock.requireAdvanceWhenArmed(by: .seconds(2400))
+        // An hour in, alive and disconnected throughout, and re-armed: still
+        // watched.
+        try await clock.requireSleeperArmed()
+        #expect(watchBegan.duration(to: clock.now) == .seconds(3600))
+        #expect(await spy.calls.isEmpty, "the daemon seized the ptys of an app that is still alive")
+
+        // It quits, well past the hour.
+        signaller.behaviors[Self.appPID] = .init(aliveInitially: false)
+        await clock.advance(by: .seconds(2400))
+        let ruling = await arbitration.value
+
+        #expect(ruling.ending == .seized, """
+            an app that stayed alive and disconnected past an hour kept its sessions claimed after \
+            it quit — nothing drains them, and every attach to them is refused for the daemon's \
+            whole life
+            """)
+        #expect(ruling.checks == 4)
+        #expect(await spy.calls == [app])
+    }
+
     /// The production schedule, pinned to what its doc comment claims: a
     /// first re-check inside a few hundred milliseconds for an app that is
-    /// exiting, a one-minute ceiling for an app that is alive, and an end.
-    @Test func theDefaultScheduleIsQuickFirstCheapLaterAndBounded() {
-        let delays = SidecarDisconnectArbiter.defaultRecheckDelays
+    /// exiting, a one-minute ceiling for an app that is alive — and no end,
+    /// because a watch lasts as long as its app is alive and disconnected.
+    @Test func theDefaultScheduleIsQuickFirstCheapLaterAndNeverRunsOut() {
+        let schedule = SidecarDisconnectArbiter.defaultRecheckSchedule
+        var delays = [schedule.first]
+        while delays.count < 100 {
+            delays.append(schedule.delay(after: delays[delays.count - 1]))
+        }
         let firstFour: Duration = delays.prefix(4).reduce(Duration.zero, +)
-        let whole: Duration = delays.reduce(Duration.zero, +)
+        let settledAtTheCeiling = delays.suffix(50).allSatisfy { $0 == .seconds(60) }
         #expect(delays.first == .milliseconds(250))
         #expect(firstFour <= .seconds(4),
                 "an exiting app is not re-checked four times inside four seconds")
         #expect(delays.max() == .seconds(60))
-        #expect(whole <= .seconds(3600))
-        #expect(delays.count == 66)
+        #expect(settledAtTheCeiling, "a long watch does not settle at one re-check a minute")
+    }
+
+    // MARK: - One watch per app
+
+    /// **A second departure of a watched app joins the watch already
+    /// running.** The same app reconnecting and dropping again, or losing the
+    /// sidecar to another instance, must not start a second watch beside the
+    /// first: that doubles the `ps` load and races the first to the same
+    /// take-back, announcing one death twice. The death is still caught, and
+    /// taken back once. And once the watch has ended, the next departure is
+    /// arbitrated afresh rather than absorbed into a watch that is gone.
+    @Test func aSecondDepartureOfTheSameAppJoinsTheWatchAlreadyRunning() async throws {
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let signaller = Self.aliveApp(startedAt: started)
+        let spy = ReclaimSpy()
+        let clock = EventDrivenTestClock()
+        let app = Self.recordedIdentity(startedAt: started)
+        let arbiter = Self.arbiter(signaller: signaller, spy: spy, clock: clock)
+
+        let first = Task { await arbiter.handleDisconnect(identity: app) }
+        try await clock.requireSleeperArmed()
+
+        let second = await arbiter.handleDisconnect(identity: app)
+
+        #expect(second.ending == .absorbed, "a second departure of a watched app started its own watch")
+        #expect(second.checks == 0, "an absorbed departure ran a liveness check of its own")
+        #expect(second.verdict == nil)
+        #expect(clock.sleeperCount == 1, "two watches are re-checking the same app")
+
+        signaller.behaviors[Self.appPID] = .init(aliveInitially: false)
+        await clock.advance(by: .milliseconds(250))
+        let ruling = await first.value
+
+        #expect(ruling.ending == .seized)
+        #expect(ruling.checks == 2)
+        #expect(await spy.calls == [app], "one app's death took its sessions back more than once")
+
+        let afterTheWatch = await arbiter.handleDisconnect(identity: app)
+        #expect(afterTheWatch.ending == .seized, """
+            a departure after the watch had ended was absorbed into a watch that no longer exists, \
+            so nothing arbitrated it
+            """)
+        #expect(afterTheWatch.checks == 1)
+    }
+
+    /// **An absorbed departure is not lost to a watch that was about to
+    /// end.** Here it lands while a round is between reading "connected
+    /// again" and acting on that — the connection the app came back on
+    /// dropping straight away. The round must not end the watch on what it
+    /// read: the departure was absorbed on the strength of this watch going
+    /// on, so ending would leave it arbitrated by nobody, and an app that then
+    /// died would keep its sessions claimed for the daemon's whole life. The
+    /// round runs again instead, finds the app alive and disconnected, and the
+    /// watch catches its death.
+    @Test func aDepartureReportedWhileARoundSettlesKeepsTheWatchGoing() async throws {
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let signaller = Self.aliveApp(startedAt: started)
+        let spy = ReclaimSpy()
+        let clock = EventDrivenTestClock()
+        let app = Self.recordedIdentity(startedAt: started)
+        let midRound = DepartureMidRound()
+        let arbiter = SidecarDisconnectArbiter(
+            liveness: AppLivenessArbiter(signaller: signaller),
+            reclaim: { await spy.record($0) },
+            sessionsHeld: { _ in 1 },
+            connectedApp: {
+                // The first read finds the app connected again, and its new
+                // connection drops before the round acts on that: the
+                // departure is reported into the very watch doing the
+                // reading, which is suspended right here and so free to take
+                // it. Every later read finds the app gone from the sidecar.
+                guard let watching = midRound.takeArbiter() else { return nil }
+                let ruling = await watching.handleDisconnect(identity: app)
+                midRound.record(ruling)
+                return app
+            },
+            recheckSchedule: Self.quickSchedule,
+            clock: clock)
+        midRound.arm(arbiter)
+
+        let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
+        // Still watching: the round that read the reconnect ran again on the
+        // departure it absorbed, and re-armed.
+        try await clock.requireSleeperArmed()
+        let absorbed = try #require(midRound.ruling, "the departure mid-round was never reported")
+        #expect(absorbed.ending == .absorbed)
+
+        signaller.behaviors[Self.appPID] = .init(aliveInitially: false)
+        await clock.advance(by: .milliseconds(250))
+        let ruling = await arbitration.value
+
+        #expect(ruling.ending == .seized, """
+            the watch ended on a reconnect it read before a departure it had absorbed, so that \
+            departure was arbitrated by nobody and the dead app's sessions stay claimed
+            """)
+        #expect(ruling.checks == 3)
+        #expect(await spy.calls == [app])
     }
 
     // MARK: - Which disconnect is a disconnect
@@ -573,6 +738,35 @@ private final class DisconnectLog: @unchecked Sendable {
     }
     var count: Int { lock.withLock { entries.count } }
     var all: [ProcessIdentity?] { lock.withLock { entries } }
+}
+
+/// Hands a test's `connectedApp` seam the arbiter it is wired into, once, so
+/// the seam can report a departure from inside a watch's round, and keeps the
+/// ruling that departure got. Lock-guarded: armed from the test's task, taken
+/// from the arbiter's.
+private final class DepartureMidRound: @unchecked Sendable {
+    private let lock = NSLock()
+    private var arbiter: SidecarDisconnectArbiter?
+    private var absorbed: SidecarDisconnectRuling?
+
+    func arm(_ arbiter: SidecarDisconnectArbiter) {
+        lock.withLock { self.arbiter = arbiter }
+    }
+
+    /// The arbiter on the first call, nil on every call after it.
+    func takeArbiter() -> SidecarDisconnectArbiter? {
+        lock.withLock {
+            let taken = arbiter
+            arbiter = nil
+            return taken
+        }
+    }
+
+    func record(_ ruling: SidecarDisconnectRuling) {
+        lock.withLock { absorbed = ruling }
+    }
+
+    var ruling: SidecarDisconnectRuling? { lock.withLock { absorbed } }
 }
 
 /// What the arbiter is told about the sidecar between its checks, scripted by
