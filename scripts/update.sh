@@ -700,10 +700,18 @@ build_products() {
 # A move, not a copy: the bundle is small, the move is atomic within a volume,
 # and a half-copied "previous" is worse than none. The running app is
 # unaffected either way — it holds its executable by inode, not by path.
+#
+# With nothing installed there is nothing to keep, and a bundle an earlier
+# update kept is left where it is: it is still a route back for the operator,
+# but it is not this run's to restore (see BUNDLE_STASHED).
 stash_installed_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
+    BUNDLE_STASHED=false
     if [ ! -d "$installed_bundle" ]; then
         log "nothing installed at $installed_bundle — keeping no previous bundle"
+        if [ -d "$PREVIOUS_BUNDLE" ]; then
+            log "leaving $PREVIOUS_BUNDLE, which an earlier update kept, where it is"
+        fi
         return 0
     fi
     mkdir -p "$(dirname "$PREVIOUS_BUNDLE")" || return 1
@@ -712,12 +720,22 @@ stash_installed_bundle() {
         log_error "could not move $installed_bundle aside — installing nothing"
         return 1
     fi
+    BUNDLE_STASHED=true
     log "kept the previous app bundle at $PREVIOUS_BUNDLE"
 }
 
+# True once stash_installed_bundle has moved the installed bundle to
+# $PREVIOUS_BUNDLE in this run. Only then is the bundle there the build this
+# run replaced. Otherwise anything at $PREVIOUS_BUNDLE was kept by an earlier
+# update and may be any older build, and moving it into $INSTALLED_BUNDLE
+# would install that build in front of whichever daemon is left, and let main
+# relaunch it as a rollback that worked.
+BUNDLE_STASHED=false
+
 # Put the kept bundle back where it was and tell LaunchServices. Called when
 # the installation is in place but the daemon behind it is not, which would
-# otherwise leave a new app talking to an old daemon.
+# otherwise leave a new app talking to an old daemon. Only for a bundle this
+# run kept; roll_back_bundle checks that first.
 restore_previous_bundle() {
     local installed_bundle="${1:-$INSTALLED_BUNDLE}"
     if [ ! -d "$PREVIOUS_BUNDLE" ]; then
@@ -734,16 +752,35 @@ restore_previous_bundle() {
 }
 
 # True once a failed install_and_handover could not put the previous bundle
-# back, so $INSTALLED_BUNDLE may still be the new build, or nothing. main reads
-# it before relaunching the app it stopped: launched from there, that app would
-# drive the old daemon, or start the new one if none is running, which is the
-# mismatch the rollback exists to prevent.
+# back, or kept none of its own to put back, so $INSTALLED_BUNDLE may still be
+# the new build, or nothing. main reads it before relaunching the app it
+# stopped: launched from there, that app would drive the old daemon, or start
+# the new one if none is running, which is the mismatch the rollback exists to
+# prevent.
 BUNDLE_RESTORE_FAILED=false
 
 # install_and_handover's rollback of the bundle: restore_previous_bundle, with
 # a failure recorded in BUNDLE_RESTORE_FAILED for main.
+#
+# It restores only a bundle this run kept (BUNDLE_STASHED). A run that found
+# nothing installed has nothing of its own to put back, and that counts as a
+# rollback that did not complete: main leaves the app stopped and logs the
+# recovery steps. Whatever this run installed stays installed, as on a first
+# update, rather than being removed. Removing it would restore the empty
+# install the run began with, but the stopped app already keeps this run from
+# launching it, and removing it takes away the bundle the recovery steps tell
+# the operator to open once it and the daemon are the same build.
 roll_back_bundle() {
-    restore_previous_bundle "${1-}" || BUNDLE_RESTORE_FAILED=true
+    local installed_bundle="${1:-$INSTALLED_BUNDLE}"
+    if [ "$BUNDLE_STASHED" = true ]; then
+        restore_previous_bundle "$installed_bundle" || BUNDLE_RESTORE_FAILED=true
+        return 0
+    fi
+    BUNDLE_RESTORE_FAILED=true
+    log_error "no previous app bundle to restore — this run found nothing installed at $installed_bundle, so what it installed there stays"
+    if [ -d "$PREVIOUS_BUNDLE" ]; then
+        log "not restoring $PREVIOUS_BUNDLE: an earlier update kept it, and it is not the build this run replaced"
+    fi
 }
 
 # Put the new bundle in place and move the fleet onto it, undoing the
@@ -761,8 +798,8 @@ install_and_handover() {
     BUNDLE_RESTORE_FAILED=false
 
     # Keeping the previous bundle: undone by moving it back, which is what the
-    # two failure paths below do. A failure here has moved nothing, so there
-    # is nothing to roll back.
+    # two failure paths below do when this run kept one. A failure here has
+    # moved nothing, so there is nothing to roll back.
     stash_installed_bundle "$installed_bundle" || return 1
 
     # Installing: the new bundle replaces the old one on disk. The RUNNING app

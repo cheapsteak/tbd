@@ -268,7 +268,9 @@ the order you would reach for them.
 
 - **From the kept bundle**, the fastest, because it needs no build. Every
   update moves the app bundle it is replacing to
-  `~/tbd/updates/previous/TBD.app` and leaves it there. Put it back with
+  `~/tbd/updates/previous/TBD.app` and leaves it there. An update that finds
+  nothing installed keeps nothing, and leaves a bundle an earlier update kept
+  where it is. Put it back with
   `rm -rf /Applications/TBD.app && /bin/cp -cR ~/tbd/updates/previous/TBD.app
   /Applications/TBD.app`, then relaunch. That bundle's
   `Contents/SourceWorktreePath.txt` names the tree the previous daemon came
@@ -294,13 +296,21 @@ kept bundle exists for — a new app driving the old daemon is a state nobody
 should be left in. The relaunch also covers a handover that failed after the
 old daemon had already exited: an app that finds no daemon starts one.
 
-The relaunch waits on both halves of that rollback. When either fails — there
-is no kept bundle to move back, as on the first update, or the bundle or the
-`.build/release` link cannot be put back — the new build may still be what an
-app would launch, or what it would start a daemon from, so the run leaves the
-app it stopped not running. It logs which half failed, then an error saying
-the rollback of the failed install did not complete, and the recovery steps
-below.
+The relaunch waits on both halves of that rollback. When either fails — the
+run kept no bundle to move back because nothing was installed when it began,
+as on the first update, or the bundle or the `.build/release` link cannot be
+put back — the new build may still be what an app would launch, or what it
+would start a daemon from, so the run leaves the app it stopped not running.
+It logs which half failed, then an error saying the rollback of the failed
+install did not complete, and the recovery steps below.
+
+The rollback only ever moves back the bundle the same run kept. A bundle an
+earlier update left at `~/tbd/updates/previous/TBD.app` is not the build the
+run replaced, and installing it would put some older app in front of
+whichever daemon is left, so a run that kept nothing leaves it where it is and
+logs that it did not restore it. The new build stays in `/Applications`, as on
+the first update, so that it is there to open once it and the daemon are the
+same build.
 
 A run interrupted while it installs the bundle and hands the daemon over —
 Ctrl-C, a signal, or a step that exits — does not launch the app again
@@ -319,7 +329,8 @@ To recover from either:
 - **Or open `/Applications/TBD.app` yourself** once it and the daemon are the
   same build.
 - **Or go back** with the kept bundle at `~/tbd/updates/previous/TBD.app`,
-  as described above, if the run got far enough to keep one.
+  as described above, if the run got far enough to keep one. A run that found
+  nothing installed kept none, and a bundle there is an earlier update's.
 
 An interruption before the install starts, or after the handover has
 completed, launches the app again as usual: before, nothing has moved; after,
