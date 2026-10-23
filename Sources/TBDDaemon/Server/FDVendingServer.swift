@@ -119,13 +119,18 @@ actor FDVendingServer {
     static let identityAttempts = 3
     /// Stamps accepted connections in accept order (`stampConnection()`).
     private let acceptStamps = MonotonicCounter()
-    /// The stamp of the latest connection adopted. Only ever increases. A
-    /// connection whose stamp is not above it was accepted before one already
-    /// installed, and is refused — see `adoptConnection(fd:stamp:)`.
-    private var latestAdoptedStamp: UInt64 = 0
-    /// Set by `stop` and never cleared. A stopped server adopts nothing more,
-    /// including a connection accepted before the stop whose adoption reaches
-    /// the actor after it.
+    /// The stamp a connection must be above to be adopted — see
+    /// `adoptConnection(fd:stamp:)`. Only ever increases. Each adoption raises
+    /// it to the adopted connection's stamp, so a connection accepted before
+    /// one already installed is refused; each `listen(on:)` raises it to the
+    /// last stamp handed out before it, so a connection accepted in an earlier
+    /// lifetime of the server is refused too.
+    private var stampFloor: UInt64 = 0
+    /// Set by `stop` and cleared by the next `listen(on:)`, which starts a
+    /// fresh lifetime. A stopped server adopts nothing, including a connection
+    /// accepted before the stop whose adoption reaches the actor after it; once
+    /// the server listens again, `stampFloor` is what keeps that connection
+    /// refused.
     private var stopped = false
     /// Delay seam (`docs/specs/2026-07-24-test-hardening-design.md` §5).
     /// Existential, not generic: this is an `actor` carrying `Sendable`
@@ -275,6 +280,12 @@ actor FDVendingServer {
     /// Start listening on `path`. Any existing file at `path` is removed first.
     /// Only meaningful in the live daemon; tests should call `adoptConnection`
     /// directly.
+    ///
+    /// A successful listen starts a fresh lifetime: a server `stop` ended
+    /// adopts again, but only connections accepted from now on. Every stamp
+    /// handed out before it is at or below the floor this sets, so a
+    /// connection the stop refused to install — whose task may still reach
+    /// the actor — is refused in this lifetime too.
     func listen(on path: String) throws {
         precondition(listenerFD == -1, "listen called twice")
         _ = unlink(path)
@@ -315,6 +326,10 @@ actor FDVendingServer {
         }
         listenerFD = fd
         socketPath = path
+        // The fresh lifetime described above. The floor is read before the
+        // accept thread below exists, so every connection it stamps is above it.
+        stopped = false
+        stampFloor = max(stampFloor, acceptStamps.current())
         logger.info("FD vending sidecar listening at \(path, privacy: .public)")
 
         // Dedicated accept thread: blocks in accept(); hands each connection
@@ -390,22 +405,26 @@ actor FDVendingServer {
     /// spawns, when the peer answers, and at most `identityAttempts` reads
     /// when none does. It is paid once per connection, never per vend.
     ///
-    /// **Adoptions install in accept order, and none after `stop`.** The
-    /// accept thread starts one task per connection, and those tasks reach the
-    /// actor in no fixed order, so the order travels with the connection: that
-    /// is the stamp. A connection installs only when its stamp is above every
-    /// stamp adopted before it and the server has not stopped. Otherwise it is
-    /// refused on arrival: its descriptor is closed without its peer being
-    /// read, and nothing is installed or reported. Installing it would
+    /// **Adoptions install in accept order, and none between a `stop` and the
+    /// next `listen(on:)`.** The accept thread starts one task per connection,
+    /// and those tasks reach the actor in no fixed order, so the order travels
+    /// with the connection: that is the stamp. A connection installs only when
+    /// the server has not stopped and its stamp is above `stampFloor` — above
+    /// every stamp adopted before it, and above every stamp handed out before
+    /// the server last listened. Otherwise it is refused on arrival: its
+    /// descriptor is closed without its peer being read, and nothing is
+    /// installed or reported. Installing it would
     /// supersede a connection accepted after it — handing the sidecar back to
     /// an older socket when the later one is the socket its peer is using,
     /// and, with a different app on each, reporting the live app as departed —
-    /// or put a connection into a server that has stopped. Nothing was vended
-    /// over a refused descriptor, since it was never current, so it leaves
-    /// nothing to arbitrate.
+    /// or put a connection into a server that has stopped, or into a later
+    /// lifetime than the one that accepted it. Nothing was vended over a
+    /// refused descriptor, since it was never current, so it leaves nothing to
+    /// arbitrate.
     func adoptConnection(fd: Int32, stamp: UInt64) {
-        guard !stopped, stamp > latestAdoptedStamp else {
-            let overtakenBy = stopped ? "the server's stop" : "a connection accepted after it"
+        guard !stopped, stamp > stampFloor else {
+            let overtakenBy = stopped
+                ? "the server's stop" : "a connection accepted after it, or a later listen"
             logger.notice("""
                 FD vending client (fd \(fd, privacy: .public)) reached the server after \
                 \(overtakenBy, privacy: .public); closing it unadopted
@@ -413,7 +432,7 @@ actor FDVendingServer {
             Darwin.close(fd)
             return
         }
-        latestAdoptedStamp = stamp
+        stampFloor = stamp
         let identity = identifyPeer(onSocket: fd)
         // Who the replaced connection belonged to, read before anything here
         // overwrites it. Only a connection still current counts: one whose
@@ -562,10 +581,12 @@ actor FDVendingServer {
 
     /// Stop the listener and drop any active client. Idempotent. Closing the
     /// listener fd makes the accept thread's blocked `accept()` return -1,
-    /// which exits the thread. A stopped server adopts nothing more: a
-    /// connection accepted before the stop whose task reaches the actor after
-    /// it, like any adopted later, has its descriptor closed rather than
-    /// installed (`adoptConnection(fd:stamp:)`).
+    /// which exits the thread. A stopped server adopts nothing until it
+    /// listens again: a connection accepted before the stop whose task reaches
+    /// the actor after it, like any adopted later, has its descriptor closed
+    /// rather than installed (`adoptConnection(fd:stamp:)`) — and it stays
+    /// refused after a later `listen(on:)`, which starts a fresh lifetime only
+    /// for connections accepted from then on.
     func stop() {
         stopped = true
         if listenerFD >= 0 { Darwin.close(listenerFD); listenerFD = -1 }

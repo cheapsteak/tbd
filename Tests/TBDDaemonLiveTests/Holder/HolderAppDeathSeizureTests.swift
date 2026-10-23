@@ -240,4 +240,105 @@ struct HolderAppDeathSeizureTests {
         #expect(resumed === suspended, "the seizure opened a second hand-over")
         #expect(await resumed.isDraining, "the suspended reader was not put back on the pty")
     }
+
+    // MARK: - One take-back at a time
+
+    /// An app closes a tab and quits straight after: its handback is still
+    /// inside its take-back when the app's death is confirmed, and a seizure
+    /// of the same attach arrives while the claim still stands. The claim is
+    /// held across the resume by design, so the generation check alone would
+    /// let the seizure resume the same reader a second time — the census would
+    /// count the daemon starting to read a pty it already reads, and the job
+    /// would be jiggled twice. The seizure leaves the outcome to the handback.
+    ///
+    /// Parked through the take-back barrier rather than raced: the real window
+    /// is a single `await` on the reader's actor.
+    @Test func aSeizureDuringTheHandbacksTakeBackRunsNoSecondTakeBack() async throws {
+        let fixture = try await HandbackFixture.start(command: Self.echoJob)
+        defer { fixture.tearDown() }
+        // Only Sendable values cross into the task below.
+        let registry = fixture.registry
+        let terminalID = fixture.terminalID
+        let row = fixture.terminalRow
+
+        let viewer = try await fixture.attachAViewer()
+        let suspended = try #require(await registry.reader(for: terminalID))
+        let generation = viewer.generation
+        let preamble = viewer.terminal.snapshot()
+        // The tab closes: the app leaves the pty, then says so.
+        viewer.close()
+
+        let barrier = ReentryBarrier()
+        await registry.setTakeBackBarrier(barrier.hook())
+        let handback = Task {
+            try await registry.acceptHandback(
+                terminal: row, generation: generation, preamble: preamble)
+        }
+        #expect(await pollUntil("the handback to reach the take-back barrier") {
+            await barrier.hasParked
+        })
+
+        // The app has quit, and its death is confirmed while the handback is
+        // still putting the reader back.
+        try await registry.seizeFromDeadApp(terminalID: terminalID, generation: generation)
+
+        #expect(await !suspended.isDraining, """
+            the seizure resumed the reader while the app's own handback was still taking the \
+            session back
+            """)
+        #expect(await registry.viewerAttachment(for: terminalID) == generation, """
+            the seizure cleared a claim the handback is holding across its resume
+            """)
+        #expect(await registry.takeBacksCompleted == 0)
+
+        await barrier.release()
+        try await handback.value
+
+        #expect(await registry.takeBacksCompleted == 1, "one attach was taken back twice")
+        #expect(await registry.readerCensusViolations == 0, """
+            a second take-back recorded the daemon as starting to read a pty it was already reading
+            """)
+        #expect(await registry.lastReaderCensusViolation == nil)
+        #expect(await registry.viewerAttachment(for: terminalID) == nil)
+        let resumed = try #require(await registry.reader(for: terminalID))
+        #expect(resumed === suspended, "the take-back opened a second hand-over")
+        #expect(await resumed.isDraining, "the handback did not put the reader back on the pty")
+    }
+}
+
+// MARK: - Forcing an interleave
+
+/// Holds the **first** caller that reaches the seam it is installed on, and
+/// waves through every one after it — the shape `HolderAdoptionTests` and
+/// `HolderAttachHandoffTests` use for their interleavings, for the same reason:
+/// each race is a continuation-ordering accident inside an actor, so
+/// reproducing it by timing would pass by luck. The polling is only how each
+/// side observes a state the other has definitely reached, and it is bounded
+/// through `pollUntil`, so a barrier nobody releases fails its test with a
+/// named diagnostic instead of hanging the suite.
+private actor ReentryBarrier {
+    private var parked = false
+    private var released = false
+
+    /// Whether a caller is being held.
+    var hasParked: Bool { parked }
+
+    /// Lets the parked caller finish.
+    func release() { released = true }
+
+    private var isReleased: Bool { released }
+
+    /// True for the first caller only; every later one is waved through.
+    private func claimPark() -> Bool {
+        guard !parked else { return false }
+        parked = true
+        return true
+    }
+
+    nonisolated func hook() -> @Sendable () async -> Void {
+        { [self] in
+            guard await claimPark() else { return }
+            await pollUntil("the test to release the parked take-back") { await self.isReleased }
+        }
+    }
 }

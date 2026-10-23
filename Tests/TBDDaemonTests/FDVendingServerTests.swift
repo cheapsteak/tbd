@@ -648,6 +648,47 @@ struct FDVendingServerTests {
         #expect(peerHasClosed(lateClientFD), "a connection adopted after the stop was left open")
         #expect(departures.count == 0)
     }
+
+    @Test("a listen after a stop adopts connections accepted from then on, and none accepted before it")
+    func aListenAfterAStopStartsAFreshLifetime() async throws {
+        // `stop` refuses every later adoption, and a server that listens again
+        // must take that back — or it binds a socket and closes every
+        // connection made to it. What it must not take back is the refusal of a
+        // connection accepted before the listen, whose task can still reach the
+        // actor afterwards.
+        let root = fencedScratchRoot(prefix: "tbd-fdv")
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let socketPath = "\(root)/vend.sock"
+        let (earlyServerFD, earlyClientFD) = try makeSocketPair()
+        let (lateServerFD, lateClientFD) = try makeSocketPair()
+        defer { Darwin.close(earlyClientFD); Darwin.close(lateClientFD) }
+        let server = FDVendingServer(peerIdentity: Self.identifiedPeer)
+
+        try await server.listen(on: socketPath)
+        await server.stop()
+        let acceptedBeforeTheListen = server.stampConnection()
+        try await server.listen(on: socketPath)
+
+        // Adopted first, so only the listen's floor can refuse it: no
+        // connection accepted after it has been installed yet.
+        await server.adoptConnection(fd: earlyServerFD, stamp: acceptedBeforeTheListen)
+        #expect(peerHasClosed(earlyClientFD), """
+            a connection accepted before the server listened again was installed in the new \
+            lifetime
+            """)
+        #expect(await server.currentClientIdentity() == nil)
+
+        await server.adoptConnection(fd: lateServerFD)
+        #expect(await server.currentClientIdentity() == Self.peer, """
+            a server that listened again after a stop refused a connection accepted after the \
+            listen
+            """)
+        #expect(!peerHasClosed(lateClientFD), "the connection accepted after the listen was torn down")
+        _ = try await server.sendFrame(Self.probeFrame)
+
+        await server.stop()
+    }
 }
 
 /// Answers identity reads from a script: nil for the first `failing` reads,

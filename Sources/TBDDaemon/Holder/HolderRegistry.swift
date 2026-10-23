@@ -356,6 +356,30 @@ actor HolderRegistry {
     /// death that happened once; this count is the instrument that tells the
     /// two apart, since both leave the late attach taken back.
     private(set) var confirmedDeathPasses = 0
+    /// Take-backs under way, each naming the session and the attach generation
+    /// it is taking back (`takeBackFromViewer`). An entry stands from that
+    /// call's generation check until it returns, on every path.
+    ///
+    /// The claim is held across the resume by design, so the generation check
+    /// alone would admit a second take-back of the same attach while the first
+    /// is suspended — a viewer's handback and a seizure on its app's death
+    /// arrive together when an app closes a tab and quits straight after. Two
+    /// take-backs would resume one reader twice: the second would record the
+    /// daemon as starting to read a pty it is already reading, which the census
+    /// counts as a double reader, and would jiggle the job a second time. The
+    /// generation is part of the key because a take-back of a later attach of
+    /// the same session is a different take-back, and must not be turned away
+    /// by one still finishing for an earlier attach.
+    private var takeBacksInFlight: Set<TakeBack> = []
+    private struct TakeBack: Hashable {
+        let terminalID: UUID
+        let generation: UInt64
+    }
+    /// How many take-backs have put a reader back on its pty and jiggled its
+    /// job. Test-facing: one take-back of a session and two leave the same
+    /// claim cleared and the same reader draining, and this count is what
+    /// tells them apart.
+    private(set) var takeBacksCompleted = 0
     /// Mints attach generations. Monotonic for the daemon's life, so an ack or
     /// a cancel naming an older attach can always be told from one naming the
     /// current attach.
@@ -506,6 +530,16 @@ actor HolderRegistry {
     /// would mean racing a single `await` on an actor. Nil in production.
     private var cancelBarrier: (@Sendable () async -> Void)?
 
+    /// Awaited inside a take-back from a viewer, immediately before the
+    /// retained reader is handed the viewer's screen and put back on its pty —
+    /// the window in which the claim still stands while a take-back of it is
+    /// already under way, which is where a second take-back of the same attach
+    /// arrives (`takeBacksInFlight`).
+    ///
+    /// A seam for the same reason as the others: the real window is a single
+    /// `await` on the reader's actor. Nil in production.
+    private var takeBackBarrier: (@Sendable () async -> Void)?
+
     /// Told about a session whose job has ended: after its exit status is
     /// established and before its reader is released — the last moment the
     /// daemon's emulator holds the session's final screen. Dev servers save
@@ -567,6 +601,12 @@ actor HolderRegistry {
     /// never calls it.
     func setCancelBarrier(_ barrier: (@Sendable () async -> Void)?) {
         cancelBarrier = barrier
+    }
+
+    /// Installs the take-back barrier described above. Test-facing; production
+    /// never calls it.
+    func setTakeBackBarrier(_ barrier: (@Sendable () async -> Void)?) {
+        takeBackBarrier = barrier
     }
 
     /// Installs the session-ended observer described above. The daemon calls
@@ -2171,9 +2211,9 @@ actor HolderRegistry {
     /// was confirmed: that pass took back everything then recorded against the
     /// app, and remembering it is what routes this late name here. Running the
     /// pass again would announce a second death that never happened, and would
-    /// reach for claims of that app whose take-back may still be in flight —
-    /// each is held across its resume, by design — so a second pass could
-    /// start a second take-back of the same session beside the first.
+    /// reach again for claims of that app whose take-back may still be in
+    /// flight — each is held across its resume, by design — leaving
+    /// `takeBacksInFlight` to turn each of those away.
     ///
     /// **Synchronous, so the record is all a caller waits for.** The attach
     /// RPC awaits this before it replies, and a take-back resumes a reader and
@@ -2202,6 +2242,14 @@ actor HolderRegistry {
                 pendingAttaches[terminalID] = pending
             }
         } else if viewerAttachments[terminalID]?.generation == generation {
+            // Defensive: no production ordering reaches this arm. Nothing turns
+            // this attach into a claim before this record lands: the ack needs
+            // the generation only the attach RPC's reply carries, and the reply
+            // waits for this record; the attach handler arms the ready-timeout
+            // after it; and a death's pass settles only attaches whose
+            // recipient is already recorded. Kept so that an ordering that does
+            // reach it still records the owner a death needs, rather than
+            // leaving the claim ownerless.
             viewerAttachments[terminalID]?.owner = recipient
         } else {
             return nil
@@ -2337,6 +2385,16 @@ actor HolderRegistry {
     /// still holds the screen it had before the attach, and the jiggle is what
     /// gets a repainting program to redraw the rest.
     ///
+    /// **One take-back per attach at a time.** Because the claim stands until
+    /// the resume lands, a second take-back of the same attach — the viewer's
+    /// handback and its app's seizure, arriving together — would pass the
+    /// generation check while the first is suspended and resume the same
+    /// reader again. So the first marks the attach in flight
+    /// (`takeBacksInFlight`) and a second returns at once, without touching
+    /// the census, the reader or the claim. It returns rather than throws:
+    /// the take-back its caller asked for is under way, and the one in flight
+    /// owns the outcome — including dropping the claim if it fails.
+    ///
     /// **The `.adopted` arm serves every attach**, acknowledged or timed out,
     /// because both keep their reader suspended on a descriptor they never let
     /// go of. It is the ordinary path, and the strictly better one: no holder
@@ -2357,6 +2415,19 @@ actor HolderRegistry {
         guard viewerAttachments[terminalID]?.generation == generation else {
             throw Error.handbackSuperseded(terminalID: terminalID, generation: generation)
         }
+        // Marked before the first suspension below and cleared on every way
+        // out; see "One take-back per attach at a time" in the header.
+        let takeBack = TakeBack(terminalID: terminalID, generation: generation)
+        guard takeBacksInFlight.insert(takeBack).inserted else {
+            Self.logger.notice(
+                """
+                attach \(generation, privacy: .public) for session \
+                \(terminalID.uuidString, privacy: .public) is already being taken back from its \
+                viewer; leaving the outcome to the take-back in flight
+                """)
+            return
+        }
+        defer { takeBacksInFlight.remove(takeBack) }
         // The viewer leaves the census here, on its caller's evidence and
         // nothing weaker: `acceptHandback` arrives only after the viewer closed
         // its descriptor (the ordering the app owns and this process cannot
@@ -2373,7 +2444,9 @@ actor HolderRegistry {
             case .adopted(let suspended):
                 // Every attach's arm. The reader never left the descriptor, so
                 // the screen goes in before the drain restarts and the resume is
-                // a restart of its thread.
+                // a restart of its thread. The barrier is where a test parks a
+                // take-back with its claim still standing; see `takeBackBarrier`.
+                await takeBackBarrier?()
                 if let preamble { await suspended.ingest(preamble: preamble) }
                 try await suspended.resumeDraining()
                 readerCensus.beganReading(
@@ -2422,6 +2495,7 @@ actor HolderRegistry {
         // asked for. It heals only programs that repaint, which is why the
         // preamble carries everything else.
         await reader.jiggle()
+        takeBacksCompleted += 1
         Self.logger.info(
             """
             attach \(generation, privacy: .public) for session \
@@ -2497,7 +2571,9 @@ actor HolderRegistry {
     /// mutates under it. The generation snapshotted with each session is what
     /// makes a stale entry harmless — `takeBackFromViewer` refuses any claim
     /// that has moved on since, so a session re-attached by a *new* app while
-    /// this loop ran is left to that app.
+    /// this loop ran is left to that app. A session whose take-back is already
+    /// under way — the dead app's own handback, sent as it closed a tab just
+    /// before it died — is left to that take-back and answered as taken back.
     ///
     /// A take-back that fails is logged and skipped rather than aborting the
     /// pass: the sessions are independent, and one unreachable holder must not
