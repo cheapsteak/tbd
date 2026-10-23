@@ -43,10 +43,29 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
     var model: String?
 
+    @Option(name: .customLong("codex-disable"), help: "Codex feature to turn off for this terminal only, passed to Codex as --disable <feature> (repeatable; requires --type codex). Example: --codex-disable computer_use")
+    var codexDisable: [String] = []
+
+    @Option(name: .long, help: "Existing Codex home for this terminal only (relative paths use the current directory). Requires --type codex and a readable PreToolUse hook; does not change ordinary Codex terminals.")
+    var codexHome: String?
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
     mutating func validate() throws {
+        if !codexDisable.isEmpty {
+            guard type == .codex else {
+                throw ValidationError(TerminalCreateParams.codexDisableRequiresCodexMessage)
+            }
+            do {
+                _ = try TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+            } catch {
+                throw ValidationError(error.localizedDescription)
+            }
+        }
+        if codexHome != nil, type != .codex {
+            throw ValidationError(TerminalCreateParams.codexHomeRequiresCodexMessage)
+        }
         guard let model else { return }
         guard type == .codex else {
             throw ValidationError(TerminalCreateParams.modelRequiresCodexMessage)
@@ -60,9 +79,18 @@ struct TerminalCreate: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeArg(worktree, client: client)
 
+        let disabledFeatures: [String]? = try codexDisable.isEmpty
+            ? nil : TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
+
+        let params = TerminalCreateParams(
+            worktreeID: worktreeID, cmd: cmd, type: type,
+            prompt: try resolvePrompt(inline: prompt, file: promptFile),
+            claudeSettingsOverlay: claudeSettings, model: model,
+            codexDisabledFeatures: disabledFeatures,
+            codexHome: Self.normalizedCodexHomePath(codexHome))
         let terminal: Terminal = try client.call(
-            method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings, model: model),
+            method: params.rpcMethod,
+            params: params,
             resultType: Terminal.self
         )
 
@@ -74,6 +102,17 @@ struct TerminalCreate: AsyncParsableCommand {
             print("  Window: \(terminal.tmuxWindowID)")
             print("  Pane:   \(terminal.tmuxPaneID)")
         }
+    }
+
+    /// The daemon accepts only canonical absolute paths. Resolve a relative
+    /// CLI argument against this process's cwd without resolving symlinks;
+    /// the daemon still checks the resulting path and directory strictly.
+    static func normalizedCodexHomePath(
+        _ path: String?, currentDirectoryPath: String = FileManager.default.currentDirectoryPath
+    ) -> String? {
+        guard let path, !path.isEmpty, !path.hasPrefix("/") else { return path }
+        let cwd = URL(fileURLWithPath: currentDirectoryPath, isDirectory: true)
+        return URL(fileURLWithPath: path, relativeTo: cwd).standardizedFileURL.path
     }
 }
 

@@ -34,9 +34,10 @@ Two properties follow, and neither is a defect:
   the same `tbd` profile, so `/model` in one terminal becomes the default for
   every Codex terminal TBD starts afterwards. Terminals already running keep
   their own model.
-- **A recreated terminal starts fresh.** Recreating a Codex terminal
+- **A recreated terminal starts a fresh session.** Recreating a Codex terminal
   (`terminal.recreateWindow`) launches a new `codex` process rather than
-  `codex resume`, so it takes whatever the profile says at that moment.
+  `codex resume`. Without a per-terminal override it takes whatever the
+  profile says at that moment, which is whichever terminal last ran `/model`.
 
 This design therefore adds no TBD-level switch. Changing a running terminal's
 model is Codex's `/model`; what TBD lacks is a way to choose the model for a
@@ -53,8 +54,9 @@ single terminal when it is created.
 ## Non-goals
 
 - A TBD-level live model switch. Codex's `/model` covers it.
-- Persisting the override. It lives exactly as long as the Codex process it
-  was passed to; a recreated terminal falls back to the profile's model.
+- Persisting the override beyond its terminal. It is recorded on that
+  terminal's row and nowhere else, so it never becomes another terminal's
+  default.
 - A model picker in the app.
 - Selecting Codex as the primary worktree agent. `--codex-model` modifies a
   Codex primary selected by the existing preference; it does not select the
@@ -98,8 +100,24 @@ the pre-session phase when a pre-session hook exists, and
 
 Both fields are optional and default to `nil` in their public initializers.
 Older clients omit them and newer daemons decode that as the current behavior;
-older daemons ignore the extra JSON keys. No value is written to the terminal,
-worktree, repository, profile, or config tables.
+older daemons ignore the extra JSON keys. The value is recorded on the new
+terminal's row, and on no worktree, repository, profile, or config table.
+
+### Relaunching Codex in the same terminal
+
+A terminal starts exactly as it was launched, every time TBD launches Codex in
+it again. The Codex spawn writes the options its command was built from — the
+model and the features turned off with `--codex-disable` — to the row's
+`codex_launch_options` column as JSON (`Terminal.codexLaunchOptions`), in the
+same insert that creates the row. A spawn with neither writes NULL, so a
+terminal launched without options relaunches with the default command.
+
+Every path that relaunches Codex in an existing terminal reads the column back
+into the command: `terminal.recreateWindow`, and the two paths that restore
+Codex after a continue-in-Claude does not finish (the in-request rollback and
+the startup recovery of a pending row). A terminal that stops running Codex —
+recreated as a shell, or converted by continue-in-Claude — has the column
+cleared.
 
 ### Codex command construction
 
@@ -158,6 +176,17 @@ agent-selection mechanism.
   and is refused with `claude`, `shell`, no type, or an empty value;
   `--codex-model` parses and refuses an empty value; both params structs
   decode from JSON that omits the new fields.
+- **`CodexLaunchOptionsStoreTests`** – the options land in the column as JSON
+  and read back; a terminal launched without options, a row older than the
+  column, and an unreadable value read nil; recreating as a shell clears the
+  column and replacing a Codex window keeps it.
+- **`ModelProfileSpawnTests`** – recreating a Codex terminal reapplies the
+  model and disabled features it was created with, and adds nothing for one
+  created without them; a Codex primary's `--codex-model` is recorded on its
+  row.
+- **`ContinueInClaudeTransactionTests`** – both the startup recovery of a
+  pending row and the in-request rollback relaunch Codex with the row's
+  options; a finished continuation clears them.
 
 Verification runs `scripts/swift-safe build` and `scripts/test.sh`.
 
@@ -177,10 +206,10 @@ so the reconciler doctrine does not apply.
 
 ### Explicit optional RPC fields – chosen
 
-Carry the one-shot value on the existing create requests and apply it at the
-two fresh Codex spawn sites. This matches the lifetime of the user's choice,
-keeps old clients compatible, and makes the no-override branch identical to
-today.
+Carry the value on the existing create requests, apply it at the two fresh
+Codex spawn sites, and record it on the row each creates. This scopes the
+user's choice to the one terminal it was made for, keeps old clients
+compatible, and makes the no-override branch identical to today.
 
 ### A TBD-level live switch – rejected
 
@@ -188,11 +217,16 @@ Restarting a terminal on a new model would need a `codex resume` replacement
 path that TBD does not have, plus a stored model to reapply, for something
 Codex's `/model` already does in place without losing the session.
 
-### Store the model on the terminal row – rejected
+### Let a relaunch take the profile's model – rejected
 
-Reapplying a stored model on recreate would need a schema column and would
-compete with `/model`: after a user switches in-session, the stored value is
-stale, and reapplying it would silently undo their choice.
+Leaving the model off the row would make a relaunched terminal take the shared
+`tbd` profile's model, which is whatever any terminal last chose with
+`/model`, not what this terminal was started on. A terminal started on a
+specific model would silently come back on another one after its window
+died. Recording the launch model costs one case: a user who switched this same
+terminal with `/model` gets the launch model back on relaunch rather than the
+switched one. A relaunch starts a fresh session either way, and the launch
+model is the one choice that is known to belong to this terminal.
 
 ### Reuse `ModelProfile.model` or `WorktreeCreateParams.model` – rejected
 
@@ -204,5 +238,5 @@ Reuse would make a Claude profile silently control Codex and would leave
 
 Editing `tbd.config.toml`, `config.toml`, or shared spawn environment would
 outlive one create request and affect unrelated terminals, and restoring the
-old value would race concurrent creates. A command-line override has the
-required one-process lifetime without shared mutation.
+old value would race concurrent creates. A command-line override, recorded on
+its own terminal's row, is scoped to that terminal without shared mutation.

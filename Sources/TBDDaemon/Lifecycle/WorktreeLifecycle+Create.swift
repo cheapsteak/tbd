@@ -1527,6 +1527,10 @@ extension WorktreeLifecycle {
         // exports, written into its row. Nil for any other primary, and for a
         // Claude one with every feature off.
         var primarySessionIncarnationID: UUID? = nil
+        // The options a Codex primary's command is built with, recorded on its
+        // row so a relaunch of Codex in that tab keeps them. Nil for any other
+        // primary.
+        var primaryCodexLaunchOptions: CodexLaunchOptions? = nil
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1547,6 +1551,8 @@ extension WorktreeLifecycle {
                 initialPrompt: effectivePrompt,
                 executablePath: codexLaunch.executablePath,
                 model: codexModelOverride)
+            primaryCodexLaunchOptions = CodexLaunchOptions.recorded(
+                model: codexModelOverride, disabledFeatures: [])
             primaryEnv = [
                 "TBD_WORKTREE_ID": worktreeID.uuidString,
                 "TBD_TERMINAL_ID": plannedTerminalID1.uuidString,
@@ -1715,7 +1721,8 @@ extension WorktreeLifecycle {
                 // reuses this row, and the wake site has nothing else to read.
                 watchDeskRole: watchDeskRole,
                 transport: transport,
-                sessionIncarnationID: primarySessionIncarnationID)
+                sessionIncarnationID: primarySessionIncarnationID,
+                codexLaunchOptions: primaryCodexLaunchOptions)
         } catch {
             await sessionTitles.release(primarySpawnTitle)
             throw error

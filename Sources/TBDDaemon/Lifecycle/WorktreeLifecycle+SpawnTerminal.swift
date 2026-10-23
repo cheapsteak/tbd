@@ -92,6 +92,10 @@ extension WorktreeLifecycle {
     ///     into the row so its process's hooks match it. Nil for every other
     ///     spawn — shells, Codex, dev servers, forks, and Claude with every
     ///     feature off.
+    ///   - codexLaunchOptions: the options a Codex spawn's command was built
+    ///     with, nil for every other spawn and for a Codex spawn with none.
+    ///     Written in the same insert, so every later relaunch of Codex in this
+    ///     tab can reapply them.
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
@@ -109,7 +113,8 @@ extension WorktreeLifecycle {
         watchDeskRole: WatchDeskRole? = nil,
         transport: TerminalSpawnTransport,
         serverName: String? = nil,
-        sessionIncarnationID: UUID? = nil
+        sessionIncarnationID: UUID? = nil,
+        codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below.
@@ -171,7 +176,8 @@ extension WorktreeLifecycle {
                 // test has to be able to pin end to end.
                 holderChildStartedAt: holderHandle == nil ? nil : now(),
                 serverName: serverName,
-                sessionIncarnationID: sessionIncarnationID
+                sessionIncarnationID: sessionIncarnationID,
+                codexLaunchOptions: codexLaunchOptions
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource

@@ -72,6 +72,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// The declared dev server this tab runs — see `Terminal.serverName`.
     var server_name: String?
 
+    /// JSON-encoded `CodexLaunchOptions` — see `Terminal.codexLaunchOptions`.
+    var codex_launch_options: String?
+
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
         self.worktreeID = terminal.worktreeID.uuidString
@@ -106,6 +109,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.child_pid = terminal.childPID
         self.holder_child_started_at = terminal.holderChildStartedAt
         self.server_name = terminal.serverName
+        self.codex_launch_options = FactColumnJSON.encode(terminal.codexLaunchOptions)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -159,6 +163,10 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             holderChildStartedAt: holder_child_started_at
         )
         model.serverName = server_name
+        // An unreadable blob degrades to "no options recorded", so a relaunch
+        // falls back to the default command rather than failing the row.
+        model.codexLaunchOptions = FactColumnJSON.decode(
+            CodexLaunchOptions.self, from: codex_launch_options)
         return model
     }
 }
@@ -169,6 +177,16 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
 /// existing `try?` treatment: an unreadable provenance blob must degrade to
 /// "no provenance recorded" — which `Terminal.observedActivity` already reads
 /// as no fact — rather than take the whole row's decode with it.
+/// A recorded `codex_launch_options` value that no longer decodes. A relaunch
+/// refuses on it rather than guess whether it named a dedicated Codex home.
+public struct UnreadableCodexLaunchOptions: Error, LocalizedError, CustomStringConvertible {
+    public let terminalID: UUID
+    public var description: String {
+        "Terminal \(terminalID)'s recorded Codex launch options cannot be read, so Codex is not relaunched in it: they may name a dedicated Codex home."
+    }
+    public var errorDescription: String? { description }
+}
+
 enum FactColumnJSON {
     static func encode<T: Encodable>(_ value: T?) -> String? {
         guard let value else { return nil }
@@ -486,6 +504,8 @@ private func resetRecreatedShellLifecycle(
     record.hibernateReason = nil
     record.label = TerminalLabel.shell
     record.kind = TerminalKind.shell.rawValue
+    // A shell launches no Codex, so the tab no longer has Codex options.
+    record.codex_launch_options = nil
     return incarnationID
 }
 
@@ -745,7 +765,8 @@ public struct TerminalStore: Sendable {
         childPID: Int32? = nil,
         holderChildStartedAt: Date? = nil,
         serverName: String? = nil,
-        sessionIncarnationID: UUID? = nil
+        sessionIncarnationID: UUID? = nil,
+        codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
         var terminal = Terminal(
             id: id,
@@ -766,6 +787,7 @@ public struct TerminalStore: Sendable {
         // already at the Swift type-checker's expression budget here.
         terminal.serverName = serverName
         terminal.sessionIncarnationID = sessionIncarnationID
+        terminal.codexLaunchOptions = codexLaunchOptions
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
@@ -830,6 +852,23 @@ public struct TerminalStore: Sendable {
         try await writer.read { db in
             try TerminalRecord.fetchOne(db, key: id.uuidString)?.toModel()
         }
+    }
+
+    /// The Codex launch options a relaunch of this tab must honor, read
+    /// strictly. The row model degrades an unreadable value to "none", which
+    /// is unsafe here: the value may name a dedicated Codex home, and a
+    /// relaunch without it would run on the shared home with no guard. So a
+    /// recorded value that does not decode throws, and the relaunch refuses.
+    public func codexLaunchOptionsForRelaunch(id: UUID) async throws -> CodexLaunchOptions? {
+        let raw = try await writer.read { db in
+            try TerminalRecord.fetchOne(db, key: id.uuidString)?.codex_launch_options
+        }
+        guard let raw else { return nil }
+        guard let data = raw.data(using: .utf8),
+              let options = try? JSONDecoder().decode(CodexLaunchOptions.self, from: data) else {
+            throw UnreadableCodexLaunchOptions(terminalID: id)
+        }
+        return options
     }
 
     /// Delete a terminal by ID.
@@ -1309,6 +1348,8 @@ public struct TerminalStore: Sendable {
             }
             record.kind = TerminalKind.claude.rawValue
             record.label = TerminalLabel.claudeCode
+            // The tab now runs Claude; its Codex options no longer describe it.
+            record.codex_launch_options = nil
             record.profile_id = profileID?.uuidString
             record.claudeSessionID = sessionID
             record.transcriptPath = transcriptPath

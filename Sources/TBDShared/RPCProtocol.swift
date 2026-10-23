@@ -150,6 +150,9 @@ public enum RPCMethod {
     public static let worktreeMove = "worktree.move"
     public static let worktreeForget = "worktree.forget"
     public static let terminalCreate = "terminal.create"
+    /// A distinct method so an older daemon cannot silently ignore the new
+    /// codexHome field and launch an unguarded terminal instead.
+    public static let terminalCreateGuardedCodex = "terminal.createGuardedCodex"
     public static let terminalContinueInCodex = "terminal.continueInCodex"
     public static let terminalContinueInClaude = "terminal.continueInClaude"
     public static let terminalList = "terminal.list"
@@ -1640,8 +1643,9 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// Codex model for the new worktree's primary terminal when that primary
     /// resolves to Codex, passed as `-c model=<id>`. Ignored for Claude and
     /// shell primaries; it never selects the agent kind. Distinct from the
-    /// Claude-only `model`. Not persisted. Optional/defaulted for backward
-    /// compatibility.
+    /// Claude-only `model`. Recorded on the primary's row
+    /// (`Terminal.codexLaunchOptions`) so a relaunch of Codex in that tab keeps
+    /// it. Optional/defaulted for backward compatibility.
     public let codexModel: String?
     public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
@@ -2762,22 +2766,74 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let claudeSettingsOverlay: String?
     /// Codex model for this fresh Codex terminal, passed to Codex as
     /// `-c model=<id>`. An opaque identifier: Codex owns the vocabulary and
-    /// reports unsupported values. Honored only for `type == .codex`; not
-    /// persisted, so a later recreate falls back to the profile's model.
-    /// Optional/defaulted for backward compatibility.
+    /// reports unsupported values. Honored only for `type == .codex`, and
+    /// recorded on the row (`Terminal.codexLaunchOptions`) so a relaunch of
+    /// Codex in this tab keeps it. Optional/defaulted for backward compatibility.
     public let model: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil) {
+    /// Codex feature keys (for example `computer_use`) to turn off for this
+    /// fresh Codex terminal only, each passed to Codex as `--disable <key>`.
+    /// Honored only for `type == .codex`, and recorded on the row with `model`
+    /// (`Terminal.codexLaunchOptions`). Validate with
+    /// `normalizedCodexDisabledFeatures(_:)`. Optional/defaulted for backward
+    /// compatibility (old clients omit it; nil = none).
+    public let codexDisabledFeatures: [String]?
+    /// Explicit Codex home for this one terminal. The daemon validates its guard
+    /// before spawn and records it on the row with `model`
+    /// (`Terminal.codexLaunchOptions`), so a relaunch of Codex in this tab
+    /// re-validates and keeps it, or refuses. Nil keeps the shared Codex home.
+    public let codexHome: String?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, codexDisabledFeatures: [String]? = nil, codexHome: String? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.model = model
+        self.codexDisabledFeatures = codexDisabledFeatures
+        self.codexHome = codexHome
     }
 
     /// Shared by the CLI's argument validation and the daemon's refusal so a
     /// caller sees the same explanation whichever layer stops it.
     public static let modelRequiresCodexMessage =
         "--model requires --type codex: Claude models come from TBD model profiles, and shell terminals have no model."
+
+    public static let codexDisableRequiresCodexMessage =
+        "--codex-disable requires --type codex: it turns off a Codex feature, and only Codex terminals run Codex."
+
+    public static let codexHomeRequiresCodexMessage =
+        "--codex-home requires --type codex: only Codex terminals use CODEX_HOME."
+
+    /// Guarded requests use a new RPC method: an older daemon must reject the
+    /// unknown method instead of ignoring an unknown `codexHome` JSON field.
+    public var rpcMethod: String {
+        codexHome == nil ? RPCMethod.terminalCreate : RPCMethod.terminalCreateGuardedCodex
+    }
+
+    /// Validates and de-duplicates (first occurrence wins) Codex feature keys.
+    /// A key is lowercase letters, digits and underscores, like
+    /// `computer_use`; anything else, surrounding whitespace included, is
+    /// refused rather than repaired or passed on to Codex.
+    public static func normalizedCodexDisabledFeatures(_ features: [String]) throws -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for feature in features {
+            let isValid = !feature.isEmpty && feature.utf8.allSatisfy {
+                ($0 >= 0x61 && $0 <= 0x7A) || ($0 >= 0x30 && $0 <= 0x39) || $0 == 0x5F
+            }
+            guard isValid else {
+                throw CodexDisabledFeatureError(feature: feature)
+            }
+            if seen.insert(feature).inserted { result.append(feature) }
+        }
+        return result
+    }
+}
+
+public struct CodexDisabledFeatureError: Error, LocalizedError, Equatable, Sendable {
+    public let feature: String
+    public var errorDescription: String? {
+        "Invalid Codex feature name \"\(feature)\": use lowercase letters, digits and underscores, for example computer_use."
+    }
 }
 
 public struct TerminalContinueInCodexParams: Codable, Sendable {
