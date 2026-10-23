@@ -300,25 +300,32 @@ seed_tmux_fallback "${TBD_HOME:-$HOME/tbd}"
 # grace only spares it a SIGKILL while it tears down its windows.
 APP_STOP_GRACE=5
 
-# True once any stop below found an app and stopped it. The EXIT trap goes by
-# it: only an app this run stopped is owed a relaunch.
+# How the last stop_app_and_report call ended: one of stop_app_process's
+# outcome words.
+last_stop_outcome=none
+
+# True once the stop of the app at APP_EXEC_PATTERN found one: anything but
+# `none`, so an app that was, or (`unknown`) may have been, running there. The
+# EXIT trap goes by it, and only by it, because that is the app the trap
+# launches. The leftover WIP instance stop_apps also stops does not count:
+# with only that one running, a relaunch would open $INSTALLED_BUNDLE, which
+# nobody had open.
 app_was_stopped=false
 
 # Stop the app whose command line is exactly <pattern>, wait for it to exit,
 # and say how that went, naming <exec_path> where the line needs to say which
-# app. Never fails the restart: an app that survives SIGKILL is reported and
-# the restart goes on. Nothing running gets no line, because it is the usual
-# answer for the leftover-WIP stop below and would print on every restart.
+# app. Never fails the restart: an app that survives SIGKILL, or that pgrep
+# cannot say is gone, is reported and the restart goes on. Nothing running
+# gets no line, because it is the usual answer for the leftover-WIP stop below
+# and would print on every restart.
 #
 #   stop_app_and_report <pattern> <exec_path>
 stop_app_and_report() {
-    local outcome
-    outcome="$(stop_app_process "$1" "$APP_STOP_GRACE")" || true
-    if [ "$outcome" = none ]; then
+    last_stop_outcome="$(stop_app_process "$1" "$APP_STOP_GRACE")" || true
+    if [ "$last_stop_outcome" = none ]; then
         return 0
     fi
-    app_was_stopped=true
-    echo "  $(describe_app_stop "$outcome" "$APP_STOP_GRACE" "$2")"
+    echo "  $(describe_app_stop "$last_stop_outcome" "$APP_STOP_GRACE" "$2")"
 }
 
 # Every app this restart replaces: the running TBDApp, and on a full install
@@ -329,6 +336,9 @@ stop_app_and_report() {
 # WIP path the two patterns are identical, so the second stop is skipped.
 stop_apps() {
     stop_app_and_report "$APP_EXEC_PATTERN" "$APP_EXEC_PATH"
+    if [ "$last_stop_outcome" != none ]; then
+        app_was_stopped=true
+    fi
     if [ "$install_to_applications" = true ] && [ -n "$WORKTREE_EXEC_PATTERN" ] \
         && [ "$WORKTREE_EXEC_PATTERN" != "$APP_EXEC_PATTERN" ]; then
         stop_app_and_report "$WORKTREE_EXEC_PATTERN" "$WORKTREE_EXEC_PATH"
@@ -344,7 +354,8 @@ stop_apps() {
 # The EXIT trap is what keeps that from costing the app: if anything between
 # here and the launch below stops the script (set -e is on), the trap launches
 # it anyway, so a restart never ends with an app it stopped not started again.
-# It owes that only when the stop found an app. With none running, the launch
+# It owes that only when the stop found the app the trap launches, the one at
+# $INSTALLED_BUNDLE (app_was_stopped). With none running there, the launch
 # below still starts one, as a full restart always has, but an exit before it
 # leaves the machine as the run found it rather than opening an app nobody
 # had open.

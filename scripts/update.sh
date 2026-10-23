@@ -919,15 +919,15 @@ APP_RELAUNCH_PENDING=false
 # half-moved installation.
 INSTALL_IN_FLIGHT=false
 
-# How the stop before the handover ended: none, stopped, killed or survived.
-# The second stop in restart_app keeps its outcome to itself, so this stays
+# How the stop before the handover ended: none, stopped, killed, survived or
+# unknown. The second stop in restart_app keeps its outcome to itself, so this stays
 # the answer to whether an app was running when the run began to move things.
 APP_STOP_OUTCOME=none
 
 # Stop the app running from the installed bundle and wait until it has exited.
-# Prints how that ended — none, stopped, killed or survived — and logs nothing,
-# so each caller decides which outcomes earn a line. Non-zero only when it is
-# still running after SIGKILL.
+# Prints how that ended — none, stopped, killed, survived or unknown — and logs
+# nothing, so each caller decides which outcomes earn a line. Non-zero when it
+# may still be running: still there after SIGKILL, or pgrep could not say.
 stop_installed_app() {
     local pattern
     pattern="$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")"
@@ -960,10 +960,11 @@ stop_app_before_handover() {
     APP_STOP_OUTCOME="$(stop_installed_app)" || status=$?
     log_app_stop "$APP_STOP_OUTCOME"
     if [ "$status" -ne 0 ]; then
-        log "WARNING: handing over anyway — the surviving app may re-attach to the new daemon"
+        log "WARNING: handing over anyway — an app still running may re-attach to the new daemon"
     fi
-    # Anything but `none` means an app was running, and the run owes the
-    # operator one again however it ends.
+    # Anything but `none` means an app was running, or (`unknown`) may have
+    # been, and the run owes the operator one again however it ends. A
+    # relaunch of an app that is in fact still running only brings it forward.
     if [ "$APP_STOP_OUTCOME" != none ]; then
         APP_RELAUNCH_PENDING=true
     fi

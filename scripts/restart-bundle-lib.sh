@@ -413,28 +413,73 @@ escape_exec_pattern() {
 #   stopped   it exited on SIGTERM
 #   killed    it outlived the grace period and exited on SIGKILL
 #   survived  something matching is still running after SIGKILL
-# Returns non-zero only for `survived`.
+#   unknown   pgrep failed instead of answering, so whether anything matching
+#             is still running cannot be told
+# Returns non-zero for `survived` and `unknown`: either way the app may still
+# be running.
 stop_app_process() {
     local pattern="${1-}"
     local grace="${2:-5}"
     local kill_wait="${3:-3}"
+    local status=0
 
-    if [ -z "$pattern" ] || ! pkill -f "^${pattern}\$" 2>/dev/null; then
+    if [ -z "$pattern" ]; then
         printf 'none\n'
         return 0
     fi
-    if _wait_for_no_match "$pattern" "$grace"; then
+
+    # A failed pkill is not by itself "nothing running". pkill exits 1 when
+    # nothing matched, but also when every match refused the signal, since a
+    # process it could not signal does not count as a match; and it exits 2
+    # or 3 on an error that says nothing either way. Read as `none`, any of
+    # those hands the caller a running app as absent, and an update then hands
+    # the daemon over with it alive and owes it no relaunch. So pgrep decides,
+    # and only its own "no match" is `none`. An app it still finds goes on to
+    # the wait and the SIGKILL like any other: the SIGTERM may never have
+    # reached it, and the escalation is what finds out whether anything can.
+    pkill -f "^${pattern}\$" 2>/dev/null || status=$?
+    if [ "$status" -ne 0 ]; then
+        status=0
+        pgrep -f "^${pattern}\$" >/dev/null 2>&1 || status=$?
+        case "$status" in
+            0) ;;
+            1)
+                printf 'none\n'
+                return 0
+                ;;
+            *)
+                printf 'unknown\n'
+                return 1
+                ;;
+        esac
+    fi
+
+    status=0
+    _wait_for_no_match "$pattern" "$grace" || status=$?
+    if [ "$status" -eq 0 ]; then
         printf 'stopped\n'
         return 0
     fi
 
+    # Still matching, or pgrep could not say: SIGKILL either way, since an
+    # app that has already gone simply matches nothing.
     pkill -KILL -f "^${pattern}\$" 2>/dev/null || true
-    if _wait_for_no_match "$pattern" "$kill_wait"; then
-        printf 'killed\n'
-        return 0
-    fi
-    printf 'survived\n'
-    return 1
+    status=0
+    _wait_for_no_match "$pattern" "$kill_wait" || status=$?
+    case "$status" in
+        0)
+            printf 'killed\n'
+            return 0
+            ;;
+        1)
+            printf 'survived\n'
+            return 1
+            ;;
+        *)
+            printf 'unknown\n'
+            return 1
+            ;;
+    esac
 }
 
 # The line that reports how a stop_app_process call ended, for the caller to
@@ -445,7 +490,7 @@ stop_app_process() {
 #
 # <grace_seconds> is the grace the stop was given, so the `killed` line states
 # the wait that actually ran. <app> names where the app runs from, a bundle or
-# an executable path, for the two lines that need it to be actionable. An
+# an executable path, for the lines that need it to be actionable. An
 # outcome stop_app_process never prints gets a line of its own rather than
 # borrowing another outcome's wording.
 describe_app_stop() {
@@ -457,23 +502,38 @@ describe_app_stop() {
         stopped) printf 'the app exited\n' ;;
         killed) printf 'the app ignored SIGTERM for %ss and exited on SIGKILL\n' "$grace" ;;
         survived) printf 'WARNING: the app running from %s is still running after SIGKILL\n' "$app" ;;
+        unknown) printf 'WARNING: could not tell whether an app is still running from %s: pgrep failed\n' \
+            "$app" ;;
         *) printf 'WARNING: stopping the app running from %s ended in an unrecognised way: [%s]\n' \
             "$app" "$outcome" ;;
     esac
 }
 
-# True once no process's command line is exactly <pattern>, checked for up to
-# <seconds>. Polled in tenths of a second: the app usually exits within the
-# first one, and a whole-second poll would add that second to every restart.
+# Wait up to <seconds> for no process's command line to be exactly <pattern>.
+# Polled in tenths of a second: the app usually exits within the first one,
+# and a whole-second poll would add that second to every restart.
+#
+# Returns 0 once pgrep finds nothing, 1 if something still matched at the last
+# poll, and 2 if the last poll was a pgrep error. Only pgrep's own "no match"
+# (exit 1) counts as gone: an error (2 or 3) is no answer at all, and read as
+# one it reports a running app as stopped.
 _wait_for_no_match() {
     local pattern="$1"
     local ticks=$(($2 * 10))
+    local status=0
     while [ "$ticks" -gt 0 ]; do
         sleep 0.1
         ticks=$((ticks - 1))
-        pgrep -f "^${pattern}\$" >/dev/null 2>&1 || return 0
+        status=0
+        pgrep -f "^${pattern}\$" >/dev/null 2>&1 || status=$?
+        if [ "$status" -eq 1 ]; then
+            return 0
+        fi
     done
-    return 1
+    if [ "$status" -eq 0 ]; then
+        return 1
+    fi
+    return 2
 }
 
 # Launch a bundle through LaunchServices with an explicit PATH.
