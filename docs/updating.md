@@ -68,12 +68,21 @@ these steps in order.
   that failed here left old binaries in place, and had the sidecar been
   written first, it would have named the commit that never actually built,
   with nothing to correct it until the clone's next successful build.
-- **Assembles, signs and installs** `/Applications/TBD.app`, using the same
-  code `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
+- **Assembles and signs** the new `TBD.app`, using the same code
+  `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
   carries the sidecar and a `SourceWorktreePath.txt` naming the update clone.
-  The bundle being replaced is moved to `~/tbd/updates/previous/TBD.app` first,
-  and stays there — it is what a failed handover puts back, and afterwards it
-  is the quickest way to return to the build you were on.
+- **Stops the app**, unless you pass `--no-app`, and waits for it to exit:
+  SIGTERM, five seconds, then SIGKILL, each outcome logged. Nothing before this
+  step touches the running installation, so a failed build, a dry run or a
+  failed signature leaves the app up. It goes before the daemon because an app
+  still running during the handover reconnects to the new daemon and
+  re-attaches the session it shows, and the new daemon keeps that claim after
+  the app is replaced, refusing the replacement's attach. From here on, every
+  way the run ends launches the app again.
+- **Installs** `/Applications/TBD.app`. The bundle being replaced is moved to
+  `~/tbd/updates/previous/TBD.app` first, and stays there — it is what a failed
+  handover puts back, and afterwards it is the quickest way to return to the
+  build you were on.
 - **Hands the daemon over.** See below.
 - **Seeds the saved tmux fallback** on a manual run, with or without
   `--no-app`; an `--auto` run skips this step. When
@@ -84,8 +93,8 @@ these steps in order.
   `--auto` run's `PATH` is the daemon's plus fixed Homebrew directories, so a
   tmux it found would be a guess rather than your shell's choice. See
   [the design](specs/2026-09-22-tmux-fallback-install-seeding-design.md).
-- **Restarts the app**, unless you pass `--no-app`. The app is a viewer;
-  nothing in it holds a session.
+- **Launches the app** again, unless you pass `--no-app`. The app is a viewer;
+  nothing in it holds a session, so the seconds it is down cost no work.
 - **Wakes what the handover parked**, unless you pass `--no-wake`.
 - **Prints a summary and writes the log.**
 
@@ -217,7 +226,8 @@ build exists. `tbd update --check` writes it too.
 - `--from-release` — install the published build for this run; see "Where
   the binaries come from".
 - `--debug` — build the debug configuration instead of release.
-- `--no-app` — leave the running app alone; hand the daemon over anyway.
+- `--no-app` — leave the running app alone, neither stopping it for the
+  handover nor restarting it; hand the daemon over anyway.
 - `--no-wake` — install and hand over, but wake nothing.
 - `--wake-only` — wake every recovery-parked session against the running
   daemon, and do nothing else.
@@ -274,9 +284,11 @@ the order you would reach for them.
 
 An update that gets as far as installing and then cannot bring the new daemon
 up performs the first of those itself: it moves the kept bundle back, tells
-LaunchServices about it, logs `restored previous app bundle`, and exits
-non-zero. That is the case the kept bundle exists for — a new app driving the
-old daemon is a state nobody should be left in.
+LaunchServices about it, logs `restored previous app bundle`, relaunches the
+app it stopped before the handover, and exits non-zero. That is the case the
+kept bundle exists for — a new app driving the old daemon is a state nobody
+should be left in. The relaunch also covers a handover that failed after the
+old daemon had already exited: an app that finds no daemon starts one.
 
 Either way, run the script from the worktree you want installed — never an
 absolute path to another tree's copy — or you will build one tree and leave

@@ -530,6 +530,83 @@ test_stop_and_launch_use_the_anchored_pattern() {
     unset STUB_LOG
 }
 
+# stop_app_process returns only once nothing matching is left, escalating to
+# SIGKILL, and says which way it went. These stubs model one app whose answer
+# to each signal is the content of $STUB_APP: `term` exits on SIGTERM, `kill`
+# only on SIGKILL, `unkillable` on neither. No file, no app.
+test_stop_waits_for_the_app_and_escalates() {
+    local stubs state outcome
+    stubs="$TEST_TMP/stubs-stop"
+    mkdir -p "$stubs"
+    cat > "$stubs/pkill" << 'EOF'
+#!/bin/sh
+printf '%s\n' "pkill $*" >> "$STUB_LOG"
+[ -f "$STUB_APP" ] || exit 1
+case "$(cat "$STUB_APP")" in
+    term) rm -f "$STUB_APP" ;;
+    kill) [ "$1" = -KILL ] && rm -f "$STUB_APP" ;;
+esac
+exit 0
+EOF
+    cat > "$stubs/pgrep" << 'EOF'
+#!/bin/sh
+printf '%s\n' "pgrep $*" >> "$STUB_LOG"
+[ -f "$STUB_APP" ] || exit 1
+echo 4242
+EOF
+    chmod +x "$stubs"/*
+    export STUB_LOG="$TEST_TMP/stop.log" STUB_APP="$TEST_TMP/stop-app"
+
+    for state in none term kill unkillable; do
+        : > "$STUB_LOG"
+        rm -f "$STUB_APP"
+        [ "$state" = none ] || printf '%s' "$state" > "$STUB_APP"
+        # A one-second grace and a one-second wait after SIGKILL keep the
+        # escalating cases short.
+        outcome="$(PATH="$stubs:$PATH" bash -c \
+            'source "$1"; o="$(stop_app_process "/x/TBDApp" 1 1)"; printf "%s rc=%s" "$o" "$?"' \
+            _ "$HELPER")"
+        case "$state" in
+            none)
+                assert_eq "nothing running: nothing to stop" "none rc=0" "$outcome"
+                if grep -q '^pgrep' "$STUB_LOG"; then
+                    fail "nothing running: no wait"
+                else
+                    pass "nothing running: no wait"
+                fi
+                ;;
+            term)
+                assert_eq "an app that exits on SIGTERM is stopped" "stopped rc=0" "$outcome"
+                if grep -q -- '-KILL' "$STUB_LOG"; then
+                    fail "an app that exits on SIGTERM is never sent SIGKILL"
+                else
+                    pass "an app that exits on SIGTERM is never sent SIGKILL"
+                fi
+                ;;
+            kill)
+                assert_eq "an app that ignores SIGTERM is killed" "killed rc=0" "$outcome"
+                if grep -q 'pkill -KILL -f \^/x/TBDApp\$' "$STUB_LOG"; then
+                    pass "the escalation is anchored on the same pattern"
+                else
+                    fail "the escalation is anchored on the same pattern: $(cat "$STUB_LOG")"
+                fi
+                if [ "$(grep -n '^pgrep' "$STUB_LOG" | head -1 | cut -d: -f1)" -lt \
+                    "$(grep -n -- '-KILL' "$STUB_LOG" | head -1 | cut -d: -f1)" ]; then
+                    pass "SIGKILL comes only after waiting out the grace period"
+                else
+                    fail "SIGKILL comes only after waiting out the grace period: $(cat "$STUB_LOG")"
+                fi
+                ;;
+            unkillable)
+                assert_eq "an app still there after SIGKILL is reported, and fails" \
+                    "survived rc=1" "$outcome"
+                ;;
+        esac
+    done
+    rm -f "$STUB_APP"
+    unset STUB_LOG STUB_APP
+}
+
 test_runtime_products_are_executable_targets() {
     local product
     if [ "${#RUNTIME_PRODUCTS[@]}" -eq 0 ]; then
@@ -686,6 +763,7 @@ test_install_rejects_missing_arguments
 test_install_ignores_a_gnu_cp_first_on_path
 test_exec_pattern_escaping
 test_stop_and_launch_use_the_anchored_pattern
+test_stop_waits_for_the_app_and_escalates
 test_runtime_products_are_executable_targets
 test_helper_refuses_direct_execution
 test_seed_writes_when_missing

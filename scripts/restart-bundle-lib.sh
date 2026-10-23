@@ -395,13 +395,60 @@ escape_exec_pattern() {
         | sed -e 's/[\\.+*?(){}^$|]/\\&/g' -e 's/\[/\\[/g' -e 's/\]/\\]/g'
 }
 
-# Kill the app process whose command line is exactly <pattern>, if it is
-# running. Always succeeds: nothing to kill is a normal outcome.
+# Stop the app process whose command line is exactly <pattern>, and wait until
+# nothing matching it is left.
+#
+#   stop_app_process <pattern> [grace_seconds] [kill_wait_seconds]
+#
+# SIGTERM (pkill's default) first, then up to <grace_seconds> (default 5) for
+# it to exit, then SIGKILL and up to <kill_wait_seconds> (default 3) more.
+# The wait is the point. An app that is still on its way out can reconnect to
+# a daemon the caller has just started and re-attach a session, leaving that
+# daemon holding a claim for a viewer about to die; and `open` on a bundle
+# whose process is still running activates that process instead of launching
+# a new one, so the relaunch is lost when it finishes exiting.
+#
+# Prints one word saying how it ended, for the caller to report:
+#   none      nothing matched, so nothing was signalled
+#   stopped   it exited on SIGTERM
+#   killed    it outlived the grace period and exited on SIGKILL
+#   survived  something matching is still running after SIGKILL
+# Returns non-zero only for `survived`.
 stop_app_process() {
     local pattern="${1-}"
-    [ -n "$pattern" ] || return 0
-    pkill -f "^${pattern}\$" 2>/dev/null && sleep 0.3
-    return 0
+    local grace="${2:-5}"
+    local kill_wait="${3:-3}"
+
+    if [ -z "$pattern" ] || ! pkill -f "^${pattern}\$" 2>/dev/null; then
+        printf 'none\n'
+        return 0
+    fi
+    if _wait_for_no_match "$pattern" "$grace"; then
+        printf 'stopped\n'
+        return 0
+    fi
+
+    pkill -KILL -f "^${pattern}\$" 2>/dev/null || true
+    if _wait_for_no_match "$pattern" "$kill_wait"; then
+        printf 'killed\n'
+        return 0
+    fi
+    printf 'survived\n'
+    return 1
+}
+
+# True once no process's command line is exactly <pattern>, checked for up to
+# <seconds>. Polled in tenths of a second: the app usually exits within the
+# first one, and a whole-second poll would add that second to every restart.
+_wait_for_no_match() {
+    local pattern="$1"
+    local ticks=$(($2 * 10))
+    while [ "$ticks" -gt 0 ]; do
+        sleep 0.1
+        ticks=$((ticks - 1))
+        pgrep -f "^${pattern}\$" >/dev/null 2>&1 || return 0
+    done
+    return 1
 }
 
 # Launch a bundle through LaunchServices with an explicit PATH.

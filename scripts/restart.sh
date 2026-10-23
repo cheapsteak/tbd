@@ -289,6 +289,62 @@ fi
 # --daemon-only included: the next login relaunch needs the file regardless.
 seed_tmux_fallback "${TBD_HOME:-$HOME/tbd}"
 
+# MARK: - Stopping the app
+
+# Stop the app whose command line is exactly <pattern>, wait for it to exit,
+# and say how that went. Never fails the restart: an app that survives SIGKILL
+# is reported and the restart goes on.
+stop_app_and_report() {
+    local outcome
+    outcome="$(stop_app_process "$1" 5)" || true
+    case "$outcome" in
+        none) ;;
+        stopped) echo "  App stopped" ;;
+        killed) echo "  App ignored SIGTERM for 5s; stopped it with SIGKILL" ;;
+        *) echo "  WARNING: an app matching $1 is still running after SIGKILL" ;;
+    esac
+}
+
+# Every app this restart replaces: the running TBDApp, and on a full install
+# also a leftover WIP instance launched from THIS worktree's own .build bundle
+# before the install, or two TBDApp processes survive. Matched end-anchored
+# against resolved exec paths, so this never touches swift build subprocesses,
+# editors, or sibling worktrees whose command line contains "TBDApp". On the
+# WIP path the two patterns are identical, so the second stop is skipped.
+stop_apps() {
+    stop_app_and_report "$APP_EXEC_PATTERN"
+    if [ "$install_to_applications" = true ] && [ -n "$WORKTREE_EXEC_PATTERN" ] \
+        && [ "$WORKTREE_EXEC_PATTERN" != "$APP_EXEC_PATTERN" ]; then
+        stop_app_and_report "$WORKTREE_EXEC_PATTERN"
+    fi
+}
+
+# When this run restarts both, the app goes before the daemon. An app still
+# running when the daemon restarts reconnects to the new daemon and
+# re-attaches the session it has on screen; the app restart below then kills
+# it, and the new daemon keeps that dead viewer's claim on the session's
+# terminal, refusing the relaunched app's attach.
+#
+# The EXIT trap is what keeps that from costing the app: if anything between
+# here and the launch below stops the script (set -e is on), the trap launches
+# it anyway, so a restart never ends with the app stopped and not started.
+app_relaunch_pending=false
+relaunch_app_on_exit() {
+    [ "$app_relaunch_pending" = true ] || return 0
+    app_relaunch_pending=false
+    echo "Relaunching the app stopped before the daemon restart..."
+    launch_app_bundle "$INSTALLED_BUNDLE" "$PATH" /tmp/tbdapp.log \
+        || echo "  ERROR: could not launch $INSTALLED_BUNDLE" >&2
+}
+app_stopped_early=false
+if [ "$app_only" = false ] && [ "$daemon_only" = false ] && [ "$install_to_applications" = true ]; then
+    trap relaunch_app_on_exit EXIT
+    app_relaunch_pending=true
+    echo "Stopping app before the daemon..."
+    stop_apps
+    app_stopped_early=true
+fi
+
 # MARK: - Restart Daemon
 
 if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
@@ -323,20 +379,14 @@ fi
 # MARK: - Restart App
 
 if [ "$daemon_only" = false ]; then
-    echo "Stopping app..."
-    # Match end-anchored against the resolved exec path so we only ever
-    # affect THIS worktree's running TBDApp — never swift build subprocesses,
-    # editors, or sibling worktrees whose command line contains "TBDApp".
-    stop_app_process "$APP_EXEC_PATTERN"
-    # On a full install, also kill a leftover WIP instance launched from THIS
-    # worktree's own .build bundle (before the install), or two TBDApp
-    # processes survive. Still never touches sibling worktrees. On the WIP
-    # path the patterns are identical, so this is skipped — no double-kill.
-    if [ "$install_to_applications" = true ] && [ -n "$WORKTREE_EXEC_PATTERN" ] \
-        && [ "$WORKTREE_EXEC_PATTERN" != "$APP_EXEC_PATTERN" ]; then
-        stop_app_process "$WORKTREE_EXEC_PATTERN"
+    # Already stopped above when this run restarted the daemon too.
+    if [ "$app_stopped_early" = false ]; then
+        echo "Stopping app..."
+        stop_apps
     fi
 
+    # The launch below is the relaunch the EXIT trap was holding in reserve.
+    app_relaunch_pending=false
     echo "Starting app..."
     if [ "$install_to_applications" = true ]; then
         # Launch from /Applications (install-ready or --wip override)

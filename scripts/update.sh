@@ -52,6 +52,11 @@ HANDOVER_TIMEOUT=120
 # the process being stopped has already missed a two-minute deadline.
 HANDOVER_STOP_GRACE=5
 
+# How long the app gets to exit on SIGTERM before it is killed, in seconds.
+# The app is a viewer that holds no session, so it has nothing to finish; the
+# grace only spares it a SIGKILL while it tears down its windows.
+APP_STOP_GRACE=5
+
 # Where the new binaries come from. `build` compiles them here, as every update
 # always has. `release` downloads the build the release workflow published for
 # a commit on main, verifies it, and installs that instead, so the update
@@ -136,7 +141,8 @@ Options:
   --dry-run        Fetch and build, then stop. Installs nothing, hands nothing
                    over, and leaves the running installation untouched.
   --debug          Build the debug configuration instead of release.
-  --no-app         Do not restart TBDApp. The daemon still hands over.
+  --no-app         Leave the running TBDApp alone: it is neither stopped for
+                   the handover nor restarted. The daemon still hands over.
   --no-wake        Do not wake sessions the new daemon parked.
   --wake-only      Wake recovery-parked sessions against the daemon that is
                    already running. Builds and installs nothing.
@@ -389,12 +395,17 @@ release_lock() {
 PREBUILT_RECONCILE_LINK=""
 PREBUILT_START_LIVE=""
 
-# Every exit from a run that took the lock: reconcile the prebuilt trees,
-# remove the copy of the running scripts, then drop the lock. Whatever branch
-# the run left by — a dry run, a failed build, a failed handover, a
-# verification failure, a completed install — nothing it downloaded outlives it
-# unless it is now what .build/release points at.
+# Every exit from a run that took the lock: relaunch an app the run stopped
+# and never brought back, reconcile the prebuilt trees, remove the copy of the
+# running scripts, then drop the lock. Whatever branch the run left by — a dry
+# run, a failed build, a failed handover, a verification failure, a completed
+# install — nothing it downloaded outlives it unless it is now what
+# .build/release points at.
 on_update_exit() {
+    # Main relaunches the app itself on every return it expects. This catches
+    # the ones it does not — an exit from inside a step, or a signal — so no
+    # run ends with the app stopped for a handover and never started again.
+    relaunch_stopped_app || true
     if [ -n "$PREBUILT_RECONCILE_LINK" ]; then
         reconcile_prebuilt "$PREBUILT_HOME" "$PREBUILT_RECONCILE_LINK" "$PREBUILT_START_LIVE" \
             || log "WARNING: could not reconcile $PREBUILT_HOME"
@@ -735,11 +746,12 @@ install_and_handover() {
     # is untouched — it holds its executable by inode — so this is still
     # reversible until something launches from the new path.
     #
-    # It happens BEFORE the handover on purpose. During the socket gap the app
-    # may decide the daemon is missing and spawn one, and the daemon it spawns
-    # is the one named by the bundle's SourceWorktreePath. That must already be
-    # the update clone, or a rescue spawn in that window reinstates the old
-    # binary underneath the new install.
+    # It happens BEFORE the handover on purpose. During the socket gap an app
+    # may decide the daemon is missing and spawn one (main stops the installed
+    # app first, but not under --no-app), and the daemon it spawns is the one
+    # named by the bundle's SourceWorktreePath. That must already be the update
+    # clone, or a rescue spawn in that window reinstates the old binary
+    # underneath the new install.
     if ! install_app_bundle "$bundle_dir" "$installed_bundle"; then
         log_error "could not install to $installed_bundle"
         restore_previous_bundle "$installed_bundle"
@@ -750,7 +762,7 @@ install_and_handover() {
     # gone. Everything before it can still be put back, and a handover that
     # never completes does exactly that with the bundle, leaving the operator
     # on the build they started the day with rather than a new app driving an
-    # old daemon.
+    # old daemon. The caller relaunches the app it stopped either way.
     HANDOVER_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if ! handover "$new_daemon"; then
         restore_previous_bundle "$installed_bundle"
@@ -887,6 +899,90 @@ stop_handover_successor() {
 
 # MARK: - The app
 
+# True from the moment this run stops the app ahead of the handover until it
+# launches the app again. Every way out of the run that finds it still true
+# relaunches the app: see relaunch_stopped_app and on_update_exit.
+APP_RELAUNCH_PENDING=false
+
+# How the last stop_installed_app ended: none, stopped, killed or survived.
+APP_STOP_OUTCOME=none
+
+# Stop the app running from the installed bundle and wait until it has exited,
+# logging how that went. Non-zero only when it is still running after SIGKILL.
+stop_installed_app() {
+    local pattern status=0
+    pattern="$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")"
+    APP_STOP_OUTCOME="$(stop_app_process "$pattern" "$APP_STOP_GRACE")" || status=$?
+    case "$APP_STOP_OUTCOME" in
+        none) log "no app running from $INSTALLED_BUNDLE to stop" ;;
+        stopped) log "the app exited" ;;
+        killed) log "the app ignored SIGTERM for ${APP_STOP_GRACE}s and exited on SIGKILL" ;;
+        *) log "WARNING: the app running from $INSTALLED_BUNDLE is still running after SIGKILL" ;;
+    esac
+    return "$status"
+}
+
+# Stop the app before the daemon is handed over, unless --no-app.
+#
+# An app left running through the handover sees its daemon go, reconnects to
+# the successor, and re-attaches the session it has on screen. The restart
+# after the handover then kills it, and the successor goes on holding that
+# dead viewer's claim on the session's terminal, refusing the attach of the
+# app that replaces it. Stopped here, the app is gone before the successor
+# exists.
+#
+# Under --no-app the app is left alone: an app that stays alive owns its
+# claims legitimately.
+stop_app_before_handover() {
+    if [ "$OPT_NO_APP" = true ]; then
+        log "--no-app: the running app stays up through the handover"
+        return 0
+    fi
+    log "stopping the app before the handover"
+    if ! stop_installed_app; then
+        log "WARNING: handing over anyway — the surviving app may re-attach to the new daemon"
+    fi
+    # Anything but `none` means an app was running, and the run owes the
+    # operator one again however it ends.
+    if [ "$APP_STOP_OUTCOME" != none ]; then
+        APP_RELAUNCH_PENDING=true
+    fi
+}
+
+# Launch the installed bundle and report whether it came up. A failed launch
+# is logged, not fatal: the app is a viewer the operator can open by hand.
+launch_installed_app() {
+    local pattern pid
+    pattern="$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")"
+    launch_app_bundle "$INSTALLED_BUNDLE" "$PATH" "$APP_LOG" || {
+        log_error "could not launch $INSTALLED_BUNDLE"
+        return 1
+    }
+    sleep 0.5
+    if pid="$(app_process_pid "$pattern")"; then
+        log "app running as pid $pid — logs: $APP_LOG"
+    else
+        log "WARNING: the app did not come back up — see $APP_LOG"
+    fi
+}
+
+# Bring back an app this run stopped for a handover that did not complete. It
+# launches whatever the rollback left at $INSTALLED_BUNDLE, which is the
+# previous build when restore_previous_bundle succeeded.
+#
+# The relaunch matters for more than the window on screen. A failed handover
+# can leave no daemon running at all — the successor stops its predecessor
+# before it reports itself, and is then stopped in turn — and an app that
+# finds no daemon socket starts one from its bundle's source worktree. That is
+# why main calls this only once .build/release names the build that was
+# running before the update.
+relaunch_stopped_app() {
+    [ "$APP_RELAUNCH_PENDING" = true ] || return 0
+    APP_RELAUNCH_PENDING=false
+    log "relaunching the app this run stopped before the handover"
+    launch_installed_app
+}
+
 # The app restart, with its opt-out. Separate from restart_app so both branches
 # are reachable from a test. A failed relaunch is logged, not fatal: the daemon
 # has already handed over and the app is only a viewer.
@@ -906,20 +1002,12 @@ run_app_stage() {
 }
 
 restart_app() {
-    local pattern pid
-    pattern="$(escape_exec_pattern "$INSTALLED_BUNDLE/Contents/MacOS/TBDApp")"
     log "restarting the app"
-    stop_app_process "$pattern"
-    launch_app_bundle "$INSTALLED_BUNDLE" "$PATH" "$APP_LOG" || {
-        log_error "could not launch $INSTALLED_BUNDLE"
-        return 1
-    }
-    sleep 0.5
-    if pid="$(app_process_pid "$pattern")"; then
-        log "app running as pid $pid — logs: $APP_LOG"
-    else
-        log "WARNING: the app did not come back up — see $APP_LOG"
-    fi
+    # Normally there is nothing left to stop: stop_app_before_handover already
+    # did. This catches an app launched since, and waits for it to exit.
+    stop_installed_app || true
+    APP_RELAUNCH_PENDING=false
+    launch_installed_app
 }
 
 # Re-point an existing ~/.local/bin/tbd at the CLI we just built. Only when the
@@ -1540,13 +1628,19 @@ main() {
     }
 
     # Up to here nothing outside the update clone has changed: walking away
-    # costs a wasted build and nothing else. install_and_handover is where the
-    # running installation moves, and it says at each line what undoing that
-    # line costs.
+    # costs a wasted build and nothing else. From here the running
+    # installation moves. The app goes first, so that no viewer is attached
+    # when the daemon changes hands (see stop_app_before_handover); from this
+    # line on, every way out of the run launches it again.
+    stop_app_before_handover
+
+    # install_and_handover says at each line what undoing that line costs.
     if ! install_and_handover "$bundle_dir" "$INSTALLED_BUNDLE" "$build_dir/TBDDaemon"; then
         # The previous app bundle is back; put the daemon path back with it,
-        # so a reboot respawns the build that is still running.
+        # so a reboot respawns the build that is still running. Then the app,
+        # in that order: an app that finds no daemon starts one from that path.
         put_release_link_back
+        relaunch_stopped_app
         return 1
     fi
 
