@@ -72,6 +72,9 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// The declared dev server this tab runs — see `Terminal.serverName`.
     var server_name: String?
 
+    /// JSON-encoded `CodexLaunchOptions` — see `Terminal.codexLaunchOptions`.
+    var codex_launch_options: String?
+
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
         self.worktreeID = terminal.worktreeID.uuidString
@@ -106,6 +109,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.child_pid = terminal.childPID
         self.holder_child_started_at = terminal.holderChildStartedAt
         self.server_name = terminal.serverName
+        self.codex_launch_options = FactColumnJSON.encode(terminal.codexLaunchOptions)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -159,6 +163,10 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             holderChildStartedAt: holder_child_started_at
         )
         model.serverName = server_name
+        // An unreadable blob degrades to "no options recorded", so a relaunch
+        // falls back to the default command rather than failing the row.
+        model.codexLaunchOptions = FactColumnJSON.decode(
+            CodexLaunchOptions.self, from: codex_launch_options)
         return model
     }
 }
@@ -486,6 +494,8 @@ private func resetRecreatedShellLifecycle(
     record.hibernateReason = nil
     record.label = TerminalLabel.shell
     record.kind = TerminalKind.shell.rawValue
+    // A shell launches no Codex, so the tab no longer has Codex options.
+    record.codex_launch_options = nil
     return incarnationID
 }
 
@@ -745,7 +755,8 @@ public struct TerminalStore: Sendable {
         childPID: Int32? = nil,
         holderChildStartedAt: Date? = nil,
         serverName: String? = nil,
-        sessionIncarnationID: UUID? = nil
+        sessionIncarnationID: UUID? = nil,
+        codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
         var terminal = Terminal(
             id: id,
@@ -766,6 +777,7 @@ public struct TerminalStore: Sendable {
         // already at the Swift type-checker's expression budget here.
         terminal.serverName = serverName
         terminal.sessionIncarnationID = sessionIncarnationID
+        terminal.codexLaunchOptions = codexLaunchOptions
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),
@@ -1309,6 +1321,8 @@ public struct TerminalStore: Sendable {
             }
             record.kind = TerminalKind.claude.rawValue
             record.label = TerminalLabel.claudeCode
+            // The tab now runs Claude; its Codex options no longer describe it.
+            record.codex_launch_options = nil
             record.profile_id = profileID?.uuidString
             record.claudeSessionID = sessionID
             record.transcriptPath = transcriptPath

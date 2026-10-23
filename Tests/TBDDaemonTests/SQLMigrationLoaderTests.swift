@@ -522,6 +522,7 @@ import Testing
             "20261010025458_config_transcript_prompt_answer",
             "20261010043448_config_program_status",
             "20261011235918_dev_server_columns",
+            "20261016070721_terminal_codex_launch_options",
             "20261019174758_config_composer_draft",
             "20261020170000_config_session_mod_usage",
         ]
