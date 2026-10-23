@@ -290,7 +290,8 @@ actor HolderRegistry {
     /// reader. So the take-back selects by owner, and a claim whose owner is
     /// unknown — the sidecar could not identify its peer — is selected by no
     /// death at all, which is the posture `AppLivenessVerdict.undetermined`
-    /// takes for the same reason.
+    /// takes for the same reason. `reclaimSessions(heldBy:)` says what clears
+    /// such a claim instead.
     private struct ViewerClaim {
         let generation: UInt64
         var owner: ProcessIdentity?
@@ -2160,11 +2161,8 @@ actor HolderRegistry {
     /// it any more and there is nothing to record.
     ///
     /// **A nil recipient records nothing**, and the attach stays ownerless: no
-    /// app's death will take it back, and only the viewer's own detach or a
-    /// release clears it. That is the fail-closed direction, chosen for the
-    /// reason `ViewerClaim` gives — a claim some death could seize while the
-    /// process actually holding it reads on is the failure this transport
-    /// cannot recover from.
+    /// app's death will take it back. `reclaimSessions(heldBy:)` lists what
+    /// does clear it, and says why a death must not.
     ///
     /// A recipient this registry has already been told is gone is taken back
     /// at once — see `appsConfirmedGone` for the window that closes — and
@@ -2446,6 +2444,21 @@ actor HolderRegistry {
     /// selected. The death is also remembered (`appsConfirmedGone`), so an
     /// attach whose recipient is recorded only after this pass ran is taken
     /// back when it is.
+    ///
+    /// **An ownerless claim is cleared by its viewer, its session or the
+    /// daemon — never by a death.** It arises when the sidecar could not
+    /// identify the peer a descriptor went to (`FDVendingServer` retries that
+    /// read before giving up, so a failure that passes in moments does not
+    /// leave one). Three things clear it: the viewer's own detach
+    /// (`acceptHandback`), which proves the descriptor closed; the session's
+    /// `release`; and a daemon restart, since claims live only in this
+    /// registry's memory. A death cannot, because nothing here says whose
+    /// death would close that descriptor: the claim may belong to an app that
+    /// is alive and reading right now, and taking it back on some other app's
+    /// death puts the daemon's drain beside that reader — the double reader
+    /// this transport cannot recover from. Leaving it standing costs one
+    /// session undrained until one of the three arrives, which is a stall, not
+    /// corruption.
     ///
     /// Attaches vended to the dead app and never acknowledged go too. Their
     /// acknowledgement cannot come now, so each is settled exactly as the

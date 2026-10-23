@@ -103,6 +103,18 @@ actor FDVendingServer {
     /// An injection seam: tests adopt `socketpair` ends, whose peer is the test
     /// process itself.
     private let peerIdentity: @Sendable (Int32) -> ProcessIdentity?
+    /// How many times `adoptConnection` reads its peer's identity before
+    /// adopting the connection unidentified, and how long it waits between
+    /// reads. The default 3/100 ms pair costs nothing when the first read
+    /// answers and at most 200 ms when none does; `identifyPeer(onSocket:)`
+    /// says why a failed read is worth asking again.
+    private let identityAttempts: Int
+    private let identityRetryInterval: Duration
+    /// Advanced by every `adoptConnection` as it begins, and by `stop`. An
+    /// adoption that suspended to retry its identity read installs its
+    /// connection only if this still holds the value it took — see
+    /// `adoptConnection`.
+    private var adoptionsBegun: UInt64 = 0
     /// Delay seam (`docs/specs/2026-07-24-test-hardening-design.md` §5).
     /// Existential, not generic: this is an `actor` carrying `Sendable`
     /// conformances, and a generic parameter would infect its type.
@@ -113,10 +125,14 @@ actor FDVendingServer {
          peerIdentity: @escaping @Sendable (Int32) -> ProcessIdentity? = {
              ProcessIdentity.ofPeer(onSocket: $0, signaller: ProductionProcessSignaller())
          },
+         identityAttempts: Int = 3,
+         identityRetryInterval: Duration = .milliseconds(100),
          clock: any Clock<Duration> = ContinuousClock()) {
         self.retryAttempts = retryAttempts
         self.retryInterval = retryInterval
         self.peerIdentity = peerIdentity
+        self.identityAttempts = max(1, identityAttempts)
+        self.identityRetryInterval = identityRetryInterval
         self.clock = clock
     }
 
@@ -317,27 +333,58 @@ actor FDVendingServer {
     /// Adopt a pre-connected socket fd. Ownership transfers here — do not close
     /// it in the caller. Replaces (and signals teardown of) any prior
     /// connection, then starts this connection's receive thread.
-    func adoptConnection(fd: Int32) {
+    ///
+    /// **Two phases: identify, then install.** The peer's identity is read
+    /// first, while the socket exists — `LOCAL_PEERPID` is a property of the
+    /// connection, so after it closes there is nothing left to ask. Everything
+    /// after that is one synchronous stretch on the actor: the old connection
+    /// is superseded, the new one recorded, and the replaced app's departure
+    /// reported, with no suspension in between — which is what
+    /// `reportSupersession` relies on.
+    ///
+    /// The identify phase suspends only when a read fails and is retried
+    /// (`identifyPeer(onSocket:)`), and the actor serves other calls while it
+    /// waits. The connection being replaced stays current meanwhile — a vend in
+    /// that window goes to it and reports its identity, so every recipient
+    /// recorded is still exact. **An adoption that suspended installs nothing
+    /// if another began, or the server stopped, while it waited:** it closes
+    /// its descriptor instead. Installing it would supersede a connection that
+    /// arrived after it, handing the sidecar back to an older socket when the
+    /// later adoption is the one its peer is using. Nothing was vended over
+    /// the dropped descriptor, since it was never current, so it leaves
+    /// nothing to arbitrate.
+    func adoptConnection(fd: Int32) async {
+        adoptionsBegun &+= 1
+        let adoption = adoptionsBegun
+        let identity = await identifyPeer(onSocket: fd)
+        guard adoption == adoptionsBegun else {
+            logger.notice("""
+                FD vending client (fd \(fd, privacy: .public)) was still being identified when a \
+                later connection or a stop overtook it; closing it unadopted
+                """)
+            Darwin.close(fd)
+            return
+        }
         // Who the replaced connection belonged to, read before anything here
-        // overwrites it. Only a connection still current counts: one whose
-        // receive loop already exited has had its departure reported by
-        // `receiveLoopExited`, which cleared both fields.
+        // overwrites it — and after the identify phase, whose suspension a
+        // receive-loop exit may have used. Only a connection still current
+        // counts: one whose receive loop already exited has had its departure
+        // reported by `receiveLoopExited`, which cleared both fields.
         let superseded = clientFD >= 0 ? clientIdentity : nil
         if clientFD >= 0 {
             shutdown(clientFD, SHUT_RDWR)   // wake the old reader; it will close its own fd
             clientFD = -1
         }
         clientFD = fd
-        // Read here, while the socket exists: `LOCAL_PEERPID` is a property of
-        // the connection, so after it closes there is nothing left to ask.
-        clientIdentity = peerIdentity(fd)
+        clientIdentity = identity
         if clientIdentity == nil {
             // Say so now rather than at the disconnect: without an identity the
             // arbiter cannot tell a dead app from a live one, so the holder
             // sessions this app owns are never reclaimed on its behalf.
             logger.error("""
                 FD vending client connected (fd \(fd, privacy: .public)) but its process identity \
-                could not be read; a dead app's holder sessions cannot be reclaimed on this connection
+                could not be read in \(self.identityAttempts, privacy: .public) attempt(s); a dead \
+                app's holder sessions cannot be reclaimed on this connection
                 """)
         }
         // The old reader will later call `receiveLoopExited(oldFD)`; its
@@ -353,6 +400,46 @@ actor FDVendingServer {
             connectionLostSink: onConnectionLost)
         logger.info("FD vending client connected (fd \(fd, privacy: .public))")
         reportSupersession(of: superseded)
+    }
+
+    /// The identity of the peer on `fd`, read up to `identityAttempts` times
+    /// with `identityRetryInterval` between reads, or nil when no read
+    /// answered.
+    ///
+    /// **A failed read is retried because its cost lasts as long as the
+    /// connection does.** Every descriptor vended over an unidentified
+    /// connection becomes a claim with no owner, and no app's death can take
+    /// that back (`HolderRegistry.reclaimSessions(heldBy:)` says why it must
+    /// not). Yet a read can fail for reasons that pass in moments: it spawns
+    /// `ps` twice, and a spawn refused under a full process table, or an
+    /// answer `ps` could not complete, says nothing about the peer. A read
+    /// that cannot succeed — the peer already gone — costs the retries and
+    /// then adopts the connection unidentified, exactly as one read would.
+    ///
+    /// The first read is synchronous and suspends nothing, so a peer
+    /// identified at once is adopted in one uninterrupted stretch on the
+    /// actor. Cancellation ends the retries, and the connection is adopted
+    /// unidentified.
+    private func identifyPeer(onSocket fd: Int32) async -> ProcessIdentity? {
+        for attempt in 1...identityAttempts {
+            if let identity = peerIdentity(fd) {
+                if attempt > 1 {
+                    logger.notice("""
+                        FD vending client (fd \(fd, privacy: .public)) identified as pid \
+                        \(identity.pid, privacy: .public) on read \(attempt, privacy: .public) of \
+                        \(self.identityAttempts, privacy: .public)
+                        """)
+                }
+                return identity
+            }
+            guard attempt < identityAttempts else { break }
+            do {
+                try await clock.sleep(for: identityRetryInterval)
+            } catch {
+                break
+            }
+        }
+        return nil
     }
 
     /// Reports the app whose connection `adoptConnection` just replaced, when
@@ -432,8 +519,11 @@ actor FDVendingServer {
 
     /// Stop the listener and drop any active client. Idempotent. Closing the
     /// listener fd makes the accept thread's blocked `accept()` return -1,
-    /// which exits the thread.
+    /// which exits the thread. An adoption still retrying its identity read
+    /// finds `adoptionsBegun` moved and closes its descriptor rather than
+    /// installing it into a stopped server.
     func stop() {
+        adoptionsBegun &+= 1
         if listenerFD >= 0 { Darwin.close(listenerFD); listenerFD = -1 }
         if let path = socketPath { _ = unlink(path); socketPath = nil }
         disconnect()

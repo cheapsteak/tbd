@@ -39,14 +39,17 @@ import TBDShared
 /// while the arbiter waits. A test whose watch would not end on its own ends
 /// it by cancelling the task running it.
 ///
-/// Tier 1, with one section of exceptions. Every test above "Which disconnect is a
-/// disconnect" touches no holder, no pty and no real process — the process
-/// table is scripted through `FakeProcessSignaller`, and time is virtual. The
-/// tests in that section are tier 2 by `Tests/CLAUDE.md`'s taxonomy: they use
-/// real `socketpair`s, real spawned receive `Thread`s, and bounded wall-clock
-/// waits. This is still their right home: tier 2 belongs in the fast parallel
-/// pass, and only tier 3 — an external process the test does not control —
-/// moves to `TBDDaemonLiveTests`.
+/// Tier 1, with one section of exceptions and one test. Every test above
+/// "Which disconnect is a disconnect" touches no holder, no pty and no real
+/// process — the process table is scripted through `FakeProcessSignaller`,
+/// and time is virtual. The tests in that section are tier 2 by
+/// `Tests/CLAUDE.md`'s taxonomy: they use real `socketpair`s, real spawned
+/// receive `Thread`s, and bounded wall-clock waits. So is
+/// `aDepartureReportedDuringACheckIsAbsorbedWithoutWaitingForIt`, which holds
+/// a real gate on the GCD thread a check runs on and observes it through a
+/// bounded wait. This is still their right home: tier 2 belongs in the fast
+/// parallel pass, and only tier 3 — an external process the test does not
+/// control — moves to `TBDDaemonLiveTests`.
 @Suite(.clockDriven) struct HolderAppLivenessTests {
 
     /// The executable the daemon recorded for the app when its sidecar
@@ -470,6 +473,8 @@ import TBDShared
     /// first re-check inside a few hundred milliseconds for an app that is
     /// exiting, a one-minute ceiling for an app that is alive — and no end,
     /// because a watch lasts as long as its app is alive and disconnected.
+    /// And the front an absorbed departure may restart comes round at most
+    /// once a minute, costing eight checks.
     @Test func theDefaultScheduleIsQuickFirstCheapLaterAndNeverRunsOut() {
         let schedule = SidecarDisconnectArbiter.defaultRecheckSchedule
         var delays = [schedule.first]
@@ -483,6 +488,19 @@ import TBDShared
                 "an exiting app is not re-checked four times inside four seconds")
         #expect(delays.max() == .seconds(60))
         #expect(settledAtTheCeiling, "a long watch does not settle at one re-check a minute")
+
+        // One front: every check a watch runs, each followed by its sleep,
+        // before it has slept long enough to restart from the front again.
+        var slept = Duration.zero
+        var checksInAFront = 0
+        while !schedule.mayRestart(afterSleeping: slept) {
+            slept += delays[checksInAFront]
+            checksInAFront += 1
+        }
+        #expect(!schedule.mayRestart(afterSleeping: .seconds(59)))
+        #expect(checksInAFront == 8)
+        #expect(slept >= .seconds(60))
+        #expect(slept <= .seconds(64), "the front a departure may restart comes round less than once a minute")
     }
 
     // MARK: - One watch per app
@@ -582,6 +600,104 @@ import TBDShared
         #expect(await spy.calls == [app])
     }
 
+    /// **An app that keeps leaving the sidecar does not keep its watch at the
+    /// front.** Two instances taking the sidecar from each other, or one that
+    /// drops and reconnects over and over, report a departure before nearly
+    /// every re-check. Each restarting the schedule would hold the watch at
+    /// its first delay — four checks a second, for as long as the churn lasts.
+    /// So inside one ceiling of the front beginning, absorbed departures leave
+    /// the progression running; once a full ceiling has been slept, the next
+    /// one restarts the front, because it may be the app's exit.
+    ///
+    /// The pacing is read off the delays the watch asks the clock for, so the
+    /// assertion is the schedule itself rather than when re-checks happened to
+    /// run.
+    @Test func absorbedDeparturesRestartTheFrontAtMostOncePerCeiling() async throws {
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let spy = ReclaimSpy()
+        let clock = EventDrivenTestClock()
+        let requested = RequestedDelays(clock)
+        let app = Self.recordedIdentity(startedAt: started)
+        let arbiter = Self.arbiter(
+            signaller: Self.aliveApp(startedAt: started), spy: spy,
+            recheckSchedule: .init(first: .milliseconds(250), ceiling: .seconds(1)),
+            clock: requested)
+
+        let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
+        // A burst of departures before each of the first two re-checks, all
+        // inside the first ceiling of the watch.
+        for delay in [Duration.milliseconds(250), .milliseconds(500)] {
+            try await clock.requireSleeperArmed()
+            for _ in 0..<3 {
+                let ruling = await arbiter.handleDisconnect(identity: app)
+                #expect(ruling.ending == .absorbed)
+            }
+            await clock.advance(by: delay)
+        }
+        try await clock.requireSleeperArmed()
+        #expect(requested.all == [.milliseconds(250), .milliseconds(500), .seconds(1)], """
+            departures absorbed inside one ceiling restarted the schedule from the front, so an \
+            app that keeps leaving the sidecar keeps its watch checking at its first delay
+            """)
+
+        // A full ceiling slept since the front began: the next departure may
+        // be an exit, and restarts it.
+        #expect(await arbiter.handleDisconnect(identity: app).ending == .absorbed)
+        await clock.advance(by: .seconds(1))
+        try await clock.requireSleeperArmed()
+        #expect(requested.all.last == Duration.milliseconds(250), """
+            a departure absorbed a full ceiling after the front began did not restart it, so an \
+            app exiting then is re-checked only at the slow end of the schedule
+            """)
+
+        arbitration.cancel()
+        let ruling = await arbitration.value
+        #expect(ruling.ending == .abandoned)
+        #expect(ruling.checks == 4)
+        #expect(await spy.calls.isEmpty, "the daemon seized the ptys of an app that is still alive")
+    }
+
+    /// **The check runs off the actor.** A verdict waits on two `ps` spawns;
+    /// run on the arbiter, every departure reported meanwhile — even one the
+    /// running watch would absorb in an instant — would queue behind them.
+    /// Here the first liveness probe is held, standing in for a slow `ps`, and
+    /// a second departure of the same app is reported while it is held: it is
+    /// absorbed without waiting for the check, and the watch goes on once the
+    /// check answers.
+    @Test func aDepartureReportedDuringACheckIsAbsorbedWithoutWaitingForIt() async throws {
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let probe = HeldFirstLivenessProbe(Self.aliveApp(startedAt: started))
+        let spy = ReclaimSpy()
+        let clock = EventDrivenTestClock()
+        let app = Self.recordedIdentity(startedAt: started)
+        let arbiter = SidecarDisconnectArbiter(
+            liveness: AppLivenessArbiter(signaller: probe),
+            reclaim: { await spy.record($0) },
+            sessionsHeld: { _ in 1 },
+            connectedApp: { nil },
+            recheckSchedule: Self.quickSchedule,
+            clock: clock)
+
+        let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
+        #expect(await waitUntil { probe.entered }, "the watch never began its first check")
+
+        let second = await arbiter.handleDisconnect(identity: app)
+        let checkStillRunning = !probe.returned
+        probe.release.signal()
+
+        #expect(second.ending == .absorbed)
+        #expect(checkStillRunning, """
+            a departure reported during a liveness check waited for that check to finish: the \
+            check runs on the arbiter, and every departure queues behind its ps spawns
+            """)
+        try await clock.requireSleeperArmed()
+        arbitration.cancel()
+        let ruling = await arbitration.value
+        #expect(ruling.ending == .abandoned)
+        #expect(ruling.checks == 1)
+        #expect(await spy.calls.isEmpty)
+    }
+
     // MARK: - Which disconnect is a disconnect
 
     /// A reconnect tears the *old* socket down, so its receive thread exits
@@ -672,11 +788,12 @@ import TBDShared
 
         let newApp = ProcessIdentity(
             pid: 22, startedAt: Date(timeIntervalSince1970: 20), commandLine: "new")
-        // Only the new connection's peer can be identified.
+        // Only the new connection's peer can be identified. One read each: a
+        // retry could not change a scripted answer, and would only wait.
         let identities = [newServerFD: newApp]
         let disconnects = DisconnectLog()
         let exits = DisconnectLog()
-        let server = FDVendingServer(peerIdentity: { identities[$0] })
+        let server = FDVendingServer(peerIdentity: { identities[$0] }, identityAttempts: 1)
         await server.setOnClientDisconnect { disconnects.record($0) }
         await server.setOnReceiveLoopExit { exits.record(nil) }
 
@@ -701,10 +818,11 @@ import TBDShared
 
         let oldApp = ProcessIdentity(
             pid: 11, startedAt: Date(timeIntervalSince1970: 10), commandLine: "old")
-        // Only the old connection's peer can be identified.
+        // Only the old connection's peer can be identified. One read each: a
+        // retry could not change a scripted answer, and would only wait.
         let identities = [oldServerFD: oldApp]
         let disconnects = DisconnectLog()
-        let server = FDVendingServer(peerIdentity: { identities[$0] })
+        let server = FDVendingServer(peerIdentity: { identities[$0] }, identityAttempts: 1)
         await server.setOnClientDisconnect { disconnects.record($0) }
 
         await server.adoptConnection(fd: oldServerFD)
@@ -738,6 +856,71 @@ private final class DisconnectLog: @unchecked Sendable {
     }
     var count: Int { lock.withLock { entries.count } }
     var all: [ProcessIdentity?] { lock.withLock { entries } }
+}
+
+/// The test's clock, recording every delay a watch asks it for, so a test
+/// reads the watch's pacing directly. Records the request, not a firing: the
+/// delay is measured from `now` at the moment of the ask, which the test holds
+/// still by advancing only while the watch is parked.
+private final class RequestedDelays: Clock, @unchecked Sendable {
+    typealias Instant = EventDrivenTestClock.Instant
+
+    private let base: EventDrivenTestClock
+    private let lock = NSLock()
+    private var recorded: [Duration] = []
+
+    init(_ base: EventDrivenTestClock) {
+        self.base = base
+    }
+
+    var now: Instant { base.now }
+    var minimumResolution: Duration { base.minimumResolution }
+    var all: [Duration] { lock.withLock { recorded } }
+
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        let requested = base.now.duration(to: deadline)
+        lock.withLock { recorded.append(requested) }
+        try await base.sleep(until: deadline, tolerance: tolerance)
+    }
+}
+
+/// A process table whose first liveness probe is held until the test
+/// releases it — a `ps` that takes its time. The hold blocks whichever thread
+/// the verdict runs on; production runs it on a GCD thread, so a correct
+/// arbiter pins no cooperative-pool thread here.
+private final class HeldFirstLivenessProbe: ProcessSignaller, @unchecked Sendable {
+    private let table: FakeProcessSignaller
+    private let lock = NSLock()
+    private var probes = 0
+    private var firstReturned = false
+    let release = DispatchSemaphore(value: 0)
+
+    init(_ table: FakeProcessSignaller) {
+        self.table = table
+    }
+
+    /// Whether the first probe has begun.
+    var entered: Bool { lock.withLock { probes > 0 } }
+    /// Whether the first probe has answered.
+    var returned: Bool { lock.withLock { firstReturned } }
+
+    func isAlive(_ pid: Int32) -> Bool {
+        let first = lock.withLock { () -> Bool in
+            probes += 1
+            return probes == 1
+        }
+        guard first else { return table.isAlive(pid) }
+        release.waitForGate("the arbiter's first liveness probe, held as a slow ps")
+        defer { lock.withLock { firstReturned = true } }
+        return table.isAlive(pid)
+    }
+
+    func terminate(_ pid: Int32) { table.terminate(pid) }
+    func forceKill(_ pid: Int32) { table.forceKill(pid) }
+    func children(ofServerPID serverPID: Int32) -> [Int32] { table.children(ofServerPID: serverPID) }
+    func commandLine(_ pid: Int32) -> String? { table.commandLine(pid) }
+    func stat(_ pid: Int32) -> String? { table.stat(pid) }
+    func startTime(_ pid: Int32) -> Date? { table.startTime(pid) }
 }
 
 /// Hands a test's `connectedApp` seam the arbiter it is wired into, once, so

@@ -19,6 +19,16 @@ struct FDVendingServerTests {
     /// budget, and each test's name says what it actually crosses.
     private static let interval: Duration = .milliseconds(50)
 
+    /// A peer every identity read names at once, for tests that adopt on a
+    /// test clock and are not about identity. The default reader runs `ps` on
+    /// this process, and a read that failed under load would retry on the
+    /// very clock the test is stepping.
+    private static let peer = ProcessIdentity(
+        pid: 7, startedAt: Date(timeIntervalSince1970: 7), commandLine: "/opt/acme/TBDApp")
+    private static let identifiedPeer: @Sendable (Int32) -> ProcessIdentity? = { _ in
+        FDVendingServerTests.peer
+    }
+
     /// Waits until a `send` is either parked on its next retry wait or has
     /// finished, for the "still retrying" reads below. `advance` resumes a due
     /// sleeper without running it, so reading the finished flag straight after
@@ -103,7 +113,9 @@ struct FDVendingServerTests {
         defer { Darwin.close(clientSideFD) }
 
         let clock = EventDrivenTestClock()
-        let server = FDVendingServer(retryAttempts: 5, retryInterval: Self.interval, clock: clock)
+        let server = FDVendingServer(
+            retryAttempts: 5, retryInterval: Self.interval, peerIdentity: Self.identifiedPeer,
+            clock: clock)
 
         let (readFD, writeFD) = try makePipe()
         defer { Darwin.close(writeFD) }
@@ -369,7 +381,9 @@ struct FDVendingServerTests {
         // clientFD, so once it fires the stale fd is already gone.
         let exited = SidecarInputCollector()
         let clock = EventDrivenTestClock()
-        let server = FDVendingServer(retryAttempts: 3, retryInterval: Self.interval, clock: clock)
+        let server = FDVendingServer(
+            retryAttempts: 3, retryInterval: Self.interval, peerIdentity: Self.identifiedPeer,
+            clock: clock)
         await server.setOnReceiveLoopExit {
             exited.record(SidecarInputHeader(worktreeID: UUID(), paneID: ""), Data())
         }
@@ -466,4 +480,168 @@ struct FDVendingServerTests {
 
         await server.stop()
     }
+
+    // MARK: peer identity at adopt
+
+    /// Whether the daemon-side end of a socket pair has been closed, read from
+    /// the client end without blocking: end of file once it has, `EAGAIN`
+    /// while it is still open.
+    private func peerHasClosed(_ clientSideFD: Int32) -> Bool {
+        _ = fcntl(clientSideFD, F_SETFL, fcntl(clientSideFD, F_GETFL) | O_NONBLOCK)
+        var byte: UInt8 = 0
+        return Darwin.read(clientSideFD, &byte, 1) == 0
+    }
+
+    /// A frame with no descriptor, for proving a connection is adopted:
+    /// `sendFrame` refuses with `.notConnected` when none is.
+    private static let probeFrame = SidecarFrameCodec.encode(type: .screenRequest, payload: Data())
+
+    @Test("an identity read that fails once is retried, and the connection is adopted identified")
+    func identityReadIsRetriedAfterATransientFailure() async throws {
+        // A read fails for reasons that pass in moments — a `ps` spawn refused
+        // under load — and a connection adopted unidentified turns every
+        // descriptor vended over it into a claim no app's death can take back.
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+        let reads = ScriptedIdentityReads(failing: 1, then: Self.peer)
+        let clock = EventDrivenTestClock()
+        let server = FDVendingServer(
+            peerIdentity: { _ in reads.read() }, identityAttempts: 3,
+            identityRetryInterval: Self.interval, clock: clock)
+
+        let adoption = Task { await server.adoptConnection(fd: serverSideFD) }
+        // Parked between reads: the first one failed.
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
+        await adoption.value
+
+        #expect(await server.currentClientIdentity() == Self.peer, """
+            a connection whose first identity read failed was adopted unidentified, so a dead \
+            app's sessions vended over it can never be taken back
+            """)
+        #expect(reads.count == 2)
+
+        await server.stop()
+    }
+
+    @Test("an identity no read answers is given up on after its attempts, and the connection is still adopted")
+    func identityReadGivesUpAfterItsAttempts() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+        let reads = ScriptedIdentityReads(failing: 3, then: Self.peer)
+        let clock = EventDrivenTestClock()
+        let server = FDVendingServer(
+            peerIdentity: { _ in reads.read() }, identityAttempts: 3,
+            identityRetryInterval: Self.interval, clock: clock)
+
+        let adoption = Task { await server.adoptConnection(fd: serverSideFD) }
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
+        try await clock.requireAdvanceWhenArmed(by: Self.interval)
+        await adoption.value
+
+        #expect(await server.currentClientIdentity() == nil)
+        #expect(reads.count == 3, "the identity was read more or fewer times than its attempts")
+        // Unidentified is still adopted: the app's tabs work, and only the
+        // take-back on its death is lost.
+        _ = try await server.sendFrame(Self.probeFrame)
+
+        await server.stop()
+    }
+
+    @Test("an adoption overtaken while it retries its identity read closes its socket, and the later connection stays current")
+    func adoptionOvertakenWhileIdentifyingIsDropped() async throws {
+        // Installing the earlier connection once it was identified would take
+        // the sidecar from the later one — which the peer is using — and,
+        // with a different app on each, report the later app as departed.
+        let (firstServerFD, firstClientFD) = try makeSocketPair()
+        let (secondServerFD, secondClientFD) = try makeSocketPair()
+        defer { Darwin.close(firstClientFD); Darwin.close(secondClientFD) }
+        let later = ProcessIdentity(
+            pid: 8, startedAt: Date(timeIntervalSince1970: 8), commandLine: "/opt/acme/TBDApp")
+        let firstReads = ScriptedIdentityReads(failing: 1, then: Self.peer)
+        let departures = ReportedDepartures()
+        let clock = EventDrivenTestClock()
+        let server = FDVendingServer(
+            peerIdentity: { $0 == firstServerFD ? firstReads.read() : later },
+            identityAttempts: 3, identityRetryInterval: Self.interval, clock: clock)
+        await server.setOnClientDisconnect { departures.record($0) }
+
+        let first = Task { await server.adoptConnection(fd: firstServerFD) }
+        // The first adoption is between reads when the second connection
+        // arrives and is identified at once.
+        try await clock.requireSleeperArmed()
+        await server.adoptConnection(fd: secondServerFD)
+        #expect(await server.currentClientIdentity() == later)
+        await clock.advance(by: Self.interval)
+        await first.value
+
+        #expect(await server.currentClientIdentity() == later, """
+            an earlier connection, identified late, took the sidecar from the connection that \
+            arrived after it
+            """)
+        #expect(firstReads.count == 2, "the overtaken adoption did not finish its identity read")
+        #expect(peerHasClosed(firstClientFD), "the overtaken connection's socket was left open")
+        #expect(departures.count == 0, "dropping an overtaken connection reported a departure")
+
+        await server.stop()
+    }
+
+    @Test("a stop while an adoption retries its identity read leaves nothing adopted")
+    func stopWhileIdentifyingAdoptsNothing() async throws {
+        let (serverSideFD, clientSideFD) = try makeSocketPair()
+        defer { Darwin.close(clientSideFD) }
+        let reads = ScriptedIdentityReads(failing: 1, then: Self.peer)
+        let clock = EventDrivenTestClock()
+        let server = FDVendingServer(
+            peerIdentity: { _ in reads.read() }, identityAttempts: 3,
+            identityRetryInterval: Self.interval, clock: clock)
+
+        let adoption = Task { await server.adoptConnection(fd: serverSideFD) }
+        try await clock.requireSleeperArmed()
+        await server.stop()
+        await clock.advance(by: Self.interval)
+        await adoption.value
+
+        #expect(await server.currentClientIdentity() == nil)
+        await #expect(throws: FDVendingServerError.notConnected) {
+            try await server.sendFrame(Self.probeFrame)
+        }
+        #expect(peerHasClosed(clientSideFD), "a connection still being identified at stop was left open")
+    }
+}
+
+/// Answers identity reads from a script: nil for the first `failing` reads,
+/// then `identity` for every read after. Lock-guarded: the server reads on its
+/// actor while the test reads the count from its own task.
+private final class ScriptedIdentityReads: @unchecked Sendable {
+    private let lock = NSLock()
+    private let failing: Int
+    private let identity: ProcessIdentity?
+    private var reads = 0
+
+    init(failing: Int, then identity: ProcessIdentity?) {
+        self.failing = failing
+        self.identity = identity
+    }
+
+    func read() -> ProcessIdentity? {
+        lock.withLock {
+            reads += 1
+            return reads > failing ? identity : nil
+        }
+    }
+
+    var count: Int { lock.withLock { reads } }
+}
+
+/// The departures a server reported through `onClientDisconnect`.
+/// Lock-guarded: reported from the server's actor, read from the test's task.
+private final class ReportedDepartures: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reported: [ProcessIdentity?] = []
+
+    func record(_ identity: ProcessIdentity?) {
+        lock.withLock { reported.append(identity) }
+    }
+
+    var count: Int { lock.withLock { reported.count } }
 }

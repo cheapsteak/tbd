@@ -93,6 +93,26 @@ struct AppLivenessArbiter: Sendable {
             return .undetermined(reason: "command-unreadable")
         }
     }
+
+    /// `verdict(for:)`, reached on a GCD thread rather than on the caller's
+    /// executor.
+    ///
+    /// A verdict spawns `ps` twice and waits for both. Run inline on an actor,
+    /// that holds the actor for both spawns — every other call into it queues
+    /// behind the check, including ones that need no check at all — and pins
+    /// one of the cooperative pool's few threads while it waits. So the check
+    /// runs on a GCD thread, the discipline `TmuxControlSupervisor.stopAll`
+    /// follows for its blocking `stop()`s, and the caller suspends until it
+    /// answers. An actor awaiting this is free for the whole check, so
+    /// anything it read before the `await` may have changed by the time the
+    /// verdict arrives.
+    func verdictOffThePool(for identity: ProcessIdentity?) async -> AppLivenessVerdict {
+        await withCheckedContinuation { (continuation: CheckedContinuation<AppLivenessVerdict, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: self.verdict(for: identity))
+            }
+        }
+    }
 }
 
 /// How one sidecar departure's arbitration ended, and what it ended on.
@@ -115,9 +135,10 @@ struct SidecarDisconnectRuling: Sendable, Equatable {
         /// ask about, and no viewer claim names an unidentified app.
         case unidentified
         /// The same app is already being watched, and that watch takes this
-        /// departure over: it starts its re-checks over from the front of its
-        /// schedule, and ends on nothing it read before this departure was
-        /// reported.
+        /// departure over: it answers it at its next re-check — starting its
+        /// schedule over from the front, unless it already did so less than
+        /// one ceiling ago — and ends on nothing it read before this
+        /// departure was reported.
         case absorbed
         /// The task running the arbitration was cancelled. Its claims stand.
         case abandoned
@@ -177,10 +198,18 @@ struct SidecarDisconnectRuling: Sendable, Equatable {
 /// watched is absorbed by that watch rather than starting a second beside it,
 /// which would double the `ps` load and race it to the same take-back. The
 /// absorbed departure is not lost: the watch answers it at its next re-check —
-/// at most one ceiling away — and starts its schedule over from the front, and
-/// it ends on a reconnect or on "holds nothing" only if no departure of that
-/// app was reported after it read the state that ending rests on (see
+/// at most one ceiling away — and starts its schedule over from the front if
+/// it has not already done so within the last ceiling
+/// (`RecheckSchedule.mayRestart(afterSleeping:)` says why that is limited),
+/// and it ends on a reconnect or on "holds nothing" only if no departure of
+/// that app was reported after it read the state that ending rests on (see
 /// `watch(_:)`).
+///
+/// **The check runs off the actor.** Each verdict waits on two `ps` spawns,
+/// and it is awaited through `AppLivenessArbiter.verdictOffThePool(for:)`, so
+/// the actor holds only bookkeeping: a departure absorbed while a check is
+/// running is counted at once rather than queued behind it, and no
+/// cooperative-pool thread waits on `ps`.
 ///
 /// `.undetermined` is re-checked exactly as `.alive` is and never seizes: the
 /// failure direction on this path is always toward reading nothing until
@@ -209,6 +238,32 @@ actor SidecarDisconnectArbiter {
         func delay(after previous: Duration) -> Duration {
             min(previous * 2, ceiling)
         }
+
+        /// Whether a departure the watch absorbed may start the schedule over
+        /// from `first`, given how long the watch has slept since the schedule
+        /// last started there: only once that is a full `ceiling`.
+        ///
+        /// **The front is for a departure that may be an exit**, so an
+        /// absorbed departure earns it — but an app that keeps dropping and
+        /// reconnecting, or two app instances taking the sidecar from each
+        /// other, report departures as fast as they churn, and a front
+        /// restarted by every one of them would keep a watch on a live app at
+        /// four checks a second for as long as the churn lasts. Limited to one
+        /// restart per `ceiling` of the watch's own sleep, a watch runs at most
+        /// one front per that interval however often its app departs: eight
+        /// checks in about a minute with the default numbers, where a restart
+        /// on every departure could cost 240. A departure inside the window is
+        /// not dropped: the progression already under way answers it at its
+        /// next re-check, so an exit there is still caught, at most one ceiling
+        /// later.
+        ///
+        /// Measured in the watch's own sleep rather than read off the clock:
+        /// the injected clock is an existential, which offers no instant
+        /// arithmetic, and a watch's time is nearly all sleep — a check takes
+        /// milliseconds.
+        func mayRestart(afterSleeping slept: Duration) -> Bool {
+            slept >= ceiling
+        }
     }
 
     /// Doubling from 250 ms to a one-minute ceiling, then once a minute.
@@ -224,6 +279,12 @@ actor SidecarDisconnectArbiter {
     /// check a minute, which stays cheap however long the watch lasts — and a
     /// watch on an app that stays alive and disconnected lasts until it quits.
     /// The ceiling is also how long, at most, that app's death goes unnoticed.
+    ///
+    /// **And the front comes round again at most once a minute.** A departure
+    /// absorbed into a running watch restarts it only once a full ceiling has
+    /// passed since it last did (`RecheckSchedule.mayRestart(afterSleeping:)`),
+    /// so an app that departs over and over costs one front a minute rather
+    /// than four checks a second.
     static let defaultRecheckSchedule = RecheckSchedule(
         first: .milliseconds(250), ceiling: .seconds(60))
 
@@ -276,6 +337,9 @@ actor SidecarDisconnectArbiter {
     /// A departure of an app already being watched returns at once, as
     /// `.absorbed`: the watch running for that app carries it. Any other
     /// returns when its own watch ends.
+    ///
+    /// An unidentified peer is ruled on the spot, with the synchronous
+    /// verdict: there is no pid to ask about, so that verdict spawns nothing.
     @discardableResult
     func handleDisconnect(identity: ProcessIdentity?) async -> SidecarDisconnectRuling {
         guard let identity else {
@@ -294,8 +358,8 @@ actor SidecarDisconnectArbiter {
             Self.logger.notice(
                 """
                 app pid \(identity.pid, privacy: .public) left the sidecar again while its earlier \
-                departure is still being watched; that watch takes this one over and starts its \
-                re-checks over, rather than a second watch running beside it
+                departure is still being watched; that watch takes this one over at its next \
+                re-check, rather than a second watch running beside it
                 """)
             return SidecarDisconnectRuling(
                 ending: .absorbed, verdict: nil, checks: 0, reclaimed: [])
@@ -313,6 +377,12 @@ actor SidecarDisconnectArbiter {
     /// which is what catches a delivery to it recorded a moment later. Only a
     /// verdict short of death goes on to ask whether the watch is still needed.
     ///
+    /// **Every suspension in a round lets a departure in**, the verdict's
+    /// included: it is awaited off the actor, so the actor takes other calls
+    /// for the whole check. That is why the round reads the departure count
+    /// once, at its top and before its first suspension, and judges whether
+    /// anything arrived since by comparing a fresh read against that one.
+    ///
     /// **Ending on a reconnect or on "holds nothing" is conditional.** Both
     /// rest on state other actors own, read across suspensions, and a
     /// departure of this app reported meanwhile — the connection it came back
@@ -323,6 +393,11 @@ actor SidecarDisconnectArbiter {
     /// removal; otherwise it runs again at once, on the state that departure
     /// left. Ending on a death is unconditional: the take-back selects by
     /// identity, so it covers every connection that app ever had.
+    ///
+    /// A round that answers a departure restarts the schedule from the front
+    /// only when `RecheckSchedule.mayRestart(afterSleeping:)` allows it, and
+    /// otherwise keeps the progression it was on. The watch's own start is a
+    /// front, so the window begins with the watch.
     private func watch(_ app: ProcessIdentity) async -> SidecarDisconnectRuling {
         // Every way out ends the watch, so the next departure starts a new
         // one. A `defer` runs at the return itself, with no suspension before
@@ -331,6 +406,10 @@ actor SidecarDisconnectArbiter {
         var checks = 0
         var departuresAnswered = 0
         var delay = recheckSchedule.first
+        // How long the watch has slept since the schedule last started from
+        // the front, capped at the ceiling — the only value the restart rule
+        // compares it with.
+        var sleptSinceFront: Duration = .zero
         var announced = false
         while true {
             // Read before anything this round decides on: a departure counted
@@ -338,17 +417,27 @@ actor SidecarDisconnectArbiter {
             let reported = departuresReported[app] ?? 0
             if reported != departuresAnswered {
                 if departuresAnswered > 0 {
+                    let pacing: String
+                    if recheckSchedule.mayRestart(afterSleeping: sleptSinceFront) {
+                        delay = recheckSchedule.first
+                        sleptSinceFront = .zero
+                        pacing = "re-checking from the front of the schedule"
+                    } else {
+                        pacing = """
+                            keeping its current pacing, since the schedule last started from the \
+                            front less than one ceiling ago
+                            """
+                    }
                     Self.logger.debug(
                         """
                         app pid \(app.pid, privacy: .public) left the sidecar again during its \
-                        watch (\(reported, privacy: .public) departure(s) so far); re-checking \
-                        from the front of the schedule
+                        watch (\(reported, privacy: .public) departure(s) so far); \
+                        \(pacing, privacy: .public)
                         """)
                 }
                 departuresAnswered = reported
-                delay = recheckSchedule.first
             }
-            let verdict = liveness.verdict(for: app)
+            let verdict = await liveness.verdictOffThePool(for: app)
             checks += 1
             if checks > 1 {
                 Self.logger.debug(
@@ -417,6 +506,7 @@ actor SidecarDisconnectArbiter {
                 return SidecarDisconnectRuling(
                     ending: .abandoned, verdict: verdict, checks: checks, reclaimed: [])
             }
+            sleptSinceFront = min(sleptSinceFront + delay, recheckSchedule.ceiling)
             delay = recheckSchedule.delay(after: delay)
         }
     }
