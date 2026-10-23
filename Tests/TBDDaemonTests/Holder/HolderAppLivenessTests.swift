@@ -553,8 +553,8 @@ import TBDShared
     /// read: the departure was absorbed on the strength of this watch going
     /// on, so ending would leave it arbitrated by nobody, and an app that then
     /// died would keep its sessions claimed for the daemon's whole life. The
-    /// round runs again instead, finds the app alive and disconnected, and the
-    /// watch catches its death.
+    /// watch goes on instead — sleeping first, as every round that does not
+    /// end does — and its next re-check catches the death.
     @Test func aDepartureReportedWhileARoundSettlesKeepsTheWatchGoing() async throws {
         let started = Date(timeIntervalSince1970: 1_700_000_000)
         let signaller = Self.aliveApp(startedAt: started)
@@ -582,8 +582,8 @@ import TBDShared
         midRound.arm(arbiter)
 
         let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
-        // Still watching: the round that read the reconnect ran again on the
-        // departure it absorbed, and re-armed.
+        // Still watching: the round that read the reconnect did not end on
+        // it, having absorbed a departure meanwhile, and slept.
         try await clock.requireSleeperArmed()
         let absorbed = try #require(midRound.ruling, "the departure mid-round was never reported")
         #expect(absorbed.ending == .absorbed)
@@ -596,8 +596,62 @@ import TBDShared
             the watch ended on a reconnect it read before a departure it had absorbed, so that \
             departure was arbitrated by nobody and the dead app's sessions stay claimed
             """)
-        #expect(ruling.checks == 3)
+        #expect(ruling.checks == 2)
         #expect(await spy.calls == [app])
+    }
+
+    /// **Churn cannot outrun the schedule.** An app dropping and reconnecting
+    /// over and over — or two instances taking the sidecar from each other —
+    /// reports a departure inside nearly every round of its watch, and here
+    /// inside every one: each round reads the app connected again, and the
+    /// connection it came back on drops before the round acts on that. No
+    /// such round may end the watch, and none may run the next round without
+    /// sleeping first: each sleeps the schedule's current delay, and the front
+    /// comes round at most once per ceiling — one check per scheduled delay,
+    /// however fast the app churns. A round that skipped its sleep would run
+    /// the `ps` pair back to back for as long as the churn lasted.
+    ///
+    /// The bound is read off the delays the watch asks the clock for. The
+    /// churn is capped, so a watch that skipped its sleeps runs out of churn
+    /// and parks rather than spinning, and the first assertion names it.
+    @Test func churnAbsorbedWhileRoundsSettleIsPacedByTheSchedule() async throws {
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        let spy = ReclaimSpy()
+        let clock = EventDrivenTestClock()
+        let requested = RequestedDelays(clock)
+        let app = Self.recordedIdentity(startedAt: started)
+        let churn = ChurningApp(app, rounds: 20)
+        let arbiter = SidecarDisconnectArbiter(
+            liveness: AppLivenessArbiter(signaller: Self.aliveApp(startedAt: started)),
+            reclaim: { await spy.record($0) },
+            sessionsHeld: { _ in 1 },
+            connectedApp: { await churn.connectedApp() },
+            recheckSchedule: .init(first: .milliseconds(250), ceiling: .seconds(1)),
+            clock: requested)
+        churn.arm(arbiter)
+
+        let arbitration = Task { await arbiter.handleDisconnect(identity: app) }
+        try await clock.requireSleeperArmed()
+        #expect(churn.roundsRead == 1, """
+            a round that absorbed a departure while it read a reconnect ran the next round without \
+            sleeping, so churn drives liveness checks back to back
+            """)
+        for delay in [Duration.milliseconds(250), .milliseconds(500), .seconds(1)] {
+            await clock.advance(by: delay)
+            try await clock.requireSleeperArmed()
+        }
+        #expect(requested.all == [.milliseconds(250), .milliseconds(500), .seconds(1), .milliseconds(250)], """
+            churn absorbed while rounds settled broke the schedule's pacing: a round slept less \
+            than its delay, or the front came round more than once per ceiling
+            """)
+        #expect(churn.roundsRead == 4)
+        #expect(churn.absorbed == 4, "a departure reported mid-round was not absorbed into the watch")
+
+        arbitration.cancel()
+        let ruling = await arbitration.value
+        #expect(ruling.ending == .abandoned)
+        #expect(ruling.checks == 4, "the watch ran more liveness checks than it slept scheduled delays")
+        #expect(await spy.calls.isEmpty, "the daemon seized the ptys of an app that is still alive")
     }
 
     /// **An app that keeps leaving the sidecar does not keep its watch at the
@@ -950,6 +1004,58 @@ private final class DepartureMidRound: @unchecked Sendable {
     }
 
     var ruling: SidecarDisconnectRuling? { lock.withLock { absorbed } }
+}
+
+/// An app churning on the sidecar, as a test's `connectedApp` seam: each read
+/// finds it connected again, and the connection it came back on drops before
+/// the reading round acts on that — a departure reported into the very watch
+/// doing the reading, which is suspended on this read and so free to take it.
+/// It churns for `rounds` reads; every read after finds it gone from the
+/// sidecar, so a watch that outran its schedule parks rather than spins.
+/// Lock-guarded: armed from the test's task, read from the arbiter's.
+private final class ChurningApp: @unchecked Sendable {
+    private let lock = NSLock()
+    private let app: ProcessIdentity
+    private var arbiter: SidecarDisconnectArbiter?
+    private var churnLeft: Int
+    private var reads = 0
+    private var absorbedDepartures = 0
+
+    init(_ app: ProcessIdentity, rounds: Int) {
+        self.app = app
+        churnLeft = rounds
+    }
+
+    func arm(_ arbiter: SidecarDisconnectArbiter) {
+        lock.withLock { self.arbiter = arbiter }
+    }
+
+    func connectedApp() async -> ProcessIdentity? {
+        guard let watching = takeOneRoundOfChurn() else { return nil }
+        let ruling = await watching.handleDisconnect(identity: app)
+        if ruling.ending == .absorbed { recordAbsorbed() }
+        return app
+    }
+
+    /// Counts a read, and answers the arbiter to report a departure into
+    /// while churn is left, nil after.
+    private func takeOneRoundOfChurn() -> SidecarDisconnectArbiter? {
+        lock.withLock {
+            reads += 1
+            guard churnLeft > 0 else { return nil }
+            churnLeft -= 1
+            return arbiter
+        }
+    }
+
+    private func recordAbsorbed() {
+        lock.withLock { absorbedDepartures += 1 }
+    }
+
+    /// How many times a round has asked which app is connected.
+    var roundsRead: Int { lock.withLock { reads } }
+    /// How many of the departures reported mid-round the watch absorbed.
+    var absorbed: Int { lock.withLock { absorbedDepartures } }
 }
 
 /// What the arbiter is told about the sidecar between its checks, scripted by

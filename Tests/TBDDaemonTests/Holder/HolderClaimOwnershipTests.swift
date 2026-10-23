@@ -135,9 +135,10 @@ import TBDShared
     /// The death is remembered. A delivery recorded only after its recipient
     /// was confirmed gone — the attach handler's record is one actor hop behind
     /// the send, and the arbitration runs concurrently with it — is taken back
-    /// the moment it names the dead app, rather than holding its session for
-    /// the daemon's whole life. A delivery to a live app is only recorded.
-    @Test func aDeliveryRecordedAfterItsRecipientWasConfirmedGoneIsTakenBack() async {
+    /// once it names the dead app, rather than holding its session for the
+    /// daemon's whole life. A delivery to a live app is only recorded, and
+    /// starts no take-back.
+    @Test func aDeliveryRecordedAfterItsRecipientWasConfirmedGoneIsTakenBack() async throws {
         let registry = Self.registry()
         let late = UUID()
         let live = UUID()
@@ -148,8 +149,13 @@ import TBDShared
         #expect(await registry.viewerAttachment(for: late) == 7,
                 "a claim that did not name the dead app yet was taken back on its death")
 
-        await registry.recordAttachRecipient(Self.oldApp, terminalID: late, generation: 7)
-        await registry.recordAttachRecipient(Self.newApp, terminalID: live, generation: 8)
+        let takeBack = try #require(
+            await registry.recordAttachRecipient(Self.oldApp, terminalID: late, generation: 7),
+            "a delivery to an app already confirmed gone started no take-back")
+        let liveTakeBack = await registry.recordAttachRecipient(
+            Self.newApp, terminalID: live, generation: 8)
+        #expect(liveTakeBack == nil, "a delivery to a live app started a take-back")
+        await takeBack.value
 
         #expect(await registry.viewerAttachment(for: late) == nil, """
             a delivery to an app already confirmed gone was recorded and left standing, so its \
@@ -169,7 +175,7 @@ import TBDShared
     /// app's. When the record lands, the attach is settled out of pending and
     /// taken back, so its ready-timeout finds nothing to turn into a claim. The
     /// death is not acted on a second time: one death, one pass, one notice.
-    @Test func aLateDeliveryTakesBackTheOneAttachItNamesWithoutASecondDeathPass() async {
+    @Test func aLateDeliveryTakesBackTheOneAttachItNamesWithoutASecondDeathPass() async throws {
         let registry = Self.registry()
         let late = UUID()
         let newSession = UUID()
@@ -185,7 +191,10 @@ import TBDShared
             pty a live app is reading
             """)
 
-        await registry.recordAttachRecipient(Self.oldApp, terminalID: late, generation: 7)
+        let takeBack = try #require(
+            await registry.recordAttachRecipient(Self.oldApp, terminalID: late, generation: 7),
+            "a delivery to an app already confirmed gone started no take-back")
+        await takeBack.value
 
         #expect(await registry.sessionsHeld(by: Self.oldApp) == 0, """
             the attach delivered to the dead app was left pending or claimed, so its session is \
@@ -204,6 +213,55 @@ import TBDShared
         #expect(await registry.viewerAttachment(for: late) == nil, """
             a late ready-timeout claimed a session the dead app's take-back had already returned
             """)
+    }
+
+    /// **Recording a late delivery returns before its take-back runs.** The
+    /// attach RPC awaits the record before it replies, and a take-back resumes
+    /// a reader and jiggles its job — work no reply should stand behind. So
+    /// the record settles the attach into a claim owned by the dead app and
+    /// returns, and the take-back runs as a task of the registry's own.
+    ///
+    /// Read from inside the registry's isolation, in the same stretch as the
+    /// record: nothing else the registry runs — that task included — can
+    /// interleave before the read, so the claim found standing is the state
+    /// the record returned in, not a race lost or won.
+    @Test func recordingALateDeliveryReturnsBeforeItsTakeBackRuns() async throws {
+        let registry = Self.registry()
+        let late = UUID()
+        await registry.recordPendingAttachForTesting(
+            terminalID: late, generation: 7, reader: Self.idleReader(for: late), recipient: nil)
+        await registry.reclaimSessions(heldBy: Self.oldApp)
+
+        let recorded = await Self.recordHoldingTheRegistry(
+            registry, Self.oldApp, terminalID: late, generation: 7)
+
+        #expect(recorded.claim == 7, """
+            the record returned with the late attach already taken back, so the attach RPC \
+            replies only after a take-back it has no reason to wait for
+            """)
+        #expect(recorded.owner == Self.oldApp)
+        let takeBack = try #require(
+            recorded.takeBack, "a delivery to an app already confirmed gone started no take-back")
+        await takeBack.value
+        #expect(await registry.viewerAttachment(for: late) == nil, """
+            the take-back of a delivery recorded late never ran, so its session is held by a \
+            process that no longer exists
+            """)
+        #expect(await registry.confirmedDeathPasses == 1)
+    }
+
+    /// Records a delivery and reads the claim it leaves, in one stretch on the
+    /// registry's own executor.
+    private static func recordHoldingTheRegistry(
+        _ registry: isolated HolderRegistry, _ recipient: ProcessIdentity,
+        terminalID: UUID, generation: UInt64
+    ) -> (takeBack: Task<Void, Never>?, claim: UInt64?, owner: ProcessIdentity?) {
+        let takeBack = registry.recordAttachRecipient(
+            recipient, terminalID: terminalID, generation: generation)
+        return (
+            takeBack,
+            registry.viewerAttachment(for: terminalID),
+            registry.viewerAttachmentOwner(for: terminalID))
     }
 
     /// A recipient names one attach by its generation, and an attach that has

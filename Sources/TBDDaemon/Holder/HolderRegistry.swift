@@ -333,8 +333,8 @@ actor HolderRegistry {
     /// the invariant is stated in full there.
     private var viewerAttachments: [UUID: ViewerClaim] = [:]
     /// Every app this registry has been told is confirmed gone, so that an
-    /// attach naming one of them *after* its take-back ran is taken back the
-    /// moment it names it — that attach alone (`recordAttachRecipient`).
+    /// attach naming one of them *after* its take-back ran is taken back as
+    /// soon as it names it — that attach alone (`recordAttachRecipient`).
     ///
     /// The recipient of a vend is recorded one actor hop after the descriptor
     /// left — `recordAttachRecipient` follows the sidecar send — and the
@@ -2149,7 +2149,8 @@ actor HolderRegistry {
             generation: generation, reader: reader, recipient: recipient)
     }
 
-    /// Records which app a vended descriptor was delivered to.
+    /// Records which app a vended descriptor was delivered to, and answers
+    /// with the take-back that recording started, if it started one.
     ///
     /// The attach handler calls this after the sidecar send, with the identity
     /// the send itself read for the connection it wrote on
@@ -2165,19 +2166,29 @@ actor HolderRegistry {
     /// does clear it, and says why a death must not.
     ///
     /// A recipient this registry has already been told is gone is taken back
-    /// at once — see `appsConfirmedGone` for the window that closes — and
-    /// **only the one attach this call names is.** The death itself was acted
-    /// on when it was confirmed: that pass took back everything then recorded
-    /// against the app, and remembering it is what routes this late name here.
-    /// Running the pass again would announce a second death that never
-    /// happened, and would reach for claims of that app whose take-back may
-    /// still be in flight — each is held across its resume, by design — so a
-    /// second pass could start a second take-back of the same session beside
-    /// the first.
+    /// — see `appsConfirmedGone` for the window that closes — and **only the
+    /// one attach this call names is.** The death itself was acted on when it
+    /// was confirmed: that pass took back everything then recorded against the
+    /// app, and remembering it is what routes this late name here. Running the
+    /// pass again would announce a second death that never happened, and would
+    /// reach for claims of that app whose take-back may still be in flight —
+    /// each is held across its resume, by design — so a second pass could
+    /// start a second take-back of the same session beside the first.
+    ///
+    /// **Synchronous, so the record is all a caller waits for.** The attach
+    /// RPC awaits this before it replies, and a take-back resumes a reader and
+    /// jiggles its job — work no reply should stand behind. So the record
+    /// lands here, in one stretch on the actor, and a late delivery's
+    /// take-back runs in a task of this registry's own
+    /// (`takeBackLateDelivery`), which re-checks the generation as every
+    /// take-back does: a claim that moved on while it waited is refused, not
+    /// seized. The returned task is that take-back, for a caller that must
+    /// see it finish; nil when the record needed none.
+    @discardableResult
     func recordAttachRecipient(
         _ recipient: ProcessIdentity?, terminalID: UUID, generation: UInt64
-    ) async {
-        guard let recipient else { return }
+    ) -> Task<Void, Never>? {
+        guard let recipient else { return nil }
         let recipientIsGone = appsConfirmedGone.contains(recipient)
         if var pending = pendingAttaches[terminalID], pending.generation == generation {
             pending.recipient = recipient
@@ -2193,9 +2204,9 @@ actor HolderRegistry {
         } else if viewerAttachments[terminalID]?.generation == generation {
             viewerAttachments[terminalID]?.owner = recipient
         } else {
-            return
+            return nil
         }
-        guard recipientIsGone else { return }
+        guard recipientIsGone else { return nil }
         Self.logger.notice(
             """
             attach \(generation, privacy: .public) for session \
@@ -2203,6 +2214,20 @@ actor HolderRegistry {
             \(recipient.pid, privacy: .public), whose death was already confirmed and acted on \
             before this delivery was recorded; taking back this one session, and only it
             """)
+        return Task {
+            await self.takeBackLateDelivery(
+                terminalID: terminalID, generation: generation, recipient: recipient)
+        }
+    }
+
+    /// The take-back `recordAttachRecipient` starts for an attach delivered to
+    /// an app already confirmed gone: that one session, under the generation
+    /// the record named. Generation-checked through `seizeFromDeadApp`, so an
+    /// attach that moved on before this ran — released, or re-attached by a
+    /// live app — is left alone.
+    private func takeBackLateDelivery(
+        terminalID: UUID, generation: UInt64, recipient: ProcessIdentity
+    ) async {
         do {
             try await seizeFromDeadApp(terminalID: terminalID, generation: generation)
             Self.logger.notice(

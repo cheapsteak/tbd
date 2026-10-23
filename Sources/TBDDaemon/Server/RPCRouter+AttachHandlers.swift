@@ -242,7 +242,9 @@ extension RPCRouter {
         // owned by that app, and only that app's confirmed death takes it back.
         // The identity is the one the send itself read for the connection it
         // wrote on — see `sendReportingRecipient` for why no earlier lookup
-        // would do.
+        // would do. Only the record is awaited: a delivery to an app already
+        // confirmed gone is taken back in a task the registry starts and owns,
+        // so this reply never waits on a holder.
         await registry.recordAttachRecipient(
             recipient, terminalID: terminal.id, generation: vend.generation)
 

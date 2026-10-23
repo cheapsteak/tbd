@@ -44,6 +44,21 @@ private final class ConnectionEpochBox: @unchecked Sendable {
     }
 }
 
+/// Lock-protected stamp counter for accepted connections, callable off-actor.
+/// The accept thread stamps each connection the moment `accept` returns it, so
+/// stamps follow accept order however the adoptions carrying them reach the
+/// actor — see `FDVendingServer.adoptConnection(fd:stamp:)`.
+private final class AcceptStampBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var last: UInt64 = 0
+    /// The next stamp, strictly greater than every stamp handed out before it.
+    func next() -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        last += 1
+        return last
+    }
+}
+
 /// A tiny per-daemon service that holds the sidecar socket the app connects to.
 /// Phase 2 has exactly one client (the app), so at most one connection is
 /// adopted at a time; a new adoption replaces the old one.
@@ -105,16 +120,24 @@ actor FDVendingServer {
     private let peerIdentity: @Sendable (Int32) -> ProcessIdentity?
     /// How many times `adoptConnection` reads its peer's identity before
     /// adopting the connection unidentified, and how long it waits between
-    /// reads. The default 3/100 ms pair costs nothing when the first read
-    /// answers and at most 200 ms when none does; `identifyPeer(onSocket:)`
-    /// says why a failed read is worth asking again.
+    /// reads. The default 3/100 ms pair costs one read when the first read
+    /// answers and at most 200 ms of waiting when none does;
+    /// `identifyPeer(onSocket:stamp:)` says why a failed read is worth asking
+    /// again.
     private let identityAttempts: Int
     private let identityRetryInterval: Duration
-    /// Advanced by every `adoptConnection` as it begins, and by `stop`. An
-    /// adoption that suspended to retry its identity read installs its
-    /// connection only if this still holds the value it took — see
-    /// `adoptConnection`.
-    private var adoptionsBegun: UInt64 = 0
+    /// Stamps accepted connections in accept order (`stampConnection()`).
+    private let acceptStamps = AcceptStampBox()
+    /// The stamp of the latest adoption to begin. Only ever increases. An
+    /// adoption whose stamp is not above it on arrival is older than one
+    /// already begun or installed, and one that finds it moved after a
+    /// suspension was overtaken while it waited: either way it installs
+    /// nothing — see `adoptConnection(fd:stamp:)`.
+    private var latestAdoptionBegun: UInt64 = 0
+    /// Set by `stop` and never cleared. A stopped server adopts nothing more,
+    /// including a connection accepted before the stop whose adoption reaches
+    /// the actor after it.
+    private var stopped = false
     /// Delay seam (`docs/specs/2026-07-24-test-hardening-design.md` §5).
     /// Existential, not generic: this is an `actor` carrying `Sendable`
     /// conformances, and a generic parameter would infect its type.
@@ -313,6 +336,7 @@ actor FDVendingServer {
         // back into the actor. Exits when the listener fd is closed (accept
         // returns -1/EBADF after stop()).
         let listener = fd
+        let stamps = acceptStamps
         let thread = Thread { [weak self] in
             while true {
                 var peer = sockaddr()
@@ -322,7 +346,11 @@ actor FDVendingServer {
                 // Darwin has no `accept4`, so the flag is set the moment the
                 // descriptor exists — see the note on the listener above.
                 _ = fcntl(accepted, F_SETFD, FD_CLOEXEC)
-                Task { [weak self] in await self?.adoptConnection(fd: accepted) }
+                // Stamped here, on this thread, because this is the only place
+                // accept order is known: the tasks below reach the actor in no
+                // fixed order (`adoptConnection(fd:stamp:)`).
+                let stamp = stamps.next()
+                Task { [weak self] in await self?.adoptConnection(fd: accepted, stamp: stamp) }
             }
         }
         thread.name = "fd-vending-accept"
@@ -330,9 +358,28 @@ actor FDVendingServer {
         thread.start()
     }
 
-    /// Adopt a pre-connected socket fd. Ownership transfers here — do not close
-    /// it in the caller. Replaces (and signals teardown of) any prior
-    /// connection, then starts this connection's receive thread.
+    /// Stamps a connection as accepted now: every stamp is greater than every
+    /// one handed out before it. The accept thread takes one the moment
+    /// `accept` returns a connection, before handing it to the actor, which is
+    /// what makes stamp order accept order. `nonisolated`, so taking one never
+    /// waits for the actor.
+    nonisolated func stampConnection() -> UInt64 {
+        acceptStamps.next()
+    }
+
+    /// `adoptConnection(fd:stamp:)`, stamped as accepted at the moment of this
+    /// call. For a caller that hands connections over one at a time, so that
+    /// its call order is its accept order — tests adopting `socketpair` ends.
+    /// The listener does not use it: its accept thread stamps each connection
+    /// itself, before the task that carries it is even scheduled.
+    nonisolated func adoptConnection(fd: Int32) async {
+        await adoptConnection(fd: fd, stamp: stampConnection())
+    }
+
+    /// Adopt a pre-connected socket fd, accepted under `stamp`
+    /// (`stampConnection()`). Ownership transfers here — do not close it in
+    /// the caller. Replaces (and signals teardown of) any prior connection,
+    /// then starts this connection's receive thread.
     ///
     /// **Two phases: identify, then install.** The peer's identity is read
     /// first, while the socket exists — `LOCAL_PEERPID` is a property of the
@@ -342,22 +389,38 @@ actor FDVendingServer {
     /// reported, with no suspension in between — which is what
     /// `reportSupersession` relies on.
     ///
-    /// The identify phase suspends only when a read fails and is retried
-    /// (`identifyPeer(onSocket:)`), and the actor serves other calls while it
-    /// waits. The connection being replaced stays current meanwhile — a vend in
-    /// that window goes to it and reports its identity, so every recipient
-    /// recorded is still exact. **An adoption that suspended installs nothing
-    /// if another began, or the server stopped, while it waited:** it closes
-    /// its descriptor instead. Installing it would supersede a connection that
-    /// arrived after it, handing the sidecar back to an older socket when the
-    /// later adoption is the one its peer is using. Nothing was vended over
-    /// the dropped descriptor, since it was never current, so it leaves
-    /// nothing to arbitrate.
-    func adoptConnection(fd: Int32) async {
-        adoptionsBegun &+= 1
-        let adoption = adoptionsBegun
-        let identity = await identifyPeer(onSocket: fd)
-        guard adoption == adoptionsBegun else {
+    /// The identify phase suspends — every read runs off the actor
+    /// (`readPeerIdentityOffTheActor(_:)`), and a failed one waits before it
+    /// is retried — and the actor serves other calls meanwhile. The connection
+    /// being replaced stays current throughout: a vend in that window goes to
+    /// it and reports its identity, so every recipient recorded is still exact.
+    ///
+    /// **Adoptions install in accept order, and none after `stop`.** The
+    /// accept thread starts one task per connection, and those tasks reach the
+    /// actor in no fixed order, so the order has to travel with the
+    /// connection: that is the stamp. An adoption installs only while no
+    /// adoption stamped after it has begun, checked on arrival and again after
+    /// every suspension, and only while the server has not stopped. Otherwise
+    /// it closes its descriptor, installs nothing and reports nothing.
+    /// Installing it would supersede a connection accepted after it — handing
+    /// the sidecar back to an older socket when the later one is the socket
+    /// its peer is using, and, with a different app on each, reporting the
+    /// live app as departed — or put a connection into a server that has
+    /// stopped. Nothing was vended over a refused descriptor, since it was
+    /// never current, so it leaves nothing to arbitrate.
+    func adoptConnection(fd: Int32, stamp: UInt64) async {
+        guard !stopped, stamp > latestAdoptionBegun else {
+            let overtakenBy = stopped ? "the server's stop" : "a connection accepted after it"
+            logger.notice("""
+                FD vending client (fd \(fd, privacy: .public)) reached the server after \
+                \(overtakenBy, privacy: .public); closing it unadopted
+                """)
+            Darwin.close(fd)
+            return
+        }
+        latestAdoptionBegun = stamp
+        let identity = await identifyPeer(onSocket: fd, stamp: stamp)
+        guard isLatestAdoption(stamp) else {
             logger.notice("""
                 FD vending client (fd \(fd, privacy: .public)) was still being identified when a \
                 later connection or a stop overtook it; closing it unadopted
@@ -402,9 +465,18 @@ actor FDVendingServer {
         reportSupersession(of: superseded)
     }
 
+    /// Whether the adoption stamped `stamp` may still install: no adoption
+    /// stamped after it has begun, and the server has not stopped.
+    /// Synchronous, so a caller that acts on the answer without an `await`
+    /// acts on a fact still true.
+    private func isLatestAdoption(_ stamp: UInt64) -> Bool {
+        !stopped && latestAdoptionBegun == stamp
+    }
+
     /// The identity of the peer on `fd`, read up to `identityAttempts` times
     /// with `identityRetryInterval` between reads, or nil when no read
-    /// answered.
+    /// answered — or when the adoption stamped `stamp` was overtaken, in
+    /// which case the caller installs nothing and the answer is moot.
     ///
     /// **A failed read is retried because its cost lasts as long as the
     /// connection does.** Every descriptor vended over an unidentified
@@ -416,13 +488,16 @@ actor FDVendingServer {
     /// that cannot succeed — the peer already gone — costs the retries and
     /// then adopts the connection unidentified, exactly as one read would.
     ///
-    /// The first read is synchronous and suspends nothing, so a peer
-    /// identified at once is adopted in one uninterrupted stretch on the
-    /// actor. Cancellation ends the retries, and the connection is adopted
-    /// unidentified.
-    private func identifyPeer(onSocket fd: Int32) async -> ProcessIdentity? {
+    /// The adoption's standing is re-checked after every suspension, the
+    /// reads' and the waits' alike, and an overtaken adoption stops reading:
+    /// it will install nothing, so a further read would be two `ps` spawns for
+    /// a descriptor about to be closed. Cancellation ends the retries, and the
+    /// connection is adopted unidentified.
+    private func identifyPeer(onSocket fd: Int32, stamp: UInt64) async -> ProcessIdentity? {
         for attempt in 1...identityAttempts {
-            if let identity = peerIdentity(fd) {
+            let answer = await readPeerIdentityOffTheActor(fd)
+            guard isLatestAdoption(stamp) else { return nil }
+            if let identity = answer {
                 if attempt > 1 {
                     logger.notice("""
                         FD vending client (fd \(fd, privacy: .public)) identified as pid \
@@ -438,8 +513,29 @@ actor FDVendingServer {
             } catch {
                 break
             }
+            guard isLatestAdoption(stamp) else { return nil }
         }
         return nil
+    }
+
+    /// One `peerIdentity` read of `fd`, run on a GCD thread while this actor
+    /// is free.
+    ///
+    /// A read spawns `ps` twice and waits for both. Run inline, it would hold
+    /// the actor for both spawns — every send, `currentClientIdentity()` and
+    /// `receiveLoopExited` queued behind a connection that is not even current
+    /// yet — and pin one of the cooperative pool's few threads while it waits,
+    /// the reason `AppLivenessArbiter.verdictOffThePool(for:)` gives for its
+    /// own check. The descriptor stays valid for the read: nothing but this
+    /// adoption closes it before it is installed.
+    private func readPeerIdentityOffTheActor(_ fd: Int32) async -> ProcessIdentity? {
+        let readIdentity = peerIdentity
+        return await withCheckedContinuation { (continuation: CheckedContinuation<ProcessIdentity?, Never>) in
+            // `.userInitiated`, not `.utility`: utility work is throttled onto the efficiency cores under load.
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: readIdentity(fd))
+            }
+        }
     }
 
     /// Reports the app whose connection `adoptConnection` just replaced, when
@@ -519,11 +615,12 @@ actor FDVendingServer {
 
     /// Stop the listener and drop any active client. Idempotent. Closing the
     /// listener fd makes the accept thread's blocked `accept()` return -1,
-    /// which exits the thread. An adoption still retrying its identity read
-    /// finds `adoptionsBegun` moved and closes its descriptor rather than
-    /// installing it into a stopped server.
+    /// which exits the thread. A stopped server adopts nothing more: an
+    /// adoption still identifying its peer, or one accepted before the stop
+    /// whose task reaches the actor after it, closes its descriptor rather
+    /// than installing it (`adoptConnection(fd:stamp:)`).
     func stop() {
-        adoptionsBegun &+= 1
+        stopped = true
         if listenerFD >= 0 { Darwin.close(listenerFD); listenerFD = -1 }
         if let path = socketPath { _ = unlink(path); socketPath = nil }
         disconnect()

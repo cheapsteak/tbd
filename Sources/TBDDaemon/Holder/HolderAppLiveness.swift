@@ -108,7 +108,8 @@ struct AppLivenessArbiter: Sendable {
     /// verdict arrives.
     func verdictOffThePool(for identity: ProcessIdentity?) async -> AppLivenessVerdict {
         await withCheckedContinuation { (continuation: CheckedContinuation<AppLivenessVerdict, Never>) in
-            DispatchQueue.global(qos: .utility).async {
+            // `.userInitiated`, not `.utility`: utility work is throttled onto the efficiency cores under load.
+            DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(returning: self.verdict(for: identity))
             }
         }
@@ -390,13 +391,18 @@ actor SidecarDisconnectArbiter {
     /// strength of this watch going on. So the round ends the watch only if
     /// the departure count is still the one it read before asking anything,
     /// compared with no suspension between the comparison and the entry's
-    /// removal; otherwise it runs again at once, on the state that departure
-    /// left. Ending on a death is unconditional: the take-back selects by
-    /// identity, so it covers every connection that app ever had.
+    /// removal; otherwise the watch goes on, and the next round reads the
+    /// state that departure left. Ending on a death is unconditional: the
+    /// take-back selects by identity, so it covers every connection that app
+    /// ever had.
     ///
-    /// A round that answers a departure restarts the schedule from the front
+    /// **Every round that does not end sleeps before the next**, whatever
+    /// kept it from ending, for the schedule's current delay. So a watch runs
+    /// at most one check per scheduled delay however fast its app churns. A
+    /// round that answers a departure restarts the schedule from the front
     /// only when `RecheckSchedule.mayRestart(afterSleeping:)` allows it, and
-    /// otherwise keeps the progression it was on. The watch's own start is a
+    /// otherwise keeps the progression it was on — so the front, too, comes
+    /// round at most once per ceiling of sleep. The watch's own start is a
     /// front, so the window begins with the watch.
     private func watch(_ app: ProcessIdentity) async -> SidecarDisconnectRuling {
         // Every way out ends the watch, so the next departure starts a new
@@ -460,8 +466,9 @@ actor SidecarDisconnectArbiter {
             }
             let held = await sessionsHeld(app)
             let reconnected = await connectedApp() == app
-            if reconnected || held == 0 {
-                guard (departuresReported[app] ?? 0) == departuresAnswered else { continue }
+            let readAnEnding = reconnected || held == 0
+            let departedSinceTheRoundBegan = (departuresReported[app] ?? 0) != departuresAnswered
+            if readAnEnding, !departedSinceTheRoundBegan {
                 if reconnected {
                     Self.logger.notice(
                         """
@@ -482,6 +489,24 @@ actor SidecarDisconnectArbiter {
                     """)
                 return SidecarDisconnectRuling(
                     ending: .holdsNothing, verdict: verdict, checks: checks, reclaimed: [])
+            }
+            if readAnEnding {
+                // A departure of this app arrived while the round read what it
+                // would have ended on, so the watch goes on — and like every
+                // round that does not end, this one sleeps first. Churn is
+                // exactly what reaches this line: an app dropping and
+                // reconnecting, or two instances taking the sidecar from each
+                // other, report a departure inside nearly every round, and a
+                // round that skipped its sleep for each would run its `ps` pair
+                // back to back for as long as the churn lasts, past both the
+                // backoff and `mayRestart`'s limit.
+                let readAs = reconnected ? "connected again" : "holding nothing"
+                Self.logger.debug(
+                    """
+                    app pid \(app.pid, privacy: .public) left the sidecar again while its watch \
+                    read it as \(readAs, privacy: .public); the watch goes on, at its next \
+                    scheduled re-check
+                    """)
             }
             if !announced {
                 announced = true
