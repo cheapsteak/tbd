@@ -87,7 +87,9 @@ struct WorktreeArchiveDeletionQueueTests {
         #expect(!registered.contains { $0.path == harness.worktreePath })
     }
 
-    @Test func theFallbackRemovalArmsItsOwnRaisedTimeout() async throws {
+    // `.fastPassBounded` because the control's git cannot end on its own (see
+    // `GitConfigReadBlock`): if the deadline never fired, this would hang.
+    @Test(.fastPassBounded) func theFallbackRemovalArmsItsOwnRaisedTimeout() async throws {
         let harness = try await ArchiveHarness.make()
         defer { harness.cleanUp() }
 
@@ -96,26 +98,39 @@ struct WorktreeArchiveDeletionQueueTests {
         // constant — must go red. This gives the archive a `GitManager` whose
         // INSTANCE deadline no real subprocess can meet: if the fallback leg
         // stopped passing its own raised timeout, `git worktree remove` would
-        // be killed and the directory would survive.
+        // fail with `GitTimeoutError`.
         //
-        // `runBoundedProcess` makes that discriminating rather than racy —
+        // `runBoundedProcess` makes that failure certain rather than racy —
         // its completion path compares real elapsed time against the armed
         // deadline and reports `.timedOut` even when every armer was late, so
-        // a 1 ms deadline cannot accidentally pass.
+        // a 1 ms deadline cannot accidentally pass. It does not make the
+        // directory certain: a late kill can land after git has already
+        // deleted the tree. So nothing below infers the outcome from whether
+        // git won that race.
         let impatient = GitManager(subprocessTimeout: .milliseconds(1))
 
         // Control: prove that deadline really is fatal, on a throwaway
         // worktree of the same repo. Without this, a fallback that silently
         // did nothing would look identical to one that succeeded.
+        //
+        // The control's git is held at its config read, before it touches the
+        // worktree, so only the deadline's kill can end it and the worktree
+        // surviving is certain. Unheld, it was a race the kill could lose: on
+        // a loaded runner `git worktree remove` deleted the control's
+        // one-file tree before the SIGTERM arrived.
         let control = (harness.tempDir.path as NSString).appendingPathComponent("control-wt")
         try await shell(
             "git worktree add \(control) -b control-branch",
             at: URL(fileURLWithPath: harness.repoPath))
+        let block = try GitConfigReadBlock(repoPath: harness.repoPath, fifoDirectory: harness.tempDir)
         await #expect(throws: GitTimeoutError.self) {
             try await impatient.worktreeRemove(
                 repoPath: harness.repoPath, worktreePath: control)
         }
         #expect(FileManager.default.fileExists(atPath: control))
+        // Before the archive, whose own git would otherwise wait out its whole
+        // raised deadline on the same include.
+        try block.release()
 
         // Force the archive onto the fallback leg: occupy the queue-dir name
         // with a regular file so `enqueue` cannot create `.deleting/`.
@@ -123,11 +138,23 @@ struct WorktreeArchiveDeletionQueueTests {
         let queueDir = WorktreeDeletionQueue().queueDir(forPool: pool)
         try "not a directory".write(toFile: queueDir, atomically: true, encoding: .utf8)
 
-        let lifecycle = WorktreeLifecycle(
+        let observed = ObservedRemoval()
+        var lifecycle = WorktreeLifecycle(
             db: harness.db, git: impatient,
             tmux: TmuxManager(dryRun: true), hooks: HookResolver())
+        lifecycle.onWorktreeRemoved = { _, path, _ in
+            await observed.record(
+                path: path,
+                existedAtCallTime: FileManager.default.fileExists(atPath: path)
+            )
+        }
         try await lifecycle.archiveWorktree(worktreeID: harness.worktreeID)
 
+        // The fallback fires `onWorktreeRemoved` only when `worktreeRemove`
+        // returned rather than threw, so this is the assertion a regression
+        // cannot slip past: under the instance deadline the call throws every
+        // time, as the control showed, even when git finished deleting first.
+        #expect(await observed.paths == [harness.worktreePath])
         #expect(!FileManager.default.fileExists(atPath: harness.worktreePath))
     }
 
@@ -181,6 +208,65 @@ private actor ObservedRemoval {
     func record(path: String, existedAtCallTime: Bool) {
         paths.append(path)
         if existedAtCallTime { everSawSurvivingPath = true }
+    }
+}
+
+/// Holds every `git` in one repository at its config read, before it can
+/// touch a worktree: the repository's config includes a FIFO nobody writes
+/// to, and opening a FIFO for reading waits for a writer. Such a git ends only
+/// when it is killed, so a deadline's effect can be read without racing git's
+/// own progress.
+private final class GitConfigReadBlock {
+    private struct FIFOFailure: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    private let configURL: URL
+    private let originalConfig: Data
+    private let fifoPath: String
+
+    init(repoPath: String, fifoDirectory: URL) throws {
+        configURL = URL(fileURLWithPath: repoPath).appendingPathComponent(".git/config")
+        originalConfig = try Data(contentsOf: configURL)
+        fifoPath = fifoDirectory.appendingPathComponent("config-read-block").path
+        guard mkfifo(fifoPath, 0o600) == 0 else {
+            throw FIFOFailure(description: "mkfifo failed: \(String(cString: strerror(errno)))")
+        }
+        // Written directly rather than through `git config`: once the include
+        // is in place, any git in this repository waits on it, including one
+        // that would take it out again.
+        try (originalConfig + Data("[include]\n\tpath = \(fifoPath)\n".utf8))
+            .write(to: configURL, options: .atomic)
+    }
+
+    /// Restores the config, then hands a malformed config line to any git
+    /// still waiting on the FIFO, so it exits on the parse error instead of
+    /// carrying on with its command or waiting forever. Normally none is: the
+    /// deadline's kill ended it. One the kill missed would be — a git started
+    /// through a `git` that forks the real binary rather than exec'ing it, for
+    /// instance, where the kill reaches only the parent.
+    func release() throws {
+        try originalConfig.write(to: configURL, options: .atomic)
+        // ENXIO here means no git is waiting, which is the expected case.
+        let writer = open(fifoPath, O_WRONLY | O_NONBLOCK)
+        guard writer >= 0 else { return }
+        defer { close(writer) }
+        // A git that exits between the open and the write would otherwise
+        // raise SIGPIPE and end the whole test process. Set on this
+        // descriptor only, so the test runner's signal disposition is left
+        // alone, and the write reports EPIPE instead.
+        guard fcntl(writer, F_SETNOSIGPIPE, 1) == 0 else {
+            throw FIFOFailure(description: "F_SETNOSIGPIPE failed: \(String(cString: strerror(errno)))")
+        }
+        let written = "[\n".withCString { write(writer, $0, 2) }
+        let writeErrno = errno
+        // Two bytes is under PIPE_BUF, so the write is all or nothing. EPIPE
+        // means the waiting git went away after the open: no git is left
+        // waiting, which is what this call is for.
+        guard written == 2 || (written < 0 && writeErrno == EPIPE) else {
+            let reason = written < 0 ? String(cString: strerror(writeErrno)) : "short write"
+            throw FIFOFailure(description: "FIFO write returned \(written) of 2 bytes: \(reason)")
+        }
     }
 }
 
