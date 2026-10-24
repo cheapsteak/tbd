@@ -950,6 +950,16 @@ public final class Daemon: Sendable {
             Self.writeClaudePlugin(sessionModFeatures: startupSessionModFeatures)
         }
 
+        // 5c. Remove runtime files no current build writes, so copies an older
+        // build left under `~/tbd/runtime` don't accumulate. Non-fatal: a
+        // removal that fails is logged and startup continues. Skipped in mock
+        // mode, like the plugin write above: a mock daemon skips live
+        // reconciliation, and its isolated `TBD_HOME` holds no older build's
+        // files.
+        if mockMode == nil {
+            RetiredRuntimeFiles().removeAll()
+        }
+
         // 6. Initialize state subscriptions (before lifecycle/router so they can broadcast)
         let subs = StateSubscriptionManager()
         self.subscriptions = subs
