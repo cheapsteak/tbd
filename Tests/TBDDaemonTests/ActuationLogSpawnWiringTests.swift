@@ -262,8 +262,7 @@ struct ActuationLogSpawnWiringTests {
         let logPath = try makeLogPath()
         let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
 
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false)
+        let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         #expect(result == .ok)
 
         let written = try rows(at: logPath)
@@ -287,57 +286,9 @@ struct ActuationLogSpawnWiringTests {
         let logPath = try makeLogPath()
         let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
 
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false)
+        let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         #expect(result == .notEligible(reason: "Terminal is pinned keep-warm"))
         #expect(try rows(at: logPath).isEmpty)
-    }
-
-    /// The pending-input veto is a rail like any other on this path: it refuses
-    /// BEFORE the request row is written, so a session the rail saved leaves no
-    /// trace of an act that never happened.
-    @Test("the pending-input veto refuses the merge park, and writes no row")
-    func mergeParkRefusedByPendingInputWritesNothing() async throws {
-        let fixture = try await makeParkable()
-        let logPath = try makeLogPath()
-        let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
-
-        // The session came to rest, then was typed into a minute later — the
-        // keystrokes are still sitting unsent in its composer.
-        let atRest = Date(timeIntervalSince1970: 1_700_000_000)
-        try await fixture.db.terminals.setActivityState(
-            id: fixture.terminalID, activityState: .idle, source: .derived, observedAt: atRest)
-        let tracker = InputActivityTracker(now: { atRest.addingTimeInterval(60) })
-        tracker.recordInput(paneID: "%0")
-        await coordinator.setInputActivity(tracker)
-
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: true)
-        #expect(result == .notEligible(reason: "Terminal has unsent typed input"))
-        #expect(try rows(at: logPath).isEmpty)
-        #expect(try await fixture.db.terminals.get(id: fixture.terminalID)?.hibernatedAt == nil)
-    }
-
-    /// The same fixture with the flag OFF parks and records the act — today's
-    /// behavior, unchanged for every install that has not opted into the soak.
-    @Test("with the veto off the same pending input still parks")
-    func mergeParkWithVetoOffParksDespitePendingInput() async throws {
-        let fixture = try await makeParkable()
-        let logPath = try makeLogPath()
-        let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
-
-        let atRest = Date(timeIntervalSince1970: 1_700_000_000)
-        try await fixture.db.terminals.setActivityState(
-            id: fixture.terminalID, activityState: .idle, source: .derived, observedAt: atRest)
-        let tracker = InputActivityTracker(now: { atRest.addingTimeInterval(60) })
-        tracker.recordInput(paneID: "%0")
-        await coordinator.setInputActivity(tracker)
-
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false)
-        #expect(result == .ok)
-        #expect(try rows(at: logPath).count == 2)
-        #expect(try await fixture.db.terminals.get(id: fixture.terminalID)?.hibernatedAt != nil)
     }
 
     @Test("an unwritable record skips the merge park — the session stays live")
@@ -345,8 +296,7 @@ struct ActuationLogSpawnWiringTests {
         let fixture = try await makeParkable()
         let coordinator = makeCoordinator(db: fixture.db, logPath: try makeUnwritablePath())
 
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false)
+        let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         guard case .notEligible(let reason) = result else {
             Issue.record("expected the park to be skipped, got \(result)")
             return

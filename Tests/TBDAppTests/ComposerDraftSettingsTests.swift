@@ -77,6 +77,26 @@ struct ComposerDraftSettingsTests {
         }
     }
 
+    /// While automatic parking holds the feature on, the daemon reports it,
+    /// and Settings greys the toggle with this caption. The flag follows the
+    /// daemon, false until capabilities arrive.
+    @Test func requiredByAutoParkFollowsCapabilities() async {
+        await withAppState { state in
+            #expect(state.composerDraftRequiredByAutoPark == false)
+            var held = Self.capabilities(composerDraft: true)
+            held.composerDraftRequiredByAutoPark = true
+            state.daemonCapabilities = held
+            #expect(state.composerDraftRequiredByAutoPark == true)
+            #expect(state.composerDraftEnabled == true)
+            state.daemonCapabilities = Self.capabilities(composerDraft: false)
+            #expect(state.composerDraftRequiredByAutoPark == false)
+        }
+    }
+
+    @Test func theCaptionSaysWhatHoldsTheToggle() {
+        #expect(AppState.composerDraftRequiredByAutoParkCaption == "On while auto-hibernation is on")
+    }
+
     @Test func computedFlagFollowsCapabilities() async {
         await withAppState { state in
             #expect(state.daemonCapabilities == nil)

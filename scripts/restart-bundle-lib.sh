@@ -86,6 +86,38 @@ json_escape_string() {
     printf '%s' "${1-}" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
+# The source file whose SchemaEpoch.current a build records, relative to the
+# repo root.
+SCHEMA_EPOCH_SOURCE="Sources/TBDShared/SchemaEpoch.swift"
+
+# Print the schema epoch the tree at <repo_root> carries: the integer in the
+# one `public static let current = <N>` line of SchemaEpoch.swift.
+#
+#   read_schema_epoch <repo_root>
+#
+# Strict on purpose. The daemon drops a retired column only once the bundle
+# kept for rollback records an epoch at or past the column's, so a bundle
+# stamped without one holds every drop until the next update replaces it.
+# Fails, naming the file, when the file is missing or the line is not exactly
+# one plain decimal declaration.
+read_schema_epoch() {
+    local repo_root="${1-}"
+    local file="$repo_root/$SCHEMA_EPOCH_SOURCE"
+    local values count
+
+    if [ ! -f "$file" ]; then
+        echo "error: $file is missing — cannot record the schema epoch in the build identity" >&2
+        return 1
+    fi
+    values="$(sed -n -E 's/^[[:space:]]*public static let current = (0|[1-9][0-9]*)[[:space:]]*$/\1/p' "$file")"
+    count="$(printf '%s' "$values" | grep -c '^' || true)"
+    if [ "$count" != 1 ]; then
+        echo "error: $file has no single 'public static let current = <integer>' line — cannot record the schema epoch in the build identity" >&2
+        return 1
+    fi
+    printf '%s\n' "$values"
+}
+
 # Write TBDBuildIdentity.json into a build directory, describing the tree
 # <repo_root> is at when this is called.
 #
@@ -102,19 +134,24 @@ json_escape_string() {
 # mismatch there would misdescribe that clone indefinitely, with no later
 # write to correct it until the clone's next successful build.
 #
-# Returns non-zero without writing anything in two cases. When <repo_root> is
+# The sidecar also records the tree's schema epoch (read_schema_epoch above),
+# which the daemon compares against each retired column before dropping it.
+#
+# Returns non-zero without writing anything in three cases. When <repo_root> is
 # not a git checkout, a build that cannot be described gets no sidecar rather
-# than a wrong one, and the loader falls back as the design says. When
-# <build_dir> does not exist yet — a tree that has never been built — the
-# stamp is DEFERRED rather than forced: SwiftPM creates `.build/<config>` as a
-# symlink to `.build/<triple>/<config>` and skips that step when a real
-# directory already occupies the path, so creating one here would send the
-# binaries somewhere the installer never looks. Callers stamp again after the
-# build for that case.
+# than a wrong one, and the loader falls back as the design says. When the
+# tree's schema epoch cannot be read, the error names the file: a bundle
+# without an epoch holds every column drop, so a missing one has to be loud
+# rather than silently stamped. When <build_dir> does not exist yet — a tree
+# that has never been built — the stamp is DEFERRED rather than forced:
+# SwiftPM creates `.build/<config>` as a symlink to `.build/<triple>/<config>`
+# and skips that step when a real directory already occupies the path, so
+# creating one here would send the binaries somewhere the installer never
+# looks. Callers stamp again after the build for that case.
 write_build_identity() {
     local repo_root="${1-}"
     local build_dir="${2-}"
-    local commit short_commit branch dirty_output dirty built_at sidecar
+    local commit short_commit branch dirty_output dirty built_at sidecar schema_epoch
 
     if [ -z "$repo_root" ] || [ -z "$build_dir" ]; then
         echo "error: write_build_identity needs a repo root and a build dir" >&2
@@ -123,6 +160,10 @@ write_build_identity() {
 
     if ! commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)" || [ -z "$commit" ]; then
         echo "warning: $repo_root has no git HEAD — skipping build identity" >&2
+        return 1
+    fi
+    if ! schema_epoch="$(read_schema_epoch "$repo_root")"; then
+        echo "error: no build identity stamped for $repo_root" >&2
         return 1
     fi
     short_commit="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || printf '%s' "${commit:0:7}")"
@@ -152,7 +193,8 @@ write_build_identity() {
   "branch": "$(json_escape_string "$branch")",
   "builtAt": "$(json_escape_string "$built_at")",
   "sourceWorktree": "$(json_escape_string "$repo_root")",
-  "dirty": $dirty
+  "dirty": $dirty,
+  "schemaEpoch": $schema_epoch
 }
 EOF
 }

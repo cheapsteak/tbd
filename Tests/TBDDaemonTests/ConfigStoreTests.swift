@@ -143,19 +143,6 @@ struct ConfigStoreTests {
         #expect(cfg.scratchProfileOverrideID == nil)
     }
 
-    @Test func hibernateInputVetoDefaultsToFalse() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let cfg = try await db.config.get()
-        #expect(cfg.hibernateInputVetoEnabled == false)
-    }
-
-    @Test func setAndGetHibernateInputVetoEnabled() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setHibernateInputVeto(enabled: true)
-        let cfg = try await db.config.get()
-        #expect(cfg.hibernateInputVetoEnabled == true)
-    }
-
     /// `delivery_verification_enabled` (v69) ships default OFF: the re-check
     /// acts on no user gesture and its retry types into a live session.
     @Test func deliveryVerificationDefaultsToFalse() async throws {
@@ -177,14 +164,6 @@ struct ConfigStoreTests {
         try await db.config.setDeliveryVerification(enabled: false)
         let cfg = try await db.config.get()
         #expect(cfg.deliveryVerificationEnabled == false)
-    }
-
-    @Test func setHibernateInputVetoToFalse() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setHibernateInputVeto(enabled: true)
-        try await db.config.setHibernateInputVeto(enabled: false)
-        let cfg = try await db.config.get()
-        #expect(cfg.hibernateInputVetoEnabled == false)
     }
 
     /// `auto_trust_worktrees` (v66) ships default ON, unlike its soak-flag

@@ -153,12 +153,7 @@ public final class TBDDatabase: Sendable {
     /// the migration must still be allowed to proceed even if e.g. the disk
     /// is full or the parent directory isn't writable.
     internal static func takePreMigrationSnapshot(pool: DatabasePool, path: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        let stamp = formatter.string(from: Date())
-        let snapshotPath = "\(path).pre-migration.\(stamp)"
+        let snapshotPath = "\(path).pre-migration.\(snapshotTimestamp(for: Date()))"
         do {
             // VACUUM INTO requires autocommit mode — it cannot run inside a
             // transaction. `pool.write` wraps the closure in a deferred
@@ -174,6 +169,26 @@ public final class TBDDatabase: Sendable {
                 "Pre-migration snapshot failed at \(snapshotPath, privacy: .public): \(String(describing: error), privacy: .public)"
             )
         }
+    }
+
+    /// The UTC suffix every database snapshot carries, e.g.
+    /// `20260513T143055Z` in `state.db.pre-migration.20260513T143055Z`.
+    internal static func snapshotTimestamp(for date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: date)
+    }
+
+    /// Drop the retired columns the kept rollback bundle no longer uses. Runs
+    /// once per daemon start, after migrations and before anything else
+    /// touches the database; see `RetiredColumnReconciler`.
+    @discardableResult
+    func reconcileRetiredColumns(
+        _ reconciler: RetiredColumnReconciler, at date: Date = Date()
+    ) async -> RetiredColumnReconciler.Report {
+        await reconciler.run(writer: writer, at: date)
     }
 
     /// Test-only accessor: allows migration tests to run migrations up to a
