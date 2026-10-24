@@ -4,7 +4,8 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// Tier 1: in-memory database and virtual time only.
+/// Tier 1: in-memory database and virtual time only. Every scheduler runs on
+/// `GateExecutor`, which changes only which thread runs it.
 @Suite("Session recapture scheduler", .clockDriven)
 struct SessionRecaptureSchedulerTests {
     @Test func persistsDetectedSessionIDAfterFiveSeconds() async throws {
@@ -18,6 +19,7 @@ struct SessionRecaptureSchedulerTests {
                 guard target == .tmuxPane(server: "tbd-recapture", paneID: "%7") else { return nil }
                 return detectedSessionID
             },
+            executor: GateExecutor.shared,
             clock: clock
         )
 
@@ -41,6 +43,7 @@ struct SessionRecaptureSchedulerTests {
             db: fixture.db,
             tmux: TmuxManager(dryRun: true),
             captureSessionID: { _ in nil },
+            executor: GateExecutor.shared,
             clock: clock
         )
 
@@ -65,6 +68,7 @@ struct SessionRecaptureSchedulerTests {
             db: fixture.db,
             tmux: TmuxManager(dryRun: true),
             captureSessionID: { _ in capture.capture() },
+            executor: GateExecutor.shared,
             clock: clock)
 
         let recapture = scheduler.schedule(
@@ -103,6 +107,7 @@ struct SessionRecaptureSchedulerTests {
             db: fixture.db,
             tmux: TmuxManager(dryRun: true),
             captureSessionID: { _ in capture.capture() },
+            executor: GateExecutor.shared,
             clock: clock)
 
         let recapture = scheduler.schedule(
@@ -136,7 +141,8 @@ struct SessionRecaptureSchedulerTests {
     /// A holder target reaches the detector unchanged and persists exactly as a
     /// pane target does. The scheduler carries the target; it never inspects it,
     /// so the fact worth pinning is that the case survives the hop and the write
-    /// still lands.
+    /// still lands. It also pins that the injected executor carries the detector
+    /// hop off the cooperative pool.
     @Test func holderChildTargetReachesTheDetectorAndPersists() async throws {
         let fixture = try await makeFixture()
         let clock = EventDrivenTestClock()
@@ -147,8 +153,10 @@ struct SessionRecaptureSchedulerTests {
             tmux: TmuxManager(dryRun: true),
             captureSessionID: { target in
                 seen.append(target)
+                seen.recordCurrentThread()
                 return detectedSessionID
             },
+            executor: GateExecutor.shared,
             clock: clock
         )
 
@@ -161,6 +169,10 @@ struct SessionRecaptureSchedulerTests {
         try await clock.requireAdvanceWhenArmed(by: .seconds(5))
         await recapture.value
         #expect(seen.all == [.holderChild(pid: 4242)])
+        #expect(
+            seen.threadName == GateExecutor.threadName,
+            "the detector ran on \(seen.threadName ?? "an unnamed thread"), not the injected executor"
+        )
         let updated = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
         #expect(updated.claudeSessionID == detectedSessionID)
     }
@@ -221,10 +233,23 @@ private final class BlockingSessionCapture: @unchecked Sendable {
     }
 }
 
-/// Lock-guarded record of the targets a scheduler handed its detector closure.
+/// Lock-guarded record of the targets a scheduler handed its detector closure,
+/// and the thread the closure ran on.
 private final class ObservedTargets: @unchecked Sendable {
     private let lock = NSLock()
     private var targets: [SessionRecaptureTarget] = []
+    private var thread: String?
+
+    /// Synchronous because `Thread.current` is unavailable across suspension
+    /// points.
+    func recordCurrentThread() {
+        let name = Thread.current.name
+        lock.withLock { thread = name }
+    }
+
+    var threadName: String? {
+        lock.withLock { thread }
+    }
 
     func append(_ target: SessionRecaptureTarget) {
         lock.withLock { targets.append(target) }
