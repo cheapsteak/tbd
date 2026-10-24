@@ -1446,9 +1446,9 @@ struct ModelProfileSpawnTests {
 
     /// The same swap of a session spawned without the feature — flag off, no
     /// spawn record — types nothing either and ends by the same SIGTERM. A
-    /// swap runs no screen check, so a typed `/exit` would submit whatever
-    /// draft the box holds; no Escape, Ctrl+C or `/exit` reaches the pane, and
-    /// the only signal is the one to the Claude pid under the pane's shell.
+    /// typed `/exit` would submit whatever draft the box holds; no Escape,
+    /// Ctrl+C or `/exit` reaches the pane, and the only signal is the one to
+    /// the Claude pid under the pane's shell.
     @Test("in-place swap of a legacy session: SIGTERM to Claude, no keys")
     func legacyTmuxSwapSendsNoKeys() async throws {
         let sessionsDir = try makeSessionsDir()

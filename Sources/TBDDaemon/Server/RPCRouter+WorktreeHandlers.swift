@@ -792,9 +792,20 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Set or clear a worktree's park-on-merge override. An override that is
+    /// true is automatic parking, which holds the composer-draft feature on,
+    /// so the write re-syncs the plugin when it changes the features on, and
+    /// tells the app when it changes what Settings shows for the feature.
     func handleWorktreeSetAutoHibernate(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeSetAutoHibernateParams.self, from: paramsData)
-        try await db.worktrees.setAutoHibernateOnMerge(id: params.worktreeID, value: params.enabled)
+        let composerDraftChanged = try await writeAffectingAutomaticParking {
+            try await db.worktrees.setAutoHibernateOnMerge(
+                id: params.worktreeID, value: params.enabled)
+        }
+        if composerDraftChanged {
+            // The config-change channel, so the app reloads its capabilities.
+            subscriptions.broadcast(delta: .modelProfilesChanged)
+        }
         return .ok()
     }
 

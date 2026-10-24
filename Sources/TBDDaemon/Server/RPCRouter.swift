@@ -1041,8 +1041,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetAutoHibernate(request.paramsData)
             case RPCMethod.configSetControlMode:
                 return try await handleConfigSetControlMode(request.paramsData)
-            case RPCMethod.configSetHibernateInputVeto:
-                return try await handleConfigSetHibernateInputVeto(request.paramsData)
             case RPCMethod.configSetDeliveryVerification:
                 return try await handleConfigSetDeliveryVerification(request.paramsData)
             case RPCMethod.configSetQueuedPrompt:
@@ -1220,7 +1218,6 @@ public final class RPCRouter: Sendable {
             controlModeEnabled: enabled,
             tmuxVersion: version?.description,
             controlModeSupported: version.map { $0 >= TmuxVersion.controlModeMinimum } ?? false,
-            hibernateInputVetoEnabled: config.hibernateInputVetoEnabled,
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
             deliveryVerificationEnabled: config.deliveryVerificationEnabled,
             autoTrustWorktrees: config.autoTrustWorktrees,
@@ -1252,6 +1249,7 @@ public final class RPCRouter: Sendable {
         result.programStatusEnabled = config.programStatusEnabled
         result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
         result.composerDraftEnabled = config.composerDraftEnabled
+        result.composerDraftRequiredByAutoPark = config.composerDraftRequiredByAutoPark
         result.agentBackgroundEnabled = config.agentBackgroundEnabled
         result.startAdmissionEnabled = config.startAdmissionEnabled
         result.sessionModUsageEnabled = config.sessionModUsageEnabled

@@ -27,15 +27,6 @@ struct TerminalTransportMigratorTests {
 
     static let sessionID = "migrate-me"
 
-    /// A pane whose prompt holds text the person typed and has not sent — the
-    /// fact the park's typed-input rail refuses on, and exactly what a
-    /// park-and-respawn would throw away.
-    static let paneWithTypedInput = """
-        ╭──────────────────────────────╮
-        │ > half-composed prompt       │
-        ╰──────────────────────────────╯
-        """
-
     // MARK: - Fixture
 
     /// Records the ids the migrator asked each operation about, in order.
@@ -188,7 +179,6 @@ struct TerminalTransportMigratorTests {
     /// a value different from `panePID` is something the person started.
     private static func makeFixture(
         holderSpawnable: Bool = true,
-        capturePane: @escaping @Sendable (String, String) -> String = { _, _ in "" },
         panePID: String = "4100",
         paneForegroundPID: Int32? = nil,
         paneSendTarget: (@Sendable (String, String) throws -> PaneSendTarget)? = nil
@@ -201,7 +191,6 @@ struct TerminalTransportMigratorTests {
         let tmux = TmuxManager(
             dryRun: true,
             dryRunRecorder: { tmuxArgv.record($0) },
-            dryRunCapturePane: capturePane,
             dryRunPaneSendTarget: paneSendTarget,
             dryRunPanePID: { _, _ in panePID })
 
@@ -581,35 +570,14 @@ struct TerminalTransportMigratorTests {
     // MARK: - The park's rails
 
     /// The park honours the rails that read live state, and a rail's refusal
-    /// becomes this session's skip reason rather than being overridden.
+    /// becomes this session's skip reason rather than being overridden. The
+    /// transcript-tail rail is the one that reads live state, and it refuses a
+    /// transcript caught mid-write.
     ///
-    /// This is the opposite of the in-place profile swap's policy, and the
-    /// difference is in what the two actions destroy: a swap preserves the
-    /// conversation and interrupts it, while a migration would discard input
-    /// the person typed and has not sent.
-    @Test("a rail refusing the park is reported as skipped, with the rail's reason")
-    func aRailRefusingTheParkIsReportedAsSkipped() async throws {
-        let fixture = try await Self.makeFixture(
-            capturePane: { _, _ in Self.paneWithTypedInput })
-        defer { fixture.tearDown() }
-        let row = try await Self.tmuxRow(fixture)
-
-        let outcome = await fixture.productionMigrator().migrate(terminalID: row.id)
-
-        #expect(outcome == .skipped(reason: "Terminal has unsent typed input"))
-        let after = try #require(try await fixture.db.terminals.get(id: row.id))
-        #expect(after.transport == .tmux, "a refused park still rewrote the row")
-        #expect(!after.isParked, "a refused park left the row parked")
-    }
-
-    /// The transcript-tail rail, the second of the two the park applies before
-    /// it takes the server lock.
-    ///
-    /// Neither this test nor the typed-input one above discriminates `.manual`
-    /// from `.profileSwap`: `honoursLiveRails` gates only the pre-lock reads,
-    /// and `performHibernateReplacementLocked` re-reads both the pane and the
-    /// transcript tail under the lock without consulting the policy, returning
-    /// the same strings. The policy itself is pinned by
+    /// This is the opposite of the in-place profile swap's policy, which
+    /// bypasses that rail: a swap interrupts the conversation and preserves
+    /// it, while a migration that cut a transcript mid-write would leave a
+    /// session the wake cannot resume. The policy itself is pinned by
     /// `theMigrationParkRefusesASuspendedRowThatTheSwapPolicyWouldPark`.
     @Test("a transcript mid-write is reported as skipped with the rail's reason")
     func aTranscriptMidWriteIsReportedAsSkipped() async throws {
@@ -1005,20 +973,19 @@ struct TerminalTransportMigratorTests {
 
     // MARK: - The park half, on its own
 
-    /// `parkForTransportMigration` passes the manual policy, so the rails that
-    /// read live state still apply. Asserted on the park directly as well as
+    /// `parkForTransportMigration` passes the manual policy, so the rail that
+    /// reads live state still applies. Asserted on the park directly as well as
     /// through the migrator, because the policy is the decision this method
     /// exists to make.
     @Test("the migration park honours the live rails")
     func theMigrationParkHonoursTheLiveRails() async throws {
-        let fixture = try await Self.makeFixture(
-            capturePane: { _, _ in Self.paneWithTypedInput })
+        let fixture = try await Self.makeFixture()
         defer { fixture.tearDown() }
-        let row = try await Self.tmuxRow(fixture)
+        let row = try await Self.tmuxRow(fixture, transcriptTail: #"{"type":"user","mess"#)
 
         let result = await fixture.coordinator.parkForTransportMigration(terminalID: row.id)
 
-        #expect(result == .notEligible(reason: "Terminal has unsent typed input"))
+        #expect(result == .notEligible(reason: "Transcript is mid-write; try again shortly"))
     }
 
     /// **The A/B that pins the policy.** `hibernationRefusal`'s `.manual` arm

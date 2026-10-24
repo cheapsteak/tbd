@@ -40,10 +40,6 @@ extension RPCRouter {
             return .ok()
         case .notEligible(let reason):
             return RPCResponse(error: reason)
-        case .draftUnconfirmed(let reason):
-            // The legacy shim has no override to offer, so it reports the
-            // refusal like any other.
-            return RPCResponse(error: ComposerDraftParkGate.unconfirmedRefusal(reason: reason))
         case .notFound:
             return RPCResponse(error: "Terminal not found")
         }

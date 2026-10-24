@@ -125,11 +125,6 @@ public enum RPCErrorCode: String, Sendable {
     /// provider identity is not the required source provider. This includes a
     /// repeated Continue-in-Claude request after the row already became Claude.
     case terminalWrongProvider
-    /// A `terminal.hibernate` was refused because the session was spawned with
-    /// the composer-draft feature and TBD cannot confirm its unsent draft is
-    /// saved. The app asks whether to hibernate anyway, and a yes reissues the
-    /// park with `TerminalHibernateParams.overrideUnconfirmedDraft`.
-    case composerDraftUnconfirmed
     /// An agent start or wake was held by the user's start-admission command
     /// (`~/tbd/hooks/start-admission`). The message is the command's reason.
     /// Nothing was started and nothing is queued: the caller asks again when
@@ -295,7 +290,6 @@ public enum RPCMethod {
     public static let scratchRevive = "scratch.revive"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
-    public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
     public static let configSetClaudeCloud = "config.setClaudeCloud"
@@ -3106,13 +3100,8 @@ public struct ConfigSetScratchProfileOverrideParams: Codable, Sendable {
 /// rails but not keep-warm or idle-time.
 public struct TerminalHibernateParams: Codable, Sendable {
     public let terminalID: UUID
-    /// Park even when TBD can't confirm the session's composer draft is saved,
-    /// which is otherwise refused with `RPCErrorCode.composerDraftUnconfirmed`.
-    /// Set only on the person's explicit "Hibernate anyway". nil == false.
-    public let overrideUnconfirmedDraft: Bool?
-    public init(terminalID: UUID, overrideUnconfirmedDraft: Bool? = nil) {
+    public init(terminalID: UUID) {
         self.terminalID = terminalID
-        self.overrideUnconfirmedDraft = overrideUnconfirmedDraft
     }
 }
 
@@ -3301,15 +3290,6 @@ public struct ConfigSetAutoHibernateParams: Codable, Sendable {
 /// (M5). The gate is `env || flag`; the change applies to newly created
 /// panes, existing attaches are untouched.
 public struct ConfigSetControlModeParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// Params for `config.setHibernateInputVeto` — persist the pending-input veto
-/// for auto-hibernate (machine-interface guard that prevents hibernation of
-/// sessions with typed-but-unsent input). The change applies on the next
-/// hibernation sweep; no daemon restart required.
-public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -4206,10 +4186,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the detected tmux meets the control-mode minimum (>= 3.2).
     /// Computed daemon-side so the app never parses version strings.
     public let controlModeSupported: Bool
-    /// Whether the pending-input veto for auto-hibernate is enabled. Guards
-    /// against hibernating sessions with typed-but-unsent input. Re-evaluated
-    /// by the daemon on every call.
-    public let hibernateInputVetoEnabled: Bool
     /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
     /// default OFF). Re-evaluated by the daemon on every call.
     public let autoCloseSetupEnabled: Bool
@@ -4323,10 +4299,14 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
     /// Resolved through `Config.transcriptPromptAnswerDefault`.
     public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
-    /// Whether composer draft save-and-restore is on
-    /// (`composer_draft_enabled`). Default OFF while it soaks. Resolved
-    /// through `Config.composerDraftDefault`.
+    /// Whether composer draft save-and-restore is on: `Config.composerDraftEnabled`,
+    /// the effective value, which automatic parking holds on whatever the
+    /// stored `composer_draft_enabled` says.
     public var composerDraftEnabled: Bool = Config.composerDraftDefault
+    /// Whether automatic parking is what holds `composerDraftEnabled` on
+    /// (`Config.composerDraftRequiredByAutoPark`). Settings shows the toggle
+    /// on and greyed while it does.
+    public var composerDraftRequiredByAutoPark: Bool = false
     /// Whether the agent background priority command is on (`agent_background_enabled`). Default OFF.
     /// Resolved through `Config.agentBackgroundDefault`.
     public var agentBackgroundEnabled: Bool = Config.agentBackgroundDefault
@@ -4361,7 +4341,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
-                hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
                 autoTrustWorktrees: Bool = true,
@@ -4380,7 +4359,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
-        self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.autoTrustWorktrees = autoTrustWorktrees
@@ -4405,8 +4383,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // conservative "unsupported / unknown version".
         tmuxVersion = try c.decodeIfPresent(String.self, forKey: .tmuxVersion)
         controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
-        // New field for pending-input veto; absent from older daemons defaults to false (soaking).
-        hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
         autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
         // New field for delivery acknowledgement; absent from older daemons defaults to false (soaking).
@@ -4476,6 +4452,10 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
+        // A daemon that does not send it does not hold the feature on for
+        // automatic parking, so nothing greys the toggle.
+        composerDraftRequiredByAutoPark = try c.decodeIfPresent(
+            Bool.self, forKey: .composerDraftRequiredByAutoPark) ?? false
         agentBackgroundEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .agentBackgroundEnabled) ?? Config.agentBackgroundDefault
         startAdmissionEnabled = try c.decodeIfPresent(

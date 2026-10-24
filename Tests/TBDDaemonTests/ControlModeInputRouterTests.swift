@@ -221,7 +221,6 @@ struct ControlModeInputRouterTests {
         // turn; taking the hops off the shared queue is the fix. Drop the
         // `executor:` argument below and this is what goes red.
         let providerThread = DeliveryThreadNameBox()
-        let inputThread = DeliveryThreadNameBox()
         let healthThread = DeliveryThreadNameBox()
         // send-keys replies `%error`, so the health edge fires — and it is
         // reported from inside the correlator actor, one SE-0417 default-actor
@@ -235,7 +234,6 @@ struct ControlModeInputRouterTests {
                 return server == "srv" ? client : nil
             },
             onHealthChange: { _, _, _, _ in healthThread.recordCurrentThread() },
-            onInput: { _ in inputThread.recordCurrentThread() },
             executor: GateExecutor.shared)
 
         let worktreeID = UUID()
@@ -251,9 +249,6 @@ struct ControlModeInputRouterTests {
         #expect(
             providerThread.name == GateExecutor.threadName,
             "the command-client lookup ran on \(providerThread.name ?? "an unnamed thread")")
-        #expect(
-            inputThread.name == GateExecutor.threadName,
-            "delivery resumed on \(inputThread.name ?? "an unnamed thread") after the lookup")
         #expect(
             healthThread.name == GateExecutor.threadName,
             "the health edge fired on \(healthThread.name ?? "an unnamed thread")")
