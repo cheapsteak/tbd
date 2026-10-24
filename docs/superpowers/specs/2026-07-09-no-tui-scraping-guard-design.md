@@ -52,11 +52,6 @@ Sanctioned scrapers (exempt now, refactor later):
   typed-but-unsent composer text (placeholders `"Ask Claude"`, `"Type a message"`,
   `"Try \""`) as a hibernation safety rail. No machine signal exists for "composer
   has pending input".
-- `NightwatchSkillContent.swift` — embedded Python (`DECISION_PAT`, `RATE_PAT`, …)
-  classifies fleet panes by UI strings; runs `tmux capture-pane` from Python inside a
-  Swift string literal. Screen classification is its entire purpose. Longer term this
-  arguably shouldn't live inside TBD at all, but TBD lacks a plugin/extensibility
-  surface for custom workflows today.
 
 The anti-pattern itself (`verifyAndRetrySubmit`, `RPCRouter+TerminalHandlers.swift:1383`)
 still exists on this branch; its removal is in flight on a sibling branch. See
@@ -84,7 +79,7 @@ Custom rule in `.swiftlint.yml`, following the `no_print_in_sources` pattern
   `bypass permissions`. (`Run /login` is deliberately absent: it false-positives
   on TBD's own UI caption `"Run /login once"` in `Models.swift`; the login
   scraper file is excluded wholesale anyway.)
-- `excluded` (each with a why-comment and refactor-later note): the three sanctioned
+- `excluded` (each with a why-comment and refactor-later note): the sanctioned
   scrapers listed above.
 - `message`: infer agent state from hooks, transcript JSONL, control mode, or exit
   codes — never from rendered screen text; see CLAUDE.md.
@@ -105,8 +100,7 @@ to scrutinize.
   (kind `string`), as one alternation with `match_kinds: [identifier, string]`.
 - `excluded`: `TmuxManager.swift` (defines the API), `RPCRouter+TerminalHandlers.swift`
   (verbatim `terminal.read`), `HibernationCoordinator.swift` (display snapshot),
-  `PaneCaptureReplay.swift` (capture-for-replay), `NightwatchSkillContent.swift`
-  (embedded Python).
+  `PaneCaptureReplay.swift` (capture-for-replay).
 
 ### Layer 3: PR-review gate instruction
 
@@ -166,7 +160,6 @@ precedent ships without tests.
 
 ## Out of scope
 
-- Refactoring the three sanctioned scrapers off screen text.
-- A plugin/extensibility surface that would let Nightwatch live outside TBD.
+- Refactoring the sanctioned scrapers off screen text.
 - Guarding `Tests/` — live-tmux tests legitimately assert pane content to verify
   delivery/rendering.

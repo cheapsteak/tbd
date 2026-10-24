@@ -257,26 +257,6 @@ adoption the single gesture already has.
 The actions are unflagged. A gesture that does nothing until somebody asks for
 it needs no switch, which is why "Hibernate now" has never had one.
 
-**They are refused outright while a watch mode is live.** Nightwatch and
-Daywatch never run with the pty-holder transport — on the holder the watch
-desk's liveness check reads an empty tmux window id and leaks one Claude
-session per tick — so the rule is absolute and two doors already enforce it:
-the transport flag refuses to come on while a mode is live, and a mode refuses
-to come on while the holder hazard is. This gesture *creates* holder-backed
-sessions, which makes it the third door, and it is guarded in the same
-vocabulary ([spec](2026-09-22-nightwatch-deprecation-holder-gate-design.md)).
-
-The refusal is per **call** rather than per session, because the hazard is the
-transport and not any one row: nothing is written, nothing is broadcast, nothing
-is migrated. The daemon owns it, which is what makes it hold for the CLI and for
-an app build older than the gate; the app additionally stops offering the
-gesture, so nobody clicks a button that cannot work. A refusal rather than a
-flag, because the remedy is something the person can do — turn the watch mode
-off — and because the state is reachable rather than theoretical: it is exactly
-where the mode refusal sends somebody who wants to keep using Nightwatch on
-tmux, and from there one fleet-wide run would put the forbidden pair live until
-the next daemon boot silently turned their watch mode off.
-
 ## The backstop
 
 Deleting the tmux path removes the code a `tmux` row's wake would take. From
@@ -411,9 +391,6 @@ wake: a pane tmux cannot answer for is not evidence that a process is there.
   each naming that session: the moved one dispatched, a busy one refused as
   not-eligible with the rail's reason, and one that moved without resuming as a
   transport failure.
-- The migration is refused outright with a watch mode live — for each mode, with
-  nothing migrated, nothing broadcast and no actuation row — and runs normally
-  with the mode off. The app's offer follows the same fact in both directions.
 - The app's fleet run sends one single-session call per non-holder row and none
   for a holder row, veils the awake rows and not the parked ones, and keeps the
   report of the rows already moved when a later call throws.

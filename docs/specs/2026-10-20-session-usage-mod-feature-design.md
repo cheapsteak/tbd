@@ -3,14 +3,12 @@
 ## Summary
 
 TBD learns a Claude session's context window — the denominator of "how full is
-this session" — from a statusline tee: a wrapper installed as the
-`statusLine.command` of Nightwatch desk sessions only, which saves Claude
-Code's statusline stdin JSON to
-`~/tbd/runtime/statusline-capture-<terminalID>.json`. The session mod's API now
-reports the same figures directly. This design adds a `usage` feature to the
-session mod that writes those figures to the session's own directory, makes it
-the context source for every Claude session that loads it, stops installing the
-tee on spawns that carry it, and ends with the tee deleted.
+this session" — from the session mod. The session-mod API reports the window
+Claude Code resolved, with the tokens and percent beside it. This design adds a
+`usage` feature to the session mod that writes those figures to the session's
+own directory and makes it the context source for every Claude session that
+loads it. A session spawned without it reports its numerator from the
+transcript tail and its window as `unknown`.
 
 ## Problem
 
@@ -23,21 +21,18 @@ at 200k or at 1M. The fleet-supervision design
 and capability errs in the unsafe direction: 1M claimed for a 200k session
 reads one-fifth full at the boundary.
 
-The tee was the one machine source for the resolved window, and it carries
-three costs:
+The other surface where Claude Code tells a third party the resolved window is
+the statusline's stdin JSON, and it is the wrong one to build on:
 
-- **It is desk-only.** `statusLine` does not merge across settings scopes, and
-  TBD's per-session `--settings` outranks every scope a person can write, so a
-  fleet-wide tee would take over their status line in every session. Every
-  non-desk session therefore reports its window as `unknown`.
-- **It is intricate.** A POSIX shell script that buffers stdin, publishes
-  atomically, delegates to the person's own statusline found by
-  `OperatorStatuslineResolver`, and stays silent in every failure branch, plus a
-  capture sweep for its leftovers — about 360 lines of source and 1,400 of
-  tests.
-- **It serves a deprecated consumer.** Its readers are the Nightwatch desk's
-  relay script and `session.states`; Nightwatch desks do not run with the pty
-  holder.
+- **It cannot cover the fleet.** `statusLine` does not merge across settings
+  scopes, and TBD's per-session `--settings` outranks every scope a person can
+  write, so a TBD statusline wrapper on every session would take over their
+  status line in every session. A wrapper confined to a few sessions leaves
+  every other one reporting its window as `unknown`.
+- **It is intricate.** A wrapper is a POSIX shell script that buffers stdin,
+  publishes atomically, delegates to the person's own statusline, and stays
+  silent in every failure branch, plus a capture sweep for its leftovers. One
+  built for TBD ran to about 360 lines of source and 1,400 of tests.
 
 ## Facts this design rests on
 
@@ -71,8 +66,7 @@ A new session-mod feature, `usage`, in `SessionMod/hooks/features/usage.ts`,
 wired through `register.ts` like `composer-draft`.
 
 - **`session.start`** writes a baseline from `$.session.usage()`, so a session's
-  window is known before its first turn — the point at which the tee's first
-  statusline run made it known.
+  window is known before its first turn.
 - **`session.measure`** writes the event's figures on every measurement.
 
 Both write `<TBD_SESSIONS_DIR>/<claudeSessionID>/usage.json`, resolving the
@@ -102,6 +96,10 @@ Nothing in TBD reads `rateLimits` or `cost` yet. They are recorded because the
 mod gets them at no extra cost and the account load-balancing work could use
 per-session rate-limit readings; a reader for them gets its own design.
 
+A reader trusts `usage.json` only when its `incarnationID` names the live
+incarnation; a file left by an earlier process of the same session reads as
+not yet written.
+
 ### The flag
 
 `session_mod_usage_enabled INTEGER` on `config`, added with no SQL default so
@@ -112,52 +110,7 @@ the Codable `Config` gain the field in the same commit as the migration.
 on, and Settings gains a toggle beside composer-draft.
 
 The flag is required because the feature loads the mod into every Claude
-session and replaces how desk sessions are configured.
-
-### Where the tee installs
-
-A desk spawn installs the tee only when `usage` is absent from that spawn's
-feature list. The decision reads the feature list the spawn was given, never a
-fresh read of config, so a spawn and the readers that later consult its
-`spawn.json` agree about which source it has. With `usage` on, a desk's overlay
-leaves the person's own `statusLine` in force, as for any other session. With
-it off, desk spawns are unchanged.
-
-A fresh spawn runs `SessionModSpawn.prepare` before it resolves the overlay, so
-the overlay is written once from the real feature list. A replacement spawn —
-a wake, an in-place profile swap, Continue in Claude — learns its incarnation
-only at launch, after its command is built, and some replacement spawns never
-launch: a wake that adopts a holder process still running starts nothing, and
-a swap can fail before its replacement starts. So a replacement spawn only
-plans its overlay up front: it computes the `--settings` path its command
-names, without writing anything. Every desk gets a per-session overlay file
-whether or not it carries the tee, so that path does not depend on the
-features. Once `prepare` has run, immediately before the process launches, the
-spawn writes the overlay from the features `prepare` returned. A spawn that
-never reaches its launch — one that stops before that step — therefore leaves
-the overlay and capture of the process the row still names exactly as they
-were.
-
-Every launch of a Claude spawn deletes the session's previous statusline
-capture when its overlay is resolved, desk or not, tee or not. That resolution
-is the one step every launch passes through: a fresh spawn resolves its
-overlay directly, and a replacement spawn resolves it in the step just before
-launch described above. The new process republishes its own capture when its
-tee fires, and an old capture must never speak for a new process: a tee desk
-swapped from a 1M-token profile to a 200k one would otherwise report 1M until
-its first statusline render.
-
-If the per-session write fails at launch, the spawn falls back to the shared
-global overlay, as every spawn's overlay resolution does, and launches with its
-command's `--settings` repointed there (or dropped, when the global overlay is
-missing too). The process then runs
-without a tee and with only TBD's hooks, never against a missing file or one
-an earlier process left. Its statusline capture is gone as for every launch,
-so an earlier process's capture is not read as this one's window.
-
-A reader trusts `usage.json` only when its `incarnationID` names the live
-incarnation; a file left by an earlier process of the same session reads as
-not yet written.
+session.
 
 ### Readers
 
@@ -175,31 +128,14 @@ not yet written.
    numerator from the transcript. Parking replaces the agent with an inert
    shell that never runs the mod, and `spawn.json` is shared by every spawn of
    the session and overwritten by each, so it cannot say which process wrote a
-   usage file still on disk. Nothing reads a parked session's window: the
-   desk's handoff runs only in a live process. A parked row whose spawn did not
-   list `usage` is `legacy` and reads the tee capture.
-2. **The tee capture**, when liveness answers `legacy` — a spawn made without
-   `usage`. Unchanged from today.
-3. **The transcript tail** for tokens, with the window `unknown`. The `why`
+   usage file still on disk.
+2. **The transcript tail** for tokens, with the window `unknown`. The `why`
    names the case: the session is parked; `usage` was spawned but the mod has
-   not confirmed this process; the usage file is missing or unreadable; or neither source applies
-   to this session.
+   not confirmed this process; the usage file is missing or unreadable; or the
+   session was spawned without `usage`, so nothing reports its window.
 
-The reader's input changes from the desk role to the spawn's source: whether
-`usage` was in its feature list, and the liveness answer.
-
-**`handoff.py`**, the desk relay script in `NightwatchSkillContent.swift`,
-reads `usage.json` through the `claudeSessionID` on the terminal row it already
-fetches, then the tee capture, then its 600,000-token fallback, applying the
-same validity rule at each step. It trusts the usage file only when its
-`incarnationID` equals the script's own `TBD_TERMINAL_INCARNATION_ID`, which
-every spawn that loads the mod sets. Wakes and swaps keep the session ID, so
-without that check a file from an earlier process — one spawned while the flag
-was on, say, before a swap to a smaller window — would outrank a fresh tee
-capture and set the ceiling too high. A missing variable or a mismatch reads as
-"not observed". It needs no heartbeat check: a matching incarnation means its
-own process wrote the file. A `/clear` keeps the incarnation, so the file under
-the row's session ID stays acceptable, and `/clear` does not change the window.
+The reader's input is the spawn's source: whether `usage` was in its feature
+list, and the liveness answer.
 
 ### Reclaim
 
@@ -225,76 +161,44 @@ session-mod design already keeps compiled — and the flag.
 
 - The column is three-state: a pre-migration row reads NULL, and an explicit
   `false` survives a change to `sessionModUsageDefault`.
-- Flag off: a desk spawn installs the tee; no spawn lists `usage`; a non-desk
-  overlay is byte-identical to the overlay produced without this change.
-- Flag on: a desk spawn installs no tee, keeps the person's `statusLine`, and
-  lists `usage` in `TBD_MOD_FEATURES` and `spawn.json` — on a fresh spawn, a
-  wake, and an in-place profile swap.
+- Flag off: no spawn lists `usage` in `TBD_MOD_FEATURES` or `spawn.json`.
+- Flag on: a spawn lists `usage` in `TBD_MOD_FEATURES` and `spawn.json` — on a
+  fresh spawn, a wake, and an in-place profile swap.
 - `ContextLoadReader`: confirmed with a valid file naming the live
   incarnation gives a paired `.observed` window sourced `sessionMod`;
   confirmed with a torn file or another incarnation's falls back; every
   unknown liveness, a stale heartbeat included, gives `unknown` with its
-  `why`; legacy reads the tee capture. A row parked through the production
-  park write whose spawn listed `usage` reads `unknown` saying it is parked,
-  even beside a usage file and a capture, and reads the tee when its spawn
-  lacked `usage`.
-- Replacement spawns: planning the overlay writes nothing and deletes nothing;
-  a wake that launches nothing and an in-place swap that fails before its
-  launch leave the overlay and capture untouched; a tee desk's relaunch
-  deletes the previous capture; a per-session write that fails at launch
-  repoints the command to the global overlay and deletes the statusline
-  capture.
-- A zero, negative or boolean window is refused by both the Swift and the
-  Python reader.
+  `why`; legacy gives the transcript numerator and an `unknown` window. A row
+  parked through the production park write whose spawn listed `usage` reads
+  `unknown` saying it is parked, even beside a usage file.
+- A zero, negative or boolean window is refused by the reader.
 
-**`handoff.py` selftest:** the usage file wins over the capture; torn, boolean,
-zero and missing windows each fall through; the capture still serves when no
-usage file exists.
-
-**Live, before merge:** one desk spawn against the fake model API with the flag
-on, on tmux and on the pty holder. `usage.json` appears with the window the
+**Live, before merge:** one spawn against the fake model API with the flag on,
+on tmux and on the pty holder. `usage.json` appears with the window the
 statusline reports, and the person's own statusline still renders.
 
 ## Soak and graduation
 
 Soak with `session_mod_usage_enabled` on. Evidence to collect: `session.states`
-reports `sessionMod`-sourced windows for non-desk sessions, and desks relay at
-three quarters of their observed window rather than at the fallback.
+reports `sessionMod`-sourced windows for the sessions that load the mod.
 
-**Accepted risk: a desk whose mod never runs has no window source.** A desk
-spawned with `usage` gets no tee, so when the mod does not run in that process
-— a Claude Code too old for mods, plugins disabled by managed settings, a
-module that fails at load, or a write to the sessions directory that fails —
-nothing reports its window. `session.states` says `unknown`, and `handoff.py`
-uses its 600,000-token fallback, which a 200k desk never reaches, so such a
-desk can run past its real ceiling. Measured with the fake model API: a
-`claude-sonnet-4-5` session with the mod loaded gave a 150,000-token ceiling
-from its usage file; the same session without the mod gave the 600,000
-fallback. The risk is accepted rather than designed out, because every cause
-breaks the mod for every session at once, the flag ships off, and the soak
-watches for exactly this: a desk whose `session.states` window stays
-`unknown`. A lower fallback for spawns that listed `usage`, or keeping the tee
-as a backup, are the remedies should the soak show it happening.
+**Accepted risk: a session whose mod never runs has no window source.** When
+the mod does not run in a process spawned with `usage` — a Claude Code too old
+for mods, plugins disabled by managed settings, a module that fails at load, or
+a write to the sessions directory that fails — nothing reports its window, and
+`session.states` says `unknown`. The risk is accepted rather than designed out,
+because every cause breaks the mod for every session at once, the flag ships
+off, and the soak watches for exactly this: a session whose `session.states`
+window stays `unknown`.
 
-Graduation sets `Config.sessionModUsageDefault` to `true`. A follow-up change
-then deletes `StatuslineTee`, `OperatorStatuslineResolver`, the capture path
-constants, the capture arm of the orphan sweep, the tee arm of both readers,
-and their tests.
+Graduation sets `Config.sessionModUsageDefault` to `true`.
 
 ## Rejected alternatives
 
-- **Read the tee first on desks during the soak.** The desk is the one consumer
-  that acts on the window, so the soak would never exercise the new source
-  where it matters.
-- **Keep both sources and let the reader choose.** The spawn already decides
-  which source it has; a second decision at read time can disagree with it.
-- **Make the daemon the only reader**, with `handoff.py` asking over a CLI or
-  RPC call. It adds a compiled surface and makes the desk's relay depend on the
-  daemon being reachable, where a file read suffices.
 - **Push figures from the mod to the daemon.** It needs the daemon-mod channel
   the session-mod design chose not to build, and no consumer needs a push.
-- **Widen the tee to every session.** It takes over the person's status line in
-  every session they open.
+- **A statusline wrapper on every session.** It takes over the person's status
+  line in every session they open.
 - **A model-to-window table.** It reports capability, not the resolved window.
 - **Record only the context figures.** Rate limits and cost arrive in the same
   event at no cost, and recording them now spares a schema bump later.

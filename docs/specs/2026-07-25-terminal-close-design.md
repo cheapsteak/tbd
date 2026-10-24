@@ -20,16 +20,17 @@ prompt (at `33494d80:112`, before the fix in this branch) — instructed session
 
 > Remedy: call `tbd terminal close --all` on the desk, let daemon respawn fresh
 
-Both halves are wrong: the command does not exist, and the daemon does not
-respawn desk sessions. This is the origin of the "RESPAWN FLAGGED" instruction
-that has sat inert in the nightwatch queue since 2026-07-20.
+Both halves were wrong: the command did not exist, and the daemon did not
+respawn desk sessions. This was the origin of a "RESPAWN FLAGGED" instruction
+that sat inert in the desk's decision queue from 2026-07-20.
 
 ### 1.2 The workaround is worse than a ghost row
 
-Lacking a CLI close, `handoff.py`'s `cmd_close()` reaches around the daemon:
-resolve the row via `tbd terminal list --json`, derive the tmux server from
-`$TMUX`, then `tmux -L <server> kill-window -t <windowID>`. That kills the window
-and leaves the DB row live. What follows is not a ghost — it is a resurrection:
+Lacking a CLI close, the desk's handoff relay script (`handoff.py`'s
+`cmd_close()`) reached around the daemon: resolve the row via
+`tbd terminal list --json`, derive the tmux server from `$TMUX`, then
+`tmux -L <server> kill-window -t <windowID>`. That kills the window and leaves
+the DB row live. What follows is not a ghost — it is a resurrection:
 
 1. **The app's dead-window path parks it, within seconds.**
    `terminal.recreateWindow` → `RPCRouter+TerminalHandlers.swift:737-759`: a
@@ -43,9 +44,10 @@ and leaves the DB row live. What follows is not a ghost — it is a resurrection
    (legacy), auto, and recovery parks still focus-wake." Navigating to the
    worktree respawns `claude --resume` on the retired session.
 
-So the relay can end with **predecessor and successor both live on the same
-desk**. It also loses the scrollback: `terminalHistory.captureOnClose` never
-runs, so the retired session never appears in Session History → Closed Terminals.
+So a relay that closes this way can end with **predecessor and successor both
+live in the same worktree**. It also loses the scrollback:
+`terminalHistory.captureOnClose` never runs, so the retired session never appears
+in Session History → Closed Terminals.
 
 ### 1.3 Reconciliation verdict
 
@@ -98,7 +100,7 @@ but every alternative is worse: `session` collides with three existing meanings
 `pane` is a tmux detail whose ids collide across servers, `tab` is taken and
 means something coarser, and `agent` is wrong for shell rows. It is also
 load-bearing across the CLI, the `terminal.*` RPC namespace, the DB table, and
-`TBD_TERMINAL_ID` (read by hooks and by `handoff.py`). Keep it; know what it
+`TBD_TERMINAL_ID` (read by hooks). Keep it; know what it
 means.
 
 ```swift
@@ -118,7 +120,7 @@ struct TerminalClose: AsyncParsableCommand {
             permission prompt is refused — pass --force to close it anyway.
 
             A terminal cannot close itself. Spawn a successor and have it close
-            you (see the nightwatch handoff relay).
+            you.
 
             Closing a worktree's last terminal does NOT archive it — the
             worktree stays active with zero terminals. Use `tbd worktree
@@ -160,9 +162,9 @@ after the row is gone.
 
 Recorded at length because this was the *documented* remedy for five days, and
 the reason it can't work is structural rather than a missing feature. Anyone
-reading the nightwatch history will otherwise propose it again.
+reading that history will otherwise propose it again.
 
-The instruction shipped in `NightwatchDeskPrompts.swift` was:
+The instruction shipped in the desk's compiled prompt (§1.1) was:
 
 > Remedy: call `tbd terminal close --all` on the desk, let daemon respawn fresh
 
@@ -170,8 +172,7 @@ It had **three** independent defects, and fixing any one of them leaves the
 other two:
 
 1. **The command did not exist.** No `close` subcommand of any shape.
-2. **Nothing respawns a desk session.** There is no babysitter daemon — see the
-   retraction in `NightwatchSkillContent.skillMd`.
+2. **Nothing respawns a desk session.** There is no babysitter daemon.
 3. **Even a working `--all` does the opposite of what was intended.** This is
    the interesting one.
 
@@ -188,9 +189,8 @@ primitive.** Self-replacement needs a second actor that outlives the first, so
 the ordering is necessarily
 *write handoff → spawn successor → successor closes predecessor*, and it must be
 that order — a predecessor that closes itself first leaves the desk unwatched if
-the spawn failed. That is exactly the shape of
-`NightwatchSkillContent.handoffPy`, and it is why the relay is the remedy rather
-than any flag on this command.
+the spawn failed. That is the shape of a handoff relay, and it is why a relay is
+the remedy rather than any flag on this command.
 
 Corollary for the flag design: `--all`'s only documented consumer was this
 incoherent instruction. Auditing what actually remains (§6 D2) left a need too
@@ -259,14 +259,14 @@ All to stderr.
 
 `ExitCode(2)` has house precedent (`DoctorCommand.swift:34,39`).
 
-**Self-close is refused with no override flag.** The tmux window kill SIGHUPs the
-calling shell, so the `tbd` process dies mid-`recv` and can never report its own
-result; the agent's turn is chopped mid-tool-call. A daemon-side "reply first,
-tear down after a delay" deferral would work mechanically and is a legitimate
-future design — this is a scope call, not an impossibility. It is deferred
-because no consumer exists: `handoff.py` refuses self-close for an independent
-availability reason (if the spawn failed, the predecessor is the only thing still
-watching the desk), and successor-closes-predecessor is the documented standing
+**Self-close is refused with no override flag.** The tmux window kill SIGHUPs
+the calling shell, so the `tbd` process dies mid-`recv` and can never report its
+own result; the agent's turn is chopped mid-tool-call. A daemon-side "reply
+first, tear down after a delay" deferral would work mechanically and is a
+legitimate future design — this is a scope call, not an impossibility. It is
+deferred because no consumer exists: a handoff relay refuses self-close for an
+independent availability reason (if the spawn failed, the predecessor is the
+only session still running), and successor-closes-predecessor is the standing
 rule. Build the deferral when a real consumer appears.
 
 Self-close is refused rather than silently skipped precisely because there is
@@ -316,8 +316,9 @@ age it out. A session that dies mid-turn (crash, OOM, killed pane) stays
 the wedged terminal you most need to close, turning the safety rail into a trap
 for the command's primary cleanup use case. So the rail refuses only when the
 state is busy **and** `tmux.windowExists` confirms a live window. A dead-window
-row cannot be mid-turn — and that is precisely the zombified-predecessor state
-`handoff.py` creates today, which must remain closeable without `--force`.
+row cannot be mid-turn — and that is precisely the zombified-predecessor state a
+raw `kill-window` leaves behind (§1.2), which must remain closeable without
+`--force`.
 
 **D2 — `--all` and `--except` both deferred, not shipped.** The independent
 design kept a worktree-scoped `--all` with the caller auto-excluded. Revised
@@ -327,7 +328,7 @@ served *backwards*. Auditing the remainder:
 
 | Claimed need | Actually served by |
 | --- | --- |
-| Recycle a tired desk session | the handoff relay (§2.1) — `--all` cannot, by construction |
+| Recycle a tired session | a handoff relay (§2.1) — `--all` cannot, by construction |
 | Retire the predecessor in a relay | single-target `--terminal` |
 | Clear a whole worktree | `tbd worktree archive`, which already capture-then-kills every terminal (`WorktreeLifecycle+Archive.swift:117-128`) |
 | Close every pane fleet-wide | refused outright; loop `tbd worktree list --json` |
@@ -392,105 +393,17 @@ claudeSessionID: String?)`, mirroring wake's `{"woken": bool}` precedent.
 
 ## 8. Migration
 
-**`handoff.py` `cmd_close()`** collapses to a single call:
+No caller in this repo needs migrating: every `kill-window` reference is either
+daemon code using `worktree.tmuxServer` correctly, or prose in `docs/specs/`.
 
-```python
-def cmd_close(args):
-    target = args.close_predecessor
-    if target == os.environ.get("TBD_TERMINAL_ID"):
-        sys.exit("refusing to close myself — pass the PREDECESSOR's terminal id")
-    r = _run(["tbd", "terminal", "close", "--terminal", target, "--json"])
-    if r.returncode == 0:
-        out = json.loads(r.stdout or "{}")
-        print(f"closed predecessor {target}" + (" (was already gone)" if out.get("alreadyGone") else ""))
-        return 0
-    sys.exit(f"close failed (exit {r.returncode}): {r.stderr.strip()}")
-```
-
-Deleted outright: the `$TMUX` server derivation, the `terminal list` row lookup,
-the raw `kill-window`, and the `"can't find"` stderr sniff. The local self-check
-stays as a belt — the CLI also refuses, but failing before the subprocess gives a
-clearer message. The predecessor now actually gets history capture, row deletion,
-and a `.terminalRemoved` broadcast.
-
-A predecessor that went idle per the relay protocol reads `.idle` and closes
-cleanly. One still finishing its last message reads `.working` and is correctly
-refused — the successor should retry briefly rather than lead with `--force`.
-
-The successor prompt's step 2 (`handoff.py:107-109`) should name the new command.
-
-**`handoff.py` is the only raw `kill-window` caller to migrate.** It now ships
-from `NightwatchSkillContent.handoffPy`, so the migration is a source edit in
-this repo rather than a hand-patch of the installed copy — and the daemon
-rewrites the installed copy on every start, so editing only the on-disk file
-would be reverted. Every other `kill-window` reference is either daemon code
-using `worktree.tmuxServer` correctly, or prose in `docs/specs/`.
-
-**One-time fleet sweep.** Shipping this does not retroactively fix predecessors
-already zombified by the old path. Those rows are parked with `.recovery` (or nil
-reason) and will focus-wake. `tbd terminal close --terminal <id>` closes them
+**One-time fleet sweep.** Shipping this does not retroactively fix terminals
+already zombified by a raw `kill-window` (§1.2). Those rows are parked with
+`.recovery` (or nil reason) and will focus-wake. `tbd terminal close --terminal <id>` closes them
 correctly once available, but their scrollback is already unrecoverable — the
 pane is gone.
 
 ## 9. Doc/reality mismatches found
 
-1. **`Sources/TBDShared/NightwatchDeskPrompts.swift`** (at `33494d80:112`) —
-   compiled-in desk prompt instructing `tbd terminal close --all` on the desk.
-   Three independent defects, dissected in §2.1: the command never existed, no
-   daemon respawns a desk session, and a working `--all` would have inverted the
-   remedy. Fixed in this branch by pointing at the handoff relay. **Nothing this
-   design ships would have made the original sentence correct** — that is the
-   whole reason §2.1 exists.
-2. **`docs/superpowers/specs/2026-05-09-pending-askuserquestion-rendering-design.md:228`**
-   — cites "`tbd terminal close` / explicit terminal close" as an existing CLI
-   trigger. The RPC half was real; the CLI half never existed.
-3. **nightwatch `SKILL.md`, "Standing rules"** — says "that command does not
-   exist", correct today and stale the moment this ships. Update in the same
-   change that migrates `handoff.py`. Keep the relay as the documented
-   context-ceiling remedy and re-state the reason in the new terms: not "the
-   command doesn't exist" but "no close command can recycle the session that
-   invokes it" (§2.1). The first framing invites someone to fix it by adding the
-   flag; the second does not.
-4. Queue records (`acted.jsonl:32,57`, `judge-summary.txt:118-119`) memorialize
-   the mismatch. Leave as-is — they are logs.
-
-## 10. Known interaction: desk nudge targeting (real, owned elsewhere)
-
-Shipping the relay does not make the desk's judge loop correct, and this section
-exists so nobody reads §8 as claiming otherwise.
-
-**The defect.** `DeskSessionManager.nudgeDeskSession` resolves "the" desk judge
-with `terminals.list(worktreeID:).first(where: { $0.label == TerminalLabel.claudeCode })`
-(`DeskSessionManager.swift:272`). `TerminalStore.list` orders `createdAt ASC`
-(`TerminalStore.swift:153`), so `.first` is the *oldest* match. A relay handoff
-spawns the successor as a new terminal in the **same worktree**, carrying the
-same `TerminalLabel.claudeCode` (`RPCRouter+TerminalHandlers.swift:267`), so
-while both rows exist the daemon keeps nudging the predecessor. And because
-`--close-predecessor` currently only kills the tmux window, the predecessor's
-row is *parked*, not deleted (§1.2) — so it persists and keeps winning.
-
-**Root cause is label-matching, not ordering.** The ordering story is the
-visible half and is not sufficient: the resume/fork path assigns a hardcoded
-lowercase `label = "claude"` (`RPCRouter+TerminalHandlers.swift:258`), which
-never equals `TerminalLabel.claudeCode` (`"Claude Code"`). A resumed or forked
-desk judge is therefore invisible to that selector with no relay involved at
-all. Fixing the ordering alone would leave that case broken.
-
-**This is not a new or unnoticed gap.** It bit on 2026-07-25 for ~4.5 hours
-(judge ticks delivered to a stale predecessor; the decision queue reached 134
-unprocessed lines) — before this branch existed, on the hand-created relay. The
-approved fix is a single derived selector — `kind == .claude`, parked excluded,
-`windowExists`-qualified, newest-first — used at all four `DeskSessionManager`
-call sites. An explicit `activeJudgeTerminalID` pointer was considered and
-rejected: its own repair fallback is "newest live candidate", so it buys a
-second source of truth, and a pointer the successor must claim reproduces the
-original failure (a relay step owned by a model is a step a human question
-preempts forever).
-
-**Ownership and sequencing.** That work is slices A/B of the
-`desk-relay-targeting` worktree, greenlit with no dependency on this branch, and
-already built there. It touches only `DeskSessionManager.swift`; this branch
-touches none of it. The two are independent and may merge in either order — this
-branch makes the relay *survive daemon restarts* (the compiled-skill ingest),
-that one makes the daemon *address the right judge*. Neither substitutes for the
-other, and the relay is not fully trustworthy until both have landed.
+- **`docs/superpowers/specs/2026-05-09-pending-askuserquestion-rendering-design.md:228`**
+  — cites "`tbd terminal close` / explicit terminal close" as an existing CLI
+  trigger. The RPC half was real; the CLI half never existed.

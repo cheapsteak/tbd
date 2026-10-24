@@ -343,12 +343,11 @@ paper tallies do not all fit under the ceiling:
 - `GatedIntervalSleepTests.returnsAfterExpectedPollCount` — 3
   `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1 `FireRecorder.next()`
   = **6** guards, 270 s, i.e. **over** the 240 s limit.
-- `GatedIntervalSleepTests.boundaryIsExact` (3 + 1 + 1) and
-  `DaywatchRunnerLoopTests.testSubsequentTicksAtInterval` (2 + 3) — **5**
-  guards, 225 s.
+- `GatedIntervalSleepTests.boundaryIsExact` (3 + 1 + 1) — **5** guards,
+  225 s.
 
 Paper is the operative word, and the arithmetic that matters is different:
-**at most one guard can elapse in any single run of these.** All three chains
+**at most one guard can elapse in any single run of these.** Both chains
 are on `EventDrivenTestClock`'s **strict** waits, where a missed arming throws
 before anything advances, so the chain stops at the first bad step and nothing
 after it runs. The one non-throwing guard in each chain — `FireRecorder.next()`,
@@ -1060,9 +1059,9 @@ Worked examples, by shape:
 - **`@MainActor` debouncers** – `AppearanceDebounceTests` and
   `SearchQueryDebouncerTests`, which reproduced the polling starvation in a
   full-suite soak.
-- **Poller chains** – `GatedIntervalSleepTests` and `DaywatchRunnerLoopTests`,
-  whose chains on the polling helpers each paid five wall-clock guards (225 s of
-  the 240 s ceiling) and on the strict waits cost at most one.
+- **Poller chains** – `GatedIntervalSleepTests`, whose chains on the polling
+  helpers each paid five wall-clock guards (225 s of the 240 s ceiling) and on
+  the strict waits cost at most one.
 - **Arming behind an unstructured task, tier 3** – `GitManagerTimeoutTests`,
   whose sleeper arms inside `runBoundedProcess`. Its polled handshake starved
   past the test's own real `/bin/sleep 30` child under induced load, so the

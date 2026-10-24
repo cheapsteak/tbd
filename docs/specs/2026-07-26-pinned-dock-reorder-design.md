@@ -22,7 +22,6 @@ disturbed by pinning something new — a fresh pin still appends to the end.
 **Only top-level pinned rows are draggable.** Expanded children are derived from
 `parentWorktreeID`, not stored as pins; dragging one would either mean nothing or imply
 re-parenting, which is a different and much riskier feature. Children move with their parent.
-The Watch Desk slot is a separate view and is not draggable at all.
 
 ## Architecture
 
@@ -175,5 +174,4 @@ again.
 - Reordering expanded children, or drag-to-re-parent.
 - Dragging a worktree *into* the dock from the repo list to pin it. Pinning stays the gutter
   button and the context menu.
-- Dragging the Watch Desk slot.
 - A CLI equivalent. The RPC makes one trivial later.

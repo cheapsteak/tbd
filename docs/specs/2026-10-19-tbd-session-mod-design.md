@@ -84,7 +84,7 @@ current tree. Only the newest Claude Code release is supported.
   …` or `… unloaded`, in every running session that loaded the plugin, legacy
   sessions included (measured live).
 - **A plugin's name is part of its identity.** It names the plugin's skills
-  (`tbd:tbd`, `tbd:nightwatch`), its error lines, `$.plugin.name`, and the keys
+  (`tbd:tbd`), its error lines, `$.plugin.name`, and the keys
   of its `$.state` and `$.store`.
 - **The hooks fire as documented.** A probe mod on a private tmux socket, in a
   live 2.1.303 session, wrote the box to a file on each event:

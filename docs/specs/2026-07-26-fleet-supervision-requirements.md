@@ -1,9 +1,9 @@
-# Design brief: fleet supervision for TBD (blue-sky redesign of "Nightwatch")
+# Design brief: fleet supervision for TBD
 
 You are designing, from scratch, the fleet-supervision subsystem of TBD — a macOS tool for
-running many Claude Code agents in parallel. An implementation of this subsystem exists and
-works after a fashion; it has been mined for the requirements below, and those requirements
-are your starting point. The implementation itself is not — see the reading instructions.
+running many Claude Code agents in parallel. A first implementation of this subsystem ran
+over real fleets and worked after a fashion; the requirements below are its useful residue,
+and they are your starting point. Its structure is not.
 
 This is a reference design meant to be argued with, not adopted verbatim. Favour a strong,
 specific point of view over implementability compromises.
@@ -31,9 +31,6 @@ It runs in two modes, and the distinction is the spine of the design:
 2. **Fully autonomous mode** — nobody is watching, typically overnight. The supervisor acts
    on its own judgment.
 
-(The current code calls these "daywatch" and "nightwatch". Ignore those names; more
-importantly, ignore how the current code draws the distinction — see story P0-3.)
-
 ## How to use the repo
 
 Repo root: `<repo-root>`
@@ -50,28 +47,12 @@ design in those real mechanics. Particularly worth your time:
 - `Sources/TBDApp/Settings/RepoHooksSettingsView.swift` — how a file-backed per-repo setting
   is surfaced to the operator
 
-Do NOT anchor on the existing Nightwatch implementation or its documentation. The
-requirements below are the useful residue of that implementation; start from them, not from
-its structure. Skip these files, and if you stumble into them, do not treat them as design
-input:
-
-```
-docs/nightwatch.md
-docs/specs/2026-07-03-nightwatch-daywatch-design.md
-Sources/TBDDaemon/Nightwatch/
-Sources/TBDDaemon/Server/RPCRouter+NightwatchHandlers.swift
-Sources/TBDDaemon/Database/{ClearanceStore,AuditStore}.swift
-Sources/TBDShared/{Models_Nightwatch,NightwatchDeskPrompts,NightwatchSkillContent}.swift
-Sources/TBDCLI/Commands/NightwatchCommand.swift
-Sources/TBDApp/**/Nightwatch*.swift
-```
-
 ## Requirements
 
 Each story is tagged with the mode it applies to: **[S]** human-supervised, **[A]** fully
 autonomous, **[both]**. Stories marked *(implied, not yet implemented)* are clearly implied
-by the current system's intent but absent or broken in it; treat them as requirements all
-the same.
+by the first implementation's intent but were absent or broken in it; treat them as
+requirements all the same.
 
 ### Two ways a story can bind TBD
 
@@ -138,8 +119,8 @@ and become a contract that migration and future change must respect.
 - **P0-3 [both]** As an operator, I want the two modes to differ *mechanically*, not merely
   in prompt wording, so that the label's promise ("a human stays in the loop") is enforced
   by the system rather than requested of the supervisor. *(implied, not yet implemented —
-  today the entire difference is one hint sentence in a prompt, and the conservative rule it
-  states references a field the data doesn't even carry.)*
+  in the first implementation the entire difference was one hint sentence in a prompt, and
+  the conservative rule it stated referenced a field the data didn't even carry.)*
 
   *This story is **Descoped**, not Built — by operator decision, it is not
   implemented as written. TBD builds
@@ -193,29 +174,28 @@ and become a contract that migration and future change must respect.
   *This is **authored discipline**, on both sides of the process boundary, and for a wake
   program the story is **Enabled** rather than Built.* For a desk the discipline is the
   shipped playbook's universal: derive the facts live, in the same breath as the send. For a
-  wake program it is the discipline the old wake.py already practiced ("re-derives truth AT
-  WAKE TIME") with no daemon help, and the reference script demonstrates it. The daemon does
-  not re-verify the claims in a desk's text sends, and does not inspect message content at all,
-  for anyone. Three findings put the obligation there. **The owner is authored, not
-  compiled.** The running system never compiled this check: it lived entirely in authored
-  content the desk executed itself — `wake.py` "re-derives truth AT WAKE TIME", and the
-  playbook already says "before dispatching any message that asserts PR state, re-read live
-  state in the same breath as the send." The hand-composed wakes this story cites as
-  hard-won predate that rule; the authored discipline *was* the fix, and it worked. **A
-  compiled guarantee is not implementable as stated.** No compiled code finds "every
-  external claim" in free prose without a model. Either the desk declares its claims
-  structurally on the call — in which case verification covers only what the desk chose to
-  declare, which is no stronger than conduct — or the daemon parses prose, which is judgment
-  work at the wrong layer. The sentence reads like a guarantee; implemented honestly it
-  could never be one. **And the field evidence says the failure is source choice, in the
-  authored tier all along.** Field measurement caught desks re-verifying faithfully and
-  being lied to anyway: `gh pr view` (GraphQL) served 17.5-hour-stale, internally
-  self-consistent state where REST was correct every time, and `git ls-remote` beat the API
-  by ~20s on a force-pushed head. A compiled verifier would consult those same lying
-  oracles, and a re-verification that consults a lying oracle is worse than none, because it
-  returns confidence. Which API tells the truth this week is data, not design — it lives as
-  a dated source note in the reference wake script, where it can rot without touching a
-  spec.
+  wake program it is the discipline the first implementation's wake.py already practiced
+  ("re-derives truth AT WAKE TIME") with no daemon help, and the reference script demonstrates
+  it. The daemon does not re-verify the claims in a desk's text sends, and does not inspect
+  message content at all, for anyone. Three findings put the obligation there. **The owner is
+  authored, not compiled.** The first implementation never compiled this check: it lived
+  entirely in authored content the desk executed itself — `wake.py` "re-derives truth AT WAKE
+  TIME", and the playbook already says "before dispatching any message that asserts PR state,
+  re-read live state in the same breath as the send." The hand-composed wakes this story cites
+  as hard-won predate that rule; the authored discipline *was* the fix, and it worked. **A
+  compiled guarantee is not implementable as stated.** No compiled code finds "every external
+  claim" in free prose without a model. Either the desk declares its claims structurally on
+  the call — in which case verification covers only what the desk chose to declare, which is
+  no stronger than conduct — or the daemon parses prose, which is judgment work at the wrong
+  layer. The sentence reads like a guarantee; implemented honestly it could never be one.
+  **And the field evidence says the failure is source choice, in the authored tier all
+  along.** Field measurement caught desks re-verifying faithfully and being lied to anyway:
+  `gh pr view` (GraphQL) served 17.5-hour-stale, internally self-consistent state where REST
+  was correct every time, and `git ls-remote` beat the API by ~20s on a force-pushed head. A
+  compiled verifier would consult those same lying oracles, and a re-verification that
+  consults a lying oracle is worse than none, because it returns confidence. Which API tells
+  the truth this week is data, not design — it lives as a dated source note in the reference
+  wake script, where it can rot without touching a spec.
 
   *What is **Built** is narrow, and is stated here exactly. Fresh work facts carrying
   source and observed-at on the readout (design §2). Public surfaces a desk or a
@@ -257,11 +237,11 @@ and become a contract that migration and future change must respect.
 - **P1-1 [A]** As an operator, I want the supervisor capacity-aware: when several agents are
   rate-capped at once it holds interventions instead of piling on, and it never nudges an
   individually rate-limited agent, so that a quota wall doesn't turn into a night of wasted
-  pokes. *(A stronger version exists in the current system — rebalancing stuck sessions onto
-  less-loaded accounts rather than passively freezing — motivated by one saturated account
-  stalling a whole fleet overnight. Treat that as conditional: it presumes an operator with
-  several accounts configured, which may be one person's topology rather than a general need.
-  Design the holding behaviour; argue for or against rebalancing.)*
+  pokes. *(A stronger version existed in the first implementation — rebalancing stuck sessions
+  onto less-loaded accounts rather than passively freezing — motivated by one saturated
+  account stalling a whole fleet overnight. Treat that as conditional: it presumes an operator
+  with several accounts configured, which may be one person's topology rather than a general
+  need. Design the holding behaviour; argue for or against rebalancing.)*
 
   *This story splits along the Built/Enabled line. Holding is **Built** for the desks TBD
   runs (design §11). For the wake program it is **Enabled** — the per-profile usage and
@@ -277,37 +257,38 @@ and become a contract that migration and future change must respect.
   exists and its state, whether checks fail — so that the supervisor never has to hold the arc
   of anyone's work in its head, and sessions with nothing outstanding are not woken at all.
   Waking is expensive; it should be the conclusion of a check, not the way the check is
-  performed. *(implied, partially broken today — the live check exists and works, but every
-  parked session is woken regardless of its verdict, including the ones just found complete.
-  On the night that motivated the check, all 24 were complete.)*
+  performed. *(implied, partially broken in the first implementation — the live check
+  existed and worked, but every parked session was woken regardless of its verdict,
+  including the ones just found complete. On the night that motivated the check, all 24
+  were complete.)*
 
-  *The story's intent survives; its assigned owner is not the daemon.* A compiled wake gate
-  in the daemon's sweep — a global "outstanding work" fact list whose any-true verdict wakes
-  a parked session — is structurally wrong, not mistuned: its "commits not on the default
-  branch" fact reads true forever for a squash-merged branch, so 33 of 70 active worktrees
-  on a live fleet — and 24 of 24 on this story's own motivating night — were finished work
-  such a sweep would have woken every cycle, one into a resume worth 750k tokens re-entering
-  work merged five days earlier. Completion is a fact about intent and forge state; git
-  commit identity cannot express it, and no compiled fact list can. So rather than an
-  inference to repair, **the wake decision sits outside the daemon entirely — and outside
-  the desk, which never needed to be involved** (the old system's wake.py composed verified
-  wakes with no model). Waking parked sessions is a **project-authored wake program**: an
-  external script, seeded once from a shipped reference and never clobbered, that reads what
-  is parked and why from TBD's public surfaces, derives live git and forge facts itself,
-  decides in its own vocabulary, composes the wake text, schedules its own cadence, and
-  actuates through `tbd terminal wake`. The story is thereby classified **Enabled** (see the
-  classification note above): TBD's obligation is that the program's inputs and actuation
-  are public, documented, and stable — never to guarantee or guardrail the program's
-  correctness. TBD builds no compiled choke point at actuation (capacity holds, dedup,
-  send-time freshness, a daemon-written ledger line): that would make TBD the guarantor of a
-  program TBD does not run, does not schedule, and — seeded once, never clobbered — cannot
-  repair. The rails are the program's to honor, readable from the same public surfaces, and
-  the reference script honors all of them. A project with no wake program gets no automated
-  wakes — parked worktrees appear in the account with their facts, and a merged pull
-  request means silence, never a wake. The story's clauses are all preserved: the facts are
-  still cheap and derived outside the session, waking is still the conclusion of a check,
-  and sessions with nothing outstanding are not woken by construction — nothing wakes at
-  all unless a program a human authored concludes it should. Full design:
+  *The story's intent survives; its assigned owner is not the daemon.* A compiled wake gate in
+  the daemon's sweep — a global "outstanding work" fact list whose any-true verdict wakes a
+  parked session — is structurally wrong, not mistuned: its "commits not on the default
+  branch" fact reads true forever for a squash-merged branch, so 33 of 70 active worktrees on
+  a live fleet — and 24 of 24 on this story's own motivating night — were finished work such a
+  sweep would have woken every cycle, one into a resume worth 750k tokens re-entering work
+  merged five days earlier. Completion is a fact about intent and forge state; git commit
+  identity cannot express it, and no compiled fact list can. So rather than an inference to
+  repair, **the wake decision sits outside the daemon entirely — and outside the desk, which
+  never needed to be involved** (the first implementation's wake.py composed verified wakes
+  with no model). Waking parked sessions is a **project-authored wake program**: an external
+  script, seeded once from a shipped reference and never clobbered, that reads what is parked
+  and why from TBD's public surfaces, derives live git and forge facts itself, decides in its
+  own vocabulary, composes the wake text, schedules its own cadence, and actuates through
+  `tbd terminal wake`. The story is thereby classified **Enabled** (see the classification note
+  above): TBD's obligation is that the program's inputs and actuation are public, documented,
+  and stable — never to guarantee or guardrail the program's correctness. TBD builds no
+  compiled choke point at actuation (capacity holds, dedup, send-time freshness, a
+  daemon-written ledger line): that would make TBD the guarantor of a program TBD does not
+  run, does not schedule, and — seeded once, never clobbered — cannot repair. The rails are
+  the program's to honor, readable from the same public surfaces, and the reference script
+  honors all of them. A project with no wake program gets no automated wakes — parked
+  worktrees appear in the account with their facts, and a merged pull request means silence,
+  never a wake. The story's clauses are all preserved: the facts are still cheap and derived
+  outside the session, waking is still the conclusion of a check, and sessions with nothing
+  outstanding are not woken by construction — nothing wakes at all unless a program a human
+  authored concludes it should. Full design:
   [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md).
 - **P1-3 [both]** As an operator, I want worktrees whose progress matters most looked at
   first, so that the important work gets attention early in every pass.
@@ -340,10 +321,10 @@ and become a contract that migration and future change must respect.
   warrants.** The supervisor then needs neither the arc of the work nor the house rules in its
   head — it reads facts it did not have to earn and a policy it did not have to invent.
 
-  The current system draws this line in the wrong place, and the damage is legible: its
-  verified wake messages hardcode one team's closeout command and one team's named review bot
-  as the definition of ready. Every other repo is told to run a command it does not have and
-  satisfy a reviewer it does not use.
+  The first implementation drew this line in the wrong place, and the damage was legible: its
+  verified wake messages hardcoded one team's closeout command and one team's named review
+  bot as the definition of ready. Every other repo was told to run a command it does not have
+  and satisfy a reviewer it does not use.
 
   Mode belongs on the same axis (see P0-3): one verdict can warrant escalate-to-human when
   supervised and act-directly when autonomous, authored per repo rather than requested of the
@@ -380,7 +361,8 @@ and become a contract that migration and future change must respect.
 - **P1-7 [both]** As an operator, I want every supervisor action recorded in a durable,
   queryable ledger — what, to whom, why, when — written by the machinery that performed it,
   so that the morning account is verifiable and not merely the supervisor's self-report.
-  *(implied, not yet implemented — today's action log is the agent's own notes file.)*
+  *(implied, not yet implemented — the first implementation's action log was the agent's own
+  notes file.)*
 
   The ledger's honesty must run in both directions. Daemon authorship protects against a
   desk overclaiming what it did; the mirror-image failure, observed in the field, is a
@@ -424,7 +406,7 @@ and become a contract that migration and future change must respect.
   are journal entries in a file the tool never rewrites. TBD's compiled part is carriage
   and display; there is no machine-appended memory tier (design §8).*
 - **P2-2 [both]** As an operator, I want ending a shift to be a deliberate, clean handover —
-  summary posted, supervisor session disposed of or parked on purpose — so that watch-desk
+  summary posted, supervisor session disposed of or parked on purpose — so that supervisor
   worktrees don't silently accumulate forever.
 - **P2-3 [A]** As an operator, I want agents that stall on routine permission prompts
   advanced past an operator-authored allowlist of safe approvals — and never past anything
@@ -472,21 +454,21 @@ and become a contract that migration and future change must respect.
   shares the daemon's fate; whether that half needs an external heartbeat remains open, and
   the outside-first rule above says any answer starts as an external program too.*
 
-### Behaviours of the current system that are accidents, not requirements
+### Behaviours of the first implementation that are accidents, not requirements
 
 Left out of the stories deliberately; do not design for them:
 
 - The merge-gate half — clearance ledger, audit-of-would-merge rows, compiled size ceilings.
-  Excluded by mandate below; being deleted, not replaced.
+  Excluded by mandate below.
 - The specific tick protocol: a 15-minute interval, a subprocess exit code as the entire
   signal channel, discarded stdout. Cadence is a requirement; this encoding is not.
 - Identifying the supervisor's worktree by its display string.
 - Classifying agent state by regexing captured pane text — this is the constraint below, not
-  a requirement; the current sweep does it and is marked as debt in the tree.
-- The one-shot "shift ending" prompt that is blind to which mode is ending, and the desk
-  worktree being left behind because its cleanup path has no caller.
+  a requirement.
+- The one-shot "shift ending" prompt that was blind to which mode was ending, and the desk
+  worktree being left behind because its cleanup path had no caller.
 - Three divergent install trees for the supervisor's playbook and scripts, one of which the
-  tool never writes.
+  tool never wrote.
 - Everything organization-specific in the shipped playbook: a repo slug, a review-bot login,
   a coworker's name, one machine's fleet snapshot. Data, not design.
 
@@ -494,7 +476,7 @@ Left out of the stories deliberately; do not design for them:
 
 **A standing bias, stated so you can argue with it rather than absorb it silently.** Where a
 behaviour could either be compiled into the app or exposed as an extension point that someone
-authors outside it, prefer the extension point. The subsystem being replaced is the case
+authors outside it, prefer the extension point. The first implementation is the case
 against the alternative: it grew a large amount of bespoke compiled machinery to serve what was
 substantially one team's process, and the process ended up welded into a general-purpose tool
 where nobody else could change it and its own author could not edit it without being

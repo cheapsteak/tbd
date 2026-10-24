@@ -16,8 +16,7 @@ never inspects message content — freshness is authored discipline on both side
 [`2026-07-26-fleet-supervision-requirements.md`](2026-07-26-fleet-supervision-requirements.md),
 which carries the stories (P0-1 … P3-1) this doc cites, the **Built/Enabled**
 classification, and the outside-first migration rule. This is the ideal-state
-design; migration from the current implementation is deliberately out of scope
-and will be planned separately.
+design.
 
 ## 1. The placement test
 
@@ -180,46 +179,36 @@ source (a compiled table, a public capability dataset, the catalog embedded in
 the Claude Code binary) reports *capability*, not the resolved value, and
 capability errs in the dangerous direction: a table saying 1M for a session
 running at 200k reads one-fifth full at the boundary. The only party that
-knows the resolved window is Claude Code itself, and the one surface where it
-tells a third party is the statusline: its stdin JSON carries
-`context_window.context_window_size` alongside used/remaining percentages.
+knows the resolved window is Claude Code itself, and it tells a third party in
+two places: the statusline's stdin JSON (`context_window.context_window_size`,
+alongside used/remaining percentages) and the session-mod API
+(`$.session.usage()` and the `session.measure` event), which reports the same
+figures.
 
-So the denominator's source is a **statusline tee**, and it is installed on
-**desk sessions only**. A desk's per-session settings overlay carries a
-statusline wrapper that writes the stdin JSON where the daemon can read it,
-then execs the statusline the operator configured — or exits quietly when
-there is none, since a wrapper that printed something of its own would be
-claiming a slot nobody gave it.
+So the denominator's source is the **session mod's `usage` feature**
+([`2026-10-20-session-usage-mod-feature-design.md`](2026-10-20-session-usage-mod-feature-design.md)):
+in every Claude session that loads TBD's session mod, the mod writes the
+window, with the tokens and percent measured beside it, to the session's own
+directory, where the daemon reads it. The statusline is not a source.
+`statusLine` is an object-valued setting with no merge across scopes, so the
+highest scope wins outright, and TBD's per-session settings file outranks every
+scope an operator can write: the project-local file, the project file, and
+their user settings. A TBD statusline wrapper would therefore take over a
+display slot the operator owns in every session they open and type into.
 
-The narrow scope follows from what the denominator is for and from what
-installing it costs. It exists to serve a desk's own context-recycling
-thresholds (§9), which are fractions of the session's effective window. Fleet
-agents need no such number: auto-compaction bears their survival, exactly as
-§9 says it bears a desk's. And the cost is not hypothetical — `statusLine` is
-an object-valued setting with no merge across scopes, so the highest scope
-wins outright, and TBD's per-session settings file outranks every scope an
-operator can write: the project-local file, the project file, and their user
-settings. A fleet-wide tee would therefore take over a display slot the
-operator owns in every session they open and type into. A desk is a session
-TBD configures end to end, so the same mechanism there costs nobody anything.
-Above TBD sits managed/enterprise settings, which outrank the overlay: where
-an organization sets a statusline, TBD's entry is ignored, the tee never runs,
-and the denominator stays unknown — the correct outcome, and one that needs no
-handling beyond not pretending otherwise.
-
-The ordinary case is therefore that there is no tee reading, and the design
-says so plainly: for every fleet session, and for a desk whose statusline has
-not run yet, the denominator is **unknown and reported as unknown** — raw
-token counts with no percentage, never a guessed one. Anything that needs a
-number anyway assumes 200k as a labeled assumption, because 200k errs safe —
-thresholds fire early, never late. Where the tee has fired, its captured
-payload supplies numerator and denominator together, computed by Claude Code
-at one instant from one source; a numerator taken from the transcript against a
-denominator captured earlier is an estimate and is labeled as one rather than
-presented as a single coherent fraction. The pane-read for context goes away:
-inferring context from a rendered status line is screen-scraping, it breaks
-silently whenever Claude Code rewords its display, and a `[1m]` suffix read off
-the screen reports capability rather than the window in force.
+Where the mod has not reported — the feature off, a Claude Code too old for
+mods, plugins disabled by managed settings — the denominator is **unknown and
+reported as unknown**: raw token counts with no percentage, never a guessed
+one. Anything that needs a number anyway assumes 200k as a labeled assumption,
+because 200k errs safe — thresholds fire early, never late. Where the mod has
+reported, its file supplies numerator and denominator together, computed by
+Claude Code at one instant from one source; a numerator taken from the
+transcript against a denominator captured earlier is an estimate and is labeled
+as one rather than presented as a single coherent fraction. The pane-read for
+context goes away: inferring context from a rendered status line is
+screen-scraping, it breaks silently whenever Claude Code rewords its display,
+and a `[1m]` suffix read off the screen reports capability rather than the
+window in force.
 
 **P1 — make existing work facts available overnight.** The daemon already
 calculates almost all work state. It gets pull request (PR) status for each
@@ -876,23 +865,22 @@ carry TBD's act record. The removed gate stays removed: no rule matching,
 no content inspection, no posture judgment. The residual race is the
 milliseconds between check and keystroke.
 
-**Two in-daemon rails still type outside this verb, and closing that is
+**One in-daemon rail still types outside this verb, and closing that is
 known work.** The public send is the only actuation this design describes,
-but it is not yet the only compiled code that types into a session. Two
-older rails paste through tmux directly: the hosted desk's own nudges and
-shift wrap-up prompt, and the rate-limit rail's auto-continue, which types
-`continue` once a limit clears. Both write their own actuation rows, so the
-record's coverage holds for them — but neither carries the dispatch
-envelope and neither can be delivery-verified (§12), and the *absence* of a
-row's confirming outcome therefore says nothing about them either way.
-That is exactly the wrong way round. These two are unattended sends, made
-on no user gesture, into sessions nobody is watching — the shape the
-acknowledgement machinery exists for — while the sends that do carry the
-envelope usually have a human or a supervisor reading the result. Routing
-both through the same actuation the public verb performs, so the envelope
-and the observation cover them without a second implementation of either,
-is the work that closes this gap; until it lands, "every send" in this
-design means every send made through `tbd terminal send`.
+but it is not yet the only compiled code that types into a session. The
+rate-limit rail's auto-continue, which types `continue` once a limit clears,
+pastes through tmux directly. It writes its own actuation rows, so the
+record's coverage holds for it — but it carries no dispatch envelope and
+cannot be delivery-verified (§12), and the *absence* of a row's confirming
+outcome therefore says nothing about it either way. That is exactly the
+wrong way round. These are unattended sends, made on no user gesture, into
+sessions nobody is watching — the shape the acknowledgement machinery
+exists for — while the sends that do carry the envelope usually have a human
+or a supervisor reading the result. Routing the rail through the same
+actuation the public verb performs, so the envelope and the observation cover
+it without a second implementation of either, is the work that closes this
+gap; until it lands, "every send" in this design means every send made
+through `tbd terminal send`.
 
 *What is deliberately not here.* No **`drive`** — it was send plus the
 record, and the record now rides every send, so a supervise-tier wrapper
@@ -2051,16 +2039,16 @@ command and review-bot name into the app — the exact warning example from the
 brief. The old merge gate shipped a `clearance` table of per-PR, SHA-pinned
 operator approvals — **designed as enforcement and never wired**: the store was
 fully built, `MergeGate.evaluate()` never consulted it, and it had zero
-production writers or readers (`docs/nightwatch.md` §1, §3.5). A prompt asked the
+production writers or readers. A prompt asked the
 desk agent to consult `approved-prs.jsonl`, so it was binding only until the
 model forgot. And the desk's notes file served as both memory and action log,
 creating the "self-report" problem in P1-7.
 
-The merge gate and its clearance and audit stores are gone from the current
-system, because whether a PR may merge is the forge's decision: branch
-protection enforces approval-bound-to-content from outside the trust boundary
-of the machine running the agents, a claim no local gate can make
-(`docs/nightwatch.md` §1). Two
+The design carries no merge gate and no clearance or audit store, because
+whether a PR may merge is the forge's decision: branch protection enforces
+approval-bound-to-content from outside the trust boundary of the machine
+running the agents, a claim no local gate can make
+([`../pr-merge-automation.md`](../pr-merge-automation.md)). Two
 of those four defects are worth carrying forward as warnings rather than as
 requirements. The `STANDING_RULE` string is why conduct is authored per project
 here instead of compiled (§3). The self-report problem is why the daemon writes
@@ -2348,7 +2336,7 @@ it never fires.
 **The context machinery is a capability, not a dependency — a desk must work
 without it.** Both of its inputs are specific to the agent kind running the
 desk: the fullness number reads a Claude transcript's usage records, and the
-window size rides a Claude statusline tee (§2). A desk driven by an agent
+window size rides the Claude session mod's usage report (§2). A desk driven by an agent
 that exposes neither — a Codex-driven desk, today — runs with no thresholds,
 no flush nudges, and no fullness-triggered recycle, and nothing above breaks,
 because survival never rested on this machinery. The layers that must hold
@@ -2363,14 +2351,14 @@ and the account
 shows its context as unknown rather than guessed.
 
 Thresholds are **fractions of the session's effective window**, never absolute
-token counts. The denominator comes from the statusline tee (§2); absolute
+token counts. The denominator comes from the session mod's usage report (§2); absolute
 numbers would be wrong on the next model, and the effective window is a
 session fact TBD receives rather than knows. As context grows the daemon
 sends staged **flush nudges** — bounded requests, same shape as the stand-down
 closing request (§9): "anything in your head not yet in artifacts, write it
 now — journal entries, proposals" — at rising fullness (§13), so that whenever
 a recycle or a compaction
-lands, the artifacts are already current. When the tee has supplied no
+lands, the artifacts are already current. When no usage report has supplied a
 denominator, the daemon nudges against the labeled 200k assumption (§2) —
 early, never late — rather than guessing a larger window.
 
@@ -2868,10 +2856,10 @@ one that is not built. Asking to verify either is refused rather than
 accepted and quietly answered *undetermined* forever, for the reason the
 whole section exists: promising evidence a target cannot produce rebuilds
 the silent-failure class one layer up. It is narrower than the send path
-too: the two in-daemon rails that paste directly rather than through the
-public verb (§3) write no envelope, so there is nothing for an observation
-to find, and bringing them onto the public actuation is what extends this
-section's guarantees to them.
+too: the in-daemon rail that pastes directly rather than through the public
+verb (§3) writes no envelope, so there is nothing for an observation to
+find, and bringing it onto the public actuation is what extends this
+section's guarantees to it.
 
 That one full attempt — adapter fallback and the evidence-bounded single
 retry included — is the whole of TBD-side persistence for any send. Beyond
@@ -3359,9 +3347,7 @@ daemon.
   author the account.
 - **Fleet-agent context management** — auto-compaction is fine for fleet
   sessions. No handoff templates, recycle flags, or compaction counters for
-  agents; the context fact is informational only (§2, §9), and for a fleet
-  session it is raw token counts with no denominator, because the statusline
-  tee that would supply one is installed on desks alone (§2). Deliberate
+  agents; the context fact is informational only (§2, §9). Deliberate
   recycling exists solely for the supervisor's own session (§9).
 - **A compiled model → window-size table** — refused, because the effective
   window is a session fact, not a model fact:
@@ -3372,10 +3358,9 @@ daemon.
   resolved value, and errs unsafe (a 1M capability read against a 200k
   session hides the boundary). The Models API would be authoritative but
   subscription OAuth tokens are contractually and technically scoped to
-  Claude Code itself. The statusline tee (§2) is the one source that reports
-  the resolved value, and it runs on desk sessions only; everywhere else — and
-  on a desk before its first statusline fires — the design says unknown rather
-  than consulting a table.
+  Claude Code itself. The session mod's usage report (§2) is the source that
+  reports the resolved value; wherever it has not reported, the design says
+  unknown rather than consulting a table.
 - **Pinning the compaction window at spawn** — rejected. Claude Code clamps
   `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the model's real window silently, so a
   pin above it leaves TBD believing a denominator that is not in effect and

@@ -182,8 +182,7 @@ holder row is no longer a category error at that branch.
 - An `.inPlace` swap of a row that is **already parked** takes the cold path,
   on either transport: re-home without waking.
 - `.fork` keeps its holder path.
-- `swapDeskRole` and the trust seed run unchanged; the row and its watch-desk
-  role survive the swap.
+- The trust seed runs unchanged.
 - The `.manual`, `.merge` and `.automatic` policies keep every rail they have.
   `.profileSwap` is a fourth policy, not a switch on the others.
 
