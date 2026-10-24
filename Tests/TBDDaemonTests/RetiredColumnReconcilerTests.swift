@@ -184,8 +184,8 @@ import Testing
         #expect(report.snapshotPath == expectedPath)
         #expect(fixture.snapshots() == ["state.db.pre-column-drop.20261024T123456Z"])
         let snapshot = try DatabaseQueue(path: expectedPath)
-        let configColumns = try snapshot.read { db in try Self.columnNames(of: "config", in: db) }
-        let terminalColumns = try snapshot.read { db in try Self.columnNames(of: "terminal", in: db) }
+        let configColumns = try await snapshot.read { db in try Self.columnNames(of: "config", in: db) }
+        let terminalColumns = try await snapshot.read { db in try Self.columnNames(of: "terminal", in: db) }
         #expect(configColumns.contains("nightwatch_mode"))
         #expect(terminalColumns.contains("watch_desk_role"))
     }

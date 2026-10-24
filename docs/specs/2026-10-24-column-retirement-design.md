@@ -15,7 +15,7 @@ A column leaves the schema in two steps.
 - **Retire** – a pull request that deletes every read and write of the column, adds it to the daemon's retired-column list with the current schema epoch, and bumps that epoch.
 - **Drop** – no pull request. A reconciler at daemon startup drops each listed column once the build kept for rollback no longer uses it.
 
-The guarantee is about the kept bundle: a drop never runs while the bundle in `~/tbd/updates/previous` might still read or write the column. Other routes back are not covered. Checking out an arbitrary older commit and building it can still meet a schema it does not understand, as it can after any change that is not additive.
+The guarantee is about the kept bundle: a drop never runs while the bundle in `~/tbd/updates/previous` might still read or write the column. Other routes back are not covered. Checking out an arbitrary older commit and building it can still meet a schema it does not understand, as it can after any change that is not additive. That includes a daemon started with `scripts/restart.sh` from a worktree whose tree predates a column's retirement: once the column is dropped, that build fails every insert into the column's table, so a developer merges `main` into such a worktree before restarting from it.
 
 ## The schema epoch
 
@@ -87,3 +87,4 @@ Both at epoch 1:
 - **Dropping in an ordinary migration, gated by the lint.** The lint runs on the author's machine and in CI and cannot see the kept bundle on a user's machine, so it cannot give the guarantee.
 - **A migration that fails until the drop is safe.** GRDB records a migration as applied the first time it runs, so the only way to retry is to throw, and a throwing migration holds back every migration ordered after it.
 - **Mechanical enforcement of the checklist.** A lint that rejects the column's name in Swift sources, or a test that drops every retired column and then exercises each store, would catch a forgotten reference before a user's daemon does. Neither was adopted; retirement relies on review against the checklist above.
+- **A default-off flag on the drop.** Dropping a column destroys persisted state, which this repository otherwise ships behind a default-off flag that soaks before it graduates. Here the epoch check is what makes the drop safe for the kept bundle: it already holds each drop until rolling back to that bundle is safe. A flag would only postpone drops that are already held for exactly that long, and for as long as it stayed off, a fresh install, which has no kept bundle to protect, would carry every retired column as dead weight.
