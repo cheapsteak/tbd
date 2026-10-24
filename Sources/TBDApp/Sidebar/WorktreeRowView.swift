@@ -436,7 +436,7 @@ struct WorktreeRowView: View {
     /// state is persistent — only unpinned rows need the hover to reveal the
     /// (hollow) affordance.
     private var showsPinToggle: Bool {
-        (isRowHovered || worktree.pinnedAt != nil) && !isMain && !worktree.isNightwatchDesk
+        (isRowHovered || worktree.pinnedAt != nil) && !isMain
     }
 
     private func handleNestedPlus(repoID: UUID) {

@@ -571,7 +571,7 @@ public enum TBDConstants {
     }
 
     /// Directory holding daemon-managed runtime files — the Claude settings
-    /// overlays, the statusline tee and its captures: `~/tbd/runtime`.
+    /// overlays and the session-mod key: `~/tbd/runtime`.
     public static func runtimeDir(environment: [String: String]) -> URL {
         configDir(environment: environment).appendingPathComponent("runtime")
     }
@@ -584,53 +584,14 @@ public enum TBDConstants {
     }
     public static var modKeyPath: URL { modKeyPath(environment: ProcessInfo.processInfo.environment) }
 
-    /// The one shared statusline tee script: `~/tbd/runtime/statusline-tee.sh`.
-    ///
-    /// One file for the whole fleet rather than one per session — the script
-    /// takes its capture path and its delegate command as arguments, so nothing
-    /// session-specific is baked into it.
-    public static func statuslineTeeScriptPath(environment: [String: String]) -> String {
-        runtimeDir(environment: environment)
-            .appendingPathComponent("statusline-tee.sh")
-            .path
-    }
-    public static var statuslineTeeScriptPath: String {
-        statuslineTeeScriptPath(environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// Filename prefix/suffix for a session's statusline capture file. Shared
-    /// between the path builder and the orphan-prune sweep so the two can't
-    /// drift, exactly as the per-session overlay's pair is.
-    public static let statuslineCapturePrefix = "statusline-capture-"
-    public static let statuslineCaptureSuffix = ".json"
-
-    /// Where the tee publishes one session's statusline stdin JSON:
-    /// `~/tbd/runtime/statusline-capture-<sessionKey>.json`.
-    ///
-    /// The payload carries the session's cwd and repo paths, so the tee writes
-    /// it under a restrictive umask; the path itself is only an opaque terminal
-    /// id.
-    public static func statuslineCapturePath(
-        sessionKey: String,
-        environment: [String: String]
-    ) -> String {
-        runtimeDir(environment: environment)
-            .appendingPathComponent(
-                "\(statuslineCapturePrefix)\(sanitizedSessionKey(sessionKey))\(statuslineCaptureSuffix)")
-            .path
-    }
-    public static func statuslineCapturePath(sessionKey: String) -> String {
-        statuslineCapturePath(sessionKey: sessionKey, environment: ProcessInfo.processInfo.environment)
-    }
-
     /// Filesystem-safe rendering of a session key (non-`[A-Za-z0-9_-]` → `_`).
     ///
     /// Callers MUST pass a unique opaque id (the terminal UUID): the mapping is
     /// only collision-safe for such inputs, since two distinct human-readable
     /// strings could sanitize to the same filename while distinct UUIDs never
-    /// do. Lives here so the overlay files and the capture files sanitize
-    /// identically — a second implementation is how the prune sweep and the
-    /// path builder drift apart.
+    /// do. Lives here so every path builder and the prune sweep that reclaims
+    /// its files sanitize identically — a second implementation is how the two
+    /// drift apart.
     public static func sanitizedSessionKey(_ sessionKey: String) -> String {
         String(sessionKey.unicodeScalars.map { scalar -> Character in
             let isSafe = scalar == "-" || scalar == "_"

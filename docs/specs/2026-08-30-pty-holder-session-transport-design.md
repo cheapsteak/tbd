@@ -598,16 +598,15 @@ Everything TBD does through tmux today, and its replacement:
 - **Input injection** (`tbd terminal send`, queued prompts) — the daemon is the
   sole injector, writing through the session's holder whether or not a viewer is
   attached.
-- **Machine reads** (`tbd terminal read`, the
-  hibernation pending-input rail, the embedded supervision babysitter) — the
-  daemon renders its own emulator when it is the reader and pulls a snapshot
+- **Machine reads** (`tbd terminal read`, the hibernation pending-input rail) —
+  the daemon renders its own emulator when it is the reader and pulls a snapshot
   from the app when a viewer is attached. Every such read answers with a
   typed screen that names which store answered and how stale it is, so a
   consumer can hold a policy rather than a hope
   ([`2026-09-05-child-as-contract-party-design.md`](2026-09-05-child-as-contract-party-design.md)).
   This replaces `capture-pane` with a first-party interface, which the
-  no-TUI-scraping rule already pushes toward; the two sanctioned scrapers
-  migrate onto it as part of this work.
+  no-TUI-scraping rule already pushes toward; the sanctioned scraper migrates
+  onto it as part of this work.
 - **Hibernation and revive** — hibernate instructs the holder to terminate its
   child (the holder reports status and exits); revive spawns a fresh holder.
   The queued-prompt flag keeps its semantics, now gating daemon writes to the

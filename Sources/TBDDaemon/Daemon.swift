@@ -21,11 +21,6 @@ struct RuntimeIntegrationRefresher {
             ensureCodexProfilePlugin: { _ = try CodexHomeManager().ensureProfilePlugin() },
             writeClaudeHookOverlay: {
                 ClaudeHookOverlay.writeOverlay()
-                // The statusline tee ships beside the overlay and is rewritten
-                // on every startup for the same reason: a desk session's
-                // overlay points at it by path, so the file has to be current
-                // before the next spawn resolves that path.
-                StatuslineTee.writeScript()
             }
         )
     }
@@ -304,7 +299,6 @@ public final class Daemon: Sendable {
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
     /// on shutdown; `nil` in mock mode.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
-    public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     /// Fleet supervision's single writer of `~/tbd/supervision/`. Owned here so
     /// the heartbeat below can read through it; also handed to the router.
     public nonisolated(unsafe) var supervision: SupervisionStore?
@@ -2205,40 +2199,7 @@ public final class Daemon: Sendable {
             rpcRouter.limitResumeScheduler = resumeScheduler
             await resumeScheduler.start()
 
-            // 12e. Start daywatch runner (autonomous fleet babysitter loop).
-            let skillDir = PluginDirWriter.pluginDirPath + "/skills/nightwatch"
-            let executor = ProcessDaywatchExecutor(skillDir: skillDir)
-
-            // Phase A: Create desk session manager for visible worker
-            let deskSessionManager = DeskSessionManager(
-                db: database,
-                lifecycle: lifecycle,
-                tmux: tmux,
-                skillDir: skillDir,
-                subscriptions: subs,
-                actuationLog: actuationLog
-            )
-
-            let runner = DaywatchRunner(
-                executor: executor,
-                deskSessionManager: deskSessionManager,
-                interval: DaywatchRunner.defaultInterval
-            )
-            self.daywatchRunner = runner
-            rpcRouter.daywatchRunner = runner
-            // Boot-reconcile: if nightwatch mode was persisted, restart the loop —
-            // unless it is combined with the pty-holder transport, which the gate
-            // turns off once (see NightwatchHolderBootReconcile).
-            do {
-                try await NightwatchHolderBootReconcile.run(
-                    db: database, subscriptions: subs,
-                    holderSupported: holderRegistry?.canSpawn == true,
-                    applyMode: { await runner.apply(mode: $0) })
-            } catch {
-                reconcileLogger.error("Failed to restore daywatch mode on boot: \(String(describing: error), privacy: .public)")
-            }
-
-            // 12f. Out-of-band supervision heartbeat (design §14). Publishes
+            // 12e. Out-of-band supervision heartbeat (design §14). Publishes
             // `status.json` at every brake edge, and runs its periodic timer
             // only while the brake is released — the brake is the one switch,
             // and a braked daemon runs no background loop. See the type's own
@@ -2458,11 +2419,6 @@ public final class Daemon: Sendable {
         // can't interleave with an in-flight `start()`/`spawnPollLoops()`.
         if let remoteManager {
             await remoteManager.shutdown()
-        }
-
-        // Stop daywatch runner.
-        if let runner = daywatchRunner {
-            await runner.apply(mode: .off)
         }
 
         // Stop the daemon-clock PR poll — whichever driver runs — through the

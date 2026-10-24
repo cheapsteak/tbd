@@ -25,28 +25,12 @@ struct TransportMigrationActionTests {
 
     @Test func theMenuItemIsOfferedOnlyForARowNotOnTheHolder() {
         func offered(_ terminal: Terminal?, holderSupported: Bool = true) -> Bool {
-            TransportMigrationMenu.isOffered(
-                for: terminal, holderSupported: holderSupported, watchMode: .off)
+            TransportMigrationMenu.isOffered(for: terminal, holderSupported: holderSupported)
         }
         #expect(offered(Self.row(transport: .tmux)))
         #expect(!offered(Self.row(transport: .holder)))
         #expect(!offered(nil))
         #expect(!offered(Self.row(transport: .tmux), holderSupported: false))
-    }
-
-    /// The app half of the Nightwatch/holder gate: nobody is offered a gesture
-    /// the daemon refuses. Both branches, because the offer is a conditional.
-    @Test func theMenuItemIsNotOfferedWhileAWatchModeIsLive() {
-        let row = Self.row(transport: .tmux)
-        #expect(TransportMigrationMenu.isOffered(
-            for: row, holderSupported: true, watchMode: .off))
-        for mode in [NightwatchMode.daywatch, .nightwatch] {
-            #expect(!TransportMigrationMenu.isOffered(
-                for: row, holderSupported: true, watchMode: mode),
-                    "the move was offered with \(mode) active")
-            #expect(TransportMigrationMenu.isBlockedByWatchMode(mode))
-        }
-        #expect(!TransportMigrationMenu.isBlockedByWatchMode(.off))
     }
 
     @Test func theActionSendsTheTerminalIDAndVeilsTheRowDuringTheCall() async {

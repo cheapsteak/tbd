@@ -844,11 +844,10 @@ script of your own that declares no identity still delivers one, reading
 `from="anonymous"`.
 A keys payload carries no envelope, and neither does a send to a plain shell
 pane — nothing there reads the tag, and `--submit` would run it as a command
-line of its own, so a shell receives your text alone. Two of TBD's own
-in-daemon rails — the watch desk's nudges and the rate-limit auto-continue —
-type into a session without going through this verb; their sends are in the
-actuation log like any other, but they carry no envelope and cannot be
-verified.
+line of its own, so a shell receives your text alone. One of TBD's own
+in-daemon rails, the rate-limit auto-continue, types into a session without
+going through this verb; its sends are in the actuation log like any other,
+but they carry no envelope and cannot be verified.
 
 `--verify` opts into landing confirmation — a tail read of the target
 transcript's JSONL for that envelope, with the re-check deadline as its

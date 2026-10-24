@@ -437,8 +437,8 @@ That single rule covers three cases that used to need their own machinery:
 - **After a restart** the licence is gone, so the pane that comes up types
   nothing and the prompt surfaces as recoverable instead.
 - **After an undeliverable outcome** the text stays in the column on purpose,
-  but the licence is spent — so a revive, a Watch Desk session, or an
-  archive-and-revive weeks later types nothing into a conversation the words
+  but the licence is spent — so a revive or an archive-and-revive weeks later
+  types nothing into a conversation the words
   were never written for.
 - **Deliver-now** re-parks, which grants the licence again. The operator's own
   gesture is what makes a retained prompt deliverable, which is the attendedness

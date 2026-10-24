@@ -106,7 +106,6 @@ extension WorktreeLifecycle {
         claudeSessionID: String?,
         profileID: UUID?,
         kind: TerminalKind?,
-        watchDeskRole: WatchDeskRole? = nil,
         transport: TerminalSpawnTransport,
         serverName: String? = nil,
         sessionIncarnationID: UUID? = nil
@@ -157,7 +156,6 @@ extension WorktreeLifecycle {
                 claudeSessionID: claudeSessionID,
                 profileID: profileID,
                 kind: kind,
-                watchDeskRole: watchDeskRole,
                 transport: holderHandle == nil ? .tmux : .holder,
                 holderPID: holderHandle?.holderPID,
                 childPID: holderHandle?.childPID,

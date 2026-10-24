@@ -54,14 +54,10 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
     case userAction(String)
     /// The session's transcript JSONL, read from the tail.
     case transcriptTail
-    /// The statusline wrapper's captured stdin JSON — one of the two surfaces
-    /// on which Claude Code tells a third party its *resolved* context window,
-    /// and the one a session spawned without the session mod's `usage`
-    /// feature has.
-    case statuslineTee
     /// The session mod's `usage.json`, written from `$.session.usage()` and
-    /// each `session.measure` — the other surface carrying the resolved
-    /// window, read only while the mod is confirmed running in the session.
+    /// each `session.measure` — the surface on which Claude Code tells a third
+    /// party its *resolved* context window, read only while the mod is
+    /// confirmed running in the session.
     case sessionMod
     /// TBD's own persisted record: the hibernation columns, the scheduled-resume
     /// rows, anything the daemon wrote down earlier and is now reading back.
@@ -102,7 +98,6 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         case .hookEvent: return "hook"
         case .userAction: return "user-action"
         case .transcriptTail: return "transcript-tail"
-        case .statuslineTee: return "statusline-tee"
         case .sessionMod: return "session-mod"
         case .database: return "database"
         case .processLiveness: return "process-liveness"
@@ -145,7 +140,6 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         case "user-action":
             if let detail, !detail.isEmpty { self = .userAction(detail) } else { self = .unrecognized(kind) }
         case "transcript-tail": self = .transcriptTail
-        case "statusline-tee": self = .statuslineTee
         case "session-mod": self = .sessionMod
         case "database": self = .database
         case "process-liveness": self = .processLiveness
@@ -621,9 +615,9 @@ public typealias SessionState = ObservedFact<SessionStateValue>
 /// full at the boundary, which is exactly where being wrong costs the most.
 ///
 /// The only party that knows the resolved window is Claude Code, and the one
-/// surface where it tells a third party is the statusline's stdin JSON. Where
-/// that tee has not fired, the answer is `.unknown` and the report carries raw
-/// token counts with no percentage.
+/// surface where it tells a third party is the session mod's `usage.json`.
+/// Where that has not been written, the answer is `.unknown` and the report
+/// carries raw token counts with no percentage.
 public enum ContextWindow: Codable, Sendable, Equatable {
     case observed(ObservedFact<Int>)
     case unknown(why: String)
@@ -635,12 +629,6 @@ public enum ContextWindow: Codable, Sendable, Equatable {
     /// flag on the way to a surface. 200k is chosen because it errs early: if
     /// the real window is larger, a threshold fires sooner than it needed to,
     /// which costs attention. The opposite error costs a session.
-    ///
-    /// The same number is spelled again in Python as `ASSUMED_WINDOW`, in the
-    /// `tick.py` body inside `NightwatchSkillContent.swift`. Two languages, one
-    /// assumption and no way to share it, so it is stated twice on purpose —
-    /// change one, change the other, and keep it labeled as an assumption in
-    /// whatever a human reads.
     public static let assumedTokens = 200_000
 
     /// The denominator to use, and whether it was assumed.
@@ -694,10 +682,11 @@ public enum ContextWindow: Codable, Sendable, Equatable {
 /// denominator that may be assumed.
 ///
 /// The two halves are separately fallible and are modeled separately for that
-/// reason. `used` comes from the last assistant record's `usage` block at the
-/// transcript tail; the window comes from the statusline tee. Either can be
-/// missing without the other, and collapsing them into one optional percentage
-/// would lose which one was missing.
+/// reason. `used` comes from the session mod's `usage.json` or from the last
+/// assistant record's `usage` block at the transcript tail; the window comes
+/// only from the session mod. Either can be missing without the other, and
+/// collapsing them into one optional percentage would lose which one was
+/// missing.
 public struct ContextLoad: Codable, Sendable, Equatable {
     /// Tokens currently in the window. nil when the transcript tail could not
     /// be read or carried no usage block.
@@ -712,12 +701,11 @@ public struct ContextLoad: Codable, Sendable, Equatable {
     /// Whether numerator and denominator are one reading rather than two.
     ///
     /// True only when both halves came from the same source at the same
-    /// instant — in practice, when the statusline tee's captured payload
-    /// carried a `current_usage` and a `context_window_size` together, or the
-    /// session mod's `usage.json` carried `tokens` beside its `window`, which is
-    /// Claude Code computing both at once from its own state. False whenever
-    /// the numerator was read from the transcript tail while the denominator
-    /// came from an earlier capture, and false when the window is unknown.
+    /// instant — in practice, when the session mod's `usage.json` carried
+    /// `tokens` beside its `window`, which is Claude Code computing both at once
+    /// from its own state. False whenever the numerator was read from the
+    /// transcript tail while the denominator came from an earlier reading, and
+    /// false when the window is unknown.
     ///
     /// The distinction is not pedantry: a numerator and a denominator observed
     /// at different moments were never simultaneously true, so a percentage

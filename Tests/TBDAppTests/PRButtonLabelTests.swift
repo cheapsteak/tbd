@@ -277,7 +277,7 @@ struct PRButtonLabelTests {
         // 8 = number, state, url, reason and mergeQueuePosition, all of which
         // the split button DOES render and which are all keyed (reason via the
         // menu row titles, mergeQueuePosition via the bus glyph's baked
-        // position badge), plus the nightwatch gate metadata (files, commits,
+        // position badge), plus the merge-gate metadata (files, commits,
         // authorWorktreeID), which it does NOT render — deliberately excluded,
         // else every metadata fetch would force a spurious item rebuild.
         // 9 adds observedAt — when the forge was last asked. The RAW stamp is

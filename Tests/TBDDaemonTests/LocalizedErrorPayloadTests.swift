@@ -93,7 +93,6 @@ struct LocalizedErrorPayloadTests {
     private static let worktreeID = UUID()
     private static let repoID = UUID()
     private static let recordID = UUID()
-    private static let holderID = UUID()
     private static let panelID = PanelID()
     private static let owningTabID = WorkspaceTabID()
     private static let incomingTabID = WorkspaceTabID()
@@ -164,17 +163,6 @@ struct LocalizedErrorPayloadTests {
                 )
             ),
             ("PanelSurfaceStoreError.alreadyImported", PanelSurfaceStoreError.alreadyImported),
-            (
-                "WatchDeskLeaseError.contended",
-                WatchDeskLeaseError.contended(
-                    holder: Self.holderID,
-                    generation: 4207,
-                    expiresAt: Date(timeIntervalSince1970: 1_800_000_000)
-                )
-            ),
-            ("WatchDeskLeaseError.notHeld", WatchDeskLeaseError.notHeld),
-            ("WatchDeskLeaseError.fenced", WatchDeskLeaseError.fenced),
-            ("WatchDeskLeaseError.terminalOutsideDesk", WatchDeskLeaseError.terminalOutsideDesk),
         ]
     }
 
@@ -267,19 +255,6 @@ struct LocalizedErrorPayloadTests {
             ),
             [Self.panelID.uuidString, Self.owningTabID.uuidString, Self.incomingTabID.uuidString],
             "PanelSurfaceStoreError.panelHistoryOwnedByOtherTab"
-        )
-    }
-
-    @Test("lease generation and holder payloads reach the rendered description")
-    func leasePayloadsRender() {
-        assertRenders(
-            WatchDeskLeaseError.contended(
-                holder: Self.holderID,
-                generation: 4207,
-                expiresAt: Date(timeIntervalSince1970: 1_800_000_000)
-            ),
-            [Self.holderID.uuidString, "4207"],
-            "WatchDeskLeaseError.contended"
         )
     }
 

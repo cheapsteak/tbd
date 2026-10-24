@@ -5,31 +5,21 @@ import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The statusline tee across `terminal.swapProfile` — "Switch account" on a
-/// Watch Desk.
+/// `terminal.swapProfile` in place — "Switch account" on a live Claude session:
+/// what holds it, what it must survive between ending the old process and
+/// starting the new one, and when it writes the new process's overlay.
 ///
-/// An `.inPlace` swap keeps the terminal row (`plannedTerminalID ==
-/// oldTerminal.id`) and never touches `watch_desk_role`, so the row goes on
-/// claiming to be a desk across the respawn. Writing the overlay without that
-/// role would leave it running with no tee — and, because a roleless write
-/// deletes the session's capture, with no denominator either — while
-/// `session.states` keeps reporting "the tee is installed but has not fired
-/// yet" forever.
-///
-/// A `.fork` swap is the opposite case: it mints a fresh row branded no desk, so
-/// its overlay must carry no tee or the two would disagree the other way.
-///
-/// Nested under `TBDHomeSerialized`: the per-session overlay and the capture
-/// path resolve through the process-global `TBD_HOME`.
+/// Nested under `TBDHomeSerialized`: the per-session overlay resolves through
+/// the process-global `TBD_HOME`.
 extension TBDHomeSerialized {
-@Suite struct SwapProfileStatuslineTeeTests {
+@Suite struct SwapProfileInPlaceTests {
 
     private struct Scratch {
         let home: URL
         let prior: String?
         init() {
             home = FileManager.default.temporaryDirectory
-                .appendingPathComponent("tbd-swap-tee-\(UUID().uuidString)", isDirectory: true)
+                .appendingPathComponent("tbd-swap-in-place-\(UUID().uuidString)", isDirectory: true)
             prior = setTBDHome(home.path)
         }
         func cleanUp() {
@@ -56,21 +46,20 @@ extension TBDHomeSerialized {
 
     private func isolatedConfigDirManager() -> ClaudeProfileConfigDirManager {
         let home = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tbd-swap-tee-claude-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("tbd-swap-in-place-claude-\(UUID().uuidString)", isDirectory: true)
         return ClaudeProfileConfigDirManager(
             baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
             hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true))
     }
 
-    /// A live (unparked) Claude terminal, optionally branded a desk, in a
-    /// worktree whose path exists on disk.
+    /// A live (unparked) Claude terminal in a worktree whose path exists on
+    /// disk.
     ///
     /// - Parameter withConversation: when true the session's transcript carries
     ///   a user message, so `isSessionBlank` is false and the swap takes the
-    ///   **resume** branch; when false it takes the **fresh** branch. Both
-    ///   branches resolve their own overlay, so both are covered.
+    ///   **resume** branch; when false it takes the **fresh** branch.
     private func makeFixture(
-        _ scratch: Scratch, desk: Bool, withConversation: Bool,
+        _ scratch: Scratch, withConversation: Bool,
         recorder: (@Sendable ([String]) -> Void)? = nil,
         clock: any Clock<Duration> = ContinuousClock(),
         sessionsDir: URL? = nil
@@ -82,11 +71,10 @@ extension TBDHomeSerialized {
             path: repoPath, displayName: "repo", defaultBranch: "main")
         let worktree = try await db.worktrees.create(
             repoID: repo.id, name: "wt", branch: "main", path: repoPath,
-            tmuxServer: "tbd-swap-tee")
+            tmuxServer: "tbd-swap-in-place")
         let terminal = try await db.terminals.create(
             worktreeID: worktree.id, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", claudeSessionID: "sess-swap", kind: .claude,
-            watchDeskRole: desk ? .readOnlyCoordinator : nil)
+            label: "claude", claudeSessionID: "sess-swap", kind: .claude)
         if withConversation {
             let transcript = scratch.home.appendingPathComponent("sess-swap.jsonl").path
             let record = #"{"type":"user","message":{"content":"hello"}}"# + "\n"
@@ -147,7 +135,7 @@ extension TBDHomeSerialized {
         defer { scratch.cleanUp() }
         let commands = FireRecorder<[String]>()
         let fixture = try await makeFixture(
-            scratch, desk: false, withConversation: true,
+            scratch, withConversation: true,
             recorder: { commands.record($0) })
         let stub = StubAdmission(.hold(reason: "camera in use"))
         fixture.router.startAdmission = stub
@@ -164,16 +152,6 @@ extension TBDHomeSerialized {
         #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
     }
 
-    private func statusLineCommand(forSessionKey key: String) -> String? {
-        let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: key)
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
-              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let entry = parsed["statusLine"] as? [String: Any] else {
-            return nil
-        }
-        return entry["command"] as? String
-    }
-
     // MARK: -
 
     /// The swap's SIGTERM can deliver SessionEnd before respawn. That hook
@@ -188,7 +166,7 @@ extension TBDHomeSerialized {
         let clock = EventDrivenTestClock()
         let commands = FireRecorder<[String]>()
         let fixture = try await makeFixture(
-            scratch, desk: false, withConversation: true,
+            scratch, withConversation: true,
             recorder: { commands.record($0) }, clock: clock)
         let predecessor = fixture.terminal
         let task = Task { try await swap(fixture, mode: .inPlace) }
@@ -246,7 +224,7 @@ extension TBDHomeSerialized {
         let clock = EventDrivenTestClock()
         let commands = FireRecorder<[String]>()
         let fixture = try await makeFixture(
-            scratch, desk: false, withConversation: true,
+            scratch, withConversation: true,
             recorder: { commands.record($0) }, clock: clock)
         let task = Task { try await swap(fixture, mode: .inPlace) }
         defer { task.cancel() }
@@ -285,130 +263,41 @@ extension TBDHomeSerialized {
         #expect(!after.isParked)
     }
 
-    @Test(arguments: [true, false])
-    func anInPlaceSwapOnADeskKeepsTheStatuslineTee(withConversation: Bool) async throws {
-        let scratch = Scratch()
-        defer { scratch.cleanUp() }
-        let fixture = try await makeFixture(
-            scratch, desk: true, withConversation: withConversation)
+    // MARK: - The session mod and the overlay across the swap
 
-        let response = try await swap(fixture, mode: .inPlace)
-        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
-
-        // The row still claims to be a desk…
-        let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(after.watchDeskRole != nil)
-        // …so the overlay it just respawned with had better install the tee.
-        let command = try #require(
-            statusLineCommand(forSessionKey: fixture.terminal.id.uuidString),
-            "an in-place swap on a desk produced an overlay with no statusLine")
-        #expect(command.contains(StatuslineTee.scriptPath))
-        // The row is reused, so the capture path is too — and it must still be
-        // the one the tee publishes to.
-        #expect(command.contains(
-            StatuslineTee.capturePath(sessionKey: fixture.terminal.id.uuidString)))
-    }
-
-    @Test func anInPlaceSwapOnAnOrdinaryTerminalInstallsNoStatusline() async throws {
-        let scratch = Scratch()
-        defer { scratch.cleanUp() }
-        let fixture = try await makeFixture(scratch, desk: false, withConversation: true)
-
-        let response = try await swap(fixture, mode: .inPlace)
-        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
-
-        // TBD's per-session `--settings` outranks the operator's `statusLine` in
-        // every scope they can write, so a leak here takes over a slot they own.
-        #expect(statusLineCommand(forSessionKey: fixture.terminal.id.uuidString) == nil)
-    }
-
-    // MARK: - A desk whose swap carries the session mod's `usage`
-
-    /// A sessions directory under the scratch home, or — `writable: false` — a
-    /// regular file where one should be, so writing a spawn record fails and
-    /// `SessionModSpawn.prepare` returns nil.
-    private func sessionsDir(_ scratch: Scratch, writable: Bool = true) throws -> URL {
+    /// A sessions directory under the scratch home.
+    private func sessionsDir(_ scratch: Scratch) throws -> URL {
         let url = scratch.home.appendingPathComponent("sessions", isDirectory: true)
-        if writable {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        } else {
-            try FileManager.default.createDirectory(
-                at: scratch.home, withIntermediateDirectories: true)
-            try Data("not a directory".utf8).write(to: url)
-        }
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }
 
-    @Test(arguments: [true, false])
-    func anInPlaceSwapOnADeskCarryingUsageKeepsThePersonsStatusLine(
-        withConversation: Bool
-    ) async throws {
-        let scratch = Scratch()
-        defer { scratch.cleanUp() }
-        let sessions = try sessionsDir(scratch)
-        let commands = FireRecorder<[String]>()
-        let fixture = try await makeFixture(
-            scratch, desk: true, withConversation: withConversation,
-            recorder: { commands.record($0) }, sessionsDir: sessions)
-        try await fixture.db.config.setSessionModUsageEnabled(true)
-
-        let response = try await swap(fixture, mode: .inPlace)
-        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
-
-        let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
-        #expect(after.watchDeskRole != nil)
-        #expect(statusLineCommand(forSessionKey: fixture.terminal.id.uuidString) == nil,
-                "an in-place swap on a desk carrying usage still took over its statusLine")
-        let launch = try #require(
-            commands.values.last(where: { $0.contains("respawn-window") }).map(tmuxEnvironmentFlags))
-        #expect(launch[SessionModSpawn.featuresVariable] == "usage")
-        let sessionID = try #require(after.claudeSessionID)
-        let record = try #require(readSpawnRecord(sessionsDir: sessions, sessionID: sessionID))
-        #expect(record.features == ["usage"])
-    }
-
-    /// The flag is on, but the spawn record could not be written, so the
-    /// launch carries no mod: the overlay written just before it carries the
-    /// tee.
-    @Test func anInPlaceSwapOnADeskWhoseSpawnRecordFailsKeepsTheTee() async throws {
-        let scratch = Scratch()
-        defer { scratch.cleanUp() }
-        let blocked = try sessionsDir(scratch, writable: false)
-        let commands = FireRecorder<[String]>()
-        let fixture = try await makeFixture(
-            scratch, desk: true, withConversation: true,
-            recorder: { commands.record($0) }, sessionsDir: blocked)
-        try await fixture.db.config.setSessionModUsageEnabled(true)
-
-        let response = try await swap(fixture, mode: .inPlace)
-        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
-
-        let command = try #require(
-            statusLineCommand(forSessionKey: fixture.terminal.id.uuidString),
-            "an in-place swap on a desk spawned without the mod lost its tee")
-        #expect(command.contains(StatuslineTee.scriptPath))
-        let launch = try #require(
-            commands.values.last(where: { $0.contains("respawn-window") }).map(tmuxEnvironmentFlags))
-        #expect(launch[SessionModSpawn.featuresVariable] == nil)
+    /// A settings fragment for the fixture's repo, which makes the swap's
+    /// overlay per-session — so the per-session file is the one a launch
+    /// would rewrite.
+    private func writeRepoFragment(_ fixture: Fixture) async throws {
+        let worktree = try #require(try await fixture.db.worktrees.get(id: fixture.terminal.worktreeID))
+        let repoID = try #require(worktree.repoID)
+        let path = TBDConstants.claudeSettingsOverlayPath(repoID: repoID)
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: path).deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data(#"{"skillOverrides":{"x":"off"}}"#.utf8).write(to: URL(fileURLWithPath: path))
     }
 
     /// The overlay is written by the launch, so a swap that fails before its
-    /// replacement starts leaves the running process's overlay and capture as
-    /// they were — even with the flag on, where a launch would have dropped
-    /// the tee and deleted the capture.
+    /// replacement starts leaves the running process's overlay as it was.
     ///
     /// The failure is staged at the swap's replacement reservation, the first
     /// write of the arm: after the overlay is planned and before the old
     /// process is signalled or anything is launched.
-    @Test func anInPlaceSwapThatFailsBeforeLaunchLeavesTheOverlayAndCaptureAlone() async throws {
+    @Test func anInPlaceSwapThatFailsBeforeLaunchLeavesTheOverlayAlone() async throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
-        let sessions = try sessionsDir(scratch)
         let commands = FireRecorder<[String]>()
         let fixture = try await makeFixture(
-            scratch, desk: true, withConversation: true,
-            recorder: { commands.record($0) }, sessionsDir: sessions)
-        try await fixture.db.config.setSessionModUsageEnabled(true)
+            scratch, withConversation: true, recorder: { commands.record($0) })
+        try await writeRepoFragment(fixture)
         let key = fixture.terminal.id.uuidString
         let running = Data(#"{"previous":"life"}"#.utf8)
         let overlayPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: key)
@@ -416,12 +305,6 @@ extension TBDHomeSerialized {
             at: URL(fileURLWithPath: overlayPath).deletingLastPathComponent(),
             withIntermediateDirectories: true)
         try running.write(to: URL(fileURLWithPath: overlayPath))
-        let capturePath = StatuslineTee.capturePath(sessionKey: key)
-        try FileManager.default.createDirectory(
-            at: URL(fileURLWithPath: capturePath).deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-        try Data(#"{"context_window":{"context_window_size":200000}}"#.utf8)
-            .write(to: URL(fileURLWithPath: capturePath))
         try await fixture.db.writerForTests.write { database in
             try database.execute(sql: """
                 CREATE TRIGGER reject_swap_reservation
@@ -443,43 +326,43 @@ extension TBDHomeSerialized {
                 "the swap launched a replacement")
         #expect(try Data(contentsOf: URL(fileURLWithPath: overlayPath)) == running,
                 "a swap that launched nothing rewrote the running process's overlay")
-        #expect(FileManager.default.fileExists(atPath: capturePath),
-                "a swap that launched nothing deleted the running process's capture")
     }
 
-    @Test func anInPlaceSwapOnAnOrdinaryTerminalWithUsageOnInstallsNoStatusline() async throws {
+    /// The other side of the same rule: a swap that launches writes the
+    /// overlay its command names, replacing the one the old process ran with.
+    @Test func anInPlaceSwapThatLaunchesRewritesTheOverlay() async throws {
+        let scratch = Scratch()
+        defer { scratch.cleanUp() }
+        let fixture = try await makeFixture(scratch, withConversation: true)
+        try await writeRepoFragment(fixture)
+        let overlayPath = ClaudeHookOverlay.perSessionOverlayPath(
+            sessionKey: fixture.terminal.id.uuidString)
+        try FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: overlayPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data(#"{"previous":"life"}"#.utf8).write(to: URL(fileURLWithPath: overlayPath))
+
+        let response = try await swap(fixture, mode: .inPlace)
+        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
+
+        #expect(try Data(contentsOf: URL(fileURLWithPath: overlayPath))
+                == (try ClaudeHookOverlay.generateBody(
+                    extraSettings: ["skillOverrides": ["x": "off"]])))
+    }
+
+    @Test func anInPlaceSwapWithUsageOnRecordsTheFeature() async throws {
         let scratch = Scratch()
         defer { scratch.cleanUp() }
         let sessions = try sessionsDir(scratch)
         let fixture = try await makeFixture(
-            scratch, desk: false, withConversation: true, sessionsDir: sessions)
+            scratch, withConversation: true, sessionsDir: sessions)
         try await fixture.db.config.setSessionModUsageEnabled(true)
 
         let response = try await swap(fixture, mode: .inPlace)
         #expect(response.error == nil, "swap errored: \(response.error ?? "")")
 
-        #expect(statusLineCommand(forSessionKey: fixture.terminal.id.uuidString) == nil)
         let record = try #require(readSpawnRecord(sessionsDir: sessions, sessionID: "sess-swap"))
         #expect(record.features == ["usage"])
-    }
-
-    /// The other direction of the same rule. A fork mints a fresh row branded
-    /// no desk (`forkSwapNewTab` passes no role), so carrying the source row's
-    /// role onto its overlay would install a tee on a session the desk
-    /// machinery does not consider a desk.
-    @Test func aForkSwapDoesNotCarryTheSourceRowsDeskRole() async throws {
-        let scratch = Scratch()
-        defer { scratch.cleanUp() }
-        let fixture = try await makeFixture(scratch, desk: true, withConversation: true)
-
-        let response = try await swap(fixture, mode: .fork)
-        #expect(response.error == nil, "swap errored: \(response.error ?? "")")
-
-        let terminals = try await fixture.db.terminals.list(worktreeID: fixture.terminal.worktreeID)
-        let forked = try #require(terminals.first(where: { $0.id != fixture.terminal.id }),
-                                  "a fork swap created no new terminal")
-        #expect(forked.watchDeskRole == nil)
-        #expect(statusLineCommand(forSessionKey: forked.id.uuidString) == nil)
     }
 }
 }

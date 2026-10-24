@@ -3759,10 +3759,10 @@ struct RPCRouterWakeErrorMappingTests {
     }
 }
 
-/// `terminal.wake` prompt delivery over RPC — the safety contract nightwatch
-/// wake.py relies on: a `prompt` reaches ONLY a session this call actually
-/// woke (`woken: true`); the idempotent no-op paths report `woken: false`
-/// and never deliver it anywhere.
+/// `terminal.wake` prompt delivery over RPC — the safety contract an
+/// autonomous caller relies on: a `prompt` reaches ONLY a session this call
+/// actually woke (`woken: true`); the idempotent no-op paths report
+/// `woken: false` and never deliver it anywhere.
 @Suite("RPCRouter terminal.wake prompt delivery")
 struct RPCRouterWakePromptDeliveryTests {
 

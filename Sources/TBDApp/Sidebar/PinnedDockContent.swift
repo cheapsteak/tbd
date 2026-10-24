@@ -35,25 +35,8 @@ struct PinnedDockRemoteRow: Identifiable, Equatable {
 
 /// Pure content model for the sidebar's pinned dock. Takes values and one
 /// lookup closure, returns values — no SwiftUI, no `AppState`, fully testable.
-///
-/// The scrolling pinned area and the fixed Watch Desk slot are separate
-/// functions because they render into separate containers with different scroll
-/// behaviour: the desk must never scroll out from above the Day/Night toggle.
 enum PinnedDockContent {
-    /// The Watch Desk worktree when it should occupy its fixed slot, else nil.
-    ///
-    /// Returns nil when mode is off, when the experimental opt-in is unset
-    /// (fail-closed, same gate as every other nightwatch surface), or when mode
-    /// is on but the daemon has not created the desk worktree yet. That last
-    /// case is ordinary, not an error — it gets no placeholder row.
-    static func deskRow(allWorktrees: [Worktree],
-                        mode: NightwatchMode,
-                        experimentalEnabled: Bool) -> Worktree? {
-        guard experimentalEnabled, mode != .off else { return nil }
-        return allWorktrees.first { $0.isNightwatchDesk }
-    }
-
-    /// The scrolling pinned area, top to bottom. Never contains the desk.
+    /// The scrolling pinned area, top to bottom.
     ///
     /// - Parameters:
     ///   - selectedIDs: drives expansion — a top-level row expands when it or
@@ -67,7 +50,7 @@ enum PinnedDockContent {
                      selectedIDs: Set<UUID>,
                      children: (UUID) -> [Worktree]) -> [PinnedDockRow] {
         let pinned = allWorktrees
-            .filter { $0.pinnedAt != nil && $0.archivedAt == nil && !$0.isNightwatchDesk }
+            .filter { $0.pinnedAt != nil && $0.archivedAt == nil }
             .sorted { lhs, rhs in
                 // Ordered pins first, by their explicit order. Pins that have
                 // never been dragged keep pinnedAt order and sort after —

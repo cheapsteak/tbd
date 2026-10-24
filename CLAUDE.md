@@ -8,22 +8,14 @@ Use the `tbd-project` skill for architecture, conventions, and file reference.
 
 **This repository is public, and TBD is used by people across different organizations.** Never commit private context — real employer, org, repo, host, account, person, or ticket names, internal URLs, or machine-specific paths (use `acme` / `acme-prod` placeholders). **Whatever a session is working on elsewhere — product features, roadmaps, ticket and task descriptions — is likely confidential to that org and must not leak here**, in docs, specs, tests, fixtures, or commit messages. Never build or document for one repo, one project, or one person's workflow: features, defaults, and docs must generalize.
 
-## Nightwatch is being replaced — two paths until cutover
+## Fleet supervision
 
-The fleet-supervision subsystem ("Nightwatch"/"Daywatch") is being redesigned
-from scratch. The target design is
+Supervising a fleet of agent sessions follows
 [`docs/specs/2026-07-26-fleet-supervision-design.md`](docs/specs/2026-07-26-fleet-supervision-design.md)
 (requirements: [`docs/specs/2026-07-26-fleet-supervision-requirements.md`](docs/specs/2026-07-26-fleet-supervision-requirements.md)).
-The redesign builds a second path alongside the existing implementation;
-cutover happens when the new path holds up, and both paths are live until
-then. New supervision features should ideally land in both: in the existing
-implementation where they're needed now, and in the new design's structures —
-where the new-path half is usually user-land (a playbook, sweep-program, or
-wake-program change) rather than compiled (see "Compile only what user-land
-cannot do well" below). Nightwatch and Daywatch are deprecated and do not run
-with the pty-holder transport; the daemon refuses to combine a watch mode with
-the holder in either direction
-([spec](docs/specs/2026-09-22-nightwatch-deprecation-holder-gate-design.md)).
+New supervision features land in that design's structures, and usually as
+user-land — a playbook, sweep-program, or wake-program change — rather than
+compiled (see "Compile only what user-land cannot do well" below).
 
 ## Main Session Agent
 
@@ -39,7 +31,7 @@ The main chat session agent should not write code directly. Delegate all impleme
 - A PR (or GitLab MR) opened from a TBD worktree ends its body with that worktree's deep-link, so the PR can be traced back to the session that produced it: get the UUID with `tbd link 2>/dev/null || tbd link "$(basename "$(git rev-parse --show-toplevel)")"`, take the `?worktree=<uuid>` portion, and make the last line `[<worktree display name>](https://cheapsteak.github.io/tbd/open/?worktree=<uuid>)`. Outside TBD, or when `tbd link` fails, skip it silently — it is never a blocker. (A guardrail rule, `pr-worktree-link`, nudges about this on `gh pr create` and `glab mr create`.)
 - Banned words — never use these in code or in PR titles, descriptions, or commit messages: "blessed", "golden"
 - No prose tables in markdown docs — use lists (bolded lead term, en-dash, prose; nested bullets when a row has several fields). A table is acceptable only when its cells are mostly short numerical or scannable values: counts, defaults, thresholds, old→new line numbers. Prose crammed into cells gets squished and unreadable.
-- Spec and doc edits must leave a document that stands alone for a first-time reader. Never write revision history into prose: no "Amended \<date\>" notes, no "an earlier draft…" retracing, no reversal narratives — rewrite the superseded passage to state the current design as if it were always so; git history is the archive. Keep **evidence** ("field measurement showed X"), drop **chronology** ("removed \<date\> after review Y"). A rejected-alternatives section is welcome as timeless why-not rationale — written as rationale, never as a revision log. The one exemption is an **as-built audit record** of an existing system (e.g. [`docs/nightwatch.md`](docs/nightwatch.md)): there, dated banners recording what was measured against which tree are the evidence, and the document must declare that purpose at the top.
+- Spec and doc edits must leave a document that stands alone for a first-time reader. Never write revision history into prose: no "Amended \<date\>" notes, no "an earlier draft…" retracing, no reversal narratives — rewrite the superseded passage to state the current design as if it were always so; git history is the archive. Keep **evidence** ("field measurement showed X"), drop **chronology** ("removed \<date\> after review Y"). A rejected-alternatives section is welcome as timeless why-not rationale — written as rationale, never as a revision log. The one exemption is an **as-built audit record** of an existing system (e.g. [`docs/tmux-dependencies.md`](docs/tmux-dependencies.md)): there, dated banners recording what was measured against which tree are the evidence, and the document must declare that purpose at the top.
 - Verify your changes compile (`scripts/swift-safe build`) before committing.
 - **`swift package resolve` can print `error:` on a run that succeeded.** SwiftPM removes a dependency checkout by unlinking it in place; a removal that doesn't complete leaves a tree the next resolve reads as "has uncommitted changes" and refuses to finish removing — gone from `Package.resolved`, still on disk, `error:` on stderr, **exit 0**. So an `error:` line in resolve output is not by itself evidence that the resolve failed: check the exit code, and to confirm the workspace really is clean compare `.build/checkouts` against the `identity` values in `Package.resolved` — they should match exactly (case-insensitively).
 - Run `scripts/test.sh` if you changed daemon or shared code. It fences the run
@@ -109,7 +101,7 @@ Decisions must be examinable — changes to our theory of the system or the prod
 
 **Prior design does not exempt.** Thinking done in prototypes, a report, another repo, or an earlier session makes the spec a cheap transcription — not an unnecessary one. Reviewers here cannot read that material, so those decisions are the ones that most need writing down.
 
-**A human answers the brainstorming questions.** An agent may not answer its own. If none is available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may not originate feature work; file it for a human instead.
+**A human answers the brainstorming questions.** An agent may not answer its own. If none is available, stop — do not proceed on assumed answers. Agents may not originate feature work; file it for a human instead.
 
 Bug fixes and minor UI changes need no spec — a bug fix restores the system to its existing theory, while the work that needs a spec is the work that revises it. If a larger change genuinely needs none, say so in the PR description. This is convention, not a gate — no linter can see whether thinking happened. In Claude Code use `/tbd-brainstorming`, not `superpowers:brainstorming`; a guardrail redirects the wrong one. Codex has no slash command for it — read `.claude/skills/tbd-brainstorming/SKILL.md` and follow it directly.
 
@@ -216,7 +208,7 @@ Enforced mechanically by the SwiftLint rule `no_raw_task_sleep` (same `lint` job
 
 Never infer an agent's state by parsing its rendered terminal screen — tmux `capture-pane` text, composer glyphs like `❯`, placeholder or status strings. Screen text is a display surface, not an API: scraping breaks *silently* when the TUI changes copy or rendering, couples TBD to one agent version, and sits at the wrong layer. Get agent state from machine interfaces instead: Claude Code hooks, transcript JSONL, tmux control-mode events, process exit codes, or TBD's own DB/RPC state. (Cautionary tale: PR #398 verified submits by scanning the composer line for `[Pasted text` — it defended an unreachable state and was removed as dead code.)
 
-Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui_scraping_literals`, `capture_pane_allowlist`), which run in the `lint` CI job and the pre-push hook. Two sanctioned scrapers predate this rule and are excluded with comments (the pending-input hibernation rail, the embedded Nightwatch babysitter) — they should eventually migrate off screen text. Adding a **new** exclusion requires a compelling justification in the PR description; the PR review gate treats unjustified additions as High severity.
+Enforced mechanically by two SwiftLint custom rules in `.swiftlint.yml` (`no_tui_scraping_literals`, `capture_pane_allowlist`), which run in the `lint` CI job and the pre-push hook. One sanctioned scraper predates this rule and is excluded with a comment (the pending-input hibernation rail) — it should eventually migrate off screen text. Adding a **new** exclusion requires a compelling justification in the PR description; the PR review gate treats unjustified additions as High severity.
 
 ### Changing the PR-review merge gate
 `claude-review` is a required check on `main`, produced by the `claude-review` job in `.github/workflows/claude-code-review.yml` — a fan-out pipeline whose verdict is computed by scripts under `.github/workflows/claude-review-v2/` (`prepare.py`, `validate.py`, `render_comment.py`) rather than typed by the model. Before touching that workflow or those scripts, read [`docs/pr-review-gate.md`](docs/pr-review-gate.md) and the design spec [`docs/specs/2026-08-03-pr-review-fanout-design.md`](docs/specs/2026-08-03-pr-review-fanout-design.md). Three traps they document: the workflow runs on `pull_request_target` and **must** pass `github_token` (the OIDC app-token exchange 401s on that trigger); changing the workflow's *trigger event* requires a one-time **admin merge** (such a PR matches neither the old nor new event, so no review runs and the required check never reports); and branch protection matches the required check by **job name**, so exactly one job in `.github/workflows/` may be named `claude-review` — the retired single-session reviewer is kept in `claude-code-review-legacy.yml` with its job named `claude-review-legacy` and `workflow_dispatch` as its only trigger. It is a **restoration source, not a fallback you can run**: dispatching it exits at the fork gate without reviewing anything, because there is no `pull_request` payload outside a PR event; reviving it means re-adding the trigger and renaming the job. The `<!-- claude-review-v2 -->` comment sentinel and the `claude-review-v2/` directory name are live state matched verbatim on every open PR; don't rename either.

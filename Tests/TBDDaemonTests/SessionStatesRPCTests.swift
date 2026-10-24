@@ -155,8 +155,7 @@ struct SessionStatesRPCTests {
     /// A plain shell is not a session this model has anything to say about: no
     /// transcript, no context window, no hook rail. Reporting one spends a stat
     /// and a transcript-tail attempt every cycle to produce a paragraph
-    /// explaining why a session that was never going to have a statusline tee
-    /// has no denominator.
+    /// explaining why a session that was never an agent has no denominator.
     @Test func aPlainShellIsNotReportedOnAtAll() async throws {
         let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
@@ -352,8 +351,8 @@ struct SessionStatesRPCTests {
         let load = try #require(report.contextLoad)
         #expect(load.used?.value == 1_000)
         #expect(load.used?.source == .transcriptTail)
-        // The statusline tee installs on desk sessions only, so the
-        // denominator is unknown and reported as unknown.
+        // Nothing reports the window of a session spawned without the
+        // session mod's `usage` feature, so it is reported as unknown.
         guard case .unknown = load.window else {
             Issue.record("expected an unknown window for a fleet session, got \(load.window)")
             return
@@ -394,42 +393,6 @@ struct SessionStatesRPCTests {
         #expect(used.value == 1_000)
         #expect(used.observedAt == pinned,
                 "the numerator's fallback stamp came from wall time, not the injected seam: \(used.observedAt)")
-    }
-
-    /// The desk role brands the ROW; the tee installs on the Claude spawn path
-    /// only. `spawnPrimaryTerminals` resolves the primary agent from
-    /// `primaryAgentPreference`, so a desk created on a Codex-preferring install
-    /// is a `.codex` row wearing `.readOnlyCoordinator` — and telling its reader
-    /// "the tee is installed but has not fired yet" would be a claim about a
-    /// capture that will never appear.
-    @Test func aCodexDeskIsNotDescribedAsWaitingForATeeItDoesNotHave() async throws {
-        let fixture = try await makeFixture()
-        defer { fixture.cleanUp() }
-        let codexDesk = try await fixture.db.terminals.create(
-            worktreeID: fixture.worktreeID, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "codex", kind: .codex, watchDeskRole: .readOnlyCoordinator)
-        let claudeDesk = try await fixture.db.terminals.create(
-            worktreeID: fixture.worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude", kind: .claude, watchDeskRole: .readOnlyCoordinator)
-
-        let reports = try await states(fixture)
-
-        let codexReport = try #require(reports.first { $0.terminalID == codexDesk.id })
-        guard case .unknown(let codexWhy) = try #require(codexReport.contextLoad).window else {
-            Issue.record("expected an unknown window for a Codex desk")
-            return
-        }
-        #expect(!codexWhy.contains("has not fired yet"))
-        #expect(codexWhy.contains("does not run the agent the statusline tee installs on"))
-
-        // The Claude desk keeps the wording it had — the fix adds a case rather
-        // than moving the existing one.
-        let claudeReport = try #require(reports.first { $0.terminalID == claudeDesk.id })
-        guard case .unknown(let claudeWhy) = try #require(claudeReport.contextLoad).window else {
-            Issue.record("expected an unknown window for a desk whose tee has not fired")
-            return
-        }
-        #expect(claudeWhy.contains("has not fired yet"))
     }
 
     @Test func countersAppearForASessionWithAReadableTranscriptAndNotForOneWithout() async throws {

@@ -82,9 +82,9 @@ Non-goals:
   session waits at its prompt for the person, as it does after a manual swap.
 - Reading utilization out of the statusline stdin payload. Setup-token
   profiles already have a per-turn signal, and signed-in profiles have a
-  90-second one; widening the desk-only statusline tee to the fleet would
-  displace the operator's own statusline in every session for a reading that
-  is at most 90 seconds fresher.
+  90-second one; a TBD statusline wrapper on every session would displace the
+  operator's own statusline everywhere for a reading that is at most 90
+  seconds fresher.
 - Overriding a repo's profile override or a per-spawn pick. Those are the
   person's explicit choices; the policy fills in only where the global
   default would otherwise have applied.
@@ -616,11 +616,10 @@ per-profile opt-out is not a flag and has no graduation.
   condition, and a stale one would show a banner on a session that has long
   since recovered. The delta plus in-memory app state has one failure mode —
   an app restart forgets the banner — and the notification row survives it.
-- **Reading utilization from the statusline payload fleet-wide.** The tee
-  would displace the operator's own statusline in every session (the reason
-  it is desk-only today), for a reading at most 90 seconds fresher than the
-  poller's for signed-in profiles, and no fresher than the per-turn probe for
-  token profiles.
+- **Reading utilization from the statusline payload fleet-wide.** A statusline
+  wrapper would displace the operator's own statusline in every session, for a
+  reading at most 90 seconds fresher than the poller's for signed-in profiles,
+  and no fresher than the per-turn probe for token profiles.
 - **Pooling all profiles regardless of kind.** API-key and Bedrock profiles
   have no comparable window readings; ranking them alongside subscription
   profiles would be comparing a number to its absence.

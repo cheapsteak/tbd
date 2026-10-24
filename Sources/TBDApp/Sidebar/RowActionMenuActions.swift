@@ -128,7 +128,6 @@ struct RowActionMenuActions {
             hasRepoID: worktree.repoID != nil,
             isScratch: worktree.isScratch,
             isPinned: worktree.pinnedAt != nil,
-            isNightwatchDesk: worktree.isNightwatchDesk,
             status: worktree.status,
             isPromoted: worktree.promotedToRepoID != nil,
             branch: worktree.branch,

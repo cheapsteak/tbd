@@ -104,12 +104,11 @@ struct ConfigSet: AsyncParsableCommand {
                 + "saved draft until they restart, so automatic hibernation skips them."
         case ("session-usage", .on):
             return "Set session-usage to on. Claude sessions started from now on save their "
-                + "context window, rate limits and cost to their session folder, and desk "
-                + "sessions stop wrapping your status line."
+                + "context window, rate limits and cost to their session folder."
         case ("session-usage", .off):
             return "Set session-usage to off. Claude sessions started from now on record no "
-                + "usage, and desk sessions wrap your status line again. Sessions already "
-                + "running keep what they started with until they restart."
+                + "usage. Sessions already running keep what they started with until they "
+                + "restart."
         case ("start-admission", .on):
             return "Set start-admission to on. Agent starts and wakes that a program asks for run "
                 + "~/tbd/hooks/start-admission first, and a nonzero exit holds the start. Starts you "

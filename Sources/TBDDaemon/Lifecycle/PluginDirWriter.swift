@@ -3,25 +3,24 @@ import TBDShared
 import os
 
 /// Writes the TBD-owned Claude Code plugin to a fixed Application Support
-/// path. The plugin contains the `tbd` skill (CLI driver), the `nightwatch`
-/// skill and, while a session-mod feature flag is on, the session mod (the
-/// plugin's hooks module). Loaded into Claude sessions per-spawn via
-/// `--plugin-dir`, so all of it is only available in TBD-spawned sessions.
+/// path. The plugin contains the `tbd` skill (CLI driver) and, while a
+/// session-mod feature flag is on, the session mod (the plugin's hooks
+/// module). Loaded into Claude sessions per-spawn via `--plugin-dir`, so all of
+/// it is only available in TBD-spawned sessions.
 ///
 /// Layout:
 ///   <applicationSupportRoot>/TBD/plugin/.claude-plugin/plugin.json
 ///   <applicationSupportRoot>/TBD/plugin/skills/tbd/SKILL.md
-///   <applicationSupportRoot>/TBD/plugin/skills/nightwatch/...
 ///   <applicationSupportRoot>/TBD/plugin/hooks/...      (session mod only)
 ///   <applicationSupportRoot>/TBD/plugin/types/...      (session mod only)
 ///
 /// Every file comes from a compiled source of truth (`TBDSkillContent`,
-/// `NightwatchSkillContent`, `SessionModContent`). Claude Code reloads the
-/// plugin in every running session on any write to this folder, so a file is
-/// written only when its bytes differ and chmodded only when its mode differs:
-/// an unchanged daemon restart touches nothing. The writer leaves alone what
-/// others put here, such as `.claude-plugin/types/` (laid down by the engine
-/// at each load) and runtime folders under `skills/`.
+/// `SessionModContent`). Claude Code reloads the plugin in every running
+/// session on any write to this folder, so a file is written only when its
+/// bytes differ: an unchanged daemon restart touches nothing. The writer
+/// leaves alone what others put here, such as `.claude-plugin/types/` (laid
+/// down by the engine at each load) and other folders under `skills/` —
+/// except the skills named in `retiredSkills`, which it removes.
 ///
 /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md, "Presence".
 struct PluginDirWriter {
@@ -42,6 +41,11 @@ struct PluginDirWriter {
     /// and removed first, so the engine never loads a module whose files are
     /// half there.
     private static let hooksManifestPath = "hooks/hooks.json"
+
+    /// Skill folders this plugin does not ship. The plugin folder outlives the
+    /// build that wrote it, so one of these left on disk would go on loading in
+    /// every TBD session; the writer removes each one it finds.
+    static let retiredSkills = ["nightwatch"]
 
     let applicationSupportRoot: String
 
@@ -90,12 +94,13 @@ struct PluginDirWriter {
     }
 
     /// Bring the plugin folder in line with the compiled sources: the manifest,
-    /// the bundled skills and, when `sessionModFeatures` is non-empty, the
+    /// the bundled skill and, when `sessionModFeatures` is non-empty, the
     /// session mod; with it empty, the session mod's folders are removed.
-    /// Creates parent directories as needed; each write is atomic.
+    /// Removes any folder `retiredSkills` names. Creates parent directories as
+    /// needed; each write is atomic.
     ///
-    /// - Returns: the number of files written, chmodded or removed. Zero means
-    ///   the folder already matched and nothing on disk changed.
+    /// - Returns: the number of files written or removed. Zero means the
+    ///   folder already matched and nothing on disk changed.
     @discardableResult
     func writePlugin(sessionModFeatures: [SessionModFeature]) throws -> Int {
         let pluginDir = pluginDirPath()
@@ -104,10 +109,9 @@ struct PluginDirWriter {
         changed += try writeIfChanged(
             Data(TBDSkillContent.body.utf8), to: pluginDir + "/skills/tbd/SKILL.md")
 
-        // Bundled `nightwatch` skill (quota-lean fleet babysitter). Ships its
-        // SKILL.md + scripts/tick.py + config/* so it works against a TBD fleet
-        // out of the box. Dormant until its description matches a babysitting task.
-        changed += try writeNightwatch(pluginDir: pluginDir)
+        // Counted as a change, so the plugin reloads once and running sessions
+        // stop offering the skill.
+        changed += removeRetiredSkills(pluginDir: pluginDir)
 
         let sessionModEnabled = !sessionModFeatures.isEmpty
         let manifest = try Self.manifestData(sessionModEnabled: sessionModEnabled)
@@ -128,24 +132,20 @@ struct PluginDirWriter {
         return changed
     }
 
-    /// Install the `nightwatch` skill into the plugin's skills dir. Scripts
-    /// carry the executable bit so cron/launchd can run them directly.
-    private func writeNightwatch(pluginDir: String) throws -> Int {
-        let root = pluginDir + "/skills/nightwatch"
+    /// Remove each `retiredSkills` folder present under `skills/`. Returns
+    /// what `removeItemIfPresent` counted, so a removal is a change and an
+    /// absent folder is not. A folder that cannot be removed is logged and
+    /// left: it is no reason to stop bringing the rest of the plugin current.
+    private func removeRetiredSkills(pluginDir: String) -> Int {
         var changed = 0
-        changed += try writeIfChanged(Data(NightwatchSkillContent.skillMd.utf8), to: root + "/SKILL.md")
-        changed += try writeIfChanged(
-            Data(NightwatchSkillContent.prioritiesTxt.utf8), to: root + "/config/priorities.txt")
-        changed += try writeIfChanged(
-            Data(NightwatchSkillContent.safeWedgesTxt.utf8), to: root + "/config/safe_wedges.txt")
-        changed += try writeIfChanged(
-            Data(NightwatchSkillContent.dontTouchTxt.utf8), to: root + "/config/dont_touch.txt")
-
-        // Scripts ship executable. NOTE: the scheduler (scheduler.sh / tick-cron.sh)
-        // is installed but NEVER auto-loaded — durable scheduling is opt-in via
-        // `scheduler.sh enable`.
-        for (name, body) in NightwatchSkillContent.scripts {
-            changed += try writeIfChanged(Data(body.utf8), to: root + "/scripts/" + name, mode: 0o755)
+        for name in Self.retiredSkills {
+            let path = pluginDir + "/skills/" + name
+            do {
+                changed += try removeItemIfPresent(path)
+            } catch {
+                Self.logger.error(
+                    "Failed to remove retired skill folder \(path, privacy: .public): \(String(describing: error), privacy: .public)")
+            }
         }
         return changed
     }
@@ -189,27 +189,16 @@ struct PluginDirWriter {
         return changed
     }
 
-    /// Write `data` to `path` only when the file's bytes differ, then set
-    /// `mode` only when the file's permissions differ. Returns 1 when either
-    /// changed the file, 0 when it already matched.
-    private func writeIfChanged(_ data: Data, to path: String, mode: Int? = nil) throws -> Int {
+    /// Write `data` to `path` only when the file's bytes differ. Returns 1 when
+    /// it changed the file, 0 when it already matched.
+    private func writeIfChanged(_ data: Data, to path: String) throws -> Int {
         let fm = FileManager.default
-        var changed = false
-        if fm.contents(atPath: path) != data {
-            try fm.createDirectory(
-                atPath: (path as NSString).deletingLastPathComponent,
-                withIntermediateDirectories: true)
-            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-            changed = true
-        }
-        if let mode {
-            let current = (try fm.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.intValue
-            if current != mode {
-                try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
-                changed = true
-            }
-        }
-        return changed ? 1 : 0
+        guard fm.contents(atPath: path) != data else { return 0 }
+        try fm.createDirectory(
+            atPath: (path as NSString).deletingLastPathComponent,
+            withIntermediateDirectories: true)
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        return 1
     }
 
     /// Remove every regular file under `<pluginDir>/<directory>` whose

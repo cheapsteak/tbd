@@ -129,11 +129,11 @@ struct TBDCommands: Commands {
 
 /// The two menus whose items are *gated* on `AppState` live in nested `View`s,
 /// not directly in the `Commands` body above — the same shape
-/// `ModelProfileMenu` and `NightwatchStatusItem` use, and for the same reason:
-/// a `Commands` body does not reliably re-evaluate when the state it reads
-/// changes, so a `.disabled(…)` computed there can be captured once and never
-/// re-computed. Selection is empty at launch, so a captured value would leave
-/// ⌘⇧A, ⌘T and ⌘W permanently disabled.
+/// `ModelProfileMenu` uses, and for the same reason: a `Commands` body does not
+/// reliably re-evaluate when the state it reads changes, so a `.disabled(…)`
+/// computed there can be captured once and never re-computed. Selection is
+/// empty at launch, so a captured value would leave ⌘⇧A, ⌘T and ⌘W permanently
+/// disabled.
 ///
 /// The ungated items stay in the `Commands` body: their closures only *call*
 /// `AppState`, and a closure that runs later needs no dependency.

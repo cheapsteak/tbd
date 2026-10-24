@@ -563,7 +563,6 @@ struct TBDAppMain: App {
         .commands {
             TBDCommands(appState: appState)
             ModelProfileMenu(appState: appState)
-            NightwatchStatusItem(appState: appState)
         }
 
         Settings {

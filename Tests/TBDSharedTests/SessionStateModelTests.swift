@@ -318,7 +318,6 @@ import Testing
     @Test(arguments: [
         FactSource.hookEvent("Notification"),
         .transcriptTail,
-        .statuslineTee,
         .sessionMod,
         .database,
         .processLiveness,
@@ -331,6 +330,16 @@ import Testing
     ])
     func everySourceRoundTrips(source: FactSource) throws {
         #expect(try roundTrip(source) == source)
+    }
+
+    /// A kind this build does not know — `statusline-tee`, say, which a build
+    /// with a statusline reader could write — decodes as unrecognized and
+    /// carries its name through rather than failing the record.
+    @Test func anUnknownKindDecodesAsUnrecognizedAndKeepsItsName() throws {
+        let decoded = try JSONDecoder().decode(
+            FactSource.self, from: Data(#"{"kind":"statusline-tee"}"#.utf8))
+        #expect(decoded == .unrecognized("statusline-tee"))
+        #expect(try roundTrip(decoded) == decoded)
     }
 
     @Test func sessionModSourceUsesItsKind() throws {
@@ -430,7 +439,7 @@ import Testing
     // MARK: - Context load
 
     @Test func unknownWindowFallsBackToTheLabeledAssumption() {
-        let (tokens, assumed) = ContextWindow.unknown(why: "no statusline tee").effectiveTokens()
+        let (tokens, assumed) = ContextWindow.unknown(why: "nothing reported the window").effectiveTokens()
         #expect(tokens == 200_000)
         #expect(assumed)
         #expect(ContextWindow.assumedTokens == 200_000)
@@ -438,7 +447,7 @@ import Testing
 
     @Test func observedWindowIsNotAssumed() {
         let window = ContextWindow.observed(
-            ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: epoch))
+            ObservedFact(value: 1_000_000, source: .sessionMod, observedAt: epoch))
         let (tokens, assumed) = window.effectiveTokens()
         #expect(tokens == 1_000_000)
         #expect(assumed == false)
@@ -446,14 +455,14 @@ import Testing
 
     @Test func percentUsedIsNilWhenTheNumeratorIsUnknown() {
         let load = ContextLoad(used: nil, window: .observed(
-            ObservedFact(value: 200_000, source: .statuslineTee, observedAt: epoch)))
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: epoch)))
         #expect(load.percentUsed() == nil)
     }
 
     @Test func percentUsedFlagsTheAssumedWindow() throws {
         let load = ContextLoad(
             used: ObservedFact(value: 50_000, source: .transcriptTail, observedAt: epoch),
-            window: .unknown(why: "no statusline tee"))
+            window: .unknown(why: "nothing reported the window"))
         let result = try #require(load.percentUsed())
         #expect(result.percent == 25.0)
         #expect(result.assumedWindow)
@@ -463,7 +472,7 @@ import Testing
         let load = ContextLoad(
             used: ObservedFact(value: 50_000, source: .transcriptTail, observedAt: epoch),
             window: .observed(
-                ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: epoch)))
+                ObservedFact(value: 1_000_000, source: .sessionMod, observedAt: epoch)))
         let result = try #require(load.percentUsed())
         #expect(result.percent == 5.0)
         #expect(result.assumedWindow == false)
@@ -472,7 +481,7 @@ import Testing
     @Test func contextLoadRoundTrips() throws {
         let load = ContextLoad(
             used: ObservedFact(value: 50_000, source: .transcriptTail, observedAt: epoch),
-            window: .unknown(why: "no statusline tee"))
+            window: .unknown(why: "nothing reported the window"))
         #expect(try roundTrip(load) == load)
     }
 
@@ -564,7 +573,7 @@ import Testing
             contextLoad: ContextLoad(
                 used: ObservedFact(value: 90_000, source: .transcriptTail, observedAt: epoch),
                 window: .observed(
-                    ObservedFact(value: 200_000, source: .statuslineTee, observedAt: epoch))),
+                    ObservedFact(value: 200_000, source: .sessionMod, observedAt: epoch))),
             counters: SessionCounters(
                 turnsInWindow: 3, hookEventsInWindow: 9,
                 windowStart: epoch, observedAt: epoch))

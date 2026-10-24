@@ -13,10 +13,9 @@ struct PinnedDockContentTests {
                            parent: UUID? = nil,
                            pinnedAt: Date? = nil,
                            archivedAt: Date? = nil,
-                           displayName: String? = nil,
                            pinSortOrder: Int? = nil) -> Worktree {
         Worktree(id: id, repoID: repoID, name: name,
-                 displayName: displayName ?? name,
+                 displayName: name,
                  branch: "b", path: "/tmp/\(name)",
                  archivedAt: archivedAt, tmuxServer: "s",
                  parentWorktreeID: parent, pinnedAt: pinnedAt,
@@ -51,34 +50,6 @@ struct PinnedDockContentTests {
             gone: gone, dismissed: dismissed, lastSeen: at(0), pinnedAt: pinnedAt)
     }
 
-    // MARK: deskRow
-
-    @Test("desk resolves only when the flag is on and mode is not off",
-          arguments: [
-            (NightwatchMode.off, true, false),
-            (NightwatchMode.off, false, false),
-            (NightwatchMode.daywatch, true, true),
-            (NightwatchMode.daywatch, false, false),
-            (NightwatchMode.nightwatch, true, true),
-            (NightwatchMode.nightwatch, false, false),
-          ])
-    func deskGate(mode: NightwatchMode, enabled: Bool, expected: Bool) {
-        let desk = Self.wt("desk", repoID: nil,
-                           displayName: NightwatchDeskPrompts.deskDisplayName)
-        let resolved = PinnedDockContent.deskRow(
-            allWorktrees: [desk, Self.wt("other")],
-            mode: mode, experimentalEnabled: enabled)
-        #expect((resolved != nil) == expected)
-    }
-
-    @Test("mode on but no desk worktree yet resolves to nil")
-    func deskMissing() {
-        let resolved = PinnedDockContent.deskRow(
-            allWorktrees: [Self.wt("other")],
-            mode: .nightwatch, experimentalEnabled: true)
-        #expect(resolved == nil)
-    }
-
     // MARK: rows — pins
 
     @Test("pins sort oldest-first so new pins append")
@@ -106,15 +77,6 @@ struct PinnedDockContentTests {
                                           selectedIDs: [], children: Self.noChildren)
         #expect(rows.isEmpty)
         #expect(archived.pinnedAt != nil)   // pin survives for revive
-    }
-
-    @Test("the desk never appears in the scrolling area, even if it carries a pin")
-    func deskExcludedFromRows() {
-        let desk = Self.wt("desk", repoID: nil, pinnedAt: Self.at(0),
-                           displayName: NightwatchDeskPrompts.deskDisplayName)
-        let rows = PinnedDockContent.rows(allWorktrees: [desk],
-                                          selectedIDs: [], children: Self.noChildren)
-        #expect(rows.isEmpty)
     }
 
     // MARK: rows — expansion

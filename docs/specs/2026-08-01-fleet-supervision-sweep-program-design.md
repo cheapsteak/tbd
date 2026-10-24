@@ -115,9 +115,7 @@ stood on, the header's contents are TBD's own facts, and the record shows
 exactly what each desk received (§3, design §6).
 
 The old system is the cautionary precedent for collapsing this split. Its
-recurring desk briefing was a prompt template compiled into the binary
-(`NightwatchDeskPrompts.judgePrompt`,
-`Sources/TBDShared/NightwatchDeskPrompts.swift:172`; `docs/nightwatch.md` §5),
+recurring desk briefing was a prompt template compiled into the binary,
 mixing mechanism, policy, and a section literally titled "Field learnings —
 apply these rules" — conduct learned on real nights that could only be taught
 by editing Swift and rebuilding. Every sentence of that content has an
@@ -794,8 +792,8 @@ refusal means.
   disassemble and reassemble text on its way to a model, putting TBD in the
   composition business the placement split assigns to the project. A
   condition vocabulary also rebuilds the old system's rules vocabulary (the
-  `clearance` table's verdict kinds, shipped with zero production readers —
-  `docs/nightwatch.md` §1) one layer down.
+  `clearance` table's verdict kinds, shipped with zero production readers)
+  one layer down.
 - **An agent-list manifest on the pipe** — briefing text plus a minimal
   structured list of the agents it concerns, so the daemon could dedup or
   track per-agent state. Rejected as the report schema's thin end: any

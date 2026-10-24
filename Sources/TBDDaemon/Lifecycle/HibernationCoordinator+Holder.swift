@@ -1267,8 +1267,8 @@ extension HibernationCoordinator {
             sessionsDir: sessionsDir, now: now())
         // Written here and not when the overlay was planned: the adopting
         // branch above launches nothing, and must leave the running process's
-        // overlay and statusline capture as they are.
-        let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
+        // overlay as it is.
+        let launchCommand = overlay.settle(command: spawnCommand)
 
         let handle: HolderHandle
         do {

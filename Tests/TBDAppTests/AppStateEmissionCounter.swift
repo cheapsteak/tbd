@@ -164,7 +164,6 @@ final class AppStateEmissionTracker {
         _ = state.gcRetainedTranscriptsEnabled
         _ = state.gcHangStacksEnabled
         _ = state.autoCreateNotesEnabled
-        _ = state.nightwatchMode
         _ = state.autoHibernateEnabled
         _ = state.hibernateIdleMinutes
         _ = state.supervisionEnabled
@@ -293,7 +292,6 @@ final class AppStateEmissionTracker {
         "gcRetainedTranscriptsEnabled",
         "gcHangStacksEnabled",
         "autoCreateNotesEnabled",
-        "nightwatchMode",
         "autoHibernateEnabled",
         "hibernateIdleMinutes",
         "supervisionEnabled",

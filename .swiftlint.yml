@@ -373,9 +373,6 @@ custom_rules:
       # Sanctioned scrapers, exempt with refactor-later intent — see CLAUDE.md "No TUI screen-scraping".
       # Typed-but-unsent-input hibernation safety rail; no machine signal for composer state.
       - "Sources/TBDDaemon/Lifecycle/HibernationSafetyChecks\\.swift"
-      # Embedded Nightwatch Python: fleet babysitting via screen classification is its purpose;
-      # belongs outside TBD once a plugin/extensibility surface exists.
-      - "Sources/TBDShared/NightwatchSkillContent\\.swift"
     regex: '❯|\[Pasted text|esc to interrupt|Do you want to proceed|Enter to select|Tab/Arrow keys|Ready to submit|Select login method|Ask Claude|Type a message|context used|until auto-compact|bypass permissions'
     match_kinds:
       - string
@@ -408,7 +405,6 @@ custom_rules:
       # archive/reconcile-auto-archive paths kill its window (the archived row +
       # history survive). Never parsed for agent/TUI state.
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\.swift"
-      - "Sources/TBDShared/NightwatchSkillContent\\.swift"               # embedded Python babysitter (see rule above)
     regex: 'capturePane\w*\s*\(|capture-pane'
     match_kinds:
       - identifier
@@ -452,7 +448,6 @@ custom_rules:
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+SpawnTerminal\\.swift" # the one spawn-and-record step every spawn path calls; covered by the caller's row: terminal.create / terminal.continueInCodex / worktree.create / scratch.create / revive
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"  # hook-terminal spawn and close; covered by worktree.rerunPreSession / create
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
-      - "Sources/TBDDaemon/Nightwatch/DeskSessionManager\\.swift"             # the nightwatch-desk rail: its pastes, spawn and close
       - "Sources/TBDDaemon/Claude/LimitResumeActuator\\.swift"                # the limit-resume rail: Escape / continue / Enter
     # Call sites only, which decides both odd-looking pieces of this regex:
     #

@@ -12,7 +12,6 @@ struct ContentView: View {
     @EnvironmentObject var overlayCoordinator: TranscriptOverlayCoordinator
     @AppStorage(FilePanelStorageKey.isVisible) private var showFilePanel = true
     @AppStorage(FilePanelStorageKey.width) private var filePanelWidth: Double = 280
-    @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     // Part of the PR split button's .id key: the baked (non-template) icon
     // colors depend on the appearance, and the materialized-once toolbar item
     // only picks up a re-bake when the id changes.

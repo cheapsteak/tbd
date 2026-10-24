@@ -206,7 +206,7 @@ struct ClaudeSpawnCommandBuilderTests {
             shellFallback: "/bin/zsh"
         )
         // Exact-match including the single-quote escaping: this argv is the
-        // mechanism nightwatch wake.py relies on to never paste into a live
+        // mechanism a wake prompt relies on to never paste into a live
         // session, so the shape (and shellEscape) must not silently change.
         #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions 'wake: don'\\''t trust the snapshot'")
     }

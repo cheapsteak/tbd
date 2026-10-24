@@ -110,7 +110,7 @@ public enum TerminalKind: String, Codable, Sendable {
     ///
     /// A plain shell has none of those, so a surface that describes agent
     /// sessions must not describe it: a report explaining that a shell's
-    /// context window is unknown because no statusline tee fired is a true
+    /// context window is unknown because nothing reported it is a true
     /// sentence about a session that was never going to have one, and the stat
     /// and transcript-tail attempt behind it are paid every cycle for nothing.
     public var isAgentBearing: Bool { self != .shell }
@@ -128,12 +128,6 @@ public enum PrimaryAgentPreference: String, Codable, Sendable, Equatable, CaseIt
         case .codex: return .codex
         }
     }
-}
-
-public enum NightwatchMode: String, Codable, Sendable, CaseIterable {
-    case off
-    case daywatch
-    case nightwatch
 }
 
 /// The compiled provider's reserved name. Reserved **unconditionally** and not
@@ -369,14 +363,6 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
 
-    /// The mode-managed Watch Desk scratch worktree, identified by its fixed
-    /// display name. Not user-pinnable — the sidebar's Day/Night toggle controls
-    /// whether it is shown. Single definition shared by the dock's desk slot and
-    /// the row-action menu's pin suppression, so the two cannot drift.
-    public var isNightwatchDesk: Bool {
-        isScratch && displayName == NightwatchDeskPrompts.deskDisplayName
-    }
-
     /// True when `displayName` has never been customized away from the
     /// auto-generated `name`. Single source of truth for "still default"
     /// shared by the `stop-rename-check` hook (skip firing when already
@@ -609,23 +595,6 @@ public enum HibernateReason: String, Codable, Sendable {
         self = HibernateReason(rawValue: raw) ?? .auto
     }
 }
-public enum WatchDeskRole: String, Codable, Sendable, Equatable {
-    case judge
-    case readOnlyCoordinator = "read_only_coordinator"
-
-    public init(from decoder: any Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
-        // A role introduced by a newer daemon must never acquire mutable
-        // semantics in an older app. Render it as read-only and keep decoding.
-        self = Self(rawValue: raw) ?? .readOnlyCoordinator
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
-}
-
 /// Which mechanism carries a terminal's session.
 ///
 /// Recorded at creation and never changed for the life of the session: the
@@ -708,9 +677,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// row). Drives the "⏳ resumes 1:01pm" tab badge. Optional for
     /// decode-compat with pre-v43 rows/JSON.
     public var pendingResumeAt: Date?
-    /// Explicit Watch Desk authority. Nil means an ordinary terminal.
-    /// The lease row, not this display marker, is authoritative for mutation.
-    public var watchDeskRole: WatchDeskRole?
     /// Where `activityState` came from. `nil` on rows written before the
     /// provenance columns existed, and on rows a future writer forgets to
     /// stamp — which is why `observedActivity` refuses to build a fact out of
@@ -823,7 +789,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
                 pendingResumeAt: Date? = nil,
-                watchDeskRole: WatchDeskRole? = nil,
                 activityStateSource: FactSource? = nil,
                 activityStateObservedAt: Date? = nil,
                 activityStateOrderObservedAt: Date? = nil,
@@ -857,7 +822,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
         self.pendingResumeAt = pendingResumeAt
-        self.watchDeskRole = watchDeskRole
         self.activityStateSource = activityStateSource
         self.activityStateObservedAt = activityStateObservedAt
         self.activityStateOrderObservedAt = activityStateOrderObservedAt
@@ -875,7 +839,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case sessionOrderObservedAt, codexTranscriptBoundaryOffset, sessionIncarnationID
         case pendingSessionIncarnationID, kind
         case activityState, presentationActivityState, presentationActivityObservedAt
-        case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
+        case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
         case transport, holderPID, childPID, holderChildStartedAt
@@ -913,7 +877,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
         pendingResumeAt = try c.decodeIfPresent(Date.self, forKey: .pendingResumeAt)
-        watchDeskRole = try c.decodeIfPresent(WatchDeskRole.self, forKey: .watchDeskRole)
         // Absent in JSON written before the state model's provenance columns.
         // Such a row carries a value with no source and no age, and
         // `observedActivity` reports exactly that by returning nil.
@@ -1441,8 +1404,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// spawns. `nil` means "fall back to the global default profile"
     /// (`defaultProfileID`).
     public var scratchProfileOverrideID: UUID?
-    /// Nightwatch mode flag: off, daywatch, or nightwatch.
-    public var nightwatchMode: NightwatchMode
     /// Master switch for the daemon-side auto-hibernate idle timer. Default
     /// OFF: the idle sweep drives a sanctioned TUI screen-scrape
     /// (`HibernationSafetyChecks.hasPendingInput`) whose failure direction is
@@ -1918,7 +1879,6 @@ public struct Config: Codable, Sendable, Equatable {
                 scratchInstructions: String? = nil,
                 scratchRenamePrompt: String? = nil,
                 scratchProfileOverrideID: UUID? = nil,
-                nightwatchMode: NightwatchMode = .off,
                 autoHibernateEnabled: Bool = false,
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
                 controlModeEnabled: Bool = false,
@@ -1961,7 +1921,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.scratchInstructions = scratchInstructions
         self.scratchRenamePrompt = scratchRenamePrompt
         self.scratchProfileOverrideID = scratchProfileOverrideID
-        self.nightwatchMode = nightwatchMode
         self.autoHibernateEnabled = autoHibernateEnabled
         self.hibernateIdleMinutes = hibernateIdleMinutes
         self.controlModeEnabled = controlModeEnabled
@@ -2015,8 +1974,6 @@ public struct Config: Codable, Sendable, Equatable {
         scratchInstructions = try c.decodeIfPresent(String.self, forKey: .scratchInstructions) ?? nil
         scratchRenamePrompt = try c.decodeIfPresent(String.self, forKey: .scratchRenamePrompt) ?? nil
         scratchProfileOverrideID = try c.decodeIfPresent(UUID.self, forKey: .scratchProfileOverrideID)
-        nightwatchMode = try c.decodeIfPresent(
-            NightwatchMode.self, forKey: .nightwatchMode) ?? .off
         autoHibernateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateEnabled) ?? false
         hibernateIdleMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateIdleMinutes)
             ?? Config.defaultHibernateIdleMinutes
