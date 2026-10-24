@@ -11,9 +11,9 @@ import TBDShared
 /// Two forwarders can send a click to the program — SwiftTerm's native mouse
 /// reporting, gated by `allowMouseReporting`, and TBD's own click passthrough
 /// (`TBDTerminalView.handleClickPassthrough`), which stands down whenever
-/// reporting is on. "Send clicks and drags to apps that use the mouse" moves a
-/// holder panel from the second to the first, so the property worth pinning is
-/// that exactly one of them is live in either state of the toggle: a click
+/// reporting is on. A holder panel uses the first and a tmux panel the
+/// second, so the property worth pinning is that exactly one of them is live
+/// on either transport: a click
 /// that reached the program twice, or not at all, would be a silent
 /// regression in every mouse-aware program.
 ///
@@ -25,7 +25,7 @@ import TBDShared
 /// sends on a later main-queue turn, so each test waits one turn before
 /// reading the recorder.
 @MainActor
-@Suite("Mouse routing: the toggle hands a holder panel's clicks to the program")
+@Suite("Mouse routing: a holder panel hands its clicks to the program")
 struct TerminalMouseRoutingTests {
 
     /// Records everything the view sends toward the session, and every link
@@ -153,11 +153,10 @@ struct TerminalMouseRoutingTests {
             return max(1, (advance * scale).rounded() / scale)
         }
 
-        /// Routing on for a holder panel, a program holding the mouse, and a
-        /// clean recorder — the state every Cmd test starts from.
-        func takeTheMouse(forwardMouseToApps: Bool = true, reportingDrags: Bool = false) async {
-            TerminalPanelRepresentable.applyMouseRouting(
-                to: view, forwardMouseToApps: forwardMouseToApps, transport: .holder)
+        /// Routing for a panel on `transport`, a program holding the mouse, and
+        /// a clean recorder — the state every Cmd test starts from.
+        func takeTheMouse(transport: TerminalTransport = .holder, reportingDrags: Bool = false) async {
+            TerminalPanelRepresentable.applyMouseRouting(to: view, transport: transport)
             programTakesTheMouse(reportingDrags: reportingDrags)
             await mainQueueTurn()
             recorder.sent.removeAll()
@@ -230,54 +229,50 @@ struct TerminalMouseRoutingTests {
         }
     }
 
-    @Test("reporting turns on only for a holder panel with the toggle on")
-    func reportsOnlyForHolderWithFlagOn() {
-        #expect(TerminalPanelRepresentable.reportsMouseToApps(forwardMouseToApps: true, transport: .holder))
-        #expect(!TerminalPanelRepresentable.reportsMouseToApps(forwardMouseToApps: true, transport: .tmux))
-        #expect(!TerminalPanelRepresentable.reportsMouseToApps(forwardMouseToApps: false, transport: .holder))
-        #expect(!TerminalPanelRepresentable.reportsMouseToApps(forwardMouseToApps: false, transport: .tmux))
+    @Test("reporting turns on only for a holder panel")
+    func reportsOnlyForHolder() {
+        #expect(TerminalPanelRepresentable.reportsMouseToApps(transport: .holder))
+        #expect(!TerminalPanelRepresentable.reportsMouseToApps(transport: .tmux))
     }
 
-    /// Re-application is what carries both inputs to a live view: the toggle
-    /// changing in Settings, and a panel made before its terminal row loaded,
-    /// whose transport read `.tmux` at `makeNSView` and `.holder` afterwards.
-    /// A fresh `TerminalView` starts with reporting on, so the first step
-    /// proves the apply writes it.
-    @Test("re-applying the routing follows the transport and the toggle")
-    func reapplyFollowsTransportAndFlag() {
+    /// Re-application is what carries the transport to a live view: a panel
+    /// made before its terminal row loaded read `.tmux` at `makeNSView` and
+    /// `.holder` afterwards, and one that reads `.tmux` again must go back
+    /// off. A fresh `TerminalView` starts with reporting on, so the first
+    /// step proves the apply writes it. The Option bypass is on throughout.
+    @Test("re-applying the routing follows the transport")
+    func reapplyFollowsTransport() {
         let fixture = Fixture()
         defer { fixture.tearDown() }
         let view = fixture.view
 
-        TerminalPanelRepresentable.applyMouseRouting(
-            to: view, forwardMouseToApps: true, transport: .tmux)
+        TerminalPanelRepresentable.applyMouseRouting(to: view, transport: .tmux)
         #expect(!view.allowMouseReporting, "a tmux panel took the mouse; tmux holds a mouse mode permanently")
         #expect(view.optionBypassesMouseReporting)
 
-        TerminalPanelRepresentable.applyMouseRouting(
-            to: view, forwardMouseToApps: true, transport: .holder)
+        TerminalPanelRepresentable.applyMouseRouting(to: view, transport: .holder)
         #expect(view.allowMouseReporting, "the panel's row loaded as holder and reporting stayed off")
         #expect(view.optionBypassesMouseReporting)
 
-        TerminalPanelRepresentable.applyMouseRouting(
-            to: view, forwardMouseToApps: false, transport: .holder)
-        #expect(!view.allowMouseReporting, "turning the toggle off left an open holder panel reporting")
-        #expect(!view.optionBypassesMouseReporting)
+        TerminalPanelRepresentable.applyMouseRouting(to: view, transport: .tmux)
+        #expect(!view.allowMouseReporting, "re-applying a tmux transport left an open panel reporting")
+        #expect(view.optionBypassesMouseReporting)
     }
 
-    /// With the toggle on SwiftTerm forwards the click and TBD's passthrough
-    /// stands down; with it off the passthrough forwards and SwiftTerm only
-    /// selects. Either way the program sees one press and one release.
-    @Test("a plain click reaches a mouse-mode program exactly once", arguments: [true, false])
-    func plainClickReachesProgramOnce(forwardMouseToApps: Bool) async {
+    /// On a holder panel SwiftTerm forwards the click and TBD's passthrough
+    /// stands down; on a tmux panel the passthrough forwards and SwiftTerm
+    /// only selects. Either way the program sees one press and one release.
+    @Test(
+        "a plain click reaches a mouse-mode program exactly once",
+        arguments: [TerminalTransport.holder, TerminalTransport.tmux])
+    func plainClickReachesProgramOnce(transport: TerminalTransport) async {
         let fixture = Fixture()
         defer { fixture.tearDown() }
 
-        TerminalPanelRepresentable.applyMouseRouting(
-            to: fixture.view, forwardMouseToApps: forwardMouseToApps, transport: .holder)
-        // Which forwarder is live, so the toggle-on case cannot pass through
+        TerminalPanelRepresentable.applyMouseRouting(to: fixture.view, transport: transport)
+        // Which forwarder is live, so the holder case cannot pass through
         // the passthrough instead of SwiftTerm.
-        #expect(fixture.view.allowMouseReporting == forwardMouseToApps)
+        #expect(fixture.view.allowMouseReporting == (transport == .holder))
         fixture.programTakesTheMouse()
         await fixture.mainQueueTurn()
         fixture.recorder.sent.removeAll()
@@ -305,8 +300,7 @@ struct TerminalMouseRoutingTests {
         var opened: [String] = []
         fixture.view.onFilePathClicked = { opened.append($0) }
         try fixture.showClickablePath()
-        TerminalPanelRepresentable.applyMouseRouting(
-            to: fixture.view, forwardMouseToApps: true, transport: .holder)
+        TerminalPanelRepresentable.applyMouseRouting(to: fixture.view, transport: .holder)
         fixture.programTakesTheMouse()
         await fixture.mainQueueTurn()
         fixture.recorder.sent.removeAll()
@@ -339,18 +333,20 @@ struct TerminalMouseRoutingTests {
     /// SwiftTerm opens an OSC 8 link on mouse-up and returns before it would
     /// report the release, so a press it had reported would be left without
     /// one — a program can sit in a held-button state after the link opens.
-    /// With the toggle off reporting is off, nothing is withheld, and the link
+    /// On a tmux panel reporting is off, nothing is withheld, and the link
     /// opens through SwiftTerm's ordinary press and release.
-    @Test("a Cmd+click on an OSC 8 link opens it once and sends the program nothing", arguments: [true, false])
-    func commandClickOnOSC8LinkOpensItAndReportsNothing(forwardMouseToApps: Bool) async {
+    @Test(
+        "a Cmd+click on an OSC 8 link opens it once and sends the program nothing",
+        arguments: [TerminalTransport.holder, TerminalTransport.tmux])
+    func commandClickOnOSC8LinkOpensItAndReportsNothing(transport: TerminalTransport) async {
         let fixture = Fixture()
         defer { fixture.tearDown() }
         fixture.showOSC8Link()
-        await fixture.takeTheMouse(forwardMouseToApps: forwardMouseToApps)
+        await fixture.takeTheMouse(transport: transport)
 
         let point = fixture.point(col: 2, row: 0)
         fixture.view.mouseDown(with: fixture.mouseEvent(.leftMouseDown, at: point, [.command]))
-        #expect(fixture.view.commandPressWithheld == forwardMouseToApps)
+        #expect(fixture.view.commandPressWithheld == (transport == .holder))
         fixture.view.mouseUp(with: fixture.mouseEvent(.leftMouseUp, at: point, [.command]))
         await fixture.mainQueueTurn()
 
@@ -515,18 +511,17 @@ struct TerminalMouseRoutingTests {
         #expect(controlClickReported, "the control click was not reported, so the program never held the mouse")
     }
 
-    /// The Cmd rule keys on reporting, not on the toggle, so it holds in a
-    /// remote-attach terminal, which reports the mouse whatever the toggle
-    /// says. Mounted the way `LocalPTYTerminalRepresentable` mounts one:
-    /// reporting set on directly, the toggle off and so no Option bypass, and
-    /// no panel click routing.
-    @Test("in a remote-attach terminal with the toggle off, a Cmd+click sends the program nothing")
+    /// The Cmd rule keys on reporting, not on the panel kind, so it holds in a
+    /// remote-attach terminal, which always reports the mouse. Mounted the way
+    /// `LocalPTYTerminalRepresentable` mounts one: reporting set on directly,
+    /// the Option bypass on, and no panel click routing.
+    @Test("in a remote-attach terminal, a Cmd+click sends the program nothing")
     func remoteAttachCommandClickReportsNothing() async {
         let fixture = Fixture()
         defer { fixture.tearDown() }
         fixture.view.onMouseDownClaimFocus = nil
         fixture.view.allowMouseReporting = true
-        fixture.view.optionBypassesMouseReporting = false
+        fixture.view.optionBypassesMouseReporting = true
         fixture.show("just some words")
         fixture.programTakesTheMouse()
         await fixture.mainQueueTurn()

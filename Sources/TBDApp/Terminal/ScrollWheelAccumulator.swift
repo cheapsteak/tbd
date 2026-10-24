@@ -5,16 +5,14 @@ import AppKit
 ///
 /// `TerminalPanelRepresentable.Coordinator`'s monitor hand-encodes wheel
 /// reports because SwiftTerm's own `scrollWheel` cannot run in this
-/// embedding: a tmux panel, and a holder panel with "Send clicks and drags
-/// to apps that use the mouse" off, keep `allowMouseReporting` off, so on the
-/// alternate screen that handler returns before reporting anything. With the
-/// toggle on a holder panel reports, but the monitor still claims every wheel
-/// event while a mouse mode is on, so the wheel takes this one path, with its
-/// rate bound, in both states of the toggle. Bypassing the entry
-/// point also bypassed its arithmetic, and the monitor sent
-/// `max(1, Int(abs(deltaY)))` reports for every event — a 0.3-line trackpad
-/// delta became a full report, and a flick's 60-120 Hz momentum tail became
-/// one report per event. Each report makes a fullscreen TUI repaint, so
+/// embedding: a tmux panel keeps `allowMouseReporting` off, so on the
+/// alternate screen that handler returns before reporting anything. A holder
+/// panel reports, but the monitor still claims every wheel event while a
+/// mouse mode is on, so the wheel takes this one path, with its rate bound,
+/// on both transports. Bypassing the entry point also bypassed its
+/// arithmetic, and the monitor sent `max(1, Int(abs(deltaY)))` reports for
+/// every event — a 0.3-line trackpad delta became a full report, and a
+/// flick's 60-120 Hz momentum tail became one report per event. Each report makes a fullscreen TUI repaint, so
 /// scrolling manufactured an output flood: 634 output chunks/s while
 /// scrolling against 79.5/s while typing (#719). This restores the
 /// arithmetic of `MacTerminalView.scrollWheel`, not its entry point:
