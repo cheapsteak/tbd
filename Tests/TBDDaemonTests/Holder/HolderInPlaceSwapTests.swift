@@ -531,16 +531,13 @@ struct HolderInPlaceSwapTests {
             overlay: plainOverlay(terminal))
     }
 
-    /// The overlay a non-desk row with no fallback models or fragments plans:
-    /// the shared global file, which `settle` never writes.
+    /// The overlay a row with no fallback models or fragments plans: the shared
+    /// global file, which `settle` never writes.
     private static func plainOverlay(_ terminal: Terminal) -> ReplacementSpawnOverlay {
         ReplacementSpawnOverlay.plan(
             fallbackModels: nil,
             sessionKey: terminal.id.uuidString,
-            repoSettingsJSON: nil,
-            watchDeskRole: nil,
-            worktreePath: nil,
-            profileConfigDir: nil)
+            repoSettingsJSON: nil)
     }
 
     /// With the flag on, a holder wake — the in-place swap's wake included —

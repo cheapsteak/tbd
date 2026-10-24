@@ -100,7 +100,7 @@ actor PendingPromptCoordinator {
     /// only on the no-pane branch, and the first `notePrimaryTerminalExists`
     /// consumes it. So a parked prompt is armed at most once, by the pane it
     /// was actually waiting for. A later spawn for the same worktree — a
-    /// revive, a Watch Desk session, anything after a daemon restart — finds no
+    /// revive, a new tab, anything after a daemon restart — finds no
     /// licence and types nothing, which is what keeps retained text from
     /// becoming an unattended delivery into a conversation it was never written
     /// for. The operator recovers it from the worktree's row, and pressing

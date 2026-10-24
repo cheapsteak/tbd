@@ -293,13 +293,6 @@ public enum RPCMethod {
     public static let scratchPromote = "scratch.promote"
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
-    public static let nightwatchSetMode = "nightwatch.setMode"
-    public static let nightwatchLeaseStatus = "nightwatch.lease.status"
-    public static let nightwatchLeaseAcquire = "nightwatch.lease.acquire"
-    public static let nightwatchLeaseValidate = "nightwatch.lease.validate"
-    public static let nightwatchLeaseRenew = "nightwatch.lease.renew"
-    public static let nightwatchLeaseTransfer = "nightwatch.lease.transfer"
-    public static let nightwatchLeaseRelease = "nightwatch.lease.release"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
     public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
@@ -524,89 +517,6 @@ public enum RPCMethod {
     public static let panelImportLegacy = "panel.importLegacy"
 }
 
-public struct NightwatchLeaseStatusParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
-}
-
-public struct NightwatchLeaseAcquireParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public let terminalID: UUID
-    public init(worktreeID: UUID, terminalID: UUID) {
-        self.worktreeID = worktreeID
-        self.terminalID = terminalID
-    }
-}
-
-public struct NightwatchLeaseCredentialsParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public let terminalID: UUID
-    public let token: UUID
-    public let generation: Int64
-    public init(worktreeID: UUID, terminalID: UUID, token: UUID, generation: Int64) {
-        self.worktreeID = worktreeID; self.terminalID = terminalID
-        self.token = token; self.generation = generation
-    }
-}
-
-public struct NightwatchLeaseTransferParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public let fromTerminalID: UUID
-    public let toTerminalID: UUID
-    public let token: UUID
-    public let generation: Int64
-    public init(
-        worktreeID: UUID, fromTerminalID: UUID, toTerminalID: UUID,
-        token: UUID, generation: Int64
-    ) {
-        self.worktreeID = worktreeID; self.fromTerminalID = fromTerminalID
-        self.toTerminalID = toTerminalID; self.token = token
-        self.generation = generation
-    }
-}
-
-public struct NightwatchLeaseStatusResult: Codable, Sendable {
-    public let held: Bool
-    public let lease: WatchDeskLeaseSnapshot?
-    public init(held: Bool, lease: WatchDeskLeaseSnapshot?) {
-        self.held = held; self.lease = lease
-    }
-}
-
-public struct WatchDeskLeaseSnapshot: Codable, Sendable {
-    public let worktreeID: UUID
-    public let terminalID: UUID
-    public let generation: Int64
-    public let acquiredAt: Date
-    public let renewedAt: Date
-    public let expiresAt: Date
-    public let valid: Bool
-    public let role: WatchDeskRole
-    /// `role` defaults to the powerless role for the same reason
-    /// `WatchDeskRole`'s decoder falls back to it: an unstated role must never
-    /// be reported as mutable authority. Callers that know the lease is valid
-    /// pass `.judge` explicitly.
-    public init(
-        worktreeID: UUID, terminalID: UUID, generation: Int64,
-        acquiredAt: Date, renewedAt: Date, expiresAt: Date, valid: Bool,
-        role: WatchDeskRole = .readOnlyCoordinator
-    ) {
-        self.worktreeID = worktreeID; self.terminalID = terminalID
-        self.generation = generation; self.acquiredAt = acquiredAt
-        self.renewedAt = renewedAt; self.expiresAt = expiresAt; self.valid = valid
-        self.role = role
-    }
-}
-
-public struct NightwatchLeaseAcquisitionResult: Codable, Sendable {
-    public let lease: WatchDeskLeaseSnapshot
-    public let credentialFile: String
-    public init(lease: WatchDeskLeaseSnapshot, credentialFile: String) {
-        self.lease = lease
-        self.credentialFile = credentialFile
-    }
-}
-
 // MARK: - Branch Listing
 
 /// Codable mirror of `BranchRef` for the `repo.listBranches` RPC.
@@ -727,13 +637,6 @@ public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
     /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
     public let value: String
     public init(value: String) { self.value = value }
-}
-
-// MARK: - Nightwatch RPC
-
-public struct NightwatchSetModeParams: Codable, Sendable {
-    public let mode: NightwatchMode
-    public init(mode: NightwatchMode) { self.mode = mode }
 }
 
 // MARK: - Terminal Swap Profile
@@ -1042,7 +945,6 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let globalEnvOverrides: [String: String]
     public let autoArchiveOnMergeDefault: Bool
     public let autoHibernateOnMergeDefault: Bool
-    public let nightwatchMode: NightwatchMode
     public let autoResumeOnLimitReset: Bool
     public let autoResumeOnApiError: Bool
     /// The orphan-GC master switch (config mirror, default true).
@@ -1068,7 +970,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         globalEnvOverrides: [String: String] = [:],
         autoArchiveOnMergeDefault: Bool = false,
         autoHibernateOnMergeDefault: Bool = false,
-        nightwatchMode: NightwatchMode = .off,
         autoResumeOnLimitReset: Bool = false,
         autoResumeOnApiError: Bool = false,
         gcEnabled: Bool = true,
@@ -1084,7 +985,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.globalEnvOverrides = globalEnvOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
         self.autoHibernateOnMergeDefault = autoHibernateOnMergeDefault
-        self.nightwatchMode = nightwatchMode
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
         self.gcEnabled = gcEnabled
@@ -1111,8 +1011,6 @@ public struct ModelProfileListResult: Codable, Sendable {
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
         autoHibernateOnMergeDefault = try c.decodeIfPresent(
             Bool.self, forKey: .autoHibernateOnMergeDefault) ?? false
-        nightwatchMode = try c.decodeIfPresent(
-            NightwatchMode.self, forKey: .nightwatchMode) ?? .off
         autoResumeOnLimitReset = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnLimitReset) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
@@ -3234,7 +3132,7 @@ public struct TerminalWakeParams: Codable, Sendable {
     /// atomic with the respawn. It reaches ONLY a session this call actually
     /// woke; on the idempotent no-op paths (already awake / wake in flight)
     /// it is never delivered anywhere, which is what makes it safe for
-    /// autonomous callers (nightwatch wake.py) racing a human wake.
+    /// autonomous callers racing a human wake.
     public let prompt: String?
     public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, fallbackToDefaultProfile: Bool? = nil, prompt: String? = nil) {
         self.terminalID = terminalID
@@ -4395,21 +4293,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// With the flag on and this false, every create silently falls back to
     /// tmux — so Settings says why, and greys the toggle out in the one state
     /// where neither direction would change anything (already off, no helper).
-    /// Turning the transport off stays available, because the effective flag is
-    /// what `NightwatchHolderGate` reads whether a holder can start or not.
     public let ptyHolderSupported: Bool
-    /// Whether any session on the pty-holder transport is still alive on this
-    /// daemon. The third term of `NightwatchHolderGate.watchModesBlocked`, sent
-    /// so the app's watch-mode controls reach the same verdict the daemon's
-    /// refusal will: a daemon whose `TBDHolder` helper went missing reports
-    /// `ptyHolderSupported == false` and may still be holding several adopted
-    /// sessions.
-    ///
-    /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `profileBalancingEnabled` gives. Absent on the
-    /// wire reads false, like `ptyHolderSupported`: a daemon that never sent it
-    /// is one that has no holder path to report.
-    public var ptyHolderSessionsLive: Bool = false
     /// Whether transcript streaming is on (`transcript_streaming_enabled`),
     /// resolved daemon-side through `Config.transcriptStreamingDefault`.
     public var transcriptStreamingEnabled: Bool
@@ -4564,16 +4448,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // false rather than resolving through the shipped default: a daemon
         // that does not send `ptyHolderEnabled` has no holder path at all, so
         // it is running no holder-backed session whatever this install's
-        // default says, and calling the transport live there would grey out the
-        // Nightwatch controls that daemon can still honor. This is a different
-        // question from the config column's NULL: there, nobody chose; here,
-        // the sender does not know the field exists.
+        // default says. This is a different question from the config column's
+        // NULL: there, nobody chose; here, the sender does not know the field
+        // exists.
         ptyHolderEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderEnabled) ?? false
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
-        ptyHolderSessionsLive = try c.decodeIfPresent(
-            Bool.self, forKey: .ptyHolderSessionsLive) ?? false
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault

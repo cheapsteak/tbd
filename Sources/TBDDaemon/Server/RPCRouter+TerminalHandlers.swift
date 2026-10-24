@@ -2283,29 +2283,6 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalMigrateTransportParams.self, from: paramsData)
 
-        // The third door into the Nightwatch/holder pair, and refused like the
-        // other two: `config.setPtyHolderEnabled` refuses `true` while a mode
-        // is on, `nightwatch.setMode` refuses a mode while the hazard is live.
-        // A watch mode and the holder are never both live — on the holder the
-        // desk's liveness check reads an empty tmux window id and leaks one
-        // Claude session per tick — and this migration CREATES holder-backed
-        // sessions, so it asks the flag door's own question with
-        // `enabling: true`: the migration is that enabling, for the rows it
-        // moves.
-        //
-        // Refused per CALL and before any row is read, because the hazard is
-        // the transport rather than any one session: nothing is written,
-        // nothing is broadcast, nothing is migrated, and no actuation row
-        // exists — the shape `nightwatch.setMode`'s refusal has. This is the
-        // authoritative gate; the app's hidden button is a courtesy on top of
-        // it and covers neither the CLI nor an older app build.
-        let config = try await db.config.get()
-        if NightwatchHolderGate.refusesHolder(
-            enabling: true, currentMode: config.nightwatchMode) {
-            logger.notice("transport migration: refusing the whole call — a watch mode is active")
-            return RPCResponse(error: NightwatchHolderGate.migrationRefusal)
-        }
-
         let operations = transportMigratorOperationsOverride ?? .production(
             hibernation: hibernationCoordinator, holderRegistry: holderRegistry)
         let migrator = TerminalTransportMigrator(db: db, operations: operations)
@@ -2536,15 +2513,6 @@ extension RPCRouter {
         // In-place respawn keeps the EXISTING terminal id so its `TBD_TERMINAL_ID`
         // (and thus SessionStart-hook routing) stays stable; fork uses a fresh id.
         let plannedTerminalID = mode == .inPlace ? oldTerminal.id : UUID()
-        // The desk role of the row this spawn will actually land on. An in-place
-        // swap keeps the row, and nothing in this handler touches
-        // `watch_desk_role`, so a resolve without the role would leave a row that
-        // still claims to be a desk running with no statusline tee — and, because
-        // a roleless resolve deletes the session's capture, with no denominator
-        // either. A fork creates a fresh row that is branded no desk (see
-        // `forkSwapNewTab`), so it must resolve without one or the overlay and
-        // the row would disagree in the other direction.
-        let swapDeskRole: WatchDeskRole? = mode == .inPlace ? oldTerminal.watchDeskRole : nil
         let swapConfig = try? await db.config.get()
         // The transport gate, asked once per swap from that one config read.
         // Only `.fork` decides a transport at all — `.inPlace` reshapes the row
@@ -2746,20 +2714,13 @@ extension RPCRouter {
         // on to reject. Both arms need it.
         //
         // The overlay is only planned here (`ReplacementSpawnOverlay`): every
-        // arm writes it — and deletes the row's previous statusline capture —
-        // immediately before its launch, from the session-mod features
-        // `SessionModSpawn.prepare` gave that launch. A swap that fails before
-        // it reaches its launch leaves the running process's overlay and
-        // capture untouched. Only an in-place swap has a desk role, and a desk
-        // carrying `usage` installs no statusline tee.
+        // arm writes it immediately before its launch. A swap that fails before
+        // it reaches its launch leaves the running process's overlay untouched.
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
         let overlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolved?.fallbackModels,
             sessionKey: plannedTerminalID.uuidString,
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-            watchDeskRole: swapDeskRole,
-            worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
         )
 
         // The session name is the swapped tab's: the new tab on a fork, the
@@ -2819,12 +2780,11 @@ extension RPCRouter {
             switch mode {
             case .fork:
                 // The fork's new tab is a fresh session under a new terminal
-                // id, so no running process shares its overlay; written here,
-                // from the session mod it was prepared with above.
+                // id, so no running process shares its overlay; written here.
                 response = try await forkSwapNewTab(
                     worktree: worktree.worktree,
                     plannedTerminalID: plannedTerminalID,
-                    spawnCommand: overlay.settle(carrying: forkSessionMod, command: spawn.command),
+                    spawnCommand: overlay.settle(command: spawn.command),
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     storedSessionID: storedSessionID,
@@ -3553,7 +3513,7 @@ extension RPCRouter {
             config: try? await db.config.get(),
             claudeSessionID: storedSessionID, incarnationID: incarnationID,
             sessionsDir: sessionsDir, now: now())
-        let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
+        let launchCommand = overlay.settle(command: spawnCommand)
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.
@@ -4483,11 +4443,9 @@ extension RPCRouter {
         // own supervision rails an observation they did not ask for — is a
         // separate change, and one this transport cannot make on its own: the
         // rails that would benefit do not pass through this handler at all.
-        // `DeskSessionManager.nudgeDeskSession` and `postShiftWrapUp` reach
-        // tmux directly with no transport branch, `LimitResumeActuator`'s
-        // holder path writes to `HolderInjectionCourier` itself, and
-        // `sendQueuedPromptVerbatim` — the one rail that does route through
-        // here — sends `.suppressed` so the operator's words arrive
+        // `LimitResumeActuator`'s holder path writes to `HolderInjectionCourier`
+        // itself, and `sendQueuedPromptVerbatim` — the one rail that does route
+        // through here — sends `.suppressed` so the operator's words arrive
         // byte-identically, and an envelope-less send is one the observation
         // structurally cannot find (`DeliveryVerifier.envelopeAppears` searches
         // the transcript for this row's dispatch id and nothing else). Arming

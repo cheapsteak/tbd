@@ -34,9 +34,6 @@ public enum StateDelta: Codable, Sendable {
     /// already had retracts a reason while broadcasting no activity change.
     case terminalAwaitingInputChanged(TerminalAwaitingInputDelta)
     case terminalProfileChanged(TerminalProfileDelta)
-    /// Explicit Watch Desk Judge/Read-only role markers changed. The app
-    /// refetches that worktree's terminal rows; lease credentials stay daemon-side.
-    case watchDeskRolesChanged(WorktreeIDDelta)
     case worktreeMoved(WorktreeMovedDelta)
     case terminalHibernationChanged(TerminalHibernationDelta)
     case controlModeInputHealthChanged(ControlModeInputHealthDelta)

@@ -126,9 +126,8 @@ private struct PreparedContinueInClaude: Sendable {
     let freshClaudeSessionID: String
     let claudeCommand: String
     /// The `--settings` overlay `claudeCommand` names, planned before the
-    /// destination's incarnation exists and written at launch from the
-    /// session mod `SessionModSpawn.prepare` gives it, so a continuation that
-    /// fails before launch writes no overlay.
+    /// destination's incarnation exists and written at launch, so a
+    /// continuation that fails before launch writes no overlay.
     let claudeOverlay: ReplacementSpawnOverlay
     /// The `--name` in `claudeCommand`, reserved in the title store by
     /// preparation; the handler confirms it once the replacement is finalized
@@ -375,15 +374,11 @@ extension RPCRouter {
             terminalID: source.id)
         // The destination's incarnation is minted only when the replacement
         // begins, so its session mod is prepared at launch, and the overlay is
-        // only planned here and written there. A desk whose spawn carries
-        // `usage` installs no statusline tee.
+        // only planned here and written there.
         let claudeOverlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: source.id.uuidString,
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-            watchDeskRole: source.watchDeskRole,
-            worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir)
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id))
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
@@ -517,8 +512,7 @@ extension RPCRouter {
             claudeSessionID: prepared.freshClaudeSessionID,
             incarnationID: destinationToken,
             sessionsDir: sessionsDir, now: now())
-        let claudeCommand = prepared.claudeOverlay.settle(
-            carrying: sessionMod, command: prepared.claudeCommand)
+        let claudeCommand = prepared.claudeOverlay.settle(command: prepared.claudeCommand)
         var destinationFailure: Error?
         do {
             // No graceful interrupt: this single tmux operation kills Codex

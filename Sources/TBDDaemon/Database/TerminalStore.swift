@@ -44,7 +44,6 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hibernateReason: String?
     var keepWarm: Bool?
     var pendingResumeAt: Date?
-    var watch_desk_role: String?
     /// JSON-encoded `FactSource` — where `activityState` came from. nil on rows
     /// written before v70 and on any row stamped without provenance.
     var activityStateSource: String?
@@ -100,7 +99,6 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.hibernateReason = terminal.hibernateReason?.rawValue
         self.keepWarm = terminal.keepWarm
         self.pendingResumeAt = terminal.pendingResumeAt
-        self.watch_desk_role = terminal.watchDeskRole?.rawValue
         self.activityStateSource = FactColumnJSON.encode(terminal.activityStateSource)
         self.activityStateObservedAt = terminal.activityStateObservedAt
         self.activityStateOrderObservedAt = terminal.activityStateOrderObservedAt
@@ -150,9 +148,6 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             hibernateReason: hibernateReason.flatMap(HibernateReason.init(rawValue:)),
             keepWarm: keepWarm ?? false,
             pendingResumeAt: pendingResumeAt,
-            watchDeskRole: watch_desk_role.map {
-                WatchDeskRole(rawValue: $0) ?? .readOnlyCoordinator
-            },
             activityStateSource: FactColumnJSON.decode(FactSource.self, from: activityStateSource),
             activityStateObservedAt: activityStateObservedAt,
             activityStateOrderObservedAt: activityStateOrderObservedAt,
@@ -721,15 +716,7 @@ public struct TerminalStore: Sendable {
     /// handler rejects user-driven creates on archived rows before spawn.
     /// Promoted rows have no such flow — they are never revived.
     ///
-    /// `watchDeskRole` is stamped here so that "this row was spawned as a Watch
-    /// Desk session" is durable from the row's first instant rather than only
-    /// from whenever a judge lease is first acquired. The wake path reads it to
-    /// decide whether to reinstall the statusline tee, and a desk that has
-    /// never held a lease is still a desk. The lease store keeps maintaining
-    /// the column afterwards — this is the same mechanism, given a starting
-    /// value, not a second one.
-    ///
-    /// `transport` is likewise stamped here and never changed afterwards — the
+    /// `transport` is stamped here and never changed afterwards — the
     /// `pty_holder_enabled` gate is read at spawn time, so a session created on
     /// one transport keeps it for life. It defaults to `.tmux` so every existing
     /// call site keeps creating tmux-backed sessions untouched.
@@ -750,7 +737,6 @@ public struct TerminalStore: Sendable {
         claudeSessionID: String? = nil,
         profileID: UUID? = nil,
         kind: TerminalKind? = nil,
-        watchDeskRole: WatchDeskRole? = nil,
         transport: TerminalTransport = .tmux,
         holderPID: Int32? = nil,
         childPID: Int32? = nil,
@@ -767,7 +753,6 @@ public struct TerminalStore: Sendable {
             claudeSessionID: claudeSessionID,
             profileID: profileID,
             kind: kind,
-            watchDeskRole: watchDeskRole,
             transport: transport,
             holderPID: holderPID,
             childPID: childPID,
@@ -810,29 +795,6 @@ public struct TerminalStore: Sendable {
             }
             request = request.order(Column("createdAt").asc, Column("id").asc)
             return try request.fetchAll(db).compactMap { $0.toModel() }
-        }
-    }
-
-    /// Whether any session on the pty-holder transport is still alive.
-    ///
-    /// The second term of `NightwatchHolderGate.watchModesBlocked`, and the one
-    /// the flag and the registry cannot answer between them: a daemon whose
-    /// `TBDHolder` helper went missing cannot spawn a holder but may well have
-    /// adopted several, so "no holder can be started" is not "no holder is
-    /// running".
-    ///
-    /// Filtered in SQL on the one unambiguous column — every install that never
-    /// ran a holder answers with an empty set — and judged in Swift by
-    /// `Terminal.isExitStamped`, so liveness cannot drift from the spelling
-    /// every other reader uses. A parked holder row counts as alive: it is woken
-    /// by a gesture and wakes back onto a holder.
-    public func hasLiveHolderSession() async throws -> Bool {
-        try await writer.read { db in
-            try TerminalRecord
-                .filter(Column("transport") == TerminalTransport.holder.rawValue)
-                .fetchAll(db)
-                .compactMap { $0.toModel() }
-                .contains { !$0.isExitStamped }
         }
     }
 
@@ -1526,7 +1488,7 @@ public struct TerminalStore: Sendable {
     /// what is now running, and preserving an agent kind here would mint a row
     /// shape that has never existed — holder-backed, agent-kinded, with no
     /// session — for which the daemon would keep paying transcript and
-    /// statusline work on behalf of a bare login shell.
+    /// context-window work on behalf of a bare login shell.
     ///
     /// `startedAt` doubles as the activity observation's timestamp: it is the
     /// moment the replacement job started, which is when this row's `unknown`

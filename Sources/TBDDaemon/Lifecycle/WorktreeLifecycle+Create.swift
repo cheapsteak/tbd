@@ -1344,14 +1344,7 @@ extension WorktreeLifecycle {
         primaryAgentPreference: PrimaryAgentPreference? = nil,
         claudeSettingsOverlay: String? = nil,
         carryover: ConversationCarryover? = nil,
-        preparedCodexLaunch: CodexLaunchPreparation? = nil,
-        /// Non-nil when this spawn is a Watch Desk session, and the only thing
-        /// that installs the statusline tee (`StatuslineTee`). The desk spawn
-        /// path passes `.readOnlyCoordinator` — the role a desk terminal holds
-        /// until the lease store promotes one of them to `.judge` — because at
-        /// spawn time no lease has been acquired yet. Every other caller leaves
-        /// it nil and gets exactly the overlay it got before the tee existed.
-        watchDeskRole: WatchDeskRole? = nil
+        preparedCodexLaunch: CodexLaunchPreparation? = nil
     ) async throws -> [(id: UUID, label: String)] {
         try await tmux.withWorktreeServerLock(
             db: db,
@@ -1374,8 +1367,7 @@ extension WorktreeLifecycle {
                 primaryAgentPreference: primaryAgentPreference,
                 claudeSettingsOverlay: claudeSettingsOverlay,
                 carryover: carryover,
-                preparedCodexLaunch: preparedCodexLaunch,
-                watchDeskRole: watchDeskRole)
+                preparedCodexLaunch: preparedCodexLaunch)
         }
     }
 
@@ -1397,8 +1389,7 @@ extension WorktreeLifecycle {
         primaryAgentPreference: PrimaryAgentPreference?,
         claudeSettingsOverlay: String?,
         carryover: ConversationCarryover?,
-        preparedCodexLaunch: CodexLaunchPreparation?,
-        watchDeskRole: WatchDeskRole?
+        preparedCodexLaunch: CodexLaunchPreparation?
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
@@ -1619,9 +1610,6 @@ extension WorktreeLifecycle {
             // now. A carryover forks (`--fork-session`), and its id exists
             // only once it has launched, so it stays legacy — which the
             // recapture below, scheduled with no incarnation, relies on.
-            // Prepared before the overlay resolves, because whether this
-            // spawn carries `usage` decides whether a desk installs the
-            // statusline tee.
             let sessionMod = carryover == nil
                 ? SessionModSpawn.prepare(
                     config: config, claudeSessionID: sessionUUID,
@@ -1638,16 +1626,7 @@ extension WorktreeLifecycle {
                 // an archived-session resume must not reapply it. Hooks
                 // overlay still resolves for resumes — only
                 // extraSettingsJSON goes nil.
-                extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
-                // Desk sessions only — see the parameter's doc comment.
-                watchDeskRole: watchDeskRole,
-                // A spawn carrying `usage` reports its figures through the
-                // mod, so a desk keeps the person's own status line.
-                statuslineTee: ClaudeHookOverlay.installsStatuslineTee(carrying: sessionMod),
-                worktreePath: worktreePath,
-                // The same config dir this spawn runs with, so the tee
-                // delegates to the user-scope statusline THIS session reads.
-                profileConfigDir: profileConfigDir
+                extraSettingsJSON: isResume ? nil : claudeSettingsOverlay
             )
             let spawnTitle = await ClaudeSessionTitle.forSpawn(
                 db: db, store: sessionTitles,
@@ -1718,10 +1697,6 @@ extension WorktreeLifecycle {
                 claudeSessionID: primarySessionID,
                 profileID: primaryProfileID,
                 kind: primaryTerminalKind,
-                // Same value the overlay above was built from, written to the row
-                // so the fact outlives this call. A desk woken from hibernation
-                // reuses this row, and the wake site has nothing else to read.
-                watchDeskRole: watchDeskRole,
                 transport: transport,
                 sessionIncarnationID: primarySessionIncarnationID)
         } catch {

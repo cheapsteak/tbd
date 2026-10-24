@@ -127,11 +127,10 @@ public extension Trait where Self == TimeLimitTrait {
     ///   `GatedIntervalSleepTests.returnsAfterExpectedPollCount` pays six
     ///   guards (3 `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1
     ///   `FireRecorder.next()`) for 270 s, past this limit;
-    ///   `GatedIntervalSleepTests.boundaryIsExact` and
-    ///   `DaywatchRunnerLoopTests.testSubsequentTicksAtInterval` pay five for
-    ///   225 s — but they are on `EventDrivenTestClock`'s strict waits, where a
-    ///   missed arming throws before anything advances, so the chain stops at
-    ///   the first bad step. Their one non-throwing guard, `next()`, sits last
+    ///   `GatedIntervalSleepTests.boundaryIsExact` pays five for 225 s — but
+    ///   they are on `EventDrivenTestClock`'s strict waits, where a missed
+    ///   arming throws before anything advances, so the chain stops at the
+    ///   first bad step. Their one non-throwing guard, `next()`, sits last
     ///   with nothing behind it to inherit the run, so at most one 45 s guard
     ///   elapses in any single run and 270 s describes a run that cannot
     ///   happen (see "The event-driven clock" below).

@@ -32,7 +32,6 @@ public final class RPCRouter: Sendable {
     /// Injected for the rate-limit handler's profile suggestion; a seam like
     /// `limitResumeScheduler` so tests can install one after construction.
     public nonisolated(unsafe) var profilePoolCandidateSource: ProfilePoolCandidateSource?
-    public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
     public nonisolated(unsafe) var claudeUsagePoller: ClaudeUsagePoller?
     /// Edge-triggered gate in front of the merged-PR fan-out (auto-archive,
     /// auto-hibernate): it fires when every PR bound to a worktree has resolved.
@@ -1032,20 +1031,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetScratchRenamePrompt(request.paramsData)
             case RPCMethod.configSetScratchProfileOverride:
                 return try await handleConfigSetScratchProfileOverride(request.paramsData)
-            case RPCMethod.nightwatchSetMode:
-                return try await handleSetNightwatchMode(request.paramsData)
-            case RPCMethod.nightwatchLeaseStatus:
-                return try await handleNightwatchLeaseStatus(request.paramsData)
-            case RPCMethod.nightwatchLeaseAcquire:
-                return try await handleNightwatchLeaseAcquire(request.paramsData)
-            case RPCMethod.nightwatchLeaseValidate:
-                return try await handleNightwatchLeaseValidate(request.paramsData)
-            case RPCMethod.nightwatchLeaseRenew:
-                return try await handleNightwatchLeaseRenew(request.paramsData)
-            case RPCMethod.nightwatchLeaseTransfer:
-                return try await handleNightwatchLeaseTransfer(request.paramsData)
-            case RPCMethod.nightwatchLeaseRelease:
-                return try await handleNightwatchLeaseRelease(request.paramsData)
             case RPCMethod.terminalHibernate:
                 return try await handleTerminalHibernate(request.paramsData, actor: request.actor)
             case RPCMethod.terminalWake:
@@ -1260,11 +1245,6 @@ public final class RPCRouter: Sendable {
         // "unable to type-check this expression in reasonable time" — so the
         // newer fields are set after construction instead.
         result.transcriptStreamingEnabled = config.transcriptStreamingEnabled
-        // Assigned rather than passed, for the same budget reason. The
-        // watch-mode controls need all three holder terms to reach the verdict
-        // the daemon's own refusal will, and this is the one neither the flag
-        // nor `ptyHolderSupported` implies.
-        result.ptyHolderSessionsLive = try await db.terminals.hasLiveHolderSession()
         // Assigned rather than passed, for the same budget reason: the
         // load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled

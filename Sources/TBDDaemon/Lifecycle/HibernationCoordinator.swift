@@ -1953,53 +1953,15 @@ public actor HibernationCoordinator {
             profile: resolvedProfile?.envOverrides
         )
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
-        // Planned, not written: the incarnation `SessionModSpawn.prepare`
-        // writes into `spawn.json` is minted only at launch, long after the
-        // command below is composed, and a wake that adopts a holder still
-        // running launches nothing at all. Each launch writes the overlay from
-        // what `prepare` returned (`ReplacementSpawnOverlay.settle`), so a desk
-        // whose spawn carries `usage` installs no tee and one without it does,
-        // and an adopting wake leaves the running process's overlay and
-        // capture alone.
+        // Planned, not written: a wake that adopts a holder still running
+        // launches nothing at all, and must leave the running process's overlay
+        // alone. Each launch writes the overlay just before it starts
+        // (`ReplacementSpawnOverlay.settle`).
         let overlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString,
             // Repo fragment is file-backed config, read fresh — reapplied on wake.
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-            // A wake reuses the SAME terminal row and therefore the same
-            // statusline capture path, so a desk woken without the tee would
-            // otherwise keep reading a capture whose mtime predates the resume.
-            //
-            // The row's own `watch_desk_role` is what this site reads, and it
-            // is durable in the direction that matters: the desk spawn path
-            // stamps it at create, so a desk is recognizable here from its first
-            // instant and without a lease ever having existed. It is **not**
-            // durable in every direction — `WatchDeskLeaseStore.release` and
-            // `.revoke` NULL the column for the whole worktree, and a
-            // hibernated desk is exactly the state that makes
-            // `DeskSessionManager` revoke (its pane no longer runs an agent, so
-            // the lease owner reads as gone). Such a desk wakes without a tee
-            // and reports its window as unknown until a lease is reacquired.
-            //
-            // Demoting instead of NULLing would not fix that: `setRoles` brands
-            // every terminal in the worktree, so a surviving role would install
-            // the tee — which outranks the operator's own statusline in every
-            // scope they can write — in ordinary sessions that merely happen to
-            // sit in a desk's worktree. Reporting no denominator is the right
-            // side to be wrong on, and it is only safe because the staleness is
-            // closed independently: `ClaudeHookOverlay.resolveOverlayPath`,
-            // which the launch's settle runs, deletes the session's capture
-            // on every call (every launch), so a session that is not
-            // (re)installing a tee cannot read a capture from a previous life. An ordinary terminal has nil here and gets a byte-identical
-            // overlay.
-            //
-            // A desk whose resume carries the session mod's `usage` installs no
-            // tee: the mod reports its window instead.
-            watchDeskRole: terminal.watchDeskRole,
-            worktreePath: worktree.path,
-            // The same config dir the resume below runs with, so the tee
-            // delegates to the user-scope statusline THIS session reads.
-            profileConfigDir: profileConfigDir
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
         )
         // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
         // isolated profile dir (never seeded before) doesn't re-prompt — the
@@ -2254,7 +2216,7 @@ public actor HibernationCoordinator {
                     config: try? await db.config.get(),
                     claudeSessionID: claudeSessionID, incarnationID: incarnationID,
                     sessionsDir: sessionsDir, now: now())
-                let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
+                let launchCommand = overlay.settle(command: spawnCommand)
                 try await tmux.respawnWindow(
                     server: server,
                     windowID: windowID,
@@ -2374,7 +2336,7 @@ public actor HibernationCoordinator {
                     config: try? await db.config.get(),
                     claudeSessionID: claudeSessionID, incarnationID: incarnationID,
                     sessionsDir: sessionsDir, now: now())
-                let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
+                let launchCommand = overlay.settle(command: spawnCommand)
                 do {
                     try await tmux.respawnWindow(
                         server: server,

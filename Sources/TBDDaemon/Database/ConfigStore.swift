@@ -43,8 +43,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var scratch_instructions: String?
     var scratch_rename_prompt: String?
     var scratch_profile_override_id: String?
-    /// Nightwatch mode: 'off', 'daywatch', or 'nightwatch'. Nil/absent defaults to 'off'.
-    var nightwatch_mode: String?
     var auto_hibernate_enabled: Bool?
     var hibernate_idle_minutes: Int?
     var control_mode_enabled: Bool?
@@ -326,8 +324,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             scratchInstructions: scratch_instructions,
             scratchRenamePrompt: scratch_rename_prompt,
             scratchProfileOverrideID: scratch_profile_override_id.flatMap(UUID.init(uuidString:)),
-            nightwatchMode: nightwatch_mode
-                .flatMap(NightwatchMode.init(rawValue:)) ?? .off,
             autoHibernateEnabled: auto_hibernate_enabled ?? false,
             // Clamped on read (not just on write) so every consumer sees a
             // bounded value regardless of what's actually in the row — a
@@ -605,15 +601,6 @@ public struct ConfigStore: Sendable {
             try db.execute(
                 sql: "UPDATE config SET scratch_profile_override_id = ? WHERE id = ?",
                 arguments: [id?.uuidString, Self.singletonID]
-            )
-        }
-    }
-
-    public func setNightwatchMode(_ mode: NightwatchMode) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET nightwatch_mode = ? WHERE id = ?",
-                arguments: [mode.rawValue, Self.singletonID]
             )
         }
     }

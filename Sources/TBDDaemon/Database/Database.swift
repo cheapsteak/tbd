@@ -27,7 +27,6 @@ public final class TBDDatabase: Sendable {
     public let terminalHistory: TerminalHistoryStore
     public let panelSurface: PanelSurfaceStore
     public let remoteSessions: RemoteSessionStore
-    public let watchDeskLeases: WatchDeskLeaseStore
     public let prBindings: PRBindingStore
     public let claudeCloudSessions: ClaudeCloudSessionStore
     /// The shadow-peer whitelist `ShadowPeerReconciler` reclaims against
@@ -79,7 +78,6 @@ public final class TBDDatabase: Sendable {
         self.terminalHistory = TerminalHistoryStore(writer: pool, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: pool)
         self.remoteSessions = RemoteSessionStore(writer: pool)
-        self.watchDeskLeases = WatchDeskLeaseStore(writer: pool)
         self.prBindings = PRBindingStore(writer: pool)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: pool)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: pool)
@@ -128,7 +126,6 @@ public final class TBDDatabase: Sendable {
         self.terminalHistory = TerminalHistoryStore(writer: queue, historyDir: terminalHistoryDir)
         self.panelSurface = PanelSurfaceStore(writer: queue)
         self.remoteSessions = RemoteSessionStore(writer: queue)
-        self.watchDeskLeases = WatchDeskLeaseStore(writer: queue)
         self.prBindings = PRBindingStore(writer: queue)
         self.claudeCloudSessions = ClaudeCloudSessionStore(writer: queue)
         self.shadowPeerArtifacts = ShadowPeerArtifactStore(writer: queue)

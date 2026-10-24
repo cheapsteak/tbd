@@ -7,9 +7,9 @@ import Testing
 /// Every argv the dry-run `TmuxManager` was handed. "Nothing was recorded" is
 /// the assertion that a guard sat ahead of the whole tmux mechanic, not merely
 /// ahead of the DB write at the end of it.
-/// Not `private`: the same teardown gate is asserted in `ScratchDeleteRPCTests`
-/// and `DeskSessionManagerTests`, whose fixtures need `TBD_HOME` and so cannot
-/// live in this suite. One recorder rather than three copies.
+/// Not `private`: the same teardown gate is asserted in suites whose fixtures
+/// need `TBD_HOME` and so cannot live in this one, such as
+/// `ScratchDeleteRPCTests`. One recorder rather than a copy per suite.
 final class RecordedTmuxArgs: @unchecked Sendable {
     private let lock = NSLock()
     private var calls: [[String]] = []
@@ -2279,12 +2279,12 @@ struct HolderTmuxAssumptionGateTests {
     // MARK: - Gate 8: the other teardowns that delete a row
 
     /// `terminal.delete` was never the only path that deletes a terminal row.
-    /// Worktree archive, forget, `scratch.delete`/`scratch.archive` and the
-    /// Watch Desk close all kill windows and then delete the rows, and every
-    /// one of them leaked a holder for the same reason: `tmuxWindowID` is the
-    /// empty string, so the kill addresses nothing while the holder, the job it
-    /// forked and its rendezvous files outlive the row that was the only record
-    /// of their pids. Nothing reclaims them until Milestone B's reconciler.
+    /// Worktree archive, forget and `scratch.delete`/`scratch.archive` all
+    /// kill windows and then delete the rows, and every one of them leaked a
+    /// holder for the same reason: `tmuxWindowID` is the empty string, so the
+    /// kill addresses nothing while the holder, the job it forked and its
+    /// rendezvous files outlive the row that was the only record of their pids.
+    /// Nothing reclaims them until Milestone B's reconciler.
     ///
     /// The observable is the one the delete gate established: `adoptAll`
     /// records a status for a session nothing answers for, and `abandon` is the

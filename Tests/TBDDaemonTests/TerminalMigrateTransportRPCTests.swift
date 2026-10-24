@@ -51,15 +51,12 @@ struct TerminalMigrateTransportRPCTests {
 
     /// Operations whose park parks the row for real (so the compare-and-set can
     /// succeed) and whose wake always succeeds. `canSpawnHolder` is a knob for
-    /// the refusal path, `wakeResult` for the moved-but-not-resumed one, and
-    /// `nightwatchMode` for the gate.
+    /// the refusal path, and `wakeResult` for the moved-but-not-resumed one.
     private func makeFixture(
         canSpawnHolder: Bool = true,
-        wakeResult: WakeResult = .ok(sessionIncarnationID: nil),
-        nightwatchMode: NightwatchMode = .off
+        wakeResult: WakeResult = .ok(sessionIncarnationID: nil)
     ) async throws -> Fixture {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setNightwatchMode(nightwatchMode)
         let actuationLogDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-actuation-migrate-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(
@@ -360,41 +357,6 @@ struct TerminalMigrateTransportRPCTests {
             $0["confirms"] as? String == request["id"] as? String
         })
         #expect(outcome["result"] as? String == "transport-failed")
-    }
-
-    // MARK: - The Nightwatch gate
-
-    /// The third door into the Nightwatch/holder pair. The reachable state is
-    /// the one `NightwatchHolderGate.modeRefusal` sends a person to: the flag
-    /// off, no live holder rows, a watch mode on. One `--all` from there would
-    /// put the forbidden pair live.
-    @Test(arguments: [NightwatchMode.daywatch, NightwatchMode.nightwatch])
-    func aWatchModeRefusesTheWholeCall(_ mode: NightwatchMode) async throws {
-        let f = try await makeFixture(nightwatchMode: mode)
-        let row = try await tmuxRow(f, parked: true)
-
-        let response = try await respond(f, terminalID: nil)
-
-        #expect(!response.success, "the migration ran with \(mode) active")
-        #expect(response.error == NightwatchHolderGate.migrationRefusal)
-        #expect(try await f.db.terminals.get(id: row.id)?.transport == .tmux,
-                "a row was migrated behind the refusal")
-        #expect(replacedRows(f).isEmpty, "the refused call broadcast a row")
-        #expect(try f.actuationRows().isEmpty,
-                "the refused call wrote an actuation row for a session it never touched")
-    }
-
-    /// The other branch, and the one every other test in this suite rests on:
-    /// with the mode off the same call migrates.
-    @Test("with no watch mode the same call migrates")
-    func withNoWatchModeTheSameCallMigrates() async throws {
-        let f = try await makeFixture(nightwatchMode: .off)
-        let row = try await tmuxRow(f, parked: true)
-
-        let result = try await call(f, terminalID: nil)
-
-        #expect(result.migrated == [row.id])
-        #expect(try await f.db.terminals.get(id: row.id)?.transport == .holder)
     }
 
     @Test("the actuation surface names the method")
