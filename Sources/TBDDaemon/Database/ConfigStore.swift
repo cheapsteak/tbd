@@ -466,7 +466,21 @@ public struct ConfigStore: Sendable {
             guard let record = try ConfigRecord.fetchOne(db, key: Self.singletonID) else {
                 return Config()
             }
-            let worktreeParksOnMerge = try Self.anyWorktreeParksOnMerge(db)
+            // An unreadable worktree table must not fail the config read:
+            // every subsystem opens on this read, and most never touch a
+            // worktree row. Resolving without the overrides is safe. Merge-park
+            // reads the worktree row before it parks and a spawn reads it
+            // before it starts, so while the table is unreadable neither can
+            // run, and nothing an override holds the mod on for can happen.
+            let worktreeParksOnMerge: Bool
+            do {
+                worktreeParksOnMerge = try Self.anyWorktreeParksOnMerge(db)
+            } catch {
+                configLogger.error(
+                    "Worktree park-on-merge overrides unreadable, resolving the composer draft without them: \(String(describing: error), privacy: .public)"
+                )
+                worktreeParksOnMerge = false
+            }
             return record.toModel(worktreeParksOnMerge: worktreeParksOnMerge)
         }
     }

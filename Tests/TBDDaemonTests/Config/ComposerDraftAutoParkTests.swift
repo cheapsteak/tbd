@@ -237,6 +237,65 @@ struct ComposerDraftAutoParkTests {
         #expect(!older.composerDraftRequiredByAutoPark)
     }
 
+    // MARK: - An unreadable worktree table
+
+    /// Arms a worktree's park-on-merge override, then drops the worktree table
+    /// so every later worktree read fails, the way a corrupt or locked database
+    /// would. The override can then reach the result only through a read that
+    /// fails, which the last line confirms.
+    private func armOverrideThenDropWorktreeTable(
+        _ worktreeID: UUID, in db: TBDDatabase
+    ) async throws {
+        try await db.worktrees.setAutoHibernateOnMerge(id: worktreeID, value: true)
+        try await db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE worktree")
+        }
+        await #expect(throws: (any Error).self) {
+            try await db.writerForTests.read { conn in
+                try ConfigStore.anyWorktreeParksOnMerge(conn)
+            }
+        }
+    }
+
+    /// Every subsystem opens on the config read, so an unreadable worktree
+    /// table must not fail it. Without the overrides, the stored flag, the
+    /// idle sweep and the merge default each still turn the feature on, and
+    /// the hold reports the two that park automatically.
+    @Test(arguments: [
+        (Stored.on, Trigger.none),
+        (.off, .idleSweep),
+        (.off, .mergeDefault),
+    ])
+    func anUnreadableWorktreeTableLeavesTheOtherTermsTurningTheFeatureOn(
+        _ stored: Stored, _ trigger: Trigger
+    ) async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let worktreeID = try await makeWorktree(db)
+        try await store(stored, in: db)
+        try await set(trigger, true, in: db, worktreeID: worktreeID)
+        try await armOverrideThenDropWorktreeTable(worktreeID, in: db)
+
+        let config = try await db.config.get()
+        #expect(config.composerDraftEnabled, "stored \(stored) with \(trigger)")
+        #expect(config.composerDraftRequiredByAutoPark == (trigger != .none),
+                "stored \(stored) with \(trigger)")
+    }
+
+    /// The other side: with the stored flag off and neither the idle sweep
+    /// nor the merge default on, the feature reads off. The override armed
+    /// before the drop holds nothing, because the read that would find it
+    /// fails.
+    @Test func anUnreadableWorktreeTableReadsTheOverridesAsAbsent() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let worktreeID = try await makeWorktree(db)
+        try await db.config.setComposerDraftEnabled(false)
+        try await armOverrideThenDropWorktreeTable(worktreeID, in: db)
+
+        let config = try await db.config.get()
+        #expect(!config.composerDraftEnabled)
+        #expect(!config.composerDraftRequiredByAutoPark)
+    }
+
     // MARK: - Plugin re-sync
 
     /// Turning automatic parking on re-syncs the plugin with the mod; the
