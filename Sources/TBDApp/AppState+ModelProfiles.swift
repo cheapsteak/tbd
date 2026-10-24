@@ -339,19 +339,6 @@ extension AppState {
         }
     }
 
-    /// Persist the pending-input veto for auto-hibernate, then re-fetch
-    /// capabilities so the Settings toggle reflects the daemon's EFFECTIVE
-    /// state. Applies on the next hibernation sweep.
-    func setHibernateInputVetoEnabled(_ enabled: Bool) async {
-        do {
-            try await hibernateInputVetoSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set pending-input veto: \(error, privacy: .public)")
-            showAlert("Failed to set pending-input veto: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Persist the auto-close-setup-tab soak flag, then re-fetch capabilities
     /// so the Settings toggle reflects the daemon's persisted state. Applies
     /// to the next worktree creation.
@@ -404,18 +391,19 @@ extension AppState {
         "Requires the TBDHolder helper beside the daemon binary; this daemon could not find it."
 
     /// Whether the pty-holder toggle is interactive, from what
-    /// `daemon.capabilities` reports.
+    /// `daemon.capabilities` reports: exactly when the daemon can start a
+    /// holder, whichever way the flag sits.
     ///
-    /// A daemon with no `TBDHolder` helper honors the flag by falling back to
-    /// tmux on every spawn, so flipping it ON there changes nothing and the
-    /// control is greyed. Flipping it OFF is never withheld: the flag ships ON,
-    /// so a daemon without the helper usually reads ON, and a toggle frozen in
-    /// that position would show a setting the operator cannot change — while the
-    /// persisted OFF is what keeps new sessions on tmux once a daemon that can
-    /// start a holder reads it. So the toggle goes inert only where it is
-    /// already off and turning it on could not take effect.
-    static func ptyHolderToggleIsInteractive(supported: Bool, flagOn: Bool) -> Bool {
-        supported || flagOn
+    /// A daemon with no `TBDHolder` helper runs every new session in tmux in
+    /// either position of the flag, so the control is greyed in both.
+    /// Unfetched capabilities read as unsupported, so the toggle is never
+    /// offered on a claim the daemon has not made.
+    ///
+    /// Takes the whole capability result rather than the one field it reads,
+    /// so a test can supply the flag in both positions and pin that it plays
+    /// no part.
+    static func ptyHolderToggleIsInteractive(_ capabilities: DaemonCapabilitiesResult?) -> Bool {
+        capabilities?.ptyHolderSupported ?? false
     }
 
     /// Persist the pty-holder transport gate, then re-fetch capabilities so the

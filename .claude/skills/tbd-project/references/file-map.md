@@ -17,6 +17,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `DeepLinks.swift` — `tbd://` URL parsing/building
 - `NameGenerator.swift` / `Adjectives.swift` / `Animals.swift` — `YYYYMMDD-adjective-animal` names
 - `RepoConstants.swift` — default rename-prompt template
+- `SchemaEpoch.swift` — `SchemaEpoch.current`, the count of retired columns; the build wrapper stamps it into `TBDBuildIdentity.json` as `schemaEpoch`
 - `EmojiData.swift` — emoji dataset for worktree-name autocomplete
 - `ClaudeEnvRegistry.swift` — registry of user-configurable spawn-time Claude env settings (`ClaudeEnvValue`: bool/int/string, frozen JSON format; `ClaudeEnvRegistry.all` is the single source of truth)
 - `EnvOverridesCoding.swift` — JSON encode/decode for the free-form env-override `[String: String]` maps (config/repo/profile scopes)
@@ -57,8 +58,9 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
 - `SuspendResumeCoordinator.swift` — auto/manual suspend-resume of idle Claude sessions
 - `PluginDirWriter.swift` — writes the TBD Claude Code plugin to Application Support: skills always, the session mod's `hooks/` and `types/` only while a session-mod flag is on; called after the database opens and on each flag change
-- `ComposerDraftParkGate.swift` — the park decision for sessions spawned with the composer-draft feature, and the tmux signal ending
+- `ComposerDraftParkGate.swift` — the park decision the session mod answers (proceed or skip, per policy), and the tmux signal ending every tmux park uses
 - `SkillFileWriter.swift` — writes the failsafe copy of the skill body
+- `RetiredRuntimeFiles.swift` — at daemon startup, removes files under `~/tbd/runtime` that no current build writes (a statusline tee script, its capture files, a lease-credential directory), matched by exact name or shape; skipped in mock mode
 - `ArchivedWorktreeBackfill.swift` — repairs archived worktree rows with missing branches
 - `RepoHealthValidator.swift` — flips repos with stale paths to `.missing`
 
@@ -72,6 +74,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 ### Database/
 - `Database.swift` — `TBDDatabase`, GRDB setup, WAL, migrations v1–v34
 - `MigrationHelpers.swift` — idempotent schema-change helpers (`addColumnIfMissing`/`createTableIfNotExists`/`addIndexIfMissing`) — required for all new migrations
+- `RetiredColumns.swift` / `RetiredColumnReconciler.swift` — the permanent list of retired columns, and the startup pass that drops each once the kept rollback bundle (`~/tbd/updates/previous/TBD.app`) records a schema epoch at or past it, after a `state.db.pre-column-drop.<UTC>` snapshot
 - `RepoStore` / `WorktreeStore` / `TerminalStore` / `NotificationStore` / `NoteStore` / `TabStore` — GRDB CRUD stores
 - `ConfigStore.swift` / `TBDMetaStore.swift` — global config + key/value meta
 - `ModelProfileRecord.swift` / `ModelProfileUsageRecord.swift` — model profile GRDB records

@@ -1,0 +1,33 @@
+/// A database column no current code reads or writes, waiting to be dropped.
+///
+/// `epoch` is the `SchemaEpoch.current` its retirement set. A build whose
+/// recorded epoch is at least that was built from a tree that had already
+/// retired the column, so it never names it.
+struct RetiredColumn: Hashable, Sendable, CustomStringConvertible {
+    let table: String
+    let column: String
+    let epoch: Int
+
+    var description: String { "\(table).\(column)" }
+}
+
+/// Every column ever retired, in retirement order. `RetiredColumnReconciler`
+/// drops each one at daemon startup once the kept rollback bundle's epoch
+/// reaches the entry's.
+///
+/// The list is permanent, like migration history. A fresh install still
+/// creates every retired column, through the frozen migration that added it,
+/// and relies on the reconciler to drop it again, so removing an entry would
+/// leave that column on every later fresh install. Append only; the checklist
+/// is "Retiring a column" in `Sources/TBDDaemon/Database/CLAUDE.md`.
+enum RetiredColumns {
+    static let all: [RetiredColumn] = [
+        // Nightwatch's mode switch, added by `v38_nightwatch_mode` as `TEXT DEFAULT 'off'`.
+        RetiredColumn(table: "config", column: "nightwatch_mode", epoch: 1),
+        // Nightwatch's watch-desk role, added by `v68_watch_desk_judge_lease` as `TEXT DEFAULT NULL`.
+        RetiredColumn(table: "terminal", column: "watch_desk_role", epoch: 1),
+        // The keystroke veto's soak flag, added by `v51_config_hibernate_input_veto`
+        // as `BOOLEAN DEFAULT 0`. The session mod is the only park draft guard.
+        RetiredColumn(table: "config", column: "hibernate_input_veto_enabled", epoch: 2),
+    ]
+}

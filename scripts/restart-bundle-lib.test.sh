@@ -13,6 +13,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 HELPER="$HERE/restart-bundle-lib.sh"
 SOURCE_PLIST="$REPO_ROOT/Resources/TBDApp.Info.plist"
+SCHEMA_EPOCH_FILE="$REPO_ROOT/Sources/TBDShared/SchemaEpoch.swift"
 
 if [ ! -f "$HELPER" ]; then
     echo "FAIL - bundle helper is missing: $HELPER"
@@ -64,15 +65,17 @@ sidecar_field() {
 }
 
 # A throwaway git repo shaped like the parts of TBD the bundle path reads:
-# a source plist, an icon, and a Sources/ tree the dirty check looks at.
+# a source plist, an icon, a Sources/ tree the dirty check looks at, and the
+# real SchemaEpoch.swift the build identity reads its epoch from.
 mkrepo() {
     local d
     d="$(mktemp -d "$TEST_TMP/repo.XXXXXX")"
     git -C "$d" init -q -b main
     git -C "$d" config user.email t@t.t
     git -C "$d" config user.name t
-    mkdir -p "$d/Sources" "$d/Resources"
+    mkdir -p "$d/Sources/TBDShared" "$d/Resources"
     echo "// seed" > "$d/Sources/Seed.swift"
+    cp "$SCHEMA_EPOCH_FILE" "$d/Sources/TBDShared/SchemaEpoch.swift"
     cp "$SOURCE_PLIST" "$d/Resources/TBDApp.Info.plist"
     printf 'icns' > "$d/Resources/AppIcon.icns"
     echo "// package" > "$d/Package.swift"
@@ -230,6 +233,80 @@ test_build_identity_defers_when_the_build_dir_is_absent() {
 
 test_build_identity_rejects_missing_arguments() {
     assert_fail "write_build_identity needs both arguments" write_build_identity "" ""
+}
+
+# The daemon drops a retired column only once the bundle kept for rollback
+# records a schema epoch at or past the column's, so the epoch has to reach
+# the sidecar, and from the tree being built rather than from anywhere else.
+test_build_identity_records_the_schema_epoch() {
+    local repo build sidecar expected
+    repo="$(mkrepo)"
+    build="$repo/.build/release"
+    mkbuild "$build"
+
+    # Read the real declaration independently of the script's own pattern, so
+    # a pattern that stops matching the real file fails here.
+    expected="$(python3 -c '
+import re, sys
+text = open(sys.argv[1]).read()
+print(re.search(r"^\s*public static let current = (\d+)\s*$", text, re.M).group(1))
+' "$SCHEMA_EPOCH_FILE")"
+    write_build_identity "$repo" "$build" >/dev/null 2>&1
+    sidecar="$build/TBDBuildIdentity.json"
+    assert_eq "the sidecar records the real SchemaEpoch.current" \
+        "$expected" "$(sidecar_field "$sidecar" schemaEpoch)"
+    assert_ok "the schema epoch is a JSON integer" python3 -c '
+import json, sys
+value = json.load(open(sys.argv[1]))["schemaEpoch"]
+sys.exit(0 if type(value) is int else 1)
+' "$sidecar"
+
+    sed -E 's/(public static let current = )[0-9]+/\17/' "$SCHEMA_EPOCH_FILE" \
+        > "$repo/Sources/TBDShared/SchemaEpoch.swift"
+    write_build_identity "$repo" "$build" >/dev/null 2>&1
+    assert_eq "the schema epoch comes from the tree being built" \
+        "7" "$(sidecar_field "$sidecar" schemaEpoch)"
+}
+
+# A bundle without an epoch holds every column drop until the next update
+# replaces it, so a tree whose epoch cannot be read gets no sidecar and an
+# error naming the file, never a sidecar that silently lacks the key.
+test_build_identity_fails_without_a_schema_epoch() {
+    local repo build err
+    repo="$(mkrepo)"
+    build="$repo/.build/release"
+    mkbuild "$build"
+
+    rm "$repo/Sources/TBDShared/SchemaEpoch.swift"
+    assert_fail "write_build_identity fails when SchemaEpoch.swift is missing" \
+        write_build_identity "$repo" "$build"
+    assert_no_file "a missing schema epoch leaves no sidecar" "$build/TBDBuildIdentity.json"
+    err="$(write_build_identity "$repo" "$build" 2>&1 >/dev/null)"
+    if [[ "$err" == *"Sources/TBDShared/SchemaEpoch.swift"* ]]; then
+        pass "the failure names the missing file"
+    else
+        fail "the failure names the missing file: got [$err]"
+    fi
+}
+
+test_build_identity_fails_on_an_unreadable_schema_epoch() {
+    local repo build file
+    repo="$(mkrepo)"
+    build="$repo/.build/release"
+    mkbuild "$build"
+    file="$repo/Sources/TBDShared/SchemaEpoch.swift"
+
+    sed -E 's/(public static let current = )[0-9]+/\1base + 1/' "$SCHEMA_EPOCH_FILE" > "$file"
+    assert_fail "write_build_identity fails when the epoch is not a plain integer" \
+        write_build_identity "$repo" "$build"
+    assert_no_file "an unreadable schema epoch leaves no sidecar" "$build/TBDBuildIdentity.json"
+
+    rm -f "$build/TBDBuildIdentity.json"
+    cp "$SCHEMA_EPOCH_FILE" "$file"
+    printf '%s\n' "public enum Other {" "    public static let current = 2" "}" >> "$file"
+    assert_fail "write_build_identity fails when two declarations could be the epoch" \
+        write_build_identity "$repo" "$build"
+    assert_no_file "an ambiguous schema epoch leaves no sidecar" "$build/TBDBuildIdentity.json"
 }
 
 test_json_escape_string() {
@@ -877,6 +954,9 @@ test_build_identity_records_a_detached_head
 test_build_identity_refuses_a_non_repo
 test_build_identity_defers_when_the_build_dir_is_absent
 test_build_identity_rejects_missing_arguments
+test_build_identity_records_the_schema_epoch
+test_build_identity_fails_without_a_schema_epoch
+test_build_identity_fails_on_an_unreadable_schema_epoch
 test_json_escape_string
 test_assemble_bundle_produces_a_launchable_bundle
 test_assemble_bundle_rejects_an_empty_path

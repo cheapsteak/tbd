@@ -780,6 +780,21 @@ public final class Daemon: Sendable {
     /// at once cannot interleave their file operations.
     private static let claudePluginWriteLock = NSLock()
 
+    /// The session-mod features the plugin is written with at daemon start:
+    /// those the resolved config turns on. The resolved config is what makes
+    /// an update reach the plugin without a migration: on an install with
+    /// automatic parking on, the composer-draft feature reads on at the first
+    /// start, so the mod is written then and every spawn after carries it. A
+    /// config that cannot be read yields the shipped defaults, logged.
+    static func startupSessionModFeatures(config: ConfigStore) async -> [SessionModFeature] {
+        do {
+            return SessionModFeature.enabled(in: try await config.get())
+        } catch {
+            daemonLogger.error("Could not read config for the TBD plugin, writing it with the shipped feature defaults: \(String(describing: error), privacy: .public)")
+            return SessionModFeature.enabled(in: Config())
+        }
+    }
+
     /// Write the TBD Claude plugin with the session mod present for
     /// `sessionModFeatures` (absent when empty). A failure is logged, never
     /// thrown: the previous plugin stays in place, which is no reason to stop
@@ -916,8 +931,21 @@ public final class Daemon: Sendable {
         }
 
         // 5. Initialize database
-        let database = try TBDDatabase(path: TBDConstants.databasePath)
+        let databasePath = TBDConstants.databasePath
+        let database = try TBDDatabase(path: databasePath)
         self.db = database
+
+        // Then drop the retired columns the kept rollback bundle no longer
+        // uses. Here, straight after migrations, because nothing else holds
+        // the database yet: mock seeding, the RPC server, the sweeps and
+        // startup reconciliation all come later, so no write races a column
+        // on its way out. Runs in mock mode too, where the isolated TBD_HOME
+        // has no kept bundle, so a mock daemon serves the schema a real one
+        // does. Never throws: a held, failed or skipped drop is logged and
+        // startup continues.
+        await database.reconcileRetiredColumns(RetiredColumnReconciler(
+            databasePath: databasePath,
+            keptBundlePath: TBDConstants.keptAppBundle().path))
 
         // 5a. Mock seeding: populate the freshly-migrated DB before servers
         // accept traffic, so the app never sees an empty-then-populated flash.
@@ -939,15 +967,18 @@ public final class Daemon: Sendable {
         // or remove the session mod in the developer's real sessions by a
         // fixture's flag.
         if mockMode == nil {
-            let startupSessionModFeatures: [SessionModFeature]
-            do {
-                let config = try await database.config.get()
-                startupSessionModFeatures = SessionModFeature.enabled(in: config)
-            } catch {
-                daemonLogger.error("Could not read config for the TBD plugin, writing it with the shipped feature defaults: \(String(describing: error), privacy: .public)")
-                startupSessionModFeatures = SessionModFeature.enabled(in: Config())
-            }
-            Self.writeClaudePlugin(sessionModFeatures: startupSessionModFeatures)
+            Self.writeClaudePlugin(
+                sessionModFeatures: await Self.startupSessionModFeatures(config: database.config))
+        }
+
+        // 5c. Remove runtime files no current build writes, so copies an older
+        // build left under `~/tbd/runtime` don't accumulate. Non-fatal: a
+        // removal that fails is logged and startup continues. Skipped in mock
+        // mode, like the plugin write above: a mock daemon skips live
+        // reconciliation, and its isolated `TBD_HOME` holds no older build's
+        // files.
+        if mockMode == nil {
+            RetiredRuntimeFiles().removeAll()
         }
 
         // 6. Initialize state subscriptions (before lifecycle/router so they can broadcast)
@@ -988,10 +1019,6 @@ public final class Daemon: Sendable {
         // through a single supervisor. When the gate is off (the default),
         // `enableIfGated` is a no-op.
         let tmuxExecutableResolver = TmuxExecutableResolver()
-        // Input activity tracker: records the timestamp of the last keystroke
-        // routed to each pane so the idle sweep can veto a park if input arrived
-        // after the session went idle (pending-input detection).
-        let inputActivity = InputActivityTracker()
         // Input router with the health sink wired to the state-delta broadcast
         // (#318 polish): edge-triggered per-pane input-delivery transitions
         // ride the same subscription channel the app already listens on.
@@ -1003,9 +1030,6 @@ public final class Daemon: Sendable {
                 subs.broadcast(delta: .controlModeInputHealthChanged(ControlModeInputHealthDelta(
                     worktreeID: worktreeID, paneID: paneID, healthy: healthy,
                     generation: generation)))
-            },
-            onInput: { [inputActivity] paneID in
-                inputActivity.recordInput(paneID: paneID)
             }
         )
         let controlModeBridge = TmuxControlModeBridge(
@@ -1079,17 +1103,6 @@ public final class Daemon: Sendable {
                     // every attached state. No reader means the session is gone
                     // or was never adopted, which is the one case with nothing
                     // to write to.
-                    //
-                    // Deliberately NOT recorded as input activity. The veto's
-                    // fact source is the app's keystroke stream, and a write
-                    // that starts here is the daemon's own — an auto-resume, a
-                    // peer's `terminal.send` — never something a person typed
-                    // and has not sent. Recording it would leave the merge
-                    // rail's `activityStateObservedAt` anchor behind a
-                    // "keystroke" that will never be consumed, vetoing every
-                    // park of that row forever. See `InputActivityTracker`'s
-                    // holder key for why the veto is vacuous on this transport
-                    // anyway.
                     guard let reader = await registry.reader(for: terminalID) else {
                         throw HolderInjectionCourier.Error.noDaemonDescriptor(
                             terminalID: terminalID)
@@ -1308,8 +1321,6 @@ public final class Daemon: Sendable {
             },
             actuationLog: actuationLog
         )
-        // Wire the shared input activity tracker to the coordinator
-        await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
         // A session-mod feature flag change rewrites the plugin, and hot
         // reload carries it to every running session. Assigned here, before
         // the socket serves (step 9), because a handler reads it unlocked.

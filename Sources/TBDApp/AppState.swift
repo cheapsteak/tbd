@@ -1910,6 +1910,15 @@ final class AppState {
     var composerDraftEnabled: Bool {
         daemonCapabilities?.composerDraftEnabled ?? false
     }
+    /// Whether automatic parking holds composer drafts on, as the daemon
+    /// reports it, which greys the Settings toggle. False until capabilities
+    /// have been fetched.
+    var composerDraftRequiredByAutoPark: Bool {
+        daemonCapabilities?.composerDraftRequiredByAutoPark ?? false
+    }
+    /// The caption under the composer-draft toggle while automatic parking
+    /// holds the feature on.
+    static let composerDraftRequiredByAutoParkCaption = "On while auto-hibernation is on"
     /// Whether session usage is recorded, as the daemon reports it. False
     /// until capabilities have been fetched.
     var sessionModUsageEnabled: Bool {
@@ -1943,10 +1952,6 @@ final class AppState {
     /// protocol), so the Settings-toggle tests can exercise the success branch.
     @ObservationIgnored lazy var controlModeSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setControlMode(enabled: enabled) }
-    /// How `setHibernateInputVetoEnabled` persists the flag — injectable for
-    /// the same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var hibernateInputVetoSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setHibernateInputVeto(enabled: enabled) }
     /// How `setAutoCloseSetupEnabled` persists the flag — injectable for the
     /// same reason as `controlModeSetter`.
     @ObservationIgnored lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
@@ -1986,19 +1991,13 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var ptyHolderFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPtyHolderEnabled(enabled: enabled) }
-    /// How `hibernateTerminals` reaches the daemon (terminal, override flag) —
-    /// injectable so the unconfirmed-draft flow is testable without a daemon.
+    /// How `hibernateTerminals` reaches the daemon — injectable so the batch
+    /// and its failure alert are testable without a daemon.
     @ObservationIgnored
-    lazy var terminalHibernateSender: @MainActor (UUID, Bool) async throws -> Void =
-        { [daemonClient] terminalID, override in
-            try await daemonClient.terminalHibernate(
-                terminalID: terminalID, overrideUnconfirmedDraft: override)
+    lazy var terminalHibernateSender: @MainActor (UUID) async throws -> Void =
+        { [daemonClient] terminalID in
+            try await daemonClient.terminalHibernate(terminalID: terminalID)
         }
-    /// How the "Hibernate anyway?" question reaches the person (count of refused
-    /// sessions) — injectable because the real one is a modal `NSAlert`.
-    @ObservationIgnored
-    lazy var unconfirmedDraftConfirmer: @MainActor (Int) -> Bool =
-        { [unowned self] count in self.confirmUnconfirmedDraftHibernate(count: count) }
     /// How `wakeTerminalOutcome` reaches the daemon — injectable for the same
     /// reason as `controlModeSetter`, so the wake's prompt plumbing and its
     /// failure branches are testable without a running daemon.
