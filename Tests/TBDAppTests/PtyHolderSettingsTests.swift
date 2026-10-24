@@ -62,9 +62,8 @@ struct PtyHolderSettingsTests {
         }
     }
 
-    /// A refused write (the daemon's pty-holder/watch-mode gate, or any other
-    /// failure) surfaces the error and re-fetches capabilities, so the toggle
-    /// snaps back to the daemon's persisted value instead of holding the
+    /// A failed write surfaces the error and re-fetches capabilities, so the
+    /// toggle snaps back to the daemon's persisted value instead of holding the
     /// optimistic flip.
     ///
     /// The cache is seeded `true` and the post-failure fetch returns `false` —
@@ -157,10 +156,8 @@ struct PtyHolderSettingsTests {
 
     /// All four combinations, because the interesting one only exists now that
     /// the flag ships ON: a daemon with no `TBDHolder` helper still resolves
-    /// the effective flag to `true`, which is what `NightwatchHolderGate`
-    /// reads, so the operator whose watch modes were turned off at boot needs
-    /// the control that turns the transport back off. Greying it out there
-    /// would name a remedy and withhold the means.
+    /// the effective flag to `true`, and greying the toggle out there would
+    /// freeze it in a position the operator cannot leave.
     @Test func theToggleIsInertOnlyWhereNeitherDirectionDoesAnything() {
         #expect(
             AppState.ptyHolderToggleIsInteractive(supported: true, flagOn: true),
@@ -170,7 +167,7 @@ struct PtyHolderSettingsTests {
             "a supported daemon can be turned on")
         #expect(
             AppState.ptyHolderToggleIsInteractive(supported: false, flagOn: true),
-            "no helper but the flag reads on: turning it off is the remedy the gate names")
+            "no helper but the flag reads on: turning it off is never withheld")
         #expect(
             !AppState.ptyHolderToggleIsInteractive(supported: false, flagOn: false),
             "no helper and already off: neither direction changes anything")

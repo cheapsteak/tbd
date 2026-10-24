@@ -40,7 +40,6 @@ struct GeneralSettingsTab: View {
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
-    @AppStorage(AppState.nightwatchExperimentalKey) private var nightwatchExperimental: Bool = false
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.chevronBeforeProjectNameKey)
     private var chevronBeforeProjectName: Bool = AppState.chevronBeforeProjectNameDefault
@@ -264,14 +263,6 @@ struct GeneralSettingsTab: View {
                 ) { await appState.setGlobalEnvOverrides($0) }
             }
 
-            Section("Fleet Automation") {
-                Toggle("Nightwatch / Daywatch", isOn: $nightwatchExperimental)
-                    .help(AppState.nightwatchSettingsHelp)
-                Text(NightwatchHolderGate.deprecationNotice)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
             Section("Experimental") {
                 Toggle("Suspend idle Claude before sleep", isOn: $autoSuspend)
                     .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
@@ -320,11 +311,11 @@ struct GeneralSettingsTab: View {
 
     /// Pty-holder transport opt-in. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPtyHolderEnabled`.
-    /// Interactive whenever either direction would do something, which
-    /// `AppState.ptyHolderToggleIsInteractive` decides and documents; the
-    /// caption explaining a missing `TBDHolder` helper shows independently of
-    /// that, because it is a fact about the daemon rather than about the
-    /// control.
+    /// Interactive except where it is already off and the daemon cannot start
+    /// a holder, which `AppState.ptyHolderToggleIsInteractive` decides and
+    /// documents; the caption explaining a missing `TBDHolder` helper shows
+    /// independently of that, because it is a fact about the daemon rather
+    /// than about the control.
     @ViewBuilder
     private var ptyHolderToggle: some View {
         let capabilities = appState.daemonCapabilities
@@ -336,21 +327,10 @@ struct GeneralSettingsTab: View {
         ))
         .help(AppState.ptyHolderHelp)
         .disabled(!AppState.ptyHolderToggleIsInteractive(supported: supported, flagOn: enabled))
-        if !supported {
-            Text(AppState.ptyHolderUnsupportedCaption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        // Hidden while a watch mode forbids the move, which the daemon refuses
-        // outright: the caption below is what explains it, and it renders in
-        // exactly that state.
-        if supported, !TransportMigrationMenu.isBlockedByWatchMode(appState.nightwatchMode) {
+        if supported {
             transportMigrationRow
-        }
-        if supported && !enabled && appState.nightwatchMode != .off {
-            Text(nightwatchExperimental
-                ? NightwatchHolderGate.holderRefusal
-                : NightwatchHolderGate.holderRefusal + " (Settings \u{2192} Fleet Automation)")
+        } else {
+            Text(AppState.ptyHolderUnsupportedCaption)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -547,8 +527,8 @@ struct GeneralSettingsTab: View {
         .help(Self.sessionModUsageHelp)
     }
 
-    static let sessionModUsageHelp = "Saves each Claude session's context window, rate limits and cost "
-        + "to its session folder. Desk sessions stop wrapping your status line."
+    static let sessionModUsageHelp =
+        "Saves each Claude session's context window, rate limits and cost to its session folder."
 
     /// Schedule-based PR polling. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPRPollScheduleEnabled`,

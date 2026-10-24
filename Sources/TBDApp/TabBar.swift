@@ -1042,8 +1042,7 @@ private struct TabBarItem: View {
         // Shells move too, so this sits outside the Claude-only block.
         if TransportMigrationMenu.isOffered(
             for: terminal,
-            holderSupported: appState.daemonCapabilities?.ptyHolderSupported ?? false,
-            watchMode: appState.nightwatchMode) {
+            holderSupported: appState.daemonCapabilities?.ptyHolderSupported ?? false) {
             Button {
                 guard let terminalID = terminal?.id else { return }
                 Task { await appState.migrateTerminalToHolder(terminalID: terminalID) }
@@ -1191,17 +1190,12 @@ private struct TabBarItem: View {
     }
 
     private var tabLabel: String {
-        let roleSuffix: String = switch terminal?.watchDeskRole {
-        case .judge: " · Judge"
-        case .readOnlyCoordinator: " · Read-only"
-        case nil: ""
-        }
-        let base: String
         if let label = tab.label, !label.isEmpty {
-            base = label
-        } else { switch tab.content {
+            return label
+        }
+        switch tab.content {
         case .terminal:
-            base = AutoTabLabelResolver.terminalLabel(
+            return AutoTabLabelResolver.terminalLabel(
                 terminal: terminal,
                 fallbackIndex: index,
                 modelProfiles: appState.modelProfiles,
@@ -1209,20 +1203,18 @@ private struct TabBarItem: View {
                 worktreeTerminals: appState.terminals[worktreeID] ?? []
             )
         case .webview(_, let url):
-            base = url.host ?? "Web"
+            return url.host ?? "Web"
         case .codeViewer(_, let path):
-            base = URL(fileURLWithPath: path).lastPathComponent
+            return URL(fileURLWithPath: path).lastPathComponent
         case .note(let noteID):
             let allNotes = appState.notes.values.flatMap { $0 }
             if let title = allNotes.first(where: { $0.id == noteID })?.title, !title.isEmpty {
-                base = title
-            } else {
-                base = "Note \(index + 1)"
+                return title
             }
+            return "Note \(index + 1)"
         case .liveTranscript:
-            base = "Transcript"
-        }}
-        return base + roleSuffix
+            return "Transcript"
+        }
     }
 }
 

@@ -722,16 +722,6 @@ struct RowActionMenuPinTests {
         let items = RowActionMenu.items(context: .init(isScratch: true, isPinned: false))
         #expect(kinds(items).contains(.pin))
     }
-
-    @Test("the Watch Desk offers neither Pin nor Unpin")
-    func deskOffersNeither() {
-        // The desk is a scratch row, so this must be suppressed in the scratch
-        // branch — not only the regular one.
-        let items = RowActionMenu.items(
-            context: .init(isScratch: true, isPinned: false, isNightwatchDesk: true))
-        #expect(!kinds(items).contains(.pin))
-        #expect(!kinds(items).contains(.unpin))
-    }
 }
 
 // MARK: - The real call site

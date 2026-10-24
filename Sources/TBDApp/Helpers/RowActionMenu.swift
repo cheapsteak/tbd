@@ -131,9 +131,6 @@ enum RowActionMenu {
         var isScratch: Bool
         /// Already pinned to the sidebar dock — selects Unpin over Pin.
         var isPinned: Bool
-        /// The mode-managed Watch Desk. Neither Pin nor Unpin is offered: the
-        /// sidebar's Day/Night toggle is what controls whether it is shown.
-        var isNightwatchDesk: Bool
         var status: WorktreeStatus
         /// Whether the scratch space has already been promoted (hides the
         /// promote-hint caption).
@@ -186,7 +183,6 @@ enum RowActionMenu {
              hasRepoID: Bool = true,
              isScratch: Bool = false,
              isPinned: Bool = false,
-             isNightwatchDesk: Bool = false,
              status: WorktreeStatus = .active,
              isPromoted: Bool = false,
              branch: String = "",
@@ -207,7 +203,6 @@ enum RowActionMenu {
             self.hasRepoID = hasRepoID
             self.isScratch = isScratch
             self.isPinned = isPinned
-            self.isNightwatchDesk = isNightwatchDesk
             self.status = status
             self.isPromoted = isPromoted
             self.branch = branch
@@ -341,12 +336,9 @@ enum RowActionMenu {
         return [Action(kind: .createPreSessionHook, title: createPreSessionLabel)]
     }
 
-    /// Pin / unpin the sidebar-dock entry. Empty for the Watch Desk — it is
-    /// mode-driven, and `joined(...)` collapses the empty section so no dangling
-    /// divider appears.
+    /// Pin / unpin the sidebar-dock entry.
     static func pinActions(context: Context) -> [Action] {
-        guard !context.isNightwatchDesk else { return [] }
-        return [context.isPinned
+        [context.isPinned
             ? Action(kind: .unpin, title: unpinLabel)
             : Action(kind: .pin, title: pinLabel)]
     }

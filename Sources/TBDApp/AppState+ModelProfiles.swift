@@ -44,9 +44,6 @@ extension AppState {
             if result.autoCreateNotesEnabled != autoCreateNotesEnabled {
                 autoCreateNotesEnabled = result.autoCreateNotesEnabled
             }
-            if result.nightwatchMode != nightwatchMode {
-                nightwatchMode = result.nightwatchMode
-            }
             if result.autoResumeOnLimitReset != autoResumeOnLimitReset {
                 autoResumeOnLimitReset = result.autoResumeOnLimitReset
             }
@@ -411,13 +408,12 @@ extension AppState {
     ///
     /// A daemon with no `TBDHolder` helper honors the flag by falling back to
     /// tmux on every spawn, so flipping it ON there changes nothing and the
-    /// control is greyed. Flipping it OFF is a different matter: the *effective*
-    /// flag is what `NightwatchHolderGate` reads, so an install that left it at
-    /// the shipped ON has its watch modes refused and turned off at boot even
-    /// on a daemon that cannot start a holder — and the only way to get them
-    /// back is to turn the transport off. Greying the toggle out there would
-    /// name a remedy and withhold the control for it. So the toggle goes inert
-    /// only where neither direction does anything.
+    /// control is greyed. Flipping it OFF is never withheld: the flag ships ON,
+    /// so a daemon without the helper usually reads ON, and a toggle frozen in
+    /// that position would show a setting the operator cannot change — while the
+    /// persisted OFF is what keeps new sessions on tmux once a daemon that can
+    /// start a holder reads it. So the toggle goes inert only where it is
+    /// already off and turning it on could not take effect.
     static func ptyHolderToggleIsInteractive(supported: Bool, flagOn: Bool) -> Bool {
         supported || flagOn
     }
@@ -437,8 +433,8 @@ extension AppState {
             logger.error("Failed to set pty holder transport: \(error, privacy: .public)")
             showAlert(
                 "Failed to set the session transport: \(error.localizedDescription)", isError: true)
-            // A refusal (e.g. a watch mode is active) leaves the daemon's value
-            // unchanged; re-fetch so the toggle snaps back to it.
+            // A failed write leaves the daemon's value unchanged; re-fetch so
+            // the toggle snaps back to it.
             await refreshDaemonCapabilities()
         }
     }
@@ -875,55 +871,6 @@ extension AppState {
                 logger.error("reorderModelProfiles RPC failed: \(error.localizedDescription, privacy: .public)")
                 await MainActor.run { self.modelProfiles = previous }
             }
-        }
-    }
-
-    // MARK: - Nightwatch Mode
-
-    /// Whether the pty-holder transport blocks the watch modes, as the controls
-    /// read it — the same three terms the daemon's own refusal asks, so the
-    /// control and the RPC cannot disagree: the effective flag, this daemon's
-    /// ability to start a holder, and whether one is already alive.
-    ///
-    /// Unfetched capabilities read as not blocking, so the controls are never
-    /// disabled on a claim the daemon has not made. That direction is
-    /// deliberate and it is the app's only divergence from the daemon: the
-    /// daemon refuses authoritatively, so the worst case is a click that comes
-    /// back with the refusal text, where the opposite default would grey out a
-    /// mode the daemon would have accepted.
-    var holderBlocksWatchModes: Bool {
-        guard let capabilities = daemonCapabilities else { return false }
-        return NightwatchHolderGate.watchModesBlocked(
-            holderEnabled: capabilities.ptyHolderEnabled,
-            holderSupported: capabilities.ptyHolderSupported,
-            holderSessionsLive: capabilities.ptyHolderSessionsLive)
-    }
-
-    /// Help text for the Settings "Nightwatch / Daywatch" toggle. A stored
-    /// constant so it is assertable; it ends with the deprecation sentence,
-    /// shown regardless of the holder flag.
-    static let nightwatchSettingsHelp = """
-        An autonomous fleet babysitter. It sweeps your \
-        worktrees, keeps stuck agents unblocked, and gates open PRs, using \
-        cheap local scripts and only paging a model for genuine judgment \
-        calls. Daywatch (◐) is a lighter pass for when you're at the \
-        keyboard; Nightwatch (🌙) is the fuller autonomous mode for when \
-        you're away. It acts on your live fleet — nudging stuck \
-        sessions and dispatching work — and its behavior and safety \
-        rules are still changing. Turning this \
-        on reveals the mode controls (sidebar footer and menu bar); \
-        off hides both. You still merge PRs and make prod/access \
-        calls yourself.
-        """ + " " + NightwatchHolderGate.deprecationNotice
-
-    /// Set the nightwatch mode (off, daywatch, or nightwatch).
-    func setNightwatchMode(_ mode: NightwatchMode) async {
-        do {
-            try await daemonClient.setNightwatchMode(mode)
-            nightwatchMode = mode
-        } catch {
-            logger.error("Failed to set nightwatch mode: \(error, privacy: .public)")
-            showAlert("Failed to set nightwatch mode: \(error.localizedDescription)", isError: true)
         }
     }
 

@@ -1169,25 +1169,10 @@ enum TransportMigrationMenu {
     static let title = "Move to Holder (No tmux)"
 
     /// Offered for any row that is not already holder-backed, and only when the
-    /// daemon can run a holder (the capability the Settings toggle reads) and
-    /// no watch mode forbids the move.
-    static func isOffered(
-        for terminal: Terminal?, holderSupported: Bool, watchMode: NightwatchMode
-    ) -> Bool {
-        guard holderSupported, !isBlockedByWatchMode(watchMode), let terminal else {
-            return false
-        }
+    /// daemon can run a holder (the capability the Settings toggle reads).
+    static func isOffered(for terminal: Terminal?, holderSupported: Bool) -> Bool {
+        guard holderSupported, let terminal else { return false }
         return terminal.transport != .holder
-    }
-
-    /// Whether a watch mode forbids moving sessions onto the holder, asked of
-    /// `NightwatchHolderGate` with the same `enabling: true` the daemon's own
-    /// refusal uses — a migration creates holder-backed sessions, which is the
-    /// hazard that gate exists for. Shared by the row's menu item and the
-    /// Settings fleet run so neither offers a gesture the daemon will refuse;
-    /// the daemon's refusal is still what makes it true.
-    static func isBlockedByWatchMode(_ mode: NightwatchMode) -> Bool {
-        NightwatchHolderGate.refusesHolder(enabling: true, currentMode: mode)
     }
 
     /// Fleet-run reasons that are app-local report concerns, not wire outcomes.

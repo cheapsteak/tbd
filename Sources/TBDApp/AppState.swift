@@ -1112,7 +1112,6 @@ final class AppState {
     /// Bumped by each `loadGCConfig()` before it fetches, so a load whose
     /// fetch returns after a newer one started applies nothing.
     @ObservationIgnored var gcConfigLoadGeneration: UInt64 = 0
-    var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
     var autoHibernateEnabled: Bool = false
@@ -3074,8 +3073,6 @@ final class AppState {
             applyPendingPromptsDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
-        case .watchDeskRolesChanged(let d):
-            Task { [weak self] in await self?.refreshTerminals(worktreeID: d.worktreeID) }
         case .terminalHibernationChanged(let d):
             applyTerminalHibernationDelta(d)
         case .worktreeMoved(let d):
@@ -4702,22 +4699,6 @@ final class AppState {
     /// never mutate the developer's live app preferences.
     static func autoSuspendClaudeEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? false
-    }
-
-    /// UserDefaults key mirroring the `@AppStorage` toggle in
-    /// Settings → Fleet Automation that gates the Nightwatch / Daywatch feature.
-    /// When off (the default), the sidebar mode control is hidden entirely —
-    /// the desk agent acts on the live fleet (nudging stuck sessions,
-    /// dispatching work) and its safety rules are still changing, so it
-    /// stays opt-in.
-    static let nightwatchExperimentalKey = "nightwatchExperimentalEnabled"
-
-    /// Whether the experimental Nightwatch / Daywatch UI is enabled. Fails
-    /// closed: defaults to false so the sidebar control only appears once the
-    /// user opts in from Settings → Fleet Automation. Tests pass a private
-    /// `UserDefaults(suiteName:)` so they never touch live app preferences.
-    static func nightwatchExperimentalEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: nightwatchExperimentalKey) as? Bool ?? false
     }
 
     /// Pure target-selection for the pre-sleep suspend hook. Returns the
