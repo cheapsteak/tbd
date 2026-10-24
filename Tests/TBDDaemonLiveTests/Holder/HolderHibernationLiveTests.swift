@@ -21,17 +21,14 @@ import Testing
 @Suite(.serialized)
 struct HolderHibernationLiveTests {
 
-    /// The park's whole point, against a job that cannot cooperate — and the
-    /// middle rung of the ladder, proved by the job's own hand.
+    /// The park's whole point, against a real job — and the rung the ladder
+    /// starts at, proved by the job's own hand.
     ///
-    /// The job never reads its terminal, so the polite `/exit` cannot possibly
-    /// work and something further down has to end it. That is deliberately the
-    /// harder half: a test whose job exited on `/exit` would pass without any
-    /// escalation ever running. What ends it here is the `SIGTERM` rung, and
-    /// the marker file is what says so rather than leaving it to be inferred
-    /// from a dead pid — a `SIGKILL` cannot run a handler, so a park that
-    /// skipped the `SIGTERM` rung and went straight to the forced one would
-    /// leave that file absent while every other assertion below still passed.
+    /// Every park starts at `SIGTERM`, and that is what ends this job. The
+    /// marker file is what says so rather than leaving it to be inferred from
+    /// a dead pid — a `SIGKILL` cannot run a handler, so a park that skipped
+    /// the `SIGTERM` rung and went straight to the forced one would leave that
+    /// file absent while every other assertion below still passed.
     @Test func parkEndsTheJobAndClearsTheRow() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
@@ -39,11 +36,12 @@ struct HolderHibernationLiveTests {
         let childPID = try #require(terminal.childPID)
         let holderPID = try #require(terminal.holderPID)
 
-        // The rail's own precondition, asked of the registry this park will
-        // ask. `.daemon` is the only source the park may act on, and it is a
-        // fact about a real adopted reader draining a real pty — the scripted
-        // suites can state the other sources, but only a live holder can prove
-        // this one is what an ordinary detached session actually answers.
+        // The snapshot's own precondition, asked of the registry this park
+        // will ask. `.daemon` is the only source the park freezes as its
+        // snapshot, and it is a fact about a real adopted reader draining a
+        // real pty — the scripted suites can state the other sources, but only
+        // a live holder can prove this one is what an ordinary detached
+        // session actually answers.
         let reader = try #require(await fixture.registry.reader(for: terminal.id))
         let observed = try await reader.screen(
             maxLines: HibernationCoordinator.holderScreenLines)
@@ -82,20 +80,19 @@ struct HolderHibernationLiveTests {
         #expect(await fixture.registry.reader(for: terminal.id) == nil,
                 "the registry still holds a reader for a parked session")
         // WHICH rung ended it. The job wrote this from its own `SIGTERM`
-        // handler, so its existence is the one fact that separates the polite
-        // rung's successor from the forced teardown after it.
+        // handler, so its existence is the one fact that separates the
+        // `SIGTERM` rung from the forced teardown after it.
         #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
-                "the job never caught a SIGTERM, so the park skipped the rung between /exit and the forced teardown")
+                "the job never caught a SIGTERM, so the park skipped the SIGTERM rung for the forced teardown")
     }
 
     /// The rung after that one, on a job that declines `SIGTERM`.
     ///
     /// `trap '' TERM` is what makes this a test of the forced teardown rather
-    /// than of the ladder generally: the polite `/exit` is unread, the
-    /// `SIGTERM` is ignored, and the only thing left that can end this process
-    /// is the `SIGKILL` `HolderRegistry.abandon` sends to its group. A park
-    /// that stopped at the middle rung would report the child survived and roll
-    /// itself back.
+    /// than of the ladder generally: the `SIGTERM` is ignored, and the only
+    /// thing left that can end this process is the `SIGKILL`
+    /// `HolderRegistry.abandon` sends to its group. A park that stopped at the
+    /// `SIGTERM` rung would report the child survived and roll itself back.
     @Test func parkEscalatesToTheForcedRungWhenTheJobIgnoresSIGTERM() async throws {
         // Three attempts rather than the fixture default: this poll is
         // guaranteed to fail every time, so its budget is pure wall time.
@@ -129,10 +126,9 @@ struct HolderHibernationLiveTests {
     /// of that draft, and Enter would send it to the model; the job records
     /// every byte its terminal delivers, so an empty record and a caught
     /// `SIGTERM` together say the park signalled and typed nothing.
-    /// `theStdinRecorderSeesTheLegacyExit` proves the recorder sees a typed
-    /// `/exit`, and `theStdinRecorderSeesInputWithNoLineTerminator` that it
-    /// sees bytes no Enter follows, which is what makes the empty record here
-    /// mean something.
+    /// `theStdinRecorderSeesInputWithNoLineTerminator` proves the recorder
+    /// sees bytes no Enter follows, a bare `/exit` among them, which is what
+    /// makes the empty record here mean something.
     @Test func parkOfAFeatureSessionSignalsAndTypesNothing() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
@@ -165,11 +161,11 @@ struct HolderHibernationLiveTests {
                 "the park wrote to the terminal of a session spawned with the feature: \(typed.debugDescription)")
     }
 
-    /// The control for the test above: the same recording job in a session
-    /// spawned without the feature, which a park still ends with a typed
-    /// `/exit`, records it. Without this, a recorder that saw nothing at all
-    /// would pass that test.
-    @Test func theStdinRecorderSeesTheLegacyExit() async throws {
+    /// The same recording job in a session spawned without the feature: a
+    /// manual park of it ends by signal and types nothing, exactly as a park
+    /// of a confirmed session does. Nothing saved its draft, so an unsent
+    /// draft is lost, but it is never typed into or sent.
+    @Test func parkOfALegacySessionSignalsAndTypesNothing() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
         let terminal = try await fixture.spawnHolderRow(
@@ -182,17 +178,49 @@ struct HolderHibernationLiveTests {
         let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
         #expect(result == .ok, "park refused: \(result)")
 
-        #expect(await pollUntil("the typed /exit to reach the job's stdin", timeout: 5) {
-            ((try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? "").contains("/exit")
-        }, "the recorder never saw the legacy park's typed /exit")
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(typed.isEmpty,
+                "the park wrote to a legacy session's terminal: \(typed.debugDescription)")
+    }
+
+    /// A session spawned with the feature whose mod has not confirmed it — a
+    /// spawn record and no heartbeat — is parked by hand without asking, by
+    /// signal, and typed into no more than any other.
+    @Test func manualParkOfAnUnconfirmedSessionSignalsAndTypesNothing() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let incarnation = UUID()
+        try fixture.seedUnconfirmedComposerDraftSession(incarnation: incarnation)
+        let terminal = try await fixture.spawnHolderRow(
+            job: HibernationFixture.stdinRecordingJob(
+                markerPath: fixture.jobTermMarkerPath, inputPath: fixture.jobInputPath),
+            sessionIncarnationID: incarnation)
+        #expect(await pollUntil("the job's stdin recorder to come up") {
+            FileManager.default.fileExists(atPath: fixture.jobInputPath)
+        })
+
+        let result = await fixture.coordinator.manualHibernate(terminalID: terminal.id)
+        #expect(result == .ok, "park refused: \(result)")
+
+        let parked = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(parked.isParked)
+        #expect(FileManager.default.fileExists(atPath: fixture.jobTermMarkerPath),
+                "the job never caught a SIGTERM, so the park did not end it by signal")
+        let typed = (try? String(contentsOfFile: fixture.jobInputPath, encoding: .utf8)) ?? ""
+        #expect(typed.isEmpty,
+                "the park wrote to an unconfirmed session's terminal: \(typed.debugDescription)")
     }
 
     /// The control for input no Enter follows: `/exit` without Enter, an
     /// Escape and a Ctrl+C, written through the session's reader, the
-    /// descriptor the legacy park writes its `/exit` to. A canonical-mode
-    /// terminal would hold all of it back from the job, so a park that typed
-    /// any of it would leave an empty record and the "types nothing" tests
-    /// above green; this shows the recorder sees each byte as it arrives.
+    /// descriptor `terminal.send` writes to. A canonical-mode terminal would
+    /// hold all of it back from the job, so a park that typed any of it would
+    /// leave an empty record and the "types nothing" tests above green; this
+    /// shows the recorder sees each byte as it arrives.
     @Test func theStdinRecorderSeesInputWithNoLineTerminator() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
@@ -235,14 +263,13 @@ struct HolderHibernationLiveTests {
     }
 
     /// A profile swap's park of a session spawned without the feature ends by
-    /// signal and types nothing too. A swap skips the screen check that keeps
-    /// a legacy park's typed `/exit` off a draft, so a typed `/exit` would
-    /// land after whatever the box holds and submit it to the model.
+    /// signal and types nothing too: a typed `/exit` would land after whatever
+    /// the box holds and submit it to the model.
     ///
     /// No session-mod files are seeded, so the session reads legacy; the
-    /// recording job is the one `theStdinRecorderSeesTheLegacyExit` shows
-    /// seeing a manual park's `/exit`, which is what makes the empty record
-    /// here mean the swap's ladder started at SIGTERM.
+    /// recording job is the one `theStdinRecorderSeesInputWithNoLineTerminator`
+    /// shows seeing a bare `/exit`, which is what makes the empty record here
+    /// mean the swap's ladder started at SIGTERM.
     @Test func profileSwapParkOfALegacySessionSignalsAndTypesNothing() async throws {
         let fixture = try await HibernationFixture.make()
         defer { fixture.tearDown() }
@@ -701,14 +728,13 @@ private final class HibernationFixture {
     /// real Claude: the pinned shell ignores the argv it is handed.
     static let sessionID = "sess-holder-hibernation"
 
-    /// The default job: deaf to `/exit`, and honest about `SIGTERM`.
+    /// The default job: it never reads its terminal, and it is honest about
+    /// `SIGTERM`.
     ///
-    /// It never reads its terminal, so the polite rung cannot possibly work and
-    /// something further down the ladder has to end it. What it *does* do is
-    /// catch `SIGTERM` and leave a mark before exiting — which is what makes
-    /// "the SIGTERM rung ended this job" an observable claim rather than an
-    /// inference from a dead pid: a `SIGKILL` cannot run a handler, so the
-    /// marker exists if and only if the middle rung is what worked.
+    /// It catches `SIGTERM` and leaves a mark before exiting — which is what
+    /// makes "the SIGTERM rung ended this job" an observable claim rather than
+    /// an inference from a dead pid: a `SIGKILL` cannot run a handler, so the
+    /// marker exists if and only if the `SIGTERM` rung is what worked.
     ///
     /// The loop sleeps in fifths of a second because a POSIX shell runs a trap
     /// only after the foreground command it was waiting on completes; a
@@ -929,14 +955,14 @@ private final class HibernationFixture {
                     .appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: URL(fileURLWithPath: home)
                     .appendingPathComponent("claude", isDirectory: true)),
-            // Two attempts at 100 ms is the polite window; the job cannot use
-            // it, so the run pays 200 ms to reach the escalation rather than
-            // the shipped three seconds. The escalation budget is generous by
-            // default — it is a real `SIGKILL` leaving a real process table on
-            // a machine that may be loaded, and a short budget there would fail
-            // this test for scheduling rather than for behaviour. A caller that
-            // has arranged for that poll to fail every time overrides it, since
-            // there the generosity is pure wall time.
+            // 100 ms paces every poll of the holder ladder. The `SIGTERM` and
+            // escalation budgets are generous by default — they wait on a real
+            // process table on a machine that may be loaded, and a short budget
+            // there would fail this test for scheduling rather than for
+            // behaviour. A caller that has arranged for a poll to fail every
+            // time overrides its budget, since there the generosity is pure
+            // wall time. `exitPollAttempts` paces only the tmux park, which no
+            // holder row reaches.
             exitPollAttempts: 2,
             exitPollInterval: .milliseconds(100),
             holderTerminateAttempts: holderTerminateAttempts,
@@ -996,6 +1022,17 @@ private final class HibernationFixture {
             holderChildStartedAt: Date(),
             sessionIncarnationID: sessionIncarnationID)
         return try #require(try await db.terminals.get(id: terminalID))
+    }
+
+    /// Writes the daemon's spawn record for a spawn made with the
+    /// composer-draft feature, naming `incarnation`, and nothing from the mod.
+    /// The park then reads the feature as unknown (`no-alive-file`).
+    func seedUnconfirmedComposerDraftSession(incarnation: UUID) throws {
+        let nowMs = Int64((Date().timeIntervalSince1970 * 1000).rounded())
+        try SessionModFiles.writeSpawnRecord(
+            .init(sessionId: Self.sessionID, incarnationId: incarnation.uuidString,
+                  spawnedAtMs: nowMs, features: ["composer-draft"]),
+            sessionsDir: sessionsDir)
     }
 
     /// Writes the session's files as a spawn made with the composer-draft

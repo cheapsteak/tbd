@@ -60,13 +60,9 @@ extension RPCRouter {
     }
 
     /// `terminal.hibernate` — manually hibernate one Claude terminal (kill its
-    /// process, keep the tmux window). Honors the running/permission rails.
-    ///
-    /// A session spawned with the composer-draft feature whose draft TBD
-    /// cannot confirm saved is refused with the coded error
-    /// `RPCErrorCode.composerDraftUnconfirmed`, which the app turns into
-    /// "Hibernate anyway?". Reissuing with `overrideUnconfirmedDraft` parks it
-    /// regardless.
+    /// process, keep the tmux window). Honors the running/permission rails. It
+    /// does not wait for the session mod to vouch for an unsent draft: a
+    /// manual park of a session whose mod is not confirmed goes ahead.
     func handleTerminalHibernate(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -75,8 +71,7 @@ extension RPCRouter {
             .terminalHibernate, actor: actor,
             target: await resolvedTerminalTarget(params.terminalID))
         let result = await hibernationCoordinator.manualHibernate(
-            terminalID: params.terminalID,
-            overrideUnconfirmedDraft: params.overrideUnconfirmedDraft ?? false)
+            terminalID: params.terminalID)
         await finishActuation(
             actuationID, ActuationOutcome.classify(result),
             error: ActuationOutcome.detail(result))
@@ -93,12 +88,6 @@ extension RPCRouter {
             return RPCResponse(error: reason)
         case .notFound:
             return RPCResponse(error: "Terminal not found")
-        case .draftUnconfirmed(let reason):
-            // Coded so the app can ask "Hibernate anyway?" and reissue with
-            // `overrideUnconfirmedDraft` rather than matching message text.
-            return RPCResponse(
-                error: ComposerDraftParkGate.unconfirmedRefusal(reason: reason),
-                code: RPCErrorCode.composerDraftUnconfirmed.rawValue)
         }
     }
 
@@ -215,10 +204,15 @@ extension RPCRouter {
         return ok ? .ok() : RPCResponse(error: "Terminal not found")
     }
 
-    /// `config.setAutoHibernate` — master enable + idle-timeout minutes.
+    /// `config.setAutoHibernate` — master enable + idle-timeout minutes. The
+    /// idle sweep is automatic parking, which holds the composer-draft feature
+    /// on, so the write re-syncs the plugin when it changes the features on.
     func handleConfigSetAutoHibernate(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetAutoHibernateParams.self, from: paramsData)
-        try await db.config.setAutoHibernate(enabled: params.enabled, idleMinutes: params.idleMinutes)
+        try await writeAffectingAutomaticParking {
+            try await db.config.setAutoHibernate(
+                enabled: params.enabled, idleMinutes: params.idleMinutes)
+        }
         // Reuse the config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()

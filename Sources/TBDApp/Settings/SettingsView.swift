@@ -272,7 +272,6 @@ struct GeneralSettingsTab: View {
                 transcriptPromptAnswerToggle
                 composerDraftToggle
                 sessionModUsageToggle
-                hibernateInputVetoToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
                 supervisionEnabledToggle
@@ -497,21 +496,35 @@ struct GeneralSettingsTab: View {
 
     /// Save and restore the unsent text in a Claude session's prompt box.
     /// Reads `daemon.capabilities`, writes `config.setComposerDraftEnabled`.
-    /// Off by default (soaking). New sessions pick it up.
+    /// Off by default (soaking). New sessions pick it up. While automatic
+    /// parking is on the daemon holds the feature on, so the toggle reads on,
+    /// is greyed, and says why; what the person stored comes back once
+    /// automatic parking is off.
     @ViewBuilder
     private var composerDraftToggle: some View {
         let capabilities = appState.daemonCapabilities
+        let requiredByAutoPark = appState.composerDraftRequiredByAutoPark
         Toggle("Save and restore composer drafts", isOn: Binding(
-            get: { capabilities?.composerDraftEnabled ?? Config.composerDraftDefault },
+            get: {
+                requiredByAutoPark
+                    || (capabilities?.composerDraftEnabled ?? Config.composerDraftDefault)
+            },
             set: { newValue in Task { await appState.setComposerDraftEnabled(newValue) } }
         ))
         .help(Self.composerDraftHelp)
+        .disabled(requiredByAutoPark)
+        if requiredByAutoPark {
+            Text(AppState.composerDraftRequiredByAutoParkCaption)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     static let composerDraftHelp = "Saves what you type in a Claude session's prompt box and puts it back "
-        + "when a hibernated session wakes. If TBD can't confirm a draft is saved, such as one holding a "
-        + "large paste, automatic hibernation skips the session and hibernating it yourself asks first. "
-        + "Applies to sessions started after you turn it on."
+        + "when a hibernated session wakes. It is the only thing that keeps hibernating from losing unsent "
+        + "text, so it stays on while auto-hibernation is on. If TBD can't confirm a draft is saved, such "
+        + "as one holding a large paste, automatic hibernation skips the session; hibernating it yourself "
+        + "goes ahead. Applies to sessions started after you turn it on."
 
     /// Record each Claude session's context window, rate limits and cost
     /// through the session mod. Reads `daemon.capabilities`, writes
@@ -563,19 +576,6 @@ struct GeneralSettingsTab: View {
     static let programStatusHelp = "Lets Claude Code report its state to TBD over the terminal on "
         + "pty-holder sessions: permission prompts, failed turns, sign-in problems and "
         + "background tasks. Applies to Claude sessions started after you turn it on."
-
-    /// Pending-input veto for auto-hibernate. Reads the persisted flag from
-    /// `daemon.capabilities` and writes via `config.setHibernateInputVeto`.
-    /// Off by default (soaking).
-    @ViewBuilder
-    private var hibernateInputVetoToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Pending-input veto for auto-hibernate", isOn: Binding(
-            get: { capabilities?.hibernateInputVetoEnabled ?? false },
-            set: { newValue in Task { await appState.setHibernateInputVetoEnabled(newValue) } }
-        ))
-        .help("Guard that prevents hibernation of sessions with typed-but-unsent input (machine-interface input detector). Off by default (soaking). Independent of the auto-hibernate idle sweep, which is also off by default.")
-    }
 
     /// Auto-close the setup-hook tab after a clean run. Reads the persisted
     /// flag from `daemon.capabilities` and writes via

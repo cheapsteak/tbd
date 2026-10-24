@@ -15,12 +15,45 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the global park-on-merge default. Park-on-merge is automatic
+    /// parking, which holds the composer-draft feature on, so the write
+    /// re-syncs the plugin when it changes the features on.
     func handleConfigSetAutoHibernateDefault(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(ConfigSetAutoHibernateDefaultParams.self, from: paramsData)
-        try await db.config.setAutoHibernateOnMergeDefault(params.enabled)
+        try await writeAffectingAutomaticParking {
+            try await db.config.setAutoHibernateOnMergeDefault(params.enabled)
+        }
         // Reuse the existing config-change channel so the app reloads Config.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
+    }
+
+    /// Runs a write that can turn automatic parking on or off — the idle
+    /// sweep, the global park-on-merge default, a worktree's park-on-merge
+    /// override — and with it the composer-draft feature, which automatic
+    /// parking holds on (`ConfigRecord.toModel`). Re-syncs the plugin when the
+    /// session-mod features the config turns on differ after the write, and
+    /// leaves the plugin alone when they do not. A config that cannot be read
+    /// before the write counts as a change.
+    ///
+    /// - Returns: whether the composer-draft state Settings shows changed: the
+    ///   effective value, or whether automatic parking holds it on.
+    /// Design: docs/specs/2026-10-24-mod-only-park-guard-design.md.
+    @discardableResult
+    func writeAffectingAutomaticParking(
+        _ write: () async throws -> Void
+    ) async throws -> Bool {
+        let before = try? await db.config.get()
+        try await write()
+        let after = try await db.config.get()
+        let features = SessionModFeature.enabled(in: after)
+        if let sessionModPluginSync,
+           before.map({ SessionModFeature.enabled(in: $0) }) != features {
+            sessionModPluginSync(features)
+        }
+        guard let before else { return true }
+        return before.composerDraftEnabled != after.composerDraftEnabled
+            || before.composerDraftRequiredByAutoPark != after.composerDraftRequiredByAutoPark
     }
 
     /// Persist the session-limit auto-resume gate. Turning it OFF cancels only
@@ -93,18 +126,6 @@ extension RPCRouter {
         let params = try decoder.decode(ConfigSetControlModeParams.self, from: paramsData)
         try await db.config.setControlModeEnabled(params.enabled)
         // Reuse the existing config-change channel so the app reloads Config.
-        subscriptions.broadcast(delta: .modelProfilesChanged)
-        return .ok()
-    }
-
-    /// Persist the pending-input veto for auto-hibernate (machine-interface
-    /// guard that prevents hibernation of sessions with typed-but-unsent input).
-    /// The hibernation sweep re-reads the flag per cycle, so this applies on
-    /// the next sweep immediately — existing hibernated sessions are unaffected.
-    func handleConfigSetHibernateInputVeto(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(ConfigSetHibernateInputVetoParams.self, from: paramsData)
-        try await db.config.setHibernateInputVeto(enabled: params.enabled)
-        // Broadcast so the app reloads daemon capabilities.
         subscriptions.broadcast(delta: .modelProfilesChanged)
         return .ok()
     }
@@ -566,7 +587,9 @@ extension RPCRouter {
     }
 
     /// Persist the composer draft gate (default OFF, soaking). Sessions pick the
-    /// feature up when they next start.
+    /// feature up when they next start. Automatic parking holds the feature on
+    /// whatever this stores, so while it is on, an off written here takes
+    /// effect only once automatic parking is off.
     /// Design: docs/specs/2026-10-19-tbd-session-mod-design.md.
     func handleConfigSetComposerDraftEnabled(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(

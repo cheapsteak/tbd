@@ -369,10 +369,7 @@ custom_rules:
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
       - "Sources/.*\\.swift"
-    excluded:
-      # Sanctioned scrapers, exempt with refactor-later intent — see CLAUDE.md "No TUI screen-scraping".
-      # Typed-but-unsent-input hibernation safety rail; no machine signal for composer state.
-      - "Sources/TBDDaemon/Lifecycle/HibernationSafetyChecks\\.swift"
+    # No exclusions: no sanctioned scraper remains. See CLAUDE.md "No TUI screen-scraping".
     regex: '❯|\[Pasted text|esc to interrupt|Do you want to proceed|Enter to select|Tab/Arrow keys|Ready to submit|Select login method|Ask Claude|Type a message|context used|until auto-compact|bypass permissions'
     match_kinds:
       - string
@@ -390,7 +387,7 @@ custom_rules:
       # scrutiny — see CLAUDE.md "No TUI screen-scraping".
       - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                     # defines the capture API
       - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"  # terminal.read returns text verbatim
-      - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"     # ANSI display snapshot + safety-rail feed
+      - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"     # ANSI display snapshot of a parked pane
       # Capture-for-replay: rebuilds a pane's display state verbatim for control-mode
       # attach/repair (replay bytes); never parses captured content for agent state.
       - "Sources/TBDDaemon/Tmux/ControlMode/PaneCaptureReplay\\.swift"

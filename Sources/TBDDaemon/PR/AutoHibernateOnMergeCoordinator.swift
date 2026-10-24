@@ -42,13 +42,11 @@ public struct AutoHibernateOnMergeCoordinator: Sendable {
             let terminals = try await db.terminals.list(worktreeID: worktreeID)
             var parked = 0
             for terminal in terminals {
-                // The pending-input veto rides on the same config snapshot that
-                // armed this fan-out: merge-park kills a live session, and a
-                // merge is no more a reason to eat typed-but-unsent input than
+                // A session whose session mod cannot vouch for its draft is
+                // skipped inside the park and logged, as the idle sweep skips
+                // it: a merge is no more a reason to lose an unsent draft than
                 // an idle timeout is.
-                let result = await hibernation.hibernateForMerge(
-                    terminalID: terminal.id,
-                    inputVetoEnabled: config.hibernateInputVetoEnabled)
+                let result = await hibernation.hibernateForMerge(terminalID: terminal.id)
                 switch result {
                 case .ok:
                     parked += 1
@@ -58,10 +56,6 @@ public struct AutoHibernateOnMergeCoordinator: Sendable {
                     logger.debug("merge-park skipped \(terminal.id, privacy: .public): not found")
                 case .notEligible(let reason):
                     logger.debug("merge-park skipped \(terminal.id, privacy: .public): \(reason, privacy: .public)")
-                case .draftUnconfirmed(let reason):
-                    // Not produced by a merge-park, which skips an unconfirmed
-                    // draft as `.notEligible`; logged like any other skip.
-                    logger.debug("merge-park skipped \(terminal.id, privacy: .public): \(ComposerDraftParkGate.unconfirmedRefusal(reason: reason), privacy: .public)")
                 }
             }
 

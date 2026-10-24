@@ -26,5 +26,8 @@ enum RetiredColumns {
         RetiredColumn(table: "config", column: "nightwatch_mode", epoch: 1),
         // Nightwatch's watch-desk role, added by `v68_watch_desk_judge_lease` as `TEXT DEFAULT NULL`.
         RetiredColumn(table: "terminal", column: "watch_desk_role", epoch: 1),
+        // The keystroke veto's soak flag, added by `v51_config_hibernate_input_veto`
+        // as `BOOLEAN DEFAULT 0`. The session mod is the only park draft guard.
+        RetiredColumn(table: "config", column: "hibernate_input_veto_enabled", epoch: 2),
     ]
 }

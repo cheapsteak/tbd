@@ -339,19 +339,6 @@ extension AppState {
         }
     }
 
-    /// Persist the pending-input veto for auto-hibernate, then re-fetch
-    /// capabilities so the Settings toggle reflects the daemon's EFFECTIVE
-    /// state. Applies on the next hibernation sweep.
-    func setHibernateInputVetoEnabled(_ enabled: Bool) async {
-        do {
-            try await hibernateInputVetoSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set pending-input veto: \(error, privacy: .public)")
-            showAlert("Failed to set pending-input veto: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Persist the auto-close-setup-tab soak flag, then re-fetch capabilities
     /// so the Settings toggle reflects the daemon's persisted state. Applies
     /// to the next worktree creation.

@@ -5,45 +5,6 @@ import Foundation
 @Suite("HibernationSafetyChecks")
 struct HibernationSafetyChecksTests {
 
-    // MARK: - Pending typed input
-
-    @Test func emptyPromptIsSafe() {
-        let capture = """
-        ╭──────────────────────────────────────╮
-        │ >                                    │
-        ╰──────────────────────────────────────╯
-        """
-        #expect(HibernationSafetyChecks.hasPendingInput(paneCapture: capture) == false)
-    }
-
-    @Test func placeholderPromptIsSafe() {
-        let capture = """
-        ╭──────────────────────────────────────╮
-        │ > Try "fix the failing test"         │
-        ╰──────────────────────────────────────╯
-        """
-        #expect(HibernationSafetyChecks.hasPendingInput(paneCapture: capture) == false)
-    }
-
-    @Test func typedTextBlocksHibernation() {
-        let capture = """
-        some transcript output above
-        ╭──────────────────────────────────────╮
-        │ > refactor the auth module and add    │
-        ╰──────────────────────────────────────╯
-        """
-        #expect(HibernationSafetyChecks.hasPendingInput(paneCapture: capture) == true)
-    }
-
-    @Test func emptyCaptureIsSafe() {
-        #expect(HibernationSafetyChecks.hasPendingInput(paneCapture: "") == false)
-    }
-
-    @Test func plainPromptWithoutBoxWithText() {
-        // A `>`-prefixed line without box drawing still counts.
-        #expect(HibernationSafetyChecks.hasPendingInput(paneCapture: "> hello world") == true)
-    }
-
     // MARK: - Transcript tail validity
 
     @Test func validJSONTailPasses() {
