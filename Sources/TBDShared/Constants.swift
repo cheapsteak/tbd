@@ -117,6 +117,37 @@ public enum TBDConstants {
         updatesDir(environment: environment).appendingPathComponent("update.log").path
     }
 
+    /// The app bundle the last update replaced, kept as the no-rebuild route
+    /// back: `~/tbd/updates/previous/TBD.app`. `scripts/update.sh` moves it
+    /// here and restores it when the new daemon cannot come up, so the daemon
+    /// drops a retired column only once this build no longer uses it. Honors
+    /// TBD_HOME.
+    public static func keptAppBundle(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        updatesDir(environment: environment)
+            .appendingPathComponent("previous")
+            .appendingPathComponent("TBD.app")
+    }
+
+    /// The build identity sidecar inside an assembled app bundle:
+    /// `<bundle>/Contents/TBDBuildIdentity.json`, where
+    /// `scripts/restart-bundle-lib.sh` copies it.
+    public static func buildIdentityFile(inAppBundle bundle: URL) -> URL {
+        bundle
+            .appendingPathComponent("Contents")
+            .appendingPathComponent(BuildIdentityLoader.sidecarFileName)
+    }
+
+    /// The kept bundle's build identity sidecar:
+    /// `~/tbd/updates/previous/TBD.app/Contents/TBDBuildIdentity.json`.
+    /// Honors TBD_HOME.
+    public static func keptAppBundleIdentityFile(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        buildIdentityFile(inAppBundle: keptAppBundle(environment: environment))
+    }
+
     public static func databasePath(environment: [String: String]) -> String {
         configDir(environment: environment).appendingPathComponent("state.db").path
     }

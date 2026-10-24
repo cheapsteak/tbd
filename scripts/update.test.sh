@@ -122,14 +122,15 @@ assert_not_contains() {
 
 # A bare-ish repo that stands in for upstream. Its working tree carries the
 # pieces update.sh reaches for in a fetched checkout: the script itself, the
-# two libraries it sources, a swift-safe that fakes a build, and the sources
-# the build identity's dirty check looks at.
+# two libraries it sources, a swift-safe that fakes a build, the sources the
+# build identity's dirty check looks at, and the SchemaEpoch.swift it reads
+# the schema epoch from.
 #
 #   mkremote <dir> [alternate-update-script]
 mkremote() {
     local d="$1"
     local alternate="${2-}"
-    mkdir -p "$d/scripts" "$d/Sources" "$d/Resources"
+    mkdir -p "$d/scripts" "$d/Sources/TBDShared" "$d/Resources"
     if [ -n "$alternate" ]; then
         cp "$alternate" "$d/scripts/update.sh"
     else
@@ -175,6 +176,7 @@ echo "Build complete! ($product)"
 EOF
     chmod +x "$d/scripts/swift-safe"
     echo "// seed" > "$d/Sources/Seed.swift"
+    cp "$REPO_ROOT/Sources/TBDShared/SchemaEpoch.swift" "$d/Sources/TBDShared/SchemaEpoch.swift"
     echo "// package" > "$d/Package.swift"
     printf 'icns' > "$d/Resources/AppIcon.icns"
     # The real source plist, so a fixture build can be assembled into a bundle
@@ -1108,6 +1110,12 @@ test_dry_run_builds_but_installs_nothing() {
             "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sourceWorktree"])' "$sidecar")"
         assert_eq "a fresh clone is not dirty" "False" \
             "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["dirty"])' "$sidecar")"
+        # The bundle this build becomes is the next update's kept bundle, and
+        # the daemon reads this value from it before dropping a retired column.
+        assert_eq "the sidecar records the fetched tree's schema epoch" \
+            "$(sed -n -E 's/^[[:space:]]*public static let current = ([0-9]+)[[:space:]]*$/\1/p' \
+                "$case_dir/remote/Sources/TBDShared/SchemaEpoch.swift")" \
+            "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["schemaEpoch"])' "$sidecar")"
     else
         fail "the build stamps a sidecar into the build directory: missing $sidecar"
     fi

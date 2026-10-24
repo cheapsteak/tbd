@@ -61,13 +61,15 @@ these steps in order.
   and the log says so rather than calling it a failed build.
 - **Stamps the build identity**, once the build above actually succeeded.
   `TBDBuildIdentity.json` lands in the build directory recording the commit,
-  the branch, the build time, the clone's path, and whether the tree was
-  dirty. Every binary reads the sidecar beside it, which is how `tbd version`
-  knows what is running. Stamping only after success matters because
-  `~/tbd/updates/src` is one long-lived clone every update reuses: a build
-  that failed here left old binaries in place, and had the sidecar been
-  written first, it would have named the commit that never actually built,
-  with nothing to correct it until the clone's next successful build.
+  the branch, the build time, the clone's path, whether the tree was dirty,
+  and the tree's schema epoch. Every binary reads the sidecar beside it, which
+  is how `tbd version` knows what is running, and a later daemon reads the
+  epoch from the kept bundle before it drops a retired column. Stamping only
+  after success matters because `~/tbd/updates/src` is one long-lived clone
+  every update reuses: a build that failed here left old binaries in place,
+  and had the sidecar been written first, it would have named the commit that
+  never actually built, with nothing to correct it until the clone's next
+  successful build.
 - **Assembles and signs** the new `TBD.app`, using the same code
   `scripts/restart.sh` uses (`scripts/restart-bundle-lib.sh`). The bundle
   carries the sidecar and a `SourceWorktreePath.txt` naming the update clone.
@@ -339,6 +341,17 @@ the bundle and the daemon are the same new build.
 Either way, run the script from the worktree you want installed — never an
 absolute path to another tree's copy — or you will build one tree and leave
 another tree's processes running.
+
+The kept bundle stays compatible with your database. The daemon drops a
+column a build has retired only once the kept bundle was built from a tree that
+had retired it too, so that bundle never names a column that is gone. The
+other two routes back, the update clone and any worktree, carry no such
+guarantee: a build of an older commit may still read or write a column the
+daemon has since dropped, and then fails every insert and update into that
+table. Before its first drop the daemon copies the database to
+`~/tbd/state.db.pre-column-drop.<UTC-timestamp>`, which still holds the dropped
+columns and their data; delete it by hand once you no longer need it. See
+[the design](specs/2026-10-24-column-retirement-design.md).
 
 ## Knowing what you are running
 

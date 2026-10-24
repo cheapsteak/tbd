@@ -76,6 +76,14 @@ import Foundation
         #expect(TBDConstants.databasePath(environment: env).hasSuffix("/tbd/state.db"))
     }
 
+    @Test func keptAppBundleFollowsTBDHome() {
+        let env = ["TBD_HOME": "/tmp/tbd-kept"]
+        #expect(TBDConstants.keptAppBundle(environment: env).path
+            == "/tmp/tbd-kept/updates/previous/TBD.app")
+        #expect(TBDConstants.keptAppBundleIdentityFile(environment: env).path
+            == "/tmp/tbd-kept/updates/previous/TBD.app/Contents/TBDBuildIdentity.json")
+    }
+
     @Test func scratchDirFollowsTBDHome() {
         let env = ["TBD_HOME": "/tmp/tbd-scratch-test"]
         #expect(TBDConstants.scratchDir(environment: env).path == "/tmp/tbd-scratch-test/scratch")
