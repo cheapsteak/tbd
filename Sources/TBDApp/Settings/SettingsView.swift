@@ -311,11 +311,11 @@ struct GeneralSettingsTab: View {
 
     /// Pty-holder transport opt-in. Reads the persisted flag from
     /// `daemon.capabilities` and writes via `config.setPtyHolderEnabled`.
-    /// Interactive except where it is already off and the daemon cannot start
-    /// a holder, which `AppState.ptyHolderToggleIsInteractive` decides and
-    /// documents; the caption explaining a missing `TBDHolder` helper shows
-    /// independently of that, because it is a fact about the daemon rather
-    /// than about the control.
+    /// Interactive only when the daemon can start a holder, in either position
+    /// of the flag, as `AppState.ptyHolderToggleIsInteractive` decides and
+    /// documents. When it cannot, the toggle is greyed and the caption names
+    /// the missing `TBDHolder` helper; when it can, the row for moving existing
+    /// sessions sits beneath it instead.
     @ViewBuilder
     private var ptyHolderToggle: some View {
         let capabilities = appState.daemonCapabilities
@@ -326,7 +326,7 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setPtyHolderEnabled(newValue) } }
         ))
         .help(AppState.ptyHolderHelp)
-        .disabled(!AppState.ptyHolderToggleIsInteractive(supported: supported, flagOn: enabled))
+        .disabled(!AppState.ptyHolderToggleIsInteractive(capabilities))
         if supported {
             transportMigrationRow
         } else {

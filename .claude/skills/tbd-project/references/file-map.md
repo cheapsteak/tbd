@@ -59,6 +59,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `PluginDirWriter.swift` — writes the TBD Claude Code plugin to Application Support: skills always, the session mod's `hooks/` and `types/` only while a session-mod flag is on; called after the database opens and on each flag change
 - `ComposerDraftParkGate.swift` — the park decision for sessions spawned with the composer-draft feature, and the tmux signal ending
 - `SkillFileWriter.swift` — writes the failsafe copy of the skill body
+- `RetiredRuntimeFiles.swift` — at daemon startup, removes files under `~/tbd/runtime` that no current build writes (a statusline tee script, its capture files, a lease-credential directory), matched by exact name or shape; skipped in mock mode
 - `ArchivedWorktreeBackfill.swift` — repairs archived worktree rows with missing branches
 - `RepoHealthValidator.swift` — flips repos with stale paths to `.missing`
 

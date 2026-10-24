@@ -146,30 +146,38 @@ struct PtyHolderSettingsTests {
             #expect(state.daemonCapabilities == nil)
             #expect((state.daemonCapabilities?.ptyHolderEnabled ?? false) == false)
             #expect((state.daemonCapabilities?.ptyHolderSupported ?? false) == false)
-            #expect(!AppState.ptyHolderToggleIsInteractive(
-                supported: state.daemonCapabilities?.ptyHolderSupported ?? false,
-                flagOn: state.daemonCapabilities?.ptyHolderEnabled ?? false))
+            #expect(!AppState.ptyHolderToggleIsInteractive(state.daemonCapabilities))
         }
     }
 
     // MARK: - When the toggle is interactive
 
-    /// All four combinations, because the interesting one only exists now that
-    /// the flag ships ON: a daemon with no `TBDHolder` helper still resolves
-    /// the effective flag to `true`, and greying the toggle out there would
-    /// freeze it in a position the operator cannot leave.
-    @Test func theToggleIsInertOnlyWhereNeitherDirectionDoesAnything() {
+    private static func capabilities(supported: Bool, flagOn: Bool) -> DaemonCapabilitiesResult {
+        DaemonCapabilitiesResult(
+            controlModeEnabled: false, ptyHolderEnabled: flagOn, ptyHolderSupported: supported)
+    }
+
+    /// A daemon that can start a holder offers the toggle in both positions,
+    /// so it can be turned off as well as on.
+    @Test func aSupportedDaemonOffersTheToggleWhicheverWayTheFlagSits() {
         #expect(
-            AppState.ptyHolderToggleIsInteractive(supported: true, flagOn: true),
+            AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: true, flagOn: true)),
             "a supported daemon running holders can be turned off")
         #expect(
-            AppState.ptyHolderToggleIsInteractive(supported: true, flagOn: false),
+            AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: true, flagOn: false)),
             "a supported daemon can be turned on")
+    }
+
+    /// A daemon with no `TBDHolder` helper greys the toggle in both positions.
+    /// The flag-on case is the one worth pinning: the flag ships ON, so that is
+    /// the position such a daemon usually reports, and it must not make the
+    /// control interactive.
+    @Test func anUnsupportedDaemonGreysTheToggleWhicheverWayTheFlagSits() {
         #expect(
-            AppState.ptyHolderToggleIsInteractive(supported: false, flagOn: true),
-            "no helper but the flag reads on: turning it off is never withheld")
+            !AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: false, flagOn: true)),
+            "no helper and the flag reads on: new sessions run in tmux either way")
         #expect(
-            !AppState.ptyHolderToggleIsInteractive(supported: false, flagOn: false),
-            "no helper and already off: neither direction changes anything")
+            !AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: false, flagOn: false)),
+            "no helper and the flag reads off: new sessions run in tmux either way")
     }
 }
