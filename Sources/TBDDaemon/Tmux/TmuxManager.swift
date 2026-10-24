@@ -159,8 +159,8 @@ public struct TmuxManager: Sendable {
     /// Optional test hook consulted by `paneCurrentCommand` in dryRun mode:
     /// `(server, paneID)` → the command string to report. Without it, dryRun
     /// always reports "zsh" (no claude), which makes the park path's verify-exit
-    /// poll always see an immediate polite `/exit` — untestable for the
-    /// SIGTERM-fallback branch where claude is still running after the poll.
+    /// poll always see Claude leave at once — untestable for the branch where
+    /// claude is still running after the poll.
     public let dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)?
     /// Optional test hook consulted by `createWindow` in dryRun mode: return a
     /// non-nil error for a server name to simulate window creation failing

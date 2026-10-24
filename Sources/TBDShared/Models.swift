@@ -1405,13 +1405,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// (`defaultProfileID`).
     public var scratchProfileOverrideID: UUID?
     /// Master switch for the daemon-side auto-hibernate idle timer. Default
-    /// OFF: the idle sweep drives a sanctioned TUI screen-scrape
-    /// (`HibernationSafetyChecks.hasPendingInput`) whose failure direction is
-    /// asymmetric — a composer-rendering change in Claude Code could let the
-    /// park eat typed-but-unsent input — so it is opt-in. When true, idle
-    /// Claude sessions are auto-hibernated to reclaim memory (their prompt
-    /// cache has already expired, so resume is cheap). When false, only manual
-    /// "Hibernate now" hibernates.
+    /// OFF. When true, idle Claude sessions are auto-hibernated to reclaim
+    /// memory (their prompt cache has already expired, so resume is cheap),
+    /// and the composer-draft feature is on for as long as it stays true (see
+    /// `composerDraftEnabled`). When false, the idle sweep parks nothing.
     public var autoHibernateEnabled: Bool
     /// Minutes a Claude session must sit idle-at-rest before the auto-hibernate
     /// timer terminates its process. Clamped to a sane floor by the daemon.
@@ -1425,14 +1422,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// classified as `ScheduledResume.apiErrorLimitType` rather than a hard
     /// usage-limit hit. Default OFF.
     public var autoResumeOnApiError: Bool
-    /// Soak flag for the input-pipeline pending-input veto (design spec
-    /// 2026-07-09). When true, the auto-hibernate idle sweep includes a
-    /// machine-interface guard against parking a pane with typed-but-unsent
-    /// input: if any keystroke arrived at or after the session went idle, the
-    /// park is vetoed. When false (the default), only the TUI scrape veto
-    /// applies. The input veto is opt-in until it soaks and the v50 master
-    /// default is reverted.
-    public var hibernateInputVetoEnabled: Bool
     /// Soak flag for auto-closing the setup-hook tab after a clean run.
     /// When true AND a setup hook resolves, the hook's exit code is written
     /// to a marker file; exit 0 closes the tab (kills the pane, deletes the
@@ -1696,10 +1685,23 @@ public struct Config: Codable, Sendable, Equatable {
     /// Assigned after construction by the daemon, so it is a stored property
     /// with a default rather than a required initializer argument.
     public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
-    /// Composer draft save-and-restore through the session mod. Resolved as
-    /// `composer_draft_enabled ?? Config.composerDraftDefault`. Assigned after
-    /// construction by the daemon, like `transcriptPromptAnswerEnabled`.
+    /// Composer draft save-and-restore through the session mod: the effective
+    /// value, which every reader acts on. On when
+    /// `composer_draft_enabled ?? Config.composerDraftDefault` is, and also
+    /// whenever automatic parking is on (`composerDraftRequiredByAutoPark`),
+    /// because the mod is the only guard a park has for an unsent draft.
+    /// Resolved by the daemon where it builds `Config`; the stored column is
+    /// never written on automatic parking's behalf, so an explicit off holds
+    /// again once automatic parking is off. Assigned after construction, like
+    /// `transcriptPromptAnswerEnabled`.
+    /// Design: docs/specs/2026-10-24-mod-only-park-guard-design.md.
     public var composerDraftEnabled: Bool = Config.composerDraftDefault
+    /// Whether automatic parking is on, and so holds `composerDraftEnabled` on
+    /// whatever the stored flag says: the idle sweep (`autoHibernateEnabled`),
+    /// the global park-on-merge default (`autoHibernateOnMergeDefault`), or a
+    /// worktree that is not archived whose park-on-merge override is true.
+    /// Settings shows the composer-draft toggle on and greyed while it holds.
+    public var composerDraftRequiredByAutoPark: Bool = false
     /// The agent background priority command (`agent_background_enabled`). Resolved as
     /// `agent_background_enabled ?? Config.agentBackgroundDefault`. Assigned after construction by
     /// the daemon, like `composerDraftEnabled`.
@@ -1883,7 +1885,6 @@ public struct Config: Codable, Sendable, Equatable {
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
                 controlModeEnabled: Bool = false,
                 autoResumeOnApiError: Bool = false,
-                hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
                 autoTrustWorktrees: Bool = true,
                 gcEnabled: Bool = true,
@@ -1925,7 +1926,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.hibernateIdleMinutes = hibernateIdleMinutes
         self.controlModeEnabled = controlModeEnabled
         self.autoResumeOnApiError = autoResumeOnApiError
-        self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.autoTrustWorktrees = autoTrustWorktrees
         self.gcEnabled = gcEnabled
@@ -1981,8 +1981,6 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .controlModeEnabled) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
-        hibernateInputVetoEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         autoCloseSetupEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .autoCloseSetupEnabled) ?? false
         // Absent (older daemon / older persisted JSON) defaults to ON, matching
@@ -2074,6 +2072,10 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
+        // Absent means the sender knew nothing about automatic parking holding
+        // the feature on, so nothing holds it.
+        composerDraftRequiredByAutoPark = try c.decodeIfPresent(
+            Bool.self, forKey: .composerDraftRequiredByAutoPark) ?? false
         agentBackgroundEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .agentBackgroundEnabled) ?? Config.agentBackgroundDefault
         startAdmissionEnabled = try c.decodeIfPresent(

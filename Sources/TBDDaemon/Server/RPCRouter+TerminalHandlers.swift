@@ -3181,12 +3181,6 @@ extension RPCRouter {
         case .notEligible(let reason):
             logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
             return (RPCResponse(error: reason), reason)
-        case .draftUnconfirmed(let unconfirmed):
-            // Not produced by a swap's park, which proceeds on an unconfirmed
-            // draft; refused like any other decline if it ever is.
-            let reason = ComposerDraftParkGate.unconfirmedRefusal(reason: unconfirmed)
-            logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
-            return (RPCResponse(error: reason), reason)
         }
         guard let parkedRow = try await db.terminals.get(id: oldTerminal.id),
               parkedRow.isParked else {
@@ -3468,15 +3462,13 @@ extension RPCRouter {
         //    `respawn-window -k` remains the termination guarantee; the graceful
         //    stop gives Claude a chance to flush before the forced replacement.
         //
-        //    By SIGTERM for every session, spawned with the composer-draft
-        //    feature or not, and nothing typed into the pane: a swap runs no
-        //    screen check, so a typed `/exit` would submit whatever draft the
-        //    box holds, and a Ctrl+C would clear a draft the feature then
-        //    records as gone. See
-        //    `ComposerDraftParkGate.endingStyle(for:policy:)`. SIGTERM runs
-        //    the same graceful shutdown, so a feature session's `session.end`
-        //    makes the final save. The poll window is the park's, so a swap
-        //    waits for that save exactly as long as a park does.
+        //    By SIGTERM, exactly as a park ends a session, and nothing typed
+        //    into the pane: a typed `/exit` would submit whatever draft the
+        //    box holds, and a Ctrl+C would clear a draft the session mod then
+        //    records as gone. See `TmuxSignalEnding`. SIGTERM runs the
+        //    graceful shutdown, so a feature session's `session.end` makes the
+        //    final save. The poll window is the park's, so a swap waits for
+        //    that save exactly as long as a park does.
         await TmuxSignalEnding.end(
             tmux: tmux, server: server, paneID: paneID, terminalID: oldTerminal.id,
             inspector: paneProcessInspector, signaller: processSignaller, clock: clock,
@@ -3741,12 +3733,6 @@ extension RPCRouter {
     /// Reuses the send core rather than reaching for tmux directly, so the pane
     /// consultation, the per-terminal serializer lane and the actuation row all
     /// apply unchanged. Answers whether the bytes reached the pane.
-    ///
-    /// It does **not** buy the pending-input hibernate veto:
-    /// `InputActivityTracker.recordInput` has one caller — the app's own
-    /// keystroke stream (`Daemon.swift`) — and nothing in the tmux paste path
-    /// touches it. So an unsubmitted queued prompt staged in a composer is
-    /// invisible to the idle sweep, exactly like any other daemon-side paste.
     func sendQueuedPromptVerbatim(
         terminalID: UUID, text: String, submit: Bool
     ) async -> Bool {

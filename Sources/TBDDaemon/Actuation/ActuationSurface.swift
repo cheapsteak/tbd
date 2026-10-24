@@ -10,9 +10,9 @@ import TBDShared
 //  - OUT: DB-only settings *about* a session (`setKeepWarm`, `setPin`,
 //    renames, config writes, worktree/notes/repo mutations). Nothing there
 //    reaches a process, so nothing there is an actuation.
-//  - Sub-steps of one actuation are NOT separate rows. The polite `/exit`,
-//    the Escape/C-c and the SIGTERM inside a hibernate, the interrupt inside
-//    a profile swap, the paste-then-Enter inside a send — one row per
+//  - Sub-steps of one actuation are NOT separate rows. The SIGTERM and the
+//    forced replacement inside a hibernate, the interrupt inside a profile
+//    swap, the paste-then-Enter inside a send — one row per
 //    actuation-level intent, at the moment the intent is acted on.
 //
 // Two layers write, and only two: the **RPC handler** for anything a caller

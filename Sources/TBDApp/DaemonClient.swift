@@ -1269,16 +1269,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the pending-input veto for auto-hibernate (machine-interface
-    /// guard that prevents hibernation of sessions with typed-but-unsent input).
-    /// Applies on the next hibernation sweep.
-    func setHibernateInputVeto(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetHibernateInputVeto,
-            params: ConfigSetHibernateInputVetoParams(enabled: enabled)
-        )
-    }
-
     /// Persist the auto-close-setup-tab soak flag (default OFF). Applies to
     /// the next worktree creation.
     func setAutoCloseSetup(enabled: Bool) async throws {
@@ -1820,14 +1810,10 @@ actor DaemonClient {
 
     /// Manually hibernate one Claude terminal (kill its process, keep the
     /// tmux window). Honors the running/permission rails.
-    /// `overrideUnconfirmedDraft` is set only after the person answered "Hibernate
-    /// anyway" to a `composerDraftUnconfirmed` refusal.
-    func terminalHibernate(terminalID: UUID, overrideUnconfirmedDraft: Bool = false) async throws {
+    func terminalHibernate(terminalID: UUID) async throws {
         try await callVoidAsync(
             method: RPCMethod.terminalHibernate,
-            params: TerminalHibernateParams(
-                terminalID: terminalID,
-                overrideUnconfirmedDraft: overrideUnconfirmedDraft ? true : nil)
+            params: TerminalHibernateParams(terminalID: terminalID)
         )
     }
 

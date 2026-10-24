@@ -860,16 +860,12 @@ struct RowActionMenuCallSiteTests {
             transport: .holder)
     }
 
-    /// A holder-backed session whose panel currently owns the pty is not
-    /// offered a park by the row menu either.
-    ///
-    /// This is the call-site half of `ManualParkAffordance`: the pure model is
-    /// exercised in `TabParkMenuModelTests`, and what this pins is that the row
-    /// menu asks the same question of the same registry. The daemon would
-    /// refuse such a park — its pending-input rail cannot read a screen it no
-    /// longer has — so an item offered here is one that always errors.
-    @Test("a holder session whose panel holds the pty is not offered a park")
-    func attachedHolderSessionIsNotOfferedAPark() {
+    /// A holder-backed session whose panel currently owns the pty is offered
+    /// a park by the row menu: a park ends Claude by signal and reads the
+    /// screen for nothing but its snapshot, so the panel holding the pty
+    /// stands in no park's way.
+    @Test("a holder session whose panel holds the pty is offered a park")
+    func attachedHolderSessionIsOfferedAPark() {
         withState { state in
             let worktree = localWorktree()
             let terminal = holderTerminal(worktreeID: worktree.id)
@@ -880,18 +876,14 @@ struct RowActionMenuCallSiteTests {
             let registration = state.terminalInjections.register(
                 terminalID: terminal.id) { _, _ in true }
 
-            #expect(!actions(state, worktree).context().hasHibernatableClaude)
+            #expect(actions(state, worktree).context().hasHibernatableClaude)
 
-            // The discriminating half: release the claim and the same row and
-            // the same terminal offer the park.
             state.terminalInjections.unregister(registration)
             #expect(actions(state, worktree).context().hasHibernatableClaude)
         }
     }
 
-    /// The same claim on a tmux session changes nothing — the daemon reads a
-    /// pane's screen with `capture-pane` whoever is looking at it — so the test
-    /// above is about the transport, not about an attached panel alone.
+    /// The same claim on a tmux session changes nothing either.
     @Test("a tmux session with an attached panel is still offered a park")
     func attachedTmuxSessionIsStillOfferedAPark() {
         withState { state in

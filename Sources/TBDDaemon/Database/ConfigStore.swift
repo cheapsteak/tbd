@@ -47,7 +47,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var hibernate_idle_minutes: Int?
     var control_mode_enabled: Bool?
     var auto_resume_on_api_error: Bool?
-    var hibernate_input_veto_enabled: Bool?
     var auto_close_setup_enabled: Bool?
     /// Pre-accept Claude's folder-trust dialog for the worktrees of registered
     /// repos (TBD-created ones and the repo's own checkout), excluding
@@ -282,6 +281,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter cloneCheckoutDefault: same shape again, for
     ///   `clone_checkout_enabled` — the clone-backed worktree checkout's soak
     ///   gate.
+    /// - Parameter worktreeParksOnMerge: whether a worktree that is not
+    ///   archived overrides park-on-merge to true. It lives in the `worktree`
+    ///   table, so `ConfigStore.get()` reads it with one query beside this row;
+    ///   it is one of the ways automatic parking turns the composer-draft
+    ///   feature on.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
@@ -304,7 +308,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         sessionModUsageDefault: Bool = Config.sessionModUsageDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         programStatusDefault: Bool = Config.programStatusEnabledDefault,
-        cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault
+        cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault,
+        worktreeParksOnMerge: Bool = false
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -338,7 +343,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             ),
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
-            hibernateInputVetoEnabled: hibernate_input_veto_enabled ?? false,
             autoCloseSetupEnabled: auto_close_setup_enabled ?? false,
             autoTrustWorktrees: auto_trust_worktrees ?? true,
             gcEnabled: gc_enabled ?? true,
@@ -403,10 +407,20 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Transcript prompt-answer gate — NOT `?? false`.
         config.transcriptPromptAnswerEnabled =
             transcript_prompt_answer_enabled ?? transcriptPromptAnswerDefault
-        // Composer draft gate — NOT `?? false`. Assigned after construction,
-        // like the fields around it, to keep the initializer call inside the
-        // type-checker's budget.
-        config.composerDraftEnabled = composer_draft_enabled ?? composerDraftDefault
+        // Composer draft gate — NOT `?? false` — held on by automatic parking.
+        // A park's only guard for an unsent draft is the session mod, so every
+        // way TBD parks without a gesture turns the feature on: the idle
+        // sweep, the global park-on-merge default, and a worktree's own
+        // park-on-merge override. The stored column is left as the person set
+        // it, so an explicit off holds again once automatic parking is off.
+        // Assigned after construction, like the fields around it, to keep the
+        // initializer call inside the type-checker's budget.
+        let automaticParking = (auto_hibernate_enabled ?? false)
+            || (auto_hibernate_on_merge_default ?? false)
+            || worktreeParksOnMerge
+        config.composerDraftRequiredByAutoPark = automaticParking
+        config.composerDraftEnabled =
+            (composer_draft_enabled ?? composerDraftDefault) || automaticParking
         config.agentBackgroundEnabled = agent_background_enabled ?? agentBackgroundDefault
         config.startAdmissionEnabled = start_admission_enabled ?? startAdmissionDefault
         // Session usage gate — NOT `?? false`.
@@ -444,10 +458,31 @@ public struct ConfigStore: Sendable {
         self.writer = writer
     }
 
+    /// The resolved config. Every reader goes through here, so all of them
+    /// agree on the effective composer-draft value, which also depends on the
+    /// worktrees' park-on-merge overrides (`ConfigRecord.toModel`).
     public func get() async throws -> Config {
         try await writer.read { db in
-            try ConfigRecord.fetchOne(db, key: Self.singletonID)?.toModel() ?? Config()
+            guard let record = try ConfigRecord.fetchOne(db, key: Self.singletonID) else {
+                return Config()
+            }
+            let worktreeParksOnMerge = try Self.anyWorktreeParksOnMerge(db)
+            return record.toModel(worktreeParksOnMerge: worktreeParksOnMerge)
         }
+    }
+
+    /// Whether a worktree that is not archived overrides park-on-merge to
+    /// true. An archived worktree's override parks nothing: merge-park acts
+    /// only on active worktrees, and a revive disarms the override.
+    static func anyWorktreeParksOnMerge(_ db: GRDB.Database) throws -> Bool {
+        try Bool.fetchOne(
+            db,
+            sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM worktree
+                    WHERE autoHibernateOnMerge = 1 AND status != ?)
+                """,
+            arguments: [WorktreeStatus.archived.rawValue]) ?? false
     }
 
     /// Decode the `claude_env_settings` JSON column into an overrides map.
@@ -629,19 +664,6 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET control_mode_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the pending-input veto for auto-hibernate (machine-interface
-    /// guard that prevents hibernation of sessions with typed-but-unsent input).
-    /// The hibernation sweep re-reads this per decision, so no daemon restart
-    /// is required — changes take effect on the next sweep cycle.
-    public func setHibernateInputVeto(enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET hibernate_input_veto_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
