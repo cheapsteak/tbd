@@ -41,6 +41,58 @@ Design and rationale: [`docs/specs/2026-08-19-migration-identifier-scheme-design
 Adding a migration touches one file no other branch has, so two branches can
 neither pick the same identifier nor edit the same text.
 
+## Retiring a column
+
+Removing a column is not a migration. It takes two steps:
+
+- **Retire** – a pull request that deletes every read and write of the column,
+  lists it in `RetiredColumns.all` (`RetiredColumns.swift`) with the current
+  schema epoch, and bumps that epoch.
+- **Drop** – no pull request. `RetiredColumnReconciler` runs
+  `ALTER TABLE … DROP COLUMN` at daemon startup, after migrations, once the app
+  bundle `tbd update` keeps for rollback (`~/tbd/updates/previous/TBD.app`)
+  records a schema epoch at or past the column's, or when there is no kept
+  bundle.
+
+The wait is for that bundle. A GRDB record writes every property it declares,
+so a build that still declares a column fails every insert and update into its
+table once the column is gone, and the kept bundle is what a failed update
+restores. A bundle built from a tree that had already retired the column never
+names it.
+
+The checklist. Review is the enforcement; no lint or test checks it.
+
+1. Delete every read and write of the column: the GRDB record's property, its
+   `CodingKeys`, any hand-written SQL that names it, and the shared model field
+   it fed.
+2. Confirm the column is nullable or has a default, so inserts that no longer
+   name it still succeed. Confirm it is not part of a key, constraint, index,
+   view or trigger: SQLite refuses to drop such a column, so it cannot be
+   retired this way.
+3. Increment `SchemaEpoch.current` in `Sources/TBDShared/SchemaEpoch.swift`.
+4. Append `(table, column, epoch)` to `RetiredColumns.all`, with the new epoch.
+5. Make all four changes in one commit.
+
+The list is permanent, like migration history. A fresh install still creates
+every retired column through the frozen migration that added it, and relies on
+the reconciler to drop it again, so removing an entry would leave that column
+on every later fresh install. Drops happen only in the reconciler: the `.sql`
+allowlist above refuses `DROP COLUMN`, because a migration cannot see the kept
+bundle.
+
+Two branches that each retire a column can both bump the epoch from N to N+1,
+and Git merges that without a conflict. The merged result is correct; a build
+from either branch alone claims N+1 while still using the other branch's
+column, which matters only if a developer makes that build the kept bundle.
+
+Before its first drop in a run, the reconciler copies the database to
+`~/tbd/state.db.pre-column-drop.<UTC-timestamp>` with `VACUUM INTO`, the way
+back for data someone still needed; like the pre-migration snapshot below, it
+is reclaimed by hand. A run whose snapshot fails drops nothing, and a drop that
+fails is logged at error level and skipped without stopping startup.
+
+Design and rationale: [`docs/specs/2026-10-24-column-retirement-design.md`](../../../docs/specs/2026-10-24-column-retirement-design.md).
+
 ## What a `.sql` file may contain
 
 Every statement must lead with one of these forms; `scripts/lint-migrations.py`

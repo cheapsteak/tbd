@@ -145,6 +145,8 @@ When adding a DB column:
 
 Migrations run through GRDB's `DatabaseMigrator`. A new one is a `.sql` file named `YYYYMMDDHHMMSS_lower_snake.sql`, whose stem is the migration identifier — one file per migration, so parallel branches can neither pick the same identifier nor edit the same text. Never modify or delete a migration that has landed; add a new one. `scripts/lint-migrations.py` enforces the naming, the statement allowlist, and the freeze. The frozen Swift block, the escape hatch for procedural migrations, and the rest of the conventions: [`Sources/TBDDaemon/Database/CLAUDE.md`](Sources/TBDDaemon/Database/CLAUDE.md).
 
+Removing a column is not a migration: retire it with the checklist under "Retiring a column" in that file, and the daemon drops it once the build kept for rollback no longer uses it.
+
 ### Per-repo config: two storage patterns
 
 - **DB columns** (`config` / `repo` tables) for small structured settings the daemon resolves at spawn time: `envOverrides`, profile override, feature flags.

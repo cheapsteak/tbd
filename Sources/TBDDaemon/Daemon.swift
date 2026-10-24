@@ -916,8 +916,21 @@ public final class Daemon: Sendable {
         }
 
         // 5. Initialize database
-        let database = try TBDDatabase(path: TBDConstants.databasePath)
+        let databasePath = TBDConstants.databasePath
+        let database = try TBDDatabase(path: databasePath)
         self.db = database
+
+        // Then drop the retired columns the kept rollback bundle no longer
+        // uses. Here, straight after migrations, because nothing else holds
+        // the database yet: mock seeding, the RPC server, the sweeps and
+        // startup reconciliation all come later, so no write races a column
+        // on its way out. Runs in mock mode too, where the isolated TBD_HOME
+        // has no kept bundle, so a mock daemon serves the schema a real one
+        // does. Never throws: a held, failed or skipped drop is logged and
+        // startup continues.
+        await database.reconcileRetiredColumns(RetiredColumnReconciler(
+            databasePath: databasePath,
+            keptBundlePath: TBDConstants.keptAppBundle().path))
 
         // 5a. Mock seeding: populate the freshly-migrated DB before servers
         // accept traffic, so the app never sees an empty-then-populated flash.
