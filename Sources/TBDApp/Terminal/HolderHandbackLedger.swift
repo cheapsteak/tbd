@@ -68,7 +68,9 @@ final class HolderHandbackLedger {
         !(resends[terminalID] ?? []).isEmpty
     }
 
-    /// Suspends until no background resend is going for `terminalID`.
+    /// Suspends until no background resend is going for `terminalID`, or until
+    /// the caller is cancelled — a torn-down panel must not be held here for
+    /// the rest of somebody's resend schedule.
     ///
     /// - Returns: `true` when at least one resend was actually waited on.
     @discardableResult
@@ -76,12 +78,31 @@ final class HolderHandbackLedger {
         var waited = false
         resendWaiters += 1
         defer { resendWaiters -= 1 }
-        while let task = resends[terminalID]?.first {
+        while !Task.isCancelled, let task = resends[terminalID]?.first {
             waited = true
-            await task.value
+            await Self.untilFinishedOrCancelled(task)
+            guard !Task.isCancelled else { break }
             dropResend(terminalID: terminalID, task: task)
         }
         return waited
+    }
+
+    /// Waits for `task` to finish, or for the calling task to be cancelled,
+    /// whichever comes first. Awaiting `task.value` alone would ignore the
+    /// caller's cancellation.
+    private static func untilFinishedOrCancelled(_ task: Task<Void, Never>) async {
+        let resumption = OnceResumption()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                resumption.install(continuation)
+                Task {
+                    await task.value
+                    resumption.resume()
+                }
+            }
+        } onCancel: {
+            resumption.resume()
+        }
     }
 
     private func dropResend(terminalID: UUID, task: Task<Void, Never>) {
@@ -146,5 +167,34 @@ final class HolderHandbackLedger {
             }
         }
         return waited
+    }
+}
+
+/// A continuation resumed exactly once, by whichever of several racers gets
+/// there first — including one that arrives before the continuation does.
+private final class OnceResumption: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var resumed = false
+
+    func install(_ continuation: CheckedContinuation<Void, Never>) {
+        lock.lock()
+        if resumed {
+            lock.unlock()
+            continuation.resume()
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func resume() {
+        lock.lock()
+        guard !resumed else { lock.unlock(); return }
+        resumed = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
     }
 }

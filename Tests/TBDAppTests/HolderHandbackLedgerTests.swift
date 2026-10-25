@@ -198,4 +198,53 @@ struct HolderHandbackLedgerTests {
         await ledger.awaitSettled(terminalID: id)
         #expect(!ledger.isInFlight(terminalID: id))
     }
+
+    @MainActor
+    @Test("awaitResends waits for a background resend, and only resends are its business")
+    func awaitResendsWaitsForTheResend() async {
+        let ledger = HolderHandbackLedger()
+        let id = UUID()
+        let gate = Gate()
+        ledger.registerResend(terminalID: id, task: Task { await gate.wait() })
+        #expect(ledger.isResending(terminalID: id))
+        #expect(!ledger.isInFlight(terminalID: id), "a resend must not hold a successor's first attempt")
+
+        let returned = Returned()
+        let waiter = Task { @MainActor in
+            let waited = await ledger.awaitResends(terminalID: id)
+            returned.raised = true
+            return waited
+        }
+        // The waiter is queued on the main actor this test holds; yielding is
+        // what lets it run and park.
+        for _ in 0..<1_000 where ledger.resendWaiters == 0 { await Task.yield() }
+        #expect(ledger.resendWaiters == 1, "the waiter never parked")
+        #expect(!returned.raised, "the waiter returned while the resend was still going")
+
+        await gate.open()
+        #expect(await waiter.value, "the waiter must report that it waited")
+        #expect(!ledger.isResending(terminalID: id))
+    }
+
+    /// A torn-down panel can be parked here; cancelling it must end the wait
+    /// at once rather than hold the panel for the rest of somebody's resend
+    /// schedule. The resend itself is not the waiter's to stop.
+    @MainActor
+    @Test("awaitResends ends when its caller is cancelled, with the resend still going")
+    func awaitResendsEndsOnCancellation() async {
+        let ledger = HolderHandbackLedger()
+        let id = UUID()
+        let gate = Gate()
+        ledger.registerResend(terminalID: id, task: Task { await gate.wait() })
+
+        let waiter = Task { @MainActor in await ledger.awaitResends(terminalID: id) }
+        for _ in 0..<1_000 where ledger.resendWaiters == 0 { await Task.yield() }
+        #expect(ledger.resendWaiters == 1, "the waiter never parked")
+        waiter.cancel()
+        _ = await waiter.value
+
+        #expect(ledger.resendWaiters == 0, "a cancelled waiter stayed parked")
+        #expect(ledger.isResending(terminalID: id), "cancelling a waiter must not drop the resend")
+        await gate.open()
+    }
 }

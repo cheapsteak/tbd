@@ -80,6 +80,35 @@ final class ScriptedHolderDaemon: HolderAttaching, @unchecked Sendable {
     }
 }
 
+/// Holds whatever awaits it until the test opens it. Suspension-based, so no
+/// thread blocks.
+actor HolderTestGate {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        opened = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+}
+
+/// A flag any thread can raise and read — whether a claim has cleared at the
+/// daemon, say.
+final class HolderTestLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var raised = false
+
+    var isSet: Bool { lock.withLock { raised } }
+
+    func set() { lock.withLock { raised = true } }
+}
+
 /// One `socketpair` standing in for a vended pty: `vended` goes to the panel,
 /// whose reader owns and closes it; `far` stays with the test, where a `read`
 /// returning 0 means every copy of `vended` in this process is closed.

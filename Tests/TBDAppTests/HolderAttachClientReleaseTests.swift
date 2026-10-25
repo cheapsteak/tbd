@@ -1,3 +1,4 @@
+import Clocks
 import Darwin
 import Foundation
 import TBDShared
@@ -36,9 +37,14 @@ struct HolderAttachClientReleaseTests {
         private let lock = NSLock()
         private var received: [RPCRequest] = []
         private var stopped = false
+        /// Hang up on the first `pane.detach` without answering it: a request
+        /// that never got its reply, which the client reads as lost in transit.
+        private let dropFirstDetach: Bool
+        private var droppedDetach = false
 
-        init(generation: UInt64) throws {
+        init(generation: UInt64, dropFirstDetach: Bool = false) throws {
             self.generation = generation
+            self.dropFirstDetach = dropFirstDetach
             root = fencedScratchRoot(prefix: "hac")
             try FileManager.default.createDirectory(
                 atPath: root, withIntermediateDirectories: true)
@@ -115,7 +121,14 @@ struct HolderAttachClientReleaseTests {
                   let request = try? JSONDecoder().decode(
                     RPCRequest.self, from: frame[frame.startIndex..<newline])
             else { return }
-            lock.withLock { received.append(request) }
+            let drop = lock.withLock { () -> Bool in
+                received.append(request)
+                guard dropFirstDetach, request.method == RPCMethod.paneDetach, !droppedDetach
+                else { return false }
+                droppedDetach = true
+                return true
+            }
+            if drop { return }
 
             let response: RPCResponse
             if request.method == RPCMethod.attachRequest {
@@ -170,5 +183,37 @@ struct HolderAttachClientReleaseTests {
         #expect(detaches.map(\.terminalID) == [terminalID as UUID?])
         #expect(detaches.allSatisfy { ($0.snapshotPreamble ?? Data()).isEmpty },
                 "nothing was painted, so there is no screen to hand back")
+    }
+
+    /// When the release's detach never gets its reply, the client resends it
+    /// in the background — and that resend has to reach the panel, which
+    /// records it with its ledger and waits for it before it gives up. It
+    /// rides the throw.
+    @Test("an undelivered attach whose release was lost in transit throws with the release's resend")
+    func anUndeliveredAttachCarriesItsReleaseResend() async throws {
+        // At or above the floor, so the release may be resent at all.
+        let generation = AttachRequestResult.uniqueGenerationFloor + Self.generation
+        let daemon = try FakeDaemonRPC(generation: generation, dropFirstDetach: true)
+        defer { daemon.stop() }
+        let client = HolderAttachClient(
+            daemonClient: DaemonClient(
+                socketPath: daemon.socketPath, vendSocketPath: daemon.socketPath + ".vend"),
+            fdTimeout: .milliseconds(100), clock: ImmediateClock<Duration>())
+
+        var thrown: (any Error)?
+        do {
+            _ = try await client.attach(worktreeID: UUID(), paneID: "", terminalID: UUID())
+        } catch {
+            thrown = error
+        }
+        let undelivered = try #require(
+            thrown as? HolderAttachUndelivered,
+            "the release's resend must ride the throw, got \(String(describing: thrown))")
+        #expect(undelivered.cause is FDSidecarError, "the cause is the descriptor that never came")
+
+        await undelivered.releaseResend.value
+        #expect(daemon.methods == [
+            RPCMethod.attachRequest, RPCMethod.attachReady, RPCMethod.paneDetach, RPCMethod.paneDetach,
+        ], "the lost detach must be resent once, and land: \(daemon.methods)")
     }
 }

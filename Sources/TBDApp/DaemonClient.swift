@@ -105,7 +105,7 @@ actor DaemonClient {
         // See HookResolver — resolve here, not at the caller's site.
         self.socketPath = socketPath ?? TBDConstants.socketPath
         self.vendSocketPath = vendSocketPath ?? TBDConstants.vendSocketPath
-        self.elapsed = SidecarReconnectBackoff.stopwatch(on: clock)
+        self.elapsed = ClockStopwatch.start(on: clock)
     }
 
     // MARK: - Connection

@@ -825,6 +825,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// A seam for pacing: a test about a single attempt empties it, and a
         /// test about the backoff drives `clock` through it.
         var holderAttachRetryDelays: [Duration] = HolderAttachRetry.delays
+        /// How long after its first attempt this panel may still start a new
+        /// one; see `HolderAttachRetry.deadline`. A seam like the delays.
+        var holderAttachDeadline: Duration = HolderAttachRetry.deadline
         /// What the holder attach's retry backoff sleeps on, and what the
         /// client this panel builds is given for its resends.
         private let clock: any Clock<Duration>
@@ -1259,10 +1262,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// that could not happen has to say so. The retries end early on a
         /// permanent refusal (`HolderAttachRetry.isPermanentRefusal`) — the
         /// session ended, above all — which paints its own placard, and on a
-        /// teardown, which paints nothing. They do not stop for a flicker of
-        /// the daemon connection: a real reconnect tears this panel down
-        /// anyway, and one that never got that far is no reason to give up on
-        /// a healthy session.
+        /// teardown, which paints nothing. No new attempt starts once
+        /// `holderAttachDeadline` has passed since the first, however much of
+        /// the schedule is left: an attempt whose descriptor never arrives
+        /// spends its own timeout too. They do not stop for a flicker of the
+        /// daemon connection: a real reconnect tears this panel down anyway,
+        /// and one that never got that far is no reason to give up on a healthy
+        /// session.
         ///
         /// No attempt leaves anything behind for the next. One that fails
         /// after the daemon minted an attach has sent its release by the time
@@ -1288,6 +1294,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
             let client = resolvedHolderAttachClient(appState)
             let ledger = handbackLedger(appState)
+            let elapsed = ClockStopwatch.start(on: clock)
             var retries = 0
             var waitedForResends = false
             while let failure = await attemptHolderAttach(
@@ -1296,7 +1303,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             ) {
                 guard !isTornDown else { return }
                 if retries < holderAttachRetryDelays.count,
-                   HolderAttachRetry.isRetryable(failure.error) {
+                   HolderAttachRetry.isRetryable(failure.error),
+                   elapsed() + holderAttachRetryDelays[retries] <= holderAttachDeadline {
                     let delay = holderAttachRetryDelays[retries]
                     retries += 1
                     logger.info("""
@@ -1414,6 +1422,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 attachment = try await client.attach(
                     worktreeID: worktreeID, paneID: paneID, terminalID: panelID)
             } catch {
+                // The release of an attach whose descriptor never arrived may
+                // still be resending: recorded here, before this attempt
+                // returns, so the wait before the placard sees it.
+                if let undelivered = error as? HolderAttachUndelivered {
+                    ledger.registerResend(terminalID: panelID, task: undelivered.releaseResend)
+                    return HolderAttachAttemptFailure(error: undelivered.cause, step: "attach refused")
+                }
                 return HolderAttachAttemptFailure(error: error, step: "attach refused")
             }
             // **Close-on-exec, before anything else touches it.** A descriptor

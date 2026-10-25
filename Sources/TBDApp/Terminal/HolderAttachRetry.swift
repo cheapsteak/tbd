@@ -18,10 +18,17 @@ enum HolderAttachRetry {
     ///
     /// Long enough to outlast a daemon restart and a predecessor's handback;
     /// short enough that a cause which will not clear reaches the placard, and
-    /// its Retry, while the user is still looking.
+    /// its Retry, while the user is still looking. The sleeps are not the
+    /// whole of it — an attempt whose descriptor never arrives also spends
+    /// the client's descriptor timeout — so `deadline` bounds the total.
     static let delays: [Duration] = [
         .milliseconds(500), .seconds(1), .seconds(2), .seconds(4), .seconds(4),
     ]
+
+    /// How long after a panel's first attempt it may still start a new one.
+    /// Past it the panel goes to the placard, after waiting out any resend
+    /// still going for its terminal, whatever is left of `delays`.
+    static let deadline: Duration = .seconds(15)
 
     /// The waits between resends of a handback or release that never reached
     /// the daemon: 0.25, 0.5, 1, 2 and 4 seconds, 7.75 s in all.

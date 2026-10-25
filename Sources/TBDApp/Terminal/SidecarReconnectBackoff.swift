@@ -61,6 +61,8 @@ struct SidecarReconnectBackoff: Sendable {
         doubling(attachInitialDelay, upTo: attachMaximumDelay, steps: count - 1)
     }
 
+    // Not `RemoteReconnectPolicy.backoffInterval`: its base and cap are its
+    // own fixed constants, in `TimeInterval`, so reuse would change its API.
     private static func doubling(_ initial: Duration, upTo maximum: Duration, steps: Int) -> Duration {
         let doublings = min(max(steps, 0), 30)
         return min(initial * (1 << doublings), maximum)
@@ -100,14 +102,4 @@ struct SidecarReconnectBackoff: Sendable {
         nextAttachAllowedAt = nil
     }
 
-    /// A clock reading as an offset from the moment this was called, so an
-    /// existential clock — whose instants cannot be subtracted — can still
-    /// stamp this type's timestamps.
-    static func stopwatch(on clock: any Clock<Duration>) -> @Sendable () -> Duration {
-        func start<C: Clock>(_ clock: C) -> @Sendable () -> Duration where C.Duration == Duration {
-            let origin = clock.now
-            return { origin.duration(to: clock.now) }
-        }
-        return start(clock)
-    }
 }

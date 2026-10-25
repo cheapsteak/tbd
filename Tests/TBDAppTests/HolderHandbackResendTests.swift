@@ -283,37 +283,18 @@ struct HolderHandbackResendTests {
         func tearDown() { defaults.removePersistentDomain(forName: suiteName) }
     }
 
-    /// Whether the predecessor's claim still stands at the daemon.
-    private final class Claim: @unchecked Sendable {
-        private let lock = NSLock()
-        private var cleared = false
-        var isCleared: Bool { lock.withLock { cleared } }
-        func clear() { lock.withLock { cleared = true } }
+    /// Counts on the main actor, where the panel's callbacks run.
+    @MainActor
+    private final class Counter {
+        var value = 0
     }
 
-    /// Holds a request open until the test lets it through.
-    private actor Gate {
-        private var opened = false
-        private var waiters: [CheckedContinuation<Void, Never>] = []
-
-        func wait() async {
-            if opened { return }
-            await withCheckedContinuation { waiters.append($0) }
-        }
-
-        func open() {
-            opened = true
-            for waiter in waiters { waiter.resume() }
-            waiters.removeAll()
-        }
-    }
-
-    /// The successor's daemon: refuses the attach while `claim` stands.
+    /// The successor's daemon: refuses the attach until `claimCleared`.
     private static func successorDaemon(
-        claim: Claim, attachment: HolderAttachment
+        claimCleared: HolderTestLatch, attachment: HolderAttachment
     ) -> ScriptedHolderDaemon {
         ScriptedHolderDaemon(attach: { _ in
-            guard claim.isCleared else {
+            guard claimCleared.isSet else {
                 throw DaemonClientError.rpcError("attach failed: attached to a viewer", code: nil)
             }
             return attachment
@@ -375,7 +356,7 @@ struct HolderHandbackResendTests {
         let attachSchedule: [Duration] = [.seconds(1), .seconds(2)]
         let session = Session()
         defer { session.tearDown() }
-        let claim = Claim()
+        let claimCleared = HolderTestLatch()
         let first = HolderTestPTY()
         let second = HolderTestPTY()
         defer { first.closeFar(); second.closeFar() }
@@ -387,17 +368,17 @@ struct HolderHandbackResendTests {
             // The first copy and every resend but the last are lost.
             detach: { call in
                 guard call == resendSchedule.count else { throw Self.lost }
-                claim.clear()
+                claimCleared.set()
             },
             resendDelays: resendSchedule, clock: predecessorClock)
         let successorDaemon = Self.successorDaemon(
-            claim: claim, attachment: second.attachment(generation: Self.generation + 1))
+            claimCleared: claimCleared, attachment: second.attachment(generation: Self.generation + 1))
         let predecessor = session.panel(clock: predecessorClock, client: predecessorDaemon)
         let successor = session.panel(clock: successorClock, client: successorDaemon)
         successor.coordinator.holderAttachRetryDelays = attachSchedule
         defer { successor.coordinator.cleanup() }
-        var successorPlacards = 0
-        successor.coordinator.onHolderAttachRetryOffered = { successorPlacards += 1 }
+        let successorPlacards = Counter()
+        successor.coordinator.onHolderAttachRetryOffered = { successorPlacards.value += 1 }
 
         await predecessor.coordinator.startHolderClient(terminalView: predecessor.view)
         #expect(predecessorDaemon.events == ["attach", "ready"])
@@ -427,7 +408,7 @@ struct HolderHandbackResendTests {
                 let expected = resends + 1
                 try await waitFor("resend \(resends)") { predecessorDaemon.detaches == expected }
             } else {
-                let attachedBefore = claim.isCleared
+                let attachedBefore = claimCleared.isSet
                 try await successorClock.requireAdvanceWhenArmed(
                     by: event.at - successorNow, timeout: TestDeadlines.saturatedPass)
                 successorNow = event.at
@@ -441,9 +422,9 @@ struct HolderHandbackResendTests {
 
         #expect(successorDaemon.readies == 1, """
             the successor gave up before the predecessor's last resend cleared the claim: \
-            \(successorDaemon.attaches) attempts, claim cleared \(claim.isCleared)
+            \(successorDaemon.attaches) attempts, claim cleared \(claimCleared.isSet)
             """)
-        #expect(successorPlacards == 0, "a successor that attached must not show the placard")
+        #expect(successorPlacards.value == 0, "a successor that attached must not show the placard")
     }
 
     /// Each failed resend spends time in transit as well as its scheduled
@@ -455,8 +436,8 @@ struct HolderHandbackResendTests {
     func aSuccessorWaitsOutASlowResend() async throws {
         let session = Session()
         defer { session.tearDown() }
-        let claim = Claim()
-        let gate = Gate()
+        let claimCleared = HolderTestLatch()
+        let gate = HolderTestGate()
         let first = HolderTestPTY()
         let second = HolderTestPTY()
         defer { first.closeFar(); second.closeFar() }
@@ -469,17 +450,17 @@ struct HolderHandbackResendTests {
             detach: { call in
                 if call == 0 { throw Self.lost }
                 await gate.wait()
-                claim.clear()
+                claimCleared.set()
             },
             resendDelays: [.milliseconds(500)], clock: predecessorClock)
         let successorDaemon = Self.successorDaemon(
-            claim: claim, attachment: second.attachment(generation: Self.generation + 1))
+            claimCleared: claimCleared, attachment: second.attachment(generation: Self.generation + 1))
         let predecessor = session.panel(clock: predecessorClock, client: predecessorDaemon)
         let successor = session.panel(clock: successorClock, client: successorDaemon)
         successor.coordinator.holderAttachRetryDelays = [.seconds(1)]
         defer { successor.coordinator.cleanup() }
-        var successorPlacards = 0
-        successor.coordinator.onHolderAttachRetryOffered = { successorPlacards += 1 }
+        let successorPlacards = Counter()
+        successor.coordinator.onHolderAttachRetryOffered = { successorPlacards.value += 1 }
         let ledger = session.ledger
 
         await predecessor.coordinator.startHolderClient(terminalView: predecessor.view)
@@ -497,7 +478,7 @@ struct HolderHandbackResendTests {
         try await successorClock.requireAdvanceWhenArmed(
             by: .seconds(1), timeout: TestDeadlines.saturatedPass)
         try await waitFor("the successor to wait for the resend", observed: {
-            "\(successorDaemon.attaches) attempts, \(successorPlacards) placards"
+            "\(successorDaemon.attaches) attempts"
         }) {
             await MainActor.run { ledger.resendWaiters == 1 }
         }
@@ -508,6 +489,6 @@ struct HolderHandbackResendTests {
 
         #expect(successorDaemon.attaches == 3, "the successor must ask once more after the resend")
         #expect(successorDaemon.readies == 1, "the claim cleared, so the successor must attach")
-        #expect(successorPlacards == 0, "a successor that attached must not show the placard")
+        #expect(successorPlacards.value == 0, "a successor that attached must not show the placard")
     }
 }

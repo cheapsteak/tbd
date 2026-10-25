@@ -216,6 +216,88 @@ struct HolderAttachRetryTests {
         #expect(!fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage))
     }
 
+    /// The release of an attach whose descriptor never arrived can still be
+    /// resending when this panel runs out of retries. The panel must record
+    /// that resend and wait for it, not paint the placard a moment before the
+    /// claim it was refused for clears.
+    @Test("a panel out of retries waits for its undelivered attach's release to finish resending")
+    func aPanelWaitsForItsUndeliveredRelease() async throws {
+        let gate = HolderTestGate()
+        let claimCleared = HolderTestLatch()
+        let releaseResend = Task {
+            await gate.wait()
+            claimCleared.set()
+        }
+        let pty = HolderTestPTY()
+        defer { pty.closeFar() }
+        let attachment = pty.attachment(generation: Self.generation)
+        let stub = ScriptedHolderDaemon(attach: { call in
+            if call == 0 {
+                throw HolderAttachUndelivered(cause: FDSidecarError.timedOut, releaseResend: releaseResend)
+            }
+            guard claimCleared.isSet else {
+                throw DaemonClientError.rpcError("attach failed: attached to a viewer", code: nil)
+            }
+            return attachment
+        })
+        // No retries: the release's resend is the only thing left to wait for.
+        let fixture = makeFixture(clock: ImmediateClock<Duration>(), stub: stub, delays: [])
+        defer { fixture.tearDown() }
+        let ledger = fixture.state.holderHandbackLedger
+
+        let attaching = Task { @MainActor in
+            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+        }
+        try await waitFor("the panel to wait for its release's resend", observed: {
+            "\(stub.attaches) attempts"
+        }) {
+            await MainActor.run { ledger.resendWaiters == 1 }
+        }
+        #expect(stub.attaches == 1)
+
+        await gate.open()
+        await attaching.value
+
+        #expect(stub.events == ["attach", "attach", "ready"], "\(stub.events)")
+        #expect(!fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage),
+                "the claim cleared, so the panel must attach rather than paint the placard")
+    }
+
+    /// An attempt whose descriptor never arrives spends the client's timeout
+    /// on top of the scheduled waits, so the schedule alone does not bound
+    /// how long a panel stays blank. Each attempt here spends three seconds.
+    @Test("no new attempt starts once the deadline has passed, however much of the schedule is left")
+    func theDeadlineEndsTheRetries() async throws {
+        let clock = EventDrivenTestClock()
+        let stub = ScriptedHolderDaemon(attach: { _ in
+            try await clock.sleep(for: .seconds(3))
+            throw FDSidecarError.timedOut
+        })
+        let fixture = makeFixture(
+            clock: clock, stub: stub, delays: [.seconds(1), .seconds(1), .seconds(1)])
+        fixture.coordinator.holderAttachDeadline = .seconds(5)
+        defer { fixture.tearDown() }
+        let finished = Flag()
+
+        let attaching = Task { @MainActor in
+            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+            finished.isSet = true
+        }
+        // The first attempt fails at 3 s; a retry at 4 s is inside the deadline.
+        try await clock.requireAdvanceWhenArmed(by: .seconds(3), timeout: TestDeadlines.saturatedPass)
+        try await clock.requireAdvanceWhenArmed(by: .seconds(1), timeout: TestDeadlines.saturatedPass)
+        // The second fails at 7 s: a third would start at 8 s, past it.
+        try await clock.requireAdvanceWhenArmed(by: .seconds(3), timeout: TestDeadlines.saturatedPass)
+        let ended = try await waitFor("the panel to stop at the deadline") {
+            await MainActor.run { finished.isSet }
+        }
+        if !ended { attaching.cancel() }  // unwedge a failing run
+        await attaching.value
+
+        #expect(stub.attaches == 2, "an attempt started past the deadline: \(stub.attaches)")
+        #expect(fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage))
+    }
+
     // MARK: - Stopping
 
     @Test("a teardown during the backoff ends the retries silently")
