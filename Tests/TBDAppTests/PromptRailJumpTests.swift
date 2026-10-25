@@ -416,9 +416,9 @@ struct PromptRailJumpTests {
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
-        try #require(scene.gapToBottom <= 1,
-                     Comment(rawValue: "precondition: primed at the end, so an update there follows the tail "
-                         + "(gap \(scene.gapToBottom) pt)"))
+        try #require(scene.gapToBottom <= 120,
+                     Comment(rawValue: "precondition: primed within the tail-follow threshold of the end, so "
+                         + "an update there follows the tail (gap \(scene.gapToBottom) pt)"))
 
         // A reply lands at the bottom and queues the tail-follow...
         let withReply = items + [.assistantText(
