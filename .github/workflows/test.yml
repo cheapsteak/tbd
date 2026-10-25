@@ -184,6 +184,24 @@ jobs:
       - name: Test the flake fixer's macOS steps under bash 3.2
         run: /bin/bash scripts/flake-bash32.test.sh
 
+      # The harness for the Swift suite gate (the `changes` job below), and the
+      # one check that keeps its skip honest: a drift check that gathers every
+      # script the `test` job can reach — named by the job or by
+      # `scripts/test.sh` / `scripts/swift-safe`, a `"scripts/…"` literal in a
+      # Swift file, or loaded from any of those — and fails if the gate's list
+      # of suite scripts is missing one. A PR that makes the suite depend on a
+      # new script edits one of those files, so it runs the suite and this
+      # step reddens until the script is listed. It lives in this job because
+      # Lint is never skipped, and under `/bin/bash` because the gate has to
+      # stay runnable by hand on a Mac, where it is replayed over merged PRs'
+      # file lists. Fixture repos in temp dirs, no build, a few seconds.
+      # `!cancelled()` for the same reason as the stall watchdog below: an
+      # earlier red guard in this job must not cost this one its verdict.
+      # docs/specs/2026-10-25-skip-swift-suite-for-non-code-prs-design.md
+      - name: Test the Swift suite gate
+        if: ${{ !cancelled() }}
+        run: /bin/bash scripts/ci/swift-suite-needed.test.sh
+
       # The stall watchdog's own harness: fixture directories, a stub
       # `scripts/test.sh` and a stub `sample`, no build, no SwiftPM, no real
       # store touched. It cannot join the Linux collection in `plans-guard`
@@ -232,7 +250,8 @@ jobs:
       # installer harnesses, the build-library harness
       # (`scripts/restart-build-lib.test.sh`), which must run under bash 3.2,
       # the flake fixer's bash 3.2 harness (`scripts/flake-bash32.test.sh`),
-      # and the stall-watchdog harness
+      # the Swift suite gate's harness (`scripts/ci/swift-suite-needed.test.sh`),
+      # which runs under bash 3.2, and the stall-watchdog harness
       # (`scripts/ci/watched-test-pass.test.sh`), which drives BSD `ps`,
       # `script(1)` and `sample`.
       #
@@ -354,7 +373,60 @@ jobs:
       - name: Test the session mod
         run: claude plugin test SessionMod
 
+  # Whether the `test` job can say anything about this run's changes
+  # (docs/specs/2026-10-25-skip-swift-suite-for-non-code-prs-design.md). A PR
+  # that changes only specs, skills, review-gate workflows or scripts the suite
+  # never reaches would otherwise hold one of the five macOS slots for 10 to 13
+  # minutes and learn nothing. `scripts/ci/swift-suite-needed.sh` answers
+  # `run=false` only when every file the PR changed matches a skip rule, and
+  # `run=true` for every other event and for anything it cannot answer
+  # honestly. Its step summary lists each changed file and the rule that
+  # decided it. The rule, its list of the suite's own scripts, and the drift
+  # check that keeps that list true are in the script and its harness, which
+  # the `lint` job runs.
+  #
+  # On Linux, so deciding never occupies a macOS slot. `fetch-depth: 0` puts
+  # `origin/<base>` and the history to find a merge base with in the clone,
+  # for the same three-dot diff the cache-policy step in `test` takes.
+  changes:
+    name: Swift suite gate
+    runs-on: ubuntu-latest
+    # 5: a full-history checkout and one `git diff`, well under a minute. Kept
+    # short because `test` waits for this job, so a wedge here delays the
+    # suite by up to this bound.
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether this run needs the Swift suite
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/swift-suite-needed.sh
+
   test:
+    # Skipped only when the gate above answered an explicit `false`. A job
+    # skipped by its own `if:` reports success to branch protection, so the
+    # required `test` check passes and a docs-only PR can merge. When the gate
+    # fails, is skipped, or ends without writing an answer, its output is
+    # empty, `!= 'false'` holds, and the suite runs: a broken gate costs a full
+    # run, never a missed one.
+    #
+    # `!cancelled()` is what lets this job run after a FAILED gate. With no
+    # status function in a job's `if:`, GitHub adds an implicit `success()`, so
+    # a failed dependency would skip this job — and a skipped `test` passes the
+    # required check. `!cancelled()` still skips it when the run itself is
+    # cancelled, as a newer push to the branch does through `concurrency`.
+    #
+    # Do not give this job a `name:`: branch protection matches the required
+    # check by the job's name, which is `test`.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: macos-26
     # 100, deliberately NOT sized to this job's 15.3-minute observed worst case
     # (10.7 median). The four test steps below carry `timeout-minutes` of 35, 15,
