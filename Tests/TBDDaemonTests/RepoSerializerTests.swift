@@ -3,12 +3,13 @@ import Foundation
 @testable import TBDDaemonLib
 import TestSupport
 
-/// Every ordering and overlap claim here is made with gates the test holds,
-/// never with wall-clock timestamps around sleeps: a body parks until the test
-/// or the other body releases it, so what the assertions see does not depend
-/// on how promptly a loaded runner schedules each task. `.fastPassBounded`
-/// bounds the one shape that regresses as a hang, a submit that waits on its
-/// predecessor.
+/// Ordering and overlap are shown by what the bodies record and wait on,
+/// never by wall-clock timestamps around sleeps: a body parks on a gate the
+/// test holds, or until it sees the other body running, so what the
+/// assertions see does not depend on how promptly a loaded runner schedules
+/// each task. The one wall-clock window left is a negative one, which a slow
+/// run cannot redden. `.fastPassBounded` bounds the one shape that regresses
+/// as a hang, a submit that waits on its predecessor.
 @Suite("RepoSerializer", .fastPassBounded)
 struct RepoSerializerTests {
 
@@ -58,28 +59,38 @@ struct RepoSerializerTests {
         let repoB = UUID()
         let aRunning = SendableBox(false)
         let bRunning = SendableBox(false)
-        let aSawB = SendableBox(false)
-        let bSawA = SendableBox(false)
+        let aWaitedForB = SendableBox<PollOutcome?>(nil)
+        let bWaitedForA = SendableBox<PollOutcome?>(nil)
 
         // Each body starts, then finishes only once it has seen the other one
         // running. Both waits succeed only if the two bodies are in flight at
         // the same time; serialized, the first body's wait would expire.
         let t1 = await serializer.submit(repoID: repoA) {
             aRunning.set(true)
-            let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { bRunning.get() }
-            aSawB.set(outcome == .satisfied)
+            aWaitedForB.set(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { bRunning.get() })
         }
         let t2 = await serializer.submit(repoID: repoB) {
             bRunning.set(true)
-            let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { aRunning.get() }
-            bSawA.set(outcome == .satisfied)
+            bWaitedForA.set(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { aRunning.get() })
         }
         await t1.value
         await t2.value
 
-        // Overlap proof: each one started before the other finished.
-        #expect(aSawB.get(), "B never started while A was running")
-        #expect(bSawA.get(), "A never started while B was running")
+        // Overlap proof: each one saw the other running before it finished.
+        // Only a timeout is a failure, reported as one; a body that never ran
+        // fails the #require instead of passing vacuously.
+        let aOutcome = try #require(aWaitedForB.get(), "A's body never ran")
+        let bOutcome = try #require(bWaitedForA.get(), "B's body never ran")
+        if aOutcome == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "B to start while A was running", observed: "B had not started",
+                deadline: TestDeadlines.saturatedPass))
+        }
+        if bOutcome == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "A to start while B was running", observed: "A had not started",
+                deadline: TestDeadlines.saturatedPass))
+        }
     }
 
     @Test("lane entries are pruned after work completes")
