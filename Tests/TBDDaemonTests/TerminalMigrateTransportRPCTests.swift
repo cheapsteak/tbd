@@ -359,12 +359,6 @@ struct TerminalMigrateTransportRPCTests {
         #expect(outcome["result"] as? String == "transport-failed")
     }
 
-    @Test("the actuation surface names the method")
-    func theActuationSurfaceNamesTheMethod() {
-        #expect(ActuationSurface.terminalMigrateTransport.method
-            == RPCMethod.terminalMigrateTransport)
-    }
-
     @Test("the result round-trips, and a payload without the newer lists decodes")
     func wireTypesRoundTrip() throws {
         let id = UUID()

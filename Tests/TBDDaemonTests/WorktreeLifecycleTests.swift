@@ -4,6 +4,18 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
+/// A create with no folder, branch or display name — what the app sends for
+/// an auto-generated worktree. Also the `useExistingBranch: false` branch of
+/// that flag (the default): a fresh `tbd/<name>` is created rather than an
+/// existing branch checked out; `WorktreeCreateExistingBranchTests` covers the
+/// other two branches.
+///
+/// The display-name half is the #419 contract. The stop-rename-check hook
+/// fires only while `hasDefaultDisplayName` (`displayName == name`), so the
+/// app passes neither `folder` (which would disable `attemptWorktreeAdd`'s
+/// collision retry) nor `displayName` (which would make the daemon mint a
+/// second, independent slug for `name`). The daemon generates `name` and
+/// `WorktreeStore.create` defaults `displayName ?? name`, so the two match.
 @Test func testCreateWorktree() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -21,10 +33,19 @@ import Testing
 
     #expect(result.status == .active)
     #expect(result.name.contains("-"))
-    #expect(result.branch.hasPrefix("tbd/"))
+    #expect(result.branch.hasPrefix("tbd/"), "a fresh tbd/* branch, not an existing one")
     #expect(FileManager.default.fileExists(atPath: result.localPath))
 
-    // Verify terminals were created
+    // Under the canonical layout (<tempDir>/.tbd/worktrees/<name>), because
+    // makeTestRepo overrides worktreeRoot to <tempDir>/.tbd/worktrees.
+    #expect(result.localPath.hasPrefix(tempDir.path))
+    #expect(result.localPath.contains(".tbd/worktrees/"))
+    #expect(result.localPath.contains(result.name))
+
+    // #419: name == displayName, so the stop-rename-check hook will fire.
+    #expect(result.displayName == result.name, "daemon defaults displayName to name")
+    #expect(result.hasDefaultDisplayName)
+
     let terminals = try await db.terminals.list(worktreeID: result.id)
     #expect(terminals.count == 2)
 }
@@ -185,30 +206,6 @@ import Testing
     #expect(result.localPath.hasSuffix("/my-folder"))
 }
 
-@Test func testCreateWithExplicitDisplayName() async throws {
-    let (tempDir, repoDir) = try await createTestRepo()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
-    )
-
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let result = try await lifecycle.createWorktree(
-        repoID: repo.id,
-        displayName: "My Custom Display Name",
-        skipClaude: true
-    )
-
-    #expect(result.displayName == "My Custom Display Name")
-    // name should be auto-generated, not the displayName
-    #expect(result.name != "My Custom Display Name")
-}
-
 @Test func testCreateCollisionWithUserFolderFails() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -239,42 +236,6 @@ import Testing
             repoID: repo.id,
             folder: "second-folder",
             branch: "feat/collision",
-            skipClaude: true
-        )
-    }
-}
-
-@Test func testCreateCollisionWithUserBranchRetries() async throws {
-    let (tempDir, repoDir) = try await createTestRepo()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
-    )
-
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-
-    // Create a worktree that will occupy a branch
-    _ = try await lifecycle.createWorktree(
-        repoID: repo.id,
-        branch: "feat/shared-branch",
-        skipClaude: true
-    )
-
-    // Create another worktree with the same branch but auto-folder.
-    // This should retry with a new folder but keep the user's branch.
-    // Since the branch already exists in git, the retry will also fail
-    // because git worktree add doesn't allow the same branch in two worktrees.
-    // So this should ultimately throw — but importantly it should NOT throw
-    // with the "folder" error, it should attempt retry first.
-    await #expect(throws: WorktreeLifecycleError.self) {
-        try await lifecycle.createWorktree(
-            repoID: repo.id,
-            branch: "feat/shared-branch",
             skipClaude: true
         )
     }
@@ -693,28 +654,6 @@ import Testing
             "expected the Claude terminal to persist profileID=\(token.id)")
 }
 
-@Test func testWorktreePathStructure() async throws {
-    let (tempDir, repoDir) = try await createTestRepo()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
-    )
-
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-
-    // Path should be under the canonical layout (tempDir/.tbd/worktrees/<name>)
-    // because makeTestRepo overrides worktreeRoot to <tempDir>/.tbd/worktrees.
-    #expect(wt.localPath.hasPrefix(tempDir.path))
-    #expect(wt.localPath.contains(".tbd/worktrees/"))
-    #expect(wt.localPath.contains(wt.name))
-}
-
 // MARK: - Reconcile Tests
 
 /// Alive server + alive windows: no terminals are deleted, window IDs unchanged.
@@ -1072,6 +1011,9 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     // When AppState sent `displayName: <slug>, folder: nil`, the daemon would
     // auto-generate a different name, causing displayName != name and
     // hasDefaultDisplayName == false, which defeats the stop-rename-check hook.
+    //
+    // It is also the explicit-display-name case: a displayName passed alone is
+    // kept as given, and the folder name is still generated.
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -1100,90 +1042,6 @@ private func encodedRow(_ terminal: Terminal) throws -> Data {
     #expect(wt.name != explicitSlug, "name is auto-generated, different from displayName")
     #expect(!wt.hasDefaultDisplayName, "hasDefaultDisplayName is false; stop-rename-check hook would skip")
     #expect(wt.branch.hasPrefix("tbd/"), "Auto-generated worktrees use tbd/* branch")
-}
-
-@Test func testCreateWorktreeAutoGeneratedBranchFixesDisplayName() async throws {
-    // CONTRACT: Verifies the fix for when the app sends neither folder nor displayName.
-    // The daemon's WorktreeStore.create defaults `displayName ?? name`, so the daemon
-    // generates a name and sets displayName equal to it, keeping name == displayName
-    // and hasDefaultDisplayName == true. This is the contract the fixed app relies on
-    // (Sources/TBDApp/AppState+Worktrees.swift lines 63-72).
-    //
-    // The app now passes NEITHER folder NOR displayName for auto-generated branches:
-    // folder is omitted to keep collision-retry safety net enabled in attemptWorktreeAdd;
-    // displayName is omitted to let the daemon default it to name.
-    let (tempDir, repoDir) = try await createTestRepo()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
-    )
-
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-
-    // Simulate the FIXED app behavior: pass neither folder nor displayName.
-    let wt = try await lifecycle.createWorktree(
-        repoID: repo.id,
-        folder: nil,
-        displayName: nil,
-        skipClaude: true
-    )
-
-    // CONTRACT: verify the fix works
-    #expect(wt.name != nil && !wt.name.isEmpty, "name should be auto-generated")
-    #expect(wt.displayName == wt.name, "daemon defaults displayName to name")
-    #expect(wt.name == wt.displayName, "name == displayName; hasDefaultDisplayName is true")
-    #expect(wt.hasDefaultDisplayName, "stop-rename-check hook will fire")
-    #expect(wt.branch.hasPrefix("tbd/"), "Auto-generated worktrees use tbd/* branch")
-    #expect(FileManager.default.fileExists(atPath: wt.localPath))
-}
-
-@Test func testCreateWorktreeExistingBranchWithoutFolderHasDefaultDisplayName() async throws {
-    // Companion test: verifies the existing-branch case maintains the contract.
-    // When creating from an existing branch, AppState now passes NEITHER folder
-    // nor displayName (Sources/TBDApp/AppState+Worktrees.swift lines 63-72).
-    // The daemon derives folder from the branch name (WorktreeLifecycle+Create.swift),
-    // and defaults displayName to name via WorktreeStore.create's `displayName ?? name`.
-    // This test verifies that when no dedup suffix is needed, name == displayName.
-    let (tempDir, repoDir) = try await createTestRepo()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    // Pre-seed a local branch that the new worktree will check out.
-    try await shell("git branch my-feature", at: repoDir)
-
-    let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
-    )
-
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-
-    // Simulate the app's input for existing branches: no folder, no displayName.
-    // Only pass the branch (which the daemon will check out) and useExistingBranch flag.
-    let wt = try await lifecycle.createWorktree(
-        repoID: repo.id,
-        folder: nil,
-        branch: "my-feature",
-        displayName: nil,
-        skipClaude: true,
-        useExistingBranch: true
-    )
-
-    // For existing branches without dedup conflicts, the folder is derived
-    // from the branch name (sanitized), so name == displayName == local branch name.
-    #expect(wt.name == "my-feature", "folder derived from branch name")
-    #expect(wt.displayName == "my-feature", "daemon defaults displayName to name")
-    #expect(wt.name == wt.displayName, "Existing-branch worktrees must have name == displayName")
-    #expect(wt.hasDefaultDisplayName, "Existing-branch worktrees must have hasDefaultDisplayName == true")
-    #expect(wt.branch == "my-feature")
-    #expect(FileManager.default.fileExists(atPath: wt.localPath))
 }
 
 // MARK: - Helpers

@@ -6383,7 +6383,8 @@ extension RPCRouter {
         // silent, leaving that terminal's pane rendering the entry forever.
         // Unioned with the polled terminal so a terminal that both lost an
         // expired entry and had one satisfied is still broadcast exactly once.
-        var affected = await pendingQuestions.gcExpired(now: Date(), maxAge: .seconds(900))
+        var affected = await pendingQuestions.gcExpired(
+            now: Date(), maxAge: PendingPromptExpirySweep.maxAge)
         let entries = await pendingQuestions.entries(forTerminal: params.terminalID)
         let merged = AskUserQuestionMerger.merge(jsonlItems: parsed, pending: entries)
         for satisfiedID in merged.satisfiedToolUseIDs {

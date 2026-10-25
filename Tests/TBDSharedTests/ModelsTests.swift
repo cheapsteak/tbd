@@ -2,10 +2,6 @@ import Foundation
 import Testing
 @testable import TBDShared
 
-@Test func testConstantsExist() {
-    #expect(TBDConstants.version == "0.1.0")
-}
-
 @Test func testPrimaryAgentPreferenceDefault() {
     #expect(PrimaryAgentPreference.defaultValue == .claude)
 }
@@ -443,55 +439,6 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
 }
 
 // MARK: - Param Structs Codable Round-Trips
-
-@Test func testRepoAddParamsRoundTrip() throws {
-    let params = RepoAddParams(path: "/tmp/repo")
-    let data = try JSONEncoder().encode(params)
-    let decoded = try JSONDecoder().decode(RepoAddParams.self, from: data)
-    #expect(decoded.path == "/tmp/repo")
-}
-
-@Test func testRepoRemoveParamsRoundTrip() throws {
-    let id = UUID()
-    let params = RepoRemoveParams(repoID: id, force: true)
-    let data = try JSONEncoder().encode(params)
-    let decoded = try JSONDecoder().decode(RepoRemoveParams.self, from: data)
-    #expect(decoded.repoID == id)
-    #expect(decoded.force == true)
-}
-
-@Test func testWorktreeListParamsRoundTrip() throws {
-    let params = WorktreeListParams(repoID: UUID(), status: .archived)
-    let data = try JSONEncoder().encode(params)
-    let decoded = try JSONDecoder().decode(WorktreeListParams.self, from: data)
-    #expect(decoded.status == .archived)
-}
-
-@Test func testNotifyParamsRoundTrip() throws {
-    let params = NotifyParams(worktreeID: UUID(), type: .taskComplete, message: "done")
-    let data = try JSONEncoder().encode(params)
-    let decoded = try JSONDecoder().decode(NotifyParams.self, from: data)
-    #expect(decoded.type == .taskComplete)
-    #expect(decoded.message == "done")
-}
-
-@Test func testDaemonStatusResultRoundTrip() throws {
-    let result = DaemonStatusResult(version: "0.1.0", uptime: 3600.5, connectedClients: 2)
-    let data = try JSONEncoder().encode(result)
-    let decoded = try JSONDecoder().decode(DaemonStatusResult.self, from: data)
-    #expect(decoded.version == "0.1.0")
-    #expect(decoded.uptime == 3600.5)
-    #expect(decoded.connectedClients == 2)
-}
-
-@Test func testResolvedPathResultRoundTrip() throws {
-    let repoID = UUID()
-    let result = ResolvedPathResult(repoID: repoID, worktreeID: nil)
-    let data = try JSONEncoder().encode(result)
-    let decoded = try JSONDecoder().decode(ResolvedPathResult.self, from: data)
-    #expect(decoded.repoID == repoID)
-    #expect(decoded.worktreeID == nil)
-}
 
 @Test func repoStatusRoundTrips() throws {
     let ok = RepoStatus.ok

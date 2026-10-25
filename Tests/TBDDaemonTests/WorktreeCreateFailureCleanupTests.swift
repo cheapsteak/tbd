@@ -586,13 +586,27 @@ import Testing
     /// `.repoLevel` makes the create throw instead of retrying, and dropping
     /// the `branchPreExisted == false` guard in `cleanUpFailedWorktreeAdd`
     /// makes the cleanup delete the colliding branch.
-    @Test func nameCollisionStillRetriesUnderAFreshName() async throws {
-        let (tempDir, repoDir) = try await createTestRepo()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+    ///
+    /// Runs with and without an `origin`. With one, `origin/main` resolves and
+    /// the collision is git's answer on the first base, which is the shape of
+    /// an ordinary repo. Without one, `origin/main` is unresolvable and the
+    /// collision arrives on the second base, after a failure of another kind.
+    @Test(arguments: [false, true])
+    func nameCollisionStillRetriesUnderAFreshName(withOrigin: Bool) async throws {
+        let fixture: (cleanupDir: URL, tempDir: URL, repoDir: URL)
+        if withOrigin {
+            let cloned = try await makeClonedTestRepo()
+            fixture = (cloned.parentDir, cloned.hostDir, cloned.repoDir)
+        } else {
+            let plain = try await createTestRepo()
+            fixture = (plain.tempDir, plain.tempDir, plain.repoDir)
+        }
+        defer { try? FileManager.default.removeItem(at: fixture.cleanupDir) }
+        let repoDir = fixture.repoDir
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
-        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let repo = try await makeTestRepo(db: db, tempDir: fixture.tempDir, repoDir: repoDir)
 
         // Reserve the name first, then plant a branch on it — the only way to
         // collide with an auto-generated `tbd/<name>` whose name nobody knows
@@ -613,6 +627,13 @@ import Testing
         #expect(created.count == 1, "expected exactly one tbd/ worktree: \(listed)")
         #expect(created.first?.branch != pending.branch,
                 "retry reused the colliding branch name")
+
+        // The row finished on the retry, and the failed attempt left no
+        // directory beside the one that landed.
+        let row = try #require(try await db.worktrees.get(id: pending.id))
+        #expect(row.status == .active)
+        let worktreeRoot = try #require(repo.worktreeRoot)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: worktreeRoot).count == 1)
 
         // And the branch that caused the collision is untouched.
         let branches = try await localBranches(repoDir)

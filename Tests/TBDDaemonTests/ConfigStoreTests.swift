@@ -36,10 +36,14 @@ struct ConfigStoreTests {
         #expect(cfg.defaultProfileID == nil)
     }
 
+    /// Both env-override columns start empty: the Claude settings overrides
+    /// (`claude_env_settings`) and the free-form global env overrides
+    /// (`env_overrides`, set through `config.setEnvOverrides`).
     @Test func envOverridesDefaultEmpty() async throws {
         let db = try TBDDatabase(inMemory: true)
         let cfg = try await db.config.get()
         #expect(cfg.envSettingOverrides.isEmpty)
+        #expect(cfg.envOverrides.isEmpty)
     }
 
     @Test func setAndGetEnvOverrides() async throws {
