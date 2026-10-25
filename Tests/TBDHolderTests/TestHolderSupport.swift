@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDHolder
 @testable import TBDShared
@@ -43,17 +44,53 @@ enum TestHolderError: LocalizedError {
 }
 
 /// Poll until `condition` holds or the deadline passes.
+///
+/// Suspends between probes rather than sleeping the thread: these suites run
+/// in the fast parallel pass, where a thread parked in `usleep` is one of the
+/// three the whole process shares. The verdict comes from `pollUntilTrue`'s
+/// fresh read after the deadline, so a resumption that lands late under load
+/// still reports a condition that has since come true.
 @discardableResult
 func waitUntil(
     _ description: String,
     timeout: TimeInterval = 10.0,
-    _ condition: () throws -> Bool
-) rethrows -> Bool {
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ condition: () -> Bool
+) async -> Bool {
+    let outcome = await pollUntilTrue(
+        timeout: .seconds(timeout), pollInterval: .milliseconds(20)
+    ) {
+        condition()
+    }
+    switch outcome {
+    case .satisfied:
+        return true
+    case .cancelled:
+        // The harness ended the test; attribution belongs to it, not here.
+        return false
+    case .timedOut:
+        Issue.record(
+            "timed out after \(timeout)s waiting for \(description)",
+            sourceLocation: sourceLocation)
+        return false
+    }
+}
+
+/// The blocking form of `waitUntil`, for the one caller that cannot suspend:
+/// `HolderFixture.tearDown`, which runs from a `defer`. It follows a SIGKILL,
+/// so it normally ends on its first probe or two.
+@discardableResult
+private func blockingWaitUntil(
+    _ description: String,
+    timeout: TimeInterval,
+    _ condition: () -> Bool
+) -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
-        if try condition() { return true }
+        if condition() { return true }
         usleep(20_000)
     }
+    if condition() { return true }
     Issue.record("timed out after \(timeout)s waiting for \(description)")
     return false
 }
@@ -167,7 +204,7 @@ final class HolderFixture {
         /// Must match the root any marker paths inside `launch` were built
         /// from; defaults to a fresh one.
         home: String = HolderFixture.scratchHome()
-    ) throws -> HolderFixture {
+    ) async throws -> HolderFixture {
         let executable = try #require(locateExecutable(), "TBDHolder must be built beside the test bundle")
         let environment = ["TBD_HOME": home]
         try FileManager.default.createDirectory(
@@ -288,7 +325,7 @@ final class HolderFixture {
 
         var raw: Int32 = 0
         var reaped = false
-        waitUntil("the bootstrap shell to exit", timeout: 10.0) {
+        await waitUntil("the bootstrap shell to exit", timeout: 10.0) {
             if waitpid(shellPID, &raw, WNOHANG) == shellPID { reaped = true }
             return reaped
         }
@@ -299,7 +336,7 @@ final class HolderFixture {
         let exitStatus: Int32? = reaped ? ((raw >> 8) & 0xff) : nil
 
         var holderPID: Int32 = 0
-        let reported = waitUntil("the bootstrap shell to report a holder pid", timeout: 10.0) {
+        let reported = await waitUntil("the bootstrap shell to report a holder pid", timeout: 10.0) {
             guard let text = try? String(contentsOfFile: pidPath, encoding: .utf8) else { return false }
             holderPID = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
             return holderPID > 0
@@ -337,8 +374,8 @@ final class HolderFixture {
         self.spawnerExitStatus = spawnerExitStatus
     }
 
-    func waitForSocket(timeout: TimeInterval = 10.0) {
-        waitUntil("the holder socket at \(socketPath)\n\(diagnostics())", timeout: timeout) {
+    func waitForSocket(timeout: TimeInterval = 10.0) async {
+        await waitUntil("the holder socket at \(socketPath)\n\(diagnostics())", timeout: timeout) {
             FileManager.default.fileExists(atPath: socketPath)
         }
     }
@@ -379,7 +416,7 @@ final class HolderFixture {
         // Neither is our child, so nothing here can `waitpid`; the kernel
         // reparents and reaps them. Confirm they are gone so a leak fails the
         // test that caused it rather than the next run.
-        waitUntil("the holder and its job to disappear", timeout: 5.0) {
+        blockingWaitUntil("the holder and its job to disappear", timeout: 5.0) {
             !processIsAlive(holderPID) && !processIsAlive(trackedChildPID)
         }
         try? FileManager.default.removeItem(atPath: home)
@@ -425,11 +462,7 @@ final class TestHolderClient {
             throw TestHolderError.connectFailed(path: socketPath, errno: saved)
         }
 
-        let whole = Int(receiveTimeout)
-        var timeout = timeval(
-            tv_sec: whole,
-            tv_usec: suseconds_t((receiveTimeout - TimeInterval(whole)) * 1_000_000))
-        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        setReceiveTimeout(receiveTimeout)
         // A holder that has already reported an exit closes as soon as it has,
         // so a write can legitimately land on a socket whose peer is gone.
         // Without this that write raises SIGPIPE, whose default disposition
@@ -437,6 +470,16 @@ final class TestHolderClient {
         // failure attributed to anything.
         var on: Int32 = 1
         _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+    }
+
+    /// Re-arms `SO_RCVTIMEO`, so one connection can wait out a short silence
+    /// probe and then give the answer to a real request the ordinary budget.
+    func setReceiveTimeout(_ seconds: TimeInterval) {
+        let whole = Int(seconds)
+        var timeout = timeval(
+            tv_sec: whole,
+            tv_usec: suseconds_t((seconds - TimeInterval(whole)) * 1_000_000))
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
     }
 
     /// Sends one `describe` and then reads until the holder reports a status
