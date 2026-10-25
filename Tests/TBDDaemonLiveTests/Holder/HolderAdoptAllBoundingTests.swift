@@ -115,7 +115,7 @@ private final class WedgedRendezvous: @unchecked Sendable {
 /// rather than growing with however many holders happen to be wedged.
 ///
 /// **Every registry here takes short stand-ins for both bounding knobs**, so a
-/// wedged row costs a quarter of a second rather than the production two, and
+/// wedged row costs half a second rather than the production two, and
 /// the suite pays for the shape of the bounding rather than for its size. Each
 /// test states what it discriminates against the stand-ins; the one production
 /// number the suite depends on — that the adoption timeout sits far below a
@@ -125,7 +125,15 @@ struct HolderAdoptAllBoundingTests {
 
     /// The per-row receive timeout every registry here uses in place of
     /// `HolderRegistry.defaultAdoptionReceiveTimeout`.
-    private static let receiveTimeout: Duration = .milliseconds(250)
+    ///
+    /// It bounds the *healthy* rows too: the two tests that rescue a live
+    /// holder adopt it under this same timeout, so it has to cover a real
+    /// handshake with room to spare, not only stand in for a wedged one. A
+    /// holder answers from a poll that wakes on the connect, in single-digit
+    /// milliseconds on an idle machine; half a second leaves room for a
+    /// scheduling stall under load and still sits well under the production
+    /// two seconds the first test's upper bound must tell it apart from.
+    private static let receiveTimeout: Duration = .milliseconds(500)
 
     /// The phase budget every registry here uses in place of
     /// `HolderRegistry.defaultAdoptAllBudget`. Shorter than one receive timeout
@@ -140,7 +148,7 @@ struct HolderAdoptAllBoundingTests {
     /// general-purpose one a long-lived connection gets.
     ///
     /// The discrimination is the gap between the two. This registry is handed
-    /// a 250 ms adoption timeout, so a registry that ignored it — falling back
+    /// a 500 ms adoption timeout, so a registry that ignored it — falling back
     /// to `HolderClient.defaultReceiveTimeout` (10 s), or to the production
     /// default (2 s) — fails the upper bound outright.
     @Test func anUnresponsiveHolderCostsSecondsNotTens() async throws {
