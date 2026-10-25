@@ -284,6 +284,44 @@ struct PromptRailAppKitTests {
         #expect(escape.live == 0, "the Escape monitor outlived the card")
     }
 
+    /// The gutter exists with no prompts and the rail reports hover there
+    /// too, so the hover model opens a card with no rows. Nothing is on
+    /// screen, so nothing may take Escape: the local monitor would swallow it
+    /// for every view in the window, a terminal's interrupt included.
+    @Test("an open card with no rows takes no Escape until a row puts it on screen")
+    func emptyCardTakesNoEscape() async throws {
+        let clock = EventDrivenTestClock()
+        let hover = Self.makeHover(clock: clock)
+        let escape = EscapeTable()
+        let mounted = Self.mount(hover: hover, escape: escape, onJump: { _ in })
+        defer { mounted.host.tearDown() }
+
+        try await Self.openCard(hover, clock)
+        #expect(mounted.card.isOpen)
+        #expect(!mounted.card.isShown, "a card with no rows is on screen")
+        #expect(escape.installs == 0, "a card with no rows installed the Escape monitor")
+        #expect(escape.live == 0)
+
+        // The first prompt arrives while the card is open: it shows, and only
+        // now takes Escape.
+        mounted.rail.promptRail(entriesDidChange: Self.entries(1))
+        #expect(mounted.card.isShown, "the open card stayed hidden after its first row arrived")
+        #expect(mounted.card.frame.height == 34)
+        #expect(escape.live == 1, "the card showed without the Escape monitor")
+
+        // Losing its last row takes it off screen and gives Escape back,
+        // though the hover model still has it open.
+        mounted.rail.promptRail(entriesDidChange: [])
+        #expect(!mounted.card.isShown)
+        #expect(hover.isOpen)
+        #expect(escape.live == 0, "the Escape monitor outlived the card's last row")
+
+        hover.closeNow()
+        #expect(!mounted.card.isOpen)
+        #expect(escape.installs == 1)
+        #expect(escape.live == 0)
+    }
+
     // MARK: Mounted through the table
 
     @Test("an AppKit mount puts the rail in the gutter as presenter, feeds the card, and routes jumps to the table")

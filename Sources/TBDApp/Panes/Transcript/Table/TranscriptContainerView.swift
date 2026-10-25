@@ -17,7 +17,8 @@ import AppKit
 ///   between the rail, the card and their shared hover model: the rail's
 ///   outline changes reach the card through here, the hover model's open and
 ///   close show and hide the card, and the Escape monitor runs only while the
-///   card is open. The card closes at once when this view leaves its window
+///   card is on screen — an open card with no rows is not. The card closes at
+///   once when this view leaves its window
 ///   (a pane rebuilt under a new identity, as on session rollover) or when
 ///   that window resigns key, so a card in a background window never holds
 ///   the app-wide Escape monitor.
@@ -142,6 +143,7 @@ final class TranscriptContainerView: NSView {
     ) {
         stopObservingKeyWindow()
         promptRailHover?.onOpenChange = nil
+        promptRailCard?.onShownChange = nil
         promptRailEscape?.stop()
 
         promptRailHover = hover
@@ -149,6 +151,7 @@ final class TranscriptContainerView: NSView {
         promptRailNotificationCenter = notificationCenter
         rail.wheelTarget = scrollView
         rail.onOutlineChange = { [weak self] in self?.pushOutlineToCard() }
+        card.onShownChange = { [weak self] shown in self?.promptRailCardShownChanged(shown) }
         cardView = card
         railView = rail
         hover.onOpenChange = { [weak self] open in self?.promptRailOpenChanged(open) }
@@ -164,16 +167,30 @@ final class TranscriptContainerView: NSView {
     }
 
     /// The hover model opened or closed the card. Opening lays it out against
-    /// this view and the pointer's place on the rail, and starts the Escape
-    /// monitor; closing hides it and stops the monitor.
+    /// this view and the pointer's place on the rail; closing hides it. The
+    /// Escape monitor follows what is on screen, not this: see
+    /// `promptRailCardShownChanged`.
     private func promptRailOpenChanged(_ open: Bool) {
         if open {
             let rail = promptRailNSView
             promptRailCard?.open(
                 pointedIndex: rail?.pointedIndex, pointerY: rail?.pointerY ?? 0, maxSize: bounds.size)
-            promptRailEscape?.start { [weak self] in self?.promptRailHover?.dismiss(.escape) }
         } else {
             promptRailCard?.close()
+            promptRailEscape?.stop()
+        }
+    }
+
+    /// Runs the Escape monitor exactly while the card is on screen. The rail
+    /// reports hover with no prompts too, so the hover model can open a card
+    /// that has no rows and stays hidden; a monitor started then would take
+    /// Escape from every view in the window — a terminal's interrupt among
+    /// them — with nothing visible to dismiss. An open card that gains its
+    /// first row shows, and starts the monitor then.
+    private func promptRailCardShownChanged(_ shown: Bool) {
+        if shown {
+            promptRailEscape?.start { [weak self] in self?.promptRailHover?.dismiss(.escape) }
+        } else {
             promptRailEscape?.stop()
         }
     }

@@ -54,7 +54,16 @@ final class PromptRailCardNSView: NSView {
         deliveredActiveIndex.flatMap { entries.indices.contains($0) ? $0 : nil }
     }
     private(set) var earlier: PromptRailEarlierHistory?
+    /// Whether the hover model has the card open. An open card with no rows
+    /// is not on screen; `isShown` says whether it is.
     private(set) var isOpen = false
+    /// Whether the card is on screen: open, with at least one row.
+    var isShown: Bool { !isHidden }
+    /// Called on every change of `isShown`, and only on a change — when the
+    /// card opens or closes with rows, and when an open card gains its first
+    /// row or loses its last. The container runs the Escape monitor off it, so
+    /// Escape is taken only while there is a card on screen to dismiss.
+    var onShownChange: (@MainActor (Bool) -> Void)?
     /// The pane size the card was last laid out against.
     private var maxSize: CGSize = .zero
 
@@ -220,7 +229,9 @@ final class PromptRailCardNSView: NSView {
     /// no empty card, and shows one as soon as a prompt arrives.
     private func applyVisibility() {
         let hidden = !isOpen || rowCount == 0
-        if isHidden != hidden { isHidden = hidden }
+        guard isHidden != hidden else { return }
+        isHidden = hidden
+        onShownChange?(!hidden)
     }
 
     /// Sizes the card against the pane: `maxWidth` capped at the pane's width
