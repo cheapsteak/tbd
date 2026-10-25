@@ -1,3 +1,4 @@
+#if TBD_HARNESSES
 import AppKit
 import Foundation
 import SwiftUI
@@ -6,7 +7,17 @@ import Testing
 import TBDShared
 
 /// Opt-in native SidebarView captures. No detail view or terminal is mounted.
-/// Set TBD_SIDEBAR_SHOTS_DIR to a task-owned output directory to enable.
+///
+/// Compiled only when the `TBD_HARNESSES` condition is set (see
+/// `Tests/CLAUDE.md`), so a normal run neither builds nor schedules it, and
+/// even then each test returns at once unless `TBD_SIDEBAR_SHOTS_DIR` names a
+/// task-owned output directory:
+///
+///     TBD_SIDEBAR_SHOTS_DIR=/tmp/sidebar-shots scripts/test.sh \
+///         -Xswiftc -DTBD_HARNESSES --filter SidebarRenderHarness
+///
+/// Nothing in CI compiles this file, so a refactor elsewhere can leave it
+/// failing to build; fix it when you next enable it.
 @MainActor
 @Suite("Sidebar render harness")
 struct SidebarRenderHarness {
@@ -146,5 +157,5 @@ struct SidebarRenderHarness {
         try capture.writePNG(to: directory.appendingPathComponent(name))
         #expect(state.recentlyAttachedRemoteSessions.isEmpty)
     }
-
 }
+#endif

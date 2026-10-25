@@ -236,6 +236,43 @@ in the parallel pass is merely the status quo, but moving a fast
 deterministic suite into the serial pass taxes every PR forever. When in
 doubt, leave it in the parallel pass.
 
+## Opt-in harnesses — `TBD_HARNESSES`
+
+Some suites exist for a person to run by hand: render harnesses that write
+PNGs to look at, benchmarks that print timings, oracle runs over a real
+session. Each is inert unless an environment variable asks for it, but an
+inert test still compiles into `TBDAppTests` on every run and still takes a
+turn in the pass. So these files compile only under the `TBD_HARNESSES`
+compilation condition:
+
+```sh
+scripts/test.sh -Xswiftc -DTBD_HARNESSES --filter <Suite>
+```
+
+`-Xswiftc` reaches every target, so the first such run rebuilds the package.
+Run it with `TBD_REMOTE_VERIFY` unset: the remote valve verifies on CI, which
+builds without the condition, so a green verdict from it says nothing about a
+harness.
+The condition only makes a harness exist; most also keep their own variable,
+so compiling them all does not start any of them. Each file's header names its
+variable and gives the full command:
+
+- **`TableTranscriptHarness`** – `TBD_TABLE_HARNESS=1`; set
+  `TBD_COMPARE_THIS_SESSION` to a session JSONL to run the real-session tests
+  over it. Its headless pane tests, which do run in CI, are
+  `TableTranscriptPaneTests`, and the two share `TableTranscriptScene`.
+- **`TranscriptEagerMeasureBench`** – `TBD_PERF_BENCH=1`.
+- **`ComposerRenderHarness`** – `TBD_COMPOSER_SHOTS_DIR=<dir>`.
+- **`SidebarRenderHarness`** – `TBD_SIDEBAR_SHOTS_DIR=<dir>`.
+- **`WorkbenchSnapshotTests`** – no variable. A normal run renders one
+  configuration as a smoke test, and the condition adds the rest of the size
+  and appearance matrix.
+
+Nothing in CI builds with the condition, so a refactor can break a harness
+without anything going red. Whoever next enables one fixes it. A new
+harness that only a person reads belongs behind the same condition; a test
+whose assertions guard behaviour does not, however slow it is.
+
 ## Population is the scheduler, and it is a moving target
 
 Swift Testing runs every non-serialized test in **one process with no
@@ -731,7 +768,7 @@ hands the main actor back, the queued block runs, and only then does the
 continuation resume — so the test observes the effect it came to assert.
 
 Two shapes, and they are not interchangeable.
-`TableTranscriptHarness.drainMainQueue()` is the minimal one — a few bare
+`TableTranscriptPaneTests.drainMainQueue()` is the minimal one — a few bare
 `Task.yield()`s, no condition and no sleep. That is enough when the work is
 already on the queue and handing it back is all that was missing, but it checks
 nothing and so **carries no failure signal**: if the work needs longer than the
@@ -762,15 +799,22 @@ because it orders test *bodies* and this work escaped one.
 
 **What a nested run loop legitimately does** is run-loop-scheduled work only:
 `NSTimer`, `CFRunLoopSource`, AppKit display and layout. Driving those from a
-synchronous body is its one honest use, and the two `pump()` helpers in
-`Tests/TBDAppTests` exist for it. It is never a synchronization primitive for
-`DispatchQueue.main.async` or Swift concurrency — if a helper's docstring claims
-to "drain" either, the claim is false.
+synchronous body is its one honest use, and `RunLoopPump`
+(`Tests/TBDAppTests/Support/OffscreenHost.swift`) exists for it: one turn capped
+at `OffscreenHostDefaults.runLoopSpin`, and a turn-bounded `until`. It is never a
+synchronization primitive for `DispatchQueue.main.async` or Swift concurrency —
+if a helper's docstring claims to "drain" either, the claim is false.
 
 **And it can be a silent no-op.** `run(until:)` returns immediately when no
 input source or timer is attached to the loop — measured 0.000 s bare against
 0.321 s once a timer was added. A pump that appears to be doing something may be
-doing nothing at all, at either end of the range.
+doing nothing at all, at either end of the range. So a pump waits on a
+condition and counts turns, never elapsed time: `TableTranscriptScene.settle()`
+turns until the table's geometry holds still, and `AppStateObservationTests`'
+probe turns until the evaluation it asserts has happened. The exception is a
+positive control for a negative assertion: it gets exactly the negative's fixed
+window, because a control that waited longer would pass while the negative
+watched too short a window to see anything.
 
 The compiler already closes the worst half. `NSRunLoop.h` annotates every
 spinning method — `run`, `run(until:)`, `run(_:before:)`,
