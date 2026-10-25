@@ -204,5 +204,19 @@ private struct TerminalCommandsContent: View {
         }
         .keyboardShortcut("/", modifiers: [.command, .option])
         .disabled(appState.composerCommandTerminalID == nil)
+
+        // Menu commands cannot observe the first responder, so these stay
+        // enabled and do nothing when no transcript pane is focused.
+        Divider()
+
+        Button("Previous Prompt") {
+            Task { @MainActor in PromptRailCommand.perform(.previous, appState: appState) }
+        }
+        .keyboardShortcut(.upArrow, modifiers: [.command, .option])
+
+        Button("Next Prompt") {
+            Task { @MainActor in PromptRailCommand.perform(.next, appState: appState) }
+        }
+        .keyboardShortcut(.downArrow, modifiers: [.command, .option])
     }
 }

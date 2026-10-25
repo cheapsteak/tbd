@@ -68,6 +68,9 @@ struct RemoteTranscriptPaneView: View {
     /// Stable `createdAt` for a remote prompt card; see `PromptFirstSeenDates`.
     @State private var promptFirstSeen = PromptFirstSeenDates()
     @State private var prependToken = 0
+    /// The table registered under `.remote(selection)`, so `onDisappear` and a
+    /// selection change withdraw exactly the one this pane installed.
+    @State private var registeredTable = RegisteredTranscriptTable()
     @State private var isNearTop = false
     /// The generation and head of the last successful read, so `ReadPlan`
     /// can tell a prepend from a reset.
@@ -165,6 +168,9 @@ struct RemoteTranscriptPaneView: View {
         }
         .onChange(of: selection) { old, _ in
             release(RemoteTranscriptTail.storeKey(old))
+            if let table = registeredTable.view {
+                appState.unregisterTranscriptView(table, for: .remote(old))
+            }
             appState.promptCardRetention.forgetLive(
                 for: .remote(provider: old.provider, sessionID: old.sessionID))
             overlayCoordinator.close()
@@ -176,6 +182,9 @@ struct RemoteTranscriptPaneView: View {
             release(storeKey)
             appState.promptCardRetention.forgetLive(for: promptTarget)
             overlayCoordinator.close()
+            if let table = registeredTable.view {
+                appState.unregisterTranscriptView(table, for: .remote(selection))
+            }
         }
         // Prompt-card bookkeeping, outside any body evaluation; see
         // `PromptCardRetention`.
@@ -273,6 +282,10 @@ struct RemoteTranscriptPaneView: View {
                     activityToggleToken: activityToggleToken,
                     linkRoot: "",
                     nodesProvider: { presentation.nodes },
+                    onTableReady: { [appState, selection, registeredTable] table in
+                        registeredTable.view = table
+                        appState.registerTranscriptView(table, for: .remote(selection))
+                    },
                     prependToken: prependToken,
                     onNearTop: { near in
                         isNearTop = near
