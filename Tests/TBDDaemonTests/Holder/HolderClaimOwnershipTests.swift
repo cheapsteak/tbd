@@ -31,17 +31,21 @@ import TBDShared
 /// Tier 1: no holder, no pty, no real process, and virtual time.
 @Suite(.clockDriven) struct HolderClaimOwnershipTests {
 
+    // The identities and the two builders below are internal rather than
+    // private because `HolderClaimReconcileTests` stands on the same fixture:
+    // a registry with no holder behind it, where a take-back fails at the
+    // hand-over and drops its claim.
     private static let appExecutable = "/opt/tbd/.build/debug/TBDApp"
     /// The app that was running before the update.
-    private static let oldApp = ProcessIdentity(
+    static let oldApp = ProcessIdentity(
         pid: 4242, startedAt: Date(timeIntervalSince1970: 1_700_000_000),
         commandLine: appExecutable)
     /// The app the update launched in its place.
-    private static let newApp = ProcessIdentity(
+    static let newApp = ProcessIdentity(
         pid: 5353, startedAt: Date(timeIntervalSince1970: 1_700_000_120),
         commandLine: appExecutable)
 
-    private static func registry() -> HolderRegistry {
+    static func registry() -> HolderRegistry {
         HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: ["TBD_HOME": "/nonexistent/acme-tbd-home"],
@@ -50,7 +54,7 @@ import TBDShared
 
     /// The reader a pending attach holds suspended, standing in: one that
     /// never started and has no descriptor, since nothing here reads a pty.
-    private static func idleReader(for session: UUID) -> HolderReader {
+    static func idleReader(for session: UUID) -> HolderReader {
         HolderReader(
             sessionID: session, ptyFD: -1, columns: 80, rows: 24, observedChildFromStart: true)
     }

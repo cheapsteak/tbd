@@ -173,6 +173,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` means "never chose". Resolve it through
     /// `Config.startAdmissionDefault`, never through `?? false`.
     var start_admission_enabled: Bool?
+    /// Tri-state: the `config_holder_claim_reconcile` migration carries no SQL
+    /// default, so `nil` means "never chose". Resolve it through
+    /// `Config.holderClaimReconcileEnabledDefault`, never through `?? false`.
+    var holder_claim_reconcile_enabled: Bool?
     /// Session usage recorded through the session mod. **Genuinely
     /// tri-state**: the `config_session_mod_usage` migration carries no SQL
     /// default, so `nil` means "never chose". Resolve it through
@@ -258,6 +262,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `composer_draft_enabled`.
     /// - Parameter startAdmissionDefault: same shape again, for
     ///   `start_admission_enabled`.
+    /// - Parameter holderClaimReconcileDefault: same shape again, for
+    ///   `holder_claim_reconcile_enabled` — the holder viewer-claim sweep's
+    ///   soak gate.
     /// - Parameter agentBackgroundDefault: same shape again, for
     ///   `agent_background_enabled`.
     /// - Parameter sessionModUsageDefault: same shape again, for
@@ -293,6 +300,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         composerDraftDefault: Bool = Config.composerDraftDefault,
         agentBackgroundDefault: Bool = Config.agentBackgroundDefault,
         startAdmissionDefault: Bool = Config.startAdmissionDefault,
+        holderClaimReconcileDefault: Bool = Config.holderClaimReconcileEnabledDefault,
         sessionModUsageDefault: Bool = Config.sessionModUsageDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         programStatusDefault: Bool = Config.programStatusEnabledDefault,
@@ -409,6 +417,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             (composer_draft_enabled ?? composerDraftDefault) || automaticParking
         config.agentBackgroundEnabled = agent_background_enabled ?? agentBackgroundDefault
         config.startAdmissionEnabled = start_admission_enabled ?? startAdmissionDefault
+        // Holder viewer-claim reconcile gate — NOT `?? false`.
+        config.holderClaimReconcileEnabled =
+            holder_claim_reconcile_enabled ?? holderClaimReconcileDefault
         // Session usage gate — NOT `?? false`.
         config.sessionModUsageEnabled = session_mod_usage_enabled ?? sessionModUsageDefault
         // Live remote transcript sync gate — NOT `?? false`.
@@ -957,6 +968,17 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET start_admission_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the holder viewer-claim reconcile gate. Written on every call, so
+    /// either value is the explicit gesture that lifts the column out of NULL.
+    public func setHolderClaimReconcileEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET holder_claim_reconcile_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

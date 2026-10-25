@@ -298,6 +298,114 @@ struct HolderAttachRetryTests {
         #expect(fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage))
     }
 
+    // MARK: - The held set
+
+    /// The claim sweep takes back any claim of this app whose terminal is not
+    /// held, so the terminal has to be held by the time the daemon can have
+    /// the request — and the request has to carry the seq minted with it, or a
+    /// sweep built just before it could take its claim back.
+    @Test("the panel holds its terminal from before its attach request, which carries the hold's seq")
+    func thePanelHoldsFromBeforeTheRequest() async throws {
+        let pty = HolderTestPTY()
+        defer { pty.closeFar() }
+        let ledger = HolderHandbackLedger()
+        let atRequest = HolderTestRecorder<HeldSnapshot>()
+        let attachment = pty.attachment(generation: Self.generation)
+        let stub = ScriptedHolderDaemon(attach: { _ in
+            atRequest.append(await MainActor.run { HeldSnapshot(ledger) })
+            return attachment
+        })
+        let fixture = makeFixture(clock: ImmediateClock<Duration>(), stub: stub)
+        fixture.coordinator.holderHandbackLedger = ledger
+        defer { fixture.tearDown() }
+        let terminalID = fixture.coordinator.panelID
+
+        await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+
+        #expect(stub.events == ["attach", "ready"], "\(stub.events)")
+        let snapshot = try #require(atRequest.values.first)
+        #expect(snapshot.held == [terminalID], "the terminal was not held when its request went out")
+        #expect(stub.attachSeqs == [1], "\(stub.attachSeqs)")
+        #expect(stub.attachSeqs == [snapshot.throughSeq],
+                "the request must carry the seq minted for it: \(stub.attachSeqs)")
+        #expect(ledger.isHeld(terminalID), "a live attach must stay held")
+    }
+
+    /// Two attempts on one terminal are one terminal in the held set, so the
+    /// first attempt's hold is observed in the backoff between them, where
+    /// only it could be holding the terminal.
+    @Test("a refused attempt ends its hold before the next attempt begins one")
+    func aFailedAttemptReleasesItsHold() async throws {
+        let pty = HolderTestPTY()
+        defer { pty.closeFar() }
+        let clock = EventDrivenTestClock()
+        let attachment = pty.attachment(generation: Self.generation)
+        let stub = ScriptedHolderDaemon(attach: { call in
+            if call == 0 {
+                throw DaemonClientError.rpcError("attach failed: no live holder reader", code: nil)
+            }
+            return attachment
+        })
+        let fixture = makeFixture(clock: clock, stub: stub)
+        defer { fixture.tearDown() }
+        let ledger = fixture.state.holderHandbackLedger
+        let terminalID = fixture.coordinator.panelID
+
+        let attaching = Task { @MainActor in
+            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+        }
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        #expect(stub.attaches == 1)
+        #expect(!ledger.isHeld(terminalID), "a refused attempt, with nothing to release, kept its hold")
+
+        try await clock.requireAdvanceWhenArmed(
+            by: HolderAttachRetry.delays[0], timeout: TestDeadlines.saturatedPass)
+        await attaching.value
+
+        #expect(stub.events == ["attach", "attach", "ready"], "\(stub.events)")
+        #expect(stub.attachSeqs == [1, 2], "each attempt is numbered afresh: \(stub.attachSeqs)")
+        #expect(ledger.isHeld(terminalID), "the attempt that went live must be held")
+    }
+
+    /// The release of an attach whose descriptor never arrived has not ended
+    /// while it is still being resent, so its terminal stays held. The panel
+    /// waits out a backoff meanwhile, so no later attempt's hold confuses the
+    /// observation.
+    @Test("an undelivered attach keeps its terminal held until its release resend ends")
+    func anUndeliveredAttachHoldsUntilItsReleaseResendEnds() async throws {
+        let gate = HolderTestGate()
+        let releaseResend = Task { await gate.wait() }
+        let clock = EventDrivenTestClock()
+        let stub = ScriptedHolderDaemon(attach: { _ in
+            throw HolderAttachUndelivered(cause: FDSidecarError.timedOut, releaseResend: releaseResend)
+        })
+        let fixture = makeFixture(clock: clock, stub: stub)
+        defer { fixture.tearDown() }
+        let ledger = fixture.state.holderHandbackLedger
+        let terminalID = fixture.coordinator.panelID
+
+        let attaching = Task { @MainActor in
+            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+        }
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        #expect(stub.attaches == 1)
+        #expect(ledger.isResending(terminalID: terminalID))
+        #expect(ledger.isHeld(terminalID), "the hold ended while its release was still being resent")
+
+        await gate.open()
+        try await waitFor("the hold to end with the release resend", observed: {
+            await MainActor.run { "held \(ledger.isHeld(terminalID)), \(stub.attaches) attempts" }
+        }) {
+            await MainActor.run { !ledger.isHeld(terminalID) }
+        }
+        #expect(stub.attaches == 1, "the panel was still in its backoff: \(stub.events)")
+
+        // Started directly rather than through `cleanup()`'s task, so it is
+        // cancelled here: the backoff reads that as a teardown and returns.
+        attaching.cancel()
+        await attaching.value
+    }
+
     // MARK: - Stopping
 
     @Test("a teardown during the backoff ends the retries silently")

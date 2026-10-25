@@ -1349,6 +1349,17 @@ actor DaemonClient {
         )
     }
 
+    /// Persist the holder claim-reconcile gate (default OFF, soaking).
+    /// `holder.reconcileClaims` reads it on every sweep, so it applies from
+    /// the next poll tick. While it is off, a sweep only logs what it would
+    /// take back.
+    func setHolderClaimReconcileEnabled(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetHolderClaimReconcileEnabled,
+            params: ConfigSetHolderClaimReconcileParams(enabled: enabled)
+        )
+    }
+
     /// Persist the transcript-streaming gate (default OFF), which decides
     /// whether the transcript renders a provisional assistant row while the
     /// model streams. Applies to sessions started after the call.
@@ -1681,14 +1692,29 @@ actor DaemonClient {
     /// default) is the control-mode caller, which names its pane.
     func attachRequest(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil
+        terminalID: UUID? = nil, attachSeq: UInt64? = nil
     ) async throws -> AttachRequestResult {
         try await callAsync(
             method: RPCMethod.attachRequest,
             params: AttachRequestParams(
                 worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID,
-                terminalID: terminalID),
+                terminalID: terminalID, attachSeq: attachSeq),
             resultType: AttachRequestResult.self
+        )
+    }
+
+    /// Tell the daemon which holder sessions this app holds
+    /// (`holder.reconcileClaims`), so it can take back the viewer claims this
+    /// app owns on every other session. `held` and `throughSeq` are one
+    /// `HolderHandbackLedger.reconcileSnapshot()`. `appPID` is the claim owner
+    /// the daemon compares against, and defaults to this process.
+    func reconcileHolderClaims(
+        held: [UUID], throughSeq: UInt64, appPID: Int32 = getpid()
+    ) async throws -> HolderReconcileClaimsResult {
+        try await callAsync(
+            method: RPCMethod.holderReconcileClaims,
+            params: HolderReconcileClaimsParams(appPID: appPID, held: held, throughSeq: throughSeq),
+            resultType: HolderReconcileClaimsResult.self
         )
     }
 

@@ -280,6 +280,35 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("agent-background: on"))
     }
 
+    // MARK: - holder-claim-reconcile: the soak switch for the holder viewer-claim sweep
+
+    @Test func holderClaimReconcileIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("holder-claim-reconcile"))
+        #expect(ConfigSet.allKeys.contains("holder-claim-reconcile"))
+        #expect(try ConfigSet.parseOnOff("on", key: "holder-claim-reconcile") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "holder-claim-reconcile") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "holder-claim-reconcile")
+        }
+    }
+
+    @Test func holderClaimReconcileDescribesBothStates() {
+        let on = ConfigSet.confirmation(key: "holder-claim-reconcile", value: .on)
+        let off = ConfigSet.confirmation(key: "holder-claim-reconcile", value: .off)
+        #expect(on.hasPrefix("Set holder-claim-reconcile to on."))
+        #expect(off.hasPrefix("Set holder-claim-reconcile to off."))
+        #expect(on.contains("takes back"))
+        #expect(off.contains("only logs"))
+        #expect(on != off)
+    }
+
+    @Test func configGetPrintsHolderClaimReconcileInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("holder-claim-reconcile: off"))
+        config.holderClaimReconcileEnabled = true
+        #expect(ConfigGet.render(config).contains("holder-claim-reconcile: on"))
+    }
+
     // MARK: - No transport-shaped switch
 
     /// Hibernation takes one switch — `auto_hibernate_enabled` — for every

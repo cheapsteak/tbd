@@ -908,6 +908,22 @@ extension AppState {
         }
     }
 
+    // MARK: - Holder claim reconcile
+
+    /// Persist the holder claim-reconcile gate and refresh daemon
+    /// capabilities, so the toggle shows what the daemon holds. The daemon
+    /// reads the flag on every sweep, so it applies from the next poll tick.
+    /// The app sweeps either way; the flag decides whether the daemon acts.
+    func setHolderClaimReconcileEnabled(_ enabled: Bool) async {
+        do {
+            try await holderClaimReconcileFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set holder claim reconcile: \(error, privacy: .public)")
+            showAlert("Failed to set session reclaiming: \(error.localizedDescription)", isError: true)
+        }
+    }
+
     // MARK: - Session usage
 
     /// Persist the session usage gate and refresh daemon capabilities, so the

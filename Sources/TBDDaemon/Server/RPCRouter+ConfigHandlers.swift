@@ -526,6 +526,19 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Persist the holder viewer-claim reconcile gate (default OFF, soaking).
+    /// `holder.reconcileClaims` reads it on every sweep, so a change takes
+    /// effect at the app's next poll tick. Design:
+    /// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+    func handleConfigSetHolderClaimReconcileEnabled(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(
+            ConfigSetHolderClaimReconcileParams.self, from: paramsData)
+        try await db.config.setHolderClaimReconcileEnabled(params.enabled)
+        // Reuse the existing config-change channel so the app reloads Config.
+        subscriptions.broadcast(delta: .modelProfilesChanged)
+        return .ok()
+    }
+
     /// Persist the the agent background priority command flag (default OFF). Read on every use, so a
     /// change takes effect at the next request. Turning it off also ends a live lease and restores
     /// what it lowered, so the flag is an off switch and not only a gate on `on`.

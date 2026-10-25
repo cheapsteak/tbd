@@ -148,6 +148,15 @@ public final class RPCRouter: Sendable {
     /// How the attach path's "ended" answer reads a recorded child pid's
     /// identity. Tests replace it with a scripted process table.
     nonisolated(unsafe) var holderChildSignaller: any ProcessSignaller = ProductionProcessSignaller()
+    /// Resolves the pid a `holder.reconcileClaims` names to the identity a
+    /// claim's owner is compared with: the read the fd sidecar makes of its
+    /// peer, so the same app reads back the same identity. Nil sweeps nothing.
+    /// It spawns `ps` twice and blocks, so the handler asks it only while
+    /// `holder_claim_reconcile_enabled` is on, and only once the registry
+    /// says there is something to take back. Tests replace it.
+    nonisolated(unsafe) var appIdentityResolver: @Sendable (Int32) -> ProcessIdentity? = { pid in
+        ProcessIdentity.of(pid: pid, signaller: ProductionProcessSignaller())
+    }
     nonisolated(unsafe) var codexHomeEnsurer: @Sendable () throws -> URL
     nonisolated(unsafe) var codexProfileFlagResolver: @Sendable (String) -> String = { executable in
         CodexSpawnCommandBuilder.detectProfileFlag(executablePath: executable) { arguments in
@@ -862,6 +871,8 @@ public final class RPCRouter: Sendable {
                 return try await handlePaneDetach(request.paramsData)
             case RPCMethod.paneResize:
                 return try await handlePaneResize(request.paramsData)
+            case RPCMethod.holderReconcileClaims:
+                return try await handleHolderReconcileClaims(request.paramsData)
             case RPCMethod.daemonCapabilities:
                 return try await handleDaemonCapabilities()
             case RPCMethod.terminalSuspend:
@@ -1060,6 +1071,8 @@ public final class RPCRouter: Sendable {
                 return try await handleAgentsBackground(request.paramsData)
             case RPCMethod.configSetStartAdmissionEnabled:
                 return try await handleConfigSetStartAdmissionEnabled(request.paramsData)
+            case RPCMethod.configSetHolderClaimReconcileEnabled:
+                return try await handleConfigSetHolderClaimReconcileEnabled(request.paramsData)
             case RPCMethod.configSetAgentBackgroundEnabled:
                 return try await handleConfigSetAgentBackgroundEnabled(request.paramsData)
             case RPCMethod.configSetSessionModUsageEnabled:
@@ -1203,6 +1216,7 @@ public final class RPCRouter: Sendable {
         result.composerDraftRequiredByAutoPark = config.composerDraftRequiredByAutoPark
         result.agentBackgroundEnabled = config.agentBackgroundEnabled
         result.startAdmissionEnabled = config.startAdmissionEnabled
+        result.holderClaimReconcileEnabled = config.holderClaimReconcileEnabled
         result.sessionModUsageEnabled = config.sessionModUsageEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds

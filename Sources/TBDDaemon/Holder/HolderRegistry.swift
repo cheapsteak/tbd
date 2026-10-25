@@ -319,6 +319,11 @@ actor HolderRegistry {
     /// put back on the pty.
     private struct PendingAttach {
         let generation: UInt64
+        /// The app's number for the `attach.request` this attach answers
+        /// (`AttachRequestParams.attachSeq`), carried into the claim it
+        /// becomes. Nil for an app that sends none, and a claim without one is
+        /// never swept (`reconcileClaims`).
+        let attachSeq: UInt64?
         let reader: HolderReader
         /// The app the descriptor was delivered to, once the attach handler
         /// has said so (`recordAttachRecipient`). Carried into the claim this
@@ -345,8 +350,13 @@ actor HolderRegistry {
     /// death at all, which is the posture `AppLivenessVerdict.undetermined`
     /// takes for the same reason. `reclaimSessions(heldBy:)` says what clears
     /// such a claim instead.
+    ///
+    /// The `attachSeq` is the pending attach's, kept so that the app's own
+    /// statement of what it holds can be ordered against this attach
+    /// (`reconcileClaims`).
     private struct ViewerClaim {
         let generation: UInt64
+        let attachSeq: UInt64?
         var owner: ProcessIdentity?
     }
 
@@ -358,11 +368,12 @@ actor HolderRegistry {
     /// pending entry and a viewer claim are never simultaneously live.** No
     /// single line enforces it, so it is written down here rather than left to
     /// be re-derived. `confirmAttach` clears the pending entry and then records
-    /// the claim; `settleAsUnacknowledged` (the one path for both
-    /// `cancelPendingAttach(.unacknowledged)` and a dead app's
-    /// `reclaimSessions(heldBy:)`) records the claim and then clears the
-    /// pending entry — both pairs synchronous, with no `await` between, so
-    /// neither leaves an observable instant in which both are set;
+    /// the claim; `settleAsUnacknowledged` (the one path for
+    /// `cancelPendingAttach(.unacknowledged)`, a dead app's
+    /// `reclaimSessions(heldBy:)`, a late delivery's `recordAttachRecipient`
+    /// and the claim sweep's `reconcileClaims`) records the claim and then
+    /// clears the pending entry — both pairs synchronous, with no `await`
+    /// between, so neither leaves an observable instant in which both are set;
     /// `beginAttach` refuses to record a pending entry over a standing claim
     /// and re-reads the claim after its suspension.
     ///
@@ -434,6 +445,26 @@ actor HolderRegistry {
     /// claim cleared and the same reader draining, and this count is what
     /// tells them apart.
     private(set) var takeBacksCompleted = 0
+    /// The attaches a claim sweep with the flag off has already logged as ones
+    /// it would take back, so each is logged once for the daemon's life rather
+    /// than on every poll tick (`reportClaims`). With the flag off a
+    /// candidate is never taken back, so it stays a candidate on every tick,
+    /// and logging it each time would be some 1,800 persisted lines an hour
+    /// for one stuck session. The sweep's result still names it every time.
+    ///
+    /// Bounded by pruning at the start of every sweep: an entry whose attach
+    /// is no longer recorded, as a pending attach or a claim, is dropped.
+    /// Generations are minted once per daemon life, so such an attach can
+    /// never be selected again, and the set never holds more than the
+    /// attaches that stood at the last sweep.
+    private var wouldTakeBacksLogged: Set<TakeBack> = []
+    /// How many "would take back" notices this registry has logged.
+    /// Test-facing: two sweeps over one stuck candidate both return it, and
+    /// this count is what shows the second did not log it again.
+    private(set) var wouldTakeBackNotices = 0
+    /// How many attaches `wouldTakeBacksLogged` remembers. Test-facing: it is
+    /// what shows the pruning keeps the set bounded.
+    var wouldTakeBacksRemembered: Int { wouldTakeBacksLogged.count }
     /// Mints attach generations. Monotonic for the daemon's life, so an ack or
     /// a cancel naming an older attach can always be told from one naming the
     /// current attach.
@@ -2409,8 +2440,14 @@ actor HolderRegistry {
     /// Refused first, and by name, once the daemon is shutting down: the
     /// reader is being released, and the app should hear that this daemon is
     /// going away rather than that the session has no reader.
+    ///
+    /// `attachSeq` is the app's number for the request this answers
+    /// (`AttachRequestParams.attachSeq`). It is recorded on the pending attach
+    /// and kept on the claim the attach becomes, and only an attach that
+    /// carries one can be swept (`reconcileClaims`).
     func beginAttach(
-        terminalID: UUID, maxScrollbackLines: Int = HolderReader.scrollbackLines
+        terminalID: UUID, attachSeq: UInt64? = nil,
+        maxScrollbackLines: Int = HolderReader.scrollbackLines
     ) async throws -> HolderAttachVend {
         guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
         guard viewerAttachments[terminalID] == nil else {
@@ -2438,7 +2475,8 @@ actor HolderRegistry {
         // checked correctly.
         lastAttachGeneration += 1
         let generation = lastAttachGeneration
-        pendingAttaches[terminalID] = PendingAttach(generation: generation, reader: reader)
+        pendingAttaches[terminalID] = PendingAttach(
+            generation: generation, attachSeq: attachSeq, reader: reader)
 
         let ptyFD: Int32
         do {
@@ -2524,7 +2562,10 @@ actor HolderRegistry {
     /// *write* to the pty — the one-reader invariant is about readers, and
     /// several writers on a pty master are fine. What it must never do is
     /// resume the drain without evidence the viewer is gone; `acceptHandback`
-    /// and `seizeFromDeadApp` are the only two callers that carry it.
+    /// (the viewer's own detach), `seizeFromDeadApp` (an app-liveness verdict)
+    /// and the claim sweep `reconcileClaims` (the app's own statement that it
+    /// holds no descriptor for the session) are the only three callers that
+    /// carry it.
     ///
     /// The jiggle goes here rather than at the vend, and that ordering is the
     /// point of it: a program repaints on `SIGWINCH` into the tty, and the ack
@@ -2578,7 +2619,7 @@ actor HolderRegistry {
         // quiesce and its guard, which would otherwise hand out a second live
         // descriptor for a pty this acknowledgement has just given away.
         viewerAttachments[terminalID] = ViewerClaim(
-            generation: generation, owner: pending.recipient)
+            generation: generation, attachSeq: pending.attachSeq, owner: pending.recipient)
 
         await reader.jiggle()
 
@@ -2622,8 +2663,10 @@ actor HolderRegistry {
     /// other arm deliberately leaves the session unread: that is the fail-closed
     /// direction, and it is not free, because a job that exits with unread
     /// output cannot finish exiting. Resuming is licensed by evidence that the
-    /// viewer is gone — either its own detach (`acceptHandback`) or an
-    /// app-liveness verdict (`seizeFromDeadApp`), and by nothing weaker.
+    /// viewer is gone — its own detach (`acceptHandback`), an app-liveness
+    /// verdict (`seizeFromDeadApp`), or its app's own statement that it holds
+    /// no descriptor for the session (`reconcileClaims`) — and by nothing
+    /// weaker.
     func cancelPendingAttach(
         terminalID: UUID, generation: UInt64, reason: AttachCancelReason
     ) async {
@@ -2692,8 +2735,10 @@ actor HolderRegistry {
             //
             // Refusing to read the pty while cheerfully duplicating it for
             // somebody else would be the same evidence answered two ways.
-            // What clears it is the viewer's own detach, or the app-liveness
-            // verdict the design spec names for app death — `seizeFromDeadApp`.
+            // What clears it is the viewer's own detach, the app-liveness
+            // verdict the design spec names for app death — `seizeFromDeadApp` —
+            // or the claim sweep, `reconcileClaims`, on the app's own statement
+            // that it holds no descriptor for this session.
             settleAsUnacknowledged(terminalID: terminalID, pending: pending)
             Self.logger.error(
                 """
@@ -2731,7 +2776,8 @@ actor HolderRegistry {
     /// `pending` from the map with no `await` since.
     private func settleAsUnacknowledged(terminalID: UUID, pending: PendingAttach) {
         viewerAttachments[terminalID] = ViewerClaim(
-            generation: pending.generation, owner: pending.recipient)
+            generation: pending.generation, attachSeq: pending.attachSeq,
+            owner: pending.recipient)
         clearPendingAttach(terminalID: terminalID, generation: pending.generation)
     }
 
@@ -2775,15 +2821,25 @@ actor HolderRegistry {
         viewerAttachments[terminalID]?.owner
     }
 
+    /// The generation of the attach vended for this session and not yet
+    /// acknowledged, or nil when there is none. Test-facing, beside
+    /// `viewerAttachment(for:)`: it tells an attach still pending from the
+    /// claim it can become.
+    func pendingAttachGeneration(for terminalID: UUID) -> UInt64? {
+        pendingAttaches[terminalID]?.generation
+    }
+
     /// Records a viewer claim with no attach behind it. Test-facing, and
     /// production never calls it: it lets a tier-1 test state "these sessions
     /// are held by these apps" without a holder, a pty or a reader, which every
     /// real claim needs. Only for a session with no pending attach — the
     /// invariant on `pendingAttaches` is the caller's to keep here.
     func recordViewerClaimForTesting(
-        terminalID: UUID, generation: UInt64, owner: ProcessIdentity?
+        terminalID: UUID, generation: UInt64, owner: ProcessIdentity?,
+        attachSeq: UInt64? = nil
     ) {
-        viewerAttachments[terminalID] = ViewerClaim(generation: generation, owner: owner)
+        viewerAttachments[terminalID] = ViewerClaim(
+            generation: generation, attachSeq: attachSeq, owner: owner)
     }
 
     /// Records an attach as vended and not yet acknowledged, with no slot
@@ -2795,10 +2851,11 @@ actor HolderRegistry {
     /// the caller's to keep here.
     func recordPendingAttachForTesting(
         terminalID: UUID, generation: UInt64, reader: HolderReader,
-        recipient: ProcessIdentity?
+        recipient: ProcessIdentity?, attachSeq: UInt64? = nil
     ) {
         pendingAttaches[terminalID] = PendingAttach(
-            generation: generation, reader: reader, recipient: recipient)
+            generation: generation, attachSeq: attachSeq, reader: reader,
+            recipient: recipient)
     }
 
     /// Records which app a vended descriptor was delivered to, and answers
@@ -2984,14 +3041,14 @@ actor HolderRegistry {
 
     /// Takes a session back from a viewer, with or without the viewer's help.
     ///
-    /// One implementation, two callers, because the two differ in exactly one
-    /// respect and share every hazard: `acceptHandback` arrives with the
-    /// viewer's screen and `seizeFromDeadApp` arrives with nothing, and
-    /// `preamble == nil` is that difference. Everything else — the generation
-    /// check, the two arms, the claim held across the resume and dropped on the
-    /// failure path, the jiggle after the resume — is identical, and a second
-    /// copy of it would be a second place for the single-reader invariant to
-    /// rot.
+    /// One implementation for every take-back, because they differ in exactly
+    /// one respect and share every hazard: `acceptHandback` arrives with the
+    /// viewer's screen, while `seizeFromDeadApp` and the claim sweep
+    /// (`reconcileClaims`) arrive with nothing, and `preamble == nil` is that
+    /// difference. Everything else — the generation check, the two arms, the
+    /// claim held across the resume and dropped on the failure path, the
+    /// jiggle after the resume — is identical, and a second copy of it would
+    /// be a second place for the single-reader invariant to rot.
     ///
     /// With no preamble there is simply nothing to ingest: the suspended reader
     /// still holds the screen it had before the attach, and the jiggle is what
@@ -3043,11 +3100,13 @@ actor HolderRegistry {
         // The viewer leaves the census here, on its caller's evidence and
         // nothing weaker: `acceptHandback` arrives only after the viewer closed
         // its descriptor (the ordering the app owns and this process cannot
-        // check), and `seizeFromDeadApp` only after an app-liveness verdict
-        // that the process holding it is gone. Both mean the same thing to the
-        // ledger — nothing outside this process is on the pty — and recording
-        // it before the resume is what makes the resume's assertion meaningful
-        // rather than self-certifying.
+        // check), `seizeFromDeadApp` only after an app-liveness verdict that
+        // the process holding it is gone, and the claim sweep only on the app's
+        // own statement that it holds no descriptor for this session, made
+        // after it closed any it received (`reconcileClaims`). All three mean
+        // the same thing to the ledger — nothing outside this process is on
+        // the pty — and recording it before the resume is what makes the
+        // resume's assertion meaningful rather than self-certifying.
         readerCensus.stoppedReading(.viewer(attach: generation), session: terminalID)
 
         let reader: HolderReader
@@ -3226,6 +3285,247 @@ actor HolderRegistry {
             }
         }
         return reclaimed
+    }
+
+    // MARK: - Taking back what a live app says it no longer holds
+
+    /// One attach a claim sweep may take back: the session, the attach
+    /// generation, and — when the attach is still pending — the entry to
+    /// settle into a claim first.
+    private struct SweepCandidate {
+        let terminalID: UUID
+        let generation: UInt64
+        let pending: PendingAttach?
+    }
+
+    /// Takes back the claims `app` owns on sessions it says it no longer
+    /// holds, and answers with them: the registry's half of
+    /// `holder.reconcileClaims` while `holder_claim_reconcile_enabled` is on,
+    /// and the reconciler for a viewer claim whose handback, or whose attach
+    /// reply, was lost while its app lives
+    /// (docs/specs/2026-10-25-holder-claim-reconcile-design.md). While the
+    /// flag is off the handler asks `reportClaims` instead, which selects by
+    /// pid and changes nothing.
+    ///
+    /// **Its authority is the one a handback carries: the app's own statement
+    /// that it holds no descriptor for a session, made only after it closed
+    /// any it received.** `held` is that statement — every session the app
+    /// holds a descriptor for or has an attach in flight for — and
+    /// `throughSeq` is the highest `attachSeq` it had sent when it built it.
+    /// An attach is a candidate only when all four hold:
+    ///
+    /// 1. it is `app`'s: a claim whose `owner` is `app`, or a pending attach
+    ///    whose recorded `recipient` is. A pending attach with no recipient —
+    ///    its descriptor not yet sent, or sent to a peer the sidecar could not
+    ///    name — is skipped, since nothing says whose table it is in;
+    /// 2. it carries an `attachSeq` at or below `throughSeq`. One above it was
+    ///    numbered after `held` was built, so `held` says nothing about it,
+    ///    whichever of the two requests arrived first; one without a seq is an
+    ///    older app's, and is never swept;
+    /// 3. its session is not in `held`;
+    /// 4. no take-back of that attach is already in flight
+    ///    (`takeBacksInFlight`). The one under way owns the outcome, and a
+    ///    handback's carries the screen this sweep cannot.
+    ///
+    /// **The candidates are selected in one synchronous stretch at entry**,
+    /// before anything here suspends, so the set acted on is the set those
+    /// conditions describe.
+    ///
+    /// Then:
+    ///
+    /// - **Only the candidate pending attaches are settled** into claims, the
+    ///   way the ready-timeout would settle each, and before the first
+    ///   suspension. Never every pending attach the app has, as a death's pass
+    ///   does: an attach on a session in `held` is one the app is still
+    ///   waiting on, and settling it would refuse its `attach.ready`.
+    /// - Each candidate is then taken back through `takeBackFromViewer` with
+    ///   no preamble, the path a dead app's seizure takes: the reader the
+    ///   attach suspended goes back on the pty, and the job is jiggled so a
+    ///   program that repaints on `SIGWINCH` redraws. Not through
+    ///   `seizeFromDeadApp` itself, whose contract is a death verdict this
+    ///   sweep does not have; the statement above stands in for it.
+    /// - Before each take-back the claim is re-read, because every take-back
+    ///   before it suspended: one that moved on to another attach, or away
+    ///   from `app`, is left alone, and the take-back re-checks the generation
+    ///   again itself.
+    ///
+    /// `takenBack` lists the take-backs that returned without throwing, as
+    /// `reclaimSessions(heldBy:)` counts them — including one that found a
+    /// take-back of the same attach begun since the selection, which owns it.
+    /// A take-back that throws is logged and skipped, and drops its claim on
+    /// the way out, as every failed take-back does. Either way the attach is
+    /// no longer a candidate, so the next sweep's cheap gate
+    /// (`hasCandidates`) does not pass it again. `wouldTakeBack` is always
+    /// empty. Whatever is not a candidate is left exactly as it was.
+    func reconcileClaims(
+        heldBy app: ProcessIdentity, held: Set<UUID>, throughSeq: UInt64
+    ) async -> HolderClaimSweep {
+        let candidates = sweepCandidates(held: held, throughSeq: throughSeq, ownedBy: { $0 == app })
+        let appPID = app.pid
+        forgetEndedWouldTakeBacks()
+        // Still the stretch the selection ran in, so every `pending` here is
+        // the value just read from the map, as `settleAsUnacknowledged`
+        // requires. Settled before the first take-back suspends, so the
+        // ready-timeout cannot turn one into a claim behind this pass's back.
+        for candidate in candidates {
+            if let pending = candidate.pending {
+                settleAsUnacknowledged(terminalID: candidate.terminalID, pending: pending)
+            }
+        }
+        var takenBack: [UUID] = []
+        for candidate in candidates {
+            let terminalID = candidate.terminalID
+            let generation = candidate.generation
+            guard let claim = viewerAttachments[terminalID], claim.generation == generation,
+                  claim.owner == app
+            else {
+                Self.logger.info(
+                    """
+                    attach \(generation, privacy: .public) of session \
+                    \(terminalID.uuidString, privacy: .public) moved on while the claim sweep for \
+                    app pid \(appPID, privacy: .public) ran; leaving it alone
+                    """)
+                continue
+            }
+            do {
+                try await takeBackFromViewer(
+                    terminalID: terminalID, generation: generation, preamble: nil)
+                takenBack.append(terminalID)
+                Self.logger.notice(
+                    """
+                    took back attach \(generation, privacy: .public) of session \
+                    \(terminalID.uuidString, privacy: .public) from app pid \
+                    \(appPID, privacy: .public), which says it no longer holds it
+                    """)
+            } catch {
+                Self.logger.error(
+                    """
+                    could not take back attach \(generation, privacy: .public) of session \
+                    \(terminalID.uuidString, privacy: .public) from app pid \
+                    \(appPID, privacy: .public), which says it no longer holds it: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
+        }
+        return HolderClaimSweep(takenBack: takenBack, wouldTakeBack: [])
+    }
+
+    /// Whether a sweep from the app with this pid could find anything to take
+    /// back: some claim owned by a process with that pid, or some pending
+    /// attach delivered to one, that also meets the other three conditions of
+    /// `reconcileClaims` — whether `reportClaims` would name anything, without
+    /// logging it.
+    ///
+    /// The cheap gate in front of a sweep. It reads only this registry, so a
+    /// caller can ask it on every poll tick before it reads the flag or
+    /// resolves the pid to an identity, which spawns `ps`. In the steady
+    /// state every live panel's session is in `held` and this answers false.
+    /// Matching by pid alone can only over-answer — a reused pid passes here
+    /// and matches no owner in a sweep that acts — and never under-answers,
+    /// because a sweep's owner always has the pid it resolved from.
+    func hasCandidates(ownedByPID pid: Int32, held: Set<UUID>, throughSeq: UInt64) -> Bool {
+        !sweepCandidates(held: held, throughSeq: throughSeq, ownedBy: { $0.pid == pid }).isEmpty
+    }
+
+    /// Names the claims a sweep from the app with this pid would take back,
+    /// and changes nothing: the registry's half of `holder.reconcileClaims`
+    /// while `holder_claim_reconcile_enabled` is off.
+    ///
+    /// **It matches the owner by pid alone**, as `hasCandidates` does, and
+    /// applies the other three conditions of `reconcileClaims` unchanged.
+    /// Matching by identity would need the pid resolved, which spawns `ps`
+    /// twice and blocks, and with the flag off a candidate is never taken
+    /// back: it stays a candidate on every 2 s tick until the app quits, so
+    /// it would be resolved again on every one. The price is that a claim
+    /// owned by an earlier process that held the same pid is named too. It is
+    /// only named: a sweep that acts resolves the identity first, and leaves
+    /// that claim alone.
+    ///
+    /// Each attach is logged at `.notice` as one the sweep would take back the
+    /// first time a report names it, and not again for the daemon's life
+    /// (`wouldTakeBacksLogged`), since a candidate the flag leaves standing is
+    /// named on every tick. Every report still lists it in `wouldTakeBack`;
+    /// `takenBack` is always empty.
+    func reportClaims(
+        ownedByPID pid: Int32, held: Set<UUID>, throughSeq: UInt64
+    ) -> HolderClaimSweep {
+        forgetEndedWouldTakeBacks()
+        let candidates = sweepCandidates(
+            held: held, throughSeq: throughSeq, ownedBy: { $0.pid == pid })
+        for candidate in candidates {
+            let terminalID = candidate.terminalID
+            let generation = candidate.generation
+            // Once per attach: the result names it on every report, the log
+            // only on the first.
+            guard wouldTakeBacksLogged.insert(
+                TakeBack(terminalID: terminalID, generation: generation)).inserted
+            else { continue }
+            wouldTakeBackNotices += 1
+            Self.logger.notice(
+                """
+                would take back attach \(generation, privacy: .public) of session \
+                \(terminalID.uuidString, privacy: .public) from app pid \
+                \(pid, privacy: .public), which says it no longer holds it; the claim sweep \
+                is off, so the claim stands
+                """)
+        }
+        return HolderClaimSweep(takenBack: [], wouldTakeBack: candidates.map(\.terminalID))
+    }
+
+    /// The attaches a sweep may take back, in session order: those `isOwner`
+    /// accepts — by a claim's `owner`, or a pending attach's recorded
+    /// `recipient` — with a covered seq, a session not in `held`, and no
+    /// take-back of the same attach in flight. Synchronous, so it describes
+    /// one instant; see `reconcileClaims` for each condition's reason.
+    private func sweepCandidates(
+        held: Set<UUID>, throughSeq: UInt64, ownedBy isOwner: (ProcessIdentity) -> Bool
+    ) -> [SweepCandidate] {
+        var candidates: [SweepCandidate] = []
+        for (terminalID, pending) in pendingAttaches {
+            guard let recipient = pending.recipient, isOwner(recipient),
+                  isSweepable(
+                    terminalID: terminalID, generation: pending.generation,
+                    attachSeq: pending.attachSeq, held: held, throughSeq: throughSeq)
+            else { continue }
+            candidates.append(SweepCandidate(
+                terminalID: terminalID, generation: pending.generation, pending: pending))
+        }
+        for (terminalID, claim) in viewerAttachments {
+            guard let owner = claim.owner, isOwner(owner),
+                  isSweepable(
+                    terminalID: terminalID, generation: claim.generation,
+                    attachSeq: claim.attachSeq, held: held, throughSeq: throughSeq)
+            else { continue }
+            candidates.append(SweepCandidate(
+                terminalID: terminalID, generation: claim.generation, pending: nil))
+        }
+        // Ordered so a sweep's result and its log lines read the same way on
+        // every run; dictionary order would not.
+        return candidates.sorted { $0.terminalID.uuidString < $1.terminalID.uuidString }
+    }
+
+    /// Drops each attach `wouldTakeBacksLogged` remembers that is no longer
+    /// recorded, as a pending attach or a claim: handed back, taken back,
+    /// released or superseded. No sweep can select it again, so remembering
+    /// it would only grow the set.
+    private func forgetEndedWouldTakeBacks() {
+        wouldTakeBacksLogged = wouldTakeBacksLogged.filter { logged in
+            viewerAttachments[logged.terminalID]?.generation == logged.generation
+                || pendingAttaches[logged.terminalID]?.generation == logged.generation
+        }
+    }
+
+    /// The three conditions of a sweep that do not depend on whose an attach
+    /// is: a seq at or below `throughSeq`, a session not in `held`, and no
+    /// take-back of the same attach in flight.
+    private func isSweepable(
+        terminalID: UUID, generation: UInt64, attachSeq: UInt64?,
+        held: Set<UUID>, throughSeq: UInt64
+    ) -> Bool {
+        guard let attachSeq, attachSeq <= throughSeq else { return false }
+        guard !held.contains(terminalID) else { return false }
+        return !takeBacksInFlight.contains(
+            TakeBack(terminalID: terminalID, generation: generation))
     }
 
     // MARK: - Reclaiming a finished session
@@ -3794,6 +4094,17 @@ struct HolderAttachVend: Sendable {
     /// The escape-sequence stream that reconstructs the session's screen —
     /// scrollback, modes, cursor — in the viewer's own terminal.
     let snapshotPreamble: Data
+}
+
+/// What one claim sweep did (`HolderRegistry.reconcileClaims`): the sessions
+/// it took back or, when it was told not to act, the ones it would have. At
+/// most one of the two is non-empty.
+struct HolderClaimSweep: Sendable, Equatable {
+    /// Sessions the daemon took back and reads again.
+    var takenBack: [UUID]
+    /// Sessions a sweep that acted would have taken back. Nothing was changed
+    /// for them.
+    var wouldTakeBack: [UUID]
 }
 
 // MARK: - Installation identity

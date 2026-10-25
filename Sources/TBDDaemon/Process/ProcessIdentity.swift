@@ -47,6 +47,22 @@ public struct ProcessIdentity: Sendable, Hashable {
         guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0, pid > 0 else {
             return nil
         }
+        return of(pid: pid, signaller: signaller)
+    }
+
+    /// The identity of the process holding `pid` now, or nil when any part of
+    /// it could not be read.
+    ///
+    /// The read `ofPeer` makes once it has a pid, so an identity built from a
+    /// pid a caller was told compares equal to one the sidecar recorded for
+    /// the same process — the comparison `holder.reconcileClaims` makes
+    /// between the app's stated pid and a claim's owner. A reused pid reads
+    /// back a different start time, and so a different identity.
+    ///
+    /// All-or-nothing for the reason `ofPeer` gives. Each fact is one `ps`
+    /// spawn, and the call blocks until both have answered.
+    static func of(pid: Int32, signaller: any ProcessSignaller) -> ProcessIdentity? {
+        guard pid > 0 else { return nil }
         guard let startedAt = signaller.startTime(pid) else { return nil }
         guard let commandLine = signaller.commandLine(pid), !commandLine.isEmpty else {
             return nil

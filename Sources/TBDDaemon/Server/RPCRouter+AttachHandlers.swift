@@ -237,7 +237,11 @@ extension RPCRouter {
                 terminal: terminal,
                 holderIsLive: holderProcessIsLive,
                 rowPermits: { await self.mayAdoptForAttach(terminal) })
-            vend = try await registry.beginAttach(terminalID: terminal.id)
+            // The app's number for this request rides onto the pending attach
+            // and the claim it becomes, which is what lets a claim sweep order
+            // the app's statement of what it holds against this attach.
+            vend = try await registry.beginAttach(
+                terminalID: terminal.id, attachSeq: params.attachSeq)
         } catch let error as HolderRegistry.Error
             where attachRefusalMeansSessionEnded(error, terminal: terminal) {
             // Refused, and the holder the row records is not running: the
@@ -593,6 +597,75 @@ extension RPCRouter {
                 """)
         }
         return .ok()
+    }
+
+    /// Handle `holder.reconcileClaims`: the app's statement, sent on every poll
+    /// tick, of which holder sessions it holds a descriptor for or has an
+    /// attach in flight for. While `holder_claim_reconcile_enabled` is on, the
+    /// registry takes back that app's claims on every other session
+    /// (`HolderRegistry.reconcileClaims`); while it is off, it only names them
+    /// (`HolderRegistry.reportClaims`). Design:
+    /// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+    ///
+    /// **The registry's cheap gate runs first.** In the steady state every
+    /// live panel's session is in `held`, so the gate answers false and the
+    /// sweep costs one actor hop: no database read, no `ps`.
+    ///
+    /// **The flag is read next, before the pid is resolved, and while it is
+    /// off the pid is never resolved.** Resolving it spawns `ps` twice and
+    /// blocks. With the flag off a candidate is never taken back, so after
+    /// one truly lost handback it would pass the gate on every 2 s tick until
+    /// the app quits, and each tick would pay for the resolve. The report
+    /// matches by pid alone instead, as the gate does; that can name a claim
+    /// whose owner merely reused the app's pid, and naming it changes
+    /// nothing. With the flag on, the pid is resolved and its start time
+    /// tells the app apart from a reused pid, and every candidate the sweep
+    /// selects is taken back, or dropped by a failed take-back, so it stops
+    /// passing the gate.
+    ///
+    /// **Nothing here is an error.** A daemon with no holder transport, a pid
+    /// that does not resolve, and a sweep with nothing to take back all answer
+    /// an empty result: the app ignores a failed sweep and sends the next one
+    /// a tick later, so an error would carry nothing it could act on. A flag
+    /// that cannot be read is taken at its shipped default, as an unset one is.
+    func handleHolderReconcileClaims(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(HolderReconcileClaimsParams.self, from: paramsData)
+        let held = Set(params.held)
+        guard let registry = holderRegistry,
+              await registry.hasCandidates(
+                ownedByPID: params.appPID, held: held, throughSeq: params.throughSeq)
+        else {
+            return try RPCResponse(result: HolderReconcileClaimsResult())
+        }
+        let act: Bool
+        do {
+            act = try await db.config.get().holderClaimReconcileEnabled
+        } catch {
+            logger.error("""
+                holder.reconcileClaims could not read holder_claim_reconcile_enabled, so the \
+                sweep takes the shipped default: \(error.localizedDescription, privacy: .public)
+                """)
+            act = Config.holderClaimReconcileEnabledDefault
+        }
+        guard act else {
+            let report = await registry.reportClaims(
+                ownedByPID: params.appPID, held: held, throughSeq: params.throughSeq)
+            return try RPCResponse(
+                result: HolderReconcileClaimsResult(
+                    takenBack: report.takenBack, wouldTakeBack: report.wouldTakeBack))
+        }
+        guard let app = appIdentityResolver(params.appPID) else {
+            logger.info("""
+                holder.reconcileClaims from pid \(params.appPID, privacy: .public) swept \
+                nothing: that pid could not be resolved to a process identity
+                """)
+            return try RPCResponse(result: HolderReconcileClaimsResult())
+        }
+        let sweep = await registry.reconcileClaims(
+            heldBy: app, held: held, throughSeq: params.throughSeq)
+        return try RPCResponse(
+            result: HolderReconcileClaimsResult(
+                takenBack: sweep.takenBack, wouldTakeBack: sweep.wouldTakeBack))
     }
 
     /// Handle `pane.resize`: the app's debounced desired size for one window.

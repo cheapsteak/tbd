@@ -787,7 +787,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// minted. Nil until `attach.ready` has been accepted, because before
         /// that the daemon has not handed the pty over and there is nothing to
         /// hand back.
-        private var holderAttach: (worktreeID: UUID, generation: UInt64)?
+        ///
+        /// `hold` is the attach's place in the handback ledger's held set,
+        /// carried here so the handback that ends this attach ends it too,
+        /// and only once that handback has ended.
+        private var holderAttach: (worktreeID: UUID, generation: UInt64, hold: HolderHold)?
         /// While non-nil, terminal replies are collected here instead of being
         /// routed to the session.
         ///
@@ -1417,18 +1421,34 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 attachSettled.finish()
                 ledger.withdraw(terminalID: panelID, task: attachSettling)
             }
+            // **Held from before the request until this attempt has ended.**
+            // The claim sweep takes back any claim of this app whose terminal
+            // is not held, so the hold is begun in the same main-actor step
+            // that numbers the request, and each exit below hands it to
+            // whatever ends up owning the descriptor. Never ended in the
+            // `defer` above: that runs when a live attach returns too.
+            let hold = ledger.beginHold(terminalID: panelID)
             let attachment: HolderAttachment
             do {
                 attachment = try await client.attach(
-                    worktreeID: worktreeID, paneID: paneID, terminalID: panelID)
+                    worktreeID: worktreeID, paneID: paneID, terminalID: panelID,
+                    attachSeq: hold.attachSeq)
             } catch {
                 // The release of an attach whose descriptor never arrived may
                 // still be resending: recorded here, before this attempt
-                // returns, so the wait before the placard sees it.
+                // returns, so the wait before the placard sees it. The hold
+                // rides it: the release has not ended until the resend has.
                 if let undelivered = error as? HolderAttachUndelivered {
-                    ledger.registerResend(terminalID: panelID, task: undelivered.releaseResend)
+                    ledger.registerResend(
+                        terminalID: panelID, task: undelivered.releaseResend, endingHold: hold)
                     return HolderAttachAttemptFailure(error: undelivered.cause, step: "attach refused")
                 }
+                // Any other failure leaves this app with no descriptor to read
+                // and nothing still being sent: a descriptor that already
+                // arrived was closed when the client cancelled its wait, and
+                // one that arrives later finds no waiter and is closed unread.
+                // A release the client sent has had its one pass.
+                ledger.endHold(hold)
                 return HolderAttachAttemptFailure(error: error, step: "attach refused")
             }
             // **Close-on-exec, before anything else touches it.** A descriptor
@@ -1451,7 +1471,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Darwin.close(attachment.ptyFD)
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation, reader: nil)
+                    generation: attachment.generation, hold: hold, reader: nil)
                 return nil
             }
             if !attachment.snapshotPreamble.isEmpty {
@@ -1469,7 +1489,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Darwin.close(attachment.ptyFD)
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation, reader: nil)
+                    generation: attachment.generation, hold: hold, reader: nil)
                 return nil
             }
             // Feed OFF-MAIN, through the view holder, exactly as the local-PTY
@@ -1555,7 +1575,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 removeLatencyTap()
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation, reader: reader)
+                    generation: attachment.generation, hold: hold, reader: reader)
                 return HolderAttachAttemptFailure(error: error, step: "attach.ready refused")
             }
             // Torn down while the ack was in flight: the daemon has confirmed
@@ -1581,7 +1601,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // drain beside it, two readers on one pty.
             guard !isTornDown else {
                 removeLatencyTap()
-                holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
+                holderAttach = (
+                    worktreeID: worktreeID, generation: attachment.generation, hold: hold)
                 detachHolderSession(stoppedReader: reader)
                 return nil
             }
@@ -1599,7 +1620,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // it is confirmed hands it back through
             // `releaseAbandonedHolderAttach`; the teardown that lands just
             // after the ack sets this itself and takes the live path.
-            holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
+            holderAttach = (
+                worktreeID: worktreeID, generation: attachment.generation, hold: hold)
             // Claimed only once the attach is live: before the ack the daemon
             // is still the session's writer, and an injection routed here in
             // that window would be written to a pty the daemon has not yet
@@ -1708,24 +1730,33 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// Registered with the ledger so a successor panel for this terminal
         /// waits for the release instead of being refused for the claim it is
         /// about to clear.
+        ///
+        /// `hold` ends only once the release has: after the descriptor is
+        /// closed and the release's first pass has returned, or, when that
+        /// pass left a resend, when the resend finishes. Until then the claim
+        /// sweep leaves this terminal alone.
         @MainActor
         private func releaseAbandonedHolderAttach(
             client: any HolderAttaching, ledger: HolderHandbackLedger,
-            worktreeID: UUID, generation: UInt64,
+            worktreeID: UUID, generation: UInt64, hold: HolderHold,
             reader: HolderStreamReader?
         ) {
             let panelID = self.panelID
             // Settles once each request has been sent once; a resend of one
             // that never reached the daemon carries on outside the entry, and
             // is recorded as a resend so a successor about to give up waits
-            // for it.
+            // for it. The hold goes with the resend rather than holding this
+            // entry open: a successor waits on the entry, and must not wait
+            // out a resend schedule.
             let release = Task { @MainActor in
                 await reader?.awaitClosed()
                 if let resend = await client.releaseUnconfirmedAttach(
                     worktreeID: worktreeID, paneID: "", terminalID: panelID,
                     generation: generation, kind: "abandoned"
                 ) {
-                    ledger.registerResend(terminalID: panelID, task: resend)
+                    ledger.registerResend(terminalID: panelID, task: resend, endingHold: hold)
+                } else {
+                    ledger.endHold(hold)
                 }
             }
             ledger.register(terminalID: panelID, task: release)
@@ -1863,6 +1894,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// carries, and reclaiming the session on that evidence is app-liveness
         /// arbitration rather than anything a teardown can do.
         ///
+        /// **The attach's hold ends here only when there is an attach to hand
+        /// back**, and then only once its handback has ended. The early return
+        /// below ends none: a teardown during the ack reaches it with the
+        /// reader stopped but not yet closed and `attach.ready` still pending,
+        /// and that attempt's hold is ended by whichever path the ack's answer
+        /// takes it down — the abandoned attach's release, or the live
+        /// handback.
+        ///
         /// - Parameter stoppedReader: A reader the caller holds that the
         ///   coordinator no longer does — one a previous call already stopped
         ///   and cleared. The handback waits for it to close exactly as for
@@ -1927,11 +1966,19 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // releases the claim is the app-liveness verdict that covers an
                 // app which died mid-detach — the same path, reached by a
                 // different failure.
+                //
+                // The hold ends with the handback: here, once the first
+                // attempt has returned, or with the resend when there is one,
+                // so a sweep acts only on a handback that was truly lost and
+                // the orderly path keeps its screen.
                 if let resend = await client.detachResendingInBackground(
                     worktreeID: attach.worktreeID, paneID: "", terminalID: panelID,
                     generation: attach.generation, snapshotPreamble: preamble
                 ) {
-                    ledger.registerResend(terminalID: panelID, task: resend)
+                    ledger.registerResend(
+                        terminalID: panelID, task: resend, endingHold: attach.hold)
+                } else {
+                    ledger.endHold(attach.hold)
                 }
             }
             ledger.register(terminalID: panelID, task: handback)
