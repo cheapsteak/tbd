@@ -250,6 +250,9 @@ scripts/test.sh -Xswiftc -DTBD_HARNESSES --filter <Suite>
 ```
 
 `-Xswiftc` reaches every target, so the first such run rebuilds the package.
+Run it with `TBD_REMOTE_VERIFY` unset: the remote valve verifies on CI, which
+builds without the condition, so a green verdict from it says nothing about a
+harness.
 The condition only makes a harness exist; most also keep their own variable,
 so compiling them all does not start any of them. Each file's header names its
 variable and gives the full command:
