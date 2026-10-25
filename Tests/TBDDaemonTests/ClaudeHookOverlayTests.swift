@@ -507,7 +507,7 @@ extension TBDHomeSerialized {
         let path = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: nil,
             sessionKey: key,
-            extraSettingsJSON: #"{"skillOverrides":{"longeye-code-review":"off"}}"#
+            extraSettingsJSON: #"{"skillOverrides":{"acme-code-review":"off"}}"#
         )
         // Per-session file (not the shared global overlay).
         #expect(path != ClaudeHookOverlay.overlayPath)
@@ -519,7 +519,7 @@ extension TBDHomeSerialized {
         let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         #expect(parsed?["hooks"] != nil)
         let overrides = parsed?["skillOverrides"] as? [String: Any]
-        #expect(overrides?["longeye-code-review"] as? String == "off")
+        #expect(overrides?["acme-code-review"] as? String == "off")
     }
 
     @Test func resolveOverlayPathWithMalformedExtraSettingsDoesNotThrowAndKeepsHooks() throws {

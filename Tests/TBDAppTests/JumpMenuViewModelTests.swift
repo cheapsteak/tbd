@@ -178,13 +178,13 @@ struct JumpMenuViewModelTests {
         let a = UUID(); let b = UUID()
         let vm = JumpMenuViewModel(
             worktrees: [
-                snap(a, name: "alpha", repo: "longeye-app"),
+                snap(a, name: "alpha", repo: "acme-app"),
                 snap(b, name: "beta", repo: "tbd"),
             ],
             unread: [:],
             recentIDs: []
         )
-        vm.query = "longeye"
+        vm.query = "acme"
         #expect(vm.rows.count == 1)
         #expect(vm.rows.first?.id == a)
     }

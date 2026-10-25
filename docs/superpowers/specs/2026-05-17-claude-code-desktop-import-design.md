@@ -130,7 +130,7 @@ No Swift code is added, so all tests are bash-script level:
 - **Argument handling**: `--repo` is required; repeated `--repo` paths that resolve to the same root are de-duped; a `--repo` pointing inside a worktree resolves to the main repo root.
 - **Dry-run**: no `tbd` write commands are invoked.
 
-Fixtures use `acme-app` / `acme-prod` placeholders — never `longeye`.
+Fixtures use `acme-app` / `acme-prod` placeholders.
 
 ## README
 
