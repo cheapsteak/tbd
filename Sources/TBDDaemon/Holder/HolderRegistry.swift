@@ -497,7 +497,27 @@ actor HolderRegistry {
     /// would take the pty of a holder about to be told to forget it. Grows by
     /// one per holder session torn down for good, which is bounded by the
     /// sessions one daemon ever runs.
-    private var sessionsLetGo: Set<UUID> = []
+    ///
+    /// Each entry carries the mark it was given (`letGoMarks`), so a caller
+    /// that read the mark before suspending can tell a newer let-go from the
+    /// one it saw (`clearLetGo(terminalID:ifUnchangedSince:)`).
+    private var sessionsLetGo: [UUID: UInt64] = [:]
+
+    /// Mints let-go marks: one per insert into `sessionsLetGo`, increasing for
+    /// the daemon's life, so no two inserts share a mark.
+    private var letGoMarks: UInt64 = 0
+
+    /// The sessions whose remembered `.exitedStatusUnknown` was recorded
+    /// because nothing answered at the rendezvous — `ENOENT` or `ECONNREFUSED`
+    /// on the startup pass's connect — rather than because a holder said so.
+    ///
+    /// Kept beside `statuses` because the two answers are not the same
+    /// evidence. A holder that reports an unknown status has observed its own
+    /// child and is winding down; a refused connect is also what a live holder
+    /// with a full accept backlog or a stalled accept loop looks like, so only
+    /// this source may be second-guessed by an attach (`attachAdoption`).
+    /// Written only through `recordStatus`, which keeps the two in step.
+    private var statusesFromAbsentRendezvous: Set<UUID> = []
 
     /// What the hand-over said about each published session's processes.
     ///
@@ -799,8 +819,40 @@ actor HolderRegistry {
     ///
     /// `nil` clears the entry, which is the distinct "no holder ever reported"
     /// state rather than a fourth status.
-    func recordStatusForTesting(_ status: HolderChildStatus?, for terminalID: UUID) {
+    ///
+    /// `fromAbsentRendezvous: true` records it as the startup pass records an
+    /// `ENOENT` or `ECONNREFUSED` at the rendezvous — the one source an attach
+    /// may second-guess (`statusesFromAbsentRendezvous`).
+    func recordStatusForTesting(
+        _ status: HolderChildStatus?, for terminalID: UUID, fromAbsentRendezvous: Bool = false
+    ) {
+        recordStatus(status, for: terminalID, fromAbsentRendezvous: fromAbsentRendezvous)
+    }
+
+    /// The one writer of `statuses`, so `statusesFromAbsentRendezvous` can
+    /// never describe a status that has since been replaced.
+    private func recordStatus(
+        _ status: HolderChildStatus?, for terminalID: UUID, fromAbsentRendezvous: Bool = false
+    ) {
         statuses[terminalID] = status
+        if fromAbsentRendezvous {
+            statusesFromAbsentRendezvous.insert(terminalID)
+        } else {
+            statusesFromAbsentRendezvous.remove(terminalID)
+        }
+    }
+
+    /// The mark this session was let go under, or nil when it is not let go
+    /// (`sessionsLetGo`). A caller that suspends before acting on a let-go
+    /// reads this first and passes it to `clearLetGo(terminalID:ifUnchangedSince:)`.
+    func letGoMark(for terminalID: UUID) -> UInt64? {
+        sessionsLetGo[terminalID]
+    }
+
+    /// Marks a session let go under a fresh mark.
+    private func markLetGo(_ terminalID: UUID) {
+        letGoMarks += 1
+        sessionsLetGo[terminalID] = letGoMarks
     }
 
     /// Records the processes behind a session as an adoption's publish
@@ -1001,9 +1053,9 @@ actor HolderRegistry {
     /// attach's on-demand adoption cannot reach for the holder in the gap
     /// between the release and the `forget`.
     func abandon(terminalID: UUID, handle: HolderHandle) async {
-        sessionsLetGo.insert(terminalID)
+        markLetGo(terminalID)
         await release(terminalID: terminalID)
-        statuses[terminalID] = nil
+        recordStatus(nil, for: terminalID)
         await dispose(handle: handle)
     }
 
@@ -1116,9 +1168,9 @@ actor HolderRegistry {
             return "\(error)"
         }
         // Let go before anything suspends, as in `abandon`.
-        sessionsLetGo.insert(terminalID)
+        markLetGo(terminalID)
         await release(terminalID: terminalID)
-        statuses[terminalID] = nil
+        recordStatus(nil, for: terminalID)
 
         let client = HolderClient(socketPath: socketPath)
         try? await client.forget()
@@ -1368,7 +1420,11 @@ actor HolderRegistry {
     /// publish would erase the very mark that said so. Checked inside the
     /// loop rather than once by the caller, because a pass that waits out a
     /// release can find the mark set by the teardown that release belonged to.
-    private func adopt(terminal: Terminal, skippingLetGo: Bool) async throws -> HolderReader {
+    ///
+    /// Internal rather than private only so a test can see the refusal by
+    /// name: the startup pass (`adoptOne`) logs and swallows every error.
+    @discardableResult
+    func adopt(terminal: Terminal, skippingLetGo: Bool) async throws -> HolderReader {
         guard terminal.transport == .holder else {
             throw Error.notAHolderSession(terminalID: terminal.id)
         }
@@ -1379,7 +1435,7 @@ actor HolderRegistry {
             guard !isShuttingDown else {
                 throw Error.daemonShuttingDown(terminalID: terminalID)
             }
-            if skippingLetGo, sessionsLetGo.contains(terminalID) {
+            if skippingLetGo, sessionsLetGo[terminalID] != nil {
                 throw Error.sessionLetGo(terminalID: terminalID)
             }
             // Re-read on every pass, not once at the top: an actor's methods
@@ -1758,7 +1814,7 @@ actor HolderRegistry {
                 // Nothing is bound at the rendezvous, so the holder is gone.
                 // The session is over, and the only honest thing to say about
                 // how it ended is that nobody collected the status.
-                statuses[terminal.id] = status
+                recordStatus(status, for: terminal.id, fromAbsentRendezvous: true)
                 Self.logger.info(
                     """
                     no holder answered for session \(terminal.id.uuidString, privacy: .public), so \
@@ -2081,16 +2137,18 @@ actor HolderRegistry {
     ///     exited still hands its master over, to rescue the output nobody
     ///     read, so an adoption would build a reader over a finished session.
     ///
-    /// `.exited` is the holder's own report and always refuses.
-    /// `.exitedStatusUnknown` refuses unless the row's holder pid verifiably
-    /// names a running `TBDHolder` (`holderIsLive`), because it is not always
-    /// a report: the startup pass records it on an `ECONNREFUSED` at the
-    /// rendezvous, and Darwin refuses a connect at once when a live holder's
-    /// accept backlog is full or its accept loop has stalled. Read as final,
-    /// that one refusal would make a running session un-adoptable for the
-    /// daemon's whole life. A live holder gets a hand-over attempt instead;
-    /// if that fails as unreachable too, the attach is refused exactly as
-    /// before.
+    /// `.exited` is the holder's own report and always refuses, and so does
+    /// an `.exitedStatusUnknown` the holder reported: it observed its own
+    /// child, and is winding down. One exception, for the one status that is
+    /// not a report: an `.exitedStatusUnknown` the startup pass recorded
+    /// because nothing answered at the rendezvous
+    /// (`statusesFromAbsentRendezvous`). Darwin refuses a connect at once when
+    /// a live holder's accept backlog is full or its accept loop has stalled,
+    /// so read as final, that one refusal would make a running session
+    /// un-adoptable for the daemon's whole life. It is lifted only while the
+    /// row's holder pid verifiably names this session's running holder
+    /// (`holderVerifiablyRunning`); if the hand-over then fails as unreachable
+    /// too, the attach is refused exactly as before.
     private func attachAdoption(
         for terminal: Terminal, holderIsLive: (Int32) -> Bool
     ) -> AttachAdoption {
@@ -2107,15 +2165,17 @@ actor HolderRegistry {
         case .adopting(let task):
             return .join(task)
         case nil:
-            if sessionsLetGo.contains(terminalID) {
+            if sessionsLetGo[terminalID] != nil {
                 return .declined("this daemon told its holder to let go")
             }
             switch statuses[terminalID] {
             case .exited:
                 return .declined("its holder reported the job exited")
             case .exitedStatusUnknown:
-                guard let holderPID = terminal.holderPID, holderPID > 1,
-                      holderIsLive(holderPID) else {
+                guard statusesFromAbsentRendezvous.contains(terminalID) else {
+                    return .declined("its holder reported the job ended")
+                }
+                guard holderVerifiablyRunning(terminal, holderIsLive: holderIsLive) else {
                     return .declined("its job has ended and its holder is not running")
                 }
             case .alive, nil:
@@ -2179,8 +2239,34 @@ actor HolderRegistry {
     /// refuses a session this registry told to let go — as a park that reached
     /// `abandon` did. Without this, the row would be awake and refused by
     /// every attach for the daemon's whole life.
-    func clearLetGo(terminalID: UUID) {
-        sessionsLetGo.remove(terminalID)
+    ///
+    /// **Only the mark the caller saw is cleared.** `mark` is what
+    /// `letGoMark(for:)` answered before the caller suspended, nil if the
+    /// session was not let go then. A newer let-go — a delete or an archive
+    /// whose `abandon` ran while the wake was adopting — carries a newer mark
+    /// and is left standing: clearing it would let an attach or the startup
+    /// pass adopt a holder that is being told to forget its session.
+    func clearLetGo(terminalID: UUID, ifUnchangedSince mark: UInt64?) {
+        guard let mark, sessionsLetGo[terminalID] == mark else { return }
+        sessionsLetGo[terminalID] = nil
+    }
+
+    /// Whether `terminal`'s recorded holder pid names this session's running
+    /// holder: `holderIsLive` — a running `TBDHolder` by name, the attach
+    /// handler's own check — and, when the row records when its job started,
+    /// a holder that started within `AgentReaper.defaultHolderIdentityWindow`
+    /// of it. A holder forks its job as it starts, so the two instants sit
+    /// together; a pid the kernel has handed to some other holder does not.
+    /// An unreadable start time is uncertainty, and answers no.
+    private func holderVerifiablyRunning(
+        _ terminal: Terminal, holderIsLive: (Int32) -> Bool
+    ) -> Bool {
+        guard let holderPID = terminal.holderPID, holderPID > 1,
+              holderIsLive(holderPID) else { return false }
+        guard let jobStartedAt = terminal.holderChildStartedAt else { return true }
+        guard let holderStartedAt = signaller.startTime(holderPID) else { return false }
+        return abs(holderStartedAt.timeIntervalSince(jobStartedAt))
+            <= AgentReaper.defaultHolderIdentityWindow
     }
 
     /// The result of `work`, or nil when `limit` passes on `clock` first.
@@ -3188,7 +3274,7 @@ actor HolderRegistry {
         guard let status else { return }
         guard case .adopted(let current) = slots[terminalID], current === reader else { return }
 
-        statuses[terminalID] = status
+        recordStatus(status, for: terminalID)
         // A SIGKILLed Claude sends no `state=clear`, so the session's end is
         // the only signal its Program Status entries are over (spec
         // "Liveness"). Dropped here, where the child's exit is confirmed,
@@ -3514,11 +3600,11 @@ actor HolderRegistry {
     /// spawned one — the exact byte theft that counter exists to catch.
     private func publish(_ adoption: Adoption, for terminalID: UUID) {
         slots[terminalID] = .adopted(adoption.reader)
-        statuses[terminalID] = adoption.description.status
+        recordStatus(adoption.description.status, for: terminalID)
         // A holder that has just handed over its pty is a live session, so
         // whatever let go of the one before it no longer describes it — the
         // spawn of a parked session's wake is the ordinary case.
-        sessionsLetGo.remove(terminalID)
+        sessionsLetGo[terminalID] = nil
         // Recorded with the reader and cleared with it, so "the registry holds
         // a reader for this session" and "the registry can name that session's
         // processes" are the same fact rather than two that can disagree.

@@ -28,12 +28,14 @@ import Testing
     private static let budget: Duration = .seconds(5)
 
     private static func registry(
+        signaller: any ProcessSignaller = FakeProcessSignaller(),
         clock: any Clock<Duration> = ContinuousClock()
     ) -> HolderRegistry {
         HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: ["TBD_HOME": "/nonexistent/acme-tbd-home"],
             listTerminals: { [] },
+            signaller: signaller,
             attachAdoptionBudget: budget,
             clock: clock)
     }
@@ -172,33 +174,77 @@ import Testing
     // MARK: - An unknown exit status from a holder that is still running
 
     /// `.exitedStatusUnknown` is not always a report. The startup pass records
-    /// it on an `ECONNREFUSED`, and Darwin refuses a connect at once when a
-    /// live holder's accept backlog is full or its accept loop has stalled.
-    /// While the row's holder pid verifiably names a running holder, the
-    /// attach tries a hand-over anyway; a holder that is not running, or one
-    /// that said outright its job exited, still refuses.
-    @Test func anUnknownExitWithALiveHolderStillGetsAHandOver() async throws {
+    /// it when nothing answers at the rendezvous, and Darwin refuses a connect
+    /// at once when a live holder's accept backlog is full or its accept loop
+    /// has stalled. That one source, and only while the row's holder pid
+    /// verifiably names a running holder, still gets a hand-over attempt; a
+    /// holder that is not running still refuses.
+    @Test func anUnknownExitFromAnAbsentRendezvousWithALiveHolderGetsAHandOver() async throws {
         var row = Self.holderRow()
         row.holderPID = 4242
 
         let live = Self.registry()
-        await live.recordStatusForTesting(.exitedStatusUnknown, for: row.id)
+        await live.recordStatusForTesting(
+            .exitedStatusUnknown, for: row.id, fromAbsentRendezvous: true)
         try await live.adoptForAttach(terminal: row, holderIsLive: { $0 == 4242 })
         #expect(await live.attachRoundTripsStarted == 1, """
-            a session whose holder is running was refused adoption over an unknown exit status, \
-            which one refused connect is enough to record
+            a session whose holder is running was refused adoption over an unknown exit status \
+            that one refused connect is enough to record
             """)
 
         let dead = Self.registry()
-        await dead.recordStatusForTesting(.exitedStatusUnknown, for: row.id)
+        await dead.recordStatusForTesting(
+            .exitedStatusUnknown, for: row.id, fromAbsentRendezvous: true)
         try await dead.adoptForAttach(terminal: row, holderIsLive: { _ in false })
         #expect(await dead.attachRoundTripsStarted == 0)
+    }
 
-        let reported = Self.registry()
-        await reported.recordStatusForTesting(.exited(code: 0), for: row.id)
-        try await reported.adoptForAttach(terminal: row, holderIsLive: { _ in true })
-        #expect(await reported.attachRoundTripsStarted == 0, """
-            a holder that reported its job exited was adopted anyway
+    /// An exit the holder itself reported — a code, or a status it could not
+    /// observe — is the holder's own word about its own child, and a holder
+    /// still winding down after it is no reason to adopt. Both refuse, however
+    /// alive the holder looks.
+    @Test(arguments: [HolderChildStatus.exited(code: 0), .exitedStatusUnknown])
+    func anExitTheHolderReportedRefusesEvenWithALiveHolder(
+        _ reported: HolderChildStatus
+    ) async throws {
+        var row = Self.holderRow()
+        row.holderPID = 4242
+        let registry = Self.registry()
+        await registry.recordStatusForTesting(reported, for: row.id)
+
+        try await registry.adoptForAttach(terminal: row, holderIsLive: { _ in true })
+
+        #expect(await registry.attachRoundTripsStarted == 0, """
+            a session whose holder reported its job ended (\(reported)) was adopted anyway
+            """)
+    }
+
+    /// The pid alone names a `TBDHolder`, not this session's. When the row
+    /// records when its job started, the holder at that pid must have started
+    /// with it — a holder forks its job as it starts — or the exception does
+    /// not apply: the pid may belong to some other session's holder by now.
+    @Test func theExceptionNeedsAHolderThatStartedWithTheRowsJob() async throws {
+        let jobStartedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        var row = Self.holderRow()
+        row.holderPID = 4242
+        row.holderChildStartedAt = jobStartedAt
+
+        let same = FakeProcessSignaller()
+        same.startTimes[4242] = jobStartedAt.addingTimeInterval(-1)
+        let matching = Self.registry(signaller: same)
+        await matching.recordStatusForTesting(
+            .exitedStatusUnknown, for: row.id, fromAbsentRendezvous: true)
+        try await matching.adoptForAttach(terminal: row, holderIsLive: { _ in true })
+        #expect(await matching.attachRoundTripsStarted == 1)
+
+        let stranger = FakeProcessSignaller()
+        stranger.startTimes[4242] = jobStartedAt.addingTimeInterval(86_400)
+        let reused = Self.registry(signaller: stranger)
+        await reused.recordStatusForTesting(
+            .exitedStatusUnknown, for: row.id, fromAbsentRendezvous: true)
+        try await reused.adoptForAttach(terminal: row, holderIsLive: { _ in true })
+        #expect(await reused.attachRoundTripsStarted == 0, """
+            a holder that started a day after the row's job was taken for this session's
             """)
     }
 
@@ -220,12 +266,20 @@ import Testing
     /// one would take the pty of a holder being told to forget it, and the
     /// publish would erase the mark that said so. The general `adopt` is left
     /// alone: the wake adopts a parked row's live holder on purpose.
+    ///
+    /// The refusal is asserted by name through the startup pass's own adopt,
+    /// since `adoptRemaining` swallows every error. The in-loop re-check — a
+    /// let-go that lands while the pass is already waiting on that row — needs
+    /// a reader to wait on, so it is `HolderAttachOnDemandAdoptionLiveTests`'.
     @Test func theStartupPassSkipsASessionLetGoSinceItBegan() async throws {
         let registry = Self.registry()
         let tornDown = Self.holderRow()
         let untouched = Self.holderRow()
         _ = await registry.abandon(terminalID: tornDown.id, holderPID: nil, childPID: nil)
 
+        await #expect(throws: HolderRegistry.Error.sessionLetGo(terminalID: tornDown.id)) {
+            try await registry.adopt(terminal: tornDown, skippingLetGo: true)
+        }
         await registry.adoptRemaining([tornDown, untouched])
 
         #expect(await registry.attachRoundTripsStarted == 1, """
@@ -233,8 +287,10 @@ import Testing
             skipped one it should have tried
             """)
 
-        await #expect(throws: (any Error).self) {
-            _ = try await registry.adopt(terminal: tornDown)
+        // The general adopt does reach for it — and fails at the connect,
+        // since no holder answers here — rather than refusing it as let go.
+        await #expect(throws: HolderClient.Error.self) {
+            try await registry.adopt(terminal: tornDown)
         }
         #expect(await registry.attachRoundTripsStarted == 2, """
             the general adopt refused a let-go session, which would stop a wake adopting a parked \
@@ -366,7 +422,8 @@ import Testing
     /// an error, not "ended", because the holder is live.
     @Test func anAttachToAnUnknownExitWithALiveHolderTriesAHandOver() async throws {
         let harness = try await RouterHarness.make()
-        await harness.registry.recordStatusForTesting(.exitedStatusUnknown, for: harness.terminalID)
+        await harness.registry.recordStatusForTesting(
+            .exitedStatusUnknown, for: harness.terminalID, fromAbsentRendezvous: true)
 
         let response = try await harness.attach()
 

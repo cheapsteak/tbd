@@ -1159,6 +1159,134 @@ struct HolderTmuxAssumptionGateTests {
                 "the holder wake path reached tmux: \(recorded.snapshot())")
     }
 
+    /// A delete or an archive that reaches `abandon` while a wake is adopting
+    /// the session's holder: its release supersedes the adoption and its
+    /// let-go mark is newer than anything the wake saw. The wake must leave
+    /// both alone — no un-park of a row being torn down, and no clearing of a
+    /// mark that keeps every attach and the startup pass off a holder being
+    /// told to forget its session.
+    @Test("a teardown during a wake's adoption keeps the row parked and its let-go mark",
+          .clockDriven)
+    func aTeardownDuringTheWakesAdoptionKeepsTheRowParked() async throws {
+        let fixture = try await heldWakeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.dir) }
+
+        let held = try await fixture.startWakeAndWaitForTheHeldAdoption()
+        guard held else { return }
+        _ = await fixture.registry.abandon(
+            terminalID: fixture.terminal.id, holderPID: nil, childPID: nil)
+        let markAfterTheTeardown = await fixture.registry.letGoMark(for: fixture.terminal.id)
+        await fixture.hold.release()
+        let result = await fixture.waking.value
+
+        guard case .respawnFailed(let reason) = result else {
+            Issue.record("expected the wake to leave the row parked, got \(result)")
+            return
+        }
+        #expect(reason.contains("released"), "the refusal did not say why: \(reason)")
+        let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(after.isParked, "the wake un-parked a row that was being torn down")
+        #expect(markAfterTheTeardown != nil)
+        #expect(await fixture.registry.letGoMark(for: fixture.terminal.id) == markAfterTheTeardown,
+                "the wake cleared a let-go mark set by a teardown that ran after it began")
+        try await fixture.registry.adoptForAttach(terminal: after)
+        #expect(await fixture.registry.attachRoundTripsStarted == 1,
+                "an attach reached for the holder of a session being torn down")
+    }
+
+    /// A shutdown that begins while the wake is adopting reaches the wake as
+    /// the hand-over's own failure, never as `daemonShuttingDown`. The wake
+    /// asks the registry instead, and leaves the row parked for the next
+    /// daemon rather than un-parking it in one that is exiting.
+    @Test("a shutdown during a wake's adoption keeps the row parked", .clockDriven)
+    func aShutdownDuringTheWakesAdoptionKeepsTheRowParked() async throws {
+        let fixture = try await heldWakeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.dir) }
+
+        let held = try await fixture.startWakeAndWaitForTheHeldAdoption()
+        guard held else { return }
+        await fixture.registry.releaseAll()
+        await fixture.hold.release()
+        let result = await fixture.waking.value
+
+        guard case .respawnFailed(let reason) = result else {
+            Issue.record("expected the wake to leave the row parked, got \(result)")
+            return
+        }
+        #expect(reason.contains("shutting down"), "the refusal did not name the shutdown: \(reason)")
+        let after = try #require(try await fixture.db.terminals.get(id: fixture.terminal.id))
+        #expect(after.isParked, """
+            the wake un-parked a row in a daemon that began shutting down during its adoption
+            """)
+    }
+
+    /// A row parked over a live child, a registry whose adoptions are held at
+    /// their publish step and whose budget timer runs on a clock nobody
+    /// advances, and the coordinator over both. For the tests that act while
+    /// a wake's adoption is in flight.
+    private struct HeldWakeFixture {
+        let db: TBDDatabase
+        let dir: URL
+        let terminal: Terminal
+        let registry: HolderRegistry
+        let hold: HeldAdoption
+        let coordinator: HibernationCoordinator
+        let waking: Task<WakeResult, Never>
+
+        /// Waits for the wake's adoption to park, and records why when it does
+        /// not. Answers whether it parked.
+        func startWakeAndWaitForTheHeldAdoption() async throws -> Bool {
+            let parked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+                await hold.parked == 1
+            }
+            guard parked == .satisfied else {
+                await hold.release()
+                let result = await waking.value
+                Issue.record(BoundedWaitTimeout(
+                    what: "the wake's adoption to reach its publish step",
+                    observed: "no adoption parked; the wake answered \(result)",
+                    deadline: TestDeadlines.saturatedPass))
+                return false
+            }
+            return true
+        }
+    }
+
+    private func heldWakeFixture() async throws -> HeldWakeFixture {
+        let db = try TBDDatabase(inMemory: true)
+        let tmux = deadWindowTmux(RecordedTmuxArgs())
+        let (wt, dir) = try await seedWorktree(db)
+
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9109] = .init(aliveInitially: true)
+        signaller.startTimes[9109] = childStartedAt
+        signaller.cmdlines[9109] = Self.holderChildCommand
+
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder,
+            childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+
+        // Never advanced: the adoption ends only when the test releases it,
+        // so the budget cannot decide what these tests are about.
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": "/tmp/tbd-hg-\(UUID().uuidString.prefix(8))"],
+            listTerminals: { [terminal] },
+            clock: EventDrivenTestClock())
+        let hold = HeldAdoption()
+        await registry.setPublishBarrier(hold.hook())
+        let hibernation = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: signaller)
+        let terminalID = terminal.id
+        let waking = Task { await hibernation.wake(terminalID: terminalID) }
+        return HeldWakeFixture(
+            db: db, dir: dir, terminal: terminal, registry: registry, hold: hold,
+            coordinator: hibernation, waking: waking)
+    }
+
     /// A wake that un-parks a row over a live holder it could not adopt leaves
     /// the adoption to the next attach — so it must clear the let-go mark a
     /// park that reached `abandon` left, or that attach refuses the revived

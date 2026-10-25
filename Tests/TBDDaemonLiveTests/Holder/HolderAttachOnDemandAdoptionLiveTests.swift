@@ -126,6 +126,66 @@ struct HolderAttachOnDemandAdoptionLiveTests {
     }
 }
 
+extension HolderAttachOnDemandAdoptionLiveTests {
+    /// The startup pass's in-loop re-check of the let-go mark. The pass finds
+    /// the row's reader on its way out and waits for the release; while it
+    /// waits, a teardown marks the session let go. When the release lands, the
+    /// pass must see the mark on its next look rather than adopt the holder
+    /// the teardown is telling to forget its session — a check made once,
+    /// before the wait, would have found nothing.
+    @Test func theStartupPassRechecksTheLetGoMarkAfterWaitingOutARelease() async throws {
+        let process = try await HolderProcessFixture.start(command: Self.echoJob)
+        defer { process.tearDown() }
+        await process.client.close()
+        let registry = HolderRegistry(
+            owner: process.owner,
+            environment: HolderProcessFixture.environment(home: process.home),
+            listTerminals: { [] })
+        defer { Task.detached { await registry.releaseAll() } }
+        let row = TBDShared.Terminal(
+            id: process.sessionID, worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder)
+        _ = try await registry.adopt(terminal: row)
+
+        let hold = ReleaseHold()
+        await registry.setReleaseBarrier(hold.hook())
+        let releasing = Task { await registry.release(terminalID: row.id) }
+        let parked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await hold.parked == 1
+        }
+        let startupPass = Task { try await registry.adopt(terminal: row, skippingLetGo: true) }
+        // Two adopt calls have consulted the slot — the first adoption and the
+        // pass — so the pass has found `.releasing` and is waiting on it.
+        let waiting = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await registry.adoptionCallsEntered == 2
+        }
+        let tearingDown = Task {
+            await registry.abandon(terminalID: row.id, holderPID: nil, childPID: nil)
+        }
+        let marked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await registry.letGoMark(for: row.id) != nil
+        }
+        await hold.release()
+        await releasing.value
+        _ = await tearingDown.value
+
+        guard parked == .satisfied, waiting == .satisfied, marked == .satisfied else {
+            Issue.record(BoundedWaitTimeout(
+                what: "the release to park, the startup pass to wait on it, and the teardown to mark it",
+                observed: "parked \(parked), waiting \(waiting), marked \(marked)",
+                deadline: TestDeadlines.saturatedPass))
+            return
+        }
+        await #expect(throws: HolderRegistry.Error.sessionLetGo(terminalID: row.id)) {
+            try await startupPass.value
+        }
+        #expect(await registry.attachRoundTripsStarted == 1, """
+            the startup pass opened a hand-over for a session let go while it waited
+            """)
+        #expect(await registry.reader(for: row.id) == nil)
+    }
+}
+
 // MARK: - Support
 
 /// A router whose only holder row is `terminalID`, with a socketpair standing

@@ -1116,11 +1116,12 @@ extension HibernationCoordinator {
     /// live child is the state this transport treats as worst, while an awake
     /// row names live pids every reconciler can judge, and the next attach
     /// adopts on demand (`HolderRegistry.adoptForAttach`). The wake clears the
-    /// session's let-go mark on those paths, because that attach refuses a
+    /// let-go mark it found on those paths, because that attach refuses a
     /// session this registry told to let go and the wake has just revived it.
-    /// The one exception is a daemon that is shutting down, which adopts
-    /// nothing: the row stays parked, and the next daemon's startup adoption
-    /// picks the holder up.
+    /// Two things keep the row parked instead (`refusalToUnparkWithoutAReader`):
+    /// a daemon that is shutting down, which adopts nothing and leaves the
+    /// holder to the next daemon's startup adoption, and a session released or
+    /// let go again while the wake waited, which something is tearing down.
     private func adoptLiveHolderInsteadOfRespawning(
         _ terminal: Terminal, registry: HolderRegistry
     ) async -> WakeResult? {
@@ -1142,39 +1143,36 @@ extension HibernationCoordinator {
             // Adopted before the row stops being parked, for the reason the
             // header gives: un-parked without a reader, nothing drains it.
             // Bounded like an attach's adoption, because this wake holds its
-            // claim and its caller's RPC for as long as it waits.
-            switch await registry.adoptWithinAttachBudget(terminal: terminal) {
-            case .success(_)?:
+            // claim and its caller's RPC for as long as it waits. The let-go
+            // mark is read before the wait, so a newer one — a teardown that
+            // runs while this wake is adopting — is told apart from the one
+            // the wake found.
+            let letGoMark = await registry.letGoMark(for: terminal.id)
+            let adoption = await registry.adoptWithinAttachBudget(terminal: terminal)
+            if case .success(_)? = adoption {
                 evidence = "its recorded child \(childPID) is identity-verified alive, and its "
                     + "holder is now adopted"
                 await restoreHolderPIDsFromRegistry(terminal, registry: registry)
-            case .failure(let error)?:
-                if let refusal = error as? HolderRegistry.Error,
-                   case .daemonShuttingDown = refusal {
-                    // Not a holder that refused: this daemon adopts nothing
-                    // any more. The row stays parked, so the next daemon's
-                    // startup adoption — which adopts parked rows too — finds
-                    // the holder and the next wake un-parks over a reader.
-                    logger.notice("wake: \(terminal.id, privacy: .public) is parked over a live holder, but the daemon is shutting down and adopts nothing; leaving the row parked for the next daemon to adopt")
-                    return .respawnFailed(
-                        reason: "the daemon is shutting down, so this session stays parked; its "
-                            + "holder is still running and the next daemon will adopt it")
+            } else {
+                if let leftParked = await refusalToUnparkWithoutAReader(
+                    terminal, adoption: adoption, letGoMark: letGoMark, registry: registry) {
+                    return leftParked
                 }
-                evidence = "its recorded child \(childPID) is identity-verified alive, though its "
-                    + "holder could not be adopted, so the next attach will adopt it"
-                logger.warning("wake: \(terminal.id, privacy: .public) is parked over a live holder that would not hand its pty over; un-parking it without a reader: \(error.localizedDescription, privacy: .public)")
+                if case .failure(let error)? = adoption {
+                    evidence = "its recorded child \(childPID) is identity-verified alive, though "
+                        + "its holder could not be adopted, so the next attach will adopt it"
+                    logger.warning("wake: \(terminal.id, privacy: .public) is parked over a live holder that would not hand its pty over; un-parking it without a reader: \(error.localizedDescription, privacy: .public)")
+                } else {
+                    evidence = "its recorded child \(childPID) is identity-verified alive, and its "
+                        + "holder's adoption is still running"
+                    logger.notice("wake: the adoption of \(terminal.id, privacy: .public)'s live holder outlasted its budget; un-parking the row while the adoption finishes on its own")
+                }
                 // The wake revives this session on purpose, and it leaves the
                 // adoption to the next attach — which refuses a session this
                 // registry told to let go, as a park that reached `abandon`
-                // did. Cleared so that promise holds.
-                await registry.clearLetGo(terminalID: terminal.id)
-            case nil:
-                evidence = "its recorded child \(childPID) is identity-verified alive, and its "
-                    + "holder's adoption is still running"
-                logger.notice("wake: the adoption of \(terminal.id, privacy: .public)'s live holder outlasted its budget; un-parking the row while the adoption finishes on its own")
-                // As above: if the adoption fails after all, the next attach
-                // must be free to try.
-                await registry.clearLetGo(terminalID: terminal.id)
+                // did. Only the mark the wake found is cleared; a newer one
+                // has already kept the row parked above.
+                await registry.clearLetGo(terminalID: terminal.id, ifUnchangedSince: letGoMark)
             }
         } else {
             return nil
@@ -1206,6 +1204,51 @@ extension HibernationCoordinator {
         // No incarnation: adopting a holder that was already running spawns
         // nothing, so there is no new session for a caller's wait to scope to.
         return .ok(sessionIncarnationID: nil)
+    }
+
+    /// Why a wake that did not adopt a parked row's live holder must leave the
+    /// row parked, or nil when it may un-park it without a reader.
+    ///
+    /// Two answers keep it parked, and neither can be read off the adoption's
+    /// error alone:
+    ///
+    /// - **The daemon is shutting down.** Asked of the registry, because a
+    ///   shutdown that began while the adoption was in flight reaches it as a
+    ///   supersession, a budget timeout or the hand-over's own failure — never
+    ///   as `daemonShuttingDown`. The row stays parked for the next daemon's
+    ///   startup adoption, which adopts parked rows too.
+    /// - **The session was released or let go while the wake waited** — a
+    ///   delete, an archive or a park reached `abandon`, whose release
+    ///   supersedes the adoption and whose mark is newer than the one this
+    ///   wake read before it (`letGoMark`). Un-parking then would revive a row
+    ///   that is being torn down, and clearing that newer mark would let an
+    ///   attach or the startup pass adopt a holder being told to forget its
+    ///   session.
+    private func refusalToUnparkWithoutAReader(
+        _ terminal: Terminal,
+        adoption: Result<HolderReader, Swift.Error>?,
+        letGoMark: UInt64?,
+        registry: HolderRegistry
+    ) async -> WakeResult? {
+        if await registry.isShuttingDown {
+            logger.notice("wake: \(terminal.id, privacy: .public) is parked over a live holder, but the daemon is shutting down and adopts nothing; leaving the row parked for the next daemon to adopt")
+            return .respawnFailed(
+                reason: "the daemon is shutting down, so this session stays parked; its holder is "
+                    + "still running and the next daemon will adopt it")
+        }
+        var superseded = false
+        if case .failure(let error)? = adoption,
+           let refusal = error as? HolderRegistry.Error,
+           case .superseded = refusal {
+            superseded = true
+        }
+        let currentMark = await registry.letGoMark(for: terminal.id)
+        let letGoSince = currentMark != nil && currentMark != letGoMark
+        guard superseded || letGoSince else { return nil }
+        logger.notice("wake: \(terminal.id, privacy: .public) was released or let go while this wake was adopting its holder, so the row stays parked")
+        return .respawnFailed(
+            reason: "this session was released while the wake was adopting its holder, so it "
+                + "stays parked")
     }
 
     /// Put the registry's own view of a session's processes back onto its row.
