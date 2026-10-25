@@ -692,10 +692,10 @@ class VerdictTests(unittest.TestCase):
 class ResultsVerdictTests(unittest.TestCase):
     """What the RESULT FILES say a red run means, which is not the conclusion.
 
-    `test.yml` holds jobs the test job does not wait on, and steps after the
-    results upload, so the run goes red for a SwiftLint violation
-    or a committed plan file while every test passed — none of which
-    `scripts/test.sh` runs locally.
+    `test.yml` holds jobs the test job does not wait on, and cache bookkeeping
+    steps that can fail without stopping the tests, so the run goes red for a
+    SwiftLint violation or a committed plan file while every test passed — none
+    of which `scripts/test.sh` runs locally.
     """
 
     def report(self, *, total=0, unreadable=(), tests=None, files=1):
@@ -1087,9 +1087,10 @@ class DriverTests(unittest.TestCase):
         self.assertIn("Test run with 9 tests failed", rendered)
 
     def test_a_red_run_whose_tests_all_passed_is_no_verdict(self):
-        # THE TEST JOB DOES NOT WAIT ON `test.yml`'S OTHER JOBS, and steps
-        # follow the results upload — so a SwiftLint violation or a
-        # committed plan file turns the run red while every test passed.
+        # THE TEST JOB DOES NOT WAIT ON `test.yml`'S OTHER JOBS, and its cache
+        # bookkeeping can fail without stopping the tests — so a SwiftLint
+        # violation or a committed plan file turns the run red while every test
+        # passed.
         # `scripts/test.sh` runs none of that locally, so adopting 1 here would
         # report a red suite for something the local suite cannot even see.
         runner = self.failing_runner(**{"xunit-quiet": CLEAN_STYLE})

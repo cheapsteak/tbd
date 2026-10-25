@@ -736,13 +736,13 @@ test_every_skip_build_pass_is_gated_on_the_build() {
   sed "s/steps\.build\.outcome == 'success' && //" "$wf" > "$d/later.yml"
   assert_eq "mutation: 1b, 2 and the quiet pass without the clause are caught" "3" \
     "$(skip_build_gates "$d/later.yml" | grep -c '^UNGATED')"
-  # MUTATION: 1a gated on `success()` alone, which still skips it after a red
-  # build today but no longer says so where the flag is used.
-  sed "s/if: \${{ steps\.build\.outcome == 'success' }}/if: \${{ success() }}/" "$wf" > "$d/first.yml"
+  # MUTATION: 1a gated on `!cancelled()` alone, which would run it after a
+  # failed build.
+  sed "s/if: \${{ !cancelled() && steps\.build\.outcome == 'success' }}/if: \${{ !cancelled() }}/" "$wf" > "$d/first.yml"
   assert_contains "mutation: 1a without the clause is caught" \
     "$(skip_build_gates "$d/first.yml" | grep '^UNGATED')" "pass 1a"
   # MUTATION: 1a with no `if:` at all.
-  sed "/if: \${{ steps\.build\.outcome == 'success' }}/d" "$wf" > "$d/none.yml"
+  sed "/if: \${{ !cancelled() && steps\.build\.outcome == 'success' }}/d" "$wf" > "$d/none.yml"
   assert_contains "mutation: 1a with no if: is caught" \
     "$(skip_build_gates "$d/none.yml" | grep '^UNGATED')" "pass 1a"
   rm -rf "$d"

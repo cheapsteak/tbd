@@ -98,7 +98,7 @@ commit_change() {
   )
 }
 
-# Record the marker the way the end of the `test` job does.
+# Record the marker the way the `test` job does after its build.
 record_marker() {
   ( cd "$1" && /bin/bash "$SCRIPT" --record "$1/marker" ) >/dev/null 2>&1
 }

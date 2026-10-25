@@ -46,8 +46,9 @@ somewhere that cannot make it up.
 A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds jobs the
 test job does not wait on — lint, the committed-plans guard, the review-script
 tests among them; it waits only on the Swift suite gate, which on a dispatched
-run always lets it run — plus steps after the results are uploaded, and ten
-fallible setup and build steps before the first `scripts/test.sh`; and
+run always lets it run — plus cache bookkeeping steps that can fail without
+stopping the tests, and ten fallible setup and build steps before the first
+`scripts/test.sh`; and
 `scripts/test.sh` runs none of that locally. So a red run only becomes a red
 suite if its results say so: `verdict_from_results` decides that, on the red
 path, for both subcommands.
@@ -871,12 +872,12 @@ def verdict_from_results(results: Report | None) -> int:
     - **A stated population and nothing failing** — `EXIT_REFUSED`: no verdict.
       Every pass that reported ran tests and none of them failed, so whatever
       made the run red is not a test. `test.yml` holds jobs the test job does
-      not wait on, and steps after the results upload, and
-      `scripts/test.sh` runs none of that locally — so reporting red here
-      would fail a lane for a SwiftLint violation or a committed plan file it
-      cannot even see, and reporting green would adopt a pass the run never
-      gave. 78 sends the lane back to the local queue, where it gets an answer
-      to its own question. Inventing red is precisely what `verdict_for` refuses
+      not wait on, and cache bookkeeping steps that can fail without stopping
+      the tests, and `scripts/test.sh` runs none of that locally — so reporting
+      red here would fail a lane for a SwiftLint violation or a committed plan
+      file it cannot even see, and reporting green would adopt a pass the run
+      never gave. 78 sends the lane back to the local queue, where it gets an
+      answer to its own question. Inventing red is precisely what `verdict_for` refuses
       to do for a cancelled run, on the same reasoning.
     - **Readable results that state no population** — `EXIT_FAILED`. Files
       arrived, they record nothing failing, and they will not say how many tests

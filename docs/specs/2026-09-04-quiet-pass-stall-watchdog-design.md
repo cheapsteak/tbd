@@ -249,10 +249,11 @@ The build clause is the one condition no pass may lose. The test job compiles
 every target in a step of its own and runs all four passes with `--skip-build`,
 and a pass that ran after a failed or killed build would test whatever bundle
 `.build/` still held — the one the cache restored, or a half-relinked one. 1a
-carries it as its whole condition (`if: steps.<build>.outcome == 'success'`,
-with GitHub's implicit `success()`), and the later passes spell it out although
-1a's outcome already implies it, so no edit to 1a's condition can let a stale
-bundle run.
+carries `if: !cancelled() && steps.<build>.outcome == 'success'`: the only steps
+between the build and 1a record the wipe marker and save the cache for the next
+run, and a failure there must not cost this run its tests. The later passes
+spell the build clause out although 1a's outcome already implies it, so no
+edit to 1a's condition can let a stale bundle run.
 
 GitHub's default step semantics skip everything after a failed step, and that
 turns one flake into a blackout: a handshake timeout in the tail of a fast pass

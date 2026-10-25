@@ -11,7 +11,9 @@
 # minute cold build, for as long as it takes someone to notice. Get it wrong in
 # the "always save" direction and the 10 GB store churns main's entry out again.
 # Neither failure has a symptom this repo's suites can see, so the branches are
-# exercised here instead.
+# exercised here instead. The same holds for WHEN it saves — right after the
+# build and the marker recording, before any test pass, so that a run cancelled
+# during its tests has still saved — and the step order is pinned here too.
 #
 # NOTHING HERE TOUCHES A REAL REPO, REMOTE OR CACHE, with one deliberate
 # exception noted below. Each case builds a throwaway git repo in a temp dir,
@@ -68,12 +70,46 @@ extract_step_script() {
   ' "$WORKFLOW"
 }
 
-# The `if:` expression the save step carries, as one line.
+SAVE_STEP_NAME='Save SwiftPM build artifacts and dependencies'
+
+# The `if:` expression the save step carries, as one line, read from WORKFLOW
+# or from the workflow file given as $1 (a mutated copy, in the cases below).
 extract_save_if() {
-  awk '
-    $0 == "      - name: Save SwiftPM build artifacts and dependencies" { found = 1; next }
+  awk -v name="      - name: $SAVE_STEP_NAME" '
+    $0 == name { found = 1; next }
+    found && /^      - / { exit }
     found && $0 ~ /^        if:/ { print; exit }
-  ' "$WORKFLOW"
+  ' "${1:-$WORKFLOW}"
+}
+
+# The `test` job's step names, in order, one per line.
+test_job_step_names() {
+  awk '
+    /^  test:[ \t]*$/ { injob = 1; next }
+    injob && /^  [^ #]/ { exit }
+    injob && /^      - name: / { sub(/^      - name: /, ""); print }
+  ' "${1:-$WORKFLOW}"
+}
+
+# Where the save sits among the steps around it: `ordered` when it comes after
+# the build and the marker recording and before the first test pass, otherwise
+# `misordered`, or `missing <step>` when one of the four cannot be found.
+save_position_verdict() {
+  local wf="${1:-$WORKFLOW}" names build record save pass
+  names="$(test_job_step_names "$wf")"
+  build="$(awk 'index($0, "Build (") == 1 { print NR; exit }' <<<"$names")"
+  record="$(awk 'index($0, "Record the sources these build artifacts came from") == 1 { print NR; exit }' <<<"$names")"
+  save="$(awk -v want="$SAVE_STEP_NAME" '$0 == want { print NR; exit }' <<<"$names")"
+  pass="$(awk 'index($0, "Test (") == 1 { print NR; exit }' <<<"$names")"
+  if [[ -z "$build" ]]; then echo "missing build"; return; fi
+  if [[ -z "$record" ]]; then echo "missing record"; return; fi
+  if [[ -z "$save" ]]; then echo "missing save"; return; fi
+  if [[ -z "$pass" ]]; then echo "missing test pass"; return; fi
+  if (( build < record && record < save && save < pass )); then
+    echo "ordered"
+  else
+    echo "misordered"
+  fi
 }
 
 SCRIPT="$(mktemp "${TMPDIR:-/tmp}/cache-save-policy.XXXXXX.sh")"
@@ -324,17 +360,72 @@ case_diff_error() {
   assert_contains "and warns with the status" "$out" '::warning::git diff against origin/unrelated failed (128)'
 }
 
+# The status functions in an `if:` expression that would let a step run after
+# an earlier step failed, space-separated, or nothing.
+widening_status_functions_in() {
+  grep -oE '(always|cancelled|failure)\(\)' <<<"$1" | sort -u | paste -sd' ' -
+}
+
+# WORKFLOW with the step named $2 cut out and appended at the end of the file,
+# which is the end of the `test` job, the last job in it. The comment above the
+# step stays where it was; only the step moves.
+move_step_to_end() {
+  awk -v name="      - name: $2" '
+    $0 == name { moving = 1 }
+    moving && $0 == "" { moving = 0; next }
+    moving { held = held $0 "\n"; next }
+    { print }
+    END { printf "\n%s", held }
+  ' "$1"
+}
+
 # The step is only half the decision; the save step's `if:` is the other half,
 # and no fixture can execute a GitHub expression. Assert its clauses are all
 # present, so dropping one — which would silently stop every save, or start
 # saving from preflight refs again — cannot pass unnoticed.
-test_the_save_step_gates_on_all_four_clauses() {
-  local expr; expr="$(extract_save_if)"
+#
+# The save runs right after the build, and its `if:` carries no status function,
+# so GitHub's implicit `success()` keeps it from running after any earlier step
+# failed, the marker recording included. An `always()` or `!cancelled()` there
+# would store an entry whose recording broke — no marker in it, so every run that
+# restored it would wipe the libraries for nothing.
+test_the_save_step_gates_on_the_build_and_the_policy() {
+  local expr d; expr="$(extract_save_if)"
   assert_contains "the save step has an if: expression" "$expr" 'if:'
-  assert_contains "gated on the job being green" "$expr" 'success()'
+  assert_contains "gated on the build having succeeded" "$expr" "steps.build.outcome == 'success'"
   assert_contains "gated on the restore having missed" "$expr" "steps.spm-cache.outputs.cache-hit != 'true'"
   assert_contains "saves on a push" "$expr" "github.event_name == 'push'"
   assert_contains "and on a library-touching pull request" "$expr" "github.event_name == 'pull_request' && steps.cache_policy.outputs.library_touched == 'true'"
+  assert_eq "no status function widens it past the implicit success()" "" "$(widening_status_functions_in "$expr")"
+  # MUTATION: an `always()` in the save's `if:` is seen by the check above.
+  d="$(mktemp -d "${TMPDIR:-/tmp}/cache-save-policy.XXXXXX")"
+  FIXTURE_ROOTS+=("$d")
+  sed "s/if: \${{ steps\.build\.outcome == 'success' && steps\.spm-cache/if: \${{ always() \&\& steps.build.outcome == 'success' \&\& steps.spm-cache/" \
+    "$WORKFLOW" > "$d/always.yml"
+  assert_eq "mutation: an always() in the save's if: is caught" "always()" \
+    "$(widening_status_functions_in "$(extract_save_if "$d/always.yml")")"
+}
+
+# WHEN the save happens is the other half of the design. It comes right after
+# the build, so a run that `concurrency` cancels during its tests — most of a
+# run's life — has already saved; and after the marker recording, so the entry
+# carries the marker the next run's wipe decision reads. A save moved behind the
+# tests goes back to saving nothing for every cancelled run, and nothing here
+# would go red for it.
+test_the_save_follows_the_build_and_the_marker_and_precedes_the_tests() {
+  local d
+  assert_eq "the save comes after the build and the marker recording, before the first test pass" \
+    "ordered" "$(save_position_verdict)"
+  d="$(mktemp -d "${TMPDIR:-/tmp}/cache-save-policy.XXXXXX")"
+  FIXTURE_ROOTS+=("$d")
+  # MUTATION: the save moved to the end of the job, behind every test pass.
+  move_step_to_end "$WORKFLOW" "$SAVE_STEP_NAME" > "$d/save-last.yml"
+  assert_eq "mutation: a save behind the tests is caught" "misordered" \
+    "$(save_position_verdict "$d/save-last.yml")"
+  # MUTATION: the marker recorded after the save, so the entry lacks it.
+  move_step_to_end "$WORKFLOW" "Record the sources these build artifacts came from" > "$d/record-last.yml"
+  assert_eq "mutation: a marker recorded after the save is caught" "misordered" \
+    "$(save_position_verdict "$d/record-last.yml")"
 }
 
 # --- run ---------------------------------------------------------------------
