@@ -4599,6 +4599,16 @@ final class AppState {
         stored.flatMap(PromptRailRenderer.init(rawValue:)) ?? promptRailRendererDefault
     }
 
+    /// A picker binding over the raw stored string: reads through
+    /// `promptRailRenderer(stored:)` so an unset key shows the default, and
+    /// writes the renderer's raw value, the form the readers decode.
+    static func promptRailRendererBinding(_ stored: Binding<String?>) -> Binding<PromptRailRenderer> {
+        Binding(
+            get: { promptRailRenderer(stored: stored.wrappedValue) },
+            set: { stored.wrappedValue = $0.rawValue }
+        )
+    }
+
     /// UserDefaults key for showing the sidebar's Scratch section (repo-less
     /// scratch spaces). Default on.
     static let showScratchSectionKey = "showScratchSection"

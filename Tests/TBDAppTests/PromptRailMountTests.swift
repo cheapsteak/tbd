@@ -32,6 +32,28 @@ struct PromptRailMountTests {
         #expect(AppState.promptRailRenderer(defaults: defaults) == .appKit)
     }
 
+    @Test("the Settings picker's binding writes the raw value the readers decode")
+    func pickerWritesTheKey() throws {
+        let suiteName = "prompt-rail-picker-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let stored = Binding<String?>(
+            get: { defaults.string(forKey: AppState.promptRailRendererKey) },
+            set: { defaults.set($0, forKey: AppState.promptRailRendererKey) }
+        )
+        let picker = AppState.promptRailRendererBinding(stored)
+
+        #expect(picker.wrappedValue == .appKit)
+        picker.wrappedValue = .swiftUI
+        #expect(defaults.string(forKey: AppState.promptRailRendererKey) == "swiftui")
+        #expect(AppState.promptRailRenderer(defaults: defaults) == .swiftUI)
+        #expect(picker.wrappedValue == .swiftUI)
+
+        picker.wrappedValue = .appKit
+        #expect(AppState.promptRailRenderer(defaults: defaults) == .appKit)
+    }
+
     @Test("each renderer gets its own mount")
     func mountPerRenderer() {
         let state = PromptRailState()

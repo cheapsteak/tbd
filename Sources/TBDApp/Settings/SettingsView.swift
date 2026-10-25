@@ -38,6 +38,7 @@ struct GeneralSettingsTab: View {
     @Environment(AppState.self) var appState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
+    @AppStorage(AppState.promptRailRendererKey) private var storedPromptRailRenderer: String?
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
@@ -277,6 +278,7 @@ struct GeneralSettingsTab: View {
                 supervisionEnabledToggle
                 programStatusToggle
                 updateModePicker
+                promptRailRendererPicker
             }
         }
         .formStyle(.grouped)
@@ -434,6 +436,22 @@ struct GeneralSettingsTab: View {
     /// A picker rather than a toggle because the middle state is the one worth
     /// having: watching for updates and installing them are different
     /// decisions, and most people want the first without the second.
+    @ViewBuilder
+    private var promptRailRendererPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker(
+                "Prompt rail renderer",
+                selection: AppState.promptRailRendererBinding($storedPromptRailRenderer)
+            ) {
+                Text("AppKit").tag(PromptRailRenderer.appKit)
+                Text("SwiftUI").tag(PromptRailRenderer.swiftUI)
+            }
+            Text("Temporary: compare the two prompt rail renderers. Open transcripts rebuild when this changes.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
     @ViewBuilder
     private var updateModePicker: some View {
         let capabilities = appState.daemonCapabilities
