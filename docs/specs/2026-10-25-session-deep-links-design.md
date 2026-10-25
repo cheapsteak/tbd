@@ -23,7 +23,7 @@ The existing shapes are unchanged:
 
 A remote session is `tbd://open?remote=<provider>/<session>`, and its shareable form carries the same `remote` param.
 
-- **The value is the address `tbd remote` already uses** – the `<provider>/<provider-session-id>` compound that `tbd remote list` prints and that every session-addressed `tbd remote` subcommand accepts (`RemoteSessionRef` in `Sources/TBDCLI/Commands/RemoteCommands.swift`). It splits at the first slash, because a provider name cannot contain one and a session id can.
+- **The value is the address `tbd remote` already uses** – the `<provider>/<provider-session-id>` compound that `tbd remote list` prints and that every session-addressed `tbd remote` subcommand accepts (`RemoteSessionRef` in `Sources/TBDCLI/Commands/RemoteCommands.swift`). It splits at the first slash, so a session id may contain slashes. The registry does not forbid a slash in a provider's name, but a provider whose name has one cannot be addressed by this compound, through a link or through `tbd remote`.
 - **`provider` is the registry key** – the name a provider is registered under in `~/tbd/agent-providers.json`, which the contract makes the identity of a registration. A remote link therefore means something on the install that made it, as a worktree UUID does.
 - **A valid `worktree` param wins** – when a link carries one, the link opens that worktree and `remote` is ignored. Every link that parsed before this change parses to the same target after it.
 - **A malformed `remote` is no target** – no slash, or an empty provider or session, and the link is ignored like any malformed link. A malformed `remote` beside a valid `worktree` changes nothing.
@@ -35,14 +35,14 @@ A remote session is `tbd://open?remote=<provider>/<session>`, and its shareable 
 
 - **`tbd link`** – the current worktree, from `TBD_WORKTREE_ID`. It never reads `TBD_TERMINAL_ID`: a bare link stays a worktree link, so scripts that rely on its output keep getting the same thing.
 - **`tbd link <worktree>`** – a worktree UUID, name, or display name.
-- **`tbd link --terminal <uuid>`** – that terminal's tab. The daemon is the authority on which worktree a terminal belongs to, read through `terminal.list`, so no worktree argument is needed. Given one, it is resolved first, and a terminal that belongs to another worktree is refused with a message naming the terminal and both worktrees.
-- **`tbd link --this-terminal`** – the calling terminal, from `TBD_TERMINAL_ID`, looked up the same way. Outside a TBD terminal it is refused. Without a worktree argument, `TBD_WORKTREE_ID` only narrows the lookup: if the daemon says the terminal lives in another worktree, the link follows the daemon.
+- **`tbd link --terminal <uuid>`** – that terminal's tab. The daemon is the authority on which worktree a terminal belongs to, read through `terminal.list`, so no worktree argument is needed. Given one, it is resolved first, and a terminal that belongs to another worktree is refused with a message naming the terminal, the worktree as typed, and the worktree the terminal belongs to.
+- **`tbd link --this-terminal`** – the calling terminal, from `TBD_TERMINAL_ID`, looked up the same way. Outside a TBD terminal it is refused.
 - **`tbd link --remote <ref>`** – a remote session. `<ref>` takes the three forms `RemoteSessionRef` resolves: `<provider>/<session>`, the UUID of a lane bound to a session, or the name of one. It cannot be combined with a worktree argument, `--terminal`, or `--this-terminal`.
 - **`--https`** – prints the shareable form of any of the above instead of `tbd://`.
 
 The output is one line, the URL. A refusal is one line on stderr with a non-zero exit.
 
-**The terminal lookup is scoped to the worktree whenever the worktree is known.** `terminal.list` reconciles every row it reports, so a fleet-wide call costs work and side effects across every session on the machine. The CLI lists one worktree's terminals when a worktree argument or `TBD_WORKTREE_ID` names it, and lists fleet-wide only when nothing names a worktree, or once more to tell a terminal in another worktree apart from one that does not exist.
+**The terminal lookup is scoped to one worktree whenever a worktree is known.** `terminal.list` reconciles every row it reports, so a fleet-wide call costs work and side effects across every session on the machine. For both `--terminal` and `--this-terminal`, the CLI lists one worktree's terminals when a worktree argument names it or, without one, when `TBD_WORKTREE_ID` does. It lists fleet-wide only when nothing names a worktree, or once after a scoped miss, to tell a terminal in another worktree apart from one that does not exist. `TBD_WORKTREE_ID` is only a hint: when the daemon puts the terminal in another worktree, the link follows the daemon. Only a worktree the caller typed turns that into a refusal.
 
 ### A remote session TBD has not mirrored
 
@@ -98,4 +98,5 @@ The status line names the session it is opening, HTML-escaped as the worktree na
 - **A bare `tbd link` inside a terminal linking to that terminal** – it changes the output of a command scripts already depend on. A tab-level link is asked for by flag.
 - **Refusing an unmirrored remote session** – it races the daemon's poll for a tool that creates a session and links it at once. A mistyped address gets a warning rather than a failure.
 - **Reattaching on open** – a link would reconnect a session the person detached on purpose, which a click on its row does not do.
+- **A terminal-by-ID RPC** – it would make the lookup one row with no reconcile, but it adds a compiled verb for a one-shot command. A list scoped to one worktree already covers the common case, and the fleet-wide list runs only after a miss.
 - **Printing `worktree=` for an adopted session** – adoption can happen after the link is made, when the session's repository is registered later. A `remote=` link resolves to the right row whenever it is opened.
