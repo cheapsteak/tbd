@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -1091,10 +1092,8 @@ struct RemoteProviderManagerTests {
         // The poll loop's first tick fires with no initial delay but runs on
         // a background Task, so bound-poll for it rather than asserting
         // immediately.
-        let deadline = Date().addingTimeInterval(2)
-        while Date() < deadline {
-            if invoker.callsSnapshot().contains(["list"]) { break }
-            try await Task.sleep(for: .milliseconds(10))
+        _ = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            invoker.callsSnapshot().contains(["list"])
         }
         #expect(
             invoker.callsSnapshot().contains(["list"]),

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -136,6 +137,19 @@ extension RPCRouterTests {
 
         try await db.worktrees.archive(id: wt1.id)
         try await db.worktrees.archive(id: wt2.id)
+        // `archive()` stamps `Date()`, and two archives inside one stored
+        // millisecond tie on the `archivedAt desc` sort, which makes the order
+        // the clock's rather than the query's. Restamp them a minute apart,
+        // wt2 the later.
+        let base = Date(timeIntervalSince1970: 1_767_225_600)
+        for (id, offset) in [(wt1.id, 0.0), (wt2.id, 60.0)] {
+            try await db.writerForTests.write { conn in
+                try conn.execute(
+                    sql: "UPDATE worktree SET archivedAt = ? WHERE id = ?",
+                    arguments: [base.addingTimeInterval(offset), id.uuidString]
+                )
+            }
+        }
 
         // Get archived with limit
         let request = try RPCRequest(

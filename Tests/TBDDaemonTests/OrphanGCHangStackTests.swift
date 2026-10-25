@@ -88,21 +88,32 @@ struct OrphanGCHangStackTests: ~Copyable {
         }
     }
 
+    /// The fixture the flag-gate tests use: two files young enough to keep and
+    /// one past `maxAge`, so an enabled sweep would reap exactly one. A gate
+    /// only has to show that nothing was touched, which three files show as
+    /// well as two thousand; the count cap is exercised where it is the
+    /// subject, by `makeTwoThousandFiles()`.
+    private func makeThreeFiles() throws {
+        try makeHangFile("hang-young-0000.txt", age: 86_400)
+        try makeHangFile("hang-young-0001.txt", age: 86_400 + 60)
+        try makeHangFile("hang-old-0000.txt", age: 20 * 86_400)
+    }
+
     private func fileNames() throws -> [String] {
         try fm.contentsOfDirectory(atPath: hangStackBase.path).sorted()
     }
 
     // MARK: - Flag gates
 
-    @Test("the hang-stack flag ships off: a real sweep leaves 2,000 aged files untouched")
+    @Test("the hang-stack flag ships off: a real sweep leaves aged files untouched")
     func flagOffIsNoOp() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)
-        try makeTwoThousandFiles()
+        try makeThreeFiles()
 
         let result = await makeGC(db: db).sweep()
 
-        #expect(try fileNames().count == 2000)
+        #expect(try fileNames().count == 3)
         #expect(!result.planned.contains { $0.hasPrefix("REAP hang-stacks ") })
         #expect(result.reaped == 0)
         #expect(try await db.reapRecords.list(repoPath: nil).isEmpty)
@@ -112,16 +123,16 @@ struct OrphanGCHangStackTests: ~Copyable {
     func flagOffDryRunStillPlans() async throws {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(true)
-        try makeTwoThousandFiles()
+        try makeThreeFiles()
 
         let result = await makeGC(db: db).sweep(dryRun: true)
 
         // The whole point of the bypass: a user deciding whether to flip a
         // default-off flag can preview exactly what it would reclaim.
         let line = try #require(result.planned.first { $0.hasPrefix("REAP hang-stacks ") })
-        #expect(line.contains("files=1000"))
+        #expect(line.hasSuffix(" files=1 bytes=32"))
         #expect(result.reaped == 0)
-        #expect(try fileNames().count == 2000)
+        #expect(try fileNames().count == 3)
     }
 
     @Test("gcEnabled off keeps everything even with the hang-stack flag on")
@@ -129,12 +140,12 @@ struct OrphanGCHangStackTests: ~Copyable {
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setGCEnabled(false)
         try await db.config.setGCHangStacksEnabled(true)
-        try makeTwoThousandFiles()
+        try makeThreeFiles()
 
         let result = await makeGC(db: db).sweep()
 
         #expect(result.planned == ["gc disabled"])
-        #expect(try fileNames().count == 2000)
+        #expect(try fileNames().count == 3)
     }
 
     // MARK: - Reaping
