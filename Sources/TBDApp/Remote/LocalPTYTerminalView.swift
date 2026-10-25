@@ -245,8 +245,9 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             // (`stopPipeline` → `TerminalIOPipeline.shutdown()`) with no bound,
             // so if that join stalls, a kill left to terminate() waits —
             // holding the main thread — until the child exits on its own.
-            // Signalled first, the child dies whatever the join does, and the
-            // pty hang-up that follows ends the IO threads. terminate()'s own
+            // Signalled first, the child dies whatever the join does, and once
+            // nothing else holds the pty's slave side open, the hang-up that
+            // follows ends the IO threads. terminate()'s own
             // SIGTERM is then a harmless repeat to the same pid, which nothing
             // has reaped yet and so cannot have been recycled before
             // `ChildReaper.reap` below.
@@ -254,7 +255,8 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             // `pid > 0`: `kill(0, …)` would signal this app's whole process
             // group. `!wasObserved`: an observed exit means SwiftTerm's monitor
             // already `waitpid`ed the pid, which may now name another process.
-            // That check cannot race the monitor: its handler runs on main and
+            // That check cannot race the monitor: its handler runs on main
+            // (the `dispatchQueue: .main` that `start` passes — keep it) and
             // records the observation before returning, so either it ran
             // before this line, or it runs after terminate() has zeroed the
             // `shellPid` it would `waitpid` — and SwiftTerm's
