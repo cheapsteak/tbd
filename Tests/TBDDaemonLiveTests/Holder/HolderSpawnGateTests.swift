@@ -622,7 +622,9 @@ struct HolderSpawnGateTests {
         // is being created. No window watches for a later write: nothing in
         // the daemon types into a login tab at all — the person runs `/login`
         // from Claude's own footer hint — so there is no delayed writer to
-        // wait out.
+        // wait out. A pump restored on the shared spawn path would still meet
+        // the three-second window in `ModelProfileSpawnTests`, which watches a
+        // login tab for a pane read or a keystroke, in the parallel pass.
         let courierWrites = CourierWriteLog()
         fixture.router.holderInjectionCourier = HolderInjectionCourier(
             sendFrame: { courierWrites.record($0) },
