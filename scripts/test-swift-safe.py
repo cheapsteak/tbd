@@ -782,9 +782,8 @@ class SharedModuleCacheTests(RunnerFixture):
     # ---- continuous integration -------------------------------------------
 
     def test_ci_keeps_swiftpms_own_per_worktree_cache(self):
-        """Ephemeral runners share nothing, and `test.yml` also builds
-        without this wrapper — flagging only some of its steps would make CI
-        alternate against its own cached `.build` on every run."""
+        """Ephemeral runners share nothing, so a shared cache saves nothing
+        there."""
         flagged = self.run_sharing("build")
         self.assertIn(self.flags_for(self.shipped_path), flagged.stdout)
 

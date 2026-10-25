@@ -251,10 +251,7 @@ Notes:
   default. A caller that passes its own `-module-cache-path` is left alone —
   a second, differently-spelled copy would itself be a third plan variant.
 - **CI opts out.** When `CI` is set the wrapper adds nothing. Runners are
-  ephemeral (one worktree per VM), so a shared cache saves nothing there, and
-  `.github/workflows/test.yml` ends its job with a build that does not route
-  through the wrapper at all — flagging only the steps that do would make CI
-  alternate against its own `actions/cache`d `.build` on every run.
+  ephemeral (one worktree per VM), so a shared cache saves nothing there.
 - **Why not `Package.swift` `swiftSettings`?** Measured dead end:
   `.unsafeFlags(["-module-cache-path", …])` on every root target still left
   a 591 MB local ModuleCache — manifest settings don't apply to dependency

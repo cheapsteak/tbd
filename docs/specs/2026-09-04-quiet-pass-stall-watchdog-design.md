@@ -242,8 +242,17 @@ shape that works, because the sweep signals only that subshell's descendants.
 
 1b, pass 2 and the quiet pass run whenever pass 1a REPORTED — success or failure
 alike. Each carries
-`if: !cancelled() && (steps.<1a>.outcome == 'success' || steps.<1a>.outcome == 'failure')`
-against 1a's step id.
+`if: !cancelled() && steps.<build>.outcome == 'success' && (steps.<1a>.outcome == 'success' || steps.<1a>.outcome == 'failure')`
+against the build step's and 1a's step ids.
+
+The build clause is the one condition no pass may lose. The test job compiles
+every target in a step of its own and runs all four passes with `--skip-build`,
+and a pass that ran after a failed or killed build would test whatever bundle
+`.build/` still held — the one the cache restored, or a half-relinked one. 1a
+carries it as its whole condition (`if: steps.<build>.outcome == 'success'`,
+with GitHub's implicit `success()`), and the later passes spell it out although
+1a's outcome already implies it, so no edit to 1a's condition can let a stale
+bundle run.
 
 GitHub's default step semantics skip everything after a failed step, and that
 turns one flake into a blackout: a handshake timeout in the tail of a fast pass
@@ -268,8 +277,9 @@ reported get to report too.
 
 | Constant | Value | Basis |
 | --- | --- | --- |
-| fast pass 1a budget | 1800 s | 1.45× the 1250 s cold-cache first pass measured over 45 runs |
-| fast pass 1a `timeout-minutes` | 35 min | budget + sampling margin |
+| build step `timeout-minutes` | 30 min | 1.45× the 1250 s cold-cache compile plus first pass, measured over 45 runs |
+| fast pass 1a budget | 600 s | tests only; same as 1b |
+| fast pass 1a `timeout-minutes` | 15 min | budget + sampling margin |
 | fast pass 1b budget | 600 s | tests only; 128 s of step time measured |
 | fast pass 1b `timeout-minutes` | 15 min | budget + sampling margin |
 | fast pass 2 budget | 600 s | tests only; 71 s of step time measured |
@@ -285,24 +295,36 @@ The healthy quiet pass reports `Test run with 179 tests in 37 suites passed
 after 116.847 seconds`, so its budget is six times a normal run and still three
 minutes short of the step timeout.
 
-The fast-pass budgets are sized against what those steps actually spend, and 1a
-is the only one that pays the test-target compile. Measured over the 45 most
-recent concluded runs of `test.yml` (2026-09-05 to 2026-09-09), the first test
-step took between 73 s and 1250 s. The three slowest — 1010 s (run 34255127220),
-1115 s (34267900663) and 1250 s (34255164378) — are exactly the runs whose
-"Cache SwiftPM build artifacts" step finished in 1 to 4 seconds, which is what a
-cache MISS looks like; a hit spends 25 to 56 seconds restoring. So 1250 s is the
-measured cold-cache figure, over a full 5,529-test daemon pass — more than 1a
-now runs — and 1800 s clears it by 45%. The warm-cache runs still spread
-73–996 s, because every run force-rebuilds TBDShared and TBDDaemonLib and a PR's
-first run restores only the deps-only fallback key, so a budget sized to the
-warm median would end healthy runs. 1b and 2 run against that warm build and
-measured 128 s and 71 s of step time on the split's first CI run, so 600 s is
-several times a healthy run while still ending a wedge inside the step's own
-bound. The
-step timeouts sit above their budgets by only the margin the expiry path needs:
-a step bound wide enough for per-test limits to fire first would buy nothing,
-because the watchdog names the test sooner and with a stack.
+The fast-pass budgets are sized against what those steps actually spend, and
+none of them pays the compile: the test job builds every target, test targets
+included, in a step of its own, and each pass runs with `--skip-build`. That
+build step's 30-minute bound comes from the record of a first test step that
+compiled for itself. Measured over the 45 most recent concluded runs of
+`test.yml` (2026-09-05 to 2026-09-09), such a step took between 73 s and
+1250 s. The three slowest — 1010 s (run 34255127220), 1115 s (34267900663) and
+1250 s (34255164378) — are exactly the runs whose "Cache SwiftPM build
+artifacts" step finished in 1 to 4 seconds, which is what a cache MISS looks
+like; a hit spends 25 to 56 seconds restoring. So 1250 s is the measured
+cold-cache figure for the compile plus a full 5,529-test daemon pass, and
+1800 s clears it by 45% — more than that for the compile alone. The warm-cache
+runs still spread 73–996 s, because those runs all force-rebuilt TBDShared and
+TBDDaemonLib and a PR's first run restores only the deps-only fallback key, so
+a bound sized to the warm median would end healthy builds. 1b and 2 measured
+128 s and 71 s of step time on the split's first CI run, so 600 s is several
+times a healthy run while still ending a wedge inside the step's own bound; 1a
+runs the daemon half predicted to be smaller and shares 1b's budget.
+
+The build step carries no watchdog. The failure the watchdog exists for — a
+test process wedged where no time limit reaches it — is not one a compile has
+shown in this job: its recorded compile failures, an OOM surfacing as a bare
+`error: fatalError` and a stale-archive link error, end on their own with the
+diagnostic in the log. A stalled compile is ended by the step's
+`timeout-minutes` with no stacks, but on a step that names the compile as what
+hung.
+
+The passes' step timeouts sit above their budgets by only the margin the expiry
+path needs: a step bound wide enough for per-test limits to fire first would buy
+nothing, because the watchdog names the test sooner and with a stack.
 
 Five seconds of sampling is what it takes to show a blocked thread
 unambiguously: a parked thread looks identical in every sample, so more buys

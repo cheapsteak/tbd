@@ -46,8 +46,8 @@ somewhere that cannot make it up.
 A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds jobs the
 test job does not wait on — lint, the committed-plans guard, the review-script
 tests among them; it waits only on the Swift suite gate, which on a dispatched
-run always lets it run — plus a `swift build` step after the results are uploaded,
-and nine fallible setup steps before the first `scripts/test.sh`; and
+run always lets it run — plus steps after the results are uploaded, and ten
+fallible setup and build steps before the first `scripts/test.sh`; and
 `scripts/test.sh` runs none of that locally. So a red run only becomes a red
 suite if its results say so: `verdict_from_results` decides that, on the red
 path, for both subcommands.
@@ -871,8 +871,8 @@ def verdict_from_results(results: Report | None) -> int:
     - **A stated population and nothing failing** — `EXIT_REFUSED`: no verdict.
       Every pass that reported ran tests and none of them failed, so whatever
       made the run red is not a test. `test.yml` holds jobs the test job does
-      not wait on, and a `swift build` step after the results upload,
-      and `scripts/test.sh` runs none of that locally — so reporting red here
+      not wait on, and steps after the results upload, and
+      `scripts/test.sh` runs none of that locally — so reporting red here
       would fail a lane for a SwiftLint violation or a committed plan file it
       cannot even see, and reporting green would adopt a pass the run never
       gave. 78 sends the lane back to the local queue, where it gets an answer
@@ -896,12 +896,12 @@ def verdict_from_results(results: Report | None) -> int:
       one that failed. Only `actions/upload-artifact`'s `if-no-files-found: warn`
       keeps the second shape off the wire today, by publishing no artifact when
       nothing matches; that is a third party's behavior, not a guard of ours.
-      `test.yml`'s test job runs nine fallible setup steps before it reaches
-      the first `scripts/test.sh` — checkout, the cache-save decision, mtime
+      `test.yml`'s test job runs ten fallible steps before it reaches the
+      first `scripts/test.sh` — checkout, the cache-save decision, mtime
       restore, `brew install tmux`, `xcode-select`, toolchain capture, cache
-      restore, workspace repair, force rebuild — and any one of them failing
-      means zero tests ran, no xUnit file was written and no artifact was
-      uploaded. `brew install` flaking on a hosted runner is ordinary weather,
+      restore, workspace repair, force rebuild, the build — and any one of
+      them failing means zero tests ran, no xUnit file was written and no
+      artifact was uploaded. `brew install` flaking on a hosted runner is ordinary weather,
       and reporting that as a red
       suite tells a caller its tests failed when they never started, with no
       local fallback to correct it. Every case that lands here is answered
