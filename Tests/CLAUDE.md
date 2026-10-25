@@ -808,7 +808,10 @@ input source or timer is attached to the loop — measured 0.000 s bare against
 doing nothing at all, at either end of the range. So a pump waits on a
 condition and counts turns, never elapsed time: `TableTranscriptScene.settle()`
 turns until the table's geometry holds still, and `AppStateObservationTests`'
-probe turns until the evaluation it asserts has happened.
+probe turns until the evaluation it asserts has happened. The exception is a
+positive control for a negative assertion: it gets exactly the negative's fixed
+window, because a control that waited longer would pass while the negative
+watched too short a window to see anything.
 
 The compiler already closes the worst half. `NSRunLoop.h` annotates every
 spinning method — `run`, `run(until:)`, `run(_:before:)`,

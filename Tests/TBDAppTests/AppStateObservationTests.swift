@@ -140,7 +140,10 @@ private struct HostedProbe {
     /// A fixed number of turns, each capped at
     /// `OffscreenHostDefaults.runLoopSpin`, because this is also the window an
     /// assertion that something did NOT happen gets: there is no condition to
-    /// wait on when the claim is that a view stayed put.
+    /// wait on when the claim is that a view stayed put. So the positive
+    /// control beside such an assertion pumps exactly this much too — a
+    /// control that waited longer would pass while a re-evaluation slower than
+    /// this window slipped past the negative unseen.
     func pump() {
         for _ in 0..<Self.pumpTurns { RunLoopPump.turn() }
         host.layoutSubtreeIfNeeded()
@@ -149,17 +152,20 @@ private struct HostedProbe {
     /// `pump()`, then keep turning the run loop until `condition` holds,
     /// bounded by `OffscreenHostDefaults.maxPumps` turns.
     ///
-    /// For a change the test asserts DID happen: a slow update costs turns
-    /// rather than a longer fixed wait, and one that never comes still fails
-    /// the assertion after it. The full `pump()` comes first so that every
-    /// evaluation one write causes lands before a caller reads a new baseline
-    /// from the counter.
+    /// For a change the test asserts DID happen and no negative assertion
+    /// leans on as its control: a slow update costs turns rather than a longer
+    /// fixed wait, and one that never comes still fails the assertion after
+    /// it. A full `pump()` comes first, and another follows whenever the
+    /// condition needed more turns than that, so the rest of what the write
+    /// caused lands before a caller reads a new baseline from the counter.
     func pump(until condition: () -> Bool) {
         pump()
+        guard !condition() else { return }
         RunLoopPump.until {
             host.layoutSubtreeIfNeeded()
             return condition()
         }
+        pump()
     }
 
     func tearDown() {
@@ -244,9 +250,11 @@ struct AppStatePerPropertyTrackingTests {
             #expect(counter.count == baseline,
                     "a write to a property this view does not read re-evaluated it")
 
-            // `repos` is.
+            // `repos` is. Pumped exactly as long as the negative above: this is
+            // its control, so it must prove a re-evaluation lands inside that
+            // window (see `HostedProbe.pump()`).
             probe.state.repos = [Repo(id: UUID(), path: "/tmp/acme", displayName: "acme")]
-            probe.pump(until: { counter.count > baseline })
+            probe.pump()
             #expect(counter.count > baseline,
                     "a write to a property this view DOES read did not re-evaluate it")
         })
@@ -278,10 +286,11 @@ struct AppStatePerPropertyTrackingTests {
             #expect(counter.count == baseline,
                     "a write to a property this view does not read re-evaluated it")
 
+            // The negative's control, so the same window (see `HostedProbe.pump()`).
             probe.state.worktrees[repoID]?.append(
                 makeWorktree(repoID: repoID, parentWorktreeID: parentID, name: "child")
             )
-            probe.pump(until: { counter.count > baseline })
+            probe.pump()
             #expect(counter.count > baseline,
                     "adding a child did not re-evaluate the view that renders children")
         })
