@@ -473,17 +473,21 @@ actor HolderRegistry {
     /// Sessions whose holder this registry has told to let go — the session
     /// was torn down, or its job was ended for a park — with nothing adopted
     /// or spawned for them since. `abandon` and `abandonVerifiedJob` add a
-    /// session before they release its reader, and `publish` removes it,
-    /// because a holder that has just handed over a pty is a live session
-    /// again.
+    /// session before they release its reader; `publish` removes it, because a
+    /// holder that has just handed over a pty is a live session again, and so
+    /// does `clearLetGo`, for the wake that deliberately revives a session it
+    /// could not adopt.
     ///
-    /// Its one reader is an attach's on-demand adoption, which refuses these
-    /// sessions. `abandon` empties the slot and forgets the session's status
-    /// before it reaches the holder, so without this mark a session being torn
-    /// down would read exactly like one whose adoption merely failed, and an
-    /// attach arriving in between would take the pty of a holder about to be
-    /// told to forget it. Grows by one per holder session torn down for good,
-    /// which is bounded by the sessions one daemon ever runs.
+    /// Two readers refuse these sessions: an attach's on-demand adoption
+    /// (`attachAdoption`) and the startup pass (`adoptOne`, through
+    /// `adopt(terminal:skippingLetGo:)`). The general `adopt` does not, because
+    /// a wake adopts a parked row's live holder on purpose. `abandon` empties
+    /// the slot and forgets the session's status before it reaches the holder,
+    /// so without this mark a session being torn down would read exactly like
+    /// one whose adoption merely failed, and an adoption arriving in between
+    /// would take the pty of a holder about to be told to forget it. Grows by
+    /// one per holder session torn down for good, which is bounded by the
+    /// sessions one daemon ever runs.
     private var sessionsLetGo: Set<UUID> = []
 
     /// What the hand-over said about each published session's processes.
