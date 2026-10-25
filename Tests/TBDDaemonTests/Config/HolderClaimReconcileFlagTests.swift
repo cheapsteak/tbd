@@ -20,7 +20,7 @@ struct HolderClaimReconcileFlagTests {
 
     /// The newest migration identifier before the flag's file. Migrating only
     /// this far reproduces the schema a pre-flag daemon ran on.
-    private static let lastIdentifierBeforeTheFlag = "20261025003424_claude_spawn_extras"
+    private static let lastIdentifierBeforeTheFlag = "20261025031506_notification_unread_index"
 
     private func fetchConfigRecord(_ db: TBDDatabase) async throws -> ConfigRecord? {
         try await db.writerForTests.read { conn in
