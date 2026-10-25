@@ -27,6 +27,18 @@ struct ClaudePluginDirsTests {
         } catch { Issue.record("wrong error \(error)") }
     }
 
+    @Test func spellingsOfOnePathCollapse() throws {
+        let r = try ClaudePluginDirs.validated(
+            ["/x/plug", "/x/plug/", "/x/./plug"], homeDirectory: "/h", fileExists: { _ in true })
+        #expect(r == ["/x/plug"])
+    }
+
+    @Test func tildeAndAbsoluteSpellingsCollapse() throws {
+        let r = try ClaudePluginDirs.validated(
+            ["~/p", "/h/p"], homeDirectory: "/h", fileExists: { _ in true })
+        #expect(r == ["/h/p"])
+    }
+
     @Test func validatedDropsDuplicates() throws {
         let r = try ClaudePluginDirs.validated(["/a", "/a"], homeDirectory: "/h", fileExists: { _ in true })
         #expect(r == ["/a"])

@@ -10,7 +10,8 @@ enum ClaudePluginDirs {
     }
 
     /// Expands a leading `~/` against `homeDirectory`, requires each result to
-    /// be absolute and existing, keeps order and drops duplicates.
+    /// be absolute and existing, standardizes it (`.`, `..`, trailing `/`), keeps
+    /// order and drops duplicates of the standardized form.
     static func validated(
         _ paths: [String],
         homeDirectory: String,
@@ -19,16 +20,17 @@ enum ClaudePluginDirs {
         var seen = Set<String>()
         var result: [String] = []
         for path in paths {
-            let expanded: String
+            let joined: String
             if path.hasPrefix("~/") {
                 let home = homeDirectory.hasSuffix("/") ? String(homeDirectory.dropLast()) : homeDirectory
-                expanded = home + "/" + path.dropFirst(2)
+                joined = home + "/" + path.dropFirst(2)
             } else {
-                expanded = path
+                joined = path
             }
-            guard expanded.hasPrefix("/") else {
+            guard joined.hasPrefix("/") else {
                 throw InvalidPath(description: "plugin folder path must be absolute or start with ~/: \(path)")
             }
+            let expanded = (joined as NSString).standardizingPath
             guard fileExists(expanded) else {
                 throw InvalidPath(description: "plugin folder does not exist: \(path)")
             }

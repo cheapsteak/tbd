@@ -806,6 +806,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
     }
 
     /// Only a Claude entry's values are applied. A shell entry carrying some
+    /// (and a session id, as `SessionStart` records onto shell rows, so only
+    /// the kind gate keeps it from resuming as Claude)
     /// — the shape a failed pre-session hook's row would leave if history
     /// kept them — reopens as the plain shell it was, and the new row keeps
     /// nothing.
@@ -815,6 +817,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let entry = TerminalHistoryEntry(
                 id: UUID(), worktreeID: f.worktree.id, label: TerminalLabel.preSession,
                 kind: .shell,
+                claudeSessionID: UUID().uuidString,
                 claudeSpawnExtras: ClaudeSpawnExtras(
                     claudeSettingsOverlay: Self.overlay, pluginDirs: [plug]))
             try await f.db.writerForTests.write { try TerminalHistoryRecord(from: entry).insert($0) }

@@ -8,12 +8,19 @@ import Foundation
 enum CLIPluginDirs {
     static let blankValueMessage = "--plugin-dir must not be empty."
 
-    /// Refuses a blank or whitespace-only value. Resolved against the current
+    static func unsupportedTildeMessage(_ value: String) -> String {
+        "--plugin-dir supports ~/ for your home folder, not ~ alone or ~user: \(value)"
+    }
+
+    /// Refuses a blank or whitespace-only value, and a `~` that is not `~/…`. Resolved against the current
     /// folder, a blank path names that folder, which exists, so the daemon
     /// would load the current folder as a plugin folder.
     static func validateNotBlank(_ paths: [String]) throws {
         if paths.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
             throw ValidationError(blankValueMessage)
+        }
+        if let bad = paths.first(where: { $0.hasPrefix("~") && !$0.hasPrefix("~/") }) {
+            throw ValidationError(unsupportedTildeMessage(bad))
         }
     }
 

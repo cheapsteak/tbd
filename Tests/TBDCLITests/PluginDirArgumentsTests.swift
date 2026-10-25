@@ -58,6 +58,18 @@ struct PluginDirArgumentsTests {
             == CLIPluginDirs.blankValueMessage)
     }
 
+    /// A bare `~` or `~user/…` would otherwise resolve against the current
+    /// folder and reach the daemon as a path that cannot exist.
+    @Test(arguments: ["~", "~bob/p", "~bob"])
+    func unsupportedTildePluginDirRefused(value: String) {
+        #expect(refusal(["wt", "--type", "claude", "--plugin-dir", value])
+            == CLIPluginDirs.unsupportedTildeMessage(value))
+    }
+
+    @Test func homeRelativePluginDirAccepted() {
+        #expect(refusal(["wt", "--type", "claude", "--plugin-dir", "~/p"]) == nil)
+    }
+
     /// Every shape the daemon treats as a shell or Codex terminal: no type
     /// (with or without `--cmd`), shell and codex.
     @Test(arguments: [[], ["--cmd", "make"], ["--type", "shell"], ["--type", "codex"]])
@@ -109,6 +121,11 @@ struct WorktreeCreatePluginDirArgumentsTests {
     func blankPluginDirRefused(value: String) {
         #expect(refusal(["--plugin-dir", "/ok", "--plugin-dir", value])
             == CLIPluginDirs.blankValueMessage)
+    }
+
+    @Test(arguments: ["~", "~bob/p"])
+    func unsupportedTildePluginDirRefused(value: String) {
+        #expect(refusal(["--plugin-dir", value]) == CLIPluginDirs.unsupportedTildeMessage(value))
     }
 
     /// The primary's agent is the daemon's to settle, so no agent flag is

@@ -31,34 +31,34 @@ rule the repo file adds.
 
 ## When each applies
 
-- The **repo fragment** is read fresh from the file at actual spawn time, so
+- **Repo fragment** – read fresh from the file at actual spawn time, so
   it applies on every Claude start — create, resume, hibernation wake,
   account switch, reopen and revive — and edits made while a preSession hook
   is still running are picked up by the spawn it gates. (recreate-window
   respawns as shell/codex, never Claude, so no overlay is involved there.)
-- The **per-spawn fragment** is kept with its terminal, beside the terminal's
-  plugin folders, and both apply on every start of that terminal's Claude
+- **Per-spawn fragment** – kept with its terminal, beside the terminal's
+  plugin folders; both apply on every start of that terminal's Claude
   session:
-  - **Terminal create**, fresh or resuming a session by id, with the values
+  - **Terminal create** – fresh or resuming a session by id, with the values
     that create passed. A resume by id that passes none starts without them:
-    TBD never copies values from an older terminal. The app's History →
-    Resume passes none.
-  - **Worktree create** — the primary Claude terminal, whether it starts at
+    TBD never copies values from an older terminal. The app's Session
+    History passes none.
+  - **Worktree create** – the primary Claude terminal, whether it starts at
     once, after a preSession hook, or from recovery after a daemon restart
     during that hook.
-  - **Wake** from hibernation, which also serves transport migration, a
+  - **Wake** – from hibernation, which also serves transport migration, a
     forced restart and reboot recovery.
-  - **Account switch** — in place; cold, where the next wake applies them;
+  - **Account switch** – in place; cold, where the next wake applies them;
     and fork, which copies them to the new terminal.
-  - **Reopen** from Closed Terminals. A Claude terminal's closed entry keeps
+  - **Reopen** – from Closed Terminals. A Claude terminal's closed entry keeps
     its values; a shell's keeps none.
-  - **Worktree revive** — inline, after a preSession hook, and by recovery.
+  - **Worktree revive** – inline, after a preSession hook, and by recovery.
     Archiving keeps each Claude session's values beside its session id, and
     each revived session starts with its own.
-  - **Revive a conversation on a fresh branch**, which starts with the
+  - **Revive a conversation on a fresh branch** – starts with the
     archived session's values.
 
-  Continue in Claude from a Codex tab has no Claude values to carry.
+  **Continue in Claude from a Codex tab** – has no Claude values to carry.
 
 ## Plugin folders
 
@@ -71,7 +71,9 @@ rule the repo file adds.
   whatever Claude Code's `--plugin-dir` accepts. TBD checks only that the
   path exists.
 - **Path rules** – on the socket a path must be absolute or start with `~/`.
-  TBD expands `~/` once, at create, and stores the absolute path. The CLI
+  TBD expands `~/` once, at create, standardizes the path (`.`, `..`, a
+  trailing `/`) and stores the absolute form, so different spellings of one
+  folder count as one. The CLI
   turns a relative path into an absolute one against the shell's current
   folder before sending it. A create with a relative path on the socket, or
   with a path that does not exist, is refused.
