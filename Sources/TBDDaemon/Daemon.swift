@@ -1564,8 +1564,8 @@ public final class Daemon: Sendable {
         // sessions have no readers — `terminal.output` fails a live session
         // with "its session is gone, was never adopted, or is mid-transition", a
         // sentence no caller
-        // can tell apart from the truth about a genuinely dead one, and the
-        // app's `attach.request` throws `noLiveReader` for the same session —
+        // can tell apart from the truth about a genuinely dead one, and every
+        // `attach.request` for such a session waits on an adoption of its own —
         // and it would not even make the daemon answerable, because steps 8b-8d
         // ahead of it are pre-bind too. The overflow, and only the overflow, is
         // what moves past the bind: see step 9c.
@@ -1613,13 +1613,15 @@ public final class Daemon: Sendable {
 
         // 9c. Finish the holder sessions the startup budget did not reach.
         //
-        // `adoptAll` is the ONLY caller of `adopt` in the daemon, so a row it
-        // walked away from would never be adopted again: its pty master would
-        // go undrained for the process's whole life, and a job cannot finish
-        // exiting while anything it wrote is still queued on its terminal. The
-        // budget therefore bounds when the *socket* is bound, not whether these
-        // sessions are rescued. Detached because nobody is waiting on it: the
-        // socket is up, so no RPC caller waits on a slow holder here.
+        // Past startup a session is adopted only when something asks for it —
+        // an attach adopts the session it names — so a row the budget walked
+        // away from that nobody opens would go undrained for the process's
+        // whole life, and a job cannot finish exiting while anything it wrote
+        // is still queued on its terminal. The budget therefore bounds when the
+        // *socket* is bound, not whether these sessions are rescued. Detached
+        // because nobody is waiting on it: the socket is up, so no RPC caller
+        // waits on a slow holder here — an attach that reaches a row first
+        // adopts it itself, and this pass then finds the reader published.
         //
         // **The rescue is serial, so a slow row delays the rows behind it**,
         // and that is a deliberate trade rather than an oversight. Each row is

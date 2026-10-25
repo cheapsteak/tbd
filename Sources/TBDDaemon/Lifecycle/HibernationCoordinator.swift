@@ -577,6 +577,16 @@ public actor HibernationCoordinator {
         swapsInFlight.contains(terminalID)
     }
 
+    /// Whether a park, a wake or an in-place profile swap of this row is in
+    /// flight. An attach asks before it adopts a holder session on demand
+    /// (`RPCRouter.mayAdoptForAttach`), because each of these owns the
+    /// session's holder while it runs.
+    func holderTransitionInFlight(terminalID: UUID) -> Bool {
+        hibernatesInFlight.contains(terminalID)
+            || wakesInFlight.contains(terminalID)
+            || swapsInFlight.contains(terminalID)
+    }
+
     /// Park a session because an in-place profile swap is about to re-home it
     /// onto another account and resume it there.
     ///

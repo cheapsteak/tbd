@@ -175,6 +175,16 @@ extension RPCRouter {
     /// Failure is reported to the caller rather than degraded into a fallback:
     /// there is no second way to render a holder-backed session, so an attach
     /// that could not happen must say so.
+    ///
+    /// **A session the registry is not reading is adopted first, on demand.**
+    /// Startup adoption can leave a live session unadopted — a holder busy or
+    /// silent past its budget, a row deferred past the startup budget and not
+    /// yet reached, a take-back whose hand-over failed — and nothing else
+    /// would adopt it until somebody asked. An attach is that ask. The
+    /// registry rules out what it can see (`HolderRegistry.adoptForAttach`),
+    /// `mayAdoptForAttach` rules out what only the row and the hibernation
+    /// coordinator can, and the wait is bounded, so the request cannot hang
+    /// on a holder that will not answer.
     private func handleHolderAttachRequest(
         params: AttachRequestParams, terminal: Terminal
     ) async throws -> RPCResponse {
@@ -198,6 +208,12 @@ extension RPCRouter {
                 FDVendHeader(
                     worktreeID: params.worktreeID, paneID: params.paneID,
                     attachID: params.attachID))
+            // A no-op for a session already adopted. When the adoption cannot
+            // happen, `beginAttach` below is what reports it: `noLiveReader`,
+            // read as "ended" when the holder is gone.
+            if await mayAdoptForAttach(terminal) {
+                try await registry.adoptForAttach(terminal: terminal)
+            }
             vend = try await registry.beginAttach(terminalID: terminal.id)
         } catch let error as HolderRegistry.Error
             where attachRefusalMeansSessionEnded(error, terminal: terminal) {
@@ -268,6 +284,23 @@ extension RPCRouter {
                 status: "pending",
                 generation: vend.generation,
                 snapshotPreamble: vend.snapshotPreamble))
+    }
+
+    /// Whether an attach may adopt this session itself when the registry is
+    /// not reading it: the row is awake, and no park, wake or in-place profile
+    /// swap is moving it.
+    ///
+    /// The registry refuses the states it can see — a reader being released,
+    /// a holder it told to let go, an ended job, a shutdown — and these are
+    /// the ones only the row and the coordinator know. A parked row's job was
+    /// ended by its park, and a transition in flight owns the session's holder
+    /// until it settles: a park ends the job behind the reader it found, and a
+    /// wake publishes the reader its own spawn makes. Adopting beside either
+    /// would put a reader on a session the transition is about to change.
+    func mayAdoptForAttach(_ terminal: Terminal) async -> Bool {
+        guard !terminal.isParked else { return false }
+        let moving = await hibernationCoordinator.holderTransitionInFlight(terminalID: terminal.id)
+        return !moving
     }
 
     /// Whether `beginAttach` refusing with `error` means the session has
