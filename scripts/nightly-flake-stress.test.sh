@@ -676,6 +676,78 @@ test_the_pass_table_matches_test_yml() {
   rm -rf "$d"
 }
 
+# CI builds once, in a step of its own, and every pass runs with `--skip-build`.
+# This harness builds before its first iteration and must never inherit the
+# flag: carried into CI_PASSES it would test whatever bundle the tree last
+# built. So the parser drops it, and the mutation proves the drop is what keeps
+# the real test.yml in agreement rather than the flag being absent.
+test_the_pass_table_drops_skip_build() {
+  local wf="$HERE/../.github/workflows/test.yml" mutant rc
+  assert_eq "every CI pass in test.yml carries --skip-build" "4" \
+    "$(grep -c -e '-- --fingerprint --skip-build ' "$wf")"
+  assert_eq "no parsed pass carries it" "0" \
+    "$(pass_table_from_workflow "$wf" | grep -c -e '--skip-build')"
+  assert_eq "and none of CI_PASSES does" "0" \
+    "$(printf '%s\n' "${CI_PASSES[@]}" | grep -c -e '--skip-build')"
+  # MUTATION: stop dropping --skip-build. The real test.yml then disagrees.
+  mutant="$(mutant_of 's/--fingerprint\|--skip-build\|/--fingerprint|/')"
+  assert_contains "the mutant really stopped dropping it" \
+    "$(grep -e '--fingerprint|' "$mutant" | head -1)" "--fingerprint|--experimental"
+  rc=0
+  bash -c "source '$mutant'; check_pass_table '$wf'" >/dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without the drop, test.yml no longer agrees" "1" "$rc"
+}
+
+# The other half of that flag, and the dangerous one. A pass with `--skip-build`
+# runs whatever test bundle `.build/` holds, so after a failed or killed build it
+# would test the cache's bundle instead of the commit — and could go green. Every
+# step that forwards the flag must therefore name the build step's success in its
+# own `if:`. It lives here because this harness already reads test.yml's pass
+# invocations and owns the drop above, and `plans-guard` runs it.
+#
+# One line per step that forwards `--skip-build` as an argument: `gated <name>`
+# or `UNGATED <name>`. Comment lines are ignored, so prose that mentions the flag
+# does not count as forwarding it, and the first `if:` of the step is the one
+# judged.
+skip_build_gates() {
+  awk -v gate="steps.build.outcome == 'success'" '
+    function flush() {
+      if (name != "" && skip) print (index(cond, gate) ? "gated" : "UNGATED"), name
+      name = ""; cond = ""; skip = 0
+    }
+    /^      - / { flush(); name = $0; sub(/^      - (name: )?/, "", name); next }
+    /^[^ #]/ || /^  [^ #]/ { flush(); next }
+    name == "" || /^[ \t]*#/ { next }
+    /^        if:/ { if (cond == "") cond = $0; next }
+    { for (i = 1; i <= NF; i++) if ($i == "--skip-build") skip = 1 }
+    END { flush() }
+  ' "$1"
+}
+
+test_every_skip_build_pass_is_gated_on_the_build() {
+  local wf="$HERE/../.github/workflows/test.yml" d
+  assert_eq "four steps in test.yml forward --skip-build" "4" \
+    "$(skip_build_gates "$wf" | grep -c .)"
+  assert_eq "every one names the build step's success in its if:" "" \
+    "$(skip_build_gates "$wf" | grep '^UNGATED')"
+  d="$(mktmpd)"
+  # MUTATION: drop the build clause from the passes that run after a red 1a.
+  # Their `!cancelled()` would then run them after a failed build too.
+  sed "s/steps\.build\.outcome == 'success' && //" "$wf" > "$d/later.yml"
+  assert_eq "mutation: 1b, 2 and the quiet pass without the clause are caught" "3" \
+    "$(skip_build_gates "$d/later.yml" | grep -c '^UNGATED')"
+  # MUTATION: 1a gated on `!cancelled()` alone, which would run it after a
+  # failed build.
+  sed "s/if: \${{ !cancelled() && steps\.build\.outcome == 'success' }}/if: \${{ !cancelled() }}/" "$wf" > "$d/first.yml"
+  assert_contains "mutation: 1a without the clause is caught" \
+    "$(skip_build_gates "$d/first.yml" | grep '^UNGATED')" "pass 1a"
+  # MUTATION: 1a with no `if:` at all.
+  sed "/if: \${{ !cancelled() && steps\.build\.outcome == 'success' }}/d" "$wf" > "$d/none.yml"
+  assert_contains "mutation: 1a with no if: is caught" \
+    "$(skip_build_gates "$d/none.yml" | grep '^UNGATED')" "pass 1a"
+  rm -rf "$d"
+}
+
 test_pass_of_filters_match_test_yml_verbatim() {
   # The pass map must not drift from CI. Each filter string, as CI spells it
   # inside single quotes, has to appear in test.yml along with its floor.

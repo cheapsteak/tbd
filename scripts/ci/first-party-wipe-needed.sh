@@ -47,22 +47,24 @@
 # for the cache this run goes on to save:
 #
 #   - on `wipe`, the libraries are re-emitted from the current sources, and the
-#     marker the job records at the end describes those same sources;
+#     marker the job records after its build describes those same sources;
 #   - on `skip`, the restored artifacts already match the current sources — that
-#     is precisely what was just proved — and the marker recorded at the end
-#     describes them too.
+#     is precisely what was just proved — and the marker recorded after the
+#     build describes them too.
 #
 # The workflow keeps its half of that bargain by REMOVING the marker as soon as
-# it has read it, and recording a new one from an unconditional step placed
-# after every compile in the job — so reaching the recording is itself the
-# evidence that the build finished. A source fingerprint cannot supply that
-# evidence on its own: it says what the artifacts were built FROM, not that
-# they were finished, and a marker written over a compile that was killed part
-# way through would let a rerun of the same commit skip the wipe that used to
-# heal it.
+# it has read it, and recording a new one from a step with no condition placed
+# right after the build step, the job's only compile — so reaching the
+# recording is itself the evidence that the build finished. A source
+# fingerprint cannot supply that evidence on its own: it says what the
+# artifacts were built FROM, not that they were finished, and a marker written
+# over a compile that was killed part way through would let a rerun of the same
+# commit skip the wipe that used to heal it. The cache save comes right after
+# the recording, so every saved entry carries the marker; the test passes after
+# it run with `--skip-build` and compile nothing that could outdate it.
 #
-# A run that dies anywhere in between therefore leaves no marker, and the next
-# run wipes. A run that died before ever reading the marker leaves the restored
+# A run that dies anywhere in between therefore records no marker and saves
+# nothing. A run that died before ever reading the marker leaves the restored
 # one in place, and `--record` refuses to overwrite a marker that is still
 # there for exactly that reason: it was never consumed, so this run took no
 # responsibility for `.build/` and the marker still describes the artifacts

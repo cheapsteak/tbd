@@ -116,13 +116,14 @@ default. If a caller passes its own `-module-cache-path`, the wrapper adds nothi
 a second, differently-spelled copy would itself be a third plan variant and reintroduce
 the alternation this removes.
 
-**Continuous integration keeps today's behavior.** When `CI` is set the wrapper adds
-no flags. Runners are ephemeral — one worktree per VM — so a shared cache saves nothing
-there, and `.github/workflows/test.yml` ends its job with a bare `swift build` that
-does not route through the wrapper. Applying the flags only to the `scripts/test.sh`
-steps in that job would make CI alternate against itself on every run, and the
-`actions/cache`d `.build` would carry whichever plan ran last into the next job. Both
-branches of this condition are tested.
+**Continuous integration keeps SwiftPM's per-worktree default.** When `CI` is set the
+wrapper adds no flags, so every CI compile plans with the module cache SwiftPM puts
+inside `.build`. Runners are ephemeral — one worktree per VM — so there is no second
+worktree on the machine for a shared cache to serve, and sharing is what the flags are
+for. The default location is also the one the CI cache already carries: the test job's
+`actions/cache` steps save and restore `.build`, while the shared location sits under
+the home directory, outside every cached path. Both branches of this condition are
+tested.
 
 ## What it costs and what it returns
 

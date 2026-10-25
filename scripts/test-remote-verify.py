@@ -692,10 +692,10 @@ class VerdictTests(unittest.TestCase):
 class ResultsVerdictTests(unittest.TestCase):
     """What the RESULT FILES say a red run means, which is not the conclusion.
 
-    `test.yml` holds jobs the test job does not wait on, and a `swift build`
-    step after the results upload, so the run goes red for a SwiftLint violation
-    or a committed plan file while every test passed — none of which
-    `scripts/test.sh` runs locally.
+    `test.yml` holds jobs the test job does not wait on, and cache bookkeeping
+    steps that can fail without stopping the tests, so the run goes red for a
+    SwiftLint violation or a committed plan file while every test passed — none
+    of which `scripts/test.sh` runs locally.
     """
 
     def report(self, *, total=0, unreadable=(), tests=None, files=1):
@@ -740,16 +740,16 @@ class ResultsVerdictTests(unittest.TestCase):
         )
 
     def test_no_results_at_all_is_no_verdict_rather_than_a_failing_suite(self):
-        # 78, NOT 1. The test job runs nine fallible setup steps before the first
+        # 78, NOT 1. The test job runs ten fallible steps before the first
         # `scripts/test.sh` — checkout, the cache-save decision, mtime restore,
         # `brew install tmux`, `xcode-select`, toolchain capture, cache restore,
-        # workspace repair, force rebuild — so a `brew` flake means zero tests
-        # ran, no xUnit file exists and no artifact was uploaded. Adopting 1
-        # there tells a caller its
-        # suite is red when nothing ever compiled, and `scripts/test.sh` has no
-        # local fallback for a 1. Every case that reaches here is answered by 78:
-        # setup died, the compile died, or the upload broke on a genuinely red run
-        # whose failures the local re-run finds properly.
+        # workspace repair, force rebuild, the build — so a `brew` flake means
+        # zero tests ran, no xUnit file exists and no artifact was uploaded.
+        # Adopting 1 there tells a caller its suite is red when nothing ever
+        # compiled, and `scripts/test.sh` has no local fallback for a 1. Every
+        # case that reaches here is answered by 78: setup died, the compile
+        # died, or the upload broke on a genuinely red run whose failures the
+        # local re-run finds properly.
         self.assertEqual(remote_verify.verdict_from_results(None), 78)
 
     def test_an_artifact_holding_no_result_file_is_no_verdict_either(self):
@@ -1087,9 +1087,10 @@ class DriverTests(unittest.TestCase):
         self.assertIn("Test run with 9 tests failed", rendered)
 
     def test_a_red_run_whose_tests_all_passed_is_no_verdict(self):
-        # THE TEST JOB DOES NOT WAIT ON `test.yml`'S OTHER JOBS, and a `swift
-        # build` step follows the results upload — so a SwiftLint violation or a
-        # committed plan file turns the run red while every test passed.
+        # THE TEST JOB DOES NOT WAIT ON `test.yml`'S OTHER JOBS, and its cache
+        # bookkeeping can fail without stopping the tests — so a SwiftLint
+        # violation or a committed plan file turns the run red while every test
+        # passed.
         # `scripts/test.sh` runs none of that locally, so adopting 1 here would
         # report a red suite for something the local suite cannot even see.
         runner = self.failing_runner(**{"xunit-quiet": CLEAN_STYLE})
