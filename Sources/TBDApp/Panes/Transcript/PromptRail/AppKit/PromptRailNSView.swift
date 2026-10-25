@@ -307,16 +307,23 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
 }
 
 /// One rail entry as an accessibility button. Pressing it runs `press`.
+///
+/// `NSAccessibilityElement` is not main-actor isolated, so neither is this
+/// subclass or its `accessibilityPerformPress` override. `press` is
+/// `@Sendable` so the override can hand it to the main actor without
+/// capturing the (non-`Sendable`) element itself.
 final class PromptRailAccessibilityButton: NSAccessibilityElement {
-    private let press: @MainActor () -> Void
+    private let press: @MainActor @Sendable () -> Void
 
-    init(press: @escaping @MainActor () -> Void) {
+    init(press: @escaping @MainActor @Sendable () -> Void) {
         self.press = press
         super.init()
     }
 
-    // Accessibility clients call in on the main thread.
+    // Accessibility clients call in on the main thread, which is what
+    // `assumeIsolated` asserts.
     override func accessibilityPerformPress() -> Bool {
+        let press = self.press
         MainActor.assumeIsolated { press() }
         return true
     }
