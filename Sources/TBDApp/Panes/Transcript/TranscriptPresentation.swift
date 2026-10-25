@@ -391,9 +391,12 @@ struct TranscriptPresentation {
 
         for node in baseNodes {
             switch node.kind {
-            case .chatBubble, .thinking:
+            case .chatBubble, .thinking, .systemReminder(_, .compactSummary, _, _, _, _):
                 // A provisional thinking summary stands alone like a bubble:
-                // folded into a group it would be hidden while it streams.
+                // folded into a group it would be hidden while it streams. So
+                // does a compaction marker: the row exists to show that the
+                // conversation was compacted, and a collapsed group would hide
+                // it as one more "context injection".
                 flushActivity()
                 projected.append(node)
             default:
@@ -476,6 +479,8 @@ struct TranscriptPresentation {
         case .toolCall(_, let name, _, _, _, _):
             return activityBucket(forToolNamed: name)
         case .systemReminder:
+            // Includes `.compactSummary` for totality, though a compaction
+            // marker flushes the run and never reaches a group.
             return .context
         case .skillBody:
             return .skill

@@ -1,10 +1,16 @@
 import Foundation
 
 /// Determines whether a decoded JSONL line is a real user-authored message
-/// vs. a tool result, system reminder, or other system-generated content.
+/// vs. a tool result, system reminder, compaction summary, or other
+/// system-generated content.
 ///
 /// This is the single place to update detection heuristics. The fixture at
 /// Tests/Fixtures/sample-session.jsonl documents the classification decisions.
+///
+/// A compaction summary is recognized by the structured `isCompactSummary`
+/// flag Claude Code sets on its line, never by its text. Only the
+/// dictionary-shaped entry points can see that flag; the `text:` entry points
+/// serve `queued_command` attachments, which never carry it.
 public enum UserMessageClassifier {
 
     /// Prefixes that mark system-generated content in the user role.
@@ -28,12 +34,17 @@ public enum UserMessageClassifier {
     ]
 
     /// Returns true if the parsed JSONL object is a real user message.
+    ///
+    /// A compaction summary is not: Claude Code writes it into the user role,
+    /// but nobody typed it.
     public static func isRealUserMessage(_ line: [String: Any]) -> Bool {
         guard
             line["type"] as? String == "user",
             let message = line["message"] as? [String: Any],
             message["role"] as? String == "user"
         else { return false }
+
+        if isCompactSummary(line) { return false }
 
         if let content = message["content"] as? String {
             return isRealUserMessage(text: content)
@@ -109,12 +120,18 @@ public enum UserMessageClassifier {
     /// Returns the typed system kind for a user-role JSONL line if it's a
     /// system-injected envelope rather than a real user prompt; returns nil
     /// for real user messages.
+    ///
+    /// A compaction summary is `.compactSummary`, decided by the line's
+    /// `isCompactSummary` flag before any of the text-based rules run: its
+    /// body is ordinary prose that no text rule would catch.
     public static func classify(_ line: [String: Any]) -> SystemKind? {
         guard
             line["type"] as? String == "user",
             let message = line["message"] as? [String: Any],
             message["role"] as? String == "user"
         else { return nil }
+
+        if isCompactSummary(line) { return .compactSummary }
 
         let text: String
         if let s = message["content"] as? String {
@@ -179,6 +196,14 @@ public enum UserMessageClassifier {
         }
 
         return nil
+    }
+
+    /// True for the line Claude Code writes when it compacts a conversation
+    /// (`/compact` or auto-compact): a `type:"user"` line carrying the summary
+    /// of everything before it, flagged `"isCompactSummary": true`. Other
+    /// lines may carry the key as `null`, which reads as false.
+    private static func isCompactSummary(_ line: [String: Any]) -> Bool {
+        line["isCompactSummary"] as? Bool == true
     }
 
     private static func hasSystemPrefix(_ text: String) -> Bool {
