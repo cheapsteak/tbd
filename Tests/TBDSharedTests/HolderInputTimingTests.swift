@@ -29,11 +29,12 @@ struct HolderInputTimingTests {
     }
 
     /// The read-side bound carries no safety invariant — nothing holds a screen
-    /// request the way the app holds an injection — but it does sit on the
-    /// critical path of every holder send to an open tab, where neither
-    /// write-side bound does. Pinning it under both is how a later tuning pass
-    /// is stopped from quietly putting a multi-second wait in front of every
-    /// composed message.
+    /// request the way the app holds an injection — but it is a wait the caller
+    /// of a screen read such as `terminal.output` sits through, while both
+    /// write-side bounds are fail-safe margins on writes that lose nothing by
+    /// waiting. Pinning it under both is how a later tuning pass is stopped
+    /// from quietly stretching a screen read's wait out to a write-side margin
+    /// of seconds.
     ///
     /// Asserts the **production constants**, like the test above.
     @Test("The screen pull's bound is shorter than both write-side bounds")
@@ -41,10 +42,10 @@ struct HolderInputTimingTests {
         #expect(
             HolderInputTiming.screenPullBound < HolderInputTiming.pasteHoldBound,
             """
-            the screen pull is consulted before every holder send composes, so \
-            \(HolderInputTiming.screenPullBound) is latency a user waits for; \
-            \(HolderInputTiming.pasteHoldBound) is a fail-safe margin on a write that \
-            loses nothing by waiting.
+            a screen read such as `terminal.output` waits up to \
+            \(HolderInputTiming.screenPullBound) for the viewer, latency its caller sits \
+            through; \(HolderInputTiming.pasteHoldBound) is a fail-safe margin on a write \
+            that loses nothing by waiting.
             """)
         #expect(
             HolderInputTiming.screenPullBound < HolderInputTiming.injectionAckDeadline,
@@ -76,9 +77,9 @@ struct HolderInputTimingTests {
     }
 
     /// The send path waits less than the read path for the same answer, because
-    /// a read has nobody waiting on it and a send does — and because the send's
-    /// expiry lands on a defined behaviour (the stale-modes rule) rather than
-    /// merely on an older answer.
+    /// a read's caller can absorb the wait and a send's cannot — and because
+    /// the send's expiry lands on a defined behaviour (the stale-modes rule)
+    /// rather than merely on an older answer.
     ///
     /// Pinned as a relationship, not a number: the constants may be tuned, but
     /// a send that waited *longer* than a read would have the asymmetry
@@ -93,8 +94,8 @@ struct HolderInputTimingTests {
             """
             the oracle waits \(HolderInputTiming.sendPathScreenPullBound) in front of every \
             holder send to an attached session, while a read waits \
-            \(HolderInputTiming.screenPullBound) with nobody blocked on it; a send waiting the \
-            longer of the two has the asymmetry backwards.
+            \(HolderInputTiming.screenPullBound) for a caller that can absorb it; a send \
+            waiting the longer of the two has the asymmetry backwards.
             """)
         // Still a real wait, not a token one: an awake app answers in one or
         // two main-actor turns, and a bound under that would make the stale

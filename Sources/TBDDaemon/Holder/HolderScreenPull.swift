@@ -32,18 +32,20 @@ import os
 ///
 /// `HolderInputTiming.screenPullBound` is 500 ms, far shorter than the
 /// injection ack's five seconds, and that type's doc argues the asymmetry: a
-/// write loses nothing by waiting, while this read sits on the critical path of
-/// every holder send to an open tab and has a correct fallback to land on. An
+/// write loses nothing by waiting, while a screen read such as `terminal.output`
+/// has a caller waiting on its answer and a correct fallback to land on. An
 /// expiry means the daemon answers from the emulator it suspended at attach,
 /// which is what every consumer's policy was already written against. An app
 /// that is napping, wedged or mid-paste was never going to answer in five
-/// seconds either, and a send — an agent's `tbd terminal send`, the queued
-/// prompt — can arrive at exactly those moments, so the read must not be the
-/// thing that blocks it.
+/// seconds either, and a read can be asked at exactly those moments, so a
+/// viewer that is not answering must not be the thing that holds its caller.
 ///
-/// It is the default rather than the rule: a caller whose wait is spent
-/// somewhere costlier can tighten it per request, and the disposal path does,
-/// because its wait sits inside a window the user is watching close.
+/// It is the default rather than the rule: the bound travels with the request,
+/// so a caller whose wait is spent somewhere costlier tightens it per request.
+/// A send's mode reading passes `sendPathScreenPullBound`, because its wait
+/// lands in front of the act itself, and the disposal path passes
+/// `closedTerminalPullBound`, because its wait sits inside a window the user is
+/// watching close.
 ///
 /// ## Overlapping pulls are independent
 ///

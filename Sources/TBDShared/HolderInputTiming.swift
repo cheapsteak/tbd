@@ -96,10 +96,10 @@ public enum HolderInputTiming {
     /// **Ordering against the other two carries no invariant.** The write-side
     /// pair constrain each other because the app holds an injection the daemon
     /// is timing; nothing holds a screen request. This bound is shorter than
-    /// both only because a read whose caller is waiting for the answer should
-    /// be, and `HolderInputTimingTests` pins that relationship so a later
-    /// tuning pass cannot quietly stretch a screen read's wait out to a
-    /// write-side margin of seconds.
+    /// both only because a read's caller, asking for information, can absorb
+    /// half a second but should not sit through seconds, and
+    /// `HolderInputTimingTests` pins that relationship so a later tuning pass
+    /// cannot quietly stretch a screen read's wait out to a write-side margin.
     public static let screenPullBound: Duration = .milliseconds(500)
 
     /// How long a holder-backed terminal's disposal waits for the viewer that
@@ -128,11 +128,11 @@ public enum HolderInputTiming {
     /// The tightest of the four, and the asymmetry is the point. Three things
     /// differ between this and the read bound:
     ///
-    /// - **A read has nobody waiting on it; a send does.** `terminal.output` is
-    ///   answered when it is answered — a caller reading a screen absorbs half
-    ///   a second without noticing. A `terminal.send` is a person or a
-    ///   rail trying to make something happen, and the wait lands in front of
-    ///   the act itself.
+    /// - **A read's caller can absorb the wait; a send's cannot.**
+    ///   `terminal.output` is answered when it is answered — a caller reading a
+    ///   screen absorbs half a second without noticing. A `terminal.send` is a
+    ///   person or a rail trying to make something happen, and the wait lands
+    ///   in front of the act itself.
     /// - **The send pays twice in the worst case.** A send to a session
     ///   somebody has open waits this bound for the modes, and then the
     ///   injection ack's five seconds for the write. The read pays once.
