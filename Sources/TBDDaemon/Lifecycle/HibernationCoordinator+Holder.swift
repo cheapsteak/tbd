@@ -1014,8 +1014,10 @@ extension HibernationCoordinator {
                 startedAt: now())
         } catch {
             // A holder and a job no row names would be reclaimable by nothing,
-            // so undo the spawn from the failing call itself.
-            await registry.abandon(terminalID: terminal.id, handle: handle)
+            // so undo the spawn from the failing call itself. A park's let-go,
+            // not a teardown's: the row stays parked, and a later wake may
+            // bring the session back.
+            await registry.abandon(terminalID: terminal.id, handle: handle, reason: .park)
             logger.warning("wake: started a holder for \(terminal.id, privacy: .public) but could not record its pids, so it was abandoned: \(error.localizedDescription, privacy: .public)")
             return await refuse(
                 "the replacement agent started, but recording its process ids failed: \(error.localizedDescription)")

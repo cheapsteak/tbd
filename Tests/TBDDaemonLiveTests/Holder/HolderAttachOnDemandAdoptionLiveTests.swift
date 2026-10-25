@@ -153,7 +153,7 @@ extension HolderAttachOnDemandAdoptionLiveTests {
         let parked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await hold.parked == 1
         }
-        let startupPass = Task { try await registry.adopt(terminal: row, skippingLetGo: true) }
+        let startupPass = Task { try await registry.adopt(terminal: row, refusingLetGo: .any) }
         // Two adopt calls have consulted the slot — the first adoption and the
         // pass — so the pass has found `.releasing` and is waiting on it.
         let waiting = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {

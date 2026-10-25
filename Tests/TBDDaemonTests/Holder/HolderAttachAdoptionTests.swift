@@ -367,7 +367,7 @@ import Testing
         _ = await registry.abandon(terminalID: tornDown.id, holderPID: nil, childPID: nil)
 
         await #expect(throws: HolderRegistry.Error.sessionLetGo(terminalID: tornDown.id)) {
-            try await registry.adopt(terminal: tornDown, skippingLetGo: true)
+            try await registry.adopt(terminal: tornDown, refusingLetGo: .any)
         }
         await registry.adoptRemaining([tornDown, untouched])
 

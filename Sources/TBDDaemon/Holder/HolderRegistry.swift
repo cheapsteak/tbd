@@ -90,9 +90,9 @@ actor HolderRegistry {
         /// and keeps running; the next daemon adopts it. `spawn` is the one
         /// path that still builds a reader — see `isShuttingDown`.
         case daemonShuttingDown(terminalID: UUID)
-        /// This registry told the session's holder to let go after the
-        /// startup adoption pass read its rows, so that pass leaves it alone
-        /// (`sessionsLetGo`). Only the startup pass refuses on this.
+        /// This registry told the session's holder to let go, and the adoption
+        /// asked not to adopt such a session (`adopt(terminal:refusingLetGo:)`):
+        /// the startup pass refuses every let-go, a wake a teardown's.
         case sessionLetGo(terminalID: UUID)
 
         var errorDescription: String? {
@@ -130,8 +130,8 @@ actor HolderRegistry {
                     + "\(terminalID.uuidString); the session keeps running, and the next daemon "
                     + "will adopt it"
             case .sessionLetGo(let terminalID):
-                return "this daemon told the holder of session \(terminalID.uuidString) to let go "
-                    + "after the startup adoption began, so that adoption leaves it alone"
+                return "this daemon told the holder of session \(terminalID.uuidString) to let go, "
+                    + "so this adoption leaves it alone"
             }
         }
     }
@@ -483,14 +483,16 @@ actor HolderRegistry {
     /// Sessions whose holder this registry has told to let go — the session
     /// was torn down, or its job was ended for a park — with nothing adopted
     /// or spawned for them since. `abandon` and `abandonVerifiedJob` add a
-    /// session before they release its reader; `publish` removes it, because a
-    /// holder that has just handed over a pty is a live session again, and so
-    /// does `clearLetGo`, for the wake that deliberately revives a parked
-    /// session it could not adopt — a park's let-go only.
+    /// session before they release its reader. `publish` removes any mark
+    /// for a freshly spawned holder, a new process for the session, but only
+    /// a park's mark for an adoption, which is the same holder the mark was
+    /// about (see `publish`); `clearLetGo` removes a park's mark for the wake
+    /// that deliberately revives a parked session it could not adopt.
     ///
     /// Two readers refuse these sessions: an attach's on-demand adoption
     /// (`attachAdoption`) and the startup pass (`adoptOne`, through
-    /// `adopt(terminal:skippingLetGo:)`). The general `adopt` does not, because
+    /// `adopt(terminal:refusingLetGo:)`), and the wake refuses a teardown's
+    /// (the same call, `.teardown`). The general `adopt` does not, because
     /// a wake adopts a parked row's live holder on purpose. `abandon` empties
     /// the slot and forgets the session's status before it reaches the holder,
     /// so without this mark a session being torn down would read exactly like
@@ -514,12 +516,14 @@ actor HolderRegistry {
 
     /// Why this registry told a session's holder to let go.
     enum LetGoReason: Sendable, Equatable {
-        /// A park ended the session's job. The one let-go a wake may undo: a
-        /// wake exists to bring a parked session back.
+        /// A park ended the session's job, or a wake undid its own spawn and
+        /// left the row parked. The one let-go a wake may undo: a wake exists
+        /// to bring a parked session back.
         case park
         /// The session is being torn down — a delete, an archive, a transport
-        /// move, a spawn undone, a hook tab closed. Nothing may bring it back,
-        /// and a wake that finds this keeps the row parked.
+        /// move, a create's spawn undone, a hook tab closed. No adoption may
+        /// bring it back, and a wake that finds this keeps the row parked;
+        /// only a fresh spawn for the same terminal clears it (`publish`).
         case teardown
     }
 
@@ -1057,7 +1061,7 @@ actor HolderRegistry {
             throw error
         }
 
-        publish(adoption, for: terminalID)
+        publish(adoption, for: terminalID, spawned: true)
         Self.logger.info(
             """
             spawned and adopted a holder for session \(terminalID.uuidString, privacy: .public): \
@@ -1435,29 +1439,41 @@ actor HolderRegistry {
     /// pass: a call that waited out a release has very likely waited out
     /// `releaseAll`'s.
     ///
-    /// A session this registry told to let go is adopted all the same: a
-    /// caller with fresh evidence that its holder is live — the wake that
-    /// finds a parked row's child verifiably running — means to adopt it.
+    /// A session this registry told to let go is adopted all the same; the
+    /// callers that must refuse one pass `refusingLetGo`.
     @discardableResult
     func adopt(terminal: Terminal) async throws -> HolderReader {
-        try await adopt(terminal: terminal, skippingLetGo: false)
+        try await adopt(terminal: terminal, refusingLetGo: .none)
     }
 
-    /// `adopt`, with the startup pass's one extra refusal.
+    /// Which let-go marks an adoption refuses (`sessionsLetGo`).
+    enum LetGoRefusal: Sendable, Equatable {
+        /// None: the general `adopt`.
+        case none
+        /// A teardown's only. The wake that adopts a parked row's live holder
+        /// may revive a park's let-go — undoing a park is what it is for —
+        /// but never a teardown's.
+        case teardown
+        /// Every let-go: the startup pass.
+        case any
+    }
+
+    /// `adopt`, refusing the let-go marks `refusingLetGo` names, on every pass
+    /// of the loop, with `sessionLetGo`.
     ///
-    /// `skippingLetGo` refuses a session in `sessionsLetGo`, on every pass of
-    /// the loop. The startup pass adopts from a row list read when it began,
-    /// and `adoptRemaining` runs after the socket is bound, so a terminal
-    /// deleted or parked in the meantime is still on its list; adopting it
-    /// would take the pty of a holder being told to forget it, and the
-    /// publish would erase the very mark that said so. Checked inside the
-    /// loop rather than once by the caller, because a pass that waits out a
-    /// release can find the mark set by the teardown that release belonged to.
+    /// The startup pass refuses `.any`: it adopts from a row list read when it
+    /// began, and `adoptRemaining` runs after the socket is bound, so a
+    /// terminal deleted or parked in the meantime is still on its list. The
+    /// wake refuses `.teardown`: a delete or an archive takes no hibernation
+    /// claim and can overlap it. Either way, adopting would take the pty of a
+    /// holder being told to forget it. Checked inside the loop rather than
+    /// once by the caller, because a call that waits out a release can find
+    /// the mark set by the teardown that release belonged to.
     ///
     /// Internal rather than private only so a test can see the refusal by
     /// name: the startup pass (`adoptOne`) logs and swallows every error.
     @discardableResult
-    func adopt(terminal: Terminal, skippingLetGo: Bool) async throws -> HolderReader {
+    func adopt(terminal: Terminal, refusingLetGo: LetGoRefusal) async throws -> HolderReader {
         guard terminal.transport == .holder else {
             throw Error.notAHolderSession(terminalID: terminal.id)
         }
@@ -1468,8 +1484,15 @@ actor HolderRegistry {
             guard !isShuttingDown else {
                 throw Error.daemonShuttingDown(terminalID: terminalID)
             }
-            if skippingLetGo, sessionsLetGo[terminalID] != nil {
-                throw Error.sessionLetGo(terminalID: terminalID)
+            if let letGo = sessionsLetGo[terminalID] {
+                switch refusingLetGo {
+                case .any:
+                    throw Error.sessionLetGo(terminalID: terminalID)
+                case .teardown where letGo.reason == .teardown:
+                    throw Error.sessionLetGo(terminalID: terminalID)
+                case .teardown, .none:
+                    break
+                }
             }
             // Re-read on every pass, not once at the top: an actor's methods
             // are not atomic across suspension, and every branch below awaits.
@@ -1626,7 +1649,7 @@ actor HolderRegistry {
                 """)
             throw Error.superseded(terminalID: terminalID)
         }
-        publish(adoption, for: terminalID)
+        publish(adoption, for: terminalID, spawned: false)
         Self.logger.info(
             """
             adopted the holder for session \(terminalID.uuidString, privacy: .public): child \
@@ -1820,7 +1843,7 @@ actor HolderRegistry {
     /// guess.
     private func adoptOne(_ terminal: Terminal) async {
         do {
-            _ = try await adopt(terminal: terminal, skippingLetGo: true)
+            _ = try await adopt(terminal: terminal, refusingLetGo: .any)
         } catch let error as Error {
             // A holder that named another installation answered correctly;
             // it is simply not ours. Left running, and not recorded as
@@ -2278,7 +2301,7 @@ actor HolderRegistry {
     /// adoption still running at the limit finishes in its own task and
     /// publishes as any adoption does.
     func adoptWithinAttachBudget(terminal: Terminal) async -> Result<HolderReader, Swift.Error>? {
-        let attempt = Task { try await self.adopt(terminal: terminal) }
+        let attempt = Task { try await self.adopt(terminal: terminal, refusingLetGo: .teardown) }
         return await Self.settlement(of: attempt, within: attachAdoptionBudget, clock: clock)
     }
 
@@ -3653,13 +3676,28 @@ actor HolderRegistry {
     /// `liveDrainLoops` negative for a spawned session, and
     /// `peakLiveDrainLoops` could not see a second loop running beside a
     /// spawned one — the exact byte theft that counter exists to catch.
-    private func publish(_ adoption: Adoption, for terminalID: UUID) {
+    ///
+    /// `spawned` says whether the reader is a freshly spawned holder's. It
+    /// decides what happens to a let-go mark, and the two answers differ on
+    /// purpose:
+    ///
+    /// - **A spawn clears any mark.** It is a new holder process — a wake's,
+    ///   or a transport move's for an existing row — so whatever let go of
+    ///   the one before it no longer describes this session. A teardown mark
+    ///   left on a live session would otherwise refuse every later attach and
+    ///   keep every later wake parked, the day its reader went away.
+    /// - **An adoption clears a park's mark only.** It is the same holder the
+    ///   mark was about. Every adoption path refuses a teardown's mark on each
+    ///   pass of its loop, so one that publishes over a teardown mark slipped
+    ///   past those checks, and erasing the mark would hide the teardown from
+    ///   the wake's own recheck (`refusalToUnpark`) and from every later
+    ///   attach.
+    private func publish(_ adoption: Adoption, for terminalID: UUID, spawned: Bool) {
         slots[terminalID] = .adopted(adoption.reader)
         recordStatus(adoption.description.status, for: terminalID)
-        // A holder that has just handed over its pty is a live session, so
-        // whatever let go of the one before it no longer describes it — the
-        // spawn of a parked session's wake is the ordinary case.
-        sessionsLetGo[terminalID] = nil
+        if spawned || sessionsLetGo[terminalID]?.reason == .park {
+            sessionsLetGo[terminalID] = nil
+        }
         // Recorded with the reader and cleared with it, so "the registry holds
         // a reader for this session" and "the registry can name that session's
         // processes" are the same fact rather than two that can disagree.
