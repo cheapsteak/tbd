@@ -676,6 +676,28 @@ test_the_pass_table_matches_test_yml() {
   rm -rf "$d"
 }
 
+# CI builds once, in a step of its own, and every pass runs with `--skip-build`.
+# This harness builds before its first iteration and must never inherit the
+# flag: carried into CI_PASSES it would test whatever bundle the tree last
+# built. So the parser drops it, and the mutation proves the drop is what keeps
+# the real test.yml in agreement rather than the flag being absent.
+test_the_pass_table_drops_skip_build() {
+  local wf="$HERE/../.github/workflows/test.yml" mutant rc
+  assert_eq "every CI pass in test.yml carries --skip-build" "4" \
+    "$(grep -c -e '-- --fingerprint --skip-build ' "$wf")"
+  assert_eq "no parsed pass carries it" "0" \
+    "$(pass_table_from_workflow "$wf" | grep -c -e '--skip-build')"
+  assert_eq "and none of CI_PASSES does" "0" \
+    "$(printf '%s\n' "${CI_PASSES[@]}" | grep -c -e '--skip-build')"
+  # MUTATION: stop dropping --skip-build. The real test.yml then disagrees.
+  mutant="$(mutant_of 's/--fingerprint\|--skip-build\|/--fingerprint|/')"
+  assert_contains "the mutant really stopped dropping it" \
+    "$(grep -e '--fingerprint|' "$mutant" | head -1)" "--fingerprint|--experimental"
+  rc=0
+  bash -c "source '$mutant'; check_pass_table '$wf'" >/dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without the drop, test.yml no longer agrees" "1" "$rc"
+}
+
 test_pass_of_filters_match_test_yml_verbatim() {
   # The pass map must not drift from CI. Each filter string, as CI spells it
   # inside single quotes, has to appear in test.yml along with its floor.

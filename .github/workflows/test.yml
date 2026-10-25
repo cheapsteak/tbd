@@ -430,17 +430,18 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: macos-26
-    # 100, deliberately NOT sized to this job's 15.3-minute observed worst case
-    # (10.7 median). The four test steps below carry `timeout-minutes` of 35, 15,
-    # 15 and 15 — an 80-minute step budget — and they exist so that a wedged
-    # suite dies on a step that names which pass hung, after that step's own
-    # watchdog has captured the stacks. A job bound at or below 80 would pre-empt
-    # all four and kill the run with the uninformative message those step bounds
-    # were written to avoid. 100 clears the step budget with room for checkout,
-    # `brew install tmux`, the cache restore and the final build — none of which
+    # 110, deliberately NOT sized to this job's 15.3-minute observed worst case
+    # (10.7 median). The build step and the four test steps below carry
+    # `timeout-minutes` of 30, 15, 15, 15 and 15 — a 90-minute step budget —
+    # and they exist so that a wedged run dies on a step that names what hung:
+    # the compile, or which pass, after that pass's own watchdog has captured
+    # the stacks. A job bound at or below 90 would pre-empt them and kill the
+    # run with the uninformative message those step bounds were written to
+    # avoid. 110 clears the step budget with room for checkout,
+    # `brew install tmux`, the cache restore and the cache save — none of which
     # is individually timed — while cutting worst-case occupancy of one of the
-    # five macOS slots from six hours to about an hour and forty minutes.
-    timeout-minutes: 100
+    # five macOS slots from six hours to under two.
+    timeout-minutes: 110
     # All four test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
     # produces one artifact covering all three fast passes and the quiet pass
@@ -456,9 +457,9 @@ jobs:
       TBD_RETRY_METRICS_PATH: /tmp/retry-metrics.jsonl
       # The ~7 GB runner's OOM cap, pinned HERE rather than inherited from
       # `scripts/swift-safe`'s default — see the "Three parallel swift-frontend
-      # processes" block below. Job-level so every step gets it: the three
-      # `scripts/test.sh` steps through the wrapper, and the bare build at the
-      # end of the job by spelling `-j "$TBD_SWIFT_JOBS"`. One cap, one place.
+      # processes" block below. Job-level so every step gets it: the build step
+      # by spelling `-j "$TBD_SWIFT_JOBS"`, and the four `scripts/test.sh` steps
+      # through the wrapper. One cap, one place.
       TBD_SWIFT_JOBS: "3"
     steps:
       - uses: actions/checkout@v4
@@ -594,10 +595,11 @@ jobs:
       #    entries in the store — which is what pushes main's entry, the one
       #    entry every branch can read, toward the bottom of the LRU. When it
       #    goes, the next push to main and the next PR's first run restore
-      #    nothing and rebuild from scratch — the step comment below puts the
-      #    first test step at 1250 s on a cold cache (run 34255164378) against
-      #    73-996 s warm, where a warm restore itself costs 30-54 s, measured
-      #    across the eight most recent green runs.
+      #    nothing and rebuild from scratch — the build step's comment below
+      #    records 1250 s for the compile plus the first test pass on a cold
+      #    cache (run 34255164378) against 73-996 s warm, where a warm restore
+      #    itself costs 30-54 s, measured across the eight most recent green
+      #    runs.
       #  - Every save costs the run that makes it 26-49 s of upload, measured
       #    across those same eight runs.
       - name: Restore SwiftPM build artifacts and dependencies
@@ -641,7 +643,7 @@ jobs:
       #
       # The wipe is not free: measured on a run whose commit touched only
       # `Sources/TBDDaemon` and one test file, it cost about three of the 278
-      # seconds the first pass spent compiling — 89 TBDShared files and 265
+      # seconds that run spent compiling — 89 TBDShared files and 265
       # TBDDaemonLib files recompiled, TestSupport and TBDDaemonTests re-emitted
       # on top, and a 38-second relink. Over the last 40 commits on `main`, 18
       # touched neither library's sources nor the manifest and paid it for
@@ -697,18 +699,104 @@ jobs:
       # all-per-file builds, default parallelism OOMed late in the build with
       # a bare `error: fatalError`, which is why a cap exists at all.
       #
-      # The test steps below do NOT pass `-j` themselves: `scripts/swift-safe`,
-      # which `scripts/test.sh` runs SwiftPM through, supplies `--jobs` from
-      # TBD_SWIFT_JOBS and refuses a command line above it. That variable is
-      # pinned in this job's `env:` block, so the cap above is stated
-      # explicitly here instead of riding on the wrapper's default — raising
-      # that default would otherwise lift CI past the runner's memory ceiling
-      # silently. A developer box, which sets its own TBD_SWIFT_JOBS, is no
-      # longer failed or throttled by a hardcoded number. The bare build at the
-      # end of the job bypasses the wrapper, so it spells the same variable on
-      # its own command line rather than repeating the number — one cap, one
-      # place to change it.
+      # Every SwiftPM invocation in this job goes through `scripts/swift-safe`,
+      # which supplies `--jobs` from TBD_SWIFT_JOBS and refuses a command line
+      # above it. That variable is pinned in this job's `env:` block, so the cap
+      # above is stated explicitly here instead of riding on the wrapper's
+      # default — raising that default would otherwise lift CI past the runner's
+      # memory ceiling silently. A developer box, which sets its own
+      # TBD_SWIFT_JOBS, is no longer failed or throttled by a hardcoded number.
+      # The build step below is the only step that compiles, and it spells the
+      # same variable on its own command line rather than repeating the number,
+      # so the cap reads off the step that spends it — one cap, one place to
+      # change it. The test steps pass no `-j`: they compile nothing, and the
+      # wrapper bounds them anyway.
       #
+      # ---------------------------------------------------------------------
+      # Why the build is its own step
+      #
+      # This step compiles the package and every test target once, and the four
+      # test steps below run against its output with `--skip-build`. A
+      # `swift test` that builds for itself re-checks the whole build graph
+      # first: run that way, the first pass carries the entire compile inside a
+      # test step, and over 96 green runs each later pass spent a median
+      # 10–13 s on a check that found nothing to do. The flag reaches SwiftPM
+      # untouched: `scripts/ci/watched-test-pass.sh` hands everything after its
+      # `--` to `scripts/test.sh`, which consumes only `--fingerprint` and
+      # `--no-fingerprint` and forwards the rest to `swift test`.
+      #
+      # `--build-tests` builds what the passes would have built for themselves.
+      # SwiftPM maps it to the `allIncludingTests` subset, which is the subset
+      # `swift test` builds when it is given no `--test-product`
+      # (`buildTestsIfNeeded` in SwiftPM's `SwiftTestCommand.swift`), and in a
+      # debug build testability is on either way. Nothing the passes forward
+      # changes what is compiled — `--parallel`, `--no-parallel`, `--filter`,
+      # `--skip` and the xUnit pair choose which tests run and where the results
+      # go — and the one flag that bears on the build, `-j`, comes from the same
+      # TBD_SWIFT_JOBS through the same wrapper.
+      #
+      # IT ALSO BUILDS EVERY EXECUTABLE TARGET, which is why the job has no
+      # separate build of TBDCLI and TBDDaemon. A build without `--build-tests`
+      # selects the `allExcludingTests` subset (llbuild target `main`), and
+      # SwiftPM's manifest builder adds every root non-test module and every
+      # non-test product to llbuild target `test` as well as to `main`
+      # (`LLBuildManifestBuilder+Swift.swift` and `+Product.swift`), so
+      # `allIncludingTests` is a superset. Package.swift alone would not show
+      # it: TBDCLI is a test dependency, but no test target depends on the
+      # TBDDaemon executable, only on TBDDaemonLib. The field record agrees: a
+      # build of `main` run after the first `swift test`, which builds this
+      # same subset, was a no-op in 96 of 96 green runs.
+      #
+      # THE PASSES RUN ONLY ON THIS STEP'S SUCCESS, and each one states it in
+      # its own `if:` rather than inheriting it from 1a's skip. `--skip-build`
+      # runs whatever test bundle `.build/` holds, and after a failed or killed
+      # compile that is the bundle the cache restored, or a half-relinked one —
+      # tests of a different tree, which could well pass. So a red build leaves
+      # the job red on this step, with the `::error::` line below naming the
+      # cause, and every pass is skipped rather than run against the wrong code.
+      #
+      # 30 minutes, which is 1800 s: 45% above the slowest measured run of a
+      # first test step that compiled for itself, and that figure covers the
+      # compile AND a full daemon test pass, so the compile alone has more room
+      # than 45%. Measured over the 45 most recent concluded runs of this
+      # workflow (2026-09-05 to 2026-09-09), such a step took between 73 s and
+      # 1250 s. The three slowest — 1010 s (run 34255127220), 1115 s
+      # (34267900663) and 1250 s (34255164378) — are exactly the runs whose
+      # SwiftPM cache restore finished in 1–4 s, which is what a cache MISS
+      # looks like: a hit spends 25–56 s restoring. So 1250 s is the measured
+      # cold-cache figure, over a full 5,529-test daemon pass on top of the
+      # compile. Warm-cache runs still spread 73–996 s, because the runs
+      # measured all force-rebuilt TBDShared and TBDDaemonLib and a PR's first
+      # run restores only the deps-only fallback key.
+      #
+      # NO STALL WATCHDOG, unlike the passes. The watchdog exists for one
+      # failure: a test process wedged where no time limit can reach it — the
+      # cooperative-pool wedge recorded below — whose stacks the platform
+      # timeout would destroy. A compile does not fail that way in this job's
+      # record. The compile failures it does record end on their own, with the
+      # diagnostic in the log: the OOM that surfaces as a bare
+      # `error: fatalError`, and the stale-archive link failure the #7715 wipe
+      # above defends against. And `scripts/ci/watched-test-pass.sh` is built
+      # around a test run — it runs `scripts/test.sh`, fails a run that reports
+      # fewer tests than its floor, and picks what to sample by the test
+      # runner's argv — so wrapping a build would take a new mode in that script
+      # and its harness, for a stall nothing has shown. What this gives up: a
+      # compile run inside a watched pass gets its stall sampled, and here
+      # `timeout-minutes` ends one with no stacks. The bound still names this
+      # step, and so the compile, as what hung; a stall that does turn up here
+      # is the evidence for adding a watchdog.
+      - name: Build (every target, including the test targets, once for all four passes)
+        id: build
+        timeout-minutes: 30
+        run: |
+          status=0
+          scripts/swift-safe build --build-tests -j "$TBD_SWIFT_JOBS" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::The build exited $status, so all four test passes are skipped: they run with --skip-build, and after a failed build that would test whatever stale bundle .build/ still holds instead of this commit."
+          fi
+          exit "$status"
+
+      # ---------------------------------------------------------------------
       # Four sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
       # §4): the tier-3 live suites live in their own target so they can run
       # serially on an otherwise idle machine instead of contending with the
@@ -754,7 +842,10 @@ jobs:
       # the honest figure: a single iteration showed +6 s and it did not hold up
       # across the run. Set against a step that already spends 139-404 s on the
       # compile, it is a good trade for halving the tail. Splitting again pays
-      # that startup cost a third time for the same reason.
+      # that startup cost a third time for the same reason. That measurement
+      # included SwiftPM's no-op build check, which every pass here skips
+      # (`--skip-build`, against the build step above), so what each extra
+      # invocation re-pays is process startup.
       #
       # This is NOT the "sharding across runners" that §1 considered and
       # rejected and §2 lists as a non-goal. That rejection was about extra
@@ -912,62 +1003,58 @@ jobs:
       # ---------------------------------------------------------------------
       - name: Test (fast parallel pass 1a — TBDDaemonTests A–O)
         id: fast_pass_daemon_a
-        # 35, against 15 for its neighbours, because this step runs the FIRST
-        # `swift test` and so pays the whole test-target compile on top of its
-        # own runtime — and because the cost of that compile is dominated by
-        # whether the SwiftPM cache hit.
-        #
-        # Measured over the 45 most recent concluded runs of this workflow
-        # (2026-09-05 to 2026-09-09), the first test step took between 73 s and
-        # 1250 s. The three slowest — 1010 s (run 34255127220), 1115 s
-        # (34267900663) and 1250 s (34255164378) — are exactly the runs whose
-        # SwiftPM cache restore finished in 1–4 s, which is what a cache MISS
-        # looks like: a hit spends 25–56 s restoring. So 1250 s is the measured
-        # cold-cache figure, and it covers a full 5,529-test daemon pass, more
-        # than this step now runs. Warm-cache runs still spread
-        # 73–996 s, because every run force-rebuilds TBDShared and TBDDaemonLib
-        # and a PR's first run restores only the deps-only fallback key.
-        #
-        # The 1800 s watchdog budget below is what actually bounds a wedge — 45%
-        # above that measured worst case — and this step bound is the platform
+        # Only on the build step's success — see "THE PASSES RUN ONLY ON THIS
+        # STEP'S SUCCESS" above. An `if:` with no status function gets
+        # `success()` prepended, so this also keeps the step's standing
+        # condition that nothing before it failed.
+        if: ${{ steps.build.outcome == 'success' }}
+        # 15 and a 600 s budget, the same as 1b: the build step pays the
+        # compile, so this pass is test runtime alone, over the A–O half of
+        # TBDDaemonTests — predicted near 2,500 tests against 1b's 3,120 (see
+        # "The two daemon halves" above), and 1b measured 128 s of step time.
+        # The watchdog budget bounds a wedge; this step bound is the platform
         # backstop behind it, sized to clear the budget with room for the
         # sampling and the kill sweep.
-        timeout-minutes: 35
+        timeout-minutes: 15
         run: |
           scripts/ci/watched-test-pass.sh \
-            --name fast-pass-daemon-a --budget-seconds 1800 \
+            --name fast-pass-daemon-a --budget-seconds 600 \
             --floor 1200 \
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
-            -- --fingerprint --parallel --filter '^TBDDaemonTests\.[A-O]' \
+            -- --fingerprint --skip-build --parallel --filter '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-a.xml --experimental-xunit-message-failure
 
       - name: Test (fast parallel pass 1b — the rest of TBDDaemonTests)
         id: fast_pass_daemon_b
         # Runs even when 1a went red, but not when the job was cancelled and not
-        # when the build or setup never reached 1a at all. Until this landed, a
-        # red fast pass skipped every step after it, so one flake in the tail of
-        # pass 1 hid the live verdict for the whole run and the next push learned
-        # nothing new. The job still fails; the cost is the +2–4 min the later
-        # passes take on a run that is already red.
-        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
-        # 15: the compile is already paid, so this is test runtime plus SPM's
-        # no-op build check — 128 s of step time on the split's first CI run.
-        # The 600 s budget bounds a wedge; this clears it.
+        # when setup never reached 1a at all. Until this landed, a red fast pass
+        # skipped every step after it, so one flake in the tail of pass 1 hid
+        # the live verdict for the whole run and the next push learned nothing
+        # new. The job still fails; the cost is the +2–4 min the later passes
+        # take on a run that is already red. And never after a failed build:
+        # 1a's own condition already implies it, and the clause is spelled out
+        # here anyway so that no change to 1a's `if:` can ever let a
+        # `--skip-build` pass run a stale bundle.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # 15: the build step pays the compile and `--skip-build` skips even
+        # SwiftPM's no-op build check, so this is test runtime alone — 128 s of
+        # step time on the split's first CI run, a figure that still included
+        # that check. The 600 s budget bounds a wedge; this clears it.
         timeout-minutes: 15
         run: |
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-daemon-b --budget-seconds 600 \
             --floor 1500 \
             --floor-message 'the --filter/--skip pair over-matched or the target was renamed.' \
-            -- --fingerprint --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]' \
+            -- --fingerprint --skip-build --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-b.xml --experimental-xunit-message-failure
 
       - name: Test (fast parallel pass 2 — everything except TBDDaemonTests and the live target)
         id: fast_pass_app
         # Expressed as a COMPLEMENT, not a list of targets — see the "Why step 1b
         # and step 2 are COMPLEMENTS" block above. A new test target lands here
-        # on its own.
-        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # on its own. Its `if:` is 1b's, for 1b's reasons.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
         # 15. A step bound wide enough for the per-test limits to fire first and
         # attribute a hang to a named test would buy nothing now: the watchdog
         # does that job sooner and with a stack. It bounds the pass at 600 s —
@@ -980,14 +1067,15 @@ jobs:
             --name fast-pass-app --budget-seconds 600 \
             --floor 1900 \
             --floor-message 'the --skip regex over-matched or a target was renamed.' \
-            -- --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
+            -- --fingerprint --skip-build --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
                --xunit-output /tmp/xunit-app.xml --experimental-xunit-message-failure
 
       - name: Test (quiet pass — tier-3 live suites, serial, idle machine)
         id: quiet_pass
         # Runs on a red fast pass for the same reason 1b and 2 do: the live
-        # suites are the ones a fast-pass flake most often hides.
-        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # suites are the ones a fast-pass flake most often hides. Like theirs,
+        # its `if:` also names the build step outright.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
         # `--no-parallel` is REQUIRED and is not the same as omitting
         # `--parallel`. SwiftPM's `--parallel` governs XCTest's process-level
         # sharding; Swift Testing parallelizes suites in-process on its own and
@@ -1008,7 +1096,7 @@ jobs:
             --name quiet-pass --budget-seconds 720 \
             --floor 35 \
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
-            -- --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
+            -- --fingerprint --skip-build --filter '^TBDDaemonLiveTests\.' --no-parallel \
                --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure
 
       # Every watched pass writes its stall files as `<name>-stall-*.txt`, so one
@@ -1058,9 +1146,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
-        run: swift build -j "$TBD_SWIFT_JOBS"
-
       # Record which sources produced the artifacts now sitting in `.build/`, so
       # the next run that restores this cache can tell whether the SPM #7715
       # wipe above is needed at all. It goes after every compile in the job and
@@ -1102,9 +1187,7 @@ jobs:
       #  - `success()`. A red run stores nothing. That is also what
       #    `actions/cache` does unattended — its `action.yml` declares
       #    `post-if: success()`, so its saving post step does not run on a failed
-      #    job — and the build step above, the last step that compiles into
-      #    `.build`, is itself skipped on a red run, so there would be nothing
-      #    freshly linked to store.
+      #    job.
       #  - `cache-hit != 'true'`. An exact hit means this key is already in the
       #    store and the save would be a duplicate of what was just restored.
       #  - The event. A `push` (main, per this workflow's triggers) always saves:
