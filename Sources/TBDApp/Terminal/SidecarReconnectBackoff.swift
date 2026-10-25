@@ -7,11 +7,16 @@ import Foundation
 /// replaces the old one. Two app instances that each reconnect the moment
 /// theirs drops would take it from each other on every poll, forever. So
 /// every reconnect this path makes pushes the next one further out — 2 s,
-/// doubling, up to 5 minutes — and the run resets only when a reconnect has
-/// held for 10 minutes, longer than the longest wait, or when the app
-/// reconnects to the daemon outright. Two instances fighting therefore settle
-/// at one swap per instance every 5 minutes, and a single app whose sidecar
-/// drops once reconnects at once.
+/// doubling, up to 5 minutes — and the run resets only when the sidecar has
+/// stayed up for 10 minutes since the last reconnect, longer than the longest
+/// wait, or when the app reconnects to the daemon outright. Two instances
+/// fighting therefore settle at one swap per instance every 5 minutes, and a
+/// single app whose sidecar drops once reconnects at once.
+///
+/// "Stayed up" needs no connection identity: the only other thing that
+/// reconnects the sidecar is `DaemonClient.connect()`, which resets the run
+/// itself, so a sidecar found up after a reconnect this path made is either
+/// that connection or one that started a fresh run.
 ///
 /// Plain data over timestamps the caller passes in, so the pacing can be
 /// tested without a clock.
@@ -23,7 +28,7 @@ struct SidecarReconnectBackoff: Sendable {
     /// Reconnects made since the run last reset.
     private(set) var reconnects = 0
     private var nextAllowedAt: Date?
-    private var lastReconnect: (connection: FDSidecarClient.ConnectionID?, at: Date)?
+    private var lastReconnectAt: Date?
 
     /// The wait after the `count`th reconnect of a run.
     static func delay(afterReconnect count: Int) -> TimeInterval {
@@ -37,20 +42,18 @@ struct SidecarReconnectBackoff: Sendable {
         return now >= nextAllowedAt
     }
 
-    /// Records a reconnect attempted at `now`, which left the sidecar on
-    /// `connection` — nil when it did not connect. A failed attempt counts:
+    /// Records a reconnect attempted at `now`, whether or not it connected:
     /// a daemon not listening is no reason to try faster.
-    mutating func noteReconnect(_ connection: FDSidecarClient.ConnectionID?, at now: Date) {
+    mutating func noteReconnect(at now: Date) {
         reconnects += 1
         nextAllowedAt = now.addingTimeInterval(Self.delay(afterReconnect: reconnects))
-        lastReconnect = (connection, now)
+        lastReconnectAt = now
     }
 
-    /// Records the sidecar found up on `connection` at `now`. The run ends
-    /// once a connection this path made has held for `stableAfter`.
-    mutating func noteConnected(_ connection: FDSidecarClient.ConnectionID, at now: Date) {
-        guard let lastReconnect, lastReconnect.connection == connection,
-              now.timeIntervalSince(lastReconnect.at) >= Self.stableAfter
+    /// Records the sidecar found up at `now`. The run ends once it has stayed
+    /// up for `stableAfter` since the last reconnect.
+    mutating func noteConnected(at now: Date) {
+        guard let lastReconnectAt, now.timeIntervalSince(lastReconnectAt) >= Self.stableAfter
         else { return }
         self = SidecarReconnectBackoff()
     }

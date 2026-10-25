@@ -301,6 +301,44 @@ struct SwitchingAccountPaneTests {
         }
     }
 
+    /// The attach-failed placard's Retry rebuilds the pane through a count of
+    /// its own. Were it to advance the attach epoch instead, a Retry landing
+    /// mid-switch would look to the swap like the rebuild it still owes, and
+    /// the pane would stay on the dead holder's attach after the switch.
+    @Test("a Retry during a switch leaves the switch its own rebuild")
+    func retryMidSwitchLeavesTheSwitchItsRebuild() async {
+        await withAppState { state in
+            let row = Self.holderRow(parked: false)
+            let worktreeID = row.worktreeID
+            state.terminals[worktreeID] = [row]
+            func identity() -> String {
+                let current = state.terminals[worktreeID]!.first { $0.id == row.id }!
+                return TerminalPanePresentation.identity(
+                    for: current, switching: state.switchingAccountTerminals[row.id],
+                    attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
+                    attachRetry: state.terminalAttachRetries[row.id] ?? 0)
+            }
+            var afterRetry: String?
+            state.terminalProfileSwapper = { @MainActor _, _, _, _, _ in
+                state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+                    terminalID: row.id, worktreeID: worktreeID,
+                    hibernated: true, keepWarm: false, hibernateReason: .auto))
+                state.retryTerminalAttach(terminalID: row.id)
+                #expect(state.terminalAttachEpochs[row.id] == nil,
+                        "Retry must not touch the epoch the switch reads")
+                afterRetry = identity()
+                return row
+            }
+
+            await state.swapTerminalProfile(terminalID: row.id, newProfileID: nil)
+
+            #expect(state.terminalAttachRetries[row.id] == 1)
+            #expect(state.terminalAttachEpochs[row.id] == 1, "the switch must still rebuild the pane once")
+            #expect(identity() != afterRetry,
+                    "the switch's rebuild was swallowed by the Retry that preceded it")
+        }
+    }
+
     /// A `terminal.list` refresh that lands after the wake commits un-parks
     /// the row by replacing it, and advances nothing; the wake delta that
     /// follows finds the row awake. The reply is what rebuilds the pane then —

@@ -28,6 +28,12 @@ import Foundation
 /// cleared any claim the detach could clear — so an attach issued after the
 /// awaited task completes does not race it. A terminal with nothing unsettled waits for nothing.
 ///
+/// An entry settles after each request's first attempt, not after its
+/// resends. A first attempt that never reached the daemon is resent in the
+/// background (`HolderAttaching.resendingInTransit`); the successor is
+/// refused until a resend lands and retries on its own meanwhile, which is
+/// cheaper than leaving it blank for a whole resend schedule.
+///
 /// Free of `AppState` so it can be unit-tested on its own; `AppState` holds
 /// the one instance the coordinators share.
 @MainActor

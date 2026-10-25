@@ -20,8 +20,6 @@ struct SidecarReconnectTests {
 
     private typealias Backoff = SidecarReconnectBackoff
     private static let start = Date(timeIntervalSince1970: 1_700_000_000)
-    private static let first = FDSidecarClient.ConnectionID(rawValue: 1)
-    private static let second = FDSidecarClient.ConnectionID(rawValue: 2)
 
     // MARK: - The pacing
 
@@ -30,7 +28,7 @@ struct SidecarReconnectTests {
         var backoff = Backoff()
         #expect(backoff.allowsReconnect(at: Self.start), "a sidecar that drops once reconnects at once")
 
-        backoff.noteReconnect(Self.first, at: Self.start)
+        backoff.noteReconnect(at: Self.start)
         #expect(!backoff.allowsReconnect(at: Self.start.addingTimeInterval(Backoff.initialDelay - 0.1)))
         #expect(backoff.allowsReconnect(at: Self.start.addingTimeInterval(Backoff.initialDelay)))
 
@@ -52,9 +50,9 @@ struct SidecarReconnectTests {
         var waits: [TimeInterval] = []
         // Each reconnect is taken away again by the other instance as soon as
         // it can; this instance reconnects as soon as it is allowed to.
-        for round in 0..<12 {
+        for _ in 0..<12 {
             #expect(backoff.allowsReconnect(at: now))
-            backoff.noteReconnect(FDSidecarClient.ConnectionID(rawValue: UInt64(round + 1)), at: now)
+            backoff.noteReconnect(at: now)
             var next = now
             while !backoff.allowsReconnect(at: next) { next = next.addingTimeInterval(1) }
             waits.append(next.timeIntervalSince(now))
@@ -64,20 +62,21 @@ struct SidecarReconnectTests {
         #expect(waits.last == Backoff.maximumDelay, "a fight must settle at the cap: \(waits)")
     }
 
-    @Test("a reconnect that holds for long enough ends the run; a shorter one or another connection does not")
+    @Test("a reconnect that holds for long enough ends the run; a shorter one does not")
     func aStableReconnectEndsTheRun() {
         var backoff = Backoff()
-        backoff.noteReconnect(Self.first, at: Self.start)
-        backoff.noteReconnect(Self.first, at: Self.start.addingTimeInterval(Backoff.initialDelay))
+        backoff.noteConnected(at: Self.start)
+        #expect(backoff.reconnects == 0, "a sidecar up with no reconnect behind it is no run")
+        backoff.noteReconnect(at: Self.start)
+        let last = Self.start.addingTimeInterval(Backoff.initialDelay)
+        backoff.noteReconnect(at: last)
         #expect(backoff.reconnects == 2)
 
-        backoff.noteConnected(Self.first, at: Self.start.addingTimeInterval(Backoff.stableAfter - 1))
+        backoff.noteConnected(at: last.addingTimeInterval(Backoff.stableAfter - 1))
         #expect(backoff.reconnects == 2, "a connection that has not held long enough ends nothing")
-        backoff.noteConnected(Self.second, at: Self.start.addingTimeInterval(Backoff.stableAfter * 2))
-        #expect(backoff.reconnects == 2, "a connection this path did not make says nothing about its run")
 
-        let held = Self.start.addingTimeInterval(Backoff.initialDelay + Backoff.stableAfter)
-        backoff.noteConnected(Self.first, at: held)
+        let held = last.addingTimeInterval(Backoff.stableAfter)
+        backoff.noteConnected(at: held)
         #expect(backoff.reconnects == 0)
         #expect(backoff.allowsReconnect(at: held), "after a stable stretch the next drop reconnects at once")
     }
@@ -125,6 +124,20 @@ struct SidecarReconnectTests {
             if accepted >= 0 { Darwin.close(accepted) }
         }
 
+        /// Takes every connection waiting to be accepted, hangs each up, and
+        /// says how many there were.
+        func pendingConnections() -> Int {
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK)
+            var count = 0
+            while true {
+                let accepted = accept(fd, nil, nil)
+                guard accepted >= 0 else { break }
+                Darwin.close(accepted)
+                count += 1
+            }
+            return count
+        }
+
         func stop() {
             Darwin.close(fd)
             try? FileManager.default.removeItem(atPath: root)
@@ -137,7 +150,7 @@ struct SidecarReconnectTests {
         defer { listener.stop() }
         let client = DaemonClient(
             socketPath: "/nonexistent/tbd-test.sock", vendSocketPath: listener.path)
-        let sidecar = client.fdSidecar
+        let sidecar = await client.fdSidecar
         #expect(!sidecar.isConnected)
 
         #expect(await client.reconnectSidecarIfDown(at: Self.start))
@@ -164,12 +177,14 @@ struct SidecarReconnectTests {
         defer { listener.stop() }
         let client = DaemonClient(
             socketPath: "/nonexistent/tbd-test.sock", vendSocketPath: listener.path)
+        let sidecar = await client.fdSidecar
         #expect(await client.reconnectSidecarIfDown(at: Self.start))
-        let connection = try #require(client.fdSidecar.currentConnection)
+        #expect(sidecar.isConnected)
 
         #expect(await client.reconnectSidecarIfDown(at: Self.start.addingTimeInterval(60)))
-        #expect(client.fdSidecar.currentConnection == connection,
-                "a sidecar that is up must not be replaced")
+        #expect(sidecar.isConnected)
+        #expect(listener.pendingConnections() == 1,
+                "a sidecar that is up must not be replaced by a second connection")
     }
 
     @Test("a holder attach reconnects a sidecar that is down before it asks")
@@ -180,11 +195,12 @@ struct SidecarReconnectTests {
         let rpc = DaemonClient(
             socketPath: "/nonexistent/tbd-test.sock", vendSocketPath: listener.path)
         let holderClient = HolderAttachClient(daemonClient: rpc)
-        #expect(!rpc.fdSidecar.isConnected)
+        let sidecar = await rpc.fdSidecar
+        #expect(!sidecar.isConnected)
 
         _ = try? await holderClient.attach(worktreeID: UUID(), paneID: "", terminalID: UUID())
 
-        #expect(rpc.fdSidecar.isConnected, """
+        #expect(sidecar.isConnected, """
             an attach sent with the sidecar down is refused, because the daemon has nowhere \
             to vend the descriptor — it must reconnect the sidecar before it asks
             """)

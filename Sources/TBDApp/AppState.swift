@@ -832,17 +832,7 @@ final class AppState {
     @ObservationIgnored private var mainAreaSizeBroadcastTask: Task<Void, Never>?
     @ObservationIgnored private var lastBroadcastCols: Int = 0
     @ObservationIgnored private var lastBroadcastRows: Int = 0
-    var isConnected: Bool = false {
-        didSet {
-            if isConnected && !oldValue { daemonConnectionEpoch &+= 1 }
-        }
-    }
-    /// Advanced every time the app (re)gains its daemon connection, so work
-    /// that spans a reconnect can tell. Every terminal panel is rebuilt across
-    /// one — the detail area is replaced while `isConnected` is false — so a
-    /// holder attach still retrying from before it is retrying for a panel
-    /// that is being replaced, and stops.
-    @ObservationIgnored private(set) var daemonConnectionEpoch: UInt64 = 0
+    var isConnected: Bool = false
     var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
     }
@@ -987,21 +977,28 @@ final class AppState {
     /// per successful switch: by the wake's delta when it un-parks a switching
     /// row, or by the swap's reply when nothing did (`applySwitchedTerminalWake`). A switching pane's identity leaves
     /// out the parked state, so this is what rebuilds it into a fresh attach —
-    /// once. Also advanced by the attach-failed placard's Retry
-    /// (`retryTerminalAttach`). Never reset: dropping back to zero when the
-    /// record clears would rebuild the pane a second time. Absent reads as zero.
+    /// once. Never reset: dropping back to zero when the record clears would
+    /// rebuild the pane a second time. Absent reads as zero.
     var terminalAttachEpochs: [UUID: Int] = [:]
+    /// Per-terminal part of a terminal view's SwiftUI identity, advanced by
+    /// each Retry on the attach-failed placard (`retryTerminalAttach`).
+    ///
+    /// Separate from `terminalAttachEpochs` on purpose: an in-place account
+    /// switch reads that epoch to decide whether it still owes the pane its
+    /// one rebuild, and a Retry landing mid-switch must not answer that
+    /// question for it. Absent reads as zero.
+    var terminalAttachRetries: [UUID: Int] = [:]
 
     /// The attach-failed placard's Retry: rebuild this terminal's panel so it
     /// attaches again from scratch.
     ///
-    /// Advancing the attach epoch changes the panel's SwiftUI identity — a
+    /// Advancing the retry count changes the panel's SwiftUI identity — a
     /// pane's and the pinned dock's both carry it — so the failed panel is torn
     /// down and a fresh one built, and the fresh one waits out anything the old
     /// one still has in flight for this terminal before it asks. Unlike closing
     /// the tab, it leaves the session alone.
     func retryTerminalAttach(terminalID: UUID) {
-        terminalAttachEpochs[terminalID, default: 0] += 1
+        terminalAttachRetries[terminalID, default: 0] += 1
     }
 
     func setSuspendingSnapshot(_ image: NSImage, for id: UUID) {

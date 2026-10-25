@@ -66,11 +66,16 @@ enum TerminalPanePresentation {
     /// nothing advanced it first (see `applySwitchedTerminalWake`) — and which
     /// stays advanced after the record clears, so clearing it does not rebuild
     /// the pane a second time.
+    ///
+    /// `attachRetry` is the attach-failed placard's Retry count
+    /// (`AppState.terminalAttachRetries`), kept apart from `attachEpoch` so a
+    /// Retry rebuilds the pane without touching the count the switch reads.
     static func identity(
-        for terminal: Terminal, switching: SwitchingAccount?, attachEpoch: Int
+        for terminal: Terminal, switching: SwitchingAccount?, attachEpoch: Int,
+        attachRetry: Int = 0
     ) -> String {
         let parked = switching == nil ? terminal.isParked : false
-        return "\(terminal.id)-\(terminal.tmuxWindowID)-\(parked)-\(attachEpoch)"
+        return "\(terminal.id)-\(terminal.tmuxWindowID)-\(parked)-\(attachEpoch)-\(attachRetry)"
     }
 
     /// The notice composed into a parked pane's frozen snapshot, or nil.

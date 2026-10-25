@@ -26,12 +26,6 @@ struct HolderAttachment: Sendable {
     /// be fed through `Coordinator.feedSnapshot` — never a bare `feed` — and
     /// before any live output is wired to the view.
     let snapshotPreamble: Data
-    /// The sidecar connection the descriptor arrived over, which names the
-    /// daemon process holding this attach. A handback that fails in transit
-    /// is resent only while this is still the live connection — see
-    /// `HolderAttaching.resendingInTransit`. Nil when it is not known, and
-    /// then nothing is resent.
-    var daemonConnection: FDSidecarClient.ConnectionID? = nil
 }
 
 enum HolderAttachError: Error, LocalizedError {
@@ -60,82 +54,118 @@ protocol HolderAttaching: Sendable {
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
         snapshotPreamble: Data
     ) async throws
-    /// Whether `connection` is still the live sidecar connection, and so
-    /// whether the daemon on the other end of a request is still the one
-    /// that minted an attach vended over it.
-    func isDaemonConnectionLive(_ connection: FDSidecarClient.ConnectionID) -> Bool
 }
 
 extension HolderAttaching {
-    /// No connection is known to be live unless the conformer says so, so a
-    /// conformer that cannot tell resends nothing.
-    func isDaemonConnectionLive(_ connection: FDSidecarClient.ConnectionID) -> Bool { false }
-
-    /// Run `send` — one holder request naming `generation` — and send it again
-    /// while it fails in transit and the daemon that minted `generation` is
-    /// still on the other end of `connection`.
+    /// Send `send` — one holder request naming `generation` — and send it
+    /// again while it fails in transit, waiting out each of
+    /// `HolderAttachRetry.delays` first.
     ///
     /// A handback that never reached the daemon leaves its claim standing, and
     /// nothing else clears a claim while this app lives: every later attach to
     /// the session is refused as owned by a viewer. So a failure in transit is
-    /// worth a resend — but only to the same daemon. Attach generations
-    /// restart at 1 in every daemon process, so a resend that reached a
-    /// successor could hand back a claim some other attach holds under the
-    /// same number, and a successor holds none of the old daemon's claims to
-    /// release anyway. `connection` is checked before every resend for that
-    /// reason; a reconnect, or a daemon that exited, ends the resends.
+    /// worth a resend, and the resends carry on across a reconnect. That is
+    /// safe because every daemon process numbers its attaches from a random
+    /// base below 2^48, so a generation from one daemon names no claim in a
+    /// successor, and a successor answers it the way it answers any generation
+    /// it never minted: a `pane.detach` with success and nothing done, an
+    /// `attach.ready` with a refusal.
     ///
-    /// Resends on `HolderAttachRetry.delays` and then gives up, rethrowing the
-    /// last failure. A failure that is an answer — anything
-    /// `HolderAttachRetry.isTransportFailure` rejects — is rethrown at once.
+    /// Returns once an attempt is accepted. An answer that is a refusal —
+    /// anything `HolderAttachRetry.isTransportFailure` rejects — is rethrown
+    /// at once; the last failure in transit is rethrown once the schedule runs
+    /// out or a wait is cancelled.
+    ///
+    /// - Parameter failure: The failure of an attempt the caller already made,
+    ///   so the first send here waits its turn; nil sends at once.
     func resendingInTransit(
         _ request: String, terminalID: UUID, generation: UInt64,
-        connection: FDSidecarClient.ConnectionID?, clock: any Clock<Duration>,
+        after failure: (any Error)? = nil, clock: any Clock<Duration>,
         _ send: () async throws -> Void
     ) async throws {
-        var resends = 0
-        while true {
+        var lastFailure: any Error
+        if let failure {
+            lastFailure = failure
+        } else {
             do {
                 try await send()
                 return
-            } catch {
-                let failure = error
-                let delays = HolderAttachRetry.delays
-                guard HolderAttachRetry.isTransportFailure(failure), resends < delays.count,
-                      let connection, isDaemonConnectionLive(connection)
-                else { throw failure }
-                let delay = delays[resends]
-                resends += 1
-                logger.info("""
-                    holder \(request, privacy: .public) for attach \(generation, privacy: .public) of \
-                    terminal \(terminalID, privacy: .public) never reached the daemon \
-                    (\(failure.localizedDescription, privacy: .public)); resend \
-                    \(resends, privacy: .public) in \(String(describing: delay), privacy: .public)
-                    """)
-                do {
-                    try await clock.sleep(for: delay)
-                } catch {
-                    throw failure
-                }
-                guard isDaemonConnectionLive(connection) else { throw failure }
+            } catch where HolderAttachRetry.isTransportFailure(error) {
+                lastFailure = error
             }
         }
+        for (index, delay) in HolderAttachRetry.delays.enumerated() {
+            let resend = index + 1
+            let cause = lastFailure.localizedDescription
+            logger.info("""
+                holder \(request, privacy: .public) for attach \(generation, privacy: .public) of \
+                terminal \(terminalID, privacy: .public) never reached the daemon \
+                (\(cause, privacy: .public)); resend \(resend, privacy: .public) in \
+                \(String(describing: delay), privacy: .public)
+                """)
+            do {
+                try await clock.sleep(for: delay)
+            } catch {
+                throw lastFailure
+            }
+            do {
+                try await send()
+                return
+            } catch where HolderAttachRetry.isTransportFailure(error) {
+                lastFailure = error
+            }
+        }
+        throw lastFailure
     }
 
-    /// `pane.detach`, resent through `resendingInTransit` while it fails in
-    /// transit and `connection` is still live.
-    func detachResendingInTransit(
+    /// Hand a session back: `pane.detach` now and, if it never reached the
+    /// daemon, again in the background on `resendingInTransit`'s schedule.
+    ///
+    /// Returns after the first attempt, so a caller holding the handback
+    /// ledger can settle it then. By that point this app is off the
+    /// descriptor, which is all a successor panel has to wait for: while a
+    /// resend is still owed the daemon refuses the successor's attach, and the
+    /// successor's own retries cover that, and a resend of this generation
+    /// cannot touch the successor's newer one.
+    ///
+    /// - Returns: The background resend, when the first attempt never reached
+    ///   the daemon; nil otherwise.
+    @discardableResult
+    func detachResendingInBackground(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
-        snapshotPreamble: Data,
-        connection: FDSidecarClient.ConnectionID?, clock: any Clock<Duration>
-    ) async throws {
-        try await resendingInTransit(
-            "pane.detach", terminalID: terminalID, generation: generation,
-            connection: connection, clock: clock
-        ) {
+        snapshotPreamble: Data, clock: any Clock<Duration>
+    ) async -> Task<Void, Never>? {
+        do {
             try await detach(
                 worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
                 generation: generation, snapshotPreamble: snapshotPreamble)
+            return nil
+        } catch where HolderAttachRetry.isTransportFailure(error) {
+            let failure = error
+            return Task {
+                do {
+                    try await self.resendingInTransit(
+                        "pane.detach", terminalID: terminalID, generation: generation,
+                        after: failure, clock: clock
+                    ) {
+                        try await self.detach(
+                            worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                            generation: generation, snapshotPreamble: snapshotPreamble)
+                    }
+                } catch {
+                    logger.error("""
+                        holder pane.detach for attach \(generation, privacy: .public) of terminal \
+                        \(terminalID, privacy: .public) never reached the daemon, so its viewer \
+                        claim still stands: \(error.localizedDescription, privacy: .public)
+                        """)
+                }
+            }
+        } catch {
+            logger.error("""
+                holder pane.detach for attach \(generation, privacy: .public) of terminal \
+                \(terminalID, privacy: .public) failed: \(error.localizedDescription, privacy: .public)
+                """)
+            return nil
         }
     }
 
@@ -150,40 +180,40 @@ extension HolderAttaching {
     /// timeout's claim already recorded, or, for a superseded attach, is
     /// refused with nothing standing — and the detach then hands back
     /// whichever claim resulted. Re-sending an ack is safe on every one of
-    /// those branches. The preamble is empty because the caller either never
-    /// painted live output or is no longer showing it, so the daemon resumes
-    /// from the screen its own reader kept.
+    /// those branches, and a refusal is an answer: the detach follows it. The
+    /// preamble is empty because the caller either never painted live output
+    /// or is no longer showing it, so the daemon resumes from the screen its
+    /// own reader kept.
     ///
     /// **The caller must already be off the descriptor**: the daemon resumes
-    /// its drain on receipt of the detach. Each request that fails in transit
-    /// is resent while `connection` is live (`resendingInTransit`); what still
-    /// fails after that is logged and dropped. The ack is resent too, because
-    /// an ack that never arrived leaves the attach pending, and the daemon's
-    /// ready timeout then records a claim the detach may already have passed.
-    /// The daemon answers a detach `ok` whether or not it found a claim to
+    /// its drain on receipt of the detach. Each request is sent once before
+    /// this returns, so the handback ledger can settle; a request that never
+    /// reached the daemon is resent in the background (`resendingInTransit`).
+    /// An ack lost in transit is resent too, and then followed by a fresh
+    /// detach: until the ack lands the attach can still be pending, and the
+    /// daemon's ready timeout would record a claim after the first detach went
+    /// by. The daemon answers a detach `ok` whether or not it found a claim to
     /// clear, so a detach error means the request never reached it, and a
     /// success proves only that it arrived.
     ///
     /// - Parameters:
     ///   - kind: Names the release in the log lines — what kind of attach this
     ///     was ("undelivered", "abandoned").
-    ///   - connection: The sidecar connection the attach was vended over, or
-    ///     nil when it is not known; nil resends nothing.
-    ///   - clock: What the resends' backoff sleeps on.
+    ///   - clock: What the background resends wait on.
+    /// - Returns: The background resend, when a first attempt never reached
+    ///   the daemon; nil otherwise.
+    @discardableResult
     func releaseUnconfirmedAttach(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
-        kind: String, connection: FDSidecarClient.ConnectionID?, clock: any Clock<Duration>
-    ) async {
+        kind: String, clock: any Clock<Duration>
+    ) async -> Task<Void, Never>? {
+        var lostReady: (any Error)?
         do {
-            try await resendingInTransit(
-                "attach.ready", terminalID: terminalID, generation: generation,
-                connection: connection, clock: clock
-            ) {
-                try await ready(
-                    worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
-                    generation: generation)
-            }
+            try await ready(
+                worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                generation: generation)
         } catch {
+            if HolderAttachRetry.isTransportFailure(error) { lostReady = error }
             logger.info("""
                 holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
                 terminal \(terminalID, privacy: .public): attach.ready failed while releasing \
@@ -191,11 +221,11 @@ extension HolderAttaching {
                 \(error.localizedDescription, privacy: .public)
                 """)
         }
+        var lostDetach: (any Error)?
         do {
-            try await detachResendingInTransit(
+            try await detach(
                 worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
-                generation: generation, snapshotPreamble: Data(),
-                connection: connection, clock: clock)
+                generation: generation, snapshotPreamble: Data())
             logger.info("""
                 holder sent pane.detach for \(kind, privacy: .public) attach \
                 \(generation, privacy: .public) for terminal \(terminalID, privacy: .public); \
@@ -203,12 +233,61 @@ extension HolderAttaching {
                 not a cleared claim
                 """)
         } catch {
+            if HolderAttachRetry.isTransportFailure(error) { lostDetach = error }
             logger.error("""
                 holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
-                terminal \(terminalID, privacy: .public): pane.detach never reached the daemon, \
-                so any claim under this generation still stands: \
+                terminal \(terminalID, privacy: .public): pane.detach failed while releasing it \
+                (resent if it never reached the daemon): \
                 \(error.localizedDescription, privacy: .public)
                 """)
+        }
+        guard lostReady != nil || lostDetach != nil else { return nil }
+        let readyFailure = lostReady
+        let detachFailure = lostDetach
+        return Task {
+            let sendReady: () async throws -> Void = {
+                try await self.ready(
+                    worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                    generation: generation)
+            }
+            let sendDetach: () async throws -> Void = {
+                try await self.detach(
+                    worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
+                    generation: generation, snapshotPreamble: Data())
+            }
+            // Which detach is owed: a fresh one after an ack that only now
+            // landed, or the resend of one that never did.
+            var detachAfter: (any Error)? = detachFailure
+            if let readyFailure {
+                do {
+                    try await self.resendingInTransit(
+                        "attach.ready", terminalID: terminalID, generation: generation,
+                        after: readyFailure, clock: clock, sendReady)
+                } catch where HolderAttachRetry.isTransportFailure(error) {
+                    logger.error("""
+                        holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
+                        terminal \(terminalID, privacy: .public): attach.ready never reached the \
+                        daemon, so the attach may still be pending: \
+                        \(error.localizedDescription, privacy: .public)
+                        """)
+                    return
+                } catch {
+                    // Refused — an answer, which is all the detach needs.
+                }
+                detachAfter = nil
+            }
+            do {
+                try await self.resendingInTransit(
+                    "pane.detach", terminalID: terminalID, generation: generation,
+                    after: detachAfter, clock: clock, sendDetach)
+            } catch {
+                logger.error("""
+                    holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
+                    terminal \(terminalID, privacy: .public): pane.detach never reached the \
+                    daemon, so any claim under this generation still stands: \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+            }
         }
     }
 }
@@ -227,12 +306,9 @@ struct HolderAttachClient: HolderAttaching {
     /// How long to wait for the vended descriptor. Matches the control-mode
     /// path's bound.
     var fdTimeout: Duration = .seconds(5)
-    /// What the resends of an undelivered attach's release sleep on.
+    /// What the resends of an undelivered attach's release wait on. A panel
+    /// passes its own, so one retry sequence runs on one clock.
     var clock: any Clock<Duration> = ContinuousClock()
-
-    func isDaemonConnectionLive(_ connection: FDSidecarClient.ConnectionID) -> Bool {
-        daemonClient.fdSidecar.currentConnection == connection
-    }
 
     /// Request the pty for one holder-backed session.
     ///
@@ -251,10 +327,6 @@ struct HolderAttachClient: HolderAttaching {
         // this attach for want of somewhere to vend it. Paced inside, so a
         // panel's retries cannot turn this into a reconnect loop.
         await daemonClient.reconnectSidecarIfDown()
-        // Read before the request, and confirmed after the descriptor lands:
-        // the same connection on both sides of the vend is one with no
-        // reconnect in between, so it is the one the descriptor came over.
-        let connection = daemonClient.fdSidecar.currentConnection
         let promise = daemonClient.fdSidecar.expectFD(
             worktreeID: worktreeID, paneID: paneID, attachID: attachID)
         let result: AttachRequestResult
@@ -293,15 +365,13 @@ struct HolderAttachClient: HolderAttaching {
             // that lands later is closed by the sidecar's no-waiter path.
             await releaseUndeliveredAttach(
                 worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
-                generation: generation, connection: connection, cause: error)
+                generation: generation, cause: error)
             throw error
         }
-        let deliveredOver = daemonClient.fdSidecar.currentConnection
         return HolderAttachment(
             ptyFD: fd,
             generation: generation,
-            snapshotPreamble: result.snapshotPreamble ?? Data(),
-            daemonConnection: deliveredOver == connection ? connection : nil)
+            snapshotPreamble: result.snapshotPreamble ?? Data())
     }
 
     /// Release an attach `attach.request` minted but whose descriptor never
@@ -311,9 +381,11 @@ struct HolderAttachClient: HolderAttaching {
     /// Run in an unstructured task and awaited, so a cancelled caller still
     /// sends both RPCs: cancellation is one of the ways the descriptor fails
     /// to arrive. The caller is already failing with the error that matters.
+    /// Returns once each request has been sent once; resends of one that never
+    /// reached the daemon carry on in the background.
     private func releaseUndeliveredAttach(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
-        connection: FDSidecarClient.ConnectionID?, cause: any Error
+        cause: any Error
     ) async {
         logger.info("""
             holder attach \(generation, privacy: .public) for terminal \
@@ -322,10 +394,9 @@ struct HolderAttachClient: HolderAttaching {
             """)
         let client = self
         await Task {
-            await client.releaseUnconfirmedAttach(
+            _ = await client.releaseUnconfirmedAttach(
                 worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
-                generation: generation, kind: "undelivered",
-                connection: connection, clock: client.clock)
+                generation: generation, kind: "undelivered", clock: client.clock)
         }.value
     }
 

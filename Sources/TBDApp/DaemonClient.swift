@@ -172,21 +172,21 @@ actor DaemonClient {
     /// - Returns: Whether the sidecar is connected afterwards.
     @discardableResult
     func reconnectSidecarIfDown(at now: Date = Date()) -> Bool {
-        if let connection = fdSidecar.currentConnection {
-            sidecarReconnectBackoff.noteConnected(connection, at: now)
+        if fdSidecar.isConnected {
+            sidecarReconnectBackoff.noteConnected(at: now)
             return true
         }
         guard sidecarReconnectBackoff.allowsReconnect(at: now) else { return false }
         connectSidecar()
-        let connection = fdSidecar.currentConnection
-        sidecarReconnectBackoff.noteReconnect(connection, at: now)
+        let connected = fdSidecar.isConnected
+        sidecarReconnectBackoff.noteReconnect(at: now)
         let reconnects = sidecarReconnectBackoff.reconnects
-        let outcome = connection == nil ? "failed" : "succeeded"
+        let outcome = connected ? "succeeded" : "failed"
         daemonClientLogger.info("""
             FD sidecar was down while the daemon was up; reconnect \
             \(reconnects, privacy: .public) of this run \(outcome, privacy: .public)
             """)
-        return connection != nil
+        return connected
     }
 
     /// Try a single connection attempt (non-async).

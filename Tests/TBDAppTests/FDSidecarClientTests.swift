@@ -496,42 +496,6 @@ struct FDSidecarClientTests {
         ) { !client.isConnected }
     }
 
-    /// The connection identity is what a lost holder handback is resent under,
-    /// and only while it is current: a resend that crossed a reconnect could
-    /// reach a daemon whose attach generations started over. So an ended
-    /// connection must stop being current at once, and a new one must never
-    /// reuse an old one's identity — and the holder client's liveness check
-    /// must read exactly that.
-    @Test("each adopted socket is a new connection, and one that ended is no longer live")
-    func connectionIdentityFollowsTheSocket() async throws {
-        let rpc = DaemonClient(socketPath: "/nonexistent/tbd-test.sock")
-        let holderClient = HolderAttachClient(daemonClient: rpc)
-        let client = rpc.fdSidecar
-        #expect(client.currentConnection == nil, "a client that never connected has no connection")
-
-        let (firstDaemonSide, firstAppSide) = try makeSocketPair()
-        client.adopt(fd: firstAppSide)
-        let first = try #require(client.currentConnection)
-        #expect(holderClient.isDaemonConnectionLive(first))
-
-        Darwin.close(firstDaemonSide)   // the daemon exits
-        _ = try await waitFor(
-            "the ended connection to stop being current",
-            observed: { "current=\(String(describing: client.currentConnection))" }
-        ) { client.currentConnection == nil }
-        #expect(!holderClient.isDaemonConnectionLive(first),
-                "a handback must not be resent over a connection that has ended")
-
-        let (secondDaemonSide, secondAppSide) = try makeSocketPair()
-        defer { Darwin.close(secondDaemonSide) }
-        client.adopt(fd: secondAppSide)
-        let second = try #require(client.currentConnection)
-        #expect(second != first, "a reconnect must mint a new identity, never reuse the old one")
-        #expect(!holderClient.isDaemonConnectionLive(first),
-                "the old connection's claims are not the new connection's to release")
-        #expect(holderClient.isDaemonConnectionLive(second))
-    }
-
     /// Carries the error a pending waiter actually failed with onto the primary
     /// failure line (assertion-hygiene rule 4: only `Issue.record(_: some Error)`
     /// survives into a CI summary).

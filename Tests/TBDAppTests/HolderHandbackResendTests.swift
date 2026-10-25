@@ -8,36 +8,33 @@ import Testing
 @testable import TBDApp
 import TestSupport
 
-/// A holder handback that never reached the daemon is sent again — to the
-/// daemon that holds the claim, and to no other.
+/// A holder handback that never reached the daemon is sent again, in the
+/// background, a bounded number of times.
 ///
 /// A lost `pane.detach` leaves the session's viewer claim standing, and while
 /// this app lives nothing else clears it: every later attach is refused as
-/// owned by a viewer. Resending it is right only while the daemon on the other
-/// end is the one that minted the generation — generations restart at 1 in
-/// every daemon process, so a resend into a successor could hand back a claim
-/// some other attach holds under the same number. The connection the attach
-/// was vended over is the witness, and the stub here plays it.
+/// owned by a viewer. The resends carry on across reconnects, which is safe
+/// because each daemon process numbers its attaches from a random base, so a
+/// generation names no claim in a successor; a successor answers a detach for
+/// it with success and an `attach.ready` for it with a refusal, and both are
+/// answers — neither is sent again.
 ///
-/// Tier 1 for the resend itself (an in-process stub and an injected clock);
-/// tier 2 for the panel test, which runs the real reader over a `socketpair`.
+/// Tier 1 for the resends (an in-process stub and an injected clock); tier 2
+/// for the panel test, which runs the real reader over a `socketpair`.
 @MainActor
-@Suite("A holder handback lost in transit is resent while the same daemon holds the claim",
-       .fastPassBounded)
+@Suite("A holder handback lost in transit is resent in the background", .fastPassBounded)
 struct HolderHandbackResendTests {
 
-    // `nonisolated`: the stub below reads them off the main actor.
-    nonisolated private static let connection = FDSidecarClient.ConnectionID(rawValue: 3)
+    // `nonisolated`: the stub below reads it off the main actor.
     nonisolated private static let generation: UInt64 = 9
 
     /// Plays the daemon's holder RPCs from a script indexed by call number,
-    /// and the sidecar connection, which stays live until `dropConnection`.
+    /// logging every one in order.
     private final class ScriptedDaemon: HolderAttaching, @unchecked Sendable {
         private let lock = NSLock()
         private var log: [String] = []
         private var detachCount = 0
         private var readyCount = 0
-        private var live: FDSidecarClient.ConnectionID? = HolderHandbackResendTests.connection
         private let attachment: HolderAttachment?
         private let detachScript: @Sendable (Int) throws -> Void
         private let readyScript: @Sendable (Int) throws -> Void
@@ -54,12 +51,6 @@ struct HolderHandbackResendTests {
 
         var events: [String] { lock.withLock { log } }
         var detaches: Int { lock.withLock { detachCount } }
-
-        func dropConnection() { lock.withLock { live = nil } }
-
-        func isDaemonConnectionLive(_ connection: FDSidecarClient.ConnectionID) -> Bool {
-            lock.withLock { live == connection }
-        }
 
         func attach(
             worktreeID: UUID, paneID: String, terminalID: UUID
@@ -93,124 +84,151 @@ struct HolderHandbackResendTests {
         }
     }
 
-    private func detach(
-        _ daemon: ScriptedDaemon,
-        connection: FDSidecarClient.ConnectionID? = HolderHandbackResendTests.connection,
-        clock: any Clock<Duration> = ImmediateClock<Duration>()
-    ) async throws {
-        try await daemon.detachResendingInTransit(
+    private func handBack(
+        _ daemon: ScriptedDaemon, clock: any Clock<Duration> = ImmediateClock<Duration>()
+    ) async -> Task<Void, Never>? {
+        await daemon.detachResendingInBackground(
             worktreeID: UUID(), paneID: "", terminalID: UUID(), generation: Self.generation,
-            snapshotPreamble: Data(), connection: connection, clock: clock)
+            snapshotPreamble: Data(), clock: clock)
     }
 
-    // MARK: - The resend
+    private func release(
+        _ daemon: ScriptedDaemon, clock: any Clock<Duration> = ImmediateClock<Duration>()
+    ) async -> Task<Void, Never>? {
+        await daemon.releaseUnconfirmedAttach(
+            worktreeID: UUID(), paneID: "", terminalID: UUID(), generation: Self.generation,
+            kind: "abandoned", clock: clock)
+    }
 
-    @Test("a detach lost in transit is resent until it lands")
-    func aLostDetachIsResent() async throws {
+    // MARK: - The handback
+
+    @Test("a handback lost in transit is resent until it lands")
+    func aLostHandbackIsResent() async throws {
         let daemon = ScriptedDaemon(detach: { call in
             if call < 2 { throw DaemonClientError.connectionFailed("refused") }
         })
 
-        try await detach(daemon)
+        let resending = try #require(await handBack(daemon), "a lost handback must be resent")
+        await resending.value
 
         #expect(daemon.detaches == 3, "two lost copies, then the one that landed: \(daemon.detaches)")
     }
 
-    @Test("the resends stop when the connection that holds the claim goes away")
-    func aConnectionChangeStopsTheResends() async throws {
+    @Test("a handback returns after its first attempt and resends in the background")
+    func theHandbackReturnsBeforeItsResends() async throws {
         let clock = EventDrivenTestClock()
-        let daemon = ScriptedDaemon(detach: { _ in throw DaemonClientError.daemonNotRunning })
-
-        let sending = Task { @MainActor in
-            do {
-                try await self.detach(daemon, clock: clock)
-                return false
-            } catch {
-                return true
-            }
-        }
-        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
-        // The daemon restarted, or the app reconnected: whoever answers next
-        // may number its attaches from 1 again.
-        daemon.dropConnection()
-        await clock.advance(by: .seconds(60))
-        let threw = await sending.value
-
-        #expect(threw, "a detach that could not be delivered must still report its failure")
-        #expect(daemon.detaches == 1,
-                "a detach was resent past a connection change, where it could hand back another claim")
-    }
-
-    @Test("a cancelled wait between resends gives up with the failure it had")
-    func aCancelledWaitStopsTheResends() async throws {
-        let clock = EventDrivenTestClock()
-        let daemon = ScriptedDaemon(detach: { _ in throw DaemonClientError.daemonNotRunning })
-
-        let sending = Task { @MainActor in
-            do {
-                try await self.detach(daemon, clock: clock)
-                return nil as (any Error)?
-            } catch {
-                return error
-            }
-        }
-        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
-        sending.cancel()
-        let thrown = await sending.value
-
-        #expect(daemon.detaches == 1, "a cancelled wait must not be followed by a resend")
-        #expect(thrown is DaemonClientError,
-                "the caller must learn the detach was not delivered, not that a sleep was cancelled")
-    }
-
-    @Test("an answer from the daemon is not resent")
-    func anAnswerIsNotResent() async {
-        let daemon = ScriptedDaemon(detach: { _ in
-            throw DaemonClientError.rpcError("malformed request", code: nil)
+        let daemon = ScriptedDaemon(detach: { call in
+            if call == 0 { throw DaemonClientError.daemonNotRunning }
         })
 
-        await #expect(throws: DaemonClientError.self) { try await self.detach(daemon) }
+        let resending = try #require(await handBack(daemon, clock: clock))
+        // Back already, with only the first copy sent: whoever held the ledger
+        // for this handback is free to settle it now.
         #expect(daemon.detaches == 1)
+
+        try await clock.requireAdvanceWhenArmed(
+            by: HolderAttachRetry.delays[0], timeout: TestDeadlines.saturatedPass)
+        await resending.value
+        #expect(daemon.detaches == 2)
     }
 
-    @Test("a detach whose connection is unknown is not resent")
-    func anUnknownConnectionIsNotResent() async {
-        let daemon = ScriptedDaemon(detach: { _ in throw DaemonClientError.connectionFailed("refused") })
+    @Test("a handback the daemon answered is not resent, whatever it answered")
+    func anAnsweredHandbackIsNotResent() async {
+        let accepted = ScriptedDaemon()
+        #expect(await handBack(accepted) == nil)
+        #expect(accepted.detaches == 1)
 
-        await #expect(throws: DaemonClientError.self) {
-            try await self.detach(daemon, connection: nil)
-        }
-        #expect(daemon.detaches == 1, "with no witness to the daemon's identity, nothing may be resent")
+        // Any RPC error is an answer — the daemon was reached.
+        let refused = ScriptedDaemon(detach: { _ in
+            throw DaemonClientError.rpcError("malformed request", code: nil)
+        })
+        #expect(await handBack(refused) == nil)
+        #expect(refused.detaches == 1)
     }
 
     @Test("the resends are bounded by the schedule")
-    func theResendsAreBounded() async {
+    func theResendsAreBounded() async throws {
         let daemon = ScriptedDaemon(detach: { _ in throw DaemonClientError.connectionFailed("refused") })
 
-        await #expect(throws: DaemonClientError.self) { try await self.detach(daemon) }
+        let resending = try #require(await handBack(daemon))
+        await resending.value
+
         #expect(daemon.detaches == HolderAttachRetry.delays.count + 1, "\(daemon.detaches)")
     }
 
-    @Test("an abandoned attach's ack lost in transit is resent before its detach")
-    func aLostReleaseAckIsResent() async {
+    @Test("a cancelled resend sends nothing more")
+    func aCancelledResendStops() async throws {
+        let clock = EventDrivenTestClock()
+        let daemon = ScriptedDaemon(detach: { _ in throw DaemonClientError.daemonNotRunning })
+
+        let resending = try #require(await handBack(daemon, clock: clock))
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        resending.cancel()
+        await resending.value
+
+        #expect(daemon.detaches == 1, "a cancelled wait must not be followed by a resend")
+    }
+
+    // MARK: - The release of an unconfirmed attach
+
+    @Test("a release whose requests both got answers resends nothing")
+    func anAnsweredReleaseResendsNothing() async {
+        // The ack refused — the daemon never minted this generation, or has
+        // settled it — and the detach accepted, which it does either way.
+        let daemon = ScriptedDaemon(ready: { _ in
+            throw DaemonClientError.rpcError("attach.ready refused: superseded", code: nil)
+        })
+
+        #expect(await release(daemon) == nil, "a refused ack is an answer, not a reason to resend")
+        #expect(daemon.events == ["ready", "detach"])
+    }
+
+    @Test("a release whose ack was lost resends the ack, then detaches again")
+    func aLostReleaseAckIsResentThenDetached() async throws {
         let daemon = ScriptedDaemon(ready: { call in
             if call == 0 { throw DaemonClientError.sendFailed("short send") }
         })
 
-        await daemon.releaseUnconfirmedAttach(
-            worktreeID: UUID(), paneID: "", terminalID: UUID(), generation: Self.generation,
-            kind: "abandoned", connection: Self.connection, clock: ImmediateClock<Duration>())
+        let resending = try #require(await release(daemon))
+        await resending.value
 
-        #expect(daemon.events == ["ready", "ready", "detach"], """
-            an ack that never arrived leaves the attach pending, and a detach does not clear a \
-            pending attach: \(daemon.events)
+        #expect(daemon.events == ["ready", "detach", "ready", "detach"], """
+            an ack that never arrived can leave the attach pending, and the daemon's ready \
+            timeout turns that into a claim after the first detach went by — so the ack is \
+            resent and a fresh detach follows it: \(daemon.events)
             """)
+    }
+
+    @Test("a release whose resent ack is refused still detaches")
+    func aRefusedResentAckStillDetaches() async throws {
+        let daemon = ScriptedDaemon(ready: { call in
+            if call == 0 { throw DaemonClientError.receiveFailed("reset") }
+            throw DaemonClientError.rpcError("attach.ready refused: superseded", code: nil)
+        })
+
+        let resending = try #require(await release(daemon))
+        await resending.value
+
+        #expect(daemon.events == ["ready", "detach", "ready", "detach"],
+                "a refused ack has reached the daemon, so the detach must follow it: \(daemon.events)")
+    }
+
+    @Test("a release whose detach was lost resends only the detach")
+    func aLostReleaseDetachIsResent() async throws {
+        let daemon = ScriptedDaemon(detach: { call in
+            if call == 0 { throw DaemonClientError.connectionFailed("refused") }
+        })
+
+        let resending = try #require(await release(daemon))
+        await resending.value
+
+        #expect(daemon.events == ["ready", "detach", "detach"], "\(daemon.events)")
     }
 
     // MARK: - Through the panel
 
-    @Test("a panel's handback that fails in transit is resent over the attach's own connection")
-    func aPanelResendsItsHandback() async throws {
+    @Test("a panel's lost handback settles the ledger after one attempt and is resent behind it")
+    func aPanelSettlesItsLedgerBeforeTheResend() async throws {
         var pair: [Int32] = [-1, -1]
         #expect(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
         for fd in pair {
@@ -220,8 +238,7 @@ struct HolderHandbackResendTests {
         defer { Darwin.close(pair[1]) }
         let daemon = ScriptedDaemon(
             attachment: HolderAttachment(
-                ptyFD: pair[0], generation: Self.generation, snapshotPreamble: Data(),
-                daemonConnection: Self.connection),
+                ptyFD: pair[0], generation: Self.generation, snapshotPreamble: Data()),
             detach: { call in
                 if call == 0 { throw DaemonClientError.connectionFailed("refused") }
             })
@@ -239,7 +256,8 @@ struct HolderHandbackResendTests {
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
             appearance: AppearanceSettings(defaults: defaults))
-        let coordinator = TerminalPanelRepresentable.Coordinator(clock: ImmediateClock<Duration>())
+        let clock = EventDrivenTestClock()
+        let coordinator = TerminalPanelRepresentable.Coordinator(clock: clock)
         coordinator.appState = state
         coordinator.panelID = terminalID
         coordinator.terminalView = view
@@ -250,17 +268,20 @@ struct HolderHandbackResendTests {
         #expect(daemon.events == ["attach", "ready"], "the attach must be live first: \(daemon.events)")
 
         coordinator.cleanup()
+        // The ledger settles on the first attempt: a successor waits for the
+        // panel to be off the descriptor and for one detach, not for a resend
+        // schedule that can run for seconds.
+        let ledger = state.holderHandbackLedger
+        try await waitFor("the handback's ledger entry to settle", observed: { "\(daemon.events)" }) {
+            await MainActor.run { !ledger.isInFlight(terminalID: terminalID) }
+        }
+        #expect(daemon.detaches == 1, "the ledger waited out a resend: \(daemon.events)")
+
+        try await clock.requireAdvanceWhenArmed(
+            by: HolderAttachRetry.delays[0], timeout: TestDeadlines.saturatedPass)
         try await waitFor("the handback to be resent", observed: { "\(daemon.events)" }) {
             daemon.detaches >= 2
         }
-        let ledger = state.holderHandbackLedger
-        try await waitFor("the handback to settle") {
-            await MainActor.run { !ledger.isInFlight(terminalID: terminalID) }
-        }
-
-        #expect(daemon.detaches == 2, """
-            a handback lost in transit must be resent while the attach's connection is live — \
-            once, since the second copy landed: \(daemon.events)
-            """)
+        #expect(daemon.detaches == 2, "one lost copy, then the resend that landed: \(daemon.events)")
     }
 }

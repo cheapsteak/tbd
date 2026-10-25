@@ -35,8 +35,8 @@ enum TerminalPreparationPresentation {
     static let holderTransportMessage =
         "This session runs on the pty-holder transport, which TBD can't display yet. The session is unaffected and keeps running."
     /// Shown when a holder attach was attempted and did not complete: the
-    /// daemon refused it, `attach.ready` was refused, or the panel could not
-    /// resolve the session it was built for.
+    /// daemon kept refusing it, `attach.ready` was refused, or the panel could
+    /// not resolve the session it was built for.
     ///
     /// Distinct from `holderTransportMessage` because that copy is false here:
     /// the app renders holder sessions, and this one merely failed to attach
@@ -48,11 +48,21 @@ enum TerminalPreparationPresentation {
     /// It must never send the user to close the tab. Closing a tab ends its
     /// session, which is the one thing this failure did not do.
     static let holderAttachFailedMessage =
-        "TBD couldn't attach to this session's terminal. The session is unaffected and keeps running. Click \(holderAttachRetryTitle) above to attach again."
+        "TBD couldn't attach to this session's terminal. The session is unaffected and keeps running. Click \(TerminalRecoveryPresentation.retryTitle) above to attach again."
     /// The banner above a panel showing `holderAttachFailedMessage`, which
     /// carries the Retry button that copy points at.
     static let holderAttachRetryBannerMessage = "Not attached to this session's terminal."
-    static let holderAttachRetryTitle = "Retry"
+    /// Shown when the daemon answered that it will never serve this attach
+    /// (`HolderAttachRetry.isPermanentRefusal`, short of the session ending):
+    /// a daemon with no holder transport wired, or one that does not speak
+    /// this handshake.
+    ///
+    /// Distinct from `holderAttachFailedMessage` because its remedy is false
+    /// here: the same daemon gives a fresh panel the same answer, so this copy
+    /// promises no Retry and the panel shows no Retry banner. The session is
+    /// still fine — nothing was taken from it.
+    static let holderAttachUnavailableMessage =
+        "The running TBD daemon can't attach to this session's terminal. The session is unaffected and keeps running."
     /// Shown when the daemon reports the holder session ended: no reader, and
     /// the holder process the row records is no longer running.
     ///
@@ -77,6 +87,9 @@ enum TerminalPreparationPresentation {
            status == AttachRequestResult.holderSessionEndedStatus {
             let resumable = terminal?.kind == .claude && terminal?.claudeSessionID != nil
             return resumable ? holderClaudeSessionEndedMessage : holderSessionEndedMessage
+        }
+        if HolderAttachRetry.isPermanentRefusal(error) {
+            return holderAttachUnavailableMessage
         }
         return holderAttachFailedMessage
     }
@@ -213,44 +226,24 @@ struct TerminalPanelView: View {
                 .background(Color.orange.opacity(0.18))
             }
             if let recoveryGuidanceMessage {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(recoveryGuidanceMessage)
-                        .font(.caption)
-                    Spacer()
-                    Button(TerminalRecoveryPresentation.retryTitle) {
-                        Task {
-                            await appState.recreateTerminalWindow(terminalID: terminalID)
-                        }
+                TerminalRetryBanner(message: recoveryGuidanceMessage) {
+                    Task {
+                        await appState.recreateTerminalWindow(terminalID: terminalID)
                     }
-                    .controlSize(.small)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color.orange.opacity(0.18))
             }
             // The Retry the attach-failed placard points at; the placard itself
             // is written into the terminal. Retry advances the terminal's
-            // attach epoch, which is part of this panel's identity, so SwiftUI
-            // builds a fresh panel that attaches again. A sibling in this
-            // VStack rather than an overlay, for the backpressure banner's
+            // attach-retry count, which is part of this panel's identity, so
+            // SwiftUI builds a fresh panel that attaches again. A sibling in
+            // this VStack rather than an overlay, for the backpressure banner's
             // reason below: it never covers the terminal.
             if holderAttachRetryOffered {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(TerminalPreparationPresentation.holderAttachRetryBannerMessage)
-                        .font(.caption)
-                    Spacer()
-                    Button(TerminalPreparationPresentation.holderAttachRetryTitle) {
-                        appState.retryTerminalAttach(terminalID: terminalID)
-                    }
-                    .controlSize(.small)
+                TerminalRetryBanner(
+                    message: TerminalPreparationPresentation.holderAttachRetryBannerMessage
+                ) {
+                    appState.retryTerminalAttach(terminalID: terminalID)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(Color.orange.opacity(0.18))
             }
             // Passive backpressure indicator: shows only while this panel's
             // outgoing queue is holding bytes a stalled pty refused, and only
@@ -390,6 +383,30 @@ struct TerminalPanelView: View {
         env.removeValue(forKey: "TMUX_PANE")
         env["TERM"] = "xterm-256color"
         return env
+    }
+}
+
+// MARK: - TerminalRetryBanner
+
+/// The orange banner above a terminal that says what went wrong and offers
+/// Retry: automatic recovery that gave up, and a holder attach that did.
+private struct TerminalRetryBanner: View {
+    let message: String
+    let onRetry: @MainActor () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.caption)
+            Spacer()
+            Button(TerminalRecoveryPresentation.retryTitle) { onRetry() }
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color.orange.opacity(0.18))
     }
 }
 
@@ -770,8 +787,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// minted. Nil until `attach.ready` has been accepted, because before
         /// that the daemon has not handed the pty over and there is nothing to
         /// hand back.
-        private var holderAttach:
-            (worktreeID: UUID, generation: UInt64, connection: FDSidecarClient.ConnectionID?)?
+        private var holderAttach: (worktreeID: UUID, generation: UInt64)?
         /// While non-nil, terminal replies are collected here instead of being
         /// routed to the session.
         ///
@@ -1216,18 +1232,20 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// A failure that outlasts the retries falls back to the placard,
         /// unlike the control-mode path's fallback to grouped sessions: there
         /// is no second way to render a holder-backed session, so an attach
-        /// that could not happen has to say so. The retries end early on an
-        /// answer `HolderAttachRetry.isRetryable` calls definitive — the
-        /// session ended, above all — and when the app reconnects to the
-        /// daemon, which rebuilds this panel anyway; both paint the placard. A
-        /// teardown ends them silently.
+        /// that could not happen has to say so. The retries end early on a
+        /// permanent refusal (`HolderAttachRetry.isPermanentRefusal`) — the
+        /// session ended, above all — which paints its own placard, and on a
+        /// teardown, which paints nothing. They do not stop for a flicker of
+        /// the daemon connection: a real reconnect tears this panel down
+        /// anyway, and one that never got that far is no reason to give up on
+        /// a healthy session.
         ///
         /// No attempt leaves anything behind for the next. One that fails
-        /// after the daemon minted an attach has handed it back by the time it
-        /// returns — the client releases an attach whose descriptor never
+        /// after the daemon minted an attach has sent its release by the time
+        /// it returns — the client releases an attach whose descriptor never
         /// arrived, and `attemptHolderAttach` stops its reader and releases one
         /// whose ack failed — and the next attempt waits on the ledger for that
-        /// release before it asks.
+        /// release's first send before it asks.
         @MainActor
         func startHolderClient(terminalView: TerminalView) async {
             guard !isTornDown else { return }
@@ -1236,9 +1254,12 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     reason: "the panel's terminal is not loaded in AppState", into: terminalView)
                 return
             }
-            let client = holderAttachClient ?? HolderAttachClient(daemonClient: appState.daemonClient)
+            // The coordinator's clock goes into the client too, so every wait
+            // in one retry sequence — the backoff here and the client's
+            // release resends — runs on the same injected clock.
+            let client = holderAttachClient
+                ?? HolderAttachClient(daemonClient: appState.daemonClient, clock: clock)
             let ledger = handbackLedger(appState)
-            let connectionEpoch = appState.daemonConnectionEpoch
             var retries = 0
             while let failure = await attemptHolderAttach(
                 terminalView: terminalView, appState: appState, client: client,
@@ -1246,8 +1267,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             ) {
                 guard !isTornDown else { return }
                 if retries < holderAttachRetryDelays.count,
-                   HolderAttachRetry.isRetryable(failure.error),
-                   appState.daemonConnectionEpoch == connectionEpoch {
+                   HolderAttachRetry.isRetryable(failure.error) {
                     let delay = holderAttachRetryDelays[retries]
                     retries += 1
                     logger.info("""
@@ -1260,7 +1280,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     // answer: whoever was waiting for this attach has stopped.
                     let slept = (try? await clock.sleep(for: delay)) != nil
                     guard !isTornDown else { return }
-                    if slept, appState.daemonConnectionEpoch == connectionEpoch { continue }
+                    if slept { continue }
                 }
                 feedHolderAttachFailure(
                     reason: "\(failure.step): \(failure.error.localizedDescription)",
@@ -1373,8 +1393,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Darwin.close(attachment.ptyFD)
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation,
-                    connection: attachment.daemonConnection, reader: nil)
+                    generation: attachment.generation, reader: nil)
                 return nil
             }
             if !attachment.snapshotPreamble.isEmpty {
@@ -1392,8 +1411,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Darwin.close(attachment.ptyFD)
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation,
-                    connection: attachment.daemonConnection, reader: nil)
+                    generation: attachment.generation, reader: nil)
                 return nil
             }
             // Feed OFF-MAIN, through the view holder, exactly as the local-PTY
@@ -1479,8 +1497,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 removeLatencyTap()
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation,
-                    connection: attachment.daemonConnection, reader: reader)
+                    generation: attachment.generation, reader: reader)
                 return HolderAttachAttemptFailure(error: error, step: "attach.ready refused")
             }
             // Torn down while the ack was in flight: the daemon has confirmed
@@ -1506,9 +1523,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // drain beside it, two readers on one pty.
             guard !isTornDown else {
                 removeLatencyTap()
-                holderAttach = (
-                    worktreeID: worktreeID, generation: attachment.generation,
-                    connection: attachment.daemonConnection)
+                holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
                 detachHolderSession(stoppedReader: reader)
                 return nil
             }
@@ -1526,9 +1541,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // it is confirmed hands it back through
             // `releaseAbandonedHolderAttach`; the teardown that lands just
             // after the ack sets this itself and takes the live path.
-            holderAttach = (
-                worktreeID: worktreeID, generation: attachment.generation,
-                connection: attachment.daemonConnection)
+            holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
             // Claimed only once the attach is live: before the ack the daemon
             // is still the session's writer, and an injection routed here in
             // that window would be written to a pty the daemon has not yet
@@ -1641,17 +1654,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         private func releaseAbandonedHolderAttach(
             client: any HolderAttaching, ledger: HolderHandbackLedger,
             worktreeID: UUID, generation: UInt64,
-            connection: FDSidecarClient.ConnectionID?,
             reader: HolderStreamReader?
         ) {
             let panelID = self.panelID
             let clock = self.clock
+            // Settles once each request has been sent once; a resend of one
+            // that never reached the daemon carries on outside the ledger.
             let release = Task { @MainActor in
                 await reader?.awaitClosed()
                 await client.releaseUnconfirmedAttach(
                     worktreeID: worktreeID, paneID: "", terminalID: panelID,
-                    generation: generation, kind: "abandoned",
-                    connection: connection, clock: clock)
+                    generation: generation, kind: "abandoned", clock: clock)
             }
             ledger.register(terminalID: panelID, task: release)
         }
@@ -1816,7 +1829,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     from whatever it last saw
                     """)
             }
-            let client = holderAttachClient ?? HolderAttachClient(daemonClient: appState.daemonClient)
+            let clock = self.clock
+            let client = holderAttachClient
+                ?? HolderAttachClient(daemonClient: appState.daemonClient, clock: clock)
             let panelID = self.panelID
             let ledger = handbackLedger(appState)
             holderHandbackInFlight = true
@@ -1826,42 +1841,32 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // here would drop the preamble — and, worse, the detach — whenever
             // SwiftUI released the coordinator inside the poll interval, which
             // is exactly the tab-close case. It is bounded: one poll interval,
-            // one main-queue turn, and the detach with its resends.
+            // one main-queue turn, one RPC; resends run in a task of their own.
             //
             // Registered with the ledger so a successor panel for this same
             // terminal — the one SwiftUI builds when the tab's layout changes
             // shape — waits for the detach to return before it attaches,
             // instead of being refused for a viewer claim this task is about
             // to release.
-            let clock = self.clock
             let handback = Task { @MainActor in
                 await reader?.awaitClosed()
                 var preamble = Data()
                 if let view { preamble = await self.captureHandbackPreamble(from: view) }
                 self.viewHolder.clear()
                 self.holderHandbackInFlight = false
-                do {
-                    // A detach lost in transit leaves the claim standing, and
-                    // with it every later attach to this session refused until
-                    // the app quits — so it is resent, but only to the daemon
-                    // that holds the claim: `resendingInTransit` says why.
-                    try await client.detachResendingInTransit(
-                        worktreeID: attach.worktreeID, paneID: "", terminalID: panelID,
-                        generation: attach.generation, snapshotPreamble: preamble,
-                        connection: attach.connection, clock: clock)
-                } catch {
-                    // Not delivered: out of resends, or the daemon that held
-                    // the claim is gone. A successor daemon holds none of the
-                    // old one's claims; otherwise the daemon still holds this
-                    // session's viewer claim, and what releases it then is the
-                    // app-liveness verdict that covers an app which died
-                    // mid-detach — the same path, reached by a different
-                    // failure.
-                    logger.error("""
-                        holder pane.detach failed for terminal \(panelID, privacy: .public): \
-                        \(error.localizedDescription, privacy: .public)
-                        """)
-                }
+                // A detach lost in transit leaves the claim standing, and with
+                // it every later attach to this session refused until the app
+                // quits — so it is resent in the background. The ledger entry
+                // settles after this first attempt rather than after the last
+                // resend: this panel is off the descriptor already, a successor
+                // refused while the claim stands retries on its own, and a
+                // resend of this generation cannot touch the successor's newer
+                // one. If every resend fails, what releases the claim is the
+                // app-liveness verdict that covers an app which died
+                // mid-detach — the same path, reached by a different failure.
+                await client.detachResendingInBackground(
+                    worktreeID: attach.worktreeID, paneID: "", terminalID: panelID,
+                    generation: attach.generation, snapshotPreamble: preamble, clock: clock)
             }
             ledger.register(terminalID: panelID, task: handback)
         }

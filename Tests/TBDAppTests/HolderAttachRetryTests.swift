@@ -187,6 +187,11 @@ struct HolderAttachRetryTests {
         for error in definitive {
             #expect(!HolderAttachRetry.isRetryable(error), "\(error) is a definitive answer")
         }
+        // Permanent refusals get copy without Retry; cancellation is not one.
+        for error in definitive.dropLast() {
+            #expect(HolderAttachRetry.isPermanentRefusal(error), "\(error) cannot change on Retry")
+        }
+        #expect(!HolderAttachRetry.isPermanentRefusal(CancellationError()))
         let transient: [any Error] = [
             DaemonClientError.rpcError("attach failed: no live holder reader", code: nil),
             DaemonClientError.rpcError("attach failed: the fd sidecar is not connected", code: nil),
@@ -324,11 +329,19 @@ struct HolderAttachRetryTests {
         #expect(fixture.retryOffers.value == 0)
     }
 
-    @Test("a daemon reconnect during the backoff ends the retries at the placard")
-    func reconnectDuringBackoffStops() async throws {
+    /// `isConnected` can drop and come back inside one refresh without any
+    /// panel being rebuilt. A retry loop that gave up on that would paint the
+    /// placard over a healthy session; a real reconnect tears the panel down,
+    /// and the teardown test above covers that.
+    @Test("a flicker of the daemon connection during the backoff does not stop the retries")
+    func aConnectionFlickerDoesNotStopTheRetries() async throws {
+        let pty = FakePTY()
+        defer { pty.closeFar() }
         let clock = EventDrivenTestClock()
-        let stub = ScriptedAttach(attach: { _ in
-            throw DaemonClientError.connectionFailed("refused")
+        let attachment = pty.attachment()
+        let stub = ScriptedAttach(attach: { call in
+            if call == 0 { throw DaemonClientError.connectionFailed("refused") }
+            return attachment
         })
         let fixture = makeFixture(clock: clock, stub: stub)
         defer { fixture.tearDown() }
@@ -337,14 +350,14 @@ struct HolderAttachRetryTests {
             await fixture.coordinator.startHolderClient(terminalView: fixture.view)
         }
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
-        // The app regains the daemon: every panel is rebuilt across that, so
-        // this one's retries are for a panel being replaced.
+        fixture.state.isConnected = false
         fixture.state.isConnected = true
-        await clock.advance(by: .seconds(60))
+        await clock.advance(by: HolderAttachRetry.delays[0])
         await attaching.value
 
-        #expect(stub.attaches == 1, "a retry that outlived a reconnect asked again: \(stub.attaches)")
-        #expect(fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage))
+        #expect(stub.events == ["attach", "attach", "ready"],
+                "the retry must survive a connection flicker: \(stub.events)")
+        #expect(!fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage))
     }
 
     @Test("a cancelled backoff ends the retries at the placard")
@@ -367,19 +380,5 @@ struct HolderAttachRetryTests {
         #expect(fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage),
                 "the panel is still up and still unattached, so it must say so")
         #expect(fixture.retryOffers.value == 1)
-    }
-
-    @Test("the connection epoch advances when the app regains the daemon, and only then")
-    func connectionEpochAdvancesOnReconnect() {
-        let state = AppState()
-        let start = state.daemonConnectionEpoch
-        state.isConnected = true
-        #expect(state.daemonConnectionEpoch == start + 1)
-        state.isConnected = true
-        #expect(state.daemonConnectionEpoch == start + 1, "staying connected is not a reconnect")
-        state.isConnected = false
-        #expect(state.daemonConnectionEpoch == start + 1, "losing the daemon is not a reconnect")
-        state.isConnected = true
-        #expect(state.daemonConnectionEpoch == start + 2)
     }
 }

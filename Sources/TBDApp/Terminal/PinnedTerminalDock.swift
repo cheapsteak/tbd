@@ -163,9 +163,9 @@ private struct PinnedTerminalCell: View {
                         await appState.requestAutomaticTerminalRecreation(terminalID: terminal.id)
                     }
                 )
-                // The attach epoch is part of the identity so the attach-failed
+                // The Retry count is part of the identity so the attach-failed
                 // placard's Retry rebuilds this panel too, as it does a pane's.
-                .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(appState.terminalAttachEpochs[terminal.id] ?? 0)")
+                .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(appState.terminalAttachRetries[terminal.id] ?? 0)")
             } else {
                 ZStack {
                     Color(nsColor: .textBackgroundColor)

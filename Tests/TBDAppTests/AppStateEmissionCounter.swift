@@ -139,6 +139,7 @@ final class AppStateEmissionTracker {
         _ = state.suspendingSnapshots
         _ = state.switchingAccountTerminals
         _ = state.terminalAttachEpochs
+        _ = state.terminalAttachRetries
         _ = state.editingWorktreeID
         _ = state.isRenamingWorktree
         _ = state.prStatuses
@@ -267,6 +268,7 @@ final class AppStateEmissionTracker {
         "suspendingSnapshots",
         "switchingAccountTerminals",
         "terminalAttachEpochs",
+        "terminalAttachRetries",
         "editingWorktreeID",
         "isRenamingWorktree",
         "prStatuses",
