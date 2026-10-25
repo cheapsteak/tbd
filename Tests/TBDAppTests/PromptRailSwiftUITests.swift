@@ -441,6 +441,7 @@ struct PromptRailSwiftUITests {
         await hover._drainForTesting()
     }
 
+    @MainActor
     private struct Mounted {
         let host: OffscreenHost<AnyView>
         let state: PromptRailState
