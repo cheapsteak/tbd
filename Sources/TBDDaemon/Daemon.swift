@@ -2372,6 +2372,12 @@ public final class Daemon: Sendable {
         // of the transport — but a reader that is merely dropped leaks its drain
         // thread and the pty descriptor it owns, because after end of file that
         // thread parks on its wake pipe rather than exiting.
+        //
+        // The sidecar and the RPC socket stay up well past this point, so an
+        // app can still ask to attach — an update's freshly launched app does,
+        // reaching this daemon before its successor binds. The registry marks
+        // itself shutting down as the release begins, and from then on every
+        // attach is refused as `daemonShuttingDown` and nothing is adopted.
         await holderRegistry?.releaseAll()
 
         // Stop the dev server running-file watch and its recheck loop.

@@ -83,6 +83,13 @@ actor HolderRegistry {
         /// attach has taken the pty, and clearing the successor's claim would
         /// put the daemon on a descriptor another process is reading.
         case handbackSuperseded(terminalID: UUID, generation: UInt64)
+        /// The daemon is shutting down: `releaseAll` has begun, so every reader
+        /// is being stopped and none may be built or handed out. A reader
+        /// adopted behind that release would never be stopped, and a pty vended
+        /// now would go to an app this daemon is about to stop serving. The
+        /// session itself is untouched and keeps running; the next daemon
+        /// adopts it.
+        case daemonShuttingDown(terminalID: UUID)
 
         var errorDescription: String? {
             switch self {
@@ -114,6 +121,10 @@ actor HolderRegistry {
             case .handbackSuperseded(let terminalID, let generation):
                 return "attach \(generation) for session \(terminalID.uuidString) is not the one "
                     + "holding that session's pty, so its detach hands nothing back"
+            case .daemonShuttingDown(let terminalID):
+                return "the daemon is shutting down, so it can neither attach nor adopt session "
+                    + "\(terminalID.uuidString); the session keeps running, and the next daemon "
+                    + "will adopt it"
             }
         }
     }
@@ -390,6 +401,18 @@ actor HolderRegistry {
     private var lastAttachGeneration: UInt64 = 0
 
     private var slots: [UUID: Slot] = [:]
+
+    /// Set when `releaseAll` begins, and never cleared: the daemon is shutting
+    /// down. From then on every adoption and every attach refuses with
+    /// `daemonShuttingDown`, because `releaseAll` releases the slots it found
+    /// when it began and a reader built after that would be stopped by nothing.
+    ///
+    /// The window it covers is real and wide. `Daemon.stop()` releases every
+    /// reader long before it stops the fd sidecar and the RPC socket, and an
+    /// app relaunched by an update reaches the dying daemon inside it. Its
+    /// attach is refused either way; the refusal has to say the daemon is
+    /// going away, because `noLiveReader` reads as a session this daemon lost.
+    private(set) var isShuttingDown = false
 
     /// What the hand-over said about each published session's processes.
     ///
@@ -1222,6 +1245,10 @@ actor HolderRegistry {
     /// vacated by awaiting a task, and an actor's methods are not atomic across
     /// suspension, so the slot is re-read after every await instead of being
     /// remembered across one.
+    ///
+    /// Refused once the daemon is shutting down (`isShuttingDown`), on every
+    /// pass: a call that waited out a release has very likely waited out
+    /// `releaseAll`'s.
     @discardableResult
     func adopt(terminal: Terminal) async throws -> HolderReader {
         guard terminal.transport == .holder else {
@@ -1231,6 +1258,9 @@ actor HolderRegistry {
         adoptionCallsEntered += 1
 
         while true {
+            guard !isShuttingDown else {
+                throw Error.daemonShuttingDown(terminalID: terminalID)
+            }
             // Re-read on every pass, not once at the top: an actor's methods
             // are not atomic across suspension, and every branch below awaits.
             // An attach that completed while this call was parked must be seen
@@ -1300,9 +1330,14 @@ actor HolderRegistry {
     ///
     /// Reached only with the slot genuinely vacant — no reader adopted, none
     /// being adopted, and none still draining its way out of a release.
+    ///
+    /// Refused while the daemon shuts down, here as well as in its callers,
+    /// so that no path into a hand-over — the take-back's no-reader arm
+    /// included — can open one behind `releaseAll`.
     private func beginAdoption(
         of terminalID: UUID, seedingScreenWith preamble: Data = Data()
     ) async throws -> HolderReader {
+        guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
         let socketPath = try HolderRendezvous.socketPath(
             sessionID: terminalID, environment: environment)
         let expected = owner
@@ -1515,6 +1550,16 @@ actor HolderRegistry {
             budget did not reach
             """)
         for (index, terminal) in rows.enumerated() {
+            // A shutdown refuses every adoption, so the rest of the pass would
+            // only log one refusal per row. The next daemon adopts them.
+            guard !isShuttingDown else {
+                Self.logger.info(
+                    """
+                    stopped the deferred adoption with \(rows.count - index, privacy: .public) \
+                    holder sessions left: the daemon is shutting down
+                    """)
+                return
+            }
             Self.logger.debug(
                 """
                 adopting deferred holder session \(terminal.id.uuidString, privacy: .public) \
@@ -1814,9 +1859,14 @@ actor HolderRegistry {
     ///
     /// The returned descriptor belongs to the caller, which closes it once it
     /// has been passed on.
+    ///
+    /// Refused first, and by name, once the daemon is shutting down: the
+    /// reader is being released, and the app should hear that this daemon is
+    /// going away rather than that the session has no reader.
     func beginAttach(
         terminalID: UUID, maxScrollbackLines: Int = HolderReader.scrollbackLines
     ) async throws -> HolderAttachVend {
+        guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
         guard viewerAttachments[terminalID] == nil else {
             throw Error.attachedToViewer(terminalID: terminalID)
         }
@@ -3142,7 +3192,15 @@ actor HolderRegistry {
 
     /// Releases every reader. The holders and their jobs are untouched — that
     /// is the whole design: a session outlives the daemon that was reading it.
+    ///
+    /// This is the daemon's shutdown, so it marks the registry shutting down
+    /// first (`isShuttingDown`), before it reads which slots to release and
+    /// with no suspension in between. Every adoption or attach that arrives
+    /// after that refuses rather than building a reader this loop has already
+    /// decided not to visit; one already in flight holds its slot, so the loop
+    /// releases it and the adoption finds itself superseded.
     func releaseAll() async {
+        isShuttingDown = true
         for terminalID in Set(slots.keys).union(viewerAttachments.keys) {
             await release(terminalID: terminalID)
         }
