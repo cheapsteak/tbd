@@ -64,7 +64,7 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
 - It is the last entry whose row top lies above a probe line 20% down the viewport.
 - Within 8pt of the bottom, the last entry is active. A prompt just sent sits low on screen, and the reader is reading its exchange.
 - When no entry lies above the probe line, the first entry is active.
-- After a jump, the target stays active until the reader scrolls. This covers prompts near the end, which cannot be scrolled to the top.
+- After a jump, the target stays active until the reader scrolls or a new prompt arrives. This covers prompts near the end, which cannot be scrolled to the top. The coordinator's own tail-follow is not a reader scroll: it ends the jump's pin, since the two would fight, but leaves the target active.
 - With no entries, the rail is empty and nothing is active.
 
 A reader scroll, here and under Jumping, is any change to the clip view's bounds that the coordinator did not make itself.
