@@ -236,6 +236,37 @@ in the parallel pass is merely the status quo, but moving a fast
 deterministic suite into the serial pass taxes every PR forever. When in
 doubt, leave it in the parallel pass.
 
+## Opt-in harnesses — `TBD_HARNESSES`
+
+Some suites exist for a person to run by hand: render harnesses that write
+PNGs to look at, benchmarks that print timings, oracle runs over a real
+session. Each is inert unless an environment variable asks for it, but an
+inert test still compiles into `TBDAppTests` on every run and still takes a
+turn in the pass. So these files compile only under the `TBD_HARNESSES`
+compilation condition:
+
+```sh
+scripts/test.sh -Xswiftc -DTBD_HARNESSES --filter <Suite>
+```
+
+`-Xswiftc` reaches every target, so the first such run rebuilds the package.
+The condition only makes a harness exist; most also keep their own variable,
+so compiling them all does not start any of them. Each file's header names its
+variable and gives the full command:
+
+- **`TableTranscriptHarness`** – `TBD_TABLE_HARNESS=1`; set
+  `TBD_COMPARE_THIS_SESSION` to a session JSONL to run the real-session tests
+  over it. Its headless pane tests, which do run in CI, are
+  `TableTranscriptPaneTests`, and the two share `TableTranscriptScene`.
+- **`TranscriptEagerMeasureBench`** – `TBD_PERF_BENCH=1`.
+- **`ComposerRenderHarness`** – `TBD_COMPOSER_SHOTS_DIR=<dir>`.
+- **`SidebarRenderHarness`** – `TBD_SIDEBAR_SHOTS_DIR=<dir>`.
+
+Nothing in CI builds with the condition, so a refactor can break a harness
+without anything going red. Whoever next enables one fixes it. A new
+harness that only a person reads belongs behind the same condition; a test
+whose assertions guard behaviour does not, however slow it is.
+
 ## Population is the scheduler, and it is a moving target
 
 Swift Testing runs every non-serialized test in **one process with no
@@ -731,7 +762,7 @@ hands the main actor back, the queued block runs, and only then does the
 continuation resume — so the test observes the effect it came to assert.
 
 Two shapes, and they are not interchangeable.
-`TableTranscriptHarness.drainMainQueue()` is the minimal one — a few bare
+`TableTranscriptPaneTests.drainMainQueue()` is the minimal one — a few bare
 `Task.yield()`s, no condition and no sleep. That is enough when the work is
 already on the queue and handing it back is all that was missing, but it checks
 nothing and so **carries no failure signal**: if the work needs longer than the

@@ -754,7 +754,7 @@ struct TranscriptEstimatorAccuracyTests {
 
     private static let shortAssistantText = "Done — the row now measures exactly."
 
-    /// Verbatim from `TableTranscriptHarness.allKindsFixture()`'s `k-assistant`.
+    /// Verbatim from `TableTranscriptScene.allKindsFixture()`'s `k-assistant`.
     private static let twoParagraphAssistantText = """
         Here is the rundown. Each upstream item becomes a render node, cached by \
         `(id, contentVersion, width)` so a re-poll never rebuilds an unchanged row. \
@@ -1287,7 +1287,7 @@ struct TranscriptEstimatorAccuracyTests {
         let window: NSWindow
     }
 
-    /// Mirrors `TableTranscriptHarness.makeScene` — a real offscreen scroll view +
+    /// Mirrors `TableTranscriptScene` — a real offscreen scroll view +
     /// table over the production Coordinator. The `scrollerStyle = .legacy` pin is
     /// deliberate and kept (commit bbf8474c).
     private static func makeScene(appState: AppState, nodes: [TranscriptRenderNode]) -> Scene {
