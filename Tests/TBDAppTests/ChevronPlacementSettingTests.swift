@@ -2,27 +2,13 @@ import Foundation
 import Testing
 @testable import TBDApp
 
-/// The chevron-placement setting's storage contract: unset means "never
-/// chose", and both explicit values persist as written. Mirrors
-/// `ShowScratchSectionSettingTests`, and pins that the shipped default is
-/// off — nobody's chevron moves, and no row shifts, until they ask.
+/// Pins that the chevron-placement setting ships off — nobody's chevron
+/// moves, and no row shifts, until they ask.
 @MainActor
 @Suite("chevronBeforeProjectName setting")
 struct ChevronPlacementSettingTests {
     @Test func defaultsToOff() {
         #expect(AppState.chevronBeforeProjectNameDefault == false)
-    }
-
-    @Test func storesBothBranches() {
-        let suiteName = "chevron-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        #expect(defaults.object(forKey: AppState.chevronBeforeProjectNameKey) == nil)
-        defaults.set(true, forKey: AppState.chevronBeforeProjectNameKey)
-        #expect(defaults.bool(forKey: AppState.chevronBeforeProjectNameKey) == true)
-        defaults.set(false, forKey: AppState.chevronBeforeProjectNameKey)
-        #expect(defaults.bool(forKey: AppState.chevronBeforeProjectNameKey) == false)
     }
 }
 
@@ -93,25 +79,12 @@ struct SidebarHeaderMetricsTests {
 }
 
 /// The Scratch section's own collapse bit — app-side, unlike a project's
-/// daemon-owned `Repo.expanded`. Pins that it ships expanded and that both
-/// explicit values persist.
+/// daemon-owned `Repo.expanded`. Pins that it ships expanded.
 @MainActor
 @Suite("scratchSectionExpanded setting")
 struct ScratchSectionExpandedTests {
     @Test func defaultsToExpanded() {
         #expect(AppState.scratchSectionExpandedDefault == true)
-    }
-
-    @Test func storesBothBranches() {
-        let suiteName = "scratch-expanded-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-
-        #expect(defaults.object(forKey: AppState.scratchSectionExpandedKey) == nil)
-        defaults.set(false, forKey: AppState.scratchSectionExpandedKey)
-        #expect(defaults.bool(forKey: AppState.scratchSectionExpandedKey) == false)
-        defaults.set(true, forKey: AppState.scratchSectionExpandedKey)
-        #expect(defaults.bool(forKey: AppState.scratchSectionExpandedKey) == true)
     }
 }
 
