@@ -133,8 +133,8 @@ issue at a time and re-dispatches a cancelled one. Neither `fix` nor `publish` h
 `publish` queued in would be one where a pending `publish` could be cancelled
 and record nothing.
 
-06:00 UTC falls in the US night, and the `fix` job's 240-minute timeout (§9)
-ends it by 10:00, before the nightly's 11:00 schedule. GitHub starts scheduled runs late
+06:00 UTC falls in the US night, and the `fix` job's 247-minute timeout (§9)
+ends it by 10:07, before the nightly's 11:00 schedule. GitHub starts scheduled runs late
 when it is busy – the last five nightlies started between 15:00 and 19:30 UTC –
 so a delayed `fix` run can still overlap the nightly; that costs a second of
 the five macOS slots, not a failure.
@@ -741,8 +741,13 @@ The `fix` job checks `main` out twice, at one SHA, into two trees:
 - **The session tree** – the job's primary checkout, at the workspace root
   (`$GITHUB_WORKSPACE`). `actions/cache/restore` restores the SwiftPM build
   cache read-only (the nightly's precedent) to the paths it was saved from,
-  which are relative to the workspace root, so only this tree can use it. It
-  builds, so the session starts warm. The session works only here.
+  which are relative to the workspace root, so only this tree can use it.
+  `test.yml` compiles those entries with less debug information than SwiftPM's
+  default (its `CI_SWIFTPM_FLAGS`), and this tree builds with the default,
+  because the session's own `scripts/test.sh` runs do. Every compile command
+  names those flags, so the restore gives this tree its dependency checkouts
+  and its build compiles the whole package. It builds before the session
+  starts, so the session starts warm. The session works only here.
 - **The verification tree** – a second, separate checkout under
   `$RUNNER_TEMP`, outside the workspace, which the session is never pointed at. It builds from cold, and the baseline
   (§6.3) and every verifier run (§6.4) happen in it.
@@ -1649,20 +1654,17 @@ Transitions, each owned by the PR driver:
 The account allows five concurrent macOS jobs, shared by every workflow.
 
 - **The `fix` job** holds one macOS slot, scheduled at 06:00 UTC, with a
-  240-minute timeout that ends it by 10:00, before the nightly's 11:00
+  247-minute timeout that ends it by 10:07, before the nightly's 11:00
   schedule (§3 covers a delayed start).
 
   The figures below were measured on CI, in
   [run 37686691741](https://github.com/cheapsteak/tbd/actions/runs/37686691741),
   on a 3-core macOS runner building with 2 jobs:
   - **Cold build** – 1167 seconds. An earlier cache-miss CI run paid 1250
-    seconds for the same compile in its first test step.
-  - **Build after a cache restore** – 761 seconds. That run did not copy
-    `test.yml`'s "Restore source mtimes from git commit times" step, so
-    SwiftPM likely saw every source as changed and rebuilt much of what the
-    cache held. The `fix` job copies that step, before its cache restore, for
-    both trees; the 761 seconds is the ceiling until a run with it is
-    measured.
+    seconds for the same compile in its first test step, and the
+    verification tree's cold build took 1198 seconds in run 40183850233. Both
+    trees' builds are this one: the session tree's restored entry was
+    compiled with other flags (§6.1).
   - **A test-alone iteration** – 17 to 25 seconds.
   - **Fast pass 2 at pass scope, under induced load** – 340 seconds for the
     first iteration, then 171 seconds for each warm one.
@@ -1684,9 +1686,9 @@ The account allows five concurrent macOS jobs, shared by every workflow.
   flakes.
 
   The job's fixed costs, as ceilings:
-  - session-tree build from a restored cache – 15 minutes (761 seconds
-    measured);
-  - verification-tree cold build – 22 minutes (1167 and 1250 seconds
+  - session-tree build – 22 minutes, the cold build's ceiling, because it
+    compiles the whole package too (§6.1);
+  - verification-tree cold build – 22 minutes (1167, 1198 and 1250 seconds
     measured);
   - pre-fix baseline, 20 test-alone iterations – 10 minutes (20 × 25
     seconds is 8.3);
@@ -1703,7 +1705,7 @@ The account allows five concurrent macOS jobs, shared by every workflow.
     measured on CI; one digest of a 4.4 GB `.build` took 3.5 seconds on a
     development machine).
 
-  That is 187 minutes, which leaves 53 of the 240-minute timeout for the two
+  That is 194 minutes, which leaves 53 of the 247-minute timeout for the two
   verifier runs: an allotment `R` of 24 minutes each, with 5 to spare. The
   push and PR writes happen in `publish`, outside this budget. Every session
   minute comes out of the verifier runs, so the 60-minute session cap is what
@@ -1726,8 +1728,8 @@ The account allows five concurrent macOS jobs, shared by every workflow.
     iteration's 340 less a warm one's 171, the larger of the two warm-ups
     measured): (1140 − 169) / 171 = 5.68, so the cap is 5.
 
-  The worst case, with both tries running their full allotment, is the 187
-  minutes of fixed cost plus 2 × 24, which is 235 minutes, 5 under the
+  The worst case, with both tries running their full allotment, is the 194
+  minutes of fixed cost plus 2 × 24, which is 242 minutes, 5 under the
   timeout. A full run inside one allotment costs 5 + 45 × 25 s = 23.75 minutes
   at test scope, and 5 + 2.82 + 5 × 2.85 = 22.1 minutes at pass scope.
 - **The PR's own CI** draws the same two macOS jobs as any PR's `test.yml` run,
