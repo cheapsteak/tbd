@@ -174,15 +174,8 @@ struct HolderReaderTests {
     /// where the old code left it — permanently unread, with the job unable to
     /// finish exiting — just later. So a failure that keeps failing keeps being
     /// retried, forever, at a floor of a few attempts a second. Both halves are
-    /// asserted: attempts continue past the one give-up point the loop itself
-    /// names, and they are paced rather than spun.
-    ///
-    /// That point is `implausibleReadFailureStreak`, 8: the eighth failure in a
-    /// row is where the loop logs that the failure no longer looks transient,
-    /// which is exactly where a loop that gave up would stop. A ninth attempt
-    /// proves it did not, and it comes about a second in — the backoff reaches
-    /// its 250 ms floor by the sixth attempt, so attempts 7 to 9 are already at
-    /// the floor cadence.
+    /// asserted: attempts continue well past any plausible give-up point, and
+    /// they are paced rather than spun.
     @Test func keepsRetryingAnUnclassifiedReadFailureRatherThanGivingUp() async throws {
         let fault = ScriptedReadFault(errno: ENOMEM, times: nil)
         let fixture = try await HolderProcessFixture.start(
@@ -199,7 +192,7 @@ struct HolderReaderTests {
         defer { stopInBackground(reader) }
 
         let keptTrying = await pollUntil("read attempts to continue past a give-up point") {
-            fault.injectedCount > 8
+            fault.injectedCount > 12
         }
         #expect(keptTrying, "the drain loop stopped retrying after \(fault.injectedCount) attempts")
         // Paced, not spun. The backoff floor is four attempts a second; a loop
