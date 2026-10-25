@@ -23,9 +23,10 @@ public func createTestRepo() async throws -> (tempDir: URL, repoDir: URL) {
 /// them. `repoDir` must not contain a `.git` yet.
 ///
 /// **Why a template.** That command is three child processes per repository,
-/// and `createTestRepo()` alone has about 250 call sites. The
-/// template is built once per test process, through `shell(_:at:)` so it has
-/// the same hermetic identity and config, and every call after that is an
+/// and `createTestRepo()` and `createTestRepoResolvingSymlinks()` have about
+/// 250 call sites between them. The template is built once per test process,
+/// through `shell(_:at:)` so it has the same hermetic identity and config:
+/// the first call waits on that build, and every call after it is an
 /// in-process copy with no child to wait for.
 ///
 /// **What the copies share.** Every repository made this way in one process
@@ -79,11 +80,16 @@ private actor TestRepoTemplate {
 
     private static func buildTemplate() async throws -> URL {
         let repoDir = URL(fileURLWithPath: testRepoTemplateRoot).appendingPathComponent("repo")
-        // A retry after a failed build starts from nothing rather than from
-        // that build's half-written `.git`.
-        try? FileManager.default.removeItem(at: repoDir)
-        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
-        try await shell("git init -b main && git commit --allow-empty -m 'init'", at: repoDir)
+        do {
+            try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+            try await shell("git init -b main && git commit --allow-empty -m 'init'", at: repoDir)
+        } catch {
+            // A failed build removes what it wrote, so a retry starts from an
+            // empty root and an unfenced run that never retries leaves no
+            // half-written `.git` that no `atexit` handler covers.
+            try? FileManager.default.removeItem(atPath: testRepoTemplateRoot)
+            throw error
+        }
         // Only a successful build gets here, and a successful build is never
         // repeated, so this registers once per process.
         atexit { try? FileManager.default.removeItem(atPath: testRepoTemplateRoot) }
@@ -94,7 +100,13 @@ private actor TestRepoTemplate {
 /// Where the template lives: under the run root that `scripts/test.sh` deletes
 /// on exit, killed or not (see `fencedScratchRoot(prefix:)`). The `atexit`
 /// removal above covers a run outside the wrapper that exits normally; only an
-/// unfenced run that is killed leaves it behind, in `/tmp`.
+/// unfenced run that is killed or crashes leaves it behind, in `/tmp`.
+///
+/// The root holds no socket, so `fencedScratchRoot`'s `sun_path` budget does
+/// not constrain the prefix; it is used for the kill-proof reclaim alone. Not
+/// under `TBD_HOME`: suites under `TBDHomeSerialized` point that at a
+/// directory of their own and delete it in teardown, so a template minted
+/// while one of them ran would vanish from under every later copy.
 private let testRepoTemplateRoot = fencedScratchRoot(prefix: "tbd-repo-template")
 
 /// Like `createTestRepo()` but resolves all symlinks in the returned paths so
