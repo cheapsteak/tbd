@@ -698,6 +698,56 @@ test_the_pass_table_drops_skip_build() {
   assert_eq "mutation: without the drop, test.yml no longer agrees" "1" "$rc"
 }
 
+# The other half of that flag, and the dangerous one. A pass with `--skip-build`
+# runs whatever test bundle `.build/` holds, so after a failed or killed build it
+# would test the cache's bundle instead of the commit — and could go green. Every
+# step that forwards the flag must therefore name the build step's success in its
+# own `if:`. It lives here because this harness already reads test.yml's pass
+# invocations and owns the drop above, and `plans-guard` runs it.
+#
+# One line per step that forwards `--skip-build` as an argument: `gated <name>`
+# or `UNGATED <name>`. Comment lines are ignored, so prose that mentions the flag
+# does not count as forwarding it, and the first `if:` of the step is the one
+# judged.
+skip_build_gates() {
+  awk -v gate="steps.build.outcome == 'success'" '
+    function flush() {
+      if (name != "" && skip) print (index(cond, gate) ? "gated" : "UNGATED"), name
+      name = ""; cond = ""; skip = 0
+    }
+    /^      - / { flush(); name = $0; sub(/^      - (name: )?/, "", name); next }
+    /^[^ #]/ || /^  [^ #]/ { flush(); next }
+    name == "" || /^[ \t]*#/ { next }
+    /^        if:/ { if (cond == "") cond = $0; next }
+    { for (i = 1; i <= NF; i++) if ($i == "--skip-build") skip = 1 }
+    END { flush() }
+  ' "$1"
+}
+
+test_every_skip_build_pass_is_gated_on_the_build() {
+  local wf="$HERE/../.github/workflows/test.yml" d
+  assert_eq "four steps in test.yml forward --skip-build" "4" \
+    "$(skip_build_gates "$wf" | grep -c .)"
+  assert_eq "every one names the build step's success in its if:" "" \
+    "$(skip_build_gates "$wf" | grep '^UNGATED')"
+  d="$(mktmpd)"
+  # MUTATION: drop the build clause from the passes that run after a red 1a.
+  # Their `!cancelled()` would then run them after a failed build too.
+  sed "s/steps\.build\.outcome == 'success' && //" "$wf" > "$d/later.yml"
+  assert_eq "mutation: 1b, 2 and the quiet pass without the clause are caught" "3" \
+    "$(skip_build_gates "$d/later.yml" | grep -c '^UNGATED')"
+  # MUTATION: 1a gated on `success()` alone, which still skips it after a red
+  # build today but no longer says so where the flag is used.
+  sed "s/if: \${{ steps\.build\.outcome == 'success' }}/if: \${{ success() }}/" "$wf" > "$d/first.yml"
+  assert_contains "mutation: 1a without the clause is caught" \
+    "$(skip_build_gates "$d/first.yml" | grep '^UNGATED')" "pass 1a"
+  # MUTATION: 1a with no `if:` at all.
+  sed "/if: \${{ steps\.build\.outcome == 'success' }}/d" "$wf" > "$d/none.yml"
+  assert_contains "mutation: 1a with no if: is caught" \
+    "$(skip_build_gates "$d/none.yml" | grep '^UNGATED')" "pass 1a"
+  rm -rf "$d"
+}
+
 test_pass_of_filters_match_test_yml_verbatim() {
   # The pass map must not drift from CI. Each filter string, as CI spells it
   # inside single quotes, has to appear in test.yml along with its floor.
