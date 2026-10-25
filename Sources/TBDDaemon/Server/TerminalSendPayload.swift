@@ -67,7 +67,7 @@ enum TerminalSendPayload: Sendable, Equatable {
 
     /// The `verify` field of the request row. Set only when the caller armed
     /// verification, so its presence alone identifies the sends that owe an
-    /// observation — which is what the startup replay and the account read.
+    /// observation — which is what the startup replay reads.
     var recordedVerify: Bool? {
         switch self {
         case .text(_, _, let verify): return verify ? true : nil

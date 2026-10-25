@@ -78,27 +78,28 @@ public enum HolderInputTiming {
     /// **Much shorter than the other two, and for a reason that is theirs in
     /// reverse.** `pasteHoldBound` and `injectionAckDeadline` govern a *write*:
     /// nothing is lost by waiting, the fallback writes the same bytes, and the
-    /// generous margin buys safety. This bound sits on a *read* that is on the
-    /// critical path of every holder send to an open tab — the input path asks
-    /// the oracle before it composes, so a supervision nudge to a session
-    /// somebody has open pays this wait and then, in the worst case, the
-    /// injection ack's as well. It also has a correct fallback to land on: a
-    /// bound that expires answers `staleDaemon` from the emulator retained
-    /// since the attach, which is what every consumer's policy was already
-    /// written against.
+    /// generous margin buys safety. This bound sits on a screen *read*: it is
+    /// the default `HolderScreenPull.pull` applies, so a `terminal.output` of a
+    /// session somebody has open gets no answer until the viewer replies or
+    /// this bound expires, while a send asks the same oracle under its own
+    /// shorter `sendPathScreenPullBound`. The read also has a correct fallback
+    /// to land on: a bound that expires answers `staleDaemon` from the emulator
+    /// retained since the attach, which is what every consumer's policy was
+    /// already written against.
     ///
     /// Half a second is therefore a latency budget rather than a safety margin.
     /// It is many main-actor turns for an app that is awake, and an app that is
     /// napping, wedged or mid-paste was never going to answer in five seconds
-    /// either — and those are exactly the moments supervision most wants to
-    /// act, so the read must not be the thing that blocks it.
+    /// either — and a read can be asked at exactly those moments, so a viewer
+    /// that is not answering must not be the thing that holds its caller.
     ///
     /// **Ordering against the other two carries no invariant.** The write-side
     /// pair constrain each other because the app holds an injection the daemon
     /// is timing; nothing holds a screen request. This bound is shorter than
-    /// both only because a read on a latency path should be, and
+    /// both only because a read's caller, asking for information, can absorb
+    /// half a second but should not sit through seconds, and
     /// `HolderInputTimingTests` pins that relationship so a later tuning pass
-    /// cannot quietly put a multi-second wait in front of every send.
+    /// cannot quietly stretch a screen read's wait out to a write-side margin.
     public static let screenPullBound: Duration = .milliseconds(500)
 
     /// How long a holder-backed terminal's disposal waits for the viewer that
@@ -127,12 +128,12 @@ public enum HolderInputTiming {
     /// The tightest of the four, and the asymmetry is the point. Three things
     /// differ between this and the read bound:
     ///
-    /// - **A read has nobody waiting on it; a send does.** `terminal.output` is
-    ///   answered when it is answered — a supervisor polling a fleet absorbs
-    ///   half a second without noticing. A `terminal.send` is a person or a
-    ///   rail trying to make something happen, and the wait lands in front of
-    ///   the act itself.
-    /// - **The send pays twice in the worst case.** A nudge to a session
+    /// - **A read's caller can absorb the wait; a send's cannot.**
+    ///   `terminal.output` is answered when it is answered — a caller reading a
+    ///   screen absorbs half a second without noticing. A `terminal.send` is a
+    ///   person or a rail trying to make something happen, and the wait lands
+    ///   in front of the act itself.
+    /// - **The send pays twice in the worst case.** A send to a session
     ///   somebody has open waits this bound for the modes, and then the
     ///   injection ack's five seconds for the write. The read pays once.
     /// - **Expiry here is a defined behaviour, not a failure.** It falls

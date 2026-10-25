@@ -974,6 +974,18 @@ public final class Daemon: Sendable {
             RetiredRuntimeFiles().removeAll()
         }
 
+        // 5d. Unload and remove the launch agent Nightwatch's scheduler
+        // installed (`RetiredLaunchAgent`), whose script the plugin write at
+        // step 5b has removed. Detached, because `launchctl bootout` waits for
+        // a running job to exit, bounded only by its runner's deadline, and
+        // nothing later in startup depends on it, so it never holds up the
+        // socket bind. Skipped in mock mode, like 5b and 5c: the LaunchAgents
+        // folder is the user's real one, outside `TBD_HOME`.
+        if mockMode == nil {
+            let retiredLaunchAgent = RetiredLaunchAgent()
+            Task.detached(priority: .utility) { await retiredLaunchAgent.removeIfPresent() }
+        }
+
         // 6. Initialize state subscriptions (before lifecycle/router so they can broadcast)
         let subs = StateSubscriptionManager()
         self.subscriptions = subs

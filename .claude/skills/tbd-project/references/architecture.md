@@ -121,7 +121,7 @@ tmux server: tbd-<djb2-hash-of-repo-path>
 - Secrets/routing env reach windows via tmux's `-e KEY=VALUE` (`createWindow(sensitiveEnv:)`), keeping them out of `ps`
 
 ### TmuxManager API highlights
-- `sendKeys` — literal text (tmux `-l`); `sendKey` — a key name like "Enter"; `sendCommand` — text + Enter
+- `sendKeys` — literal text (tmux `-l`); `sendKey` — a key name like "Enter"
 - `capturePaneOutput` / `capturePaneWithAnsi` — plain or ANSI-escaped snapshot
 - `paneCurrentCommand` / `panePID` — used by `ClaudeStateDetector`
 - `windowExists` — reconcile check; `dryRun` mode for tests

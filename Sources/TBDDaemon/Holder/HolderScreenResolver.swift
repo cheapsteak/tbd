@@ -143,8 +143,8 @@ struct HolderScreenResolver: Sendable {
         case .refused, .undeliverable, .timedOut:
             // The honest re-read: whatever the reader says *now*. A viewer that
             // detached while the pull was in flight has left the reader
-            // draining again, and calling that stale would make the
-            // hibernation rail refuse a park it could safely take.
+            // draining again, and calling that stale would have
+            // `terminal.output` label a live screen stale.
             return try await store.screen(maxLines)
         }
     }
@@ -164,10 +164,11 @@ struct HolderScreenResolver: Sendable {
     ///   below. A walk there could exceed the bound on a deep scrollback and
     ///   drop the send onto the frozen modes, which is the failure this whole
     ///   path exists to remove.
-    /// - **It waits `sendPathScreenPullBound`, not `screenPullBound`.** A read
-    ///   has nobody waiting on it and a send does; `HolderInputTiming` argues
-    ///   the asymmetry, and the bound travels with the request rather than
-    ///   belonging to the puller, so one pull serves every caller.
+    /// - **It waits `sendPathScreenPullBound`, not `screenPullBound`.** A
+    ///   read's caller can absorb the wait and a send's cannot;
+    ///   `HolderInputTiming` argues the asymmetry, and the bound travels with
+    ///   the request rather than belonging to the puller, so one pull serves
+    ///   every caller.
     ///
     /// - Returns: nil when the daemon publishes no reader. **A nil answer makes
     ///   the caller proceed, never refuse** — the composition step's job is to

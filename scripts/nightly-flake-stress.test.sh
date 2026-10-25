@@ -594,7 +594,7 @@ test_pass_of_maps_each_target_to_its_ci_pass() {
     'TBDDaemonTests.ArchiveTests/x()|Pass-fast-pass-daemon-a|1200'
     'TBDDaemonTests.OrphanGCTests/a()|Pass-fast-pass-daemon-a|1200'
     'TBDDaemonTests.PRStatusTests/x()|Pass-fast-pass-daemon-b|1500'
-    'TBDDaemonTests.SupervisionBrakeRPCTests/a()|Pass-fast-pass-daemon-b|1500'
+    'TBDDaemonTests.SessionStatesRPCTests/a()|Pass-fast-pass-daemon-b|1500'
     'TBDDaemonTests.TBDHomeSerialized.AutoCloseSetupTests/a()|Pass-fast-pass-daemon-b|1500'
     'TBDDaemonTests/nilPreferredKeepsOrder()|Pass-fast-pass-daemon-b|1500'
     'TBDDaemonLiveTests.GitManagerTimeoutTests/a()|Pass-quiet-pass|35'
@@ -641,12 +641,12 @@ test_pass_of_ranges_are_code_point_ranges() {
 }
 
 test_pass_of_refuses_an_ambiguous_or_unmatched_id() {
-  # MUTATION: widen 1a to every letter. SupervisionBrakeRPCTests is then run by
+  # MUTATION: widen 1a to every letter. SessionStatesRPCTests is then run by
   # 1a AND 1b, and the harness must refuse rather than pick one.
   local mutant out rc=0
   mutant="$(mutant_of 's/^(  "fast-pass-daemon-a.*)\[A-O\]/\1[A-Z]/')"
   assert_contains "the mutant really widened 1a" "$(grep fast-pass-daemon-a "$mutant" | head -1)" "[A-Z]"
-  out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests.SupervisionBrakeRPCTests/a()'" 2>&1)" || rc=$?
+  out="$(bash -c "source '$mutant'; pass_spec_of 'TBDDaemonTests.SessionStatesRPCTests/a()'" 2>&1)" || rc=$?
   assert_eq "mutation: a 1a widened to [A-Z] no longer maps the P-Z suite" "1" "$rc"
   assert_contains "and says it is run by two passes" "$out" "two CI passes"
   # MUTATION: drop the quiet pass. A live test then lands in no pass.

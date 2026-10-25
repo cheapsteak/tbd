@@ -42,7 +42,7 @@ import Testing
 
     /// An unrecognized tag is ignorance, and stays ignorance: it must not throw
     /// (which would take the whole record with it) and must not become a
-    /// confident value (which would have a supervisor act on a session nobody
+    /// confident value (which would have a caller act on a session nobody
     /// could read).
     @Test func unrecognizedStateTagDecodesToUnknown() throws {
         let json = #"{"state":"compacting","detail":"whatever"}"#
