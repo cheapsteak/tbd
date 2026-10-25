@@ -299,6 +299,69 @@ struct PromptRailCoordinatorTests {
         #expect(scene.coordinator.activePromptIndex == 2)
     }
 
+    /// A streamed tick grows the last reply below the viewport, and the
+    /// tail-follow catches up a main-queue turn later. In between the clip is
+    /// off the bottom, where the probe rule would hand the active notch from
+    /// the last prompt to the one before it for that turn.
+    @Test("streaming at the bottom never moves the active prompt off the last one")
+    func streamingAtBottomKeepsLastActive() async throws {
+        let suiteName = "prompt-rail-streaming-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        // Tall exchanges, then a short last one, so at the bottom the last
+        // prompt sits low on screen and only the bottom rule makes it active.
+        var items = PromptRailFixtures.conversation(
+            prompts: 30, replySentences: { $0 == 29 ? 2 : Self.tallReplies($0) })
+        let scene = TableTranscriptScene(items: items, appState: appState)
+        let presenter = RecordingPresenter()
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        defer { withExtendedLifetime(presenter) {} }
+        scene.coordinator.startObservingScroll()
+        scene.prime(nodes: transcriptRenderNodes(from: items))
+        scene.scroll(toY: .greatestFiniteMagnitude)
+        scene.settle()
+        scene.scroll(toY: .greatestFiniteMagnitude)
+        try #require(scene.gapToBottom <= 1, Comment(rawValue: "precondition: at the end (gap \(scene.gapToBottom) pt)"))
+        let entries = scene.coordinator.promptEntries
+        try #require(entries.count == 30)
+        let probe = PromptRailActiveRule.probeFraction * TableTranscriptScene.viewportHeight
+        let lastTop = scene.screenOffset(ofRow: entries[29].rowIndex)
+        try #require(lastTop > probe + 200,
+                     Comment(rawValue: "precondition: the last prompt sits well below the probe line, so the "
+                         + "probe rule alone would pick the one before it (top \(lastTop) pt)"))
+        try #require(scene.coordinator.activePromptIndex == 29)
+        scene.coordinator.promptRailPresenter = presenter
+
+        for tick in 1...4 {
+            items[items.count - 1] = .assistantText(
+                id: "a-29",
+                text: String(repeating: "A reply sentence whose prose wraps across the column. ", count: 2 + 3 * tick),
+                timestamp: nil,
+                usage: nil)
+            let nodes = transcriptRenderNodes(from: items)
+            try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: nodes)
+                             == .updateLast,
+                         "precondition: the tick arrives as a tail re-render")
+            scene.coordinator.update(nodes: nodes, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "")
+            scene.tableView.layoutSubtreeIfNeeded()
+            try #require(scene.gapToBottom > PromptRailActiveRule.bottomSlack,
+                         Comment(rawValue: "precondition: tick \(tick) grew the reply below the viewport, so the "
+                             + "clip is off the bottom until the tail-follow runs (gap \(scene.gapToBottom) pt)"))
+            // AppKit can post a bounds change while it lays the grown row out.
+            NotificationCenter.default.post(
+                name: NSView.boundsDidChangeNotification, object: scene.scrollView.contentView)
+            await drainMainQueue()
+            #expect(scene.gapToBottom <= 1,
+                    Comment(rawValue: "tick \(tick): the tail-follow did not reach the end (gap \(scene.gapToBottom) pt)"))
+        }
+
+        // Only the value pushed on attach: the last prompt stayed active.
+        #expect(presenter.activeIndices == [29],
+                Comment(rawValue: "the active prompt left the last one while streaming: \(presenter.activeIndices)"))
+    }
+
     @Test("attaching a presenter pushes the current outline and active prompt")
     func attachingPresenterPushesCurrentState() throws {
         let suiteName = "prompt-rail-attach-\(UUID().uuidString)"

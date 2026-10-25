@@ -75,7 +75,13 @@ extension TableTranscriptView.Coordinator {
     /// view's bounds, and tells the presenter if the active index changed. The
     /// clip-bounds observer calls it on every scroll; the rule's binary search
     /// keeps that to O(log n) `rect(ofRow:)` reads.
+    ///
+    /// Does nothing while a tail-follow is queued (`isAwaitingTailFollow`):
+    /// the document has grown at the bottom and the clip has not followed, so
+    /// the bottom rule would fail for that turn. The follow calls this once
+    /// the clip is at the end.
     func refreshActivePrompt() {
+        guard !isAwaitingTailFollow else { return }
         let index: Int?
         if promptEntries.isEmpty {
             index = nil
@@ -153,8 +159,11 @@ extension TableTranscriptView.Coordinator {
 
         // The jump moves the reader, so a held prepend anchor no longer says
         // where they are looking: a later correction above it would pull the
-        // viewport back. The previous jump's anchor is replaced below.
+        // viewport back. The previous jump's anchor is replaced below. A
+        // tail-follow queued before the jump, by content that landed at the
+        // bottom, would undo it.
         pendingPrependAnchor = nil
+        supersedeQueuedTailFollow()
         // Held before the move, so the active prompt the move reports through
         // the bounds observer is already the target.
         heldJumpTargetID = id

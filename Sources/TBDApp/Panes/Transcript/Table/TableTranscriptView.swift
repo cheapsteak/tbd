@@ -342,6 +342,24 @@ struct TableTranscriptView: NSViewRepresentable {
         /// name it when a hold ends early. Cleared by each jump.
         var lastJumpRelease: JumpRelease?
 
+        /// Counts the scrolls that supersede a queued tail-follow: every jump
+        /// and every reader scroll (`supersedeQueuedTailFollow()`). `update`
+        /// decides to follow the tail from where the clip is when the update
+        /// lands, but the follow runs a main-queue turn later; a jump or a
+        /// reader scroll in between makes that decision stale, and following
+        /// the tail then would undo it. A queued follow captures the count and
+        /// skips its scroll if it has moved.
+        private(set) var scrollGeneration = 0
+        /// The `scrollGeneration` the last queued tail-follow was decided
+        /// against, until it runs; nil when none is queued.
+        private var queuedTailFollowGeneration: Int?
+        /// Whether a tail-follow is queued and still current: content landed
+        /// at the bottom and grew the document, and the clip has not followed
+        /// it yet. `refreshActivePrompt()` waits for the follow meanwhile,
+        /// because the bottom rule would fail for that turn and hand the last
+        /// prompt's notch to the one before it.
+        var isAwaitingTailFollow: Bool { queuedTailFollowGeneration == scrollGeneration }
+
         /// The clip's origin at the last clip-bounds change, so the observer
         /// can tell a move of the origin from a change to the clip's size.
         private var lastClipOriginY: CGFloat?
@@ -2127,6 +2145,16 @@ struct TableTranscriptView: NSViewRepresentable {
             }
 
             let wasAtBottom = isAtBottom()
+            // Follow the tail only for content the SESSION produced. A user-driven
+            // disclosure toggle keeps the viewport exactly where it is, so the row
+            // that was clicked stays under the pointer and only the content below
+            // it moves. (Everything above the clicked row keeps its cached exact
+            // height across the rebuild, so its rows do not re-lay either.)
+            let followsTail = wasAtBottom && !isActivityToggle
+            // From here until the follow runs, the active prompt waits for it
+            // (`isAwaitingTailFollow`): the table ops below grow the document
+            // past a clip that has not followed yet.
+            if followsTail { queuedTailFollowGeneration = scrollGeneration }
             // Capture BEFORE `nodes` is replaced: the visible rows are read off
             // the old geometry and the old node array.
             let prependAnchor = isPrepend && !wasAtBottom ? capturePrependAnchor() : nil
@@ -2213,25 +2241,28 @@ struct TableTranscriptView: NSViewRepresentable {
                 }
             }
 
+            // The tail-follow is decided against the clip as this update's own
+            // table ops left it: a clamp they caused is not a later scroll that
+            // supersedes the follow, so the generation is read again here.
+            let tailFollowGeneration = scrollGeneration
+            if followsTail { queuedTailFollowGeneration = tailFollowGeneration }
+
             // After the table ops and any anchor restore, so the active prompt
             // is read off the rows and clip the reader will see. A streaming
             // tick re-renders only the last row: unless that row is or was a
             // prompt, the outline cannot have changed, so skip rebuilding it
-            // and re-read the active prompt against the grown document.
+            // and re-read the active prompt against the grown document. With a
+            // tail-follow queued, the follow re-reads the active prompt itself
+            // once the clip has followed; the entries are delivered now.
             if step == .updateLast, !updateLastCanChangeOutline() {
                 refreshActivePrompt()
             } else {
                 refreshPromptOutline()
             }
 
-            // Follow the tail only for content the SESSION produced. A user-driven
-            // disclosure toggle keeps the viewport exactly where it is, so the row
-            // that was clicked stays under the pointer and only the content below
-            // it moves. (Everything above the clicked row keeps its cached exact
-            // height across the rebuild, so its rows do not re-lay either.)
-            if wasAtBottom && !isActivityToggle {
+            if followsTail {
                 DispatchQueue.main.async { [weak self] in
-                    self?.followTail()
+                    self?.runQueuedTailFollow(decidedAt: tailFollowGeneration)
                     self?.recomputeAtBottom(atBottom)
                 }
             } else {
@@ -2331,8 +2362,10 @@ struct TableTranscriptView: NSViewRepresentable {
                 // The reader moved the viewport: a held prepend or jump anchor
                 // no longer describes where they are looking, so stop re-pinning
                 // it, and a jump target stops overriding the active-prompt rule.
+                // A tail-follow queued before the scroll would pull them back.
                 pendingPrependAnchor = nil
                 releaseJumpAnchor(.readerScroll)
+                supersedeQueuedTailFollow()
             }
             reportNearTopIfChanged()
             if let binding = atBottomBinding {
@@ -2535,6 +2568,23 @@ struct TableTranscriptView: NSViewRepresentable {
             isRestoringAnchor = true
             defer { isRestoringAnchor = false }
             scrollToEnd(animated: false)
+        }
+
+        /// Runs a tail-follow `update` queued against `generation`: follows the
+        /// tail unless a jump or a reader scroll has superseded it since, then
+        /// re-derives the active prompt, which waited for the follow. The
+        /// explicit refresh covers a clip already at the end, whose scroll
+        /// posts no bounds change.
+        private func runQueuedTailFollow(decidedAt generation: Int) {
+            if queuedTailFollowGeneration == generation { queuedTailFollowGeneration = nil }
+            if generation == scrollGeneration { followTail() }
+            refreshActivePrompt()
+        }
+
+        /// A jump or a reader scroll: a tail-follow queued before it is stale
+        /// and must not undo it. See `scrollGeneration`.
+        func supersedeQueuedTailFollow() {
+            scrollGeneration &+= 1
         }
 
         private func recomputeAtBottom(_ atBottom: Binding<Bool>) {

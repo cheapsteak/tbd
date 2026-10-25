@@ -361,6 +361,53 @@ struct PromptRailJumpTests {
         #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
     }
 
+    /// `update` decides to follow the tail from where the clip is when the
+    /// update lands, and the follow runs a turn later. A jump in between — a
+    /// menu command lands this way while a reply streams — moves the reader
+    /// away from the bottom, so the queued follow must not pull them back.
+    @Test("a tail-follow queued before a jump does not undo it")
+    func queuedTailFollowYieldsToJump() async throws {
+        let suiteName = "prompt-rail-jump-queued-follow-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
+        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        let entries = scene.coordinator.promptEntries
+        try #require(entries.count == Self.promptCount)
+        try #require(scene.gapToBottom <= 1,
+                     Comment(rawValue: "precondition: primed at the end, so an update there follows the tail "
+                         + "(gap \(scene.gapToBottom) pt)"))
+
+        // A reply lands at the bottom and queues the tail-follow...
+        let withReply = items + [.assistantText(
+            id: "a-59-more",
+            text: String(repeating: "A further reply sentence that wraps across the column. ", count: 8),
+            timestamp: nil,
+            usage: nil)]
+        scene.coordinator.update(
+            nodes: transcriptRenderNodes(from: withReply), atBottom: .constant(true),
+            activityToggleToken: 0, linkRoot: "")
+        // ...and the reader jumps before it runs. Prompt 50 sits among the
+        // bottom window's exact heights, so its pin has little to absorb.
+        let target = entries[50]
+        scene.coordinator.jump(toNodeID: target.id)
+        await Self.settleJump(scene)
+
+        let offset = scene.screenOffset(ofRow: target.rowIndex)
+        #expect(abs(offset - Self.inset) <= 1,
+                Comment(rawValue: "the target sat at \(offset) pt after the queued follow ran; "
+                    + Self.releaseNote(scene).rawValue))
+        #expect(scene.gapToBottom > 120,
+                Comment(rawValue: "the queued tail-follow pulled the clip back to the end "
+                    + "(gap \(scene.gapToBottom) pt)"))
+        #expect(scene.coordinator.heldJumpTargetID == target.id, Self.releaseNote(scene))
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+        #expect(scene.coordinator.lastJumpRelease == nil, Self.releaseNote(scene))
+    }
+
     @Test("a prepend and a width change each release the jump anchor")
     func prependAndWidthChangeRelease() async throws {
         let suiteName = "prompt-rail-jump-release-\(UUID().uuidString)"
