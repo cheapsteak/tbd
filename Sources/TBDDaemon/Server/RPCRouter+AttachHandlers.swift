@@ -23,10 +23,30 @@ extension RPCRouter {
         // transport is the whole gate: a row can only be `.holder` because the
         // holder flag was on when it was created, and flipping that flag off
         // afterwards must never strand a live session.
-        if let terminalID = params.terminalID,
-           let terminal = try? await db.terminals.get(id: terminalID),
-           terminal.transport == .holder {
-            return try await handleHolderAttachRequest(params: params, terminal: terminal)
+        //
+        // A read that throws is answered as an error, not swallowed into the
+        // control-mode path: that path answers "unavailable" with its gate
+        // off, which the app takes as permanent — no retry, no Retry button —
+        // for what is usually a moment of `SQLITE_BUSY` under a write. An
+        // error is what the app retries. A row that is simply absent still
+        // falls through, as before.
+        if let terminalID = params.terminalID {
+            let terminal: Terminal?
+            do {
+                terminal = try await db.terminals.get(id: terminalID)
+            } catch {
+                logger.error("""
+                    attach.request could not read terminal \
+                    \(terminalID.uuidString, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                return RPCResponse(
+                    error: "attach failed: the terminal could not be read: "
+                        + error.localizedDescription)
+            }
+            if let terminal, terminal.transport == .holder {
+                return try await handleHolderAttachRequest(params: params, terminal: terminal)
+            }
         }
         // Gate evaluated per attach (env || persisted flag): a Settings
         // toggle affects the next attach without a daemon restart.

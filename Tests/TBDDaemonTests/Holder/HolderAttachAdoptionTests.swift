@@ -522,6 +522,26 @@ import Testing
         #expect(!response.success)
     }
 
+    /// A terminal read that throws — a moment of `SQLITE_BUSY` under a write —
+    /// is an error the app retries, never the "unavailable" status the
+    /// control-mode path answers with its gate off, which the app takes as
+    /// permanent and offers no retry for.
+    @Test func aTerminalReadThatThrowsAnswersARetryableError() async throws {
+        let harness = try await RouterHarness.make()
+        try await harness.db.writerForTests.write { conn in
+            try conn.execute(sql: "DROP TABLE terminal")
+        }
+
+        let response = try await harness.attach()
+
+        #expect(!response.success, """
+            a failed terminal read was answered \
+            \(String(describing: try? response.decodeResult(AttachRequestResult.self).status)), \
+            which the app treats as permanent
+            """)
+        #expect(response.error?.contains("could not be read") == true)
+    }
+
     /// An ended session is answered as ended, and without reaching for its
     /// holder first: the status gate stops the adoption, and the handler's
     /// own verdict on a dead holder and a gone job does the rest.
