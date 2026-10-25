@@ -47,10 +47,10 @@ struct LinkCommand: AsyncParsableCommand {
             thisTerminal: thisTerminal,
             environment: ProcessInfo.processInfo.environment,
             resolveWorktree: { try resolveWorktreeNameOrID($0, client: client) },
-            terminals: {
+            terminals: { scope in
                 try client.call(
                     method: RPCMethod.terminalList,
-                    params: TerminalListParams(worktreeID: nil),
+                    params: TerminalListParams(worktreeID: scope),
                     resultType: [Terminal].self
                 )
             }
@@ -69,13 +69,20 @@ struct LinkCommand: AsyncParsableCommand {
     /// access is injected so the decision is testable without a socket. The
     /// bare form deliberately never reads `TBD_TERMINAL_ID`: only
     /// `--this-terminal` opts into a terminal anchor.
+    ///
+    /// A worktree argument is resolved first, so its error wins. The terminal
+    /// list is then scoped to that worktree; under `--this-terminal` with no
+    /// argument, `TBD_WORKTREE_ID` is only a scope hint. With no scope the
+    /// list is fleet-wide. A scoped miss costs one fleet-wide list to tell
+    /// "belongs to another worktree" from "no such terminal"; a terminal
+    /// found elsewhere is an error only when the caller named the worktree.
     static func resolveTarget(
         worktreeArg: String?,
         terminalArg: String?,
         thisTerminal: Bool,
         environment: [String: String],
         resolveWorktree: (String) throws -> UUID,
-        terminals: () throws -> [Terminal]
+        terminals: (UUID?) throws -> [Terminal]
     ) throws -> (worktree: UUID, terminal: UUID?) {
         let terminalID: UUID?
         if thisTerminal {
@@ -109,16 +116,22 @@ struct LinkCommand: AsyncParsableCommand {
             return (id, nil)
         }
 
-        guard let match = try terminals().first(where: { $0.id == terminalID }) else {
+        let expected = try worktreeArg.map { try resolveWorktree($0) }
+        var scope = expected
+        if scope == nil && thisTerminal, let envValue = environment["TBD_WORKTREE_ID"] {
+            scope = UUID(uuidString: envValue)
+        }
+        var match = try terminals(scope).first(where: { $0.id == terminalID })
+        if match == nil && scope != nil {
+            match = try terminals(nil).first(where: { $0.id == terminalID })
+        }
+        guard let match else {
             throw CLIError.invalidArgument("No terminal found with ID: \(terminalID.uuidString)")
         }
-        if let arg = worktreeArg {
-            let expected = try resolveWorktree(arg)
-            guard expected == match.worktreeID else {
-                throw CLIError.invalidArgument(
-                    "Terminal \(terminalID.uuidString) belongs to worktree \(match.worktreeID.uuidString), not \(expected.uuidString)"
-                )
-            }
+        if let expected, expected != match.worktreeID {
+            throw CLIError.invalidArgument(
+                "Terminal \(terminalID.uuidString) belongs to worktree \(match.worktreeID.uuidString), not \(expected.uuidString)"
+            )
         }
         return (match.worktreeID, terminalID)
     }

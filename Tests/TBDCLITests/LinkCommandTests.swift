@@ -22,6 +22,27 @@ struct LinkCommandTests {
         }
     }
 
+    /// Terminal-list stub: a nil scope returns every terminal, a scope
+    /// returns that worktree's terminals, as the daemon does.
+    private func target(
+        worktree: String? = nil,
+        terminal: String? = nil,
+        this: Bool = false,
+        env: [String: String] = [:],
+        terminals: [TBDShared.Terminal] = [],
+        scopes: inout [UUID?]
+    ) throws -> (worktree: UUID, terminal: UUID?) {
+        try LinkCommand.resolveTarget(
+            worktreeArg: worktree, terminalArg: terminal, thisTerminal: this,
+            environment: env, resolveWorktree: resolve,
+            terminals: { scope in
+                scopes.append(scope)
+                guard let scope else { return terminals }
+                return terminals.filter { $0.worktreeID == scope }
+            }
+        )
+    }
+
     private func target(
         worktree: String? = nil,
         terminal: String? = nil,
@@ -29,9 +50,10 @@ struct LinkCommandTests {
         env: [String: String] = [:],
         terminals: [TBDShared.Terminal] = []
     ) throws -> (worktree: UUID, terminal: UUID?) {
-        try LinkCommand.resolveTarget(
-            worktreeArg: worktree, terminalArg: terminal, thisTerminal: this,
-            environment: env, resolveWorktree: resolve, terminals: { terminals }
+        var scopes: [UUID?] = []
+        return try target(
+            worktree: worktree, terminal: terminal, this: this, env: env,
+            terminals: terminals, scopes: &scopes
         )
     }
 
@@ -104,9 +126,76 @@ struct LinkCommandTests {
     }
 
     @Test func terminalAndThisTerminalFailValidation() {
-        #expect(throws: (any Error).self) {
+        do {
             _ = try LinkCommand.parse(["--terminal", termA.uuidString, "--this-terminal"])
+            Issue.record("expected a validation error")
+        } catch {
+            #expect(LinkCommand.message(for: error).contains("mutually exclusive"))
         }
+    }
+
+    @Test func worktreeArgScopesTheTerminalList() throws {
+        var scopes: [UUID?] = []
+        let t = try target(
+            worktree: "b", terminal: termA.uuidString,
+            terminals: [term(termA, in: wtB)], scopes: &scopes
+        )
+        #expect(t.worktree == wtB)
+        #expect(scopes == [wtB])
+    }
+
+    @Test func unresolvedWorktreeErrorWinsAndNeverListsTerminals() {
+        var scopes: [UUID?] = []
+        let msg = refusal {
+            _ = try target(
+                worktree: "typo", terminal: termA.uuidString,
+                terminals: [term(termA, in: wtA)], scopes: &scopes
+            )
+        }
+        #expect(msg == "No worktree found with name or ID: typo")
+        #expect(scopes.isEmpty)
+    }
+
+    @Test func terminalWithoutWorktreeListsFleetWideOnce() throws {
+        var scopes: [UUID?] = []
+        _ = try target(terminal: termA.uuidString, terminals: [term(termA, in: wtA)], scopes: &scopes)
+        #expect(scopes.count == 1)
+        #expect(scopes[0] == nil)
+    }
+
+    @Test func thisTerminalWithOtherWorktreeArgRefuses() {
+        let msg = refusal {
+            _ = try target(
+                worktree: "a", this: true, env: ["TBD_TERMINAL_ID": termA.uuidString],
+                terminals: [term(termA, in: wtB)]
+            )
+        }
+        #expect(msg?.contains(termA.uuidString) == true)
+        #expect(msg?.contains(wtA.uuidString) == true)
+        #expect(msg?.contains(wtB.uuidString) == true)
+    }
+
+    @Test func thisTerminalWithStaleIDRefuses() {
+        let msg = refusal {
+            _ = try target(
+                this: true,
+                env: ["TBD_TERMINAL_ID": termA.uuidString, "TBD_WORKTREE_ID": wtA.uuidString],
+                terminals: [term(UUID(), in: wtA)]
+            )
+        }
+        #expect(msg == "No terminal found with ID: \(termA.uuidString)")
+    }
+
+    @Test func thisTerminalEnvScopeFollowsTheOwningWorktree() throws {
+        var scopes: [UUID?] = []
+        let t = try target(
+            this: true,
+            env: ["TBD_TERMINAL_ID": termA.uuidString, "TBD_WORKTREE_ID": wtA.uuidString],
+            terminals: [term(termA, in: wtB)], scopes: &scopes
+        )
+        #expect(t.worktree == wtB)
+        #expect(t.terminal == termA)
+        #expect(scopes == [wtA, nil])
     }
 
     @Test func terminalFlagParses() throws {
