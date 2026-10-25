@@ -49,6 +49,12 @@ BUILD_CONFIG=release
 # generously past the two together and still bounded.
 HANDOVER_TIMEOUT=120
 
+# How long one `tbd daemon status` may take, in seconds, before it is cut off.
+# The CLI has no timeout of its own, so a daemon that accepts a connection and
+# never replies would otherwise hold the run, and the handover's budget with
+# it, for as long as it pleases.
+STATUS_PROBE_TIMEOUT=10
+
 # How long a successor that has to be stopped gets to exit on SIGTERM before
 # it is killed, in seconds. It only runs on the failure path, so it is short:
 # the process being stopped has already missed a two-minute deadline.
@@ -450,8 +456,10 @@ else:
 ' "$path" 2>/dev/null
 }
 
+# Cut off after STATUS_PROBE_TIMEOUT seconds (run_with_time_limit, from
+# scripts/restart-bundle-lib.sh, which main sources first).
 daemon_status_json() {
-    tbd daemon status --json 2>/dev/null
+    run_with_time_limit "$STATUS_PROBE_TIMEOUT" tbd daemon status --json 2>/dev/null
 }
 
 # The worktree a daemon executable was built from: the parent of its `.build`
@@ -835,14 +843,6 @@ install_and_handover() {
 
 # MARK: - Handover
 
-running_daemon_pid() {
-    local pid
-    [ -f "$DAEMON_PID_FILE" ] || return 1
-    pid="$(head -1 "$DAEMON_PID_FILE" 2>/dev/null | tr -dc '0-9')"
-    [ -n "$pid" ] || return 1
-    printf '%s\n' "$pid"
-}
-
 # True when two paths name the same file after symlink resolution. The daemon
 # reports the path it was executed from; ours came out of the build directory,
 # which is itself a symlink.
@@ -854,7 +854,8 @@ paths_match() {
 }
 
 # True when `tbd daemon status` names <expected> as the daemon's executable.
-# One question, asked once; wait_for_handover polls it.
+# One question, asked once and cut off like every status call
+# (daemon_status_json).
 daemon_reports_executable() {
     local reported
     reported="$(json_field "$(daemon_status_json)" executablePath)"
@@ -884,6 +885,11 @@ daemon_reports_executable() {
 # successor's first answer separately. A successor that dies ends the wait at
 # once, in either phase: it would never retire the predecessor, and the run
 # would otherwise sit out the whole budget with the app stopped.
+#
+# The second phase waits for `tbd daemon status` to answer at all, each try
+# cut off after STATUS_PROBE_TIMEOUT seconds, and only then checks the path
+# once. The probe that is cut off has to be the `tbd` process itself, not a
+# shell function around it whose `tbd` would outlive the cut.
 wait_for_handover() {
     local old_pid="${1:-0}"
     local new_pid="${2-}"
@@ -922,17 +928,22 @@ wait_for_handover() {
             ;;
     esac
 
-    outcome="$(wait_until_daemon_ready "$new_pid" "$deadline" 1 daemon_reports_executable "$expected")"
+    outcome="$(wait_until_daemon_ready "$new_pid" "$deadline" 1 "$STATUS_PROBE_TIMEOUT" \
+        tbd daemon status --json)"
     case "$outcome" in
         ready)
-            return 0
+            if daemon_reports_executable "$expected"; then
+                return 0
+            fi
+            log "the daemon that answers does not report $expected as its executable"
+            return 1
             ;;
         successor-exited)
-            log "the new daemon (pid $new_pid) exited before it reported itself"
+            log "the new daemon (pid $new_pid) exited before it answered"
             return 1
             ;;
         timeout)
-            log "the daemon never reported $expected as its executable"
+            log "the new daemon (pid $new_pid) did not answer \`tbd daemon status\` within ${timeout}s"
             return 1
             ;;
         *)
@@ -967,10 +978,11 @@ handover() {
         return 1
     fi
 
-    old_pid="$(running_daemon_pid || true)"
-    if [ -z "$old_pid" ]; then
+    # The pid file under TBD_HOME, where the daemon and the CLI look too
+    # (handover_from_pid, shared with scripts/restart.sh).
+    old_pid="$(handover_from_pid "$TBD_HOME_DIR")"
+    if [ "$old_pid" = 0 ]; then
         log "no running daemon in $DAEMON_PID_FILE — starting the new one cold"
-        old_pid=0
     else
         log "handing over from daemon pid $old_pid"
     fi

@@ -90,7 +90,9 @@ these steps in order.
   build you were on.
 - **Hands the daemon over**, as described below, and waits until the new
   daemon is the one answering: the old daemon's process has exited, and
-  `tbd daemon status` then reports the new binary's path. The path alone
+  `tbd daemon status` then reports the new binary's path. Each status call is
+  cut off after ten seconds, so a daemon that accepts a connection and never
+  replies cannot hold the run. The path alone
   cannot say which daemon answered. A local build runs the old and the new
   daemon from the same file, the update clone's `.build/release/TBDDaemon`,
   and the old one goes on answering for the seconds its shutdown takes, after

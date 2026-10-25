@@ -386,6 +386,11 @@ fi
 # its own startup to finish.
 DAEMON_HANDOVER_TIMEOUT=60
 
+# How long one `daemon status` probe of the new daemon may take, in seconds,
+# before it is cut off. The CLI has no timeout of its own, and a daemon that
+# accepts a connection and never replies would otherwise hold the restart.
+DAEMON_PROBE_TIMEOUT=5
+
 if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
     # The daemon is replaced by a handover, as `tbd update` replaces it: the
     # new daemon starts with TBD_HANDOVER_FROM_PID naming the old one, writes
@@ -395,35 +400,16 @@ if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
     # throughout, so the app's watchdog, which starts a daemon of its own
     # when the socket is missing and the pid file names none, never runs a
     # second daemon beside the new one; and the old daemon's teardown is over
-    # before the new one binds anything it could unlink. See the handover
-    # section of scripts/restart-bundle-lib.sh.
-    old_daemon_pid=0
-    if [ -f ~/tbd/tbdd.pid ]; then
-        old_daemon_pid="$(head -1 ~/tbd/tbdd.pid 2>/dev/null | tr -dc '0-9')"
-        [ -n "$old_daemon_pid" ] || old_daemon_pid=0
-    fi
-
-    # Preserve the previous daemon's log for post-mortem diagnostics — the
-    # daemon does not persist os.Logger output, so this file is the only
-    # record of a crash that happened before a restart.
-    [ -f /tmp/tbdd.log ] && mv /tmp/tbdd.log /tmp/tbdd.log.1
-    echo "Starting daemon..."
-    TBD_HANDOVER_FROM_PID="$old_daemon_pid" "$BUILD_DIR/TBDDaemon" > /tmp/tbdd.log 2>&1 &
-    new_daemon_pid=$!
-
-    # The app goes on only once the old daemon is gone and the new one
-    # answers `daemon status`; describe_daemon_handover decides, and stops
-    # the restart on anything else, an outcome it does not recognise
-    # included.
-    handover_outcome="$(wait_for_daemon_handover "$old_daemon_pid" "$new_daemon_pid" \
-        "$DAEMON_HANDOVER_TIMEOUT" 0.2 "$BUILD_DIR/TBDCLI" daemon status --json)" || true
-    if handover_report="$(describe_daemon_handover "$handover_outcome" "$old_daemon_pid" \
-        "$new_daemon_pid" "$DAEMON_HANDOVER_TIMEOUT" /tmp/tbdd.log)"; then
-        echo "  $handover_report"
-    else
-        echo "  $handover_report" >&2
-        exit 1
-    fi
+    # before the new one binds anything it could unlink.
+    #
+    # restart_daemon_by_handover (scripts/restart-bundle-lib.sh) is the whole
+    # step: it reads the pid file under TBD_HOME, where the daemon and the CLI
+    # look, waits for the old daemon's exit and then for `daemon status`, and
+    # returns non-zero, having stopped the new daemon, when the app must not
+    # go on.
+    restart_daemon_by_handover "${TBD_HOME:-$HOME/tbd}" "$BUILD_DIR/TBDDaemon" /tmp/tbdd.log \
+        "$DAEMON_HANDOVER_TIMEOUT" "$DAEMON_PROBE_TIMEOUT" "$BUILD_DIR/TBDCLI" daemon status --json \
+        || exit 1
 elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then
     echo "(Skipping daemon restart for WIP worktree)"
 fi
