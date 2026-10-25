@@ -66,18 +66,20 @@ struct NotificationUnreadSummaryTests {
     @Test func picksMostRecentTimestamp() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wt = try await makeWorktree(db, name: "wt-recent")
-        let a = try await db.notifications.create(worktreeID: wt.id, type: .responseComplete)
-        let b = try await db.notifications.create(worktreeID: wt.id, type: .taskComplete)
-        // Two creates in a row can share a stored millisecond, so the rows get
-        // explicit, distinct stamps. The first-created row is the more recent
-        // one, so the summary cannot pass by keeping the last row it reads.
-        let older = Date(timeIntervalSince1970: 1_767_225_600)
-        let newer = older.addingTimeInterval(60)
-        try await stampCreatedAt(db, id: a.id, newer)
-        try await stampCreatedAt(db, id: b.id, older)
+        let first = try await db.notifications.create(worktreeID: wt.id, type: .responseComplete)
+        let middle = try await db.notifications.create(worktreeID: wt.id, type: .taskComplete)
+        let last = try await db.notifications.create(worktreeID: wt.id, type: .responseComplete)
+        // Creates in a row can share a stored millisecond, so the rows get
+        // explicit, distinct stamps. The newest is the middle row, so the
+        // summary cannot pass by keeping the first or the last row it reads.
+        let oldest = Date(timeIntervalSince1970: 1_767_225_600)
+        let newest = oldest.addingTimeInterval(120)
+        try await stampCreatedAt(db, id: first.id, oldest.addingTimeInterval(60))
+        try await stampCreatedAt(db, id: middle.id, newest)
+        try await stampCreatedAt(db, id: last.id, oldest)
         let summary = try await db.notifications.unreadSummaryByWorktree()
         // SQLite stores at millisecond precision; allow tolerance.
-        let expected = newer.timeIntervalSince1970
+        let expected = newest.timeIntervalSince1970
         let actual = summary[wt.id]?.mostRecentAt.timeIntervalSince1970 ?? 0
         #expect(abs(actual - expected) < 0.001)
     }
