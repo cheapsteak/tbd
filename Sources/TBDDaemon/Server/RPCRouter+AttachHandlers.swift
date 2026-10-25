@@ -242,8 +242,8 @@ extension RPCRouter {
             where attachRefusalMeansSessionEnded(error, terminal: terminal) {
             // Refused, and the holder the row records is not running: the
             // session is over, not merely unattachable. Answered as a status
-            // rather than an error so the app does not tell the user the
-            // session "keeps running" and to reopen the tab to retry.
+            // rather than an error so the app neither retries it nor tells the
+            // user the session "keeps running" and to retry the attach.
             logger.warning("""
                 holder attach.request for terminal \(terminal.id.uuidString, privacy: .public): \
                 its holder (pid \(terminal.holderPID ?? 0, privacy: .public)) is no longer \

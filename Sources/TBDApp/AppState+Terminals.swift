@@ -647,6 +647,9 @@ extension AppState {
         terminalSessionOrderObservedAt.removeValue(forKey: terminalID)
         terminalReplacementObservedGeneration.removeValue(forKey: terminalID)
         if limitHits[terminalID] != nil { limitHits.removeValue(forKey: terminalID) }
+        if terminalAttachRetries[terminalID] != nil {
+            terminalAttachRetries.removeValue(forKey: terminalID)
+        }
         pruneRecentTerminalDeletions(date: date)
         recentlyDeletedTerminalIDs[terminalID] = date
         if recreatingTerminalIDs.contains(terminalID) {

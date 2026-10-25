@@ -412,7 +412,8 @@ struct TransportMigrationRaceTests {
         let current = state.terminals[row.worktreeID]!.first { $0.id == row.id }!
         return TerminalPanePresentation.identity(
             for: current, switching: state.switchingAccountTerminals[row.id],
-            attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
+            attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
+            attachRetry: state.terminalAttachRetries[row.id] ?? 0)
     }
 
     @Test func theDeltasLandingAfterTheReplyCauseOneRebuildAndEndTheVeil() async throws {

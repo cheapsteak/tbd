@@ -175,7 +175,7 @@ final class FDSidecarClient: @unchecked Sendable {
     /// frame. Never blocks the caller: encodes inline (cheap) then enqueues the
     /// write on `sendQueue`. Errors — including a disconnected socket — are
     /// logged and dropped; the receive loop's EOF path handles daemon death and
-    /// Phase B owns reconnect.
+    /// `DaemonClient` owns reconnect.
     ///
     /// Returns whether the frame was **handed to `sendQueue`** — `false` for
     /// either refusal that is knowable at call time (over-cap payload, encode
@@ -426,8 +426,9 @@ final class FDSidecarClient: @unchecked Sendable {
                 break
             }
         }
-        // EOF: fail everything pending, mark disconnected (reconnect is a
-        // Phase B crash-recovery concern).
+        // EOF: fail everything pending, mark disconnected. Reconnecting is
+        // `DaemonClient`'s: `connect()` while the app is disconnected, and
+        // `reconnectSidecarIfDown` while it stays connected.
         lock.lock()
         let pending = waiters; waiters = [:]
         socketFD = -1

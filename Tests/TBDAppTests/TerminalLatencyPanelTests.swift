@@ -239,6 +239,9 @@ struct TerminalLatencyPanelTests {
         // reads it: this reference is weak, so the fixture holds the view too.
         coordinator.terminalView = view
         coordinator.latencyDiagnosticForTesting = diagnostic
+        // One attempt: a refused ack is the end of this panel's attach here,
+        // and the stub would hand a retry the descriptor its reader closed.
+        coordinator.holderAttachRetryDelays = []
         coordinator.holderAttachClient = StubAttach(
             attachment: HolderAttachment(
                 ptyFD: vended, generation: 7, snapshotPreamble: Data()),

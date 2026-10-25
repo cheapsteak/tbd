@@ -980,6 +980,27 @@ final class AppState {
     /// once. Never reset: dropping back to zero when the record clears would
     /// rebuild the pane a second time. Absent reads as zero.
     var terminalAttachEpochs: [UUID: Int] = [:]
+    /// Per-terminal part of a terminal view's SwiftUI identity, advanced by
+    /// each Retry on the attach-failed placard (`retryTerminalAttach`).
+    ///
+    /// Separate from `terminalAttachEpochs` on purpose: an in-place account
+    /// switch reads that epoch to decide whether it still owes the pane its
+    /// one rebuild, and a Retry landing mid-switch must not answer that
+    /// question for it. Absent reads as zero; a terminal's entry goes with
+    /// the terminal (`recordTerminalRemoval`).
+    var terminalAttachRetries: [UUID: Int] = [:]
+
+    /// The attach-failed placard's Retry: rebuild this terminal's panel so it
+    /// attaches again from scratch.
+    ///
+    /// Advancing the retry count changes the panel's SwiftUI identity — a
+    /// pane's and the pinned dock's both carry it — so the failed panel is torn
+    /// down and a fresh one built, and the fresh one waits out anything the old
+    /// one still has in flight for this terminal before it asks. Unlike closing
+    /// the tab, it leaves the session alone.
+    func retryTerminalAttach(terminalID: UUID) {
+        terminalAttachRetries[terminalID, default: 0] += 1
+    }
 
     func setSuspendingSnapshot(_ image: NSImage, for id: UUID) {
         suspendingSnapshots[id] = image
@@ -3762,6 +3783,13 @@ final class AppState {
                     }
                     if !self.isConnected { return }
                 }
+                // The block above runs only while `isConnected` is false, so it
+                // never sees a sidecar that dropped on its own while the app
+                // stayed connected. This does, and it is paced inside — free
+                // while the sidecar is up, and backed off so a second app
+                // instance cannot make the two take it from each other every
+                // tick.
+                await self.daemonClient.reconnectSidecarIfDown(.poll)
                 // Guard the whole refresh cycle (refreshAll + the every-15th
                 // pr.list) so a slow daemon can never stack overlapping cycles or
                 // run them concurrently. pollCycle is advanced only when a cycle
