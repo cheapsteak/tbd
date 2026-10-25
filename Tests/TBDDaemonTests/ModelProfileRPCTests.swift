@@ -113,12 +113,15 @@ final class ProfileRowPresenceProbe: ClaudeCredentialsKeychainDeleting, @uncheck
 
 // Runs outside TBDHomeSerialized, which is safe only while nothing here reads
 // `TBD_HOME`, `TBD_CLAUDE_HOST_HOME` or `TBD_TEST_CODEX_HOME`, directly or
-// through a production default. Every path the handlers resolve comes from `home`
-// below: secrets go through the router's injected `ModelProfileKeychain.Store`
-// (never the statics, which read the process-global `TBD_HOME` on every call),
-// and the router and lifecycle get explicit config-dir managers, hooks dir,
-// sessions dir and remote-transcript environment instead of the defaults that
-// resolve those variables. A test added here that calls a
+// through a production default. Every path the handlers resolve is named
+// explicitly, by `home` below or by a config-dir manager a test roots in a temp
+// dir of its own: secrets go through the router's injected
+// `ModelProfileKeychain.Store` (never the statics, which read the
+// process-global `TBD_HOME` on every call), and the router and lifecycle get
+// explicit config-dir managers, hooks dir, sessions dir and remote-transcript
+// environment instead of the defaults that resolve those variables. (The
+// store's read-only legacy fallback follows `HOME`, not any of the three; under
+// `scripts/test.sh` that is the fake home.) A test added here that calls a
 // `ModelProfileKeychain` static, builds a default `ClaudeProfileConfigDirManager`
 // or relies on another `TBD_HOME`-derived default puts this suite back in the
 // race `TBDHomeSerializedSuites.swift` describes: a seed and a read straddling
@@ -129,11 +132,12 @@ struct ModelProfileRPCTests {
 
     /// Per-test scratch home. Swift Testing builds a fresh suite instance for
     /// every test, so each test gets its own. It has no in-process teardown:
-    /// `fencedScratchRoot` mints it under the run root `scripts/test.sh` removes
-    /// on exit, the same reclaim the fenced `TBD_HOME` these writes used to land
-    /// in gets. Not `$TMPDIR`, which the wrapper leaves pointing at the real
-    /// per-user temp dir, where every secret file, profile dir and host mirror
-    /// written here would outlive the run.
+    /// under `scripts/test.sh`, `fencedScratchRoot` mints it inside the run root
+    /// the wrapper removes on exit, the same reclaim the fenced `TBD_HOME` gets.
+    /// Not `$TMPDIR`, which the wrapper leaves pointing at the real per-user temp
+    /// dir, where every secret file, profile dir and host mirror written here
+    /// would outlive the run. A bare `swift test` falls back to `/tmp` and
+    /// leaks, as `fencedScratchRoot` documents.
     private let home = URL(
         fileURLWithPath: fencedScratchRoot(prefix: "tbdmp"), isDirectory: true)
 
