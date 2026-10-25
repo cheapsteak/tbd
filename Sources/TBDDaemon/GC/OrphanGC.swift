@@ -51,8 +51,9 @@ public actor OrphanGC {
     private let git: GitManager
     private let broadcast: @Sendable (StateDelta) -> Void
     /// Optional-returning live-cwd provider. The provider returning `nil`
-    /// means "live cwds could not be determined" and makes `sweep` skip
-    /// entirely; the property itself being `nil` means "use the real lsof".
+    /// means "live cwds could not be determined" and makes `sweep` skip every
+    /// leg but the notification prune; the property itself being `nil` means
+    /// "use the real lsof".
     private let liveCWDsProvider: (@Sendable () async -> [String]?)?
     private let scratchpadBase: URL
     private let now: @Sendable () -> Date
@@ -155,8 +156,8 @@ public actor OrphanGC {
 
     /// Internal seam (tests): the provider may return `nil` to simulate the
     /// real lsof path's "unavailable" sentinel (timeout / spawn failure /
-    /// non-zero exit), which must make `sweep` skip entirely rather than be
-    /// treated as "no live processes". `liveCWDsProvider` has no default so
+    /// non-zero exit), which must make `sweep` skip every leg but the
+    /// notification prune rather than be treated as "no live processes". `liveCWDsProvider` has no default so
     /// this never collides with the public init's defaulted overload.
     init(
         db: TBDDatabase,

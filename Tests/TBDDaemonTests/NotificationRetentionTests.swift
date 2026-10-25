@@ -97,6 +97,20 @@ struct NotificationRetentionTests {
         #expect(result.planned.contains { $0.contains("notifications") } == false)
     }
 
+    /// The cutoff is strict: a read row created exactly one window before now
+    /// is not older than the window, so it stays.
+    @Test func readNotificationExactlyAtCutoffIsKept() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wt = try await makeWorktree(db, name: "wt-cutoff-read")
+        let id = try await insert(
+            db, worktree: wt.id, read: true, age: OrphanGC.notificationReadRetention)
+
+        let result = await makeGC(db: db).sweep()
+
+        #expect(try await exists(db, id), "a read row exactly 7 days old was pruned")
+        #expect(result.planned.contains { $0.contains("notifications") } == false)
+    }
+
     @Test func unreadNotificationOnActiveWorktreeIsKept() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wt = try await makeWorktree(db, name: "wt-old-unread")
@@ -160,6 +174,12 @@ struct NotificationRetentionTests {
 
     /// The leg on a sweep that gets past the `lsof` gate: it prunes there too,
     /// and its count joins the sweep's total.
+    ///
+    /// `>= 1` rather than `== 1`, deliberately. Not every leg this sweep runs
+    /// is fenced: the deletion-queue and scratchpad legs also drain the scratch
+    /// worktree pool at `TBDConstants.scratchDir`, which has no seam on
+    /// `OrphanGC` and resolves from the process-wide `TBD_HOME` other suites
+    /// share. The leg's own count is pinned exactly by the `REAP` line.
     @Test func aHealthySweepPrunesAndCountsNotifications() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wt = try await makeWorktree(db, name: "wt-healthy")
@@ -248,6 +268,52 @@ struct NotificationRetentionTests {
         let definition = try #require(sql, "the unread notification index is missing")
         #expect(definition.contains("ON notification(worktreeID)"))
         #expect(definition.contains("WHERE read = 0"))
+    }
+
+    /// The unread summary, polled every 2 seconds, is the main reader the index
+    /// exists for. Its WHERE must match the index's own for SQLite to use it.
+    @Test func unreadSummaryScansThroughTheUnreadIndex() async throws {
+        let db = try TBDDatabase(inMemory: true)
+
+        let details = try await db.writerForTests.read { connection in
+            try Row.fetchAll(
+                connection, sql: "EXPLAIN QUERY PLAN \(NotificationStore.unreadSummarySQL)"
+            ).compactMap { $0["detail"] as String? }
+        }
+
+        #expect(
+            details.contains { $0.contains("USING INDEX idx_notification_unread_worktree") },
+            "the unread summary does not use the unread index: \(details)")
+    }
+
+    /// Switching the summary to raw SQL changes how it reads, not what it
+    /// returns: read rows are still left out, and each worktree still gets its
+    /// highest-severity unread type and its newest unread timestamp.
+    @Test func unreadSummaryStillSummarizesOnlyUnreadRows() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wt = try await makeWorktree(db, name: "wt-summary")
+        let allRead = try await makeWorktree(db, name: "wt-summary-read")
+        let errorRow = TBDNotification(
+            worktreeID: wt.id, type: .error, read: false,
+            createdAt: fixedNow.addingTimeInterval(-2 * day))
+        let newest = TBDNotification(
+            worktreeID: wt.id, type: .responseComplete, read: false,
+            createdAt: fixedNow.addingTimeInterval(-day))
+        let readNewer = TBDNotification(
+            worktreeID: wt.id, type: .limitReached, read: true, createdAt: fixedNow)
+        let readElsewhere = TBDNotification(
+            worktreeID: allRead.id, type: .error, read: true, createdAt: fixedNow)
+        let records = [errorRow, newest, readNewer, readElsewhere].map { NotificationRecord(from: $0) }
+        try await db.writerForTests.write { connection in
+            for record in records { try record.insert(connection) }
+        }
+
+        let summary = try await db.notifications.unreadSummaryByWorktree()
+
+        #expect(summary.count == 1)
+        #expect(summary[allRead.id] == nil)
+        #expect(summary[wt.id]?.type == .error)
+        #expect(summary[wt.id]?.mostRecentAt == newest.createdAt)
     }
 
     /// Mark-read filters on `read = 0` so SQLite searches the partial index

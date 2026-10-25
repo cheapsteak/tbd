@@ -166,14 +166,20 @@ public struct NotificationStore: Sendable {
             .max(by: { $0.severity < $1.severity })
     }
 
+    /// The query `unreadSummaryByWorktree` runs. Raw SQL with a literal
+    /// `read = 0` on purpose: SQLite uses the partial index
+    /// `idx_notification_unread_worktree` only when the query's WHERE matches
+    /// the index's own. GRDB's `Column("read") == false` renders as `NOT
+    /// "read"` (or a bound parameter), which reads the same rows but which
+    /// SQLite does not match against the index, so it scans the whole table.
+    static let unreadSummarySQL = "SELECT * FROM notification WHERE read = 0"
+
     /// One row per worktree with at least one unread notification: the highest
     /// severity unread type and the timestamp of the most-recent unread row.
     /// Used by the cmd-K jump menu to sort worktrees by attention-recency.
     public func unreadSummaryByWorktree() async throws -> [UUID: UnreadSummary] {
         let records = try await writer.read { db in
-            try NotificationRecord
-                .filter(Column("read") == false)
-                .fetchAll(db)
+            try NotificationRecord.fetchAll(db, sql: Self.unreadSummarySQL)
         }
         var result: [UUID: UnreadSummary] = [:]
         for record in records {
