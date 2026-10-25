@@ -85,8 +85,15 @@ assert_eq() {
     if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1: expected [$2] got [$3]"; fi
 }
 
+# The three matchers feed grep a here-string, never `printf … | grep -q`.
+# `grep -q` leaves at its first match, and a printf still writing then dies of
+# SIGPIPE (or, where SIGPIPE is ignored, exits 1 on `write error: Broken
+# pipe`). Under pipefail that status is the pipeline's, so a match reads as a
+# miss — and assert_not_contains passes with the text present. Which side wins
+# is timing, so it reddened about one run in a hundred;
+# `test_the_matchers_survive_output_longer_than_a_pipe` makes it certain.
 assert_contains() {
-    if printf '%s' "$3" | grep -q -- "$2"; then
+    if grep -q -- "$2" <<< "$3"; then
         pass "$1"
     else
         fail "$1: [$2] not found in output"
@@ -105,7 +112,7 @@ file_inode() {
 # For output that is itself a regex — the anchored pkill pattern, say — where
 # grep's default BRE would reinterpret the very escapes under test.
 assert_contains_literal() {
-    if printf '%s' "$3" | grep -qF -- "$2"; then
+    if grep -qF -- "$2" <<< "$3"; then
         pass "$1"
     else
         fail "$1: [$2] not found in output"
@@ -113,7 +120,7 @@ assert_contains_literal() {
 }
 
 assert_not_contains() {
-    if printf '%s' "$3" | grep -q -- "$2"; then
+    if grep -q -- "$2" <<< "$3"; then
         fail "$1: [$2] unexpectedly present"
     else
         pass "$1"
@@ -337,6 +344,26 @@ mkcase() {
 }
 EOF
     printf '%s\n' "$d"
+}
+
+# MARK: - The harness's own matchers
+
+# The text sits on the first line of 384 KiB of output, six times what a pipe
+# holds, so a piped matcher's grep always leaves while printf is still blocked
+# writing. Against `printf … | grep -q` all three rows fail on every run, not
+# one run in a hundred.
+test_the_matchers_survive_output_longer_than_a_pipe() {
+    local filler=$'filler line\n' long verdict
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do filler="$filler$filler"; done
+    long=$'needle\n'"$filler"
+    assert_contains "a match ahead of long output is found" "needle" "$long"
+    assert_contains_literal "and found literally" "needle" "$long"
+    # A subshell, so the FAIL this row expects to see is not counted as one.
+    verdict="$(assert_not_contains "probe" "needle" "$long")"
+    case "$verdict" in
+        FAIL*) pass "and is never reported absent" ;;
+        *) fail "assert_not_contains passed with the text present: $verdict" ;;
+    esac
 }
 
 # MARK: - Argument handling
@@ -3454,6 +3481,7 @@ test_stopping_a_successor_that_is_already_gone_is_not_an_error() {
     assert_contains "an empty pid is a no-op" "rc=0" "$out"
 }
 
+test_the_matchers_survive_output_longer_than_a_pipe
 test_help_lists_every_flag
 test_unknown_flag_is_rejected
 test_parse_args_sets_options
