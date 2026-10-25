@@ -21,7 +21,7 @@ struct ProfileCommandsTests {
     // MARK: - Identity column rendering
 
     @Test func identityCell_oauthLoggedIn_showsEmail() {
-        #expect(profileIdentityCell(kind: .oauth, loginIdentity: "zadam@longeye.co") == "zadam@longeye.co")
+        #expect(profileIdentityCell(kind: .oauth, loginIdentity: "dev@acme.example") == "dev@acme.example")
     }
 
     @Test func identityCell_oauthNotLoggedIn_showsNeedsLogin() {

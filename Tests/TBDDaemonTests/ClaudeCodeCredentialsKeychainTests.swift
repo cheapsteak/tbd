@@ -19,13 +19,13 @@ struct ClaudeCodeCredentialsKeychainTests {
 
     // MARK: - Suffix computation
 
-    @Test("known vector: sha256 of zadam profile path starts with db64a81f")
+    @Test("known vector: sha256 of acme profile path starts with 9c701bd6")
     func knownVector() {
-        let path = "/Users/zionts/.claude-profiles/zadam"
-        #expect(ClaudeCodeCredentialsKeychain.serviceSuffix(forConfigDirPath: path) == "db64a81f")
+        let path = "/Users/me/.claude-profiles/acme"
+        #expect(ClaudeCodeCredentialsKeychain.serviceSuffix(forConfigDirPath: path) == "9c701bd6")
         #expect(
             ClaudeCodeCredentialsKeychain.serviceName(forConfigDirPath: path)
-                == "Claude Code-credentials-db64a81f"
+                == "Claude Code-credentials-9c701bd6"
         )
     }
 
@@ -67,9 +67,9 @@ struct ClaudeCodeCredentialsKeychainTests {
     @Test("deleteCredentials requests the derived, suffixed service name")
     func deleteRequestsDerivedServiceName() {
         let recorder = RecordingCredentialsKeychain()
-        let path = "/Users/zionts/.claude-profiles/zadam"
+        let path = "/Users/me/.claude-profiles/acme"
         let status = recorder.deleteCredentials(forConfigDirPath: path)
         #expect(status == errSecSuccess)
-        #expect(recorder.deletedServices == ["Claude Code-credentials-db64a81f"])
+        #expect(recorder.deletedServices == ["Claude Code-credentials-9c701bd6"])
     }
 }

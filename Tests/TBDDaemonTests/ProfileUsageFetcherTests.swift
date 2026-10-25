@@ -622,6 +622,6 @@ struct ProfileUsageKeychainDerivationTests {
     /// Known vector from the class doc comment, verified empirically.
     @Test func knownSHA256Vector() {
         #expect(ClaudeCodeCredentialsKeychain.serviceSuffix(
-            forConfigDirPath: "/Users/zionts/.claude-profiles/zadam") == "db64a81f")
+            forConfigDirPath: "/Users/me/.claude-profiles/acme") == "9c701bd6")
     }
 }
