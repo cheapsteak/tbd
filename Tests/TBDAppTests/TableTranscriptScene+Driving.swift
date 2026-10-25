@@ -2,12 +2,46 @@ import AppKit
 import SwiftUI
 import Testing
 @testable import TBDApp
+import TestProcessDefaults
 
 /// Driving helpers for `TableTranscriptScene`, shared by `TableTranscriptPaneTests`
 /// and the prompt-rail suites: prime the coordinator the way production's first
 /// update does, move the clip, and read row geometry back.
 @MainActor
 extension TableTranscriptScene {
+    /// Throws `AppKitRowHeightEstimationIsOn` when the table holds a row
+    /// height its delegate does not give for that row.
+    ///
+    /// With `NSTableViewCanEstimateRowHeights` off, as production runs, AppKit
+    /// asks the delegate for every row's height, so once the table has settled
+    /// every row's rectangle is the delegate's height plus the intercell
+    /// spacing; a realize-time correction under 0.5pt is not passed on, hence
+    /// the 1pt tolerance. With it on, rows AppKit has never shown keep a height
+    /// of its own guessing, and AppKit moves the clip itself as it swaps the
+    /// guesses out — so a test that scrolls or pins would fail for a reason
+    /// its own assertions cannot name. Asks the delegate through its
+    /// `heightOfRow`, which reads cached heights and estimates and builds no
+    /// cell.
+    func requireDelegateRowHeights() throws {
+        let spacing = tableView.intercellSpacing.height
+        var mismatched = 0
+        var first: AppKitRowHeightEstimationIsOn.Row?
+        for row in 0..<tableView.numberOfRows {
+            let appKit = tableView.rect(ofRow: row).height - spacing
+            let delegate = coordinator.tableView(tableView, heightOfRow: row)
+            guard abs(appKit - delegate) > 1 else { continue }
+            mismatched += 1
+            if first == nil {
+                first = AppKitRowHeightEstimationIsOn.Row(index: row, appKit: appKit, delegate: delegate)
+            }
+        }
+        guard let first else { return }
+        throw AppKitRowHeightEstimationIsOn(
+            mismatchedRows: mismatched, rowCount: tableView.numberOfRows, first: first,
+            registeredAtLoad: TBDTestProcessDefaultsRegistered())
+    }
+
+
     /// Primes the scene on `nodes` exactly as production's first `updateNSView`
     /// does, then keeps updating until the table's COLUMN WIDTH stops moving.
     ///
@@ -25,7 +59,9 @@ extension TableTranscriptScene {
     /// width re-flows every one of them, so the anchor still jumps.
     ///
     /// So: settle the width FIRST, and only then take a "before" snapshot. Returns
-    /// the settled column width; fails the test if it never settles.
+    /// the settled column width; fails the test if it never settles, or if
+    /// AppKit's own row-height estimation is on in this process
+    /// (`requireDelegateRowHeights()`).
     @discardableResult
     func prime(nodes: [TranscriptRenderNode], linkRoot: String = "") -> CGFloat {
         for _ in 0..<4 {
@@ -33,7 +69,10 @@ extension TableTranscriptScene {
             coordinator.update(
                 nodes: nodes, atBottom: .constant(true), activityToggleToken: 0, linkRoot: linkRoot)
             settle()
-            if tableView.bounds.width == widthAtUpdate { return widthAtUpdate }
+            if tableView.bounds.width == widthAtUpdate {
+                do { try requireDelegateRowHeights() } catch { Issue.record(error) }
+                return widthAtUpdate
+            }
         }
         Issue.record("the table's column width never settled: \(tableView.bounds.width)")
         return tableView.bounds.width
@@ -65,6 +104,34 @@ extension TableTranscriptScene {
     var gapToBottom: CGFloat {
         let clip = scrollView.contentView
         return tableView.frame.height - (clip.bounds.origin.y + clip.bounds.height)
+    }
+}
+
+/// The table holds row heights its delegate never gave it: NSTableView's own
+/// row-height estimation is on in this test process. See
+/// `TableTranscriptScene.requireDelegateRowHeights()`.
+struct AppKitRowHeightEstimationIsOn: Error, CustomStringConvertible {
+    struct Row {
+        let index: Int
+        let appKit: CGFloat
+        let delegate: CGFloat
+    }
+
+    let mismatchedRows: Int
+    let rowCount: Int
+    let first: Row
+    /// Whether `TestProcessDefaults` registered the opt-out when the test
+    /// bundle loaded.
+    let registeredAtLoad: Bool
+
+    var description: String {
+        "NSTableView's row-height estimation is on in this test process: \(mismatchedRows) of "
+            + "\(rowCount) rows hold a height the delegate does not give (row \(first.index): "
+            + "AppKit \(first.appKit) pt, delegate \(first.delegate) pt). The app turns it off at "
+            + "launch; the TestProcessDefaults target registers NSTableViewCanEstimateRowHeights = NO "
+            + "when the test bundle loads (registered: \(registeredAtLoad)). With it on, AppKit moves "
+            + "the clip as it swaps its guesses for real heights, so scroll and pin assertions fail "
+            + "for that reason."
     }
 }
 

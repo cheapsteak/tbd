@@ -966,12 +966,12 @@ struct TableTranscriptScene {
             coordinator = TableTranscriptView.Coordinator(context: context)
         }
 
-        // Turn off AppKit's own row-height estimation, as `makeNSView` and the
-        // app's launch do. Left on, NSTableView sizes rows it has not shown from a
-        // default height and moves the clip itself as it swaps in the delegate's
-        // heights, which production never sees. `register` writes only the
-        // volatile registration domain, never the real plist.
-        UserDefaults.standard.register(defaults: ["NSTableViewCanEstimateRowHeights": false])
+        // AppKit's own row-height estimation is off for this whole process, as
+        // the app turns it off at launch: the `TestProcessDefaults` target
+        // registers the opt-out when the test bundle loads. Registering it here
+        // would come too late, because AppKit reads it once per process and
+        // another suite may have built a table first. `prime(nodes:)` and
+        // `requireDelegateRowHeights()` say so if it is ever on.
         let tableView = NSTableView()
         tableView.headerView = nil
         tableView.gridStyleMask = []

@@ -265,6 +265,17 @@ let package = Package(
             ],
             path: "Tests/TestSupport"
         ),
+        // User defaults the test process must register before any test runs,
+        // as the app registers them in `applicationWillFinishLaunching`: a
+        // constructor in this target runs when the test bundle loads. AppKit
+        // reads `NSTableViewCanEstimateRowHeights` once per process and every
+        // suite shares the process, so a test registering it is too late
+        // whenever another suite built a table first. Test-only.
+        .target(
+            name: "TestProcessDefaults",
+            path: "Tests/TestProcessDefaults",
+            linkerSettings: [.linkedFramework("Foundation")]
+        ),
         .testTarget(
             name: "TBDSharedTests",
             dependencies: ["TBDShared"],
@@ -329,6 +340,9 @@ let package = Package(
                 // and only this test target links the SwiftTerm product.
                 "TBDDaemonLib",
                 "TestSupport",
+                // Turns off NSTableView's row-height estimation for the whole
+                // test process before any table exists; see the target.
+                "TestProcessDefaults",
                 "TBDTerminalSerialization",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
