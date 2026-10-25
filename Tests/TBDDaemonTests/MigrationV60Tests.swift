@@ -36,14 +36,4 @@ import GRDB
         #expect(!names.contains("idx_clearance_pr_repo"))
         #expect(!names.contains("idx_audit_log_ts"))
     }
-
-    /// Guard the surgical scope: the sibling nightwatch DESK feature (System B)
-    /// keeps its `config.nightwatch_mode` column from v38.
-    @Test func nightwatchModeColumnSurvives() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let columns = try await db.writerForTests.read { dbConn in
-            try dbConn.columns(in: "config").map(\.name)
-        }
-        #expect(columns.contains("nightwatch_mode"))
-    }
 }

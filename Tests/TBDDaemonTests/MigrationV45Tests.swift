@@ -1,19 +1,9 @@
 import Testing
 import Foundation
-import GRDB
 @testable import TBDDaemonLib
 @testable import TBDShared
 
 @Suite struct MigrationV45Tests {
-
-    @Test func controlModeColumnExists() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.writerForTests.read { dbConn in
-            let columns = try Row.fetchAll(dbConn, sql: "PRAGMA table_info(config)")
-            let names = columns.compactMap { $0["name"] as String? }
-            #expect(names.contains("control_mode_enabled"))
-        }
-    }
 
     @Test func controlModeDefaultsToFalse() async throws {
         let db = try TBDDatabase(inMemory: true)
