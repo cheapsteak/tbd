@@ -18,7 +18,21 @@ public struct WorktreeLayout: Sendable {
     /// `layout_version` once the migration sweep completes end-to-end.
     public static let currentVersion: Int = 1
 
-    public init() {}
+    /// The root `basePath(for:)` composes a repo's slot under. `nil`, which is
+    /// what `init()` gives every production caller, reads
+    /// `TBDConstants.worktreesDir` on each call.
+    private let worktreesBase: URL?
+
+    public init() {
+        self.worktreesBase = nil
+    }
+
+    /// Test seam: compose under `worktreesBase` rather than the process-global
+    /// `TBD_HOME`. `OrphanGC` takes it so a sweep in a test drains no
+    /// `.deleting/` queue outside the test's own tree.
+    init(worktreesBase: URL) {
+        self.worktreesBase = worktreesBase
+    }
 
     /// Sanitize a repo display name into a filesystem-safe slot.
     ///
@@ -70,10 +84,10 @@ public struct WorktreeLayout: Sendable {
         if let override = repo.worktreeRoot, !override.isEmpty {
             return override
         }
-        // Below the override guard on purpose: `worktreesDir` snapshots the
-        // whole process environment into a Dictionary on every access, and the
-        // override path has no use for the result.
-        let base = TBDConstants.worktreesDir.path
+        // Below the override guard on purpose: `TBDConstants.worktreesDir`
+        // snapshots the whole process environment into a Dictionary on every
+        // access, and the override path has no use for the result.
+        let base = (worktreesBase ?? TBDConstants.worktreesDir).path
         if let slot = repo.worktreeSlot, !slot.isEmpty {
             return "\(base)/\(slot)"
         }

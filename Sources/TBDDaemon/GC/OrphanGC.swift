@@ -90,6 +90,22 @@ public actor OrphanGC {
     private let devServersStore: DevServerRunningFileStore
     /// Liveness read for that leg. `.live` in production.
     private let devServerProbe: DevServerProcessProbe
+    /// The `~/tbd/transcripts` root the retained-transcript leg walks, and the
+    /// root it names every receipt's file under, so the walk and the reference
+    /// set cannot disagree. `TBDConstants.retainedTranscriptsDir` in
+    /// production; tests pass a temp directory.
+    private let retainedTranscriptsBase: URL
+    /// The scratch-space pool, `~/tbd/scratch`. The deletion-queue leg drains
+    /// its `.deleting/` queue whatever the database holds and takes it as an
+    /// archived scratch row's only allowed prefix; the orphan-process leg
+    /// classifies against it. `TBDConstants.scratchDir` in production; tests
+    /// pass a temp directory.
+    private let scratchSpacesBase: URL
+    /// Where each repo row's canonical worktree pool lives, read by the same
+    /// two legs: the deletion-queue leg drains every pool's `.deleting/` queue.
+    /// `WorktreeLayout()` in production, which reads `TBDConstants.worktreesDir`;
+    /// tests pass a temp directory as `worktreesBase`.
+    private let worktreeLayout: WorktreeLayout
     private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -186,7 +202,10 @@ public actor OrphanGC {
         devServerProbe: DevServerProcessProbe? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
-        rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
+        rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil,
+        retainedTranscriptsBase: URL? = nil,
+        scratchSpacesBase: URL? = nil,
+        worktreesBase: URL? = nil
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
@@ -238,6 +257,11 @@ public actor OrphanGC {
         self.devServersStore = DevServerRunningFileStore(
             directory: devServersBase ?? TBDConstants.devServersDir())
         self.devServerProbe = devServerProbe ?? .live
+        self.retainedTranscriptsBase = retainedTranscriptsBase
+            ?? TBDConstants.retainedTranscriptsDir
+        self.scratchSpacesBase = scratchSpacesBase ?? TBDConstants.scratchDir
+        self.worktreeLayout = worktreesBase.map { WorktreeLayout(worktreesBase: $0) }
+            ?? WorktreeLayout()
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -835,8 +859,8 @@ public actor OrphanGC {
         repos: [Repo], archived: [Worktree], live: [String], graceSeconds: Int, dryRun: Bool,
         planned: inout [String], reaped: inout Int
     ) async {
-        let layout = WorktreeLayout()
-        let scratchPrefix = TBDConstants.scratchDir.path
+        let layout = worktreeLayout
+        let scratchPrefix = scratchSpacesBase.path
         var repoPathByID: [UUID: String] = [:]
         var prefixesByRepoID: [UUID: [String]] = [:]
         var pools: Set<String> = []
@@ -1459,13 +1483,15 @@ public actor OrphanGC {
         var referenced = Set<String>()
         for row in liveRows {
             referenced.insert(deletionQueueCollector.resolvedPath(
-                TBDConstants.retainedTranscriptPath(provider: row.provider, key: row.key).path))
+                TBDConstants.retainedTranscriptPath(
+                    provider: row.provider, key: row.key, directory: retainedTranscriptsBase
+                ).path))
             if let localPath = row.localPath {
                 referenced.insert(deletionQueueCollector.resolvedPath(localPath))
             }
         }
 
-        for file in Self.retainedTranscriptFiles(in: TBDConstants.retainedTranscriptsDir) {
+        for file in Self.retainedTranscriptFiles(in: retainedTranscriptsBase) {
             guard !referenced.contains(deletionQueueCollector.resolvedPath(file.path)) else {
                 continue
             }
@@ -2050,7 +2076,7 @@ public actor OrphanGC {
     private func orphanProcessRoots(
         repos: [Repo], archived: [Worktree], liveRows: [LocalWorktree]
     ) -> (TBDProcessRoots, [String: String]) {
-        let layout = WorktreeLayout()
+        let layout = worktreeLayout
         var pools: [String] = []
         var repoPathByPool: [String: String] = [:]
         var repoPathByID: [UUID: String] = [:]
@@ -2065,7 +2091,7 @@ public actor OrphanGC {
         // The scratch-worktree pool is TBD's outright, and belongs to no repo —
         // hence no `repoPathByPool` entry, which stamps the record with `""`
         // the same way the scratchpad phase does.
-        pools.append(deletionQueueCollector.resolvedPath(TBDConstants.scratchDir.path))
+        pools.append(deletionQueueCollector.resolvedPath(scratchSpacesBase.path))
         // The Claude scratchpad base is SHARED, not owned. Claude Code creates
         // one directory there per project it has ever run in, and TBD manages
         // almost none of them — a single census of one developer machine found
