@@ -26,8 +26,14 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-trust
 /// (`refs/pull/<n>/head`) rather than from a branch already present in the
 /// operator's repo. TBD created the directory, but the `.claude/settings.json`,
 /// hooks, MCP config and `CLAUDE.md` inside it came in with that fetched ref —
-/// which may be a third-party fork's. That is precisely what the dialog exists
-/// to gate, so these worktrees are never seeded and Claude asks as usual.
+/// which may be a third-party fork's. That is what the dialog exists to gate,
+/// so these worktrees get no per-path seed of their own. That withholding keeps
+/// the dialog only while the repo's main checkout is itself untrusted: Claude
+/// Code resolves a linked worktree's trust through its main checkout (observed
+/// on Claude Code 2.1.310), so once the main checkout is trusted — TBD seeds
+/// it whenever a Claude session starts there, and operators usually trust
+/// their own checkout — a `foreignHead` worktree starts without a prompt and
+/// its project settings, hooks, MCP config and `CLAUDE.md` load.
 ///
 /// **Why prevention is the only fix.** The trust dialog blocks *before*
 /// SessionStart, so no Claude Code hook ever fires while it is up. A session
@@ -36,11 +42,13 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-trust
 /// spawn. There is no detect-and-recover path; there is only never rendering
 /// the dialog.
 ///
-/// Claude Code persists the decision per-directory in
-/// `<CLAUDE_CONFIG_DIR>/.claude.json` under
-/// `projects["<absolute-cwd-path>"].hasTrustDialogAccepted = true`. A fresh
-/// worktree or scratch dir has never been seen at that path, so the key is
-/// absent and Claude prompts.
+/// Claude Code persists the decision in `<CLAUDE_CONFIG_DIR>/.claude.json`
+/// under `projects["<absolute-path>"].hasTrustDialogAccepted = true`. A scratch
+/// dir has never been seen at its path, so the key is absent and Claude
+/// prompts. A linked worktree is looked up through its main checkout: with the
+/// main checkout's path trusted, a session in the worktree starts without the
+/// dialog and no entry is written for the worktree's own path; with nothing
+/// trusted, the dialog blocks the session (observed on Claude Code 2.1.310).
 ///
 /// **Two-tier gate** (`ensureTrusted`):
 /// - **Scratch spaces seed unconditionally.** TBD created the directory, owns
@@ -126,9 +134,13 @@ enum ClaudeTrustSeeder {
         // trust answer is equally known — but the operator can opt out of
         // seeding them via `config.auto_trust_worktrees`.
         //
-        // The `foreignHead` exclusion is the boundary of the whole argument:
-        // TBD vouches for the directory it created, NOT for contents fetched
-        // from a ref that was not already in the operator's repo. The flag means
+        // The `foreignHead` exclusion withholds TBD's own vouching: TBD vouches
+        // for the directory it created, NOT for contents fetched from a ref
+        // that was not already in the operator's repo. It keeps the dialog only
+        // while the repo's main checkout is untrusted, because Claude Code
+        // resolves a linked worktree's trust through its main checkout (observed
+        // on Claude Code 2.1.310); a trusted main checkout covers the worktree
+        // with no entry for its own path. The flag means
         // exactly that — the contents came from a pull-request head TBD fetched
         // (`refs/pull/<n>/head`) rather than from a local branch. That covers a
         // fork contributor's PR, and also a colleague's same-repo PR whose head
@@ -136,8 +148,8 @@ enum ClaudeTrustSeeder {
         // BranchPickerMerge.swift: every PR-only row sets `checkoutPRHead`).
         // Either way the ref brings its own `.claude/settings.json`, hooks, MCP
         // config and `CLAUDE.md` into a directory TBD made, which is what the
-        // trust dialog exists to gate — so let it render. Erring toward asking
-        // on a same-repo PR head is the safe direction. Note this is deliberately
+        // trust dialog exists to gate — so we do not seed it, and Claude asks
+        // whenever the main checkout is untrusted. Note this is deliberately
         // NOT keyed on `prNumber`: a decorated same-repo PR row stamps a number
         // while checking out an ordinary local branch, and must still seed.
         // It applies to the non-scratch tier only — a scratch space has no git
