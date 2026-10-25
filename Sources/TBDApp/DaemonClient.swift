@@ -164,9 +164,9 @@ actor DaemonClient {
     }
 
     /// Reconnect the FD sidecar if it is down, paced for `caller` by
-    /// `SidecarReconnectBackoff`: the poll tick on an escalating backoff, a
-    /// holder attach about to send its request on a fixed minimum interval
-    /// that leaves the poll's backoff alone.
+    /// `SidecarReconnectBackoff`: the poll tick and a holder attach about to
+    /// send its request each on an escalating backoff of their own, so a
+    /// burst of panels cannot use up the poll's.
     ///
     /// `connect()` runs only while the app believes itself disconnected, so
     /// it never sees a sidecar that drops on its own while the app stays
@@ -187,14 +187,22 @@ actor DaemonClient {
         connectSidecar()
         let connected = fdSidecar.isConnected
         sidecarReconnectBackoff.noteReconnect(caller, at: now)
-        let reconnects = sidecarReconnectBackoff.reconnects
+        let reconnects = caller == .poll
+            ? sidecarReconnectBackoff.reconnects : sidecarReconnectBackoff.attachReconnects
         let outcome = connected ? "succeeded" : "failed"
         let asker = caller == .poll ? "the poll tick" : "a holder attach"
         daemonClientLogger.info("""
-            FD sidecar was down; a reconnect for \(asker, privacy: .public) \
-            \(outcome, privacy: .public) (poll reconnects this run: \(reconnects, privacy: .public))
+            FD sidecar was down; reconnect \(reconnects, privacy: .public) of this run for \
+            \(asker, privacy: .public) \(outcome, privacy: .public)
             """)
         return connected
+    }
+
+    /// A holder attach was delivered: the run of attach-time sidecar
+    /// reconnects, if any, is over — a reconnect another instance keeps
+    /// taking away never gets this far.
+    func noteHolderAttachDelivered() {
+        sidecarReconnectBackoff.noteAttachDelivered()
     }
 
     /// Try a single connection attempt (non-async).

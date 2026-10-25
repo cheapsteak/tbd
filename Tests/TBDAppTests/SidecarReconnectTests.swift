@@ -82,25 +82,46 @@ struct SidecarReconnectTests {
         #expect(backoff.allowsReconnect(.poll, at: held), "after a stable stretch the next drop reconnects at once")
     }
 
-    /// Panels retrying through a daemon restart try to reconnect the sidecar
-    /// before every attempt. Were those tries to escalate the poll's backoff,
-    /// they would spend it against a vend socket that is not up yet, and when
-    /// it came back no reconnect would be allowed.
-    @Test("attach-time reconnects wait a fixed interval and never escalate the poll's backoff")
-    func attachReconnectsLeaveThePollAlone() {
+    /// A second app instance that takes the sidecar back on every attach must
+    /// be slowed down, not fought tab by tab: attach-time reconnects escalate
+    /// too, on a run of their own. And panels retrying through a daemon
+    /// restart must not spend the poll's run against a vend socket that is
+    /// not up yet, or no reconnect would be allowed when it came back.
+    @Test("attach-time reconnects back off on a run of their own, apart from the poll's")
+    func attachReconnectsBackOffOnTheirOwn() {
         var backoff = Backoff()
         var now = Duration.zero
-        for _ in 0..<20 {
+        var waits: [Duration] = []
+        for _ in 0..<8 {
             #expect(backoff.allowsReconnect(.attach, at: now))
             backoff.noteReconnect(.attach, at: now)
-            #expect(!backoff.allowsReconnect(.attach, at: now + Backoff.attachMinimumInterval / 2),
-                    "a burst of panels must not all connect at once")
-            now += Backoff.attachMinimumInterval
+            var next = now
+            while !backoff.allowsReconnect(.attach, at: next) { next += .milliseconds(500) }
+            waits.append(next - now)
+            now = next
         }
+        #expect(waits == [.seconds(1), .seconds(2), .seconds(4), .seconds(8), .seconds(16),
+                          .seconds(30), .seconds(30), .seconds(30)], "\(waits)")
         #expect(backoff.reconnects == 0, "an attach-time try is not a step in the poll's run")
         #expect(backoff.allowsReconnect(.poll, at: now),
                 "the poll must still be free to reconnect the moment the socket is back")
-        #expect(backoff.allowsReconnect(.attach, at: now), "the attach interval is fixed, never longer")
+    }
+
+    @Test("a delivered attach ends the attach run, and only that run")
+    func aDeliveredAttachEndsTheAttachRun() {
+        var backoff = Backoff()
+        backoff.noteReconnect(.attach, at: .zero)
+        backoff.noteReconnect(.attach, at: .seconds(1))
+        backoff.noteReconnect(.poll, at: .seconds(1))
+        #expect(!backoff.allowsReconnect(.attach, at: .seconds(2)))
+
+        backoff.noteAttachDelivered()
+
+        #expect(backoff.attachReconnects == 0)
+        #expect(backoff.allowsReconnect(.attach, at: .seconds(2)),
+                "a reconnect that led to a delivered attach was not fighting anybody")
+        #expect(backoff.reconnects == 1, "the poll's run is not the attach's to end")
+        #expect(!backoff.allowsReconnect(.poll, at: .seconds(2)))
     }
 
     // MARK: - The reconnect
@@ -213,7 +234,7 @@ struct SidecarReconnectTests {
         #expect(await client.reconnectSidecarIfDown(.attach) == false, "nothing is listening yet")
         #expect(await client.reconnectSidecarIfDown(.attach) == false)
         for _ in 0..<5 {
-            await clock.advance(by: Backoff.attachMinimumInterval)
+            await clock.advance(by: Backoff.attachInitialDelay)
             #expect(await client.reconnectSidecarIfDown(.attach) == false)
         }
 
@@ -226,26 +247,42 @@ struct SidecarReconnectTests {
         #expect(sidecar.isConnected)
     }
 
-    @Test("attach-time reconnects are spaced by the fixed minimum interval")
-    func attachReconnectsAreSpaced() async throws {
+    /// A second app instance takes the sidecar back every time this one
+    /// reconnects it for an attach. Each takeover must push the next
+    /// attach-time reconnect further out, until a delivered attach shows the
+    /// fight is over.
+    @Test("attach-time reconnects slow down under repeated takeover, and a delivered attach resets them")
+    func repeatedTakeoverSlowsAttachReconnects() async throws {
         let listener = try VendListener()
         defer { listener.stop() }
         let clock = EventDrivenTestClock()
         let client = DaemonClient(
             socketPath: "/nonexistent/tbd-test.sock", vendSocketPath: listener.path, clock: clock)
         let sidecar = await client.fdSidecar
-        #expect(await client.reconnectSidecarIfDown(.attach))
+        func takeOver() async throws {
+            listener.dropPendingConnection()
+            _ = try await waitFor(
+                "the sidecar to be taken over",
+                observed: { "isConnected=\(sidecar.isConnected)" }
+            ) { !sidecar.isConnected }
+        }
 
-        listener.dropPendingConnection()
-        _ = try await waitFor(
-            "the dropped sidecar to be seen as down",
-            observed: { "isConnected=\(sidecar.isConnected)" }
-        ) { !sidecar.isConnected }
+        #expect(await client.reconnectSidecarIfDown(.attach), "the first reconnect is immediate")
+        var wait = Backoff.attachInitialDelay
+        for _ in 0..<3 {
+            try await takeOver()
+            await clock.advance(by: wait / 2)
+            #expect(await client.reconnectSidecarIfDown(.attach) == false,
+                    "a reconnect inside the wait of \(wait) went through")
+            await clock.advance(by: wait / 2)
+            #expect(await client.reconnectSidecarIfDown(.attach), "the wait of \(wait) is over")
+            wait *= 2
+        }
 
-        #expect(await client.reconnectSidecarIfDown(.attach) == false,
-                "a second attach-time try inside the interval must wait")
-        await clock.advance(by: Backoff.attachMinimumInterval)
-        #expect(await client.reconnectSidecarIfDown(.attach))
+        await client.noteHolderAttachDelivered()
+        try await takeOver()
+        #expect(await client.reconnectSidecarIfDown(.attach),
+                "after a delivered attach the next takeover is answered at once")
         #expect(sidecar.isConnected)
     }
 

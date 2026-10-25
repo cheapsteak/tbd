@@ -27,9 +27,11 @@ enum HolderAttachRetry {
     /// the daemon: 0.25, 0.5, 1, 2 and 4 seconds, 7.75 s in all.
     ///
     /// Shorter than `delays` on purpose. A successor panel refused while this
-    /// handback's claim stands is retrying on `delays`, and the last resend
-    /// has to land well inside that budget, or the successor paints its
-    /// placard just before the claim clears.
+    /// handback's claim stands is retrying on `delays`, so the resends usually
+    /// land inside its budget. The sleeps alone do not bound that — a failed
+    /// resend also spends time in transit — so a successor out of retries
+    /// waits out any resend still going before it gives up
+    /// (`HolderHandbackLedger.awaitResends`).
     static let handbackResendDelays: [Duration] = [
         .milliseconds(250), .milliseconds(500), .seconds(1), .seconds(2), .seconds(4),
     ]
@@ -54,6 +56,19 @@ enum HolderAttachRetry {
     static func isRetryable(_ error: any Error) -> Bool {
         if error is CancellationError { return false }
         return !isPermanentRefusal(error)
+    }
+
+    /// Whether a handback or release naming `generation` may be resent at all.
+    ///
+    /// The resend contract, `AttachRequestResult.uniqueGenerationFloor`: a
+    /// generation at or above it was minted by a daemon that starts each
+    /// process at a random base, so it cannot match a claim in any other
+    /// daemon, older or newer. Below it the generation came from an older
+    /// daemon whose count restarts at 1 in every process, and a resend that
+    /// reached a successor could hand back another attach's claim — so it gets
+    /// the one attempt it had before resends existed.
+    static func allowsResend(of generation: UInt64) -> Bool {
+        generation >= AttachRequestResult.uniqueGenerationFloor
     }
 
     /// Whether a request that failed with `error` got no answer from the

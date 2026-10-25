@@ -45,6 +45,11 @@ enum HolderAttachError: Error, LocalizedError {
 
 /// The two RPC halves of a holder attach, behind a seam so a panel test can
 /// drive the attach path without a daemon.
+///
+/// A conformer also owns the pacing of its own resends — `resendDelays` and
+/// `clock` — so there is one place they come from: the panel builds its client
+/// once, from its own values, and the resend paths below read them back off
+/// the client.
 protocol HolderAttaching: Sendable {
     func attach(worktreeID: UUID, paneID: String, terminalID: UUID) async throws -> HolderAttachment
     func ready(
@@ -54,22 +59,30 @@ protocol HolderAttaching: Sendable {
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
         snapshotPreamble: Data
     ) async throws
+    /// The waits between resends of a handback or release that never reached
+    /// the daemon.
+    var resendDelays: [Duration] { get }
+    /// What those waits sleep on.
+    var clock: any Clock<Duration> { get }
 }
 
 extension HolderAttaching {
+    var resendDelays: [Duration] { HolderAttachRetry.handbackResendDelays }
+    var clock: any Clock<Duration> { ContinuousClock() }
+
     /// Send `send` — one holder request naming `generation` — and send it
     /// again while it fails in transit, waiting out each of `resendDelays`
-    /// first (production passes `HolderAttachRetry.handbackResendDelays`).
+    /// first.
     ///
     /// A handback that never reached the daemon leaves its claim standing, and
     /// nothing else clears a claim while this app lives: every later attach to
     /// the session is refused as owned by a viewer. So a failure in transit is
     /// worth a resend, and the resends carry on across a reconnect — but only
-    /// for a generation at or above `AttachRequestResult.uniqueGenerationFloor`
-    /// (the check below). Such a generation names no claim in any other daemon
-    /// process, and a daemon answers it the way it answers any generation it
-    /// never minted: a `pane.detach` with success and nothing done, an
-    /// `attach.ready` with a refusal. Below the floor the request is sent once.
+    /// for a generation `HolderAttachRetry.allowsResend` accepts. Such a
+    /// generation names no claim in any other daemon process, and a daemon
+    /// answers it the way it answers any generation it never minted: a
+    /// `pane.detach` with success and nothing done, an `attach.ready` with a
+    /// refusal. Any other generation is sent once.
     ///
     /// Returns once an attempt is accepted. An answer that is a refusal —
     /// anything `HolderAttachRetry.isTransportFailure` rejects — is rethrown
@@ -81,7 +94,6 @@ extension HolderAttaching {
     func resendingInTransit(
         _ request: String, terminalID: UUID, generation: UInt64,
         after failure: (any Error)? = nil,
-        resendDelays: [Duration], clock: any Clock<Duration>,
         _ send: () async throws -> Void
     ) async throws {
         var lastFailure: any Error
@@ -95,21 +107,8 @@ extension HolderAttaching {
                 lastFailure = error
             }
         }
-        // The resend contract, `AttachRequestResult.uniqueGenerationFloor`: a
-        // generation at or above it was minted by a daemon that starts each
-        // process at a random base, so it cannot match a claim in any other
-        // daemon, older or newer. Below it the generation came from an older
-        // daemon whose count restarts at 1 in every process, and a resend that
-        // reached a successor could hand back another attach's claim — so it
-        // gets the one attempt it had before resends existed.
-        guard generation >= AttachRequestResult.uniqueGenerationFloor else {
-            logger.info("""
-                holder \(request, privacy: .public) for attach \(generation, privacy: .public) of \
-                terminal \(terminalID, privacy: .public) never reached the daemon; not resent, \
-                because a generation below the unique floor may name a claim in another daemon
-                """)
-            throw lastFailure
-        }
+        guard HolderAttachRetry.allowsResend(of: generation) else { throw lastFailure }
+        let clock = self.clock
         for (index, delay) in resendDelays.enumerated() {
             let resend = index + 1
             let cause = lastFailure.localizedDescription
@@ -134,6 +133,16 @@ extension HolderAttaching {
         throw lastFailure
     }
 
+    /// Logs that a request naming a generation below the unique floor never
+    /// reached the daemon and will not be resent.
+    private func logNotResent(_ request: String, terminalID: UUID, generation: UInt64) {
+        logger.error("""
+            holder \(request, privacy: .public) for attach \(generation, privacy: .public) of \
+            terminal \(terminalID, privacy: .public) never reached the daemon, and is not resent: \
+            a generation below the unique floor may name a claim in another daemon
+            """)
+    }
+
     /// Hand a session back: `pane.detach` now and, if it never reached the
     /// daemon, again in the background on `resendingInTransit`'s schedule.
     ///
@@ -145,11 +154,11 @@ extension HolderAttaching {
     /// cannot touch the successor's newer one.
     ///
     /// - Returns: The background resend, when the first attempt never reached
-    ///   the daemon; nil otherwise.
+    ///   the daemon and its generation may be resent; nil otherwise.
     @discardableResult
     func detachResendingInBackground(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
-        snapshotPreamble: Data, resendDelays: [Duration], clock: any Clock<Duration>
+        snapshotPreamble: Data
     ) async -> Task<Void, Never>? {
         do {
             try await detach(
@@ -157,12 +166,16 @@ extension HolderAttaching {
                 generation: generation, snapshotPreamble: snapshotPreamble)
             return nil
         } catch where HolderAttachRetry.isTransportFailure(error) {
+            guard HolderAttachRetry.allowsResend(of: generation) else {
+                logNotResent("pane.detach", terminalID: terminalID, generation: generation)
+                return nil
+            }
             let failure = error
             return Task {
                 do {
                     try await self.resendingInTransit(
                         "pane.detach", terminalID: terminalID, generation: generation,
-                        after: failure, resendDelays: resendDelays, clock: clock
+                        after: failure
                     ) {
                         try await self.detach(
                             worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
@@ -204,25 +217,22 @@ extension HolderAttaching {
     /// **The caller must already be off the descriptor**: the daemon resumes
     /// its drain on receipt of the detach. Each request is sent once before
     /// this returns, so the handback ledger can settle; a request that never
-    /// reached the daemon is resent in the background (`resendingInTransit`).
-    /// An ack lost in transit is resent too, and then followed by a fresh
-    /// detach: until the ack lands the attach can still be pending, and the
-    /// daemon's ready timeout would record a claim after the first detach went
-    /// by. The daemon answers a detach `ok` whether or not it found a claim to
-    /// clear, so a detach error means the request never reached it, and a
-    /// success proves only that it arrived.
+    /// reached the daemon is resent in the background (`resendingInTransit`),
+    /// when its generation may be. An ack lost in transit is resent too, and
+    /// then followed by a fresh detach: until the ack lands the attach can
+    /// still be pending, and the daemon's ready timeout would record a claim
+    /// after the first detach went by. The daemon answers a detach `ok`
+    /// whether or not it found a claim to clear, so a detach error means the
+    /// request never reached it, and a success proves only that it arrived.
     ///
-    /// - Parameters:
-    ///   - kind: Names the release in the log lines — what kind of attach this
-    ///     was ("undelivered", "abandoned").
-    ///   - resendDelays: The waits between the background resends.
-    ///   - clock: What the background resends wait on.
+    /// - Parameter kind: Names the release in the log lines — what kind of
+    ///   attach this was ("undelivered", "abandoned").
     /// - Returns: The background resend, when a first attempt never reached
-    ///   the daemon; nil otherwise.
+    ///   the daemon and its generation may be resent; nil otherwise.
     @discardableResult
     func releaseUnconfirmedAttach(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
-        kind: String, resendDelays: [Duration], clock: any Clock<Duration>
+        kind: String
     ) async -> Task<Void, Never>? {
         var lostReady: (any Error)?
         do {
@@ -253,12 +263,15 @@ extension HolderAttaching {
             if HolderAttachRetry.isTransportFailure(error) { lostDetach = error }
             logger.error("""
                 holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
-                terminal \(terminalID, privacy: .public): pane.detach failed while releasing it \
-                (resent if it never reached the daemon): \
+                terminal \(terminalID, privacy: .public): pane.detach failed while releasing it: \
                 \(error.localizedDescription, privacy: .public)
                 """)
         }
         guard lostReady != nil || lostDetach != nil else { return nil }
+        guard HolderAttachRetry.allowsResend(of: generation) else {
+            logNotResent("\(kind) release", terminalID: terminalID, generation: generation)
+            return nil
+        }
         let readyFailure = lostReady
         let detachFailure = lostDetach
         return Task {
@@ -279,7 +292,7 @@ extension HolderAttaching {
                 do {
                     try await self.resendingInTransit(
                         "attach.ready", terminalID: terminalID, generation: generation,
-                        after: readyFailure, resendDelays: resendDelays, clock: clock, sendReady)
+                        after: readyFailure, sendReady)
                 } catch where HolderAttachRetry.isTransportFailure(error) {
                     logger.error("""
                         holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
@@ -296,7 +309,7 @@ extension HolderAttaching {
             do {
                 try await self.resendingInTransit(
                     "pane.detach", terminalID: terminalID, generation: generation,
-                    after: detachAfter, resendDelays: resendDelays, clock: clock, sendDetach)
+                    after: detachAfter, sendDetach)
             } catch {
                 logger.error("""
                     holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
@@ -323,11 +336,11 @@ struct HolderAttachClient: HolderAttaching {
     /// How long to wait for the vended descriptor. Matches the control-mode
     /// path's bound.
     var fdTimeout: Duration = .seconds(5)
-    /// The waits between resends of an undelivered attach's release. A panel
-    /// passes its own seam, so a test paces both the same way.
+    /// The waits between resends of a handback or release; see
+    /// `HolderAttaching.resendDelays`.
     var resendDelays: [Duration] = HolderAttachRetry.handbackResendDelays
-    /// What the resends of an undelivered attach's release wait on. A panel
-    /// passes its own, so one retry sequence runs on one clock.
+    /// What those resends wait on. The panel that builds this client passes
+    /// its own clock, so one retry sequence runs on one clock.
     var clock: any Clock<Duration> = ContinuousClock()
 
     /// Request the pty for one holder-backed session.
@@ -388,6 +401,9 @@ struct HolderAttachClient: HolderAttaching {
                 generation: generation, cause: error)
             throw error
         }
+        // Ends any run of attach-time sidecar reconnects: one that was
+        // followed by a delivered attach was not fighting anybody.
+        await daemonClient.noteHolderAttachDelivered()
         return HolderAttachment(
             ptyFD: fd,
             generation: generation,
@@ -416,8 +432,7 @@ struct HolderAttachClient: HolderAttaching {
         await Task {
             _ = await client.releaseUnconfirmedAttach(
                 worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
-                generation: generation, kind: "undelivered",
-                resendDelays: client.resendDelays, clock: client.clock)
+                generation: generation, kind: "undelivered")
         }.value
     }
 

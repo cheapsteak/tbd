@@ -34,13 +34,60 @@ import Foundation
 /// refused until a resend lands and retries on its own meanwhile, which is
 /// cheaper than leaving it blank for a whole resend schedule.
 ///
+/// Those background resends are recorded here too, apart from the entries a
+/// successor waits on before it asks (`registerResend`). Each failed resend
+/// spends real time in transit as well as its scheduled wait, so the last one
+/// can land after a successor's last retry; a successor about to give up waits
+/// for them (`awaitResends`) and asks once more.
+///
 /// Free of `AppState` so it can be unit-tested on its own; `AppState` holds
 /// the one instance the coordinators share.
 @MainActor
 final class HolderHandbackLedger {
     private var inFlight: [UUID: Task<Void, Never>] = [:]
+    private var resends: [UUID: [Task<Void, Never>]] = [:]
+    /// How many callers are parked in `awaitResends` right now. For tests: it
+    /// is how one observes a successor waiting on a resend rather than racing
+    /// it.
+    private(set) var resendWaiters = 0
 
     init() {}
+
+    /// Records `task`, a background resend of a handback or release for
+    /// `terminalID`, until it finishes. Bounded by the resend's own schedule.
+    func registerResend(terminalID: UUID, task: Task<Void, Never>) {
+        resends[terminalID, default: []].append(task)
+        Task { @MainActor [weak self] in
+            await task.value
+            self?.dropResend(terminalID: terminalID, task: task)
+        }
+    }
+
+    /// Whether a background resend is still going for `terminalID`.
+    func isResending(terminalID: UUID) -> Bool {
+        !(resends[terminalID] ?? []).isEmpty
+    }
+
+    /// Suspends until no background resend is going for `terminalID`.
+    ///
+    /// - Returns: `true` when at least one resend was actually waited on.
+    @discardableResult
+    func awaitResends(terminalID: UUID) async -> Bool {
+        var waited = false
+        resendWaiters += 1
+        defer { resendWaiters -= 1 }
+        while let task = resends[terminalID]?.first {
+            waited = true
+            await task.value
+            dropResend(terminalID: terminalID, task: task)
+        }
+        return waited
+    }
+
+    private func dropResend(terminalID: UUID, task: Task<Void, Never>) {
+        resends[terminalID]?.removeAll { $0 == task }
+        if resends[terminalID]?.isEmpty == true { resends[terminalID] = nil }
+    }
 
     /// Records `task` as the unsettled work for `terminalID` — a handback, an
     /// abandoned attach's release, or an attach still in progress.

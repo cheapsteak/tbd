@@ -825,13 +825,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// A seam for pacing: a test about a single attempt empties it, and a
         /// test about the backoff drives `clock` through it.
         var holderAttachRetryDelays: [Duration] = HolderAttachRetry.delays
-        /// The waits between resends of this panel's handback, or of an
-        /// attach release, that never reached the daemon; see
-        /// `HolderAttachRetry.handbackResendDelays`. The same kind of seam as
-        /// `holderAttachRetryDelays`, and on the same `clock`.
-        var holderHandbackResendDelays: [Duration] = HolderAttachRetry.handbackResendDelays
-        /// What the holder attach's retry backoff sleeps on.
+        /// What the holder attach's retry backoff sleeps on, and what the
+        /// client this panel builds is given for its resends.
         private let clock: any Clock<Duration>
+        /// The holder attach this panel is running, retries and all, so
+        /// `cleanup()` can cancel it: a backoff sleep would otherwise hold the
+        /// coordinator past its view.
+        private var holderAttachTask: Task<Void, Never>?
         /// Seam for the handback ledger. Nil means "use the one on AppState",
         /// which every production coordinator shares; a test may inject its
         /// own to drive the wait without an AppState.
@@ -1228,8 +1228,26 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         @MainActor
         private func handleHolderTransport(into terminalView: TerminalView) async -> Bool {
             guard panelTransport() == .holder else { return false }
-            await startHolderClient(terminalView: terminalView)
+            // A task of its own, kept so `cleanup()` can cancel it: the retry
+            // loop inside can sleep for seconds, holding this coordinator.
+            let attach = Task { @MainActor in
+                await self.startHolderClient(terminalView: terminalView)
+            }
+            holderAttachTask = attach
+            await attach.value
+            if holderAttachTask == attach { holderAttachTask = nil }
             return true
+        }
+
+        /// The holder client this panel talks through: the injected one, or
+        /// one built once from this panel's own `clock`, so the client's resends
+        /// and this panel's retries are paced from one place.
+        @MainActor
+        private func resolvedHolderAttachClient(_ appState: AppState) -> any HolderAttaching {
+            if let holderAttachClient { return holderAttachClient }
+            let client = HolderAttachClient(daemonClient: appState.daemonClient, clock: clock)
+            holderAttachClient = client
+            return client
         }
 
         /// Render a holder-backed session, trying the attach again on
@@ -1252,6 +1270,13 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// arrived, and `attemptHolderAttach` stops its reader and releases one
         /// whose ack failed — and the next attempt waits on the ledger for that
         /// release's first send before it asks.
+        ///
+        /// Before the placard, one more wait: a predecessor's handback, or a
+        /// release, may still be resending in the background, and its last
+        /// resend can land after this panel's last retry, because a failed
+        /// resend spends time in transit as well as its scheduled wait. So a
+        /// panel out of retries waits for any resend still going for this
+        /// terminal (`HolderHandbackLedger.awaitResends`) and asks once more.
         @MainActor
         func startHolderClient(terminalView: TerminalView) async {
             guard !isTornDown else { return }
@@ -1261,15 +1286,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     offersRetry: true)
                 return
             }
-            // The coordinator's clock and resend schedule go into the client
-            // too, so every wait in one retry sequence — the backoff here and
-            // the client's release resends — runs on the same injected pacing.
-            let client = holderAttachClient
-                ?? HolderAttachClient(
-                    daemonClient: appState.daemonClient,
-                    resendDelays: holderHandbackResendDelays, clock: clock)
+            let client = resolvedHolderAttachClient(appState)
             let ledger = handbackLedger(appState)
             var retries = 0
+            var waitedForResends = false
             while let failure = await attemptHolderAttach(
                 terminalView: terminalView, appState: appState, client: client,
                 ledger: ledger, worktreeID: worktreeID
@@ -1285,11 +1305,24 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                         \(failure.error.localizedDescription, privacy: .public)); retrying in \
                         \(String(describing: delay), privacy: .public)
                         """)
-                    // A cancelled sleep ends the retries like a definitive
-                    // answer: whoever was waiting for this attach has stopped.
-                    let slept = (try? await clock.sleep(for: delay)) != nil
+                    do {
+                        try await clock.sleep(for: delay)
+                    } catch {
+                        // Cancelled, which only `cleanup()` does: a teardown.
+                        return
+                    }
                     guard !isTornDown else { return }
-                    if slept { continue }
+                    continue
+                }
+                if !waitedForResends, HolderAttachRetry.isRetryable(failure.error),
+                   await ledger.awaitResends(terminalID: panelID) {
+                    waitedForResends = true
+                    guard !isTornDown, !Task.isCancelled else { return }
+                    logger.info("""
+                        holder attach for terminal \(self.panelID, privacy: .public) is out of \
+                        retries; a handback resend for it was still going, so it asks once more
+                        """)
+                    continue
                 }
                 feedHolderAttachFailure(
                     reason: "\(failure.step): \(failure.error.localizedDescription)",
@@ -1667,16 +1700,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             reader: HolderStreamReader?
         ) {
             let panelID = self.panelID
-            let clock = self.clock
-            let resendDelays = holderHandbackResendDelays
             // Settles once each request has been sent once; a resend of one
-            // that never reached the daemon carries on outside the ledger.
+            // that never reached the daemon carries on outside the entry, and
+            // is recorded as a resend so a successor about to give up waits
+            // for it.
             let release = Task { @MainActor in
                 await reader?.awaitClosed()
-                await client.releaseUnconfirmedAttach(
+                if let resend = await client.releaseUnconfirmedAttach(
                     worktreeID: worktreeID, paneID: "", terminalID: panelID,
-                    generation: generation, kind: "abandoned",
-                    resendDelays: resendDelays, clock: clock)
+                    generation: generation, kind: "abandoned"
+                ) {
+                    ledger.registerResend(terminalID: panelID, task: resend)
+                }
             }
             ledger.register(terminalID: panelID, task: release)
         }
@@ -1841,11 +1876,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     from whatever it last saw
                     """)
             }
-            let clock = self.clock
-            let resendDelays = holderHandbackResendDelays
-            let client = holderAttachClient
-                ?? HolderAttachClient(
-                    daemonClient: appState.daemonClient, resendDelays: resendDelays, clock: clock)
+            let client = resolvedHolderAttachClient(appState)
             let panelID = self.panelID
             let ledger = handbackLedger(appState)
             holderHandbackInFlight = true
@@ -1875,15 +1906,18 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // resend: this panel is off the descriptor already, a successor
                 // refused while the claim stands retries on its own, and a
                 // resend of this generation cannot touch the successor's newer
-                // one. The resend schedule ends well inside the successor's
-                // retry budget, so a claim cleared by the last resend is still
-                // seen. If every resend fails, what releases the claim is the
-                // app-liveness verdict that covers an app which died
-                // mid-detach — the same path, reached by a different failure.
-                await client.detachResendingInBackground(
+                // one. The resend is recorded with the ledger as a resend, so a
+                // successor that runs out of retries while it is still going
+                // waits for it and asks once more. If every resend fails, what
+                // releases the claim is the app-liveness verdict that covers an
+                // app which died mid-detach — the same path, reached by a
+                // different failure.
+                if let resend = await client.detachResendingInBackground(
                     worktreeID: attach.worktreeID, paneID: "", terminalID: panelID,
-                    generation: attach.generation, snapshotPreamble: preamble,
-                    resendDelays: resendDelays, clock: clock)
+                    generation: attach.generation, snapshotPreamble: preamble
+                ) {
+                    ledger.registerResend(terminalID: panelID, task: resend)
+                }
             }
             ledger.register(terminalID: panelID, task: handback)
         }
@@ -2465,6 +2499,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // Before anything else: any in-flight attach establishment must
             // see the teardown at its next await resumption (review H2).
             isTornDown = true
+            // A holder attach still retrying would sleep out its backoff
+            // holding this coordinator; cancelling wakes it, and it reads the
+            // cancelled sleep as this teardown.
+            holderAttachTask?.cancel()
+            holderAttachTask = nil
             // Capture the pid BEFORE anything releases the `LocalProcess` —
             // it is the only thing that knows it.
             let ptyChildPid = localProcess?.shellPid ?? 0
