@@ -43,9 +43,10 @@ files carry the run's population, which is why a green run downloads them too:
 the verdict a caller reads is `Test run with N tests`, and N has to come from
 somewhere that cannot make it up.
 
-A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds four jobs
-with no `needs:` between them — lint, the committed-plans guard, the review-script
-tests and the test job — plus a `swift build` step after the results are uploaded,
+A FAILED RUN IS NOT THE SAME CLAIM AS A FAILED SUITE. `test.yml` holds jobs the
+test job does not wait on — lint, the committed-plans guard, the review-script
+tests among them; it waits only on the Swift suite gate, which on a dispatched
+run always lets it run — plus a `swift build` step after the results are uploaded,
 and nine fallible setup steps before the first `scripts/test.sh`; and
 `scripts/test.sh` runs none of that locally. So a red run only becomes a red
 suite if its results say so: `verdict_from_results` decides that, on the red
@@ -869,8 +870,8 @@ def verdict_from_results(results: Report | None) -> int:
       a claim that nothing failed.
     - **A stated population and nothing failing** — `EXIT_REFUSED`: no verdict.
       Every pass that reported ran tests and none of them failed, so whatever
-      made the run red is not a test. `test.yml` holds four jobs with no
-      `needs:` between them and a `swift build` step after the results upload,
+      made the run red is not a test. `test.yml` holds jobs the test job does
+      not wait on, and a `swift build` step after the results upload,
       and `scripts/test.sh` runs none of that locally — so reporting red here
       would fail a lane for a SwiftLint violation or a committed plan file it
       cannot even see, and reporting green would adopt a pass the run never

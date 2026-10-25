@@ -81,7 +81,7 @@ The skip list is only as good as its list of suite scripts. If the suite comes t
 - each `"scripts/…"` string literal in a Swift file under `Sources/` or `Tests/` that names a file that exists in the repo;
 - each script named on a line of a gathered script that is not a `#` comment, and each file a gathered script loads with `source` or `.`, all the way down.
 
-A script counts as named when the line holds its full `scripts/…` path, or its bare file name, as in `source "$(dirname "${BASH_SOURCE[0]}")/dsym-prune-lib.sh"`. Names are followed all the way down because a script CI runs can start running a helper of its own: if `watched-test-pass.sh` began to run `scripts/diag/x.py`, a PR that changes only `x.py` must still run the suite.
+A script counts as named when the line holds its full `scripts/…` path, or its bare file name if that name ends in `.sh` or `.py` or is `swift-safe`, as in `source "$(dirname "${BASH_SOURCE[0]}")/dsym-prune-lib.sh"`. Names are followed all the way down because a script CI runs can start running a helper of its own: if `watched-test-pass.sh` began to run `scripts/diag/x.py`, a PR that changes only `x.py` must still run the suite.
 
 Two gathered scripts are stops. The harness follows what a stop loads but not what it names, because the suite never runs it:
 
@@ -90,13 +90,15 @@ Two gathered scripts are stops. The harness follows what a stop loads but not wh
 
 A file reached only through a stop's loads is part of that stop: its loads are followed and its names are not. A file that a followed script also names or loads is followed in full, so `restart-build-lib.sh`, which `restart.sh` loads and `swift-safe` names, has its names followed.
 
+Each stop's reason holds only while CI does not run what the stop hides, so the harness fails if the `test` job, or the workflow's top-level settings that reach it, name either stop or `TBD_REMOTE_VERIFY`.
+
 It fails if any script it gathers is missing from the suite's list. Today it gathers exactly the list above, apart from the `scripts/ci/` files the job does not name. A PR that makes the suite depend on a new script changes one of these referencing files, so that PR runs the suite and its Lint job fails until the script is added to the list. A name that runs nothing, such as one in an error message, fails the check too, which errs toward running the suite.
 
 It also fails when the `test` job uses a local composite action or reusable workflow (`uses: ./…`): those files sit under `.github/**`, which the gate skips, so they would have to become suite inputs first.
 
-The drift check cannot see a Swift test that builds a script's path from pieces, whether with `appendingPathComponent`, as in `appendingPathComponent("scripts").appendingPathComponent("x.sh")`, or by interpolation or concatenation, as in `"\(repoRoot)/scripts/x.sh"`. No test does either today: the only repo file outside `Sources/` and `Tests/` that a Swift test reads is `scripts/restart.sh`, through a string literal.
+The drift check cannot see a Swift test that builds a script's path from pieces, whether with `appendingPathComponent`, as in `appendingPathComponent("scripts").appendingPathComponent("x.sh")`, or by interpolation or concatenation, as in `"\(repoRoot)/scripts/x.sh"`. No test does either today: the only repo file outside `Sources/` and `Tests/` that a Swift test reads is `scripts/restart.sh`, through a string literal. Nor does the check follow a Python `import`; today `swift-safe` imports only standard-library modules.
 
-**Wiring.** The gate fails closed only because of how the workflow reads its answer, and no fixture can run a GitHub expression, so the harness pins that wiring as written: the `test` job's `needs: changes` and its exact `if:`, the absence of a `name:` on that job, the `changes` job's `run` output taken from the step with `id: decide`, and that step running `scripts/ci/swift-suite-needed.sh`.
+**Wiring.** The gate fails closed only because of how the workflow reads its answer, and no fixture can run a GitHub expression, so the harness pins that wiring as written: the `test` job's `needs: changes` and its exact `if:`, the absence of a `name:` on that job, the `changes` job's `run` output taken from the step with `id: decide`, that step running `scripts/ci/swift-suite-needed.sh`, and the `changes` job's checkout keeping `fetch-depth: 0`. Without that history `origin/<base>` does not resolve, the gate answers `run=true` every time, and no PR ever skips, with nothing going red.
 
 ## Verification
 
