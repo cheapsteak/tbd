@@ -67,8 +67,9 @@ final class ChildExitObservation: Sendable {
 /// zombie under TBDApp for the life of the app. Observed in the field as 67
 /// permanently-`<defunct>` `tmux … attach` children.
 ///
-/// The fix is to guarantee the `waitpid` ourselves at teardown, without
-/// changing *how* the child is asked to die. A blocking `waitpid` is the
+/// The fix is to guarantee the `waitpid` ourselves at teardown; the reaper
+/// only waits, and never itself changes *how* the child is asked to die —
+/// that stays with each `cleanup()`. A blocking `waitpid` is the
 /// deterministic instrument for that: it reaps whether the child is still
 /// running (it blocks until exit), already a zombie (returns immediately), or
 /// already reaped (`ECHILD`, immediately). Registering a second
@@ -134,7 +135,8 @@ final class ChildExitObservation: Sendable {
 /// `SIGHUP` (and `SIGTERM`, on the path that sends one) never exits, so its
 /// reaper thread parks forever. Bounding that wait and escalating to `SIGKILL`
 /// is a separate change — it needs an injected clock per `CLAUDE.md` and it
-/// changes how the child is asked to die, which this fix deliberately does not.
+/// changes how the child is asked to die, which the reaper deliberately does
+/// not.
 enum ChildReaper {
     /// Which reaps are still parked, so `drainPendingReaps` can say when every
     /// reap started before a given moment has finished. Sequence numbers are

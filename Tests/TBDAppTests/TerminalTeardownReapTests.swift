@@ -131,10 +131,12 @@ struct TerminalTeardownReapTests {
     /// Derived from the lifetime, not from `reapDrainHangGuard`, although both
     /// are 30 s today. The drain guard bounds an asynchronous wait, so it is
     /// sized against the suite limit and re-derived when the test population
-    /// moves. This bound brackets one synchronous call inside the main hop,
-    /// which excludes every scheduling wait, so population never moves it.
-    /// What it has to stay is well under the lifetime: tied to the drain guard,
-    /// a raise of that guard past 120 s would leave this check unable to fail.
+    /// moves. This bound brackets one synchronous call inside the main hop, so
+    /// it excludes the wait for main that dominates this suite's durations;
+    /// the IO threads that call joins still need CPU, which three orders of
+    /// magnitude of margin absorb. What it has to stay is well under the
+    /// lifetime: tied to the drain guard, a raise of that guard past 120 s
+    /// would leave this check unable to fail.
     private static let cleanupHangGuard: Duration = .seconds(killedChildLifetimeSeconds / 4)
 
     /// The child is gone, but `cleanup()` took too long to have ended it
@@ -149,10 +151,11 @@ struct TerminalTeardownReapTests {
             "LocalPTYTerminalRepresentable cleanup() took \(cleanupTook) to return for PTY "
                 + "child \(pid) (bound \(bound); a healthy one takes milliseconds). cleanup() "
                 + "SIGTERMs the child before LocalProcess.terminate() joins SwiftTerm's IO "
-                + "threads; in the serial run this test's doc comment cites, a join that waited "
-                + "for the child to exit is what held cleanup() that long. A figure near the "
-                + "child's \(TerminalTeardownReapTests.killedChildLifetimeSeconds) s lifetime "
-                + "means the child exited on its own and teardown killed nothing — check that "
+                + "threads, and in the serial run this test's doc comment cites, that join "
+                + "waiting for the child to exit is the likeliest thing that held the test for "
+                + "the child's whole lifetime. A figure near the child's "
+                + "\(TerminalTeardownReapTests.killedChildLifetimeSeconds) s lifetime means "
+                + "the child exited on its own and teardown killed nothing — check that "
                 + "the early SIGTERM is still sent. A figure well short of it points to a stall "
                 + "the signal did not end. Either way the drain and reap assertions passed only "
                 + "because the child is gone."
@@ -509,9 +512,9 @@ struct TerminalTeardownReapTests {
     /// **What this does not pin: which route ends the child.** Closing the
     /// master fd, which SwiftTerm's IO threads do as they exit once
     /// `terminate()` or `deinit` stops them, hangs up the child's controlling
-    /// terminal, and `sleep` dies of that SIGHUP as promptly as of SIGTERM. The panel tests send no signal at all, and in that same
-    /// pass they reaped their 0.4 s children within 0.009–0.032 s by exactly
-    /// that route. Removing either SIGTERM leaves this test green while the
+    /// terminal, and `sleep` dies of that SIGHUP as promptly as of SIGTERM.
+    /// The panel tests send no signal at all, and in that same pass they
+    /// reaped their 0.4 s children within 0.009–0.032 s by exactly that route. Removing either SIGTERM leaves this test green while the
     /// other routes still fire. Removing the early one reddens it only on a run
     /// where the join stalls — once in the serial pass, and in none of the
     /// parallel-pass timings examined.
