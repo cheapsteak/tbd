@@ -2916,10 +2916,9 @@ test_a_predecessor_that_never_exits_fails_the_handover() {
     stop_predecessor "$case_dir"
 
     assert_eq "a predecessor that never exits fails the run" "1" "$rc"
-    assert_contains "the log names the predecessor that did not exit" \
-        "the previous daemon (pid $pid) is still running after 2s" "$out"
-    assert_contains "the failed handover is an error" \
-        "ERROR: the handover did not complete within 2s" "$out"
+    assert_contains "the error names the predecessor that did not exit" \
+        "ERROR: the previous daemon (pid $pid) is still running after 2s" "$out"
+    assert_contains "and points at the new daemon's output" "the new daemon's output is in" "$out"
     assert_not_contains "the new daemon is never called the one serving" "daemon is serving from" "$out"
     assert_contains "the failure path stops the successor" \
         "so the rollback leaves no daemon from the new build: stopped" "$out"
@@ -3150,35 +3149,65 @@ test_paths_match_resolves_symlinks() {
     assert_fail "an empty path matches nothing" paths_match "" ""
 }
 
-test_daemon_reports_executable_reads_the_status() {
-    local state out
-    state="$TEST_TMP/handover-state"
-    mkdir -p "$state" "$TEST_TMP/handover-bin"
-    mkstub_tbd "$TEST_TMP/handover-bin"
+# The daemon that answers once the predecessor is gone is the successor, and
+# the path in that answer must be the binary just installed. One that names
+# another binary fails the handover, with an error naming both.
+test_a_daemon_that_reports_another_binary_fails_the_handover() {
+    local root out
+    root="$TEST_TMP/handover-other-binary"
+    mkdir -p "$root/bin" "$root/state" "$root/updates"
+    mkstub_tbd "$root/bin"
+    printf '{"executablePath":"/old/.build/release/TBDDaemon"}\n' > "$root/state/status.json"
 
-    printf '{"executablePath":"/old/.build/release/TBDDaemon"}\n' > "$state/status.json"
     out="$(
-        export FAKE_TBD_STATE="$state" PATH="$TEST_TMP/handover-bin:$PATH"
-        daemon_reports_executable "/new/.build/release/TBDDaemon"
+        export FAKE_TBD_STATE="$root/state" PATH="$root/bin:$PATH"
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        HANDOVER_STATUS_FILE="$root/updates/handover-status.json"
+        wait_for_handover 0 "$$" "/new/.build/release/TBDDaemon" 5
         printf 'rc=%s\n' "$?"
     )"
-    assert_contains "a status naming another binary is not the new daemon" "rc=1" "$out"
+    assert_contains "a daemon naming another binary fails the handover" "rc=1" "$out"
+    assert_contains "with an error naming both" \
+        "ERROR: the new daemon reports [/old/.build/release/TBDDaemon] as its executable, not /new/.build/release/TBDDaemon" \
+        "$out"
+    if [ -e "$root/updates/handover-status.json" ]; then
+        fail "the answer it read is not left behind"
+    else
+        pass "the answer it read is not left behind"
+    fi
+}
 
-    printf '{"executablePath":"/new/.build/release/TBDDaemon"}\n' > "$state/status.json"
+# The answer that ends the wait decides. A `tbd` that answers once, with the
+# new binary, and fails every call after is a successor serving through one
+# transient failure: a second status call would see only the failure and roll
+# a good update back.
+test_the_answer_that_ends_the_wait_decides() {
+    local root out
+    root="$TEST_TMP/handover-one-answer"
+    mkdir -p "$root/bin" "$root/updates"
+    cat > "$root/bin/tbd" << EOF
+#!/bin/sh
+calls="\$(cat "$root/calls" 2>/dev/null || printf 0)"
+calls=\$((calls + 1))
+printf '%s\n' "\$calls" > "$root/calls"
+[ "\$calls" -eq 1 ] || exit 1
+printf '{"executablePath":"/new/.build/release/TBDDaemon"}\n'
+EOF
+    chmod +x "$root/bin/tbd"
+
     out="$(
-        export FAKE_TBD_STATE="$state" PATH="$TEST_TMP/handover-bin:$PATH"
-        daemon_reports_executable "/new/.build/release/TBDDaemon"
+        export PATH="$root/bin:$PATH"
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        HANDOVER_STATUS_FILE="$root/updates/handover-status.json"
+        wait_for_handover 0 "$$" "/new/.build/release/TBDDaemon" 5
         printf 'rc=%s\n' "$?"
     )"
-    assert_contains "a status naming the new binary is" "rc=0" "$out"
-
-    rm -f "$state/status.json"
-    out="$(
-        export FAKE_TBD_STATE="$state" PATH="$TEST_TMP/handover-bin:$PATH"
-        daemon_reports_executable "/new/.build/release/TBDDaemon"
-        printf 'rc=%s\n' "$?"
-    )"
-    assert_contains "no answer at all is not the new daemon" "rc=1" "$out"
+    assert_contains "one answer naming the new binary completes the handover" "rc=0" "$out"
+    assert_eq "and the status is asked once" "1" "$(cat "$root/calls" 2>/dev/null)"
 }
 
 # `tbd daemon status` has no timeout of its own, so a daemon that accepts the
@@ -3200,12 +3229,12 @@ EOF
     out="$(
         export PATH="$root/bin:$PATH"
         STATUS_PROBE_TIMEOUT=1
-        daemon_reports_executable "/new/.build/release/TBDDaemon"
+        daemon_status_json
         printf 'rc=%s\n' "$?"
     )"
     elapsed=$((SECONDS - started))
 
-    assert_contains "a status call that never answers is no answer" "rc=1" "$out"
+    assert_eq "a status call that never answers is cut off, with no answer" "rc=124" "$out"
     if [ "$elapsed" -lt 10 ]; then
         pass "the hung status call is cut off near its one-second limit"
     else
@@ -3233,31 +3262,42 @@ unused_pid() {
 # A pid file can outlive its daemon: after a crash, or a reboot that handed the
 # pid to something else. The successor starts as on a cold start then, and
 # waiting for that unrelated process to exit would time a good handover out
-# and roll it back. Only a running daemon is waited for. The successor in these
-# function-level cases is this harness's own process, which is running.
+# and roll it back. Only a running daemon is waited for, and the log does not
+# claim a handover from a pid that is not one. The successor in the
+# function-level cases after this one is this harness's own process, which is
+# running.
 test_a_stale_pid_file_is_not_waited_on() {
     local root out other
     root="$TEST_TMP/handover-stale-pid"
     mkdir -p "$root/bin" "$root/state" "$root/updates"
     mkstub_tbd "$root/bin"
-    printf '{"executablePath":"/new/.build/release/TBDDaemon"}\n' > "$root/state/status.json"
+    mksuccessor "$root/newdaemon"
+    printf '{"executablePath":"%s"}\n' "$root/newdaemon" > "$root/state/status.json"
     sleep 30 > /dev/null 2>&1 &
     other=$!
+    printf '%s\n' "$other" > "$root/tbdd.pid"
 
     out="$(
         export FAKE_TBD_STATE="$root/state" PATH="$root/bin:$PATH"
         OPT_AUTO=false
         UPDATE_HOME="$root/updates"
         UPDATE_LOG="$root/updates/update.log"
-        wait_for_handover "$other" "$$" "/new/.build/release/TBDDaemon" 3
+        HANDOVER_STATUS_FILE="$root/updates/handover-status.json"
+        TBD_HOME_DIR="$root"
+        DAEMON_PID_FILE="$root/tbdd.pid"
+        DAEMON_LOG="$root/tbdd.log"
+        HANDOVER_TIMEOUT=10
+        handover "$root/newdaemon"
         printf 'rc=%s\n' "$?"
     )"
     kill "$other" 2>/dev/null
     wait "$other" 2>/dev/null
+    stop_stand_in "$root/newdaemon.pid"
 
     assert_contains "a live pid that is not a daemon is not waited on" "rc=0" "$out"
-    assert_contains "and the log says why" \
-        "pid $other named no running daemon when the wait began" "$out"
+    assert_contains "and the log says what the pid file named" \
+        "names pid $other, which is not a running daemon" "$out"
+    assert_not_contains "and claims no handover from it" "handing over from daemon pid" "$out"
     assert_not_contains "nothing waits for it to exit" "is still running" "$out"
 }
 
@@ -3343,7 +3383,9 @@ test_a_successor_that_dies_before_it_answers_ends_the_wait() {
 # there is no status.json, so the stub `tbd` reports nothing. It `exec`s a copy
 # of sleep named TBDDaemon (mksuccessor), so the pid handover captured is the
 # process that has to be signalled, and it is one stop_daemon_process
-# recognises as a daemon.
+# recognises as a daemon. The budget is two seconds because SECONDS ticks on
+# the wall clock's second boundaries: a budget of 1 could end within
+# milliseconds, before the stub has become that TBDDaemon.
 test_a_timed_out_handover_stops_the_successor() {
     local root out pid
     root="$TEST_TMP/handover-stop"
@@ -3356,10 +3398,11 @@ test_a_timed_out_handover_stops_the_successor() {
         OPT_AUTO=false
         UPDATE_HOME="$root/updates"
         UPDATE_LOG="$root/updates/update.log"
+        HANDOVER_STATUS_FILE="$root/updates/handover-status.json"
         TBD_HOME_DIR="$root"
         DAEMON_PID_FILE="$root/tbdd.pid"
         DAEMON_LOG="$root/tbdd.log"
-        HANDOVER_TIMEOUT=1
+        HANDOVER_TIMEOUT=2
         HANDOVER_STOP_GRACE=3
         handover "$root/newdaemon"
         printf 'rc=%s\n' "$?"
@@ -3477,7 +3520,8 @@ test_a_completed_handover_keeps_the_previous_bundle
 test_a_first_install_has_no_previous_bundle
 test_a_failed_first_install_records_that_nothing_was_restored
 test_paths_match_resolves_symlinks
-test_daemon_reports_executable_reads_the_status
+test_a_daemon_that_reports_another_binary_fails_the_handover
+test_the_answer_that_ends_the_wait_decides
 test_a_status_call_that_hangs_is_cut_off
 test_a_stale_pid_file_is_not_waited_on
 test_the_handover_has_one_budget_for_both_waits

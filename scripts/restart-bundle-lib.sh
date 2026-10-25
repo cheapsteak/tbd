@@ -813,10 +813,12 @@ handover_from_pid() {
 #
 #   wait_for_predecessor_exit <old_pid> <new_pid> <deadline>
 #
-# Polled every tenth of a second. The old daemon is looked at with one `ps`
-# each time. The new one, this script's own child, costs nothing to look at
-# with `kill -0`, and gets the `ps` state check too once a second, which
-# catches one that has exited but is not yet reaped. Prints one word:
+# Polled every tenth of a second, and cheaply: both daemons are looked at with
+# `kill -0`, a builtin that starts no process, and with the `ps` checks once a
+# second, on the first look and every tenth one after. Those confirm the old
+# daemon is still a daemon, not a zombie or a pid handed on, and catch a new
+# one that has exited but is not yet reaped. `kill -0` fails on another user's
+# process, but both daemons are this user's own. Prints one word:
 #   none              <old_pid> named no running daemon at the first look: a
 #                     cold start (<old_pid> 0), or a stale pid file
 #   exited            it was running, and has exited
@@ -830,7 +832,12 @@ wait_for_predecessor_exit() {
         printf 'invalid\n'
         return 2
     fi
-    while daemon_process_is_running "$old_pid"; do
+    while :; do
+        if [ $((ticks % 10)) -eq 0 ]; then
+            daemon_process_is_running "$old_pid" || break
+        else
+            kill -0 "$old_pid" 2>/dev/null || break
+        fi
         seen=true
         if ! kill -0 "$new_pid" 2>/dev/null ||
             { [ $((ticks % 10)) -eq 0 ] && ! process_is_running "$new_pid"; }; then

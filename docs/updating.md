@@ -90,21 +90,21 @@ these steps in order.
   build you were on.
 - **Hands the daemon over**, as described below, and waits until the new
   daemon is the one answering: the old daemon's process has exited, and
-  `tbd daemon status` then reports the new binary's path. Each status call is
-  cut off after ten seconds, so a daemon that accepts a connection and never
-  replies cannot hold the run. The path alone
+  `tbd daemon status` then reports the new binary's path. The path alone
   cannot say which daemon answered. A local build runs the old and the new
   daemon from the same file, the update clone's `.build/release/TBDDaemon`,
   and the old one goes on answering for the seconds its shutdown takes, after
   it has let go of every session. The new daemon binds its socket only once
   the old one is gone, so from that exit on the answer is the new daemon's,
   and the app launch and the wake below reach it. If either has not happened
-  within two minutes, one budget covering both, the run stops the new daemon
-  and rolls back as described under "Going back to the previous build". A new
-  daemon that exits before then fails the handover at once, down the same
-  path: it would never stop the old one, and waiting out the budget would keep
-  the app down for nothing. With no daemon running when the update starts,
-  the run waits only for the status.
+  within two minutes, one budget covering both, or the answer names another
+  binary, the run stops the new daemon and rolls back as described under
+  "Going back to the previous build". A new daemon that exits before then
+  fails the handover at once, down the same path: it would never stop the old
+  one, and waiting out the budget would keep the app down for nothing. Each
+  status call is cut off after ten seconds, so a daemon that accepts a
+  connection and never replies cannot hold the run. With no daemon running
+  when the update starts, the run waits only for the status.
 - **Seeds the saved tmux fallback** on a manual run, with or without
   `--no-app`; an `--auto` run skips this step. When
   `~/tbd/tmux-executable-path` is missing or names no usable executable, the

@@ -107,6 +107,9 @@ UPDATE_LOG="$UPDATE_HOME/update.log"
 # update.log carries only the first errors and a pointer here.
 UPDATE_BUILD_LOG="$UPDATE_HOME/build.log"
 UPDATE_LOCK="$UPDATE_HOME/update.lock"
+# The successor's first `tbd daemon status` answer, read by wait_for_handover
+# and removed once read.
+HANDOVER_STATUS_FILE="$UPDATE_HOME/handover-status.json"
 TBD_HOME_DIR="${TBD_HOME:-$HOME/tbd}"
 DAEMON_PID_FILE="$TBD_HOME_DIR/tbdd.pid"
 DAEMON_LOG="/tmp/tbdd.log"
@@ -853,15 +856,6 @@ paths_match() {
     [ -n "$a" ] && [ "$a" = "$b" ]
 }
 
-# True when `tbd daemon status` names <expected> as the daemon's executable.
-# One question, asked once and cut off like every status call
-# (daemon_status_json).
-daemon_reports_executable() {
-    local reported
-    reported="$(json_field "$(daemon_status_json)" executablePath)"
-    [ -n "$reported" ] && paths_match "$reported" "${1-}"
-}
-
 # Wait until the daemon that answers is the successor: the predecessor has
 # exited, and `tbd daemon status` then reports the executable just installed.
 #
@@ -880,25 +874,31 @@ daemon_reports_executable() {
 # status reports no pid, which is why the exit is what tells the two apart.
 #
 # The two phases are wait_for_predecessor_exit and wait_until_daemon_ready
-# (scripts/restart-bundle-lib.sh), under one deadline. Each line logged here
-# says how a phase ended, so update.log times the predecessor's exit and the
-# successor's first answer separately. A successor that dies ends the wait at
-# once, in either phase: it would never retire the predecessor, and the run
-# would otherwise sit out the whole budget with the app stopped.
+# (scripts/restart-bundle-lib.sh), under one deadline. They are called one at
+# a time rather than through the library's wait_for_daemon_handover so that
+# each line logged here lands as its phase ends, and update.log times the
+# predecessor's exit and the successor's first answer separately. A successor
+# that dies ends the wait at once, in either phase: it would never retire the
+# predecessor, and the run would otherwise sit out the whole budget with the
+# app stopped. Every failure is logged as an error naming what went wrong.
 #
-# The second phase waits for `tbd daemon status` to answer at all, each try
-# cut off after STATUS_PROBE_TIMEOUT seconds, and only then checks the path
-# once. The probe that is cut off has to be the `tbd` process itself, not a
-# shell function around it whose `tbd` would outlive the cut.
+# The second phase waits for `tbd daemon status` to answer, each try cut off
+# after STATUS_PROBE_TIMEOUT seconds, and reads the path from the answer that
+# ended the wait, so one call decides: a second call could fail on its own and
+# roll back a successor that is serving. The try that is cut off has to be the
+# `tbd` process itself, which is why the probe is a `sh` that execs it with
+# its output in HANDOVER_STATUS_FILE, not a shell function whose `tbd` would
+# outlive the cut. That file is one fixed path, overwritten by every handover
+# and removed once read, so nothing accumulates there.
 wait_for_handover() {
     local old_pid="${1:-0}"
     local new_pid="${2-}"
     local expected="${3-}"
     local timeout="${4:-$HANDOVER_TIMEOUT}"
-    local deadline outcome
+    local deadline outcome reported
 
     if ! _is_whole_number "$timeout"; then
-        log "the handover budget is not a whole number of seconds: [$timeout]"
+        log_error "the handover budget is not a whole number of seconds: [$timeout]"
         return 1
     fi
     deadline=$((SECONDS + timeout))
@@ -909,45 +909,47 @@ wait_for_handover() {
             log "the previous daemon (pid $old_pid) has exited"
             ;;
         none)
-            # A cold start needs no line: handover() has said it starts cold.
-            if [ "$old_pid" != 0 ]; then
-                log "pid $old_pid named no running daemon when the wait began; there was no predecessor to wait for"
-            fi
+            # handover() has already said whether there was one to wait for.
             ;;
         successor-exited)
-            log "the new daemon (pid $new_pid) exited while the previous daemon (pid $old_pid) was still running"
+            log_error "the new daemon (pid $new_pid) exited while the previous daemon (pid $old_pid) was still running"
             return 1
             ;;
         timeout)
-            log "the previous daemon (pid $old_pid) is still running after ${timeout}s"
+            log_error "the previous daemon (pid $old_pid) is still running after ${timeout}s"
             return 1
             ;;
         *)
-            log "waiting for the previous daemon ended in an unrecognised way: [$outcome]"
+            log_error "waiting for the previous daemon ended in an unrecognised way: [$outcome]"
             return 1
             ;;
     esac
 
+    mkdir -p "$(dirname "$HANDOVER_STATUS_FILE")" 2>/dev/null || true
+    rm -f "$HANDOVER_STATUS_FILE"
+    # shellcheck disable=SC2016 # $1 is for the inner sh
     outcome="$(wait_until_daemon_ready "$new_pid" "$deadline" 1 "$STATUS_PROBE_TIMEOUT" \
-        tbd daemon status --json)"
+        sh -c 'exec tbd daemon status --json > "$1" 2>/dev/null' _ "$HANDOVER_STATUS_FILE")"
+    reported="$(json_field "$(cat "$HANDOVER_STATUS_FILE" 2>/dev/null)" executablePath)"
+    rm -f "$HANDOVER_STATUS_FILE"
     case "$outcome" in
         ready)
-            if daemon_reports_executable "$expected"; then
+            if [ -n "$reported" ] && paths_match "$reported" "$expected"; then
                 return 0
             fi
-            log "the daemon that answers does not report $expected as its executable"
+            log_error "the new daemon reports [${reported:-no executable}] as its executable, not $expected"
             return 1
             ;;
         successor-exited)
-            log "the new daemon (pid $new_pid) exited before it answered"
+            log_error "the new daemon (pid $new_pid) exited before it answered"
             return 1
             ;;
         timeout)
-            log "the new daemon (pid $new_pid) did not answer \`tbd daemon status\` within ${timeout}s"
+            log_error "the new daemon (pid $new_pid) did not answer \`tbd daemon status\` within ${timeout}s"
             return 1
             ;;
         *)
-            log "waiting for the new daemon ended in an unrecognised way: [$outcome]"
+            log_error "waiting for the new daemon ended in an unrecognised way: [$outcome]"
             return 1
             ;;
     esac
@@ -983,8 +985,10 @@ handover() {
     old_pid="$(handover_from_pid "$TBD_HOME_DIR")"
     if [ "$old_pid" = 0 ]; then
         log "no running daemon in $DAEMON_PID_FILE — starting the new one cold"
-    else
+    elif daemon_process_is_running "$old_pid"; then
         log "handing over from daemon pid $old_pid"
+    else
+        log "$DAEMON_PID_FILE names pid $old_pid, which is not a running daemon — starting the new one cold"
     fi
 
     # Preserve the predecessor's log. The daemon does not persist os.Logger
@@ -997,7 +1001,8 @@ handover() {
         log "daemon is serving from $new_daemon"
         return 0
     fi
-    log_error "the handover did not complete within ${HANDOVER_TIMEOUT}s — see $DAEMON_LOG"
+    # wait_for_handover has logged what went wrong.
+    log "the new daemon's output is in $DAEMON_LOG"
     stop_handover_successor "$new_pid" || true
     return 1
 }
