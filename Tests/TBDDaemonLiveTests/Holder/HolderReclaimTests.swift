@@ -40,18 +40,27 @@ struct HolderReclaimTests {
     /// which makes this the leg that proves the reclaimer does not depend on
     /// one.
     ///
-    /// The job's short sleep is what keeps the exit *after* the handshake
+    /// The job exits on a cue, and the cue is given only once the handshake
     /// connection is closed. A holder pushes the exit at whichever client is
     /// connected when it reaps and then winds down, unlinking its rendezvous —
     /// so an exit that beat the `close()` below would leave nothing to adopt.
-    /// The job is forked the moment the holder binds, the spawner's handshake
-    /// lands within one 20 ms bind poll of that, and the holder notices the
-    /// close as soon as its poll wakes on the hang-up — so the margin is the
-    /// sleep less one poll interval and a handshake.
+    /// Ordering the two by hand makes that impossible rather than unlikely,
+    /// where a fixed sleep only made it a race the sleep usually won. The wait
+    /// for the cue is counted, so a job this test can no longer reach ends on
+    /// its own.
     @Test func releasesTheReaderForAJobThatEndedDuringTheOutage() async throws {
-        let fixture = try await HolderProcessFixture.start(command: "sleep 0.3; exit 7")
+        let cueDirectory = HolderProcessFixture.scratchHome()
+        try FileManager.default.createDirectory(
+            atPath: cueDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: cueDirectory) }
+        let cue = cueDirectory + "/go"
+        let fixture = try await HolderProcessFixture.start(
+            command: "i=0; while [ ! -e '\(cue)' ] && [ $i -lt 600 ]; do sleep 0.05; i=$((i+1)); done; exit 7")
         defer { fixture.tearDown() }
         await fixture.client.close()
+        #expect(
+            FileManager.default.createFile(atPath: cue, contents: nil),
+            "could not give the job its cue at \(cue)")
 
         let ended = await pollUntil("the job to finish exiting") {
             !holderProcessIsAlive(fixture.handle.childPID)
