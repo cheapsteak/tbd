@@ -3,6 +3,8 @@ import Testing
 @testable import TBDCLI
 import TBDShared
 
+/// Tier 1 — in-process only; the daemon, worktree resolver and environment
+/// are stubs, so there is no socket and no subprocess.
 @Suite("tbd link target resolution")
 struct LinkCommandTests {
     private let wtA = UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000001")!
@@ -30,11 +32,12 @@ struct LinkCommandTests {
         this: Bool = false,
         env: [String: String] = [:],
         terminals: [TBDShared.Terminal] = [],
+        resolver: ((String) throws -> UUID)? = nil,
         scopes: inout [UUID?]
     ) throws -> (worktree: UUID, terminal: UUID?) {
         try LinkCommand.resolveTarget(
             worktreeArg: worktree, terminalArg: terminal, thisTerminal: this,
-            environment: env, resolveWorktree: resolve,
+            environment: env, resolveWorktree: resolver ?? resolve,
             terminals: { scope in
                 scopes.append(scope)
                 guard let scope else { return terminals }
@@ -48,12 +51,13 @@ struct LinkCommandTests {
         terminal: String? = nil,
         this: Bool = false,
         env: [String: String] = [:],
-        terminals: [TBDShared.Terminal] = []
+        terminals: [TBDShared.Terminal] = [],
+        resolver: ((String) throws -> UUID)? = nil
     ) throws -> (worktree: UUID, terminal: UUID?) {
         var scopes: [UUID?] = []
         return try target(
             worktree: worktree, terminal: terminal, this: this, env: env,
-            terminals: terminals, scopes: &scopes
+            terminals: terminals, resolver: resolver, scopes: &scopes
         )
     }
 
@@ -103,9 +107,17 @@ struct LinkCommandTests {
         let msg = refusal {
             _ = try target(worktree: "a", terminal: termA.uuidString, terminals: [term(termA, in: wtB)])
         }
-        #expect(msg?.contains(termA.uuidString) == true)
-        #expect(msg?.contains(wtA.uuidString) == true)
-        #expect(msg?.contains(wtB.uuidString) == true)
+        #expect(msg == "Terminal \(termA.uuidString) belongs to worktree \(wtB.uuidString), not a (\(wtA.uuidString))")
+    }
+
+    @Test func mismatchWithUUIDArgumentPrintsItOnce() {
+        let msg = refusal {
+            _ = try target(
+                worktree: wtA.uuidString, terminal: termA.uuidString,
+                terminals: [term(termA, in: wtB)], resolver: { UUID(uuidString: $0)! }
+            )
+        }
+        #expect(msg == "Terminal \(termA.uuidString) belongs to worktree \(wtB.uuidString), not \(wtA.uuidString)")
     }
 
     @Test func worktreeTerminalMatchWorks() throws {
@@ -170,9 +182,7 @@ struct LinkCommandTests {
                 terminals: [term(termA, in: wtB)]
             )
         }
-        #expect(msg?.contains(termA.uuidString) == true)
-        #expect(msg?.contains(wtA.uuidString) == true)
-        #expect(msg?.contains(wtB.uuidString) == true)
+        #expect(msg == "Terminal \(termA.uuidString) belongs to worktree \(wtB.uuidString), not a (\(wtA.uuidString))")
     }
 
     @Test func thisTerminalWithStaleIDRefuses() {
@@ -191,6 +201,28 @@ struct LinkCommandTests {
         let t = try target(
             this: true,
             env: ["TBD_TERMINAL_ID": termA.uuidString, "TBD_WORKTREE_ID": wtA.uuidString],
+            terminals: [term(termA, in: wtB)], scopes: &scopes
+        )
+        #expect(t.worktree == wtB)
+        #expect(t.terminal == termA)
+        #expect(scopes == [wtA, nil])
+    }
+
+    @Test func terminalFlagUsesWorktreeEnvAsScope() throws {
+        var scopes: [UUID?] = []
+        let t = try target(
+            terminal: termA.uuidString, env: ["TBD_WORKTREE_ID": wtA.uuidString],
+            terminals: [term(termA, in: wtA)], scopes: &scopes
+        )
+        #expect(t.worktree == wtA)
+        #expect(t.terminal == termA)
+        #expect(scopes == [wtA])
+    }
+
+    @Test func terminalFlagInAnotherWorktreeThanEnvLinksToOwner() throws {
+        var scopes: [UUID?] = []
+        let t = try target(
+            terminal: termA.uuidString, env: ["TBD_WORKTREE_ID": wtA.uuidString],
             terminals: [term(termA, in: wtB)], scopes: &scopes
         )
         #expect(t.worktree == wtB)

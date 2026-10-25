@@ -70,12 +70,14 @@ struct LinkCommand: AsyncParsableCommand {
     /// bare form deliberately never reads `TBD_TERMINAL_ID`: only
     /// `--this-terminal` opts into a terminal anchor.
     ///
-    /// A worktree argument is resolved first, so its error wins. The terminal
-    /// list is then scoped to that worktree; under `--this-terminal` with no
-    /// argument, `TBD_WORKTREE_ID` is only a scope hint. With no scope the
-    /// list is fleet-wide. A scoped miss costs one fleet-wide list to tell
-    /// "belongs to another worktree" from "no such terminal"; a terminal
-    /// found elsewhere is an error only when the caller named the worktree.
+    /// A worktree argument is resolved first, so its error wins. The first
+    /// terminal list (for `--terminal` and `--this-terminal` alike) is scoped
+    /// to the worktree argument, or, with none, to a valid `TBD_WORKTREE_ID`,
+    /// which is only a scope hint; with neither it is fleet-wide. A scoped miss
+    /// costs one fleet-wide list to tell "belongs to another worktree" from
+    /// "no such terminal". A terminal found in another worktree is linked to
+    /// the worktree it belongs to, and is an error only when the caller typed
+    /// a worktree argument.
     static func resolveTarget(
         worktreeArg: String?,
         terminalArg: String?,
@@ -118,7 +120,7 @@ struct LinkCommand: AsyncParsableCommand {
 
         let expected = try worktreeArg.map { try resolveWorktree($0) }
         var scope = expected
-        if scope == nil && thisTerminal, let envValue = environment["TBD_WORKTREE_ID"] {
+        if scope == nil, let envValue = environment["TBD_WORKTREE_ID"] {
             scope = UUID(uuidString: envValue)
         }
         var match = try terminals(scope).first(where: { $0.id == terminalID })
@@ -128,9 +130,12 @@ struct LinkCommand: AsyncParsableCommand {
         guard let match else {
             throw CLIError.invalidArgument("No terminal found with ID: \(terminalID.uuidString)")
         }
-        if let expected, expected != match.worktreeID {
+        if let expected, let typed = worktreeArg, expected != match.worktreeID {
+            let typedLabel = typed.caseInsensitiveCompare(expected.uuidString) == .orderedSame
+                ? expected.uuidString
+                : "\(typed) (\(expected.uuidString))"
             throw CLIError.invalidArgument(
-                "Terminal \(terminalID.uuidString) belongs to worktree \(match.worktreeID.uuidString), not \(expected.uuidString)"
+                "Terminal \(terminalID.uuidString) belongs to worktree \(match.worktreeID.uuidString), not \(typedLabel)"
             )
         }
         return (match.worktreeID, terminalID)
