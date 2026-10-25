@@ -41,7 +41,6 @@ extension TableTranscriptScene {
             registeredAtLoad: TBDTestProcessDefaultsRegistered())
     }
 
-
     /// Primes the scene on `nodes` exactly as production's first `updateNSView`
     /// does, then keeps updating until the table's COLUMN WIDTH stops moving.
     ///
