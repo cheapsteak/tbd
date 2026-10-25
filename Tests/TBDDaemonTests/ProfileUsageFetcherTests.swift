@@ -614,7 +614,7 @@ struct ProfileUsageKeychainDerivationTests {
     /// bare "Claude Code-credentials" item of the user's default ~/.claude.
     @Test func serviceNameIsAlwaysSuffixed() {
         let service = ClaudeCodeCredentialsKeychain.serviceName(
-            forConfigDirPath: "/Users/zionts/tbd/profiles/abc/claude")
+            forConfigDirPath: "/Users/octocat/tbd/profiles/abc/claude")
         #expect(service.hasPrefix("Claude Code-credentials-"))
         #expect(service != "Claude Code-credentials")
     }

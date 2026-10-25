@@ -1336,7 +1336,7 @@ struct PRStatusManagerTests {
                     "headRefName": "show-weekly-reset",
                     "isDraft": false,
                     "isCrossRepository": true,
-                    "headRepositoryOwner": { "login": "zionts" }
+                    "headRepositoryOwner": { "login": "octocat" }
                   },
                   {
                     "number": 12,
@@ -1358,7 +1358,7 @@ struct PRStatusManagerTests {
         #expect(prs[0].number == 454)
         #expect(prs[0].title == "Weekly reset job")
         #expect(prs[0].headRefName == "show-weekly-reset")
-        #expect(prs[0].headOwner == "zionts")
+        #expect(prs[0].headOwner == "octocat")
         #expect(prs[0].isCrossRepository == true)
         #expect(prs[0].isDraft == false)
         #expect(prs[1].number == 12)
@@ -2239,7 +2239,7 @@ struct PRStatusManagerTests {
                     "headRefName": "show-weekly-reset",
                     "isDraft": false,
                     "isCrossRepository": true,
-                    "headRepositoryOwner": { "login": "zionts" }
+                    "headRepositoryOwner": { "login": "octocat" }
                   }
                 ]
               }
