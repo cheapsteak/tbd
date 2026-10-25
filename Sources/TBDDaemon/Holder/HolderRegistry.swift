@@ -251,16 +251,23 @@ actor HolderRegistry {
     /// indefinitely.
     static let defaultAttachAdoptionBudget: Duration = .seconds(5)
 
-    /// Every registry's first attach generation lies above a base below this:
-    /// 2^48, far enough under `UInt64.max` that the count never wraps, and
-    /// under 2^53, so a generation stays exact even through a `Double`.
+    /// The ceiling a registry's attach generations stay under: 2^48, far
+    /// enough below `UInt64.max` that the count never wraps, and below 2^53,
+    /// so a generation stays exact even through a `Double`.
     static let attachGenerationBaseLimit: UInt64 = 1 << 48
 
-    /// A fresh base for one registry's attach generations, drawn at random
-    /// below `attachGenerationBaseLimit`. Why it is random rather than zero is
-    /// on `lastAttachGeneration`.
+    /// A fresh base for one registry's attach generations, drawn uniformly
+    /// from [2^32, 2^48 − 2^32).
+    ///
+    /// The floor is `AttachRequestResult.uniqueGenerationFloor`, so every
+    /// generation this daemon mints says on its face that it came from a
+    /// randomizing daemon — the contract the app's handback resend relies on.
+    /// The 2^32 of headroom under `attachGenerationBaseLimit` is four billion
+    /// attaches, which no daemon process will ever mint. Why the base is
+    /// random at all is on `lastAttachGeneration`.
     static func randomAttachGenerationBase() -> UInt64 {
-        UInt64.random(in: 0..<attachGenerationBaseLimit)
+        let lowest = AttachRequestResult.uniqueGenerationFloor
+        return UInt64.random(in: lowest..<(attachGenerationBaseLimit - lowest))
     }
 
     /// This installation's token, compared against every holder's before it is
@@ -440,7 +447,9 @@ actor HolderRegistry {
     /// it: two readers on one pty. A base drawn from 48 bits makes such a
     /// collision vanishingly unlikely, and leaves the count far from both
     /// `UInt64`'s ceiling and the 2^53 past which a `Double` stops holding it
-    /// exactly. See `randomAttachGenerationBase()`.
+    /// exactly. The base is never below `AttachRequestResult.uniqueGenerationFloor`,
+    /// which daemons that count from 1 never reach, so a generation also says
+    /// which kind of daemon minted it. See `randomAttachGenerationBase()`.
     private var lastAttachGeneration: UInt64
 
     /// The most recent attach generation minted, or the registry's base when

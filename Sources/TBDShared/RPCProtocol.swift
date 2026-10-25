@@ -4090,6 +4090,23 @@ public struct AttachRequestResult: Codable, Sendable {
     /// error because the app tells the user something different: not "try
     /// again", but "this session has ended".
     public static let holderSessionEndedStatus = "ended"
+    /// The least holder-attach generation a daemon that randomizes its
+    /// generations ever mints: 2^32.
+    ///
+    /// **The contract.** A holder attach `generation` at or above this floor
+    /// came from a daemon that starts each process's count at a random base
+    /// drawn from [2^32, 2^48 − 2^32). Such a generation never matches a claim
+    /// in an older daemon process, which counts from 1 and never reaches the
+    /// floor, and matches one in another randomizing daemon process only if
+    /// two random 48-bit bases land within a session's few attaches of each
+    /// other — so a message carrying it, delivered to the wrong daemon, finds
+    /// no claim to act on. A generation below the floor came from an older
+    /// daemon and may repeat across processes. The app resends a lost
+    /// handback (`pane.detach`) only for generations at or above it.
+    ///
+    /// Holder attaches only: a control-mode attach's generation is the tmux
+    /// fanout's own count, which starts small in every process.
+    public static let uniqueGenerationFloor: UInt64 = 1 << 32
     /// Daemon-side fanout generation of the vended attach ("pending" only).
     /// The app echoes it back in `pane.detach` so a stale detach — a closing
     /// view racing a fresh attach for the same pane — cannot kill the newer
