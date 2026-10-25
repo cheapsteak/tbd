@@ -16,10 +16,11 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 ///   active one `PromptRailLayout.edgeMargin` from either end, and a gradient
 ///   mask fades whichever edge clips a notch.
 /// - **Hover** – an `NSTrackingArea` over the rail column feeds
-///   `PromptRailHoverModel.railHoverChanged` and `pointedIndex`. A tracking
-///   area follows geometry, not hit-testing, so the rail stays hovered while
-///   the open card covers it — which is what keeps Escape and click
-///   suppression in force while the pointer is still on the rail.
+///   `PromptRailHoverModel.railHoverChanged`, on entering and on every move,
+///   and `pointedIndex`. A tracking area follows geometry, not hit-testing,
+///   so the rail stays hovered while the open card covers it — which is what
+///   keeps Escape and click suppression in force while the pointer is still
+///   on the rail.
 /// - **Wheel** – the rail never scrolls under the wheel; it hands wheel
 ///   events to the transcript's scroll view, so the gutter is not a dead zone.
 /// - **Accessibility** – a group labelled "Prompts" with one button per entry,
@@ -133,7 +134,14 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     override func setFrameSize(_ newSize: NSSize) {
         let heightChanged = newSize.height != frame.height
         super.setFrameSize(newSize)
-        if heightChanged { relayoutNotches() } else { withoutAnimation { layoutContentLayer() } }
+        if heightChanged {
+            relayoutNotches()
+            // The pitch follows the height, so the buttons' bands move even
+            // when the overflow offset does not.
+            updateAccessibilityFrames(currentLayout())
+        } else {
+            withoutAnimation { layoutContentLayer() }
+        }
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -228,6 +236,12 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
 
     override func mouseMoved(with event: NSEvent) {
         trackPointer(event)
+        // Every move re-asserts rail hover, as the SwiftUI rail's handler
+        // does. `closeNow()` — the window resigning key, the app deactivating
+        // — forgets it, and a pointer resting on the rail sends no new enter,
+        // so without this the card would not reopen until the pointer left
+        // the rail and came back.
+        hover.railHoverChanged(true)
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -275,6 +289,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
                 logger.debug("rail accessibility press id=\(id, privacy: .public)")
                 self?.onJump(id)
             }
+            button.setAccessibilityElement(true)
             button.setAccessibilityRole(.button)
             button.setAccessibilityLabel(PromptRailAccessibility.label(for: entry, now: now))
             button.setAccessibilityParent(self)

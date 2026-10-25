@@ -128,6 +128,7 @@ struct PromptRailAppKitTests {
         #expect(rail.accessibilityLabel() == "Prompts")
         let buttons = try #require(rail.accessibilityChildren() as? [PromptRailAccessibilityButton])
         #expect(buttons.count == 3)
+        #expect(buttons.allSatisfy { $0.isAccessibilityElement() })
         #expect(buttons[1].accessibilityRole() == .button)
         #expect(buttons[1].accessibilityLabel() == "Prompt 1")
         let time = PromptOutline.timeLabel(dated, now: Date(), calendar: .current, locale: .current)
@@ -135,6 +136,50 @@ struct PromptRailAppKitTests {
 
         #expect(buttons[1].accessibilityPerformPress())
         #expect(jumps.ids == ["p-1"])
+    }
+
+    /// The pitch follows the rail's height, so a resize moves every
+    /// button's band even when the overflow offset stays at zero.
+    @Test("a rail height change moves the accessibility bands though the offset stays put")
+    func railResizeMovesAccessibilityFrames() throws {
+        let rail = Self.makeRail(onJump: { _ in })
+        rail.promptRail(entriesDidChange: Self.entries(10))
+        let buttons = try #require(rail.accessibilityChildren() as? [PromptRailAccessibilityButton])
+        try #require(buttons.count == 10)
+        // 600pt: the 8pt maximum pitch, band 9 at 12 + 9.5 × 8 − 4.
+        try #require(buttons[9].accessibilityFrameInParentSpace()
+                         == NSRect(x: 0, y: 84, width: PromptRailLayout.width, height: 8))
+
+        // 64pt: 40pt free over 10 notches is the 4pt minimum pitch, and the
+        // 64pt of content still fits, so nothing overflows.
+        rail.setFrameSize(NSSize(width: PromptRailLayout.width, height: 64))
+        try #require(rail.offset == 0, "precondition: the offset stayed put, so only the height moved the bands")
+        #expect(buttons[9].accessibilityFrameInParentSpace()
+                    == NSRect(x: 0, y: 48, width: PromptRailLayout.width, height: 4),
+                Comment(rawValue: "band 9 is \(buttons[9].accessibilityFrameInParentSpace())"))
+        #expect(buttons[0].accessibilityFrameInParentSpace().height == 4)
+    }
+
+    /// `closeNow()` — the window resigning key, the app deactivating — forgets
+    /// rail hover, and a pointer resting on the rail sends no new enter.
+    @Test("a pointer moving over the rail reopens a card closed under it")
+    func railMoveReassertsHover() async throws {
+        let clock = EventDrivenTestClock()
+        let hover = Self.makeHover(clock: clock)
+        let rail = PromptRailNSView(hover: hover, onJump: { _ in })
+        rail.frame = NSRect(x: 0, y: 0, width: PromptRailLayout.width, height: 600)
+        rail.promptRail(entriesDidChange: Self.entries(5))
+        try await Self.openCard(hover, clock)
+        hover.closeNow()
+        try #require(!hover.isOpen)
+
+        let move = try #require(NSEvent.mouseEvent(
+            with: .mouseMoved, location: NSPoint(x: 8, y: 300), modifierFlags: [], timestamp: 0,
+            windowNumber: 0, context: nil, eventNumber: 0, clickCount: 0, pressure: 0))
+        rail.mouseMoved(with: move)
+        try await clock.requireAdvanceWhenArmed(by: Self.openDelay, timeout: Self.mainActorHop)
+        await hover._drainForTesting()
+        #expect(hover.isOpen, "a move over the rail did not reopen the card")
     }
 
     // MARK: Card
