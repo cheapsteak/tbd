@@ -445,6 +445,26 @@ actor HolderRegistry {
     /// claim cleared and the same reader draining, and this count is what
     /// tells them apart.
     private(set) var takeBacksCompleted = 0
+    /// The attaches a claim sweep with the flag off has already logged as ones
+    /// it would take back, so each is logged once for the daemon's life rather
+    /// than on every poll tick (`reconcileClaims`). With the flag off a
+    /// candidate is never taken back, so it stays a candidate on every tick,
+    /// and logging it each time would be some 1,800 persisted lines an hour
+    /// for one stuck session. The sweep's result still names it every time.
+    ///
+    /// Bounded by pruning at the start of every sweep: an entry whose attach
+    /// is no longer recorded, as a pending attach or a claim, is dropped.
+    /// Generations are minted once per daemon life, so such an attach can
+    /// never be selected again, and the set never holds more than the
+    /// attaches that stood at the last sweep.
+    private var wouldTakeBacksLogged: Set<TakeBack> = []
+    /// How many "would take back" notices this registry has logged.
+    /// Test-facing: two sweeps over one stuck candidate both return it, and
+    /// this count is what shows the second did not log it again.
+    private(set) var wouldTakeBackNotices = 0
+    /// How many attaches `wouldTakeBacksLogged` remembers. Test-facing: it is
+    /// what shows the pruning keeps the set bounded.
+    var wouldTakeBacksRemembered: Int { wouldTakeBacksLogged.count }
     /// Mints attach generations. Monotonic for the daemon's life, so an ack or
     /// a cancel naming an older attach can always be told from one naming the
     /// current attach.
@@ -3301,9 +3321,11 @@ actor HolderRegistry {
     /// before anything here suspends, so the set acted on is the set those
     /// conditions describe.
     ///
-    /// With `act` false — the flag off — each candidate is logged as one the
-    /// sweep would take back and returned in `wouldTakeBack`, and nothing is
-    /// settled, cleared or resumed.
+    /// With `act` false — the flag off — each candidate is returned in
+    /// `wouldTakeBack`, and nothing is settled, cleared or resumed. It is
+    /// logged as one the sweep would take back the first time a sweep selects
+    /// that attach, and not again (`wouldTakeBacksLogged`), since a candidate
+    /// the flag leaves standing is selected on every tick.
     ///
     /// With `act` true:
     ///
@@ -3334,10 +3356,17 @@ actor HolderRegistry {
     ) async -> HolderClaimSweep {
         let candidates = sweepCandidates(held: held, throughSeq: throughSeq, ownedBy: { $0 == app })
         let appPID = app.pid
+        forgetEndedWouldTakeBacks()
         guard act else {
             for candidate in candidates {
                 let terminalID = candidate.terminalID
                 let generation = candidate.generation
+                // Once per attach: the result names it on every sweep, the
+                // log only on the first.
+                guard wouldTakeBacksLogged.insert(
+                    TakeBack(terminalID: terminalID, generation: generation)).inserted
+                else { continue }
+                wouldTakeBackNotices += 1
                 Self.logger.notice(
                     """
                     would take back attach \(generation, privacy: .public) of session \
@@ -3441,6 +3470,17 @@ actor HolderRegistry {
         // Ordered so a sweep's result and its log lines read the same way on
         // every run; dictionary order would not.
         return candidates.sorted { $0.terminalID.uuidString < $1.terminalID.uuidString }
+    }
+
+    /// Drops each attach `wouldTakeBacksLogged` remembers that is no longer
+    /// recorded, as a pending attach or a claim: handed back, taken back,
+    /// released or superseded. No sweep can select it again, so remembering
+    /// it would only grow the set.
+    private func forgetEndedWouldTakeBacks() {
+        wouldTakeBacksLogged = wouldTakeBacksLogged.filter { logged in
+            viewerAttachments[logged.terminalID]?.generation == logged.generation
+                || pendingAttaches[logged.terminalID]?.generation == logged.generation
+        }
     }
 
     /// The three conditions of a sweep that do not depend on whose an attach

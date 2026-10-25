@@ -245,6 +245,81 @@ import Testing
         #expect(await registry.viewerAttachment(for: vended) == nil)
     }
 
+    // MARK: - Logging what it would take back
+
+    /// With the flag off a candidate stands, so every tick selects it again.
+    /// Each sweep names it, and it is logged once per attach: a later attach
+    /// of the same session, stuck the same way, is a new attach and is logged
+    /// again.
+    @Test func eachAttachIsLoggedOnce() async {
+        let registry = HolderClaimOwnershipTests.registry()
+        let session = UUID()
+        await registry.recordViewerClaimForTesting(
+            terminalID: session, generation: 11, owner: Self.appA, attachSeq: 5)
+
+        let first = await registry.reconcileClaims(
+            heldBy: Self.appA, held: [], throughSeq: 5, act: false)
+        let second = await registry.reconcileClaims(
+            heldBy: Self.appA, held: [], throughSeq: 5, act: false)
+
+        #expect(first.wouldTakeBack == [session])
+        #expect(second.wouldTakeBack == [session], """
+            a report stopped naming a candidate that still stands
+            """)
+        #expect(await registry.wouldTakeBackNotices == 1, """
+            two reports over one stuck attach logged it twice
+            """)
+
+        // The attach ends (here its take-back fails at the hand-over and drops
+        // the claim), and the session's next attach gets stuck the same way.
+        _ = await registry.reconcileClaims(heldBy: Self.appA, held: [], throughSeq: 5, act: true)
+        #expect(await registry.viewerAttachment(for: session) == nil)
+        await registry.recordViewerClaimForTesting(
+            terminalID: session, generation: 12, owner: Self.appA, attachSeq: 6)
+
+        let later = await registry.reconcileClaims(
+            heldBy: Self.appA, held: [], throughSeq: 6, act: false)
+
+        #expect(later.wouldTakeBack == [session])
+        #expect(await registry.wouldTakeBackNotices == 2, """
+            a later attach of the same session was taken for the one already logged
+            """)
+    }
+
+    /// What the log remembers is bounded by what still stands: an attach that
+    /// has ended is forgotten at the next sweep, even one that selects nothing.
+    @Test func anEndedAttachIsForgotten() async {
+        let registry = HolderClaimOwnershipTests.registry()
+        let session = UUID()
+        await registry.recordViewerClaimForTesting(
+            terminalID: session, generation: 11, owner: Self.appA, attachSeq: 5)
+
+        _ = await registry.reconcileClaims(heldBy: Self.appA, held: [], throughSeq: 5, act: false)
+        #expect(await registry.wouldTakeBacksRemembered == 1)
+
+        // A report for a session the app holds leaves the attach standing,
+        // and so remembered.
+        _ = await registry.reconcileClaims(
+            heldBy: Self.appA, held: [session], throughSeq: 5, act: false)
+        #expect(await registry.wouldTakeBacksRemembered == 1, """
+            a sweep forgot an attach that still stands, so it would be logged again
+            """)
+
+        // The take-back fails at the hand-over here and drops the claim.
+        _ = await registry.reconcileClaims(heldBy: Self.appA, held: [], throughSeq: 5, act: true)
+        #expect(await registry.viewerAttachment(for: session) == nil)
+
+        let after = await registry.reconcileClaims(
+            heldBy: Self.appA, held: [], throughSeq: 5, act: false)
+
+        #expect(after == Self.nothing)
+        #expect(await registry.wouldTakeBacksRemembered == 0, """
+            the sweep still remembers an attach that has ended, so the set grows for the \
+            daemon's life
+            """)
+        #expect(await registry.wouldTakeBackNotices == 1)
+    }
+
     // MARK: - The cheap gate
 
     /// The gate a caller asks before it resolves the app's identity applies

@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -17,7 +18,13 @@ import Testing
 /// Every viewer here is vended to `HandbackFixture.viewerApp` under
 /// `attachSeq` 5, and every sweep is that app's, through `throughSeq` 5 with
 /// nothing held: the app has closed its descriptor and stopped listing the
-/// session, which is the statement a sweep acts on.
+/// session, which is the statement a sweep acts on. The exception is
+/// `attachRequestRecordsItsSeq`, whose attach is a real `attach.request`
+/// numbered 9.
+///
+/// The last two tests go through the router (`holder.reconcileClaims`), whose
+/// app-identity resolver is scripted to resolve `viewerApp`'s pid to
+/// `viewerApp`; the sidecar records the same identity for every vend.
 ///
 /// **Tier 3.** A real `TBDHolder`, a real pty, a real job.
 @Suite(.serialized)
@@ -185,6 +192,198 @@ struct HolderClaimReconcileLiveTests {
         let resumed = try #require(await registry.reader(for: terminalID))
         #expect(resumed === suspended, "the take-back opened a second hand-over")
         #expect(await resumed.isDraining, "the handback did not put the reader back on the pty")
+    }
+
+    // MARK: - Through the RPC
+
+    /// The flag decides whether `holder.reconcileClaims` acts. Unset, the
+    /// sweep names the lost handback and leaves it; written on, the way the
+    /// Settings toggle writes it, the same sweep takes the session back.
+    @Test func flagOnTakesBack() async throws {
+        let harness = try await ReconcileRPCHarness.start(command: Self.echoJob)
+        defer { harness.tearDown() }
+
+        let viewer = try await harness.fixture.attachAViewer(attachSeq: Self.attachSeq)
+        let suspended = try #require(await harness.registry.reader(for: harness.terminalID))
+        // The panel leaves the pty, and its handback is lost on the way.
+        viewer.close()
+
+        let report = try await harness.reconcile(throughSeq: Self.attachSeq)
+        #expect(report == HolderReconcileClaimsResult(wouldTakeBack: [harness.terminalID]))
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID)
+                    == viewer.generation, "a sweep with the flag unset took the session back")
+
+        try await harness.enableTheSweep()
+        let result = try await harness.reconcile(throughSeq: Self.attachSeq)
+
+        #expect(result == HolderReconcileClaimsResult(takenBack: [harness.terminalID]), """
+            with the flag on, holder.reconcileClaims did not take back a session its app says \
+            it no longer holds
+            """)
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == nil)
+        #expect(await harness.registry.ptyReader(for: harness.terminalID) == .daemon)
+        #expect(await harness.registry.readerCensusViolations == 0)
+        let resumed = try #require(await harness.registry.reader(for: harness.terminalID))
+        #expect(resumed === suspended, "the take-back opened a second hand-over")
+        #expect(await resumed.isDraining, "the session was taken back without being read")
+    }
+
+    /// `attach.request` records the app's number for it on the attach, and
+    /// the claim the attach becomes keeps it. Without that, a real attach
+    /// would carry no seq and no sweep could ever take it back. The number
+    /// also bounds the sweep: one built before the attach was numbered, with a
+    /// `throughSeq` below it, leaves the claim alone.
+    @Test func attachRequestRecordsItsSeq() async throws {
+        let harness = try await ReconcileRPCHarness.start(command: Self.echoJob)
+        defer { harness.tearDown() }
+        try await harness.enableTheSweep()
+
+        let response = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.attachRequest,
+                params: AttachRequestParams(
+                    worktreeID: harness.worktreeID, paneID: "", windowID: "",
+                    attachID: UUID(), terminalID: harness.terminalID, attachSeq: 9)))
+        #expect(response.success, "attach.request failed: \(response.error ?? "")")
+        let generation = try #require(
+            try response.decodeResult(AttachRequestResult.self).generation)
+        let (vendedFD, _) = try SidecarTestSupport.receiveVend(from: harness.appSide)
+        #expect(vendedFD >= 0)
+        let viewer = Viewer(
+            ptyFD: vendedFD, generation: generation,
+            terminal: ViewerTerminal(columns: 80, rows: 24))
+        defer { viewer.close() }
+        let ready = await harness.router.handle(
+            try RPCRequest(
+                method: RPCMethod.attachReady,
+                params: AttachReadyParams(
+                    worktreeID: harness.worktreeID, paneID: "", generation: generation,
+                    terminalID: harness.terminalID)))
+        #expect(ready.success, "attach.ready failed: \(ready.error ?? "")")
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == generation)
+        #expect(await harness.registry.viewerAttachmentOwner(for: harness.terminalID)
+                    == HandbackFixture.viewerApp)
+        let suspended = try #require(await harness.registry.reader(for: harness.terminalID))
+        // The panel leaves the pty, and its handback is lost on the way.
+        viewer.close()
+
+        let before = try await harness.reconcile(throughSeq: 8)
+
+        #expect(before == HolderReconcileClaimsResult(), """
+            a sweep through seq 8 took back attach 9, which the app numbered after it built its \
+            held set
+            """)
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == generation)
+        #expect(await !suspended.isDraining)
+
+        let through = try await harness.reconcile(throughSeq: 9)
+
+        #expect(through == HolderReconcileClaimsResult(takenBack: [harness.terminalID]), """
+            a sweep through seq 9 did not take back attach 9: attach.request did not record \
+            the app's number on the attach
+            """)
+        #expect(await harness.registry.viewerAttachment(for: harness.terminalID) == nil)
+        #expect(await harness.registry.ptyReader(for: harness.terminalID) == .daemon)
+        #expect(await suspended.isDraining, "the session was taken back without being read")
+    }
+}
+
+// MARK: - The router
+
+/// A router in front of `HandbackFixture`'s registry, with a socketpair
+/// standing in for the app's fd sidecar — `HolderAttachRPCTests`' shape,
+/// kept separate for the reason that suite keeps its own.
+///
+/// The sidecar records `HandbackFixture.viewerApp` as the peer of every vend,
+/// and the router resolves that app's pid to the same identity, so a sweep
+/// from that pid speaks for the app every claim here belongs to without a
+/// `ps` read of this test process.
+private struct ReconcileRPCHarness {
+    let router: RPCRouter
+    let fixture: HandbackFixture
+    let worktreeID: UUID
+    /// The app's end of the sidecar.
+    let appSide: Int32
+
+    var registry: HolderRegistry { fixture.registry }
+    var terminalID: UUID { fixture.terminalID }
+
+    static func start(command: String) async throws -> ReconcileRPCHarness {
+        let fixture = try await HandbackFixture.start(command: command)
+        do {
+            return try await wire(fixture)
+        } catch {
+            fixture.tearDown()
+            throw error
+        }
+    }
+
+    private static func wire(_ fixture: HandbackFixture) async throws -> ReconcileRPCHarness {
+        let db = try TBDDatabase(inMemory: true)
+        let router = RPCRouter(
+            db: db,
+            lifecycle: WorktreeLifecycle(
+                db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
+            tmux: TmuxManager(dryRun: true),
+            startTime: Date(),
+            actuationLog: makeTestActuationLog())
+        let repo = try await db.repos.create(
+            path: "/tmp/holder-claim-reconcile", displayName: "holder-claim-reconcile",
+            defaultBranch: "main")
+        let worktree = try await db.worktrees.create(
+            repoID: repo.id, name: "holder-claim-reconcile", branch: "main",
+            path: "/tmp/holder-claim-reconcile", tmuxServer: "tbd-holder-claim-reconcile")
+        // The row the attach handler resolves, and branches on by transport.
+        _ = try await db.terminals.create(
+            id: fixture.terminalID, worktreeID: worktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            transport: .holder)
+
+        var pair: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
+            throw FDChannelError.sendFailed(errno)
+        }
+        let vending = FDVendingServer(
+            retryAttempts: 1, peerIdentity: { _ in HandbackFixture.viewerApp })
+        await vending.adoptConnection(fd: pair[0])
+        // Present only for its fd sidecar, the one piece of the bridge the
+        // holder path borrows. The ready timeout is far beyond any test here,
+        // so it never settles an attach behind one's back.
+        router.controlMode = TmuxControlModeBridge(
+            supervisor: TmuxControlSupervisor(), environment: [:], fdVending: vending,
+            readyTimeout: .seconds(600), clock: ContinuousClock())
+        router.holderRegistry = fixture.registry
+        let app = HandbackFixture.viewerApp
+        router.appIdentityResolver = { pid in pid == app.pid ? app : nil }
+
+        return ReconcileRPCHarness(
+            router: router, fixture: fixture, worktreeID: worktree.id, appSide: pair[1])
+    }
+
+    /// Turns the sweep on, through the RPC the Settings toggle uses.
+    func enableTheSweep() async throws {
+        let response = await router.handle(
+            try RPCRequest(
+                method: RPCMethod.configSetHolderClaimReconcileEnabled,
+                params: ConfigSetHolderClaimReconcileParams(enabled: true)))
+        #expect(response.success)
+    }
+
+    /// One `holder.reconcileClaims` from `viewerApp`'s pid, decoded.
+    func reconcile(
+        held: [UUID] = [], throughSeq: UInt64
+    ) async throws -> HolderReconcileClaimsResult {
+        let response = await router.handle(
+            try RPCRequest(
+                method: RPCMethod.holderReconcileClaims,
+                params: HolderReconcileClaimsParams(
+                    appPID: HandbackFixture.viewerApp.pid, held: held, throughSeq: throughSeq)))
+        #expect(response.success, "holder.reconcileClaims failed: \(response.error ?? "")")
+        return try response.decodeResult(HolderReconcileClaimsResult.self)
+    }
+
+    func tearDown() {
+        Darwin.close(appSide)
+        fixture.tearDown()
     }
 }
 
