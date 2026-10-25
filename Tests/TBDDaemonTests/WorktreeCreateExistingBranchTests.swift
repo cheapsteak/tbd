@@ -9,32 +9,16 @@ import Testing
 /// gates behavior, every branch needs its own test.
 ///
 /// Three branches are exercised:
-/// 1. `useExistingBranch: false` — current behavior preserved (creates `tbd/<name>`).
+/// 1. `useExistingBranch: false` — creates `tbd/<name>`. Pinned by
+///    `testCreateWorktree` in `WorktreeLifecycleTests.swift`, the default create.
 /// 2. `useExistingBranch: true` + local branch — checks out existing branch, no `-b`.
 /// 3. `useExistingBranch: true` + `origin/<name>` ref — creates a local tracking branch.
 
-@Test func testCreateWorktreeDoesNotUseExistingBranchByDefault() async throws {
-    let (tempDir, repoDir) = try await createTestRepo()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
-    )
-
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-
-    // useExistingBranch defaults to false — behavior is identical to the
-    // legacy create flow: a fresh `tbd/<auto-name>` branch is created.
-    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-    #expect(wt.status == .active)
-    #expect(wt.branch.hasPrefix("tbd/"))
-    #expect(FileManager.default.fileExists(atPath: wt.localPath))
-}
-
+/// Also the existing-branch half of the #419 display-name contract: the app
+/// passes neither folder nor displayName here either, the daemon derives the
+/// folder from the branch, and `WorktreeStore.create` defaults
+/// `displayName ?? name` — so with no dedup suffix, name == displayName and the
+/// stop-rename-check hook still fires.
 @Test func testCreateWorktreeUsesExistingLocalBranch() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -66,6 +50,9 @@ import Testing
     // Folder name is derived from the branch's local name (sanitized).
     #expect(wt.name == "existing-feature")
     #expect(FileManager.default.fileExists(atPath: wt.localPath))
+    // #419: name == displayName, so the stop-rename-check hook will fire.
+    #expect(wt.displayName == "existing-feature", "daemon defaults displayName to name")
+    #expect(wt.hasDefaultDisplayName)
 
     // Verify git also reports the worktree on the existing branch.
     // Path comparison uses `hasSuffix` because macOS resolves the temp dir
