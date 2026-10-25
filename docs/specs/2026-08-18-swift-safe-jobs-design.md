@@ -108,7 +108,8 @@ CI's debug-information flags live there for the same kind of reason. The job's
 and the build step and each of the four test passes spell it on their own
 command lines; the wrapper forwards those arguments untouched and adds only the
 job count. Nothing on a runner reads an index store or a local variable, and
-the flags compile in about 0.825 of the default's time on the same runner. A
+on paired cold builds, both arms on one runner, the flags took about 0.825 of
+the default's time. A
 developer machine needs full debug information for lldb, so the wrapper's
 defaults stay SwiftPM's, and the flags reach only the runs whose configuration
 names them.

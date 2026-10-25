@@ -480,8 +480,10 @@ jobs:
       # (3 cores, Swift 6.3.3), in both orders: SwiftPM's defaults 795.1 s then
       # these flags 656.1 s (run 40222086540), and these flags 927.5 s then the
       # defaults 1124.8 s (run 40232573803). The ratio is 0.825 in both orders,
-      # so building second buys nothing, and only same-runner pairs count:
-      # runners differ from each other by about 20%. `.build` shrinks from
+      # so building second buys nothing, and only same-runner pairs count: the
+      # same build took about 41% longer on the slower of the two runners
+      # (795.1 s against 1124.8 s with the defaults, 656.1 s against 927.5 s
+      # with these flags). `.build` shrinks from
       # about 4.9 GB to 4.4 GB — the 174 MB index store goes, and the test
       # bundle's dSYM drops from 655 MB to 443 MB. On a typical incremental
       # build (513 s median) the same ratio predicts 85-95 s saved; that figure
@@ -854,10 +856,12 @@ jobs:
       # cold-cache figure, over a full 5,529-test daemon pass on top of the
       # compile. Warm-cache runs still spread 73–996 s, because the runs
       # measured all force-rebuilt TBDShared and TBDDaemonLib and a PR's first
-      # run restores only the deps-only fallback key. Those runs compiled with
-      # SwiftPM's default debug information. CI_SWIFTPM_FLAGS compiles in about
-      # 0.825 of the time on the same runner, so the bound has more room than
-      # those figures show.
+      # run restores only a fallback entry. Those runs compiled with SwiftPM's
+      # default debug information. Paired cold builds put CI_SWIFTPM_FLAGS at
+      # about 0.825 of the default's compile time on the same runner; whether
+      # these warm and compile-plus-test figures shrink by the same factor is
+      # inferred, not measured, so the bound stays sized against them as
+      # measured.
       #
       # NO STALL WATCHDOG, unlike the passes. The watchdog exists for one
       # failure: a test process wedged where no time limit can reach it — the

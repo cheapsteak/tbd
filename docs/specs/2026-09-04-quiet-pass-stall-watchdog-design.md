@@ -313,11 +313,12 @@ like; a hit spends 25 to 56 seconds restoring. So 1250 s is the measured
 cold-cache figure for the compile plus a full 5,529-test daemon pass, and
 1800 s clears it by 45% — more than that for the compile alone. The warm-cache
 runs still spread 73–996 s, because those runs all force-rebuilt TBDShared and
-TBDDaemonLib and a PR's first run restores only the deps-only fallback key, so
-a bound sized to the warm median would end healthy builds. Those runs compiled
-with SwiftPM's default debug information; the job's lighter flags (below) take
-about 0.825 of the time, so the bound has more room than the figures show. 1b
-and 2 measured 128 s and 71 s of step time on the split's first CI run, so
+TBDDaemonLib and a PR's first run restores only a fallback entry, so a bound
+sized to the warm median would end healthy builds. Those runs compiled with
+SwiftPM's default debug information. Paired cold builds put the job's lighter
+flags (below) at about 0.825 of the default's compile time; whether these warm
+and compile-plus-test figures shrink by the same factor is inferred, not
+measured, so the bound stays sized against them as measured. 1b and 2 measured 128 s and 71 s of step time on the split's first CI run, so
 600 s is several times a healthy run while still ending a wedge inside the
 step's own bound; 1a runs the daemon half predicted to be smaller and shares
 1b's budget.
@@ -335,7 +336,9 @@ Measured as paired cold builds, both arms of a pair on one `macos-26` runner
 (3 cores, Swift 6.3.3) and the pairs run in both orders, the flags take 0.825
 of the default's time either way round: 795.1 s against 656.1 s in run
 40222086540, and 1124.8 s against 927.5 s in run 40232573803. Only same-runner
-pairs count, because runners differ from each other by about 20%. `.build`
+pairs count, because the same build took about 41% longer on the slower of the
+two runners (795.1 s against 1124.8 s with the defaults, 656.1 s against
+927.5 s with the flags). `.build`
 shrinks from about 4.9 GB to 4.4 GB; the index store was 174 MB of that, and
 the test bundle's dSYM drops from 655 MB to 443 MB. A pass carries the flags
 although it compiles nothing because it re-plans from its own command line, and
