@@ -172,6 +172,74 @@ import Testing
         #expect(try await fixture.columns(of: "config").contains("nightwatch_mode") == false)
     }
 
+    // MARK: - Pruning the copies
+
+    /// A run in which nothing failed prunes the copies to three. Every seeded
+    /// copy is stamped after the run's own, so only the protection of the copy
+    /// just written keeps it: it takes one of the three places, and the
+    /// newest two seeded copies take the others.
+    @Test func aCleanRunPrunesToThreeAndKeepsItsOwnCopy() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let later = (1...5).map { String(format: "202611%02dT000000Z", $0) }
+        fixture.seedSnapshots(later)
+
+        let report = await fixture.db.reconcileRetiredColumns(fixture.reconciler(), at: Self.firstRun)
+
+        #expect(report.outcomes[Self.nightwatchMode] == .dropped)
+        #expect(report.outcomes[Self.watchDeskRole] == .dropped)
+        #expect(fixture.snapshots() == [
+            "state.db.pre-column-drop.20261024T123456Z",
+            "state.db.pre-column-drop.20261104T000000Z",
+            "state.db.pre-column-drop.20261105T000000Z",
+        ])
+    }
+
+    /// A run whose drop fails prunes nothing. Such a drop fails at every
+    /// start, each writing a fresh copy, and pruning then would push out the
+    /// copy that still holds a column an earlier run dropped.
+    @Test func aRunWhoseDropFailsPrunesNothing() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        try await fixture.db.writerForTests.write { db in
+            try db.execute(sql: "CREATE TABLE retirement_probe (id INTEGER PRIMARY KEY, indexed TEXT)")
+            try db.execute(sql: "CREATE INDEX retirement_probe_indexed ON retirement_probe(indexed)")
+        }
+        let indexed = RetiredColumn(table: "retirement_probe", column: "indexed", epoch: 1)
+        let later = (1...5).map { String(format: "202611%02dT000000Z", $0) }
+        fixture.seedSnapshots(later)
+
+        let report = await fixture.db.reconcileRetiredColumns(
+            fixture.reconciler(columns: [indexed, Self.nightwatchMode]), at: Self.firstRun)
+
+        guard case .failed(_)? = report.outcomes[indexed] else {
+            Issue.record("expected the indexed column's drop to fail, got \(String(describing: report.outcomes[indexed]))")
+            return
+        }
+        #expect(report.outcomes[Self.nightwatchMode] == .dropped)
+        #expect(fixture.snapshots()
+            == (["20261024T123456Z"] + later).map { "state.db.pre-column-drop.\($0)" })
+    }
+
+    /// A run with nothing to drop and nothing failed still prunes, so a
+    /// backlog clears at the next start rather than at the next drop.
+    @Test func aRunWithNothingToDropPrunesTheBacklog() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        _ = await fixture.db.reconcileRetiredColumns(fixture.reconciler(), at: Self.firstRun)
+        let earlier = (1...5).map { String(format: "202601%02dT000000Z", $0) }
+        fixture.seedSnapshots(earlier)
+
+        let second = await fixture.db.reconcileRetiredColumns(fixture.reconciler(), at: Self.secondRun)
+
+        #expect(second.snapshotPath == nil)
+        #expect(fixture.snapshots() == [
+            "state.db.pre-column-drop.20260104T000000Z",
+            "state.db.pre-column-drop.20260105T000000Z",
+            "state.db.pre-column-drop.20261024T123456Z",
+        ])
+    }
+
     /// The snapshot is taken before the first drop, so it still holds the
     /// columns the run went on to drop, and it is named for the run's date.
     @Test func theSnapshotIsWrittenBeforeTheFirstDrop() async throws {
@@ -296,6 +364,15 @@ import Testing
         func columns(of table: String) async throws -> Set<String> {
             try await db.writerForTests.read { conn in
                 try RetiredColumnReconcilerTests.columnNames(of: table, in: conn)
+            }
+        }
+
+        /// Lay down a pre-column-drop copy beside the database for each stamp.
+        func seedSnapshots(_ stamps: [String]) {
+            for stamp in stamps {
+                FileManager.default.createFile(
+                    atPath: scratch.appendingPathComponent("state.db.pre-column-drop.\(stamp)").path,
+                    contents: Data("x".utf8))
             }
         }
 

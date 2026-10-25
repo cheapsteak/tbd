@@ -43,16 +43,17 @@ public enum OrphanGCError: LocalizedError, CustomStringConvertible, Equatable {
 /// and broadcasts `.reapRecordsChanged` whenever anything actually changed.
 ///
 /// Every failure direction here is toward keeping/no-op: a DB read failure
-/// short-circuits the whole sweep, an `lsof` timeout skips the whole sweep
-/// (never treated as "no live processes"), and `dryRun` never touches disk or
-/// the DB regardless of `gcEnabled`.
+/// short-circuits the whole sweep, an `lsof` timeout skips every leg but the
+/// database-only notification prune (never treated as "no live processes"),
+/// and `dryRun` never touches disk or the DB regardless of `gcEnabled`.
 public actor OrphanGC {
     private let db: TBDDatabase
     private let git: GitManager
     private let broadcast: @Sendable (StateDelta) -> Void
     /// Optional-returning live-cwd provider. The provider returning `nil`
-    /// means "live cwds could not be determined" and makes `sweep` skip
-    /// entirely; the property itself being `nil` means "use the real lsof".
+    /// means "live cwds could not be determined" and makes `sweep` skip every
+    /// leg but the notification prune; the property itself being `nil` means
+    /// "use the real lsof".
     private let liveCWDsProvider: (@Sendable () async -> [String]?)?
     private let scratchpadBase: URL
     private let now: @Sendable () -> Date
@@ -155,8 +156,8 @@ public actor OrphanGC {
 
     /// Internal seam (tests): the provider may return `nil` to simulate the
     /// real lsof path's "unavailable" sentinel (timeout / spawn failure /
-    /// non-zero exit), which must make `sweep` skip entirely rather than be
-    /// treated as "no live processes". `liveCWDsProvider` has no default so
+    /// non-zero exit), which must make `sweep` skip every leg but the
+    /// notification prune rather than be treated as "no live processes". `liveCWDsProvider` has no default so
     /// this never collides with the public init's defaulted overload.
     init(
         db: TBDDatabase,
@@ -253,7 +254,8 @@ public actor OrphanGC {
     /// Runs one full orphan-GC pass. `dryRun` computes and returns `planned`
     /// without touching disk or the DB, regardless of `gcEnabled`. When
     /// `gcEnabled` is `false` and `dryRun` is also `false`, the sweep does
-    /// nothing at all — not even the `lsof` pass.
+    /// nothing at all — not even the `lsof` pass. When `lsof` fails, only the
+    /// notification prune, which runs before it, takes effect.
     public func sweep(dryRun: Bool = false) async -> GCSweepResult {
         var planned: [String] = []
         var reaped = 0
@@ -270,13 +272,20 @@ public actor OrphanGC {
         var devServerFilesReaped = 0
         // Same reasoning again: a checkout template produces no `ReapRecord`.
         var checkoutTemplatesReaped = 0
+        // And again: a notification row produces no `ReapRecord`.
+        var notificationsReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
 
+        // Before the lsof gate, deliberately: this leg reads and writes only
+        // the database, so an lsof outage is no reason to skip it.
+        await reclaimNotifications(dryRun: dryRun, planned: &planned, reaped: &notificationsReaped)
+
         guard let live = await liveCWDs() else {
-            logger.error("gc: lsof unavailable this sweep (timeout or spawn failure) — skipping entirely")
-            return .init(planned: ["lsof unavailable - sweep skipped"], reaped: 0)
+            logger.error("gc: lsof unavailable this sweep (timeout or spawn failure) — skipping the rest")
+            return .init(
+                planned: planned + ["lsof unavailable - sweep skipped"], reaped: notificationsReaped)
         }
 
         // nil when the read failed: the template leg must tell that apart
@@ -403,7 +412,68 @@ public actor OrphanGC {
             planned: planned,
             reaped: reaped + hangStacksReaped + unsentPromptsReaped + devServerFilesReaped
                 + checkoutTemplatesReaped
-                + sessionDirectoriesReaped)
+                + sessionDirectoriesReaped
+                + notificationsReaped)
+    }
+
+    // MARK: - Notifications
+
+    /// How long a read notification is kept. Nothing reads a notification
+    /// back once it is marked read — the only production reader is the
+    /// per-worktree unread summary — so this is a short history, not a
+    /// contract anything depends on.
+    static let notificationReadRetention: TimeInterval = 7 * 24 * 60 * 60
+
+    /// Prunes the `notification` table, which otherwise only grows: one row
+    /// per turn end of every session, each holding that turn's final message
+    /// (`docs/specs/2026-10-25-state-db-retention-design.md`).
+    ///
+    /// Removes read rows older than `notificationReadRetention` and every row,
+    /// read or unread, on an archived worktree, whose badges nobody can see.
+    /// Unread rows on any other worktree are never removed. Runs under
+    /// `gcEnabled` alone, with no flag of its own: it removes data nothing
+    /// reads.
+    ///
+    /// A dry run counts what a real run would remove and deletes nothing. No
+    /// `ReapRecord` is written: there is no worktree directory involved and
+    /// nothing a `tbd gc restore` could put back.
+    private func reclaimNotifications(
+        dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        // Through the date seam: the cutoff is compared against a persisted
+        // timestamp, which is data rather than behavior.
+        let cutoff = now().addingTimeInterval(-Self.notificationReadRetention)
+
+        if dryRun {
+            do {
+                let count = try await db.notifications.countExpired(readBefore: cutoff)
+                if count > 0 { planned.append("REAP notifications \(count)") }
+            } catch {
+                planned.append("KEEP rows-unreadable notifications")
+                logger.error("""
+                gc: notification rows unreadable this sweep \
+                (\(error.localizedDescription, privacy: .public)) — skipping the phase
+                """)
+            }
+            return
+        }
+
+        do {
+            let removed = try await db.notifications.deleteExpired(readBefore: cutoff)
+            guard removed > 0 else { return }
+            planned.append("REAP notifications \(removed)")
+            reaped += removed
+            logger.info("""
+            gc: dropped \(removed, privacy: .public) notification row(s): read and created \
+            before \(cutoff.description, privacy: .public), or on archived worktrees
+            """)
+        } catch {
+            planned.append("KEEP row-delete-failed notifications")
+            logger.warning("""
+            gc: could not drop expired notification rows \
+            (\(error.localizedDescription, privacy: .public))
+            """)
+        }
     }
 
     // MARK: - Checkout templates

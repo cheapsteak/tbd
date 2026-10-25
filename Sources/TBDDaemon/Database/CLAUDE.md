@@ -87,9 +87,13 @@ column, which matters only if a developer makes that build the kept bundle.
 
 Before its first drop in a run, the reconciler copies the database to
 `~/tbd/state.db.pre-column-drop.<UTC-timestamp>` with `VACUUM INTO`, the way
-back for data someone still needed; like the pre-migration snapshot below, it
-is reclaimed by hand. A run whose snapshot fails drops nothing, and a drop that
-fails is logged at error level and skipped without stopping startup.
+back for data someone still needed. A run whose snapshot fails drops nothing,
+and a drop that fails is logged at error level and skipped without stopping
+startup. Every run in which nothing failed, whether or not it wrote a copy,
+ends with `DatabaseSnapshotPruner` keeping the newest three `pre-column-drop`
+copies and deleting older ones, never the one the run just wrote. A run with
+any failure prunes nothing, so a drop that fails at every start cannot push out
+the copy that still holds a column an earlier run dropped.
 
 Design and rationale: [`docs/specs/2026-10-24-column-retirement-design.md`](../../../docs/specs/2026-10-24-column-retirement-design.md).
 
@@ -303,5 +307,11 @@ disagreement means one side's framing code drifted, not that SQLite changed.
 `~/tbd/state.db.pre-migration.<UTC-timestamp>` (e.g.
 `state.db.pre-migration.20260513T143055Z`) via `VACUUM INTO` whenever migration
 work is pending AND the database file already existed. Failures log at error
-level but do not block the migration — best effort only. Safe to delete the
-snapshot once the upgrade looks clean.
+level but do not block the migration — best effort only. Once migrations
+succeed, at every start, `DatabaseSnapshotPruner` keeps the newest three
+`pre-migration` copies (counted apart from the `pre-column-drop` ones) and
+deletes older ones, never the copy this start just wrote. A start whose
+migration fails prunes nothing, so a daemon relaunched into the same failure
+cannot push out the clean copy taken before the upgrade. Only whole names of
+the exact form above match; other files beside the database are never touched.
+Safe to delete a copy yourself once the upgrade looks clean.

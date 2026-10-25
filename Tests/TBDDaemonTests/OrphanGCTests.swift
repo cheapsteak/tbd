@@ -386,9 +386,9 @@ struct OrphanGCTests {
         #expect(parsed?.paths == [wtA, wtB])
     }
 
-    // MARK: - lsof unavailable skips the entire sweep
+    // MARK: - lsof unavailable skips every leg but the notification prune
 
-    @Test func sweepSkipsEntirelyWhenLiveCWDsUnavailable() async throws {
+    @Test func sweepSkipsAllButNotificationPruneWhenLiveCWDsUnavailable() async throws {
         let (tmp, repo) = try await createTestRepoResolvingSymlinks()
         defer { try? FileManager.default.removeItem(at: tmp) }
 
