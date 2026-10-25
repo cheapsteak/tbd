@@ -200,7 +200,11 @@ actor HolderRegistry {
     ///
     /// It bounds the *reachable but silent* holder specifically. A dead one
     /// fails at `connect` with `ECONNREFUSED` and never reaches a receive.
-    static let adoptionReceiveTimeout: Duration = .seconds(2)
+    ///
+    /// The default for the `adoptionReceiveTimeout` init parameter, which
+    /// exists so a test of a wedged holder can wait a fraction of a second
+    /// rather than this whole budget per row.
+    static let defaultAdoptionReceiveTimeout: Duration = .seconds(2)
 
     /// How long the whole startup adoption phase may take before it stops and
     /// hands the rest back to its caller.
@@ -476,6 +480,12 @@ actor HolderRegistry {
 
     private let busyRetryBudget: Duration
     private let adoptAllBudget: Duration
+    /// How long one adoption waits for a holder to answer; see
+    /// `defaultAdoptionReceiveTimeout`.
+    private let adoptionReceiveTimeout: Duration
+    /// How long the reclaimer keeps asking whether a child has exited; see
+    /// `defaultExitConfirmationBudget`.
+    private let exitConfirmationBudget: Duration
     /// Where every reader this registry builds sends its Program Status
     /// Protocol (OSC 7501) reports, and whose gate decides whether it answers
     /// the probe. nil (tests that do not exercise the protocol) leaves OSC 7501
@@ -564,6 +574,8 @@ actor HolderRegistry {
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
         busyRetryBudget: Duration = HolderRegistry.defaultBusyRetryBudget,
         adoptAllBudget: Duration = HolderRegistry.defaultAdoptAllBudget,
+        adoptionReceiveTimeout: Duration = HolderRegistry.defaultAdoptionReceiveTimeout,
+        exitConfirmationBudget: Duration = HolderRegistry.defaultExitConfirmationBudget,
         programStatus: ProgramStatusStore? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
@@ -576,6 +588,8 @@ actor HolderRegistry {
         self.canSpawn = spawner != nil
         self.busyRetryBudget = busyRetryBudget
         self.adoptAllBudget = adoptAllBudget
+        self.adoptionReceiveTimeout = adoptionReceiveTimeout
+        self.exitConfirmationBudget = exitConfirmationBudget
         self.clock = clock
     }
 
@@ -1293,6 +1307,7 @@ actor HolderRegistry {
             sessionID: terminalID, environment: environment)
         let expected = owner
         let budget = busyRetryBudget
+        let receiveTimeout = adoptionReceiveTimeout
         let clock = self.clock
         let notifyEndOfOutput = endOfOutputNotifier(for: terminalID)
         let statusTap = self.programStatusTap(for: terminalID)
@@ -1302,7 +1317,7 @@ actor HolderRegistry {
                 socketPath: socketPath,
                 expecting: expected,
                 busyRetryBudget: budget,
-                receiveTimeout: Self.adoptionReceiveTimeout,
+                receiveTimeout: receiveTimeout,
                 clock: clock,
                 // The child has been running without this emulator — since the
                 // last daemon, or since a viewer took the pty — so its mode
@@ -2628,7 +2643,11 @@ actor HolderRegistry {
     /// budget is comfortably longer than the holder's 50 ms poll slice and
     /// finite next to the ten-second window a holder keeps its rendezvous bound
     /// after its child dies.
-    static let exitConfirmationBudget: Duration = .seconds(2)
+    ///
+    /// The default for the `exitConfirmationBudget` init parameter, which
+    /// exists so a test whose negative window must outlast the budget can wait
+    /// out a short one instead of this.
+    static let defaultExitConfirmationBudget: Duration = .seconds(2)
     static let exitConfirmationInterval: Duration = .milliseconds(50)
 
     /// The callback a reader announces its exhausted drain on.
@@ -2725,7 +2744,7 @@ actor HolderRegistry {
             status = await Self.confirmChildExit(
                 socketPath: socketPath,
                 expecting: owner,
-                budget: Self.exitConfirmationBudget,
+                budget: exitConfirmationBudget,
                 clock: clock)
         }
 
