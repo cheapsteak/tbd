@@ -161,4 +161,91 @@ struct PromptRailMountTests {
         onJump("p-1")
         #expect(coordinator.heldJumpTargetID == "p-1", "onJump did not reach the table's jump")
     }
+
+    /// End to end through the pane shape: the container reads the key, picks
+    /// the branch, and the table's `makeNSView` builds the gutter its mount
+    /// names. One arm per renderer, each on its own suite so `.standard` is
+    /// never read or written.
+    @Test("the container mounts the renderer its key names, with the gutter in the right place")
+    func containerMountsChosenRenderer() async throws {
+        // Key unset: the AppKit default keeps the gutter inside the container.
+        do {
+            let suiteName = "prompt-rail-container-appkit-\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let host = Self.hostContainer(defaults: defaults)
+            defer { host.tearDown() }
+            let container = try await Self.settledContainer(in: host)
+
+            #expect(host.flippedWindowFrame(container).minX == 0)
+            #expect(host.flippedWindowFrame(container).width == 680)
+            #expect(container.leadingGutter == PromptRailLayout.width)
+            #expect(container.scrollView.frame.minX == 20)
+            #expect(container.scrollView.frame.width == 660)
+            let coordinator = try #require(container.coordinator, "the container has no coordinator")
+            #expect(coordinator.promptRailPresenter == nil,
+                    "the AppKit mount attached the SwiftUI renderer's state")
+        }
+
+        // "swiftui": the table sits right of the SwiftUI rail column, with no
+        // gutter of its own, and the container's state hears the outline.
+        do {
+            let suiteName = "prompt-rail-container-swiftui-\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            defaults.set("swiftui", forKey: AppState.promptRailRendererKey)
+            let host = Self.hostContainer(defaults: defaults)
+            defer { host.tearDown() }
+            let container = try await Self.settledContainer(in: host)
+
+            #expect(host.flippedWindowFrame(container).minX == 20)
+            #expect(host.flippedWindowFrame(container).width == 660)
+            #expect(container.leadingGutter == 0)
+            #expect(container.scrollView.frame.minX == 0)
+            #expect(container.scrollView.frame.width == 660)
+
+            let coordinator = try #require(container.coordinator, "the container has no coordinator")
+            let state = try #require(
+                coordinator.promptRailPresenter as? PromptRailState,
+                "the SwiftUI mount did not make the container's state the presenter")
+            let delivered = await host.settle { state.entries.count == 3 }
+            #expect(delivered, "the state never received the outline (entries: \(state.entries.count))")
+            #expect(state.entries == coordinator.promptEntries)
+        }
+    }
+
+    /// A pane-shaped mount: `PromptRailContainer` over a table of three
+    /// prompts, reading the renderer key from `defaults`.
+    private static func hostContainer(defaults: UserDefaults) -> OffscreenHost<AnyView> {
+        let appState = AppState(userDefaults: defaults)
+        let nodes = transcriptRenderNodes(
+            from: PromptRailFixtures.conversation(prompts: 3, replySentences: { _ in 2 }))
+        let root = PromptRailContainer { mount in
+            TableTranscriptView(
+                context: TranscriptCardContext(
+                    terminalID: nil,
+                    openTranscriptOverlay: nil,
+                    appState: appState,
+                    linkResolver: nil,
+                    onLinkClicked: nil),
+                atBottom: .constant(true),
+                scrollToBottomToken: 0,
+                activityToggleToken: 0,
+                linkRoot: "",
+                nodesProvider: { nodes },
+                promptRail: mount)
+        }
+        .defaultAppStorage(defaults)
+        return OffscreenHost(root: AnyView(root), size: NSSize(width: 680, height: 600))
+    }
+
+    /// The host's container once SwiftUI has made and sized it.
+    private static func settledContainer(in host: OffscreenHost<AnyView>) async throws -> TranscriptContainerView {
+        let laidOut = await host.settle {
+            (host.firstDescendant(TranscriptContainerView.self)?.bounds.width ?? 0) > 0
+        }
+        try #require(laidOut, "the table never mounted and laid out")
+        await host.pump(times: 5)
+        return try #require(host.firstDescendant(TranscriptContainerView.self))
+    }
 }
