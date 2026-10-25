@@ -6,8 +6,10 @@ import TBDShared
 
 /// Jumps to a prompt in the transcript table, driven headlessly in
 /// `TableTranscriptScene`: a jump puts its target 16pt below the viewport top
-/// and holds it there while estimated rows above it realize, until the reader
-/// scrolls or the rows are re-laid; Previous and Next step through the prompts.
+/// and pins it there while estimated rows above it realize, and holds it as the
+/// active prompt. A reader scroll or re-laid rows end both; the coordinator's
+/// own tail-follow ends only the pin, and a new prompt only the hold. Previous
+/// and Next step through the prompts.
 @Suite("Prompt rail jumps")
 @MainActor
 struct PromptRailJumpTests {
@@ -57,6 +59,14 @@ struct PromptRailJumpTests {
         scene.settle()
     }
 
+    /// An AskUserQuestion card whose question wraps. The estimator models chat
+    /// bubbles exactly, so prose rows realize without correcting, but this card
+    /// it under-reserves by construction (`card/askUserQuestion-wrapping` in
+    /// `TranscriptEstimatorAccuracyTests`, 36pt at the calibrated text size), so
+    /// the card's correction when it realizes moves every row below it.
+    private static let wrappingAskCardJSON =
+        #"{"questions":[{"question":"This question is deliberately very long indeed, so long that it must wrap across at least three separate lines inside the card at either of the column widths the transcript pane is ever laid out at, which is the shape a count-based model cannot see.","header":"Sizing","multiSelect":false,"options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}"#
+
     @Test("a jump pins a far row with an estimated height 16pt below the top")
     func jumpPinsAFarEstimatedRow() async throws {
         let suiteName = "prompt-rail-jump-pin-\(UUID().uuidString)"
@@ -64,25 +74,50 @@ struct PromptRailJumpTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let appState = AppState(userDefaults: defaults)
 
-        let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
+        // The row right above prompt 5 is the card, so the jump brings it on
+        // screen and its correction is certain to land above the target.
+        var items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
+        let replyIndex = try #require(items.firstIndex { $0.id == "a-4" })
+        items.insert(.toolCall(
+            id: "ask-4",
+            name: "AskUserQuestion",
+            inputJSON: Self.wrappingAskCardJSON,
+            inputTruncatedTo: nil,
+            result: ToolResult(text: "A", truncatedTo: nil, isError: false),
+            subagent: nil,
+            timestamp: nil), at: replyIndex + 1)
         let scene = Self.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries
         try #require(entries.count == Self.promptCount)
         let target = entries[5]
         let rowAbove = scene.coordinator.nodes[target.rowIndex - 1]
+        try #require(rowAbove.id == "ask-4")
         try #require(scene.coordinator.cachedExactHeight(for: rowAbove) == nil,
-                     "precondition: the row above the target carries only an estimate")
+                     "precondition: the card above the target carries only an estimate")
 
         scene.coordinator.jump(toNodeID: target.id)
+        let topAtJump = scene.tableView.rect(ofRow: target.rowIndex).minY
         let firstFrame = scene.screenOffset(ofRow: target.rowIndex)
         #expect(abs(firstFrame - Self.inset) <= 1,
                 Comment(rawValue: "the first frame put the target at \(firstFrame) pt, not \(Self.inset)"))
 
-        await Self.settleJump(scene)
+        // Lay out the rows the jump brought on screen: the card realizes and
+        // corrects here. Read before the deferred re-pin gets a turn, so this
+        // pins the synchronous re-pin in `correctRowHeightIfNeeded` alone.
+        scene.tableView.layoutSubtreeIfNeeded()
+        let afterLayout = scene.screenOffset(ofRow: target.rowIndex)
+        #expect(abs(afterLayout - Self.inset) <= 1,
+                Comment(rawValue: "after layout, before the deferred re-pin, the target sat at \(afterLayout) pt"))
 
-        #expect(scene.coordinator.cachedExactHeight(for: rowAbove) != nil,
-                "the row above the target realized, so its height correction was exercised")
+        await drainMainQueue()
+        scene.settle()
+
+        #expect(scene.coordinator.cachedExactHeight(for: rowAbove) != nil, "the card above the target realized")
+        let moved = scene.tableView.rect(ofRow: target.rowIndex).minY - topAtJump
+        try #require(abs(moved) > 1,
+                     Comment(rawValue: "precondition: rows above the target corrected by more than the 1pt "
+                         + "tolerance, so holding it took a re-pin (it moved \(moved) pt in the document)"))
         let settled = scene.screenOffset(ofRow: target.rowIndex)
         #expect(abs(settled - Self.inset) <= 1,
                 Comment(rawValue: "the target drifted to \(settled) pt as rows around it realized"))
@@ -114,6 +149,9 @@ struct PromptRailJumpTests {
         #expect(scene.coordinator.heldJumpTargetID == nil)
     }
 
+    /// Away from the bottom nothing tail-follows, so this isolates what an
+    /// append itself does: a reply keeps both the pin and the held target, and
+    /// a new prompt keeps the pin but ends the hold.
     @Test("an append keeps the jump anchor and the target where it landed")
     func appendKeepsAnchor() async throws {
         let suiteName = "prompt-rail-jump-append-\(UUID().uuidString)"
@@ -132,28 +170,138 @@ struct PromptRailJumpTests {
         await Self.settleJump(scene)
         let offsetBefore = scene.screenOffset(ofRow: target.rowIndex)
 
+        // A reply row arrives below.
+        let withReply = items + [.assistantText(
+            id: "a-59-more", text: "A further reply sentence.", timestamp: nil, usage: nil)]
+        let replyNodes = transcriptRenderNodes(from: withReply)
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: replyNodes)
+                         == .append(fromIndex: items.count),
+                     "precondition: the reply arrives as an append")
+        scene.coordinator.update(
+            nodes: replyNodes, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id)
+        #expect(scene.coordinator.heldJumpTargetID == target.id)
+        #expect(scene.coordinator.activePromptIndex == 20)
+        let afterReply = scene.screenOffset(ofRow: target.rowIndex)
+        #expect(abs(afterReply - offsetBefore) <= 1,
+                Comment(rawValue: "the reply moved the target: before=\(offsetBefore) after=\(afterReply)"))
+
+        // A new prompt arrives below: the pin stays, the hold ends, and the rule
+        // still picks the target, whose top sits above the probe line.
+        let withPrompt = transcriptRenderNodes(
+            from: withReply + [.userPrompt(id: "p-60", text: "Prompt 60", timestamp: nil)])
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: withPrompt)
+                         == .append(fromIndex: withReply.count),
+                     "precondition: the new prompt arrives as an append")
+        scene.coordinator.update(
+            nodes: withPrompt, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id)
+        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.promptEntries.count == Self.promptCount + 1)
+        #expect(scene.coordinator.activePromptIndex == 20)
+        let firstFrame = scene.screenOffset(ofRow: target.rowIndex)
+        #expect(abs(firstFrame - offsetBefore) <= 1,
+                Comment(rawValue: "the prompt moved the target: before=\(offsetBefore) after=\(firstFrame)"))
+
+        await Self.settleJump(scene)
+
+        let settled = scene.screenOffset(ofRow: target.rowIndex)
+        #expect(abs(settled - offsetBefore) <= 1,
+                Comment(rawValue: "the target moved once the appends settled: before=\(offsetBefore) after=\(settled)"))
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id)
+    }
+
+    /// Short replies on the last two exchanges, so both fit on the last screen
+    /// and a jump to prompt 58 clamps at the end.
+    nonisolated private static func shortLastReplies(_ index: Int) -> Int { index >= 58 ? 3 : tallReplies(index) }
+
+    /// The scene from `shortLastReplies`, parked mid-transcript and then jumped
+    /// to prompt 58, so the clip sits at the end with 58 held.
+    private static func jumpedToPrompt58(appState: AppState) async throws -> (TableTranscriptScene, [TranscriptItem]) {
+        let items = PromptRailFixtures.conversation(prompts: promptCount, replySentences: shortLastReplies)
+        let scene = primedAtEnd(items: items, appState: appState)
+        let entries = scene.coordinator.promptEntries
+        try #require(entries.count == promptCount)
+        scene.park(row: entries[40].rowIndex, below: 40)
+        scene.coordinator.jump(toNodeID: entries[58].id)
+        await settleJump(scene)
+        try #require(scene.gapToBottom <= 1,
+                     Comment(rawValue: "precondition: prompt 58 clamps at the end (gap \(scene.gapToBottom) pt)"))
+        try #require(scene.coordinator.heldJumpTargetID == "p-58")
+        try #require(scene.coordinator.pendingJumpAnchor != nil)
+        return (scene, items)
+    }
+
+    /// The tail-follow is the coordinator's own scroll, not the reader's: it
+    /// ends the pin, which would fight it, but the target stays active.
+    @Test("following the tail after a jump to the end keeps the target active and ends the pin")
+    func tailFollowKeepsHeldTarget() async throws {
+        let suiteName = "prompt-rail-jump-tail-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let (scene, items) = try await Self.jumpedToPrompt58(appState: appState)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+
+        // The last reply streams more text, with the clip at the end.
+        var streamed = items
+        streamed[streamed.count - 1] = .assistantText(
+            id: "a-59",
+            text: String(repeating: "A reply sentence whose prose wraps across the column. ", count: 12),
+            timestamp: nil,
+            usage: nil)
+        let streamedNodes = transcriptRenderNodes(from: streamed)
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: streamedNodes)
+                         == .updateLast,
+                     "precondition: the reply token arrives as a tail re-render")
+        scene.coordinator.update(
+            nodes: streamedNodes, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "")
+        // Lay the grown row out, as a live pane has by the tail-follow's turn.
+        scene.tableView.layoutSubtreeIfNeeded()
+        try #require(scene.gapToBottom > 1,
+                     Comment(rawValue: "precondition: the reply grew below the viewport, so the tail-follow "
+                         + "has to scroll (gap \(scene.gapToBottom) pt)"))
+
+        await drainMainQueue()
+
+        #expect(scene.gapToBottom <= 1,
+                Comment(rawValue: "the tail-follow did not reach the end (gap \(scene.gapToBottom) pt)"))
+        #expect(scene.coordinator.heldJumpTargetID == "p-58")
+        #expect(scene.coordinator.activePromptIndex == 58)
+        #expect(scene.coordinator.pendingJumpAnchor == nil)
+    }
+
+    @Test("a new prompt after a held jump target ends the hold")
+    func newPromptReleasesHeldTarget() async throws {
+        let suiteName = "prompt-rail-jump-newprompt-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let (scene, items) = try await Self.jumpedToPrompt58(appState: appState)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+
         let grown = transcriptRenderNodes(
             from: items + [.userPrompt(id: "p-60", text: "Prompt 60", timestamp: nil)])
         try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: grown)
                          == .append(fromIndex: items.count),
                      "precondition: the new prompt arrives as an append")
         scene.coordinator.update(
-            nodes: grown, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+            nodes: grown, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "")
+        #expect(scene.coordinator.heldJumpTargetID == nil, "the outline rebuild must end the hold at once")
+        scene.tableView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
 
-        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id)
-        #expect(scene.coordinator.heldJumpTargetID == target.id)
-        #expect(scene.coordinator.promptEntries.count == Self.promptCount + 1)
-        #expect(scene.coordinator.activePromptIndex == 20)
-        let firstFrame = scene.screenOffset(ofRow: target.rowIndex)
-        #expect(abs(firstFrame - offsetBefore) <= 1,
-                Comment(rawValue: "the append moved the target: before=\(offsetBefore) after=\(firstFrame)"))
-
-        await Self.settleJump(scene)
-
-        let settled = scene.screenOffset(ofRow: target.rowIndex)
-        #expect(abs(settled - offsetBefore) <= 1,
-                Comment(rawValue: "the target moved once the append settled: before=\(offsetBefore) after=\(settled)"))
-        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id)
+        let lastIndex = scene.coordinator.promptEntries.count - 1
+        #expect(scene.coordinator.promptEntries.last?.id == "p-60")
+        #expect(scene.gapToBottom <= 1,
+                Comment(rawValue: "the tail-follow did not reach the end (gap \(scene.gapToBottom) pt)"))
+        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.activePromptIndex == lastIndex)
+        #expect(scene.coordinator.pendingJumpAnchor == nil)
     }
 
     @Test("a prepend and a width change each release the jump anchor")
@@ -255,9 +403,8 @@ struct PromptRailJumpTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let appState = AppState(userDefaults: defaults)
 
-        // Short replies on the last two exchanges, so both fit in the last screen.
         let items = PromptRailFixtures.conversation(
-            prompts: Self.promptCount, replySentences: { $0 >= 58 ? 3 : Self.tallReplies($0) })
+            prompts: Self.promptCount, replySentences: Self.shortLastReplies)
         let scene = Self.primedAtEnd(items: items, appState: appState)
         defer { withExtendedLifetime(scene.coordinator) {} }
         let entries = scene.coordinator.promptEntries

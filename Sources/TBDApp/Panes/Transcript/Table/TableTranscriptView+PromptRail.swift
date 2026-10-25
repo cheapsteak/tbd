@@ -24,13 +24,30 @@ extension TableTranscriptView.Coordinator {
     /// Rebuilds the outline from `nodes`, tells the presenter if it changed,
     /// then re-derives the active prompt. `update(...)` calls it once the table
     /// holds the new rows.
+    ///
+    /// A prompt arriving after a held jump target ends the hold before the
+    /// active prompt is re-derived, so the rule can pick the new prompt. The
+    /// jump's pin is unaffected: a row added below cannot move the target.
     func refreshPromptOutline() {
         let entries = PromptOutline.entries(from: nodes)
         if entries != promptEntries {
+            if gainsEntryAfterHeldJumpTarget(entries) { heldJumpTargetID = nil }
             promptEntries = entries
             promptRailPresenter?.promptRail(entriesDidChange: entries)
         }
         refreshActivePrompt()
+    }
+
+    /// Whether `entries` has more entries after the held jump target than
+    /// `promptEntries` does: a prompt or peer message arrived below it. False
+    /// with no held target, or one that is not an entry (it holds nothing).
+    private func gainsEntryAfterHeldJumpTarget(_ entries: [PromptOutlineEntry]) -> Bool {
+        guard let held = heldJumpTargetID, entries.count > promptEntries.count,
+              let newIndex = entries.firstIndex(where: { $0.id == held })
+        else { return false }
+        let oldCountAfter = promptEntries.firstIndex { $0.id == held }
+            .map { promptEntries.count - 1 - $0 } ?? 0
+        return entries.count - 1 - newIndex > oldCountAfter
     }
 
     /// Applies `PromptRailActiveRule` to the entries' row tops and the clip
@@ -98,7 +115,8 @@ extension TableTranscriptView.Coordinator {
     /// whenever a row above it corrects an estimated height, and
     /// `heldJumpTargetID`, which keeps it the active prompt. Nothing above the
     /// target is measured; the pin absorbs those rows' corrections as they
-    /// realize. See `pendingJumpAnchor` for what releases the hold.
+    /// realize. See `pendingJumpAnchor` and `heldJumpTargetID` for what
+    /// releases each.
     ///
     /// An id with no row is ignored, unlike `scrollToRow(withNodeID:)`, whose
     /// fallback to the end suits the composer hint that uses it.
@@ -176,8 +194,10 @@ extension TableTranscriptView.Coordinator {
         }
     }
 
-    /// Stops holding the last jump's target, as an anchor and as the active
-    /// prompt. Every caller re-derives the active prompt on its own path.
+    /// Stops holding the last jump's target, as a pin and as the active
+    /// prompt: the release for a reader scroll, a width change, a rebuild, a
+    /// prepend, and Next from the last prompt. Every caller re-derives the
+    /// active prompt on its own path.
     func releaseJumpAnchor() {
         pendingJumpAnchor = nil
         heldJumpTargetID = nil

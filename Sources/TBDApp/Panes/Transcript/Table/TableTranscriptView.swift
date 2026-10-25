@@ -273,15 +273,16 @@ struct TableTranscriptView: NSViewRepresentable {
         var pendingPrependAnchor: PrependAnchor?
         /// The anchor of the last jump to a prompt (`jump(toNodeID:)`): the target
         /// row and where it landed in the viewport. Re-pinned exactly as
-        /// `pendingPrependAnchor` is, and held until the reader scrolls, the width
-        /// changes, the rows rebuild or history is prepended. Appends, tail
-        /// re-renders and `.noop`s add or change rows below it and keep it.
-        /// Released together with `heldJumpTargetID`. Set only by the jump; the
-        /// setter is internal for the same reason as `pendingPrependAnchor`'s.
+        /// `pendingPrependAnchor` is. A reader scroll, a width change, a rebuild
+        /// or a prepend releases it together with `heldJumpTargetID`; the
+        /// tail-follow releases it alone (see `followTail()`). Appends, tail
+        /// re-renders and `.noop`s add or change rows below it and keep it. Set
+        /// only by the jump; the setter is internal for the same reason as
+        /// `pendingPrependAnchor`'s.
         var pendingJumpAnchor: PrependAnchor?
-        /// Set while the coordinator itself moves the clip — restoring an anchor
-        /// or jumping — so the bounds observer can tell that scroll from the
-        /// reader's.
+        /// Set while the coordinator itself moves the clip — restoring an anchor,
+        /// jumping or following the tail — so the bounds observer can tell that
+        /// scroll from the reader's.
         var isRestoringAnchor = false
 
         // MARK: Prompt rail state (see TableTranscriptView+PromptRail.swift)
@@ -302,8 +303,11 @@ struct TableTranscriptView: NSViewRepresentable {
         /// Index into `promptEntries` of the active prompt, kept by
         /// `refreshActivePrompt()` and written only there. Nil with no entries.
         var activePromptIndex: Int?
-        /// Node id of a jump target that stays active until the reader scrolls.
-        /// Set by `jump(toNodeID:)` and released with `pendingJumpAnchor`.
+        /// Node id of a jump target that stays active until the reader scrolls
+        /// or a new prompt arrives after it. Set by `jump(toNodeID:)`. Released
+        /// with `pendingJumpAnchor` by the events that release both, and alone
+        /// by `refreshPromptOutline()` when the outline gains an entry after it.
+        /// The tail-follow keeps it.
         var heldJumpTargetID: String?
 
         /// The worktree root the entries in `composedCache` were composed
@@ -2164,7 +2168,7 @@ struct TableTranscriptView: NSViewRepresentable {
             // height across the rebuild, so its rows do not re-lay either.)
             if wasAtBottom && !isActivityToggle {
                 DispatchQueue.main.async { [weak self] in
-                    self?.scrollToEnd(animated: false)
+                    self?.followTail()
                     self?.recomputeAtBottom(atBottom)
                 }
             } else {
@@ -2262,8 +2266,8 @@ struct TableTranscriptView: NSViewRepresentable {
             // The reader moved the viewport: a held prepend or jump anchor no
             // longer describes where they are looking, so stop re-pinning it,
             // and a jump target stops overriding the active-prompt rule. The
-            // coordinator's own restore and jump scrolls are the moves that
-            // keep them.
+            // coordinator's own scrolls — restores, jumps and the tail-follow —
+            // keep them; the tail-follow ends the pins itself.
             if !isRestoringAnchor {
                 pendingPrependAnchor = nil
                 releaseJumpAnchor()
@@ -2433,6 +2437,19 @@ struct TableTranscriptView: NSViewRepresentable {
                     scrollView.reflectScrolledClipView(clip)
                 }
             }
+        }
+
+        /// Follows the tail after content the session produced. This is the
+        /// coordinator's own scroll, not the reader's, so it runs under
+        /// `isRestoringAnchor` and a held jump target stays active. It ends any
+        /// held pin first, since an anchor holding a row still and the tail
+        /// pulling the clip to the end would fight over it.
+        private func followTail() {
+            pendingPrependAnchor = nil
+            pendingJumpAnchor = nil
+            isRestoringAnchor = true
+            defer { isRestoringAnchor = false }
+            scrollToEnd(animated: false)
         }
 
         private func recomputeAtBottom(_ atBottom: Binding<Bool>) {
