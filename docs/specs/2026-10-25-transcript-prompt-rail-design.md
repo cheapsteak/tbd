@@ -81,7 +81,7 @@ The coordinator recomputes the active entry on the clip view's bounds notificati
   - The row under the pointer gets a quaternary-fill background with a 6pt corner radius.
   - A truncated row shows the prompt's first 500 characters as a tooltip.
 - **Click** – jumps to the prompt and closes the card.
-- **Remote, older history not loaded** – the card's first row reads "Earlier prompts not loaded" in the secondary color, with a Load button that calls `RemoteTranscriptSyncDriver.loadEarlier(trigger: .button)`. The rail never loads history by itself.
+- **Remote, older history not loaded** – the card's first row reads "Earlier prompts not loaded" in the secondary color, with a Load button that calls the pane's existing load-earlier action, the one the "Load earlier messages" header button calls. The rail never loads history by itself.
 
 ## Jumping
 
@@ -101,7 +101,7 @@ The Go menu gains **Previous Prompt** (⌥⌘↑) and **Next Prompt** (⌥⌘↓
 
 - **Previous** jumps to the active prompt itself when the reader is inside its exchange, more than 16pt below its top; otherwise to the prompt before it. From the top of the first prompt it does nothing.
 - **Next** jumps to the prompt after the active one. From the last prompt it scrolls to the end of the transcript.
-- **Scope** – the commands act on the transcript pane whose table or composer is first responder. `AppState` keeps a registry of rail-bearing panes alongside its existing transcript and composer focus registries. With no such pane focused the items are disabled, so the keys reach terminals untouched.
+- **Scope** – the commands act on the transcript pane whose table or composer is first responder. The table is found by walking up the view hierarchy from the first responder; a composer leads to its table through `AppState`'s existing composer and transcript focus registries, which the Remote pane joins. SwiftUI menu commands cannot observe the first responder, so the items stay enabled and do nothing when no such pane is focused. A view that claims ⌥⌘↑ or ⌥⌘↓ as its own key equivalent, as a terminal's natural text editing may, still receives it first, because AppKit offers a key equivalent to the key window's views before the menu bar.
 
 ## Lazy rendering
 
