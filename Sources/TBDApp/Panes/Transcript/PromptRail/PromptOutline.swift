@@ -25,47 +25,88 @@ struct PromptOutlineEntry: Equatable, Identifiable {
 enum PromptOutline {
     static let tooltipLimit = 500
 
+    /// What one node contributes to the outline apart from where it sits:
+    /// everything in its entry but the row index. A node's projection
+    /// depends on its content alone, so `PromptOutlineCache` keeps it by
+    /// `(id, contentVersion)` across rebuilds.
+    struct Projection: Equatable {
+        let id: String
+        let kind: PromptOutlineEntry.Kind
+        let firstLine: String
+        let tooltip: String
+        let timestamp: Date?
+
+        func entry(rowIndex: Int) -> PromptOutlineEntry {
+            PromptOutlineEntry(
+                id: id, rowIndex: rowIndex, kind: kind,
+                firstLine: firstLine, tooltip: tooltip, timestamp: timestamp)
+        }
+    }
+
     static func entries(from nodes: [TranscriptRenderNode]) -> [PromptOutlineEntry] {
         var result: [PromptOutlineEntry] = []
-        for (index, node) in nodes.enumerated() {
-            guard case .chatBubble(let item) = node.kind else { continue }
-            switch item {
-            case .userPrompt(let id, let text, let timestamp):
-                if UserMessageClassifier.isUntypedPromptMarker(text) { continue }
-                result.append(entry(id: id, rowIndex: index, kind: .prompt, text: text, timestamp: timestamp))
-            case .peerMessage(let id, let sender, let text, _, let timestamp):
-                result.append(entry(
-                    id: id, rowIndex: index,
-                    kind: .peer(sender: PeerHeaderChrome.displayName(for: sender)),
-                    text: text, timestamp: timestamp))
-            default:
-                continue
-            }
+        for (index, node) in nodes.enumerated() where isCandidate(node) {
+            if let projection = projection(of: node) { result.append(projection.entry(rowIndex: index)) }
         }
         return result
     }
 
-    private static func entry(
-        id: String, rowIndex: Int, kind: PromptOutlineEntry.Kind, text: String, timestamp: Date?
-    ) -> PromptOutlineEntry {
-        PromptOutlineEntry(
+    /// Whether `node` is a prompt or a peer message bubble, the only nodes
+    /// `projection(of:)` can turn into an entry. A kind check; reads no text.
+    static func isCandidate(_ node: TranscriptRenderNode) -> Bool {
+        guard case .chatBubble(let item) = node.kind else { return false }
+        switch item {
+        case .userPrompt, .peerMessage:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The entry `node` makes, less its row index; nil for a node that makes
+    /// none: anything but a prompt or a peer message, and a prompt nobody
+    /// typed (`UserMessageClassifier.isUntypedPromptMarker`).
+    static func projection(of node: TranscriptRenderNode) -> Projection? {
+        guard case .chatBubble(let item) = node.kind else { return nil }
+        switch item {
+        case .userPrompt(let id, let text, let timestamp):
+            if UserMessageClassifier.isUntypedPromptMarker(text) { return nil }
+            return projection(id: id, kind: .prompt, text: text, timestamp: timestamp)
+        case .peerMessage(let id, let sender, let text, _, let timestamp):
+            return projection(
+                id: id, kind: .peer(sender: PeerHeaderChrome.displayName(for: sender)),
+                text: text, timestamp: timestamp)
+        default:
+            return nil
+        }
+    }
+
+    private static func projection(
+        id: String, kind: PromptOutlineEntry.Kind, text: String, timestamp: Date?
+    ) -> Projection {
+        // Unwrapped once, for both the first line and the tooltip.
+        let unwrapped = TranscriptPastedContent.unwrap(text)
+        return Projection(
             id: id,
-            rowIndex: rowIndex,
             kind: kind,
-            firstLine: firstLine(of: text),
-            tooltip: String(TranscriptPastedContent.unwrap(text).prefix(tooltipLimit)),
+            firstLine: firstLine(ofUnwrapped: unwrapped),
+            tooltip: String(unwrapped.prefix(tooltipLimit)),
             timestamp: timestamp)
     }
 
     /// First line with non-whitespace content of the unwrapped text, whitespace
     /// runs collapsed to one space and trimmed.
     static func firstLine(of text: String) -> String {
-        let unwrapped = TranscriptPastedContent.unwrap(text)
-        for line in unwrapped.split(whereSeparator: \.isNewline) {
-            let words = line.split(whereSeparator: \.isWhitespace)
-            if !words.isEmpty { return words.joined(separator: " ") }
-        }
-        return ""
+        firstLine(ofUnwrapped: TranscriptPastedContent.unwrap(text))
+    }
+
+    /// `firstLine(of:)` for text already unwrapped. Reads only as far as the
+    /// end of the first line with content: that line is the one holding the
+    /// first non-whitespace character, so nothing after it is split or read.
+    private static func firstLine(ofUnwrapped text: String) -> String {
+        guard let start = text.firstIndex(where: { !$0.isWhitespace }) else { return "" }
+        let end = text[start...].firstIndex(where: \.isNewline) ?? text.endIndex
+        return text[start..<end].split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     /// Today: short local time. Earlier: abbreviated month and day.

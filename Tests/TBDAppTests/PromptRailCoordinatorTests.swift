@@ -77,6 +77,41 @@ struct PromptRailCoordinatorTests {
         #expect(presenter.entryLists.last == scene.coordinator.promptEntries)
     }
 
+    /// Every update but a streaming tick rebuilds the outline, and projecting
+    /// a prompt reads its whole text, so a rebuild projects only the prompts
+    /// it has not seen.
+    @Test("an append projects only the prompts it brings, and the outline matches the uncached builder")
+    func appendProjectsOnlyNewPrompts() throws {
+        let suiteName = "prompt-rail-projection-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
+        let scene = TableTranscriptScene(items: items, appState: appState)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        scene.coordinator.startObservingScroll()
+        scene.prime(nodes: transcriptRenderNodes(from: items))
+        // Priming rebuilt the outline more than once; each prompt was read once.
+        try #require(scene.coordinator.promptOutlineCache.projectionCount == 30,
+                     Comment(rawValue: "projections: \(scene.coordinator.promptOutlineCache.projectionCount)"))
+
+        let grown = items + [
+            .assistantText(id: "a-29-more", text: "One more reply.", timestamp: nil, usage: nil),
+            .userPrompt(id: "p-30", text: "Prompt 30", timestamp: nil),
+        ]
+        let grownNodes = transcriptRenderNodes(from: grown)
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: grownNodes)
+                         == .append(fromIndex: items.count),
+                     "precondition: the rows arrive as an append")
+        scene.coordinator.update(nodes: grownNodes, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+
+        #expect(scene.coordinator.promptOutlineCache.projectionCount == 31,
+                Comment(rawValue: "the append re-projected old prompts "
+                    + "(projections: \(scene.coordinator.promptOutlineCache.projectionCount))"))
+        #expect(scene.coordinator.promptEntries == PromptOutline.entries(from: grownNodes))
+    }
+
     /// A streaming tick re-renders only the last row. Rebuilding the outline on
     /// every tick would re-read every prompt for nothing, so `.updateLast`
     /// rebuilds it only when the last row is a prompt.

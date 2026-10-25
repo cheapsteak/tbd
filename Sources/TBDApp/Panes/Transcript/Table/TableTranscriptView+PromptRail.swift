@@ -46,8 +46,11 @@ extension TableTranscriptView.Coordinator {
     /// A prompt arriving after a held jump target ends the hold before the
     /// active prompt is re-derived, so the rule can pick the new prompt. The
     /// jump's pin is unaffected: a row added below cannot move the target.
+    ///
+    /// Projects only the prompts `promptOutlineCache` has not seen at their
+    /// current content, so an append reads the new prompts' text and no other.
     func refreshPromptOutline() {
-        let entries = PromptOutline.entries(from: nodes)
+        let entries = promptOutlineCache.entries(from: nodes)
         if entries != promptEntries {
             if gainsEntryAfterHeldJumpTarget(entries) {
                 heldJumpTargetID = nil

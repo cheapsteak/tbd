@@ -207,23 +207,31 @@ public enum UserMessageClassifier {
     /// Markers are recognised only in their structural position (every line is
     /// an image marker, or the text begins with the marker), so a typed prompt
     /// that merely mentions one stays a typed prompt.
+    ///
+    /// The rail asks this of every prompt it has not seen before, so it reads
+    /// as little as it can: it copies nothing, a typed prompt is told apart by
+    /// the start of its first non-blank line, and only text that opens with an
+    /// image marker is read to its end.
     public static func isUntypedPromptMarker(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty { return true }
-        if trimmed.hasPrefix("[Request interrupted by user") { return true }
-        if trimmed.hasPrefix("This session is being continued from a previous conversation") {
+        guard let start = text.firstIndex(where: { !$0.isWhitespace }) else { return true }
+        let body = text[start...]
+        if body.hasPrefix("[Request interrupted by user") { return true }
+        if body.hasPrefix("This session is being continued from a previous conversation") {
             return true
         }
-        return trimmed
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .allSatisfy { line in
-                line.hasPrefix("[Image: source: ")
-                    && line.hasSuffix("]")
-                    && line.count > "[Image: source: ]".count
-            }
+        // Every non-blank line must be an image marker, so the first must be.
+        guard body.hasPrefix(imageMarkerPrefix) else { return false }
+        return body.split(whereSeparator: \.isNewline).allSatisfy { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty
+                || (trimmed.hasPrefix(imageMarkerPrefix)
+                    && trimmed.hasSuffix("]")
+                    && trimmed.count > imageMarkerPrefix.count + 1)
+        }
     }
+
+    /// How an image-attachment meta line begins: `[Image: source: <path>]`.
+    private static let imageMarkerPrefix = "[Image: source: "
 
     /// True for the line Claude Code writes when it compacts a conversation
     /// (`/compact` or auto-compact): a `type:"user"` line carrying the summary

@@ -381,6 +381,11 @@ struct TableTranscriptView: NSViewRepresentable {
         /// `refreshPromptOutline()`. Written only there; the setter is internal
         /// because `private(set)` does not reach an extension in another file.
         var promptEntries: [PromptOutlineEntry] = []
+        /// Each prompt's projection into the outline, by `(id, contentVersion)`,
+        /// so a rebuild reads only the prompts that are new or changed. Used
+        /// only by `refreshPromptOutline()`; internal for the same reason as
+        /// `promptEntries`.
+        var promptOutlineCache = PromptOutlineCache()
         /// Index into `promptEntries` of the active prompt, kept by
         /// `refreshActivePrompt()` and written only there. Nil with no entries.
         var activePromptIndex: Int?
