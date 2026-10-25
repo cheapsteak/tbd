@@ -103,6 +103,16 @@ hardware, so it belongs in CI's configuration — where it is visible next to th
 runner it constrains, and where a change to the wrapper's default constant
 cannot silently lift it.
 
+CI's debug-information flags live there for the same kind of reason. The job's
+`CI_SWIFTPM_FLAGS` holds `--disable-index-store -Xswiftc -gline-tables-only`,
+and the build step and each of the four test passes spell it on their own
+command lines; the wrapper forwards those arguments untouched and adds only the
+job count. Nothing on a runner reads an index store or a local variable, and
+the flags compile in about 0.825 of the default's time on the same runner. A
+developer machine needs full debug information for lldb, so the wrapper's
+defaults stay SwiftPM's, and the flags reach only the runs whose configuration
+names them.
+
 ## Accepted limitation
 
 An environment variable can be set inline by any subprocess, so "the machine's
