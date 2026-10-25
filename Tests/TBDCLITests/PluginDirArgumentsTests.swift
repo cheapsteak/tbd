@@ -77,3 +77,43 @@ struct PluginDirArgumentsTests {
         #expect(refusal(["wt", "--type", "shell"]) == nil)
     }
 }
+
+@Suite("--plugin-dir on worktree create")
+struct WorktreeCreatePluginDirArgumentsTests {
+    private func refusal(_ arguments: [String]) -> String? {
+        do {
+            _ = try WorktreeCreate.parse(arguments)
+            return nil
+        } catch {
+            return WorktreeCreate.message(for: error)
+        }
+    }
+
+    @Test func repeatedPluginDirParsesInOrder() throws {
+        let parsed = try WorktreeCreate.parse(["--plugin-dir", "a", "--plugin-dir", "/b"])
+        #expect(parsed.pluginDirs == ["a", "/b"])
+    }
+
+    @Test func pluginDirsReachTheParamsAbsolute() throws {
+        let parsed = try WorktreeCreate.parse(["--plugin-dir", "plug", "--plugin-dir", "~/h"])
+        #expect(parsed.pluginDirsParam(cwd: "/work") == ["/work/plug", "~/h"])
+    }
+
+    @Test func noPluginDirSendsNone() throws {
+        let parsed = try WorktreeCreate.parse([])
+        #expect(parsed.pluginDirs.isEmpty)
+        #expect(parsed.pluginDirsParam(cwd: "/work") == nil)
+    }
+
+    @Test(arguments: ["", "  ", "\t"])
+    func blankPluginDirRefused(value: String) {
+        #expect(refusal(["--plugin-dir", "/ok", "--plugin-dir", value])
+            == CLIPluginDirs.blankValueMessage)
+    }
+
+    /// The primary's agent is the daemon's to settle, so no agent flag is
+    /// needed and none is checked.
+    @Test func pluginDirNeedsNoAgentFlag() {
+        #expect(refusal(["--plugin-dir", "/plug"]) == nil)
+    }
+}

@@ -43,12 +43,12 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSpawnExtras: ClaudeSpawnExtras? = nil) async throws -> Worktree {
         let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch, prNumber: prNumber)
         // Pass the original branch ref (may include `origin/` prefix) through
         // so phase 2 can dispatch to the correct git command.
         let existingBranchRef = useExistingBranch ? branch : nil
-        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
+        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, primaryAgentPreference: primaryAgentPreference, claudeSpawnExtras: claudeSpawnExtras)
         // Legacy synchronous contract: the returned worktree is fully set up.
         // Await phase 3 inline when a preSession hook gated the primary spawn.
         if case .preSessionPending(let phase3) = completion {
@@ -243,7 +243,7 @@ extension WorktreeLifecycle {
     /// Set `retryGeneratedNameOnCollision` to false when callers have already
     /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true, rollBackOnFailure: Bool = true) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSpawnExtras: ClaudeSpawnExtras? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true, rollBackOnFailure: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -509,10 +509,16 @@ extension WorktreeLifecycle {
             // the primary terminals on its completion marker. The wait runs in
             // a background task so the caller's RepoSerializer lane is freed
             // immediately — never block it for the duration of the hook.
+            //
+            // The hook's row carries a create's Claude values until phase 3
+            // starts the primary, so a primary started by recovery after a
+            // daemon restart — which has nothing but rows to go on — still
+            // gets them. Only a Claude primary has any use for them.
             if let preSession = try await spawnPreSessionTerminal(
                 worktree: spawnWorktree, repo: repo,
                 worktreePath: resultPath,
-                cols: cols, rows: rows
+                cols: cols, rows: rows,
+                claudeSpawnExtras: creationPrimaryKind == .claude ? claudeSpawnExtras : nil
             ) {
                 // Broadcast early. `.worktreeCreated` is for non-app clients —
                 // the app's handleDelta ignores it (default: break); what makes
@@ -544,7 +550,7 @@ extension WorktreeLifecycle {
                         modelOverride: modelOverride,
                         codexModelOverride: codexModelOverride,
                         primaryAgentPreference: primaryAgentPreference,
-                        claudeSettingsOverlay: claudeSettingsOverlay,
+                        claudeSpawnExtras: claudeSpawnExtras,
                         carryover: carryover,
                         preparedCodexLaunch: preparedCodexLaunch
                     )
@@ -572,7 +578,7 @@ extension WorktreeLifecycle {
                 modelOverride: modelOverride,
                 codexModelOverride: codexModelOverride,
                 primaryAgentPreference: primaryAgentPreference,
-                claudeSettingsOverlay: claudeSettingsOverlay,
+                claudeSpawnExtras: claudeSpawnExtras,
                 carryover: carryover,
                 preparedCodexLaunch: preparedCodexLaunch
             )
@@ -1324,6 +1330,10 @@ extension WorktreeLifecycle {
     /// Returns the created terminals as `(id, label)` pairs so phase 3 can
     /// broadcast `.terminalCreated` for each.
     ///
+    /// `claudeSpawnExtras` are a create's Claude values: a fresh Claude primary
+    /// gets them and keeps them on its row. A restored or carried-over
+    /// conversation, and any primary that is not Claude, gets none.
+    ///
     /// **It does not read or write `worktree.pending_prompt`.** Its whole
     /// involvement with a queued prompt is one notification, after the primary
     /// terminal row exists, that the pane is up
@@ -1342,7 +1352,7 @@ extension WorktreeLifecycle {
         modelOverride: String? = nil,
         codexModelOverride: String? = nil,
         primaryAgentPreference: PrimaryAgentPreference? = nil,
-        claudeSettingsOverlay: String? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil,
         carryover: ConversationCarryover? = nil,
         preparedCodexLaunch: CodexLaunchPreparation? = nil
     ) async throws -> [(id: UUID, label: String)] {
@@ -1365,7 +1375,7 @@ extension WorktreeLifecycle {
                 modelOverride: modelOverride,
                 codexModelOverride: codexModelOverride,
                 primaryAgentPreference: primaryAgentPreference,
-                claudeSettingsOverlay: claudeSettingsOverlay,
+                claudeSpawnExtras: claudeSpawnExtras,
                 carryover: carryover,
                 preparedCodexLaunch: preparedCodexLaunch)
         }
@@ -1387,7 +1397,7 @@ extension WorktreeLifecycle {
         modelOverride: String?,
         codexModelOverride: String?,
         primaryAgentPreference: PrimaryAgentPreference?,
-        claudeSettingsOverlay: String?,
+        claudeSpawnExtras: ClaudeSpawnExtras?,
         carryover: ConversationCarryover?,
         preparedCodexLaunch: CodexLaunchPreparation?
     ) async throws -> [(id: UUID, label: String)] {
@@ -1526,6 +1536,10 @@ extension WorktreeLifecycle {
         // exports, written into its row. Nil for any other primary, and for a
         // Claude one with every feature off.
         var primarySessionIncarnationID: UUID? = nil
+        // The create's Claude values, applied to a fresh Claude primary and
+        // kept on its row. Nil for any other primary, and for a restored or
+        // carried-over conversation.
+        var primarySpawnExtras: ClaudeSpawnExtras? = nil
         switch primaryTerminalKind {
         case .shell:
             primaryCommand = defaultShell
@@ -1565,6 +1579,7 @@ extension WorktreeLifecycle {
             let sessionUUID = carryover?.sourceSessionID ?? archivedSession ?? UUID().uuidString
             primarySessionID = sessionUUID
             let isResume = archivedSession != nil || carryover != nil
+            primarySpawnExtras = isResume ? nil : claudeSpawnExtras
             // `--resume` is what actually restores the prior conversation;
             // `--session-id` is for starting a NEW session with a pre-chosen
             // UUID (used on fresh create). Reviving with `--session-id` on an
@@ -1622,11 +1637,10 @@ extension WorktreeLifecycle {
                 // Repo fragment is file-backed config, read fresh at
                 // spawn time — applies on every spawn path, resume included.
                 repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                // Per-spawn fragment applies to FRESH primary spawns only;
-                // an archived-session resume must not reapply it. Hooks
-                // overlay still resolves for resumes — only
-                // extraSettingsJSON goes nil.
-                extraSettingsJSON: isResume ? nil : claudeSettingsOverlay
+                // The create's fragment, on a fresh primary only; a restored
+                // or carried-over conversation gets none here. The hooks
+                // overlay still resolves for those — only the fragment is nil.
+                extraSettingsJSON: primarySpawnExtras?.claudeSettingsOverlay
             )
             let spawnTitle = await ClaudeSessionTitle.forSpawn(
                 db: db, store: sessionTitles,
@@ -1657,6 +1671,7 @@ extension WorktreeLifecycle {
                 shellFallback: defaultShell,
                 settingsOverlayPath: primaryOverlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: primarySpawnExtras?.pluginDirs ?? [],
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: spawnTitle.name,
                 sessionModEnvironment: sessionMod?.environment ?? [:]
@@ -1698,7 +1713,8 @@ extension WorktreeLifecycle {
                 profileID: primaryProfileID,
                 kind: primaryTerminalKind,
                 transport: transport,
-                sessionIncarnationID: primarySessionIncarnationID)
+                sessionIncarnationID: primarySessionIncarnationID,
+                claudeSpawnExtras: primarySpawnExtras)
         } catch {
             await sessionTitles.release(primarySpawnTitle)
             throw error

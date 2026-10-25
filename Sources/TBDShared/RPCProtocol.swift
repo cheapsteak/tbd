@@ -1520,9 +1520,12 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// the configured global preference. Optional for backward compatibility.
     public let primaryAgentPreference: PrimaryAgentPreference?
     /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
-    /// per-session `--settings` overlay for this spawn's Claude agent. General
-    /// passthrough — TBD does not interpret the contents. Optional/defaulted for
-    /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
+    /// per-session `--settings` overlay for the primary Claude terminal. General
+    /// passthrough — TBD does not interpret the contents. Kept on that
+    /// terminal's row with `pluginDirs` (`Terminal.claudeSpawnExtras`), and on
+    /// the pre-session hook's row until the primary starts. Ignored when the
+    /// primary is Codex. Optional/defaulted for backward compatibility (old
+    /// daemons ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
     /// GitHub PR number this worktree is being created from. Stamped on the row
     /// (with `useExistingBranch == true`) so `PRStatusManager` tracks it by
@@ -1551,7 +1554,15 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// Claude-only `model`. Not persisted. Optional/defaulted for backward
     /// compatibility.
     public let codexModel: String?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil) {
+    /// Claude Code plugin folders for the primary Claude terminal — a plugin, a
+    /// folder of plugins, or a `.zip`, whatever `--plugin-dir` accepts — each
+    /// passed as `--plugin-dir` after TBD's own. Each path must be absolute or
+    /// start with `~/`, and must exist, or the create is refused before
+    /// anything of it exists. `~/` is expanded once, at create, and the
+    /// absolute paths are kept with `claudeSettingsOverlay`. Ignored when the
+    /// primary is Codex. Optional/defaulted for backward compatibility.
+    public let pluginDirs: [String]?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil, pluginDirs: [String]? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -1567,6 +1578,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.checkoutPRHead = checkoutPRHead
         self.autoArchiveOnMerge = autoArchiveOnMerge
         self.codexModel = codexModel
+        self.pluginDirs = pluginDirs
     }
 }
 
