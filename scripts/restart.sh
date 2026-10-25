@@ -380,31 +380,36 @@ fi
 
 # MARK: - Restart Daemon
 
-if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
-    echo "Stopping daemon..."
-    if [ -f ~/tbd/tbdd.pid ]; then
-        pid=$(cat ~/tbd/tbdd.pid)
-        kill "$pid" 2>/dev/null && sleep 0.5 || true
-    fi
-    # Clean stale files
-    rm -f ~/tbd/sock ~/tbd/tbdd.pid ~/tbd/port
+# How long the restart waits, in seconds, for the old daemon to exit and the
+# new one to answer, one budget across both. The new daemon gives the old one
+# 35 seconds at most (DaemonHandover.termBudget and killBudget) and then has
+# its own startup to finish.
+DAEMON_HANDOVER_TIMEOUT=60
 
-    # Preserve the previous daemon's log for post-mortem diagnostics — the
-    # daemon does not persist os.Logger output, so this file is the only
-    # record of a crash that happened before a restart.
-    [ -f /tmp/tbdd.log ] && mv /tmp/tbdd.log /tmp/tbdd.log.1
-    echo "Starting daemon..."
-    "$BUILD_DIR/TBDDaemon" > /tmp/tbdd.log 2>&1 &
-    # Wait for socket
-    for i in $(seq 1 30); do
-        [ -S ~/tbd/sock ] && break
-        sleep 0.1
-    done
-    if [ -S ~/tbd/sock ]; then
-        echo "  Daemon ready (PID $(cat ~/tbd/tbdd.pid 2>/dev/null))"
-    else
-        echo "  WARNING: Daemon socket not found after 3s"
-    fi
+# How long one `daemon status` probe of the new daemon may take, in seconds,
+# before it is cut off. The CLI has no timeout of its own, and a daemon that
+# accepts a connection and never replies would otherwise hold the restart.
+DAEMON_PROBE_TIMEOUT=5
+
+if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
+    # The daemon is replaced by a handover, as `tbd update` replaces it: the
+    # new daemon starts with TBD_HANDOVER_FROM_PID naming the old one, writes
+    # its own pid over the pid file, retires the old daemon, and binds its
+    # sockets only once the old one has exited. Nothing here signals the old
+    # daemon or removes its files. The pid file names a live daemon
+    # throughout, so the app's watchdog, which starts a daemon of its own
+    # when the socket is missing and the pid file names none, never runs a
+    # second daemon beside the new one; and the old daemon's teardown is over
+    # before the new one binds anything it could unlink.
+    #
+    # restart_daemon_by_handover (scripts/restart-bundle-lib.sh) is the whole
+    # step: it reads the pid file under TBD_HOME, where the daemon and the CLI
+    # look, waits for the old daemon's exit and then for `daemon status`, and
+    # returns non-zero, having stopped the new daemon, when the app must not
+    # go on.
+    restart_daemon_by_handover "${TBD_HOME:-$HOME/tbd}" "$BUILD_DIR/TBDDaemon" /tmp/tbdd.log \
+        "$DAEMON_HANDOVER_TIMEOUT" "$DAEMON_PROBE_TIMEOUT" "$BUILD_DIR/TBDCLI" daemon status --json \
+        || exit 1
 elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then
     echo "(Skipping daemon restart for WIP worktree)"
 fi

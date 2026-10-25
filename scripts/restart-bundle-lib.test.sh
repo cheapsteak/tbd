@@ -4,8 +4,9 @@
 # Every case runs against a temp directory. The three functions that reach for
 # system tools (codesign/security, open, pkill/pgrep) get stubs on a temp PATH
 # that record their arguments, so nothing here signs, launches, or kills
-# anything real. macOS-only: the assembly reads `plutil` and the install uses
-# `/bin/cp -cR`.
+# anything real. The daemon process cases start copies of `sleep` of their own
+# and signal only those. macOS-only: the assembly reads `plutil` and the
+# install uses `/bin/cp -cR`.
 # shellcheck disable=SC2329 # test_* helpers are dispatched dynamically below
 set -uo pipefail
 
@@ -57,6 +58,28 @@ assert_no_file() {
 # next person debugging a resource lookup has to rule out.
 assert_no_dir() {
     if [ -d "$2" ]; then fail "$1: unexpected $2"; else pass "$1"; fi
+}
+
+# Pass when <output> contains <text>, matched literally: the expected lines
+# here are full of parentheses, brackets and dots that a regex would misread.
+# A here-string rather than a pipe, so that grep -q leaving early cannot turn
+# into a SIGPIPE that pipefail reports as no match.
+#
+#   assert_contains <description> <text> <output>
+assert_contains() {
+    if grep -qF -- "$2" <<< "$3"; then
+        pass "$1"
+    else
+        fail "$1: [$2] not found in output"
+    fi
+}
+
+assert_not_contains() {
+    if grep -qF -- "$2" <<< "$3"; then
+        fail "$1: [$2] unexpectedly present"
+    else
+        pass "$1"
+    fi
 }
 
 # Read one top-level field out of the sidecar without assuming jq is installed.
@@ -812,6 +835,698 @@ test_describe_app_stop_names_every_outcome() {
         "$(describe_app_stop bogus 5 "$app")"
 }
 
+# MARK: - Daemon process control
+#
+# These cases run real processes, all of them children of this harness and all
+# of them `sleep` in the end: a stand-in daemon is sleep copied to a file named
+# TBDDaemon, which is the name daemon_process_is_running looks for. Every pid
+# they hand to anything that signals is one they started, or one nothing runs
+# as.
+
+# Copy sleep to <dir>/TBDDaemon and echo the copy's path.
+mkfakedaemon() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cp "$(command -v sleep)" "$dir/TBDDaemon"
+    printf '%s\n' "$dir/TBDDaemon"
+}
+
+# Start the stand-in daemon at <bin> in the background, sleeping 30 seconds,
+# and set STARTED_PID to its pid. With `ignore-term` it ignores SIGTERM, which
+# survives the exec, so only SIGKILL stops it. Returns once the pid names a
+# daemon: until the fork has become the exec, it is still a shell.
+#
+#   start_fake_daemon <bin> [ignore-term]
+start_fake_daemon() {
+    local bin="$1" mode="${2-}" ticks=0
+    if [ "$mode" = ignore-term ]; then
+        ( trap '' TERM; exec "$bin" 30 ) > /dev/null 2>&1 &
+    else
+        "$bin" 30 > /dev/null 2>&1 &
+    fi
+    STARTED_PID=$!
+    while ! daemon_process_is_running "$STARTED_PID" && [ "$ticks" -lt 50 ]; do
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+}
+
+# Kill the process whose pid <pid_file> holds, if it is still a running
+# daemon: once a stand-in has gone, its pid is free for anything.
+stop_recorded_daemon() {
+    local pid
+    pid="$(head -1 "$1" 2>/dev/null | tr -dc '0-9')"
+    if daemon_process_is_running "$pid"; then
+        kill -KILL "$pid" 2>/dev/null
+    fi
+}
+
+# A pid no process runs as, by `ps`, which sees every user's processes. `kill
+# -0` would not do: it also fails on a live process another user owns.
+unused_pid() {
+    local pid=$(( ($$ + 100000) % 60000 + 2 ))
+    while ps -p "$pid" > /dev/null 2>&1; do
+        pid=$((pid + 1))
+    done
+    printf '%s\n' "$pid"
+}
+
+# Wait, up to five seconds, until the process running as <pid> has executed
+# <name>: until the fork has become the exec, it is still a shell.
+wait_until_named() {
+    local ticks=0
+    while [ "$(ps -o ucomm= -p "$1" 2>/dev/null | tr -d ' ')" != "$2" ] && [ "$ticks" -lt 50 ]; do
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+}
+
+# Run <command...> and print "<its output> rc=<its status>".
+run_word() {
+    local output status=0
+    output="$("$@")" || status=$?
+    printf '%s rc=%s' "$output" "$status"
+}
+
+# Every budget and deadline is a whole number written the way bash arithmetic
+# reads it, and every poll interval is a number above zero.
+test_number_checks_refuse_what_arithmetic_and_sleep_misread() {
+    local value
+    for value in 0 7 10 120; do
+        assert_ok "[$value] is a whole number" _is_whole_number "$value"
+    done
+    for value in '' 08 010 00 1.5 -1 ' 3' x 3x; do
+        assert_fail "[$value] is not a whole number" _is_whole_number "$value"
+    done
+    assert_ok "1 is a pid" _is_pid 1
+    assert_fail "0 is not a pid" _is_pid 0
+    for value in 1 0.2 0.05 2.5 1.; do
+        assert_ok "[$value] is an interval" _is_positive_interval "$value"
+    done
+    for value in '' 0 0.0 00 . 1.2.3 -1 x; do
+        assert_fail "[$value] is not an interval" _is_positive_interval "$value"
+    done
+}
+
+# A daemon is a live process whose executable is TBDDaemon. Anything else a pid
+# file might name — a process the pid has since been handed to, one that only
+# mentions a TBDDaemon path, a pid nothing runs as, a zombie, or no pid at all
+# — is not one, so nothing waits on it or signals it.
+test_daemon_process_is_running_wants_a_live_daemon() {
+    local bin daemon other mentions renamed
+    bin="$(mkfakedaemon "$TEST_TMP/daemon-running")"
+    start_fake_daemon "$bin"
+    daemon="$STARTED_PID"
+    sleep 30 > /dev/null 2>&1 &
+    other=$!
+    # A reused pid that a debugger or an editor holds: a TBDDaemon path among
+    # its arguments, another executable.
+    tail -f "$bin" > /dev/null 2>&1 &
+    mentions=$!
+    wait_until_named "$mentions" tail
+    # And one whose argv[0] is a TBDDaemon path while it runs sleep.
+    ( exec -a "$bin" sleep 30 ) > /dev/null 2>&1 &
+    renamed=$!
+    wait_until_named "$renamed" sleep
+
+    assert_ok "a live process named TBDDaemon is a running daemon" \
+        daemon_process_is_running "$daemon"
+    assert_fail "a live process with another name is not" daemon_process_is_running "$other"
+    assert_fail "a process with a TBDDaemon path among its arguments is not" \
+        daemon_process_is_running "$mentions"
+    assert_fail "a process whose argv[0] is a TBDDaemon path is not" \
+        daemon_process_is_running "$renamed"
+    assert_ok "any live process is running" process_is_running "$other"
+    kill -KILL "$daemon" "$other" "$mentions" "$renamed" 2>/dev/null
+    wait "$daemon" "$other" "$mentions" "$renamed" 2>/dev/null
+    assert_fail "a daemon that has exited is not running" daemon_process_is_running "$daemon"
+    assert_fail "a process that has exited is not running" process_is_running "$other"
+    assert_fail "a pid nothing runs as is not a running daemon" \
+        daemon_process_is_running "$(unused_pid)"
+    assert_fail "a pid nothing runs as is not running" process_is_running "$(unused_pid)"
+    assert_fail "an empty pid is not a running daemon" daemon_process_is_running ""
+    assert_fail "an empty pid is not running" process_is_running ""
+    assert_fail "a pid that is not a number is not a running daemon" daemon_process_is_running "12x"
+    assert_fail "pid 0 is not a running daemon" daemon_process_is_running 0
+    assert_fail "pid 0 is not running" process_is_running 0
+}
+
+# A zombie keeps its name, so only its state tells it from a daemon. The
+# fixture takes no chances with timing. The stand-in sleeps 30 seconds under
+# a shell that then becomes a sleep of its own, which never reaps a child; the
+# case kills the stand-in only once that exec has happened, so no shell is
+# left that could reap it first.
+test_a_zombie_daemon_is_not_running() {
+    local bin parent zombie_file zombie ticks
+    bin="$(mkfakedaemon "$TEST_TMP/daemon-zombie")"
+    zombie_file="$TEST_TMP/daemon-zombie.pid"
+    sh -c '"$1" 30 & echo "$!" > "$2"; exec sleep 60' _ "$bin" "$zombie_file" > /dev/null 2>&1 &
+    parent=$!
+    wait_until_named "$parent" sleep
+    ticks=0
+    while ! daemon_process_is_running "$(head -1 "$zombie_file" 2>/dev/null | tr -dc '0-9')" &&
+        [ "$ticks" -lt 50 ]; do
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+    zombie="$(head -1 "$zombie_file" 2>/dev/null | tr -dc '0-9')"
+    if [ -n "$zombie" ] && [ "$(ps -o ucomm= -p "$parent" 2>/dev/null | tr -d ' ')" = sleep ]; then
+        pass "the stand-in runs under a parent that will not reap it"
+    else
+        fail "the stand-in runs under a parent that will not reap it: pid [$zombie]"
+        kill -KILL "$parent" 2>/dev/null
+        return
+    fi
+
+    kill -KILL "$zombie" 2>/dev/null
+    ticks=0
+    while ! ps -o stat= -p "$zombie" 2>/dev/null | grep -q Z && [ "$ticks" -lt 50 ]; do
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+    if ps -o stat= -p "$zombie" 2>/dev/null | grep -q Z; then
+        pass "the killed stand-in is a zombie"
+        assert_fail "a zombie daemon is not a running daemon" daemon_process_is_running "$zombie"
+        assert_fail "a zombie is not running" process_is_running "$zombie"
+    else
+        fail "the killed stand-in is a zombie: pid [$zombie] never showed state Z"
+    fi
+    # Its parent's exit hands the zombie to launchd, which reaps it.
+    kill -KILL "$parent" 2>/dev/null
+    wait "$parent" 2>/dev/null
+}
+
+# Run stop_daemon_process on <pid> with a one-second grace and a one-second
+# wait after SIGKILL, and print "<outcome> rc=<status>".
+run_stop_daemon() {
+    local outcome status=0
+    outcome="$(stop_daemon_process "$1" 1 1)" || status=$?
+    printf '%s rc=%s' "$outcome" "$status"
+}
+
+# stop_daemon_process returns only once the daemon has exited, escalating to
+# SIGKILL, and says which way it went. It never signals a pid that names no
+# daemon, nor any pid when a budget is malformed.
+test_stop_daemon_waits_and_escalates() {
+    local bin other outcome
+    bin="$(mkfakedaemon "$TEST_TMP/daemon-stop")"
+
+    assert_eq "no daemon at the pid: nothing to stop" "none rc=0" \
+        "$(run_stop_daemon "$(unused_pid)")"
+
+    # A budget bash arithmetic cannot use is refused before any signal.
+    start_fake_daemon "$bin"
+    for outcome in "0.5 1" "1 x" "08 1" "1 010"; do
+        # shellcheck disable=SC2086 # the two budgets, split on purpose
+        assert_eq "budgets [$outcome] are refused" "invalid rc=2" \
+            "$(run_word stop_daemon_process "$STARTED_PID" $outcome)"
+    done
+    assert_ok "and the daemon is not signalled" daemon_process_is_running "$STARTED_PID"
+    assert_eq "wait_for_daemon_exit refuses a fractional budget" "2" \
+        "$(wait_for_daemon_exit "$STARTED_PID" 0.5; printf '%s' "$?")"
+    kill -KILL "$STARTED_PID" 2>/dev/null
+    wait "$STARTED_PID" 2>/dev/null
+
+    sleep 30 > /dev/null 2>&1 &
+    other=$!
+    assert_eq "a pid that names another process is nothing to stop" "none rc=0" \
+        "$(run_stop_daemon "$other")"
+    if kill -0 "$other" 2>/dev/null; then
+        pass "the other process is not signalled"
+    else
+        fail "the other process is not signalled"
+    fi
+    kill "$other" 2>/dev/null
+    wait "$other" 2>/dev/null
+
+    start_fake_daemon "$bin"
+    assert_eq "a daemon that exits on SIGTERM is stopped" "stopped rc=0" \
+        "$(run_stop_daemon "$STARTED_PID")"
+    assert_fail "and it is gone" daemon_process_is_running "$STARTED_PID"
+    wait "$STARTED_PID" 2>/dev/null
+
+    start_fake_daemon "$bin" ignore-term
+    assert_eq "a daemon that ignores SIGTERM is killed" "killed rc=0" \
+        "$(run_stop_daemon "$STARTED_PID")"
+    assert_fail "and it is gone" daemon_process_is_running "$STARTED_PID"
+    wait "$STARTED_PID" 2>/dev/null
+
+    # A process SIGKILL cannot stop is one in an uninterruptible kernel wait,
+    # which no harness can make on demand. A `kill` that drops SIGKILL stands
+    # in for it.
+    start_fake_daemon "$bin" ignore-term
+    outcome="$(
+        kill() {
+            [ "$1" = -KILL ] && return 0
+            builtin kill "$@"
+        }
+        run_stop_daemon "$STARTED_PID"
+    )"
+    assert_eq "a daemon still running after SIGKILL is reported, and fails" \
+        "survived rc=1" "$outcome"
+    kill -KILL "$STARTED_PID" 2>/dev/null
+    wait "$STARTED_PID" 2>/dev/null
+}
+
+# A command that records its pid in $HANG_PID_FILE and then sleeps 30 seconds:
+# a probe of a daemon that accepted the connection and never replied.
+mkhangingprobe() {
+    local path="$1"
+    cat > "$path" << 'EOF'
+#!/bin/sh
+printf '%s\n' "$$" > "$HANG_PID_FILE"
+exec sleep 30
+EOF
+    chmod +x "$path"
+}
+
+# run_with_time_limit returns the command's own status, or 124 once it has
+# had to stop a command that ran out of time, and refuses a malformed call.
+test_run_with_time_limit_cuts_off_a_hung_command() {
+    local hang started elapsed pid
+    hang="$TEST_TMP/hanging-probe"
+    mkhangingprobe "$hang"
+    export HANG_PID_FILE="$TEST_TMP/hanging-probe.pid"
+
+    assert_eq "a command that finishes keeps its own status" "3" \
+        "$(run_with_time_limit 5 sh -c 'exit 3'; printf '%s' "$?")"
+    assert_eq "and its output" "hello" "$(run_with_time_limit 5 echo hello)"
+
+    rm -f "$HANG_PID_FILE"
+    started=$SECONDS
+    assert_eq "a command that hangs is cut off with 124" "124" \
+        "$(run_with_time_limit 1 "$hang"; printf '%s' "$?")"
+    elapsed=$((SECONDS - started))
+    if [ "$elapsed" -lt 10 ]; then
+        pass "the cut comes near the one-second limit"
+    else
+        fail "the cut comes near the one-second limit: it took ${elapsed}s"
+    fi
+    pid="$(head -1 "$HANG_PID_FILE" 2>/dev/null | tr -dc '0-9')"
+    if [ -n "$pid" ] && ! process_is_running "$pid"; then
+        pass "the hung command is stopped, not left behind"
+    else
+        fail "the hung command is stopped, not left behind: pid [$pid]"
+        [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null
+    fi
+
+    assert_eq "a limit of 0 is refused" "125" "$(run_with_time_limit 0 true; printf '%s' "$?")"
+    assert_eq "a fractional limit is refused" "125" "$(run_with_time_limit 0.5 true; printf '%s' "$?")"
+    assert_eq "no command is refused" "125" "$(run_with_time_limit 5; printf '%s' "$?")"
+    unset HANG_PID_FILE
+}
+
+# The pid a handover replaces comes from the pid file under TBD_HOME, where
+# the daemon and the CLI look, and is 0 for a cold start.
+test_handover_from_pid_reads_the_pid_file_under_tbd_home() {
+    local home other_home
+    home="$TEST_TMP/handover-home"
+    other_home="$TEST_TMP/handover-home-env"
+    mkdir -p "$home" "$other_home"
+
+    assert_eq "no pid file is a cold start" "0" "$(handover_from_pid "$home")"
+    printf '4242' > "$home/tbdd.pid"
+    assert_eq "the pid the daemon wrote" "4242" "$(handover_from_pid "$home")"
+    printf '  4242\n' > "$home/tbdd.pid"
+    assert_eq "whitespace around it is ignored" "4242" "$(handover_from_pid "$home")"
+    printf '0042\n' > "$home/tbdd.pid"
+    assert_eq "a leading zero is dropped, never read as octal" "42" "$(handover_from_pid "$home")"
+    printf 'garbage\n' > "$home/tbdd.pid"
+    assert_eq "a file with no pid is a cold start" "0" "$(handover_from_pid "$home")"
+    : > "$home/tbdd.pid"
+    assert_eq "an empty file is a cold start" "0" "$(handover_from_pid "$home")"
+
+    printf '5151\n' > "$other_home/tbdd.pid"
+    assert_eq "with no argument, TBD_HOME's pid file" "5151" \
+        "$(TBD_HOME="$other_home" handover_from_pid)"
+    mkdir -p "$TEST_TMP/handover-user/tbd"
+    printf '6161\n' > "$TEST_TMP/handover-user/tbd/tbdd.pid"
+    assert_eq "with no argument and no TBD_HOME, ~/tbd's" "6161" \
+        "$(unset TBD_HOME; HOME="$TEST_TMP/handover-user" handover_from_pid)"
+}
+
+# The handover cases below use this harness's own process as the new daemon
+# wherever one has to be running: process_is_running does not look at names.
+
+# The first phase of a handover: the old daemon's exit, with the new daemon's
+# death and the deadline as the ways out. `none` only when the old daemon was
+# never seen running, so a caller can log which it was truthfully.
+test_wait_for_predecessor_exit_says_how_it_ended() {
+    local bin other
+
+    assert_eq "pid 0 is a cold start: nothing to wait for" "none rc=0" \
+        "$(run_word wait_for_predecessor_exit 0 "$$" $((SECONDS + 5)))"
+    sleep 30 > /dev/null 2>&1 &
+    other=$!
+    assert_eq "a pid that names no daemon is nothing to wait for" "none rc=0" \
+        "$(run_word wait_for_predecessor_exit "$other" "$$" $((SECONDS + 5)))"
+    kill "$other" 2>/dev/null
+    wait "$other" 2>/dev/null
+
+    bin="$(mkfakedaemon "$TEST_TMP/daemon-predecessor")"
+    start_fake_daemon "$bin"
+    ( sleep 0.5; kill "$STARTED_PID" 2>/dev/null ) > /dev/null 2>&1 &
+    assert_eq "an old daemon that exits during the wait has exited" "exited rc=0" \
+        "$(run_word wait_for_predecessor_exit "$STARTED_PID" "$$" $((SECONDS + 10)))"
+    wait "$STARTED_PID" 2>/dev/null
+
+    start_fake_daemon "$bin"
+    assert_eq "a new daemon that is gone ends the wait at once" "successor-exited rc=1" \
+        "$(run_word wait_for_predecessor_exit "$STARTED_PID" "$(unused_pid)" $((SECONDS + 30)))"
+    assert_eq "an old daemon still running at the deadline is a timeout" "timeout rc=1" \
+        "$(run_word wait_for_predecessor_exit "$STARTED_PID" "$$" "$SECONDS")"
+    assert_ok "and the wait signals neither" daemon_process_is_running "$STARTED_PID"
+    assert_eq "a deadline that is not a whole number is refused" "invalid rc=2" \
+        "$(run_word wait_for_predecessor_exit "$STARTED_PID" "$$" soon)"
+    assert_eq "a new daemon pid that is no pid is refused" "invalid rc=2" \
+        "$(run_word wait_for_predecessor_exit "$STARTED_PID" 0 $((SECONDS + 5)))"
+    kill -KILL "$STARTED_PID" 2>/dev/null
+    wait "$STARTED_PID" 2>/dev/null
+}
+
+# Succeeds on its third call, counting calls in $READY_COUNT_FILE. An
+# executable, as wait_until_daemon_ready's probe must be.
+mkreadyonthirdcall() {
+    cat > "$1" << 'EOF'
+#!/bin/sh
+calls="$(cat "$READY_COUNT_FILE" 2>/dev/null || printf 0)"
+calls=$((calls + 1))
+printf '%s\n' "$calls" > "$READY_COUNT_FILE"
+[ "$calls" -ge 3 ]
+EOF
+    chmod +x "$1"
+}
+
+# The second phase: the caller's readiness probe, polled and each time cut
+# off, with the new daemon's death and the deadline as the ways out.
+test_wait_until_daemon_ready_says_how_it_ended() {
+    local third hang started elapsed pid
+    third="$TEST_TMP/ready-on-third-call"
+    mkreadyonthirdcall "$third"
+    hang="$TEST_TMP/ready-probe-hangs"
+    mkhangingprobe "$hang"
+
+    assert_eq "a probe that passes is ready, and its output is not the answer" "ready rc=0" \
+        "$(run_word wait_until_daemon_ready "$$" $((SECONDS + 5)) 0.1 5 echo noise)"
+    assert_eq "the probe is asked once even past the deadline" "ready rc=0" \
+        "$(run_word wait_until_daemon_ready "$$" 0 0.1 5 true)"
+    export READY_COUNT_FILE="$TEST_TMP/ready-count"
+    rm -f "$READY_COUNT_FILE"
+    assert_eq "the probe is polled until it passes" "ready rc=0" \
+        "$(run_word wait_until_daemon_ready "$$" $((SECONDS + 10)) 0.1 5 "$third")"
+    assert_eq "and was asked three times" "3" "$(cat "$READY_COUNT_FILE")"
+    unset READY_COUNT_FILE
+    assert_eq "a new daemon that is gone ends the wait at once" "successor-exited rc=1" \
+        "$(run_word wait_until_daemon_ready "$(unused_pid)" $((SECONDS + 30)) 0.1 5 false)"
+    assert_eq "a probe still failing at the deadline is a timeout" "timeout rc=1" \
+        "$(run_word wait_until_daemon_ready "$$" "$SECONDS" 0.1 5 false)"
+
+    # A daemon that accepts and never replies: each probe is cut off after a
+    # second, so the wait still ends near its deadline rather than never.
+    export HANG_PID_FILE="$TEST_TMP/ready-probe-hangs.pid"
+    rm -f "$HANG_PID_FILE"
+    started=$SECONDS
+    assert_eq "a probe that hangs is cut off, and the wait times out" "timeout rc=1" \
+        "$(run_word wait_until_daemon_ready "$$" $((SECONDS + 2)) 0.1 1 "$hang")"
+    elapsed=$((SECONDS - started))
+    if [ "$elapsed" -lt 10 ]; then
+        pass "a hung probe holds the wait past its deadline by one probe at most"
+    else
+        fail "a hung probe holds the wait past its deadline by one probe at most: it took ${elapsed}s"
+    fi
+    pid="$(head -1 "$HANG_PID_FILE" 2>/dev/null | tr -dc '0-9')"
+    if [ -n "$pid" ] && ! process_is_running "$pid"; then
+        pass "the hung probe is stopped, not left behind"
+    else
+        fail "the hung probe is stopped, not left behind: pid [$pid]"
+        [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null
+    fi
+    unset HANG_PID_FILE
+
+    assert_eq "a poll interval of 0 is refused" "invalid rc=2" \
+        "$(run_word wait_until_daemon_ready "$$" $((SECONDS + 5)) 0 5 true)"
+    assert_eq "a malformed poll interval is refused" "invalid rc=2" \
+        "$(run_word wait_until_daemon_ready "$$" $((SECONDS + 5)) 1.2.3 5 true)"
+    assert_eq "a probe limit of 0 is refused" "invalid rc=2" \
+        "$(run_word wait_until_daemon_ready "$$" $((SECONDS + 5)) 0.1 0 true)"
+    assert_eq "a deadline that is not a whole number is refused" "invalid rc=2" \
+        "$(run_word wait_until_daemon_ready "$$" soon 0.1 5 true)"
+    assert_eq "no probe at all is refused" "invalid rc=2" \
+        "$(run_word wait_until_daemon_ready "$$" $((SECONDS + 5)) 0.1 5)"
+}
+
+# Records "early" in $ORDER_FILE when the daemon whose pid is in
+# $ORDER_PREDECESSOR is still running, then "asked", then succeeds. It calls
+# daemon_process_is_running, so it runs this harness's copy of the library.
+mkorderprobe() {
+    cat > "$1" << EOF
+#!/usr/bin/env bash
+# shellcheck source=/dev/null
+source "$HELPER"
+if daemon_process_is_running "\$ORDER_PREDECESSOR"; then
+    printf 'early\n' >> "\$ORDER_FILE"
+fi
+printf 'asked\n' >> "\$ORDER_FILE"
+EOF
+    chmod +x "$1"
+}
+
+# Both phases under one budget, in order: the readiness probe never runs while
+# the old daemon does, and not at all when the first phase fails.
+test_wait_for_daemon_handover_runs_the_phases_in_order() {
+    local bin probe
+    export ORDER_FILE="$TEST_TMP/handover-order"
+    bin="$(mkfakedaemon "$TEST_TMP/daemon-handover")"
+    probe="$TEST_TMP/handover-order-probe"
+    mkorderprobe "$probe"
+
+    assert_eq "a cold start that answers is ready" "none ready rc=0" \
+        "$(run_word wait_for_daemon_handover 0 "$$" 5 0.1 5 true)"
+
+    start_fake_daemon "$bin"
+    export ORDER_PREDECESSOR="$STARTED_PID"
+    rm -f "$ORDER_FILE"
+    ( sleep 0.5; kill "$STARTED_PID" 2>/dev/null ) > /dev/null 2>&1 &
+    assert_eq "an old daemon that exits, then an answer, is ready" "exited ready rc=0" \
+        "$(run_word wait_for_daemon_handover "$STARTED_PID" "$$" 10 0.1 5 "$probe")"
+    assert_eq "the readiness probe ran only after the old daemon had gone" "asked" \
+        "$(cat "$ORDER_FILE" 2>/dev/null)"
+    wait "$STARTED_PID" 2>/dev/null
+
+    start_fake_daemon "$bin"
+    export ORDER_PREDECESSOR="$STARTED_PID"
+    rm -f "$ORDER_FILE"
+    assert_eq "an old daemon still running at the deadline skips the second phase" \
+        "timeout skipped rc=1" \
+        "$(run_word wait_for_daemon_handover "$STARTED_PID" "$$" 0 0.1 5 "$probe")"
+    assert_eq "a new daemon that dies first skips it too" "successor-exited skipped rc=1" \
+        "$(run_word wait_for_daemon_handover "$STARTED_PID" "$(unused_pid)" 30 0.1 5 "$probe")"
+    if [ -e "$ORDER_FILE" ]; then
+        fail "a skipped second phase never asks the readiness probe"
+    else
+        pass "a skipped second phase never asks the readiness probe"
+    fi
+    kill -KILL "$STARTED_PID" 2>/dev/null
+    wait "$STARTED_PID" 2>/dev/null
+    unset ORDER_FILE ORDER_PREDECESSOR
+
+    assert_eq "a new daemon that dies before it answers" "none successor-exited rc=1" \
+        "$(run_word wait_for_daemon_handover 0 "$(unused_pid)" 30 0.1 5 false)"
+    assert_eq "a new daemon that never answers" "none timeout rc=1" \
+        "$(run_word wait_for_daemon_handover 0 "$$" 0 0.1 5 false)"
+    assert_eq "a budget that is not a whole number is refused" "invalid skipped rc=2" \
+        "$(run_word wait_for_daemon_handover 0 "$$" 1.5 0.1 5 true)"
+}
+
+# restart.sh goes on to the app only when the old daemon is gone and the new
+# one runs; every other answer stops it, an unrecognised one included.
+test_describe_daemon_handover_decides_each_outcome() {
+    local outcome
+    for outcome in 'exited ready' 'none ready'; do
+        assert_eq "[$outcome] goes on" "Daemon ready (PID 222) rc=0" \
+            "$(run_word describe_daemon_handover "$outcome" 111 222 60 /x/tbdd.log)"
+    done
+    for outcome in 'exited timeout' 'none timeout'; do
+        assert_eq "[$outcome] goes on with a warning" \
+            "WARNING: the daemon (PID 222) is running but did not answer within 60s — see /x/tbdd.log rc=0" \
+            "$(run_word describe_daemon_handover "$outcome" 111 222 60 /x/tbdd.log)"
+    done
+    assert_eq "[successor-exited skipped] stops" \
+        "ERROR: the new daemon (PID 222) exited while the old one (PID 111) was still running — see /x/tbdd.log rc=1" \
+        "$(run_word describe_daemon_handover 'successor-exited skipped' 111 222 60 /x/tbdd.log)"
+    for outcome in 'exited successor-exited' 'none successor-exited'; do
+        assert_eq "[$outcome] stops" \
+            "ERROR: the new daemon (PID 222) exited before it answered — see /x/tbdd.log rc=1" \
+            "$(run_word describe_daemon_handover "$outcome" 111 222 60 /x/tbdd.log)"
+    done
+    assert_eq "[timeout skipped] stops" \
+        "ERROR: the old daemon (PID 111) was still running after 60s — see /x/tbdd.log rc=1" \
+        "$(run_word describe_daemon_handover 'timeout skipped' 111 222 60 /x/tbdd.log)"
+    for outcome in '' 'invalid skipped' 'exited' 'ready' 'none ready extra'; do
+        assert_eq "[$outcome] is unrecognised, and stops" \
+            "ERROR: the daemon handover ended in an unrecognised way: [$outcome] — see /x/tbdd.log rc=1" \
+            "$(run_word describe_daemon_handover "$outcome" 111 222 60 /x/tbdd.log)"
+    done
+}
+
+# A fixture for restart_daemon_by_handover in <dir>: a TBD home, a stand-in
+# successor and a stand-in `daemon status` probe.
+#
+# The successor, <dir>/new-daemon, records its pid in new-daemon.pid and the
+# TBD_HANDOVER_FROM_PID it was given in new-daemon.from, then does what
+# $STUB_SUCCESSOR says. `retires` kills the daemon it was told to hand over
+# from, the way a real successor retires its predecessor; `exits` exits at
+# once; anything else leaves the old daemon alone. Unless it exits, it then
+# becomes a copy of sleep named TBDDaemon, a daemon that stays up.
+#
+# The probe, <dir>/probe, answers when $STUB_PROBE is empty, fails for `fails`
+# and hangs for `hangs`.
+mkrestartfixture() {
+    local dir="$1"
+    mkdir -p "$dir/home"
+    mkfakedaemon "$dir/bin" > /dev/null
+    cat > "$dir/new-daemon" << EOF
+#!/bin/sh
+printf '%s\n' "\$\$" > "$dir/new-daemon.pid"
+printf '%s\n' "\$TBD_HANDOVER_FROM_PID" > "$dir/new-daemon.from"
+case "\${STUB_SUCCESSOR-}" in
+    exits) exit 1 ;;
+    retires) [ "\$TBD_HANDOVER_FROM_PID" = 0 ] || kill "\$TBD_HANDOVER_FROM_PID" ;;
+esac
+exec "$dir/bin/TBDDaemon" 60
+EOF
+    cat > "$dir/probe" << 'EOF'
+#!/bin/sh
+case "${STUB_PROBE-}" in
+    fails) exit 1 ;;
+    hangs) exec sleep 30 ;;
+esac
+exit 0
+EOF
+    chmod +x "$dir/new-daemon" "$dir/probe"
+}
+
+# Run restart_daemon_by_handover against the fixture in <dir> with a budget
+# of <timeout> seconds and a one-second probe limit, and print its stdout and
+# stderr, then "rc=<status>". Any VAR=value arguments after <timeout> are set
+# for the run.
+#
+#   run_restart <dir> <timeout> [VAR=value ...]
+run_restart() {
+    local dir="$1" timeout="$2"
+    shift 2
+    (
+        for assignment in "$@"; do
+            export "${assignment?}"
+        done
+        restart_daemon_by_handover "$dir/home" "$dir/new-daemon" "$dir/tbdd.log" \
+            "$timeout" 1 "$dir/probe" 2>&1
+        printf 'rc=%s\n' "$?"
+    )
+}
+
+# restart.sh's daemon step, every branch: the pid it hands over from, a cold
+# start, a handover the new daemon completes, one it never completes, a new
+# daemon that dies, and one that runs but does not answer. A step that stops
+# the restart stops the new daemon first; one that goes on leaves it running.
+test_restart_daemon_by_handover_takes_every_branch() {
+    local dir out new_pid old_pid probe
+
+    # A cold start that answers. The log the last daemon left is kept.
+    dir="$TEST_TMP/restart-cold"
+    mkrestartfixture "$dir"
+    printf 'the last daemon\n' > "$dir/tbdd.log"
+    out="$(run_restart "$dir" 10)"
+    new_pid="$(head -1 "$dir/new-daemon.pid" 2>/dev/null | tr -dc '0-9')"
+    assert_contains "a cold start goes on" "rc=0" "$out"
+    assert_contains "and says it starts the daemon" "Starting daemon..." "$out"
+    assert_contains "and that it is ready" "Daemon ready (PID $new_pid)" "$out"
+    assert_eq "the new daemon is told there is no daemon to hand over from" "0" \
+        "$(cat "$dir/new-daemon.from" 2>/dev/null)"
+    assert_eq "the previous log is kept beside the new one" "the last daemon" \
+        "$(cat "$dir/tbdd.log.1" 2>/dev/null)"
+    assert_ok "a restart that goes on leaves the new daemon running" \
+        daemon_process_is_running "$new_pid"
+    stop_recorded_daemon "$dir/new-daemon.pid"
+
+    # A pid file with no pid in it is a cold start too.
+    dir="$TEST_TMP/restart-garbage"
+    mkrestartfixture "$dir"
+    printf 'garbage\n' > "$dir/home/tbdd.pid"
+    out="$(run_restart "$dir" 10)"
+    assert_contains "a pid file with no pid goes on as a cold start" "rc=0" "$out"
+    assert_eq "and hands over from nothing" "0" "$(cat "$dir/new-daemon.from" 2>/dev/null)"
+    stop_recorded_daemon "$dir/new-daemon.pid"
+
+    # A handover the new daemon completes: it retires the old one.
+    dir="$TEST_TMP/restart-handover"
+    mkrestartfixture "$dir"
+    start_fake_daemon "$dir/bin/TBDDaemon"
+    old_pid="$STARTED_PID"
+    printf '%s\n' "$old_pid" > "$dir/home/tbdd.pid"
+    out="$(run_restart "$dir" 10 STUB_SUCCESSOR=retires)"
+    new_pid="$(head -1 "$dir/new-daemon.pid" 2>/dev/null | tr -dc '0-9')"
+    assert_contains "a completed handover goes on" "rc=0" "$out"
+    assert_contains "and names the daemon it handed over from" \
+        "handing over from PID $old_pid" "$out"
+    assert_eq "the new daemon is told which daemon to replace" "$old_pid" \
+        "$(cat "$dir/new-daemon.from" 2>/dev/null)"
+    assert_contains "and the new daemon is ready" "Daemon ready (PID $new_pid)" "$out"
+    assert_fail "the old daemon is gone" daemon_process_is_running "$old_pid"
+    wait "$old_pid" 2>/dev/null
+    stop_recorded_daemon "$dir/new-daemon.pid"
+
+    # A handover that never completes: the old daemon is still running at the
+    # deadline. The restart stops, and stops the new daemon it started. Two
+    # seconds, because SECONDS ticks on the wall clock's second boundaries: a
+    # budget of 1 could end within milliseconds, before the stand-in successor
+    # has become the TBDDaemon that stop_daemon_process looks for.
+    dir="$TEST_TMP/restart-refused"
+    mkrestartfixture "$dir"
+    start_fake_daemon "$dir/bin/TBDDaemon"
+    old_pid="$STARTED_PID"
+    printf '%s\n' "$old_pid" > "$dir/home/tbdd.pid"
+    out="$(run_restart "$dir" 2)"
+    new_pid="$(head -1 "$dir/new-daemon.pid" 2>/dev/null | tr -dc '0-9')"
+    assert_contains "an old daemon that outlives the budget stops the restart" "rc=1" "$out"
+    assert_contains "and says so" "ERROR: the old daemon (PID $old_pid) was still running after 2s" "$out"
+    assert_contains "and stops the new daemon" "Stopped the new daemon (PID $new_pid): stopped" "$out"
+    assert_fail "which is no longer running" daemon_process_is_running "$new_pid"
+    assert_ok "while the old daemon is left alone" daemon_process_is_running "$old_pid"
+    kill -KILL "$old_pid" 2>/dev/null
+    wait "$old_pid" 2>/dev/null
+    stop_recorded_daemon "$dir/new-daemon.pid"
+
+    # A new daemon that dies at once, with an old one still running.
+    dir="$TEST_TMP/restart-successor-exits"
+    mkrestartfixture "$dir"
+    start_fake_daemon "$dir/bin/TBDDaemon"
+    old_pid="$STARTED_PID"
+    printf '%s\n' "$old_pid" > "$dir/home/tbdd.pid"
+    out="$(run_restart "$dir" 30 STUB_SUCCESSOR=exits)"
+    assert_contains "a new daemon that dies stops the restart" "rc=1" "$out"
+    assert_contains "and says so" "exited while the old one (PID $old_pid) was still running" "$out"
+    assert_not_contains "there is nothing left to stop" "Stopped the new daemon" "$out"
+    kill -KILL "$old_pid" 2>/dev/null
+    wait "$old_pid" 2>/dev/null
+
+    # A new daemon that runs but never answers, because the probe fails or
+    # hangs: a warning, and the restart goes on with it running.
+    for probe in fails hangs; do
+        dir="$TEST_TMP/restart-probe-$probe"
+        mkrestartfixture "$dir"
+        out="$(run_restart "$dir" 2 STUB_PROBE="$probe")"
+        new_pid="$(head -1 "$dir/new-daemon.pid" 2>/dev/null | tr -dc '0-9')"
+        assert_contains "a new daemon whose probe $probe goes on" "rc=0" "$out"
+        assert_contains "with a warning ($probe)" "WARNING: the daemon (PID $new_pid) is running but did not answer" "$out"
+        assert_ok "and leaves the new daemon running ($probe)" daemon_process_is_running "$new_pid"
+        stop_recorded_daemon "$dir/new-daemon.pid"
+    done
+
+    out="$(restart_daemon_by_handover "$dir/home" "$dir/new-daemon" 2>&1; printf 'rc=%s' "$?")"
+    assert_contains "a call missing its arguments is refused" "rc=1" "$out"
+}
+
 test_runtime_products_are_executable_targets() {
     local product
     if [ "${#RUNTIME_PRODUCTS[@]}" -eq 0 ]; then
@@ -975,6 +1690,17 @@ test_stop_waits_for_the_app_and_escalates
 test_a_zero_second_wait_still_checks
 test_stop_does_not_read_a_failure_as_no_app
 test_describe_app_stop_names_every_outcome
+test_number_checks_refuse_what_arithmetic_and_sleep_misread
+test_daemon_process_is_running_wants_a_live_daemon
+test_a_zombie_daemon_is_not_running
+test_stop_daemon_waits_and_escalates
+test_run_with_time_limit_cuts_off_a_hung_command
+test_handover_from_pid_reads_the_pid_file_under_tbd_home
+test_wait_for_predecessor_exit_says_how_it_ended
+test_wait_until_daemon_ready_says_how_it_ended
+test_wait_for_daemon_handover_runs_the_phases_in_order
+test_describe_daemon_handover_decides_each_outcome
+test_restart_daemon_by_handover_takes_every_branch
 test_runtime_products_are_executable_targets
 test_helper_refuses_direct_execution
 test_seed_writes_when_missing
