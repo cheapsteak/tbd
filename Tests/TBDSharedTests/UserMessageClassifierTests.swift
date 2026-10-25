@@ -332,4 +332,21 @@ struct UserMessageClassifierClassifyTests {
         #expect(UserMessageClassifier.joinTextBlocks([["type": "image"]]) == nil)
         #expect(UserMessageClassifier.joinTextBlocks([]) == nil)
     }
+
+    @Test func untypedMarkers() {
+        #expect(UserMessageClassifier.isUntypedPromptMarker("[Image: source: /tmp/a/1.png]"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker("[Image: source: /tmp/a/1.png]\n[Image: source: /tmp/a/2.png]"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker("[Request interrupted by user]"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker("[Request interrupted by user for tool use]"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker(
+            "This session is being continued from a previous conversation that ran out of context. …"))
+        #expect(UserMessageClassifier.isUntypedPromptMarker("  \n "))
+    }
+
+    @Test func typedPromptsThatMentionMarkers() {
+        #expect(!UserMessageClassifier.isUntypedPromptMarker("why did I see [Request interrupted by user] there?"))
+        #expect(!UserMessageClassifier.isUntypedPromptMarker("[Image #1] what is this?"))
+        #expect(!UserMessageClassifier.isUntypedPromptMarker("look: [Image: source: /tmp/a/1.png] and fix it"))
+        #expect(!UserMessageClassifier.isUntypedPromptMarker("/review 1174"))
+    }
 }

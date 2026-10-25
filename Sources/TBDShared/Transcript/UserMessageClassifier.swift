@@ -198,6 +198,33 @@ public enum UserMessageClassifier {
         return nil
     }
 
+    /// True when a user-role prompt body was not typed by a person but is still
+    /// a real user row: an image-attachment meta line, an interrupt marker, or
+    /// the continuation preamble Claude Code writes after running out of
+    /// context. Blank text counts too. Used only by the transcript prompt rail;
+    /// transcript rendering does not call it.
+    ///
+    /// Markers are recognised only in their structural position (every line is
+    /// an image marker, or the text begins with the marker), so a typed prompt
+    /// that merely mentions one stays a typed prompt.
+    public static func isUntypedPromptMarker(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        if trimmed.hasPrefix("[Request interrupted by user") { return true }
+        if trimmed.hasPrefix("This session is being continued from a previous conversation") {
+            return true
+        }
+        return trimmed
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .allSatisfy { line in
+                line.hasPrefix("[Image: source: ")
+                    && line.hasSuffix("]")
+                    && line.count > "[Image: source: ]".count
+            }
+    }
+
     /// True for the line Claude Code writes when it compacts a conversation
     /// (`/compact` or auto-compact): a `type:"user"` line carrying the summary
     /// of everything before it, flagged `"isCompactSummary": true`. Other
