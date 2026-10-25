@@ -7,7 +7,7 @@ fragment contents beyond "is it a JSON object".
 
 ## Scopes and precedence
 
-Merged in order (later wins key collisions; object-valued keys recurse):
+Merged in order (later wins key collisions; object-valued keys recurse; lists join, earlier entries first, exact duplicates dropped):
 
 1. **TBD hooks base** — the generated overlay body (hooks, optional
    `fallbackModel`).
@@ -19,6 +19,10 @@ Merged in order (later wins key collisions; object-valued keys recurse):
    file means no fragment.
 3. **Per-spawn fragment** — the `--claude-settings` flag on
    `tbd worktree create` / `tbd terminal create` (PR #451).
+
+Because lists join, a later layer cannot narrow or clear a list an earlier
+layer set: for example, a terminal's `--claude-settings` cannot remove a deny
+rule the repo file adds.
 
 ## When each applies
 
