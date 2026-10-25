@@ -299,7 +299,7 @@ extension RPCRouter {
     /// would put a reader on a session the transition is about to change.
     func mayAdoptForAttach(_ terminal: Terminal) async -> Bool {
         guard !terminal.isParked else { return false }
-        let moving = await hibernationCoordinator.holderTransitionInFlight(terminalID: terminal.id)
+        let moving = await hibernationCoordinator.transitionInFlight(terminalID: terminal.id)
         return !moving
     }
 

@@ -558,9 +558,7 @@ public actor HibernationCoordinator {
     /// - Returns: true when the claim was taken, false when it was refused and
     ///   the caller must change nothing.
     func claimSwap(terminalID: UUID) -> Bool {
-        guard !hibernatesInFlight.contains(terminalID),
-              !wakesInFlight.contains(terminalID),
-              !swapsInFlight.contains(terminalID) else { return false }
+        guard !transitionInFlight(terminalID: terminalID) else { return false }
         swapsInFlight.insert(terminalID)
         return true
     }
@@ -578,10 +576,12 @@ public actor HibernationCoordinator {
     }
 
     /// Whether a park, a wake or an in-place profile swap of this row is in
-    /// flight. An attach asks before it adopts a holder session on demand
-    /// (`RPCRouter.mayAdoptForAttach`), because each of these owns the
-    /// session's holder while it runs.
-    func holderTransitionInFlight(terminalID: UUID) -> Bool {
+    /// flight — the three claims that each own a row while they run.
+    ///
+    /// The one statement of that question: a wake and a swap claim refuse a
+    /// row any of the three holds, and an attach asks it before adopting a
+    /// holder session on demand (`RPCRouter.mayAdoptForAttach`).
+    func transitionInFlight(terminalID: UUID) -> Bool {
         hibernatesInFlight.contains(terminalID)
             || wakesInFlight.contains(terminalID)
             || swapsInFlight.contains(terminalID)
@@ -1680,13 +1680,12 @@ public actor HibernationCoordinator {
         // `performHibernate` is actor-reentrant while it waits for the SIGTERM
         // poll and tmux. Once its durable begin transition marks this row parked, a
         // wake must not rotate/clear the row and let hibernation resume against
-        // the replacement process.
-        guard !hibernatesInFlight.contains(terminalID) else { return .inFlight }
-        guard !wakesInFlight.contains(terminalID) else { return .inFlight }
-        // An in-place profile swap owns this row from before its park until
-        // after its wake. A focus-wake landing in the gap between those halves
-        // would un-park the row under the account the swap is moving it off.
-        guard !swapsInFlight.contains(terminalID) else { return .inFlight }
+        // the replacement process. A second wake is refused for the reason
+        // above, and an in-place profile swap owns this row from before its
+        // park until after its wake: a focus-wake landing in the gap between
+        // those halves would un-park the row under the account the swap is
+        // moving it off.
+        guard !transitionInFlight(terminalID: terminalID) else { return .inFlight }
         wakesInFlight.insert(terminalID)
         defer { wakesInFlight.remove(terminalID) }
 
