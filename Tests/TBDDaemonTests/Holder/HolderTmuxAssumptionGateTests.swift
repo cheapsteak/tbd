@@ -989,6 +989,58 @@ struct HolderTmuxAssumptionGateTests {
                 "the holder wake path reached tmux: \(recorded.snapshot())")
     }
 
+    /// The same row, reached by a wake while the daemon is shutting down.
+    ///
+    /// A shutting-down registry adopts nothing, and that is not a holder
+    /// refusing its pty: un-parking here would leave the row awake with no
+    /// reader in a daemon that is about to exit, when keeping it parked lets
+    /// the next daemon's startup adoption — which adopts parked rows — pick
+    /// the holder up. So the wake refuses, names the shutdown, and leaves the
+    /// row exactly as it found it.
+    @Test("a wake during shutdown leaves a row parked over a live holder parked")
+    func wakeDuringShutdownLeavesTheRowParked() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9109] = .init(aliveInitially: true)
+        signaller.startTimes[9109] = childStartedAt
+        signaller.cmdlines[9109] = Self.holderChildCommand
+
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder,
+            childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+        let before = RowFingerprint(try #require(try await db.terminals.get(id: terminal.id)))
+
+        let registry = holderRegistry(listing: [terminal])
+        await registry.releaseAll()
+
+        let result = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: signaller)
+            .wake(terminalID: terminal.id)
+        guard case .respawnFailed(let reason) = result else {
+            Issue.record("expected .respawnFailed naming the shutdown, got \(result)")
+            return
+        }
+        #expect(reason.contains("shutting down"), "the refusal did not name the shutdown: \(reason)")
+
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(after.isParked, """
+            a wake during shutdown un-parked the row over a holder nothing will read, instead of \
+            leaving it for the next daemon to adopt
+            """)
+        #expect(RowFingerprint(after) == before, "a wake during shutdown mutated the holder row")
+        #expect(await registry.attachRoundTripsStarted == 0)
+        #expect(recorded.snapshot().isEmpty,
+                "the holder wake path reached tmux: \(recorded.snapshot())")
+    }
+
     /// An adopting wake launches nothing, so the live session still carries
     /// whatever name it had, and the title store must keep the entry it had.
     /// Recording the wake's `--name` instead would claim the session took a

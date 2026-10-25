@@ -1113,6 +1113,9 @@ extension HibernationCoordinator {
     /// a row parked over a live child is the state this transport treats as
     /// worst, while an awake row names live pids every reconciler can judge,
     /// and the next attach adopts on demand (`HolderRegistry.adoptForAttach`).
+    /// The one exception is a daemon that is shutting down, which adopts
+    /// nothing: the row stays parked, and the next daemon's startup adoption
+    /// picks the holder up.
     private func adoptLiveHolderInsteadOfRespawning(
         _ terminal: Terminal, registry: HolderRegistry
     ) async -> WakeResult? {
@@ -1138,6 +1141,15 @@ extension HibernationCoordinator {
                 evidence = "its recorded child \(childPID) is identity-verified alive, and its "
                     + "holder is now adopted"
                 await restoreHolderPIDsFromRegistry(terminal, registry: registry)
+            } catch HolderRegistry.Error.daemonShuttingDown {
+                // Not a holder that refused: this daemon adopts nothing any
+                // more. The row stays parked, so the next daemon's startup
+                // adoption — which adopts parked rows too — finds the holder
+                // and the next wake un-parks over a reader instead of none.
+                logger.notice("wake: \(terminal.id, privacy: .public) is parked over a live holder, but the daemon is shutting down and adopts nothing; leaving the row parked for the next daemon to adopt")
+                return .respawnFailed(
+                    reason: "the daemon is shutting down, so this session stays parked; its holder "
+                        + "is still running and the next daemon will adopt it")
             } catch {
                 evidence = "its recorded child \(childPID) is identity-verified alive, though its "
                     + "holder could not be adopted, so the next attach will adopt it"
@@ -1150,9 +1162,12 @@ extension HibernationCoordinator {
         do {
             try await db.terminals.clearHibernated(id: terminal.id)
         } catch {
-            // Nothing was started and nothing is abandoned: the row is exactly
-            // as it was, still parked over its own live holder, and the next
-            // retry or the next daemon start reaches this same branch again.
+            // Nothing was spawned and nothing is abandoned: the row is still
+            // parked over its own live holder and still names its pids. If
+            // this wake adopted the holder, the reader stays — it is draining
+            // a live session — and the next retry takes the first leg;
+            // otherwise the next retry or the next daemon start reaches this
+            // same branch again.
             logger.error("wake: \(terminal.id, privacy: .public) is parked over a holder that is already running, but the parked marker could not be cleared: \(error.localizedDescription, privacy: .public)")
             return .respawnFailed(
                 reason: "this session's holder is already running, but clearing its parked "
