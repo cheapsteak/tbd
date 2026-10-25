@@ -167,7 +167,7 @@ struct PromptRailAppKitTests {
         #expect(card.rowCount == 5)
     }
 
-    @Test("the card is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height")
+    @Test("the card is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height less 60pt")
     func cardWidthCaps() {
         let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
         card.update(entries: Self.entries(5), activeIndex: nil, earlier: nil)
@@ -182,9 +182,12 @@ struct PromptRailAppKitTests {
         #expect(card.frame.width == 320)
         card.close()
 
+        // Forty rows outgrow a 300pt rail, so the card stops 60pt above its
+        // bottom, clear of the pane's jump-to-bottom button.
         card.update(entries: Self.entries(40), activeIndex: nil, earlier: nil)
         card.open(pointedIndex: nil, pointerY: 0, maxSize: CGSize(width: 700, height: 300))
-        #expect(card.frame.height == 300)
+        #expect(card.frame.height == 240)
+        #expect(PromptRailCardMetrics.bottomClearance == 60)
     }
 
     @Test("a new entry while the card is open keeps it open and keeps the list where it was")

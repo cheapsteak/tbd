@@ -9,9 +9,10 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 /// `PromptRailHoverModel` says.
 ///
 /// - **Size** – `PromptRailCardMetrics.maxWidth` wide, capped at the pane's
-///   width minus `PromptRailCardMetrics.paneInset`, and at most as tall as the
-///   rail. A longer list scrolls inside, without scrollers, behind 24pt fades
-///   over whichever edge clips a row.
+///   width minus `PromptRailCardMetrics.paneInset`, and at most the rail's
+///   height less `PromptRailCardMetrics.bottomClearance`, which keeps the
+///   pane's jump-to-bottom button clear of it. A longer list scrolls inside,
+///   without scrollers, behind 24pt fades over whichever edge clips a row.
 /// - **Opening** – fades in over `PromptRailCardMetrics.fadeDuration`, easing
 ///   out, with the list scrolled so the row for the pointed notch sits under
 ///   the pointer, or as close as the list's ends allow.
@@ -217,13 +218,15 @@ final class PromptRailCardNSView: NSView {
         onShownChange?(!hidden)
     }
 
-    /// Sizes the card against the pane: `PromptRailCardMetrics.maxWidth`
-    /// capped at the pane's width minus `PromptRailCardMetrics.paneInset`, as
-    /// tall as its rows up to the pane's height, at the rail's top-left.
+    /// Sizes the card against the pane, whose height is the rail's:
+    /// `PromptRailCardMetrics.maxWidth` capped at the pane's width minus
+    /// `PromptRailCardMetrics.paneInset`, as tall as its rows up to the rail's
+    /// height less `PromptRailCardMetrics.bottomClearance`, at the rail's
+    /// top-left.
     func layoutCard(maxSize: CGSize) {
         self.maxSize = maxSize
         let width = max(0, min(Metrics.maxWidth, maxSize.width - Metrics.paneInset))
-        let height = max(0, min(contentHeight, maxSize.height))
+        let height = Metrics.height(contentHeight: contentHeight, railHeight: maxSize.height)
         let widthChanged = width != frame.width
         let cardFrame = NSRect(x: 0, y: 0, width: width, height: height)
         if frame != cardFrame { frame = cardFrame }

@@ -245,7 +245,7 @@ struct PromptRailSwiftUITests {
         #expect(escape.installs == 1, "the card was taken down and rebuilt when a prompt arrived")
     }
 
-    @Test("the card is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height")
+    @Test("the card is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height less 60pt")
     func cardWidthCaps() async throws {
         #expect(PromptRailCardView.width(paneWidth: 300) == 276)
         #expect(PromptRailCardView.width(paneWidth: 700) == 320)
@@ -267,9 +267,12 @@ struct PromptRailSwiftUITests {
 
         state.promptRail(entriesDidChange: Self.entries(40))
         await drainMainQueue()
+        // Forty rows outgrow a 300pt rail, so the card stops 60pt above its
+        // bottom, clear of the pane's jump-to-bottom button.
         let short = NSHostingView(rootView: PromptRailCardView(
             state: state, hover: hover, pointedIndex: nil, earlier: nil, maxWidth: 700, maxHeight: 300))
-        #expect(short.fittingSize.height == 300)
+        #expect(short.fittingSize.height == 240)
+        #expect(PromptRailCardView.height(rowCount: 40, maxHeight: 300) == 240)
     }
 
     @Test("with earlier history unloaded the card's first row is the earlier row, and opening the card loads nothing")

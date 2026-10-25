@@ -57,8 +57,18 @@ enum PromptRailCardMetrics {
     /// short one.
     static let drawnPrefix = 400
 
+    /// The card stops this far above the bottom of the rail, which keeps the
+    /// pane's bottom-corner jump-to-bottom button clear of it.
+    static let bottomClearance: CGFloat = 60
+
     /// Where row text starts: after the dash column and its gap.
     static var textLeading: CGFloat { dashColumnLeading + dashColumnWidth + dashGap }
+
+    /// The card's height over a list `contentHeight` tall and a rail
+    /// `railHeight` tall: the list's, up to the rail's less `bottomClearance`.
+    static func height(contentHeight: CGFloat, railHeight: CGFloat) -> CGFloat {
+        max(0, min(contentHeight, railHeight - bottomClearance))
+    }
 
     /// A row's rectangle in list coordinates.
     static func rowRect(_ row: Int, width: CGFloat) -> NSRect {

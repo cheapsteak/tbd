@@ -84,8 +84,10 @@ struct PromptRailCardOverlay: View {
 ///
 /// - **Size** – `PromptRailCardMetrics.maxWidth` wide, capped at `maxWidth`
 ///   (the pane's width) minus `PromptRailCardMetrics.paneInset`, and at most
-///   `maxHeight` (the rail's height) tall. A longer list scrolls inside,
-///   without scrollers, behind 24pt fades over whichever edge clips a row.
+///   `maxHeight` (the rail's height) less
+///   `PromptRailCardMetrics.bottomClearance` tall, which keeps the pane's
+///   jump-to-bottom button clear of it. A longer list scrolls inside, without
+///   scrollers, behind 24pt fades over whichever edge clips a row.
 /// - **Opening** – the card is built afresh each time it opens, with its list
 ///   scrolled so the row for `pointedIndex` sits under `pointerY`, or as close
 ///   as the list's ends allow.
@@ -348,9 +350,10 @@ struct PromptRailCardView: View {
         Metrics.verticalPadding * 2 + CGFloat(rowCount) * Metrics.rowHeight
     }
 
-    /// As tall as the rows, up to `maxHeight`.
+    /// As tall as the rows, up to `maxHeight` (the rail's height) less
+    /// `PromptRailCardMetrics.bottomClearance`.
     static func height(rowCount: Int, maxHeight: CGFloat) -> CGFloat {
-        max(0, min(contentHeight(rowCount: rowCount), maxHeight))
+        Metrics.height(contentHeight: contentHeight(rowCount: rowCount), railHeight: maxHeight)
     }
 
     /// The list offset that puts the centre of `row` at `pointerY` in card
