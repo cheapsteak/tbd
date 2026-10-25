@@ -299,7 +299,7 @@ struct WorktreeReviveFreshTests {
         // argument, so Claude does not start an unrequested turn. Provenance
         // lives in the seeded Notes tab asserted below, not in a prompt.
         #expect(
-            isPromptFreeForkResumeInvocation(claudeCommand),
+            isPromptFreeResumeInvocation(claudeCommand, forkSession: true),
             "fresh revive must spawn with no trailing prompt argument: \(claudeCommand)"
         )
 
@@ -752,60 +752,10 @@ struct WorktreeReviveFreshTests {
         #expect(claudeCommand.contains("--resume A"))
         #expect(claudeCommand.contains("--fork-session"))
         #expect(
-            isPromptFreeForkResumeInvocation(claudeCommand),
+            isPromptFreeResumeInvocation(claudeCommand, forkSession: true),
             "fresh revive must spawn with no trailing prompt argument: \(claudeCommand)"
         )
     }
-
-    /// Self-test for the guard below: a whitelist that cannot fail would make
-    /// every use of it vacuous.
-    @Test func promptFreeGuardRejectsATrailingPromptArgument() {
-        let base = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume A"
-            + " --fork-session --dangerously-skip-permissions --settings '/tmp/overlay.json'"
-        #expect(isPromptFreeForkResumeInvocation(base))
-        #expect(!isPromptFreeForkResumeInvocation(base + " 'You have been moved.'"))
-
-        // `--name '<worktree display name>'` is a permitted flag, not a
-        // positional — its quoted value must not smuggle a prompt past the
-        // guard, so the trailing-argument rejection still has to hold with it
-        // present.
-        let named = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume A"
-            + " --fork-session --dangerously-skip-permissions --name 'acme-worker'"
-            + " --settings '/tmp/overlay.json'"
-        #expect(isPromptFreeForkResumeInvocation(named))
-        #expect(!isPromptFreeForkResumeInvocation(named + " 'You have been moved.'"))
-
-        // A display name containing an apostrophe is escaped as `'acme'\''s'`.
-        // The guard must accept that shape (or it would report a conforming
-        // command as non-conforming) and must still reject a trailing prompt
-        // after it — the escape must not become a hole.
-        let escaped = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume A"
-            + " --fork-session --dangerously-skip-permissions --name 'acme'\\''s worktree'"
-            + " --settings '/tmp/overlay.json'"
-        #expect(isPromptFreeForkResumeInvocation(escaped))
-        #expect(!isPromptFreeForkResumeInvocation(escaped + " 'You have been moved.'"))
-    }
-
-    /// Whitelists the permitted invocation shape instead of blacklisting the
-    /// removed prompt's wording: only the resume/fork/permission flags plus the
-    /// optional file-path flags may appear. Any trailing positional argument
-    /// fails, whatever it says.
-    private func isPromptFreeForkResumeInvocation(_ command: String) -> Bool {
-        guard let start = command.range(of: "claude --resume") else { return false }
-        let invocation = String(command[start.lowerBound...])
-        let permitted = "^claude --resume [-0-9A-Za-z]+ --fork-session"
-            + " --dangerously-skip-permissions( --name \(Self.shellEscapedWordPattern))?"
-            + "( --settings '[^']*')?( --plugin-dir '[^']*')?$"
-        return invocation.range(of: permitted, options: .regularExpression) != nil
-    }
-
-    /// A single-quoted word as `SystemPromptBuilder.shellEscape` actually emits
-    /// it: an apostrophe inside the value closes the quote, escapes the
-    /// apostrophe and reopens (`'acme'\''s'`), so a naive `'[^']*'` cannot
-    /// match a legitimate command whose display name contains one. The helper
-    /// fails closed there, so it was never a safety hole — but a guard that
-    /// misreads a conforming command is a guard nobody trusts.
-    static let shellEscapedWordPattern = #"'(?:[^']|'\\'')*'"#
 
     /// `isolateTBDHome()` plus `TBD_CLAUDE_HOST_HOME`: the spawn (and the
     /// validation) resolves the profile config dir through the lifecycle's own
