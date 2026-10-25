@@ -20,8 +20,9 @@ actor PendingPromptExpirySweep {
 
     private static let log = Logger(subsystem: "com.tbd.daemon", category: "askUserQuestion")
 
-    /// Unchanged from the value the RPC handler passed, so moving the sweep
-    /// changes when it runs but not what it reaps.
+    /// How old a capture must be before it is reaped. The `terminal.transcript`
+    /// handler's own reap passes this same value, so the two passes always
+    /// agree on what counts as stranded.
     static let maxAge = Duration.seconds(900)
 
     /// Cadence. Well under `maxAge`, so the worst-case lifetime of a stranded
