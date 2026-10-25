@@ -182,7 +182,7 @@ extension RPCRouter {
     /// yet reached, a take-back whose hand-over failed — and nothing else
     /// would adopt it until somebody asked. An attach is that ask. The
     /// registry rules out what it can see (`HolderRegistry.adoptForAttach`),
-    /// `mayAdoptForAttach` rules out what only the row and the hibernation
+    /// `mayAdoptForAttach` refuses early what only the row and the hibernation
     /// coordinator can, and the wait is bounded, so the request cannot hang
     /// on a holder that will not answer.
     private func handleHolderAttachRequest(
@@ -290,16 +290,26 @@ extension RPCRouter {
     }
 
     /// Whether an attach may adopt this session itself when the registry is
-    /// not reading it: the row is awake, and no park, wake or in-place profile
-    /// swap is moving it.
+    /// not reading it: the row, as the attach read it, is awake, and no park,
+    /// wake or in-place profile swap holds it right now.
     ///
-    /// The registry refuses the states it can see — a reader being released,
-    /// a holder it told to let go, an ended job, a shutdown — and these are
-    /// the ones only the row and the coordinator know. A parked row's job was
-    /// ended by its park, and a transition in flight owns the session's holder
-    /// until it settles: a park ends the job behind the reader it found, and a
-    /// wake publishes the reader its own spawn makes. Adopting beside either
-    /// would put a reader on a session the transition is about to change.
+    /// **A best-effort early refusal, not an exclusion.** It runs outside the
+    /// registry, on a row read at the top of the request, and takes no claim,
+    /// so a park, wake or swap that claims the row after it answers does not
+    /// stop the adoption that follows. Nothing locks across the two actors to
+    /// close that, because nothing needs to: the registry's own gates — a
+    /// reader being released, a holder it told to let go, an ended job, a
+    /// shutdown — are re-asked in the stretch that adopts, and a transition
+    /// that claims late meets an adopted session like any other. A park (and
+    /// so a swap, which starts with one) ends the job behind the reader it
+    /// finds, and refuses when there is none yet. A wake reaches the holder
+    /// only through the registry, which joins an adoption in flight and
+    /// refuses to spawn over an occupied slot, so it never stacks a second
+    /// reader beside this one.
+    ///
+    /// What the early refusal buys is not opening a hand-over at all for a
+    /// row that reads parked — its job was ended by its park — or while a
+    /// transition already owns the session's holder.
     func mayAdoptForAttach(_ terminal: Terminal) async -> Bool {
         guard !terminal.isParked else { return false }
         let moving = await hibernationCoordinator.transitionInFlight(terminalID: terminal.id)
