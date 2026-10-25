@@ -123,6 +123,16 @@ struct PaneFanoutReplayTests {
         }
     }
 
+    /// Closes a test's read end only after stopping any thread still writing
+    /// to the pane. A writer thread outlives a wait that failed or was
+    /// cancelled; detaching first makes its next re-validation throw, where a
+    /// write into a pipe with no reader would raise SIGPIPE and kill the whole
+    /// test process.
+    private func detachThenClose(_ fanout: PaneFanout, key: PaneKey, readFD: Int32) {
+        fanout.detach(key: key)
+        Darwin.close(readFD)
+    }
+
     @Test("replay lands in the pipe BEFORE the sink is ready, and live output follows it")
     func preReadyWriteLands() throws {
         let fanout = PaneFanout()
@@ -178,7 +188,7 @@ struct PaneFanoutReplayTests {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%3")
         let (readFD, generation) = try fanout.attach(key: key)
-        defer { Darwin.close(readFD) }
+        defer { detachThenClose(fanout, key: key, readFD: readFD) }
 
         // Far larger than any pipe buffer, with position-dependent content so
         // a dropped or duplicated chunk cannot go unnoticed.
@@ -215,7 +225,7 @@ struct PaneFanoutReplayTests {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%4")
         let (readFD, generation) = try fanout.attach(key: key)
-        defer { Darwin.close(readFD) }
+        defer { detachThenClose(fanout, key: key, readFD: readFD) }
 
         let replay = Data(repeating: UInt8(ascii: "r"), count: 512 * 1024)
         let writer = ReplayWriteThread()
@@ -241,7 +251,7 @@ struct PaneFanoutReplayTests {
         let fanout = PaneFanout()
         let key = PaneKey(server: server, paneID: "%5")
         let (readFD, generation) = try fanout.attach(key: key)
-        defer { Darwin.close(readFD) }
+        defer { detachThenClose(fanout, key: key, readFD: readFD) }
 
         let replay = Data(repeating: UInt8(ascii: "d"), count: 512 * 1024)
         let writer = ReplayWriteThread()
