@@ -271,8 +271,9 @@ public enum ClaudeHookOverlay {
     /// merged body rather than a second overlay.
     ///
     /// `extraSettings`, when present, is DEEP-MERGED into the body after
-    /// `fallbackModel`: object-valued keys present in both recurse; any other
-    /// clash lets the `extraSettings` value win. This preserves TBD's `hooks`
+    /// `fallbackModel`: object-valued keys present in both recurse; lists
+    /// join (exact duplicates dropped); any other clash lets the
+    /// `extraSettings` value win. This preserves TBD's `hooks`
     /// when the fragment only adds top-level keys (e.g. `skillOverrides`).
     public static func generateBody(
         fallbackModels: [String]? = nil,
@@ -374,7 +375,7 @@ public enum ClaudeHookOverlay {
     /// Recursive merge of settings layers, for a key present in both:
     /// - both values `[String: Any]` → recurse;
     /// - both values `[Any]` → join: `base` entries first, then `overlay`
-    ///   entries not already present (exact duplicates dropped), so a fragment's
+    ///   entries, keeping only the first occurrence of each exact duplicate, so a fragment's
     ///   hooks or permission lists add to TBD's rather than replace them;
     /// - anything else → the `overlay` value wins.
     private static func deepMerge(_ base: inout [String: Any], _ overlay: [String: Any]) {
@@ -385,9 +386,9 @@ public enum ClaudeHookOverlay {
                 base[key] = baseChild
             } else if let baseList = base[key] as? [Any],
                       let overlayList = overlayValue as? [Any] {
-                var seen = Set(baseList.compactMap(canonicalJSON))
-                var joined = baseList
-                for entry in overlayList {
+                var seen = Set<Data>()
+                var joined: [Any] = []
+                for entry in baseList + overlayList {
                     guard let canonical = canonicalJSON(entry) else {
                         joined.append(entry)
                         continue
@@ -469,8 +470,9 @@ public enum ClaudeHookOverlay {
     /// via `repoSettingsFragment`) and
     /// `extraSettingsJSON` (the per-spawn param) are JSON OBJECT strings that
     /// also force a per-session overlay and are deep-merged into the body —
-    /// repo fragment first, per-spawn fragment on top (per-spawn wins
-    /// collisions). Each parses independently: a malformed one is logged and
+    /// repo fragment first, per-spawn fragment on top (objects recurse, lists
+    /// join with exact duplicates dropped, any other clash goes to the
+    /// per-spawn fragment). Each parses independently: a malformed one is logged and
     /// dropped without discarding the other, and a bad fragment must never
     /// abort the spawn.
     ///

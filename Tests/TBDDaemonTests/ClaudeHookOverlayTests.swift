@@ -699,6 +699,24 @@ extension TBDHomeSerialized {
         #expect(deny == ["WebFetch"])
     }
 
+    @Test func duplicatesWithinEarlierListAreDropped() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"permissions":{"deny":["A","A","B"]}}"#,
+            extra: #"{"permissions":{"deny":["C","B","C"]}}"#
+        )
+        let deny = (parsed["permissions"] as? [String: Any])?["deny"] as? [String]
+        #expect(deny == ["A", "B", "C"])
+    }
+
+    @Test func threeLayersOfPreToolUseJoinInOrder() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"repo"}]}]}}"#,
+            extra: #"{"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"spawn"}]}]}}"#
+        )
+        let pre = try #require((parsed["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]])
+        #expect(pre.compactMap { $0["matcher"] as? String } == ["AskUserQuestion", "Bash", "Edit"])
+    }
+
     @Test func scalarStillReplaced() throws {
         let parsed = try mergedOverlay(repo: #"{"model":"a"}"#, extra: #"{"model":"b"}"#)
         #expect(parsed["model"] as? String == "b")

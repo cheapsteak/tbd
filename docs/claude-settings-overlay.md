@@ -20,6 +20,10 @@ Merged in order (later wins key collisions; object-valued keys recurse; lists jo
 3. **Per-spawn fragment** — the `--claude-settings` flag on
    `tbd worktree create` / `tbd terminal create` (PR #451).
 
+Because lists join, a later layer cannot narrow or clear a list an earlier
+layer set: for example, a terminal's `--claude-settings` cannot remove a deny
+rule the repo file adds.
+
 ## When each applies
 
 - The **repo fragment** is read fresh from the file at actual spawn time, so
