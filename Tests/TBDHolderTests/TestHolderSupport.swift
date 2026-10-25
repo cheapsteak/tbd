@@ -50,13 +50,21 @@ enum TestHolderError: LocalizedError {
 /// three the whole process shares. The verdict comes from `pollUntilTrue`'s
 /// fresh read after the deadline, so a resumption that lands late under load
 /// still reports a condition that has since come true.
+///
+/// The deadline defaults to `TestDeadlines.saturatedPassSeconds`, per
+/// `Tests/CLAUDE.md`: what these waits watch is a real holder process, which
+/// that pass's load slows as much as anything else in it, and a green run
+/// never pays for the budget. `description` is read only on a timeout, so a
+/// diagnostic that interpolates the holder's log reports the log as it stood
+/// when the wait gave up.
 @discardableResult
 func waitUntil(
-    _ description: String,
-    timeout: TimeInterval = 10.0,
+    _ description: @autoclosure () -> String,
+    timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
     sourceLocation: SourceLocation = #_sourceLocation,
     _ condition: () -> Bool
 ) async -> Bool {
+    let started = ContinuousClock.now
     let outcome = await pollUntilTrue(
         timeout: .seconds(timeout), pollInterval: .milliseconds(20)
     ) {
@@ -70,7 +78,8 @@ func waitUntil(
         return false
     case .timedOut:
         Issue.record(
-            "timed out after \(timeout)s waiting for \(description)",
+            HolderWaitTimedOut(
+                what: description(), budget: timeout, elapsed: ContinuousClock.now - started),
             sourceLocation: sourceLocation)
         return false
     }
@@ -78,21 +87,38 @@ func waitUntil(
 
 /// The blocking form of `waitUntil`, for the one caller that cannot suspend:
 /// `HolderFixture.tearDown`, which runs from a `defer`. It follows a SIGKILL,
-/// so it normally ends on its first probe or two.
+/// so it normally ends on its first probe or two. Its bound stays short on
+/// purpose, unlike `waitUntil`'s: this one parks a cooperative-pool thread for
+/// as long as it runs, and a leaked holder is what it reports, not a slow one.
 @discardableResult
 private func blockingWaitUntil(
     _ description: String,
     timeout: TimeInterval,
     _ condition: () -> Bool
 ) -> Bool {
+    let started = ContinuousClock.now
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
         if condition() { return true }
         usleep(20_000)
     }
     if condition() { return true }
-    Issue.record("timed out after \(timeout)s waiting for \(description)")
+    Issue.record(
+        HolderWaitTimedOut(what: description, budget: timeout, elapsed: ContinuousClock.now - started))
     return false
+}
+
+/// A bounded wait in this target expired. An `Error` rather than a string, so
+/// its text lands on the primary failure line a CI summary keeps
+/// (`Tests/CLAUDE.md`, "Assertion hygiene" rule 4).
+struct HolderWaitTimedOut: Error, CustomStringConvertible {
+    let what: String
+    let budget: TimeInterval
+    let elapsed: Duration
+
+    var description: String {
+        "gave up after \(elapsed) (budget \(budget)s) waiting for \(what)"
+    }
 }
 
 func processIsAlive(_ pid: Int32) -> Bool {
@@ -325,7 +351,7 @@ final class HolderFixture {
 
         var raw: Int32 = 0
         var reaped = false
-        await waitUntil("the bootstrap shell to exit", timeout: 10.0) {
+        await waitUntil("the bootstrap shell to exit") {
             if waitpid(shellPID, &raw, WNOHANG) == shellPID { reaped = true }
             return reaped
         }
@@ -336,7 +362,7 @@ final class HolderFixture {
         let exitStatus: Int32? = reaped ? ((raw >> 8) & 0xff) : nil
 
         var holderPID: Int32 = 0
-        let reported = await waitUntil("the bootstrap shell to report a holder pid", timeout: 10.0) {
+        let reported = await waitUntil("the bootstrap shell to report a holder pid") {
             guard let text = try? String(contentsOfFile: pidPath, encoding: .utf8) else { return false }
             holderPID = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
             return holderPID > 0
@@ -374,7 +400,7 @@ final class HolderFixture {
         self.spawnerExitStatus = spawnerExitStatus
     }
 
-    func waitForSocket(timeout: TimeInterval = 10.0) async {
+    func waitForSocket(timeout: TimeInterval = TestDeadlines.saturatedPassSeconds) async {
         await waitUntil("the holder socket at \(socketPath)\n\(diagnostics())", timeout: timeout) {
             FileManager.default.fileExists(atPath: socketPath)
         }
