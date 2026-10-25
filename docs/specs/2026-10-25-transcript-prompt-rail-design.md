@@ -67,7 +67,7 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
 - After a jump, the target stays active until the reader scrolls or a new prompt arrives. This covers prompts near the end, which cannot be scrolled to the top. The coordinator's own tail-follow is not a reader scroll: it ends the jump's pin, since the two would fight, but leaves the target active.
 - With no entries, the rail is empty and nothing is active.
 
-A reader scroll, here and under Jumping, is any change to the clip view's bounds that the coordinator did not make itself.
+A reader scroll, here and under Jumping, is a move of the clip view's origin that neither the coordinator nor AppKit made. A size-only change is not one, and neither is AppKit moving the origin by exactly as much as the row at the top of the viewport moved, which is AppKit keeping that row in place after a height change.
 
 The coordinator recomputes the active entry on the clip view's bounds notification, which it already observes. A binary search over the entries' row rectangles finds it, and `rect(ofRow:)` builds no cells. The rail is told only when the active entry changes.
 
