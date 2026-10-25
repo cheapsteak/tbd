@@ -109,7 +109,8 @@ public struct DaemonHandover: Sendable {
     /// overlaps it: the predecessor goes on answering on its socket after it
     /// has let go of its sessions, and its teardown removes files the
     /// successor has just created. So the wait is for the shutdown to end.
-    /// `scripts/restart.sh` gives a daemon it replaces the same two budgets.
+    /// `scripts/update.sh` and `scripts/restart.sh` both replace the daemon
+    /// through this handover, so these are the budgets every replacement gets.
     ///
     /// The real shutdown is a sequence of awaits: the usage pollers and the
     /// limit-resume scheduler stop, every holder reader is released one at a
@@ -277,8 +278,8 @@ public struct HandoverClaim: Sendable {
     public func takeOver(from predecessor: pid_t) async throws -> Result {
         // Claim first. With our pid in the file from this instant, every
         // spurious spawn during the retirement — the app's two-second poller,
-        // a stray `restart.sh` — meets a file naming a live daemon and exits at
-        // the same gate we just came through.
+        // a daemon started by hand — meets a file naming a live daemon and
+        // exits at the same gate we just came through.
         try writeClaim(ownPID)
         handoverLogger.info("handover: claimed the pid file from predecessor daemon \(predecessor, privacy: .public); retiring it now")
 

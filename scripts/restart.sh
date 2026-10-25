@@ -380,51 +380,49 @@ fi
 
 # MARK: - Restart Daemon
 
-# How long the daemon being replaced gets to finish its shutdown on SIGTERM
-# before it is killed, and how long to wait after SIGKILL, in seconds: the
-# budgets a successor daemon gives its predecessor in a handover
-# (DaemonHandover.termBudget and killBudget).
-DAEMON_STOP_GRACE=30
-DAEMON_KILL_WAIT=5
+# How long the restart waits, in seconds, for the old daemon to exit and the
+# new one to answer, one budget across both. The new daemon gives the old one
+# 35 seconds at most (DaemonHandover.termBudget and killBudget) and then has
+# its own startup to finish.
+DAEMON_HANDOVER_TIMEOUT=60
 
 if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
-    echo "Stopping daemon..."
-    # The old daemon is gone before its files are cleared and the new one
-    # starts. Its stop() takes seconds, and a daemon started before it ends
-    # runs beside one that still answers on the socket and whose teardown
-    # unlinks sockets the new daemon has just bound. A daemon that outlives
-    # SIGKILL stops the restart before its pid file is removed: a second
-    # daemon started beside it would put two writers on state.db.
+    # The daemon is replaced by a handover, as `tbd update` replaces it: the
+    # new daemon starts with TBD_HANDOVER_FROM_PID naming the old one, writes
+    # its own pid over the pid file, retires the old daemon, and binds its
+    # sockets only once the old one has exited. Nothing here signals the old
+    # daemon or removes its files. The pid file names a live daemon
+    # throughout, so the app's watchdog, which starts a daemon of its own
+    # when the socket is missing and the pid file names none, never runs a
+    # second daemon beside the new one; and the old daemon's teardown is over
+    # before the new one binds anything it could unlink. See the handover
+    # section of scripts/restart-bundle-lib.sh.
+    old_daemon_pid=0
     if [ -f ~/tbd/tbdd.pid ]; then
-        pid=$(cat ~/tbd/tbdd.pid)
-        daemon_stop_outcome="$(stop_daemon_process "$pid" "$DAEMON_STOP_GRACE" "$DAEMON_KILL_WAIT")" || true
-        case "$daemon_stop_outcome" in
-            stopped) echo "  Daemon (PID $pid) exited" ;;
-            killed) echo "  Daemon (PID $pid) ignored SIGTERM for ${DAEMON_STOP_GRACE}s and exited on SIGKILL" ;;
-            survived)
-                echo "  ERROR: daemon (PID $pid) is still running after SIGKILL — not starting another beside it" >&2
-                exit 1
-                ;;
-        esac
+        old_daemon_pid="$(head -1 ~/tbd/tbdd.pid 2>/dev/null | tr -dc '0-9')"
+        [ -n "$old_daemon_pid" ] || old_daemon_pid=0
     fi
-    # Clean stale files
-    rm -f ~/tbd/sock ~/tbd/tbdd.pid ~/tbd/port
 
     # Preserve the previous daemon's log for post-mortem diagnostics — the
     # daemon does not persist os.Logger output, so this file is the only
     # record of a crash that happened before a restart.
     [ -f /tmp/tbdd.log ] && mv /tmp/tbdd.log /tmp/tbdd.log.1
     echo "Starting daemon..."
-    "$BUILD_DIR/TBDDaemon" > /tmp/tbdd.log 2>&1 &
-    # Wait for socket
-    for i in $(seq 1 30); do
-        [ -S ~/tbd/sock ] && break
-        sleep 0.1
-    done
-    if [ -S ~/tbd/sock ]; then
-        echo "  Daemon ready (PID $(cat ~/tbd/tbdd.pid 2>/dev/null))"
+    TBD_HANDOVER_FROM_PID="$old_daemon_pid" "$BUILD_DIR/TBDDaemon" > /tmp/tbdd.log 2>&1 &
+    new_daemon_pid=$!
+
+    # The app goes on only once the old daemon is gone and the new one
+    # answers `daemon status`; describe_daemon_handover decides, and stops
+    # the restart on anything else, an outcome it does not recognise
+    # included.
+    handover_outcome="$(wait_for_daemon_handover "$old_daemon_pid" "$new_daemon_pid" \
+        "$DAEMON_HANDOVER_TIMEOUT" 0.2 "$BUILD_DIR/TBDCLI" daemon status --json)" || true
+    if handover_report="$(describe_daemon_handover "$handover_outcome" "$old_daemon_pid" \
+        "$new_daemon_pid" "$DAEMON_HANDOVER_TIMEOUT" /tmp/tbdd.log)"; then
+        echo "  $handover_report"
     else
-        echo "  WARNING: Daemon socket not found after 3s"
+        echo "  $handover_report" >&2
+        exit 1
     fi
 elif [ "$app_only" = false ] && [ "$install_to_applications" = false ]; then
     echo "(Skipping daemon restart for WIP worktree)"

@@ -223,7 +223,8 @@ arguments, and inherits the user's environment. The script is the procedure:
    two daemons apart: a local build runs both from the update clone's
    `.build/release/TBDDaemon`, and the old one answers until its `stop()`
    ends. The successor binds only after the old pid has exited, so from then
-   on the answer is the successor's.
+   on the answer is the successor's. A successor that exits first fails the
+   handover at once.
 6. **Restart the app** — kill the exact installed executable path, `open`
    the bundle with `--env PATH=$PATH` as `restart.sh` does. `--no-app` skips
    this. The app is a viewer; nothing in it holds a session.
@@ -308,8 +309,10 @@ Sequence, with the app running throughout:
 Why successor-first: the app polls every two seconds and spawns a daemon the
 moment the socket is missing *and* the pid file does not name a live daemon.
 With the successor's pid in the file from the first instant, every spurious
-spawn — the app's, or a stray `restart.sh` — exits at the gate. This closes
-the race that a plain kill-then-start opens, and it needs no new RPC.
+spawn — the app's, or a daemon started by hand — exits at the gate. This
+closes the race that a plain kill-then-start opens, and it needs no new RPC.
+`scripts/restart.sh` replaces the daemon through the same handover for that
+reason.
 
 Why not overlap (successor serving while the predecessor drains): two daemons
 would be two writers on `state.db` and two reconcilers with different

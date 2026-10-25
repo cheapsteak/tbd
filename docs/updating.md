@@ -98,8 +98,11 @@ these steps in order.
   the old one is gone, so from that exit on the answer is the new daemon's,
   and the app launch and the wake below reach it. If either has not happened
   within two minutes, one budget covering both, the run stops the new daemon
-  and rolls back as described under "Going back to the previous build". With
-  no daemon running when the update starts, it waits only for the status.
+  and rolls back as described under "Going back to the previous build". A new
+  daemon that exits before then fails the handover at once, down the same
+  path: it would never stop the old one, and waiting out the budget would keep
+  the app down for nothing. With no daemon running when the update starts,
+  the run waits only for the status.
 - **Seeds the saved tmux fallback** on a manual run, with or without
   `--no-app`; an `--auto` run skips this step. When
   `~/tbd/tmux-executable-path` is missing or names no usable executable, the
@@ -126,10 +129,11 @@ one, parking live sessions wholesale. Four things make the handover safe.
   `TBD_HANDOVER_FROM_PID` naming its predecessor, writes its own pid over the
   pid file, then terminates the predecessor and waits for it to exit. From the
   first instant, anything that would spawn a rescue daemon — the app's
-  two-second watchdog, a stray `restart.sh` — finds a live daemon named in that
-  file and exits at the single-instance gate. There is a brief window with no
-  socket, the same window every restart has always had, in which CLI calls fail
-  and retry.
+  two-second watchdog, a daemon started by hand — finds a live daemon named in
+  that file and exits at the single-instance gate. `scripts/restart.sh`
+  replaces the daemon through this same handover. There is a brief window with
+  no socket, the same window every restart has always had, in which CLI calls
+  fail and retry.
 - **Reconcile no longer parks on an ambiguous answer.** The tmux probes report
   `alive`, `absent` or `unknown`, and only `absent` — tmux itself answering
   that the window is gone — parks a Claude row or deletes a non-Claude one. A

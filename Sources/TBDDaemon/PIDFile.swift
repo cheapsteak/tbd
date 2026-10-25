@@ -47,7 +47,7 @@ public struct PIDFile: Sendable {
     ///
     /// A handover puts two daemons on one pid file for a moment: the successor
     /// writes its own pid over the file first, so that every spurious spawn in
-    /// the gap — the app's two-second poller, a stray `restart.sh` — meets a
+    /// the gap — the app's two-second poller, a daemon started by hand — meets a
     /// file naming a live daemon and exits at the gate. The predecessor then
     /// shuts down. An unconditional `remove()` there deletes the *successor's*
     /// claim, reopening exactly the race the successor-first write closes.

@@ -853,30 +853,18 @@ paths_match() {
     [ -n "$a" ] && [ "$a" = "$b" ]
 }
 
-# Poll `tbd daemon status` until it reports the executable we just installed.
-# It asks at least once, so a caller whose budget is already spent still gets
-# the answer the daemon gives now.
-wait_for_daemon_executable() {
-    local expected="${1-}"
-    local timeout="${2:-$HANDOVER_TIMEOUT}"
-    local waited=0
+# True when `tbd daemon status` names <expected> as the daemon's executable.
+# One question, asked once; wait_for_handover polls it.
+daemon_reports_executable() {
     local reported
-
-    while :; do
-        reported="$(json_field "$(daemon_status_json)" executablePath)"
-        if [ -n "$reported" ] && paths_match "$reported" "$expected"; then
-            return 0
-        fi
-        [ "$waited" -lt "$timeout" ] || return 1
-        sleep 1
-        waited=$((waited + 1))
-    done
+    reported="$(json_field "$(daemon_status_json)" executablePath)"
+    [ -n "$reported" ] && paths_match "$reported" "${1-}"
 }
 
 # Wait until the daemon that answers is the successor: the predecessor has
 # exited, and `tbd daemon status` then reports the executable just installed.
 #
-#   wait_for_handover <old_pid> <expected_executable> [timeout]
+#   wait_for_handover <old_pid> <new_pid> <expected_executable> [timeout]
 #
 # The status answer alone cannot say which daemon gave it. A local build runs
 # the old and the new daemon from the same file, the update clone's
@@ -890,38 +878,74 @@ wait_for_daemon_executable() {
 # successor, and the path confirms it serves the build just installed. The
 # status reports no pid, which is why the exit is what tells the two apart.
 #
-# <old_pid> 0 is a cold start, with nothing to wait for, and so is a pid that
-# names no running daemon (daemon_process_is_running): a stale pid file. One
-# budget covers both phases.
+# The two phases are wait_for_predecessor_exit and wait_until_daemon_ready
+# (scripts/restart-bundle-lib.sh), under one deadline. Each line logged here
+# says how a phase ended, so update.log times the predecessor's exit and the
+# successor's first answer separately. A successor that dies ends the wait at
+# once, in either phase: it would never retire the predecessor, and the run
+# would otherwise sit out the whole budget with the app stopped.
 wait_for_handover() {
     local old_pid="${1:-0}"
-    local expected="${2-}"
-    local timeout="${3:-$HANDOVER_TIMEOUT}"
-    local waited=0
+    local new_pid="${2-}"
+    local expected="${3-}"
+    local timeout="${4:-$HANDOVER_TIMEOUT}"
+    local deadline outcome
 
-    if daemon_process_is_running "$old_pid"; then
-        while daemon_process_is_running "$old_pid"; do
-            if [ "$waited" -ge "$timeout" ]; then
-                log "the previous daemon (pid $old_pid) is still running after ${timeout}s"
-                return 1
-            fi
-            sleep 1
-            waited=$((waited + 1))
-        done
-        log "the previous daemon (pid $old_pid) has exited"
-    elif [ "$old_pid" != 0 ]; then
-        log "pid $old_pid names no running daemon, so there is no predecessor to wait for"
-    fi
-    if ! wait_for_daemon_executable "$expected" "$((timeout - waited))"; then
-        log "the daemon never reported $expected as its executable"
+    if ! _is_whole_number "$timeout"; then
+        log "the handover budget is not a whole number of seconds: [$timeout]"
         return 1
     fi
+    deadline=$((SECONDS + timeout))
+
+    outcome="$(wait_for_predecessor_exit "$old_pid" "$new_pid" "$deadline")"
+    case "$outcome" in
+        exited)
+            log "the previous daemon (pid $old_pid) has exited"
+            ;;
+        none)
+            # A cold start needs no line: handover() has said it starts cold.
+            if [ "$old_pid" != 0 ]; then
+                log "pid $old_pid named no running daemon when the wait began; there was no predecessor to wait for"
+            fi
+            ;;
+        successor-exited)
+            log "the new daemon (pid $new_pid) exited while the previous daemon (pid $old_pid) was still running"
+            return 1
+            ;;
+        timeout)
+            log "the previous daemon (pid $old_pid) is still running after ${timeout}s"
+            return 1
+            ;;
+        *)
+            log "waiting for the previous daemon ended in an unrecognised way: [$outcome]"
+            return 1
+            ;;
+    esac
+
+    outcome="$(wait_until_daemon_ready "$new_pid" "$deadline" 1 daemon_reports_executable "$expected")"
+    case "$outcome" in
+        ready)
+            return 0
+            ;;
+        successor-exited)
+            log "the new daemon (pid $new_pid) exited before it reported itself"
+            return 1
+            ;;
+        timeout)
+            log "the daemon never reported $expected as its executable"
+            return 1
+            ;;
+        *)
+            log "waiting for the new daemon ended in an unrecognised way: [$outcome]"
+            return 1
+            ;;
+    esac
 }
 
 # Start the successor with TBD_HANDOVER_FROM_PID set. It claims the pid file
-# before it signals its predecessor, so the app's respawn watchdog — and any
-# stray restart.sh — finds a live daemon in that file from the first instant
-# and exits at the single-instance gate instead of racing us.
+# before it signals its predecessor, so the app's respawn watchdog finds a
+# live daemon in that file from the first instant and starts no daemon of its
+# own to race us.
 #
 # It returns once the successor is the daemon that answers
 # (wait_for_handover), never while the predecessor is still shutting down:
@@ -957,7 +981,7 @@ handover() {
     TBD_HANDOVER_FROM_PID="$old_pid" "$new_daemon" > "$DAEMON_LOG" 2>&1 &
     new_pid=$!
 
-    if wait_for_handover "$old_pid" "$new_daemon" "$HANDOVER_TIMEOUT"; then
+    if wait_for_handover "$old_pid" "$new_pid" "$new_daemon" "$HANDOVER_TIMEOUT"; then
         log "daemon is serving from $new_daemon"
         return 0
     fi
@@ -971,44 +995,30 @@ handover() {
 #
 #   stop_handover_successor <pid>
 #
-# SIGTERM first, then a bounded wait, then SIGKILL. Every outcome is logged,
-# including the one this cannot fix: a process that survives SIGKILL, where
-# the operator has to be told which pid to look at. A pid that is already gone
-# is the ordinary case for a successor that crashed rather than stalled.
+# stop_daemon_process does the work: SIGTERM, HANDOVER_STOP_GRACE seconds,
+# then SIGKILL and three more, signalling only a pid that is a running daemon.
+# Its outcome word is logged, including the one this cannot fix: a process
+# that survives SIGKILL, where the operator has to be told which pid to look
+# at. A pid that is already gone is the ordinary case for a successor that
+# crashed rather than stalled.
 stop_handover_successor() {
     local pid="${1-}"
-    local waited=0
+    local outcome status=0
 
     [ -n "$pid" ] || return 0
-    if ! kill -0 "$pid" 2>/dev/null; then
-        log "the new daemon (pid $pid) is not running; nothing to stop"
-        return 0
-    fi
-
-    log "stopping the new daemon (pid $pid) so the rollback leaves no daemon from the new build"
-    kill -TERM "$pid" 2>/dev/null || true
-    while [ "$waited" -lt "$HANDOVER_STOP_GRACE" ]; do
-        sleep 1
-        waited=$((waited + 1))
-        if ! kill -0 "$pid" 2>/dev/null; then
-            log "the new daemon (pid $pid) stopped"
-            return 0
-        fi
-    done
-
-    log "the new daemon (pid $pid) ignored SIGTERM for ${HANDOVER_STOP_GRACE}s — killing it"
-    kill -KILL "$pid" 2>/dev/null || true
-    waited=0
-    while [ "$waited" -lt 3 ]; do
-        sleep 1
-        waited=$((waited + 1))
-        if ! kill -0 "$pid" 2>/dev/null; then
-            log "the new daemon (pid $pid) stopped after SIGKILL"
-            return 0
-        fi
-    done
-    log "WARNING: the new daemon (pid $pid) is still running after SIGKILL"
-    return 1
+    outcome="$(stop_daemon_process "$pid" "$HANDOVER_STOP_GRACE" 3)" || status=$?
+    case "$outcome" in
+        none)
+            log "the new daemon (pid $pid) is not running; nothing to stop"
+            ;;
+        stopped | killed)
+            log "stopped the new daemon (pid $pid) so the rollback leaves no daemon from the new build: $outcome"
+            ;;
+        *)
+            log "WARNING: could not stop the new daemon (pid $pid): $outcome"
+            ;;
+    esac
+    return "$status"
 }
 
 # MARK: - The app
