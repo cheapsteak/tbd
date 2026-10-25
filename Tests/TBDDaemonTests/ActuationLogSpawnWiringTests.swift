@@ -73,22 +73,6 @@ struct ActuationLogSpawnWiringTests {
         )
     }
 
-    /// The deadline is the shared saturated-pass budget rather than a literal:
-    /// what these wait for is produced by a detached task no test owns, which
-    /// SE-0417 leaves on the cooperative pool behind the whole fast pass — see
-    /// `gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`.
-    private func waitUntil(
-        timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
-        _ condition: @Sendable () async throws -> Bool
-    ) async throws -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if try await condition() { return true }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        return try await condition()
-    }
-
     // MARK: - scratch.create
 
     @Test("scratch.create writes one spawn row naming the scratch space")
@@ -169,8 +153,12 @@ struct ActuationLogSpawnWiringTests {
         #expect(written.last?["result"] as? String == "dispatched")
 
         // Let the background phase finish before the fixture repo goes away.
-        _ = try await waitUntil {
-            try await db.worktrees.get(id: pending.id)?.status != .creating
+        // It runs in a detached task no test owns, which SE-0417 leaves on the
+        // cooperative pool behind the whole fast pass, so the bound is the
+        // shared saturated-pass budget (`gateHoldingTask` in
+        // `Tests/TestSupport/BoundedGateSupport.swift`).
+        _ = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            (try? await db.worktrees.get(id: pending.id))?.status != .creating
         }
     }
 
