@@ -90,6 +90,10 @@ actor HolderRegistry {
         /// session itself is untouched and keeps running; the next daemon
         /// adopts it.
         case daemonShuttingDown(terminalID: UUID)
+        /// This registry told the session's holder to let go after the
+        /// startup adoption pass read its rows, so that pass leaves it alone
+        /// (`sessionsLetGo`). Only the startup pass refuses on this.
+        case sessionLetGo(terminalID: UUID)
 
         var errorDescription: String? {
             switch self {
@@ -125,6 +129,9 @@ actor HolderRegistry {
                 return "the daemon is shutting down, so it can neither attach nor adopt session "
                     + "\(terminalID.uuidString); the session keeps running, and the next daemon "
                     + "will adopt it"
+            case .sessionLetGo(let terminalID):
+                return "this daemon told the holder of session \(terminalID.uuidString) to let go "
+                    + "after the startup adoption began, so that adoption leaves it alone"
             }
         }
     }
@@ -1287,8 +1294,26 @@ actor HolderRegistry {
     /// Refused once the daemon is shutting down (`isShuttingDown`), on every
     /// pass: a call that waited out a release has very likely waited out
     /// `releaseAll`'s.
+    ///
+    /// A session this registry told to let go is adopted all the same: a
+    /// caller with fresh evidence that its holder is live — the wake that
+    /// finds a parked row's child verifiably running — means to adopt it.
     @discardableResult
     func adopt(terminal: Terminal) async throws -> HolderReader {
+        try await adopt(terminal: terminal, skippingLetGo: false)
+    }
+
+    /// `adopt`, with the startup pass's one extra refusal.
+    ///
+    /// `skippingLetGo` refuses a session in `sessionsLetGo`, on every pass of
+    /// the loop. The startup pass adopts from a row list read when it began,
+    /// and `adoptRemaining` runs after the socket is bound, so a terminal
+    /// deleted or parked in the meantime is still on its list; adopting it
+    /// would take the pty of a holder being told to forget it, and the
+    /// publish would erase the very mark that said so. Checked inside the
+    /// loop rather than once by the caller, because a pass that waits out a
+    /// release can find the mark set by the teardown that release belonged to.
+    private func adopt(terminal: Terminal, skippingLetGo: Bool) async throws -> HolderReader {
         guard terminal.transport == .holder else {
             throw Error.notAHolderSession(terminalID: terminal.id)
         }
@@ -1298,6 +1323,9 @@ actor HolderRegistry {
         while true {
             guard !isShuttingDown else {
                 throw Error.daemonShuttingDown(terminalID: terminalID)
+            }
+            if skippingLetGo, sessionsLetGo.contains(terminalID) {
+                throw Error.sessionLetGo(terminalID: terminalID)
             }
             // Re-read on every pass, not once at the top: an actor's methods
             // are not atomic across suspension, and every branch below awaits.
@@ -1647,11 +1675,12 @@ actor HolderRegistry {
     /// guess.
     private func adoptOne(_ terminal: Terminal) async {
         do {
-            _ = try await adopt(terminal: terminal)
+            _ = try await adopt(terminal: terminal, skippingLetGo: true)
         } catch let error as Error {
             // A holder that named another installation answered correctly;
             // it is simply not ours. Left running, and not recorded as
-            // exited — it is somebody else's live session.
+            // exited — it is somebody else's live session. A session let go
+            // since the pass began, and a shutdown, land here too.
             Self.logger.info(
                 """
                 skipping session \(terminal.id.uuidString, privacy: .public): \

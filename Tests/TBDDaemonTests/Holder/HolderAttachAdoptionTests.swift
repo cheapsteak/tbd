@@ -159,6 +159,35 @@ import Testing
         #expect(await registry.attachRoundTripsStarted == 0)
     }
 
+    // MARK: - The startup pass
+
+    /// The deferred startup pass adopts from a row list read before the socket
+    /// was bound, so a terminal torn down since is still on it. Adopting that
+    /// one would take the pty of a holder being told to forget it, and the
+    /// publish would erase the mark that said so. The general `adopt` is left
+    /// alone: the wake adopts a parked row's live holder on purpose.
+    @Test func theStartupPassSkipsASessionLetGoSinceItBegan() async throws {
+        let registry = Self.registry()
+        let tornDown = Self.holderRow()
+        let untouched = Self.holderRow()
+        _ = await registry.abandon(terminalID: tornDown.id, holderPID: nil, childPID: nil)
+
+        await registry.adoptRemaining([tornDown, untouched])
+
+        #expect(await registry.attachRoundTripsStarted == 1, """
+            the startup pass reached for the holder of a session torn down after it began, or \
+            skipped one it should have tried
+            """)
+
+        await #expect(throws: (any Error).self) {
+            _ = try await registry.adopt(terminal: tornDown)
+        }
+        #expect(await registry.attachRoundTripsStarted == 2, """
+            the general adopt refused a let-go session, which would stop a wake adopting a parked \
+            row's live holder
+            """)
+    }
+
     // MARK: - The wait is bounded
 
     /// An attach waits for its adoption only as long as the budget, on the
