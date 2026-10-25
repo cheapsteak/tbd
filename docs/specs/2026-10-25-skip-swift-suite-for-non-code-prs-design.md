@@ -76,16 +76,27 @@ The skip list is only as good as its list of suite scripts. If the suite comes t
 
 **Drift check.** The harness gathers every script the suite can reach:
 
+- `scripts/test.sh` and `scripts/swift-safe`, the wrappers every pass runs through;
 - each script named on a line of the `test` job in `test.yml` that is not a `#` comment;
-- each script named on a line of `scripts/test.sh` or `scripts/swift-safe` that is not a `#` comment;
 - each `"scripts/…"` string literal in a Swift file under `Sources/` or `Tests/` that names a file that exists in the repo;
-- each file that a gathered script loads with `source` or `.`, and what that file loads in turn.
+- each script named on a line of a gathered script that is not a `#` comment, and each file a gathered script loads with `source` or `.`, all the way down.
 
-A script counts as named when the line holds its full `scripts/…` path, or its bare file name, as in `source "$(dirname "${BASH_SOURCE[0]}")/dsym-prune-lib.sh"`. Names are followed one level, from the job and the two wrappers; loads are followed all the way down. Following names further reaches scripts that are mentioned only in passing: `restart.sh` names `update.sh`, and `update.sh` is not a suite input.
+A script counts as named when the line holds its full `scripts/…` path, or its bare file name, as in `source "$(dirname "${BASH_SOURCE[0]}")/dsym-prune-lib.sh"`. Names are followed all the way down because a script CI runs can start running a helper of its own: if `watched-test-pass.sh` began to run `scripts/diag/x.py`, a PR that changes only `x.py` must still run the suite.
 
-It fails if any script it gathers is missing from the suite's list. Today it gathers exactly the list above, apart from the `scripts/ci/` files the job does not name. A PR that makes the suite depend on a new script changes one of these referencing files, so that PR runs the suite and its Lint job fails until the script is added to the list.
+Two gathered scripts are stops. The harness follows what a stop loads but not what it names, because the suite never runs it:
 
-The drift check cannot see a Swift test that builds a script's path from separate pieces, such as `appendingPathComponent("scripts").appendingPathComponent("x.sh")`. No test does that today: the only repo file outside `Sources/` and `Tests/` that a Swift test reads is `scripts/restart.sh`, through a string literal.
+- **`scripts/restart.sh`** – `DaemonBuildSkewTests` reads it as text. It runs `reclaim-build.sh` and `sweep-scratchpads.sh`, and `restart-bundle-lib.sh`, which it loads, names `update.sh`; none of them is a suite input.
+- **`scripts/remote-verify.sh`** – the remote verification valve. CI never arms it, so CI never runs what it runs. Following its names would add `remote_verify.py` and, through it, the pre-push hook, `lint-migrations.py`, `nightly-flake-stress.sh` and `sweep-preflight-refs.sh`.
+
+A file reached only through a stop's loads is part of that stop: its loads are followed and its names are not. A file that a followed script also names or loads is followed in full, so `restart-build-lib.sh`, which `restart.sh` loads and `swift-safe` names, has its names followed.
+
+It fails if any script it gathers is missing from the suite's list. Today it gathers exactly the list above, apart from the `scripts/ci/` files the job does not name. A PR that makes the suite depend on a new script changes one of these referencing files, so that PR runs the suite and its Lint job fails until the script is added to the list. A name that runs nothing, such as one in an error message, fails the check too, which errs toward running the suite.
+
+It also fails when the `test` job uses a local composite action or reusable workflow (`uses: ./…`): those files sit under `.github/**`, which the gate skips, so they would have to become suite inputs first.
+
+The drift check cannot see a Swift test that builds a script's path from pieces, whether with `appendingPathComponent`, as in `appendingPathComponent("scripts").appendingPathComponent("x.sh")`, or by interpolation or concatenation, as in `"\(repoRoot)/scripts/x.sh"`. No test does either today: the only repo file outside `Sources/` and `Tests/` that a Swift test reads is `scripts/restart.sh`, through a string literal.
+
+**Wiring.** The gate fails closed only because of how the workflow reads its answer, and no fixture can run a GitHub expression, so the harness pins that wiring as written: the `test` job's `needs: changes` and its exact `if:`, the absence of a `name:` on that job, the `changes` job's `run` output taken from the step with `id: decide`, and that step running `scripts/ci/swift-suite-needed.sh`.
 
 ## Verification
 
