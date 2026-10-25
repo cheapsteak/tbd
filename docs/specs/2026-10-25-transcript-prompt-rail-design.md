@@ -67,9 +67,9 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
 - After a jump, the target stays active until the reader scrolls or a new prompt arrives. This covers prompts near the end, which cannot be scrolled to the top. The coordinator's own tail-follow is not a reader scroll: it ends the jump's pin, since the two would fight, but leaves the target active.
 - With no entries, the rail is empty and nothing is active.
 
-A reader scroll, here and under Jumping, is a move of the clip view's origin that neither the coordinator nor AppKit made. A size-only change is not one, and neither is AppKit moving the origin by exactly as much as the row at the top of the viewport moved, which is AppKit keeping that row in place after a height change.
+A reader scroll, here and under Jumping, is any move of the clip view's origin that the coordinator did not make itself. A change to the clip's size that leaves the origin where it was is not one. AppKit's own row-height estimation, which would move the origin as it swapped its guesses for real heights, is turned off for the whole process at launch, so the only other origin move is the clip clamping to a document that got shorter, and that rare case counts as the reader's.
 
-The coordinator recomputes the active entry on the clip view's bounds notification, which it already observes. A binary search over the entries' row rectangles finds it, and `rect(ofRow:)` builds no cells. The rail is told only when the active entry changes.
+The coordinator recomputes the active entry on the clip view's bounds notification, which it already observes. A binary search over the entries' row rectangles finds it, and `rect(ofRow:)` builds no cells. The rail is told only when the active entry changes. Content streaming in at the bottom grows the document before the coordinator's tail-follow catches up with it on the next main-queue turn; the active entry is not recomputed in between, so the bottom rule does not lapse for that turn and hand the last prompt's notch to the one before it.
 
 ## The card
 
@@ -92,7 +92,7 @@ The coordinator recomputes the active entry on the clip view's bounds notificati
   - The anchor is released when the reader scrolls, the table rebuilds, the column width changes, history is prepended, or another jump starts.
   - It survives appends and tail re-renders, which add or change rows below it and cannot move it.
 - **Unknown IDs** – an ID with no row is ignored. `scrollToRow(withNodeID:)`'s fallback to the end is right for the composer hint that uses it, and wrong here.
-- **Follow-tail** – a jump away from the bottom ends tail-following, as a manual scroll does. A jump that lands at the bottom leaves it on.
+- **Follow-tail** – a jump away from the bottom ends tail-following, as a manual scroll does, including a tail-follow already queued for content that arrived just before the jump. A jump that lands at the bottom leaves it on.
 - **Remote** – a jump to the earliest loaded prompt lands near the top and so triggers the ordinary page load. The existing prepend anchor holds the reader's place, as it does when they scroll there by hand.
 
 ## Keyboard
