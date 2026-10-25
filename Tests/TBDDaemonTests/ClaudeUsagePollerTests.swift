@@ -11,13 +11,15 @@ import TestSupport
 ///
 /// **Arming is a signal, not a poll.**
 /// ``requireSleeperArmed(count:timeout:sourceLocation:)`` parks on a
-/// continuation that `sleep(until:)` resumes from inside the critical section
-/// that registers the sleeper: the handshake `EventDrivenTestClock` gives a
-/// `Clock<Duration>` seam (`Tests/CLAUDE.md`, "The event-driven clock"), here
-/// for the Date-based `PollerClock` seam that clock cannot satisfy. The loops
-/// driven through this clock (`ClaudeUsagePoller`, `LimitResumeScheduler`) park
-/// on exactly one sleeper whenever they have future work, so "a sleeper is
-/// armed" means "the loop has finished everything the last advance made due".
+/// continuation that `sleep(until:)` claims inside the critical section that
+/// registers the sleeper, and resumes once the lock is released: the handshake
+/// `EventDrivenTestClock` gives a `Clock<Duration>` seam (`Tests/CLAUDE.md`,
+/// "The event-driven clock"), here for the Date-based `PollerClock` seam that
+/// clock cannot satisfy. The loops driven through this clock
+/// (`ClaudeUsagePoller`, `LimitResumeScheduler`) park on exactly one sleeper
+/// whenever they have future work and are not paused, and sleep nowhere else
+/// outside store-error retries, so "a sleeper is armed" means "the loop has
+/// finished everything the last advance made due".
 ///
 /// **`advance(by:)` does no yielding.** It resolves due sleepers and returns,
 /// so a positive assertion about what a resumed loop did must first wait for
@@ -302,10 +304,10 @@ private func makePoller(
 
 /// Every step waits for the loop to re-arm on the clock instead of sleeping a
 /// fixed time: the poller sleeps on exactly one deadline whenever it has an
-/// eligible profile, so once it is parked again, every tick the last advance
-/// (or poke) made due has finished. With stagger 0 the first deadline is "now",
-/// which the clock returns without parking, so the first arming after `start()`
-/// already follows the first tick.
+/// eligible profile and is not paused, so once it is parked again, every tick
+/// the last advance (or poke) made due has finished. With stagger 0 the first
+/// deadline is "now", which the clock returns without parking, so the first
+/// arming after `start()` already follows the first tick.
 @Suite("ClaudeUsagePoller")
 struct ClaudeUsagePollerTests {
 

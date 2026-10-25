@@ -52,14 +52,16 @@ final class OutcomeCollector: @unchecked Sendable {
 /// No step sleeps a fixed time. Each test uses one of two waits, whichever
 /// its next assertion needs:
 ///
-/// - `clock.requireSleeperArmed()` when the loop still has a pending row. The
-///   loop parks on exactly one clock sleep per pending row, so once it is
-///   parked, everything the last advance made due has run, and a negative
-///   ("still sleeping, not actuated") is settled rather than sampled.
-/// - `loopEffect(_:)` when the row leaves pending and the loop goes idle,
-///   which the clock cannot see. It waits for the last write the branch makes
-///   (the row's status, or the outcome callback that follows it), so every
-///   assertion after it reads a finished fire.
+/// - `clock.requireSleeperArmed()` when the loop still has a pending row.
+///   Whenever a row is pending the loop parks on exactly one clock sleep, for
+///   the earliest row (its other sleeps are store-error retries, which these
+///   tests never provoke), so once it is parked, everything the last advance
+///   made due has run, and a negative ("still sleeping, not actuated") is
+///   settled rather than sampled.
+/// - `loopEffect(_:observed:_:)` when the row leaves pending and the loop
+///   goes idle, which the clock cannot see. It waits for the last write the
+///   branch makes (the row's status, or the outcome callback that follows
+///   it), so every assertion after it reads a finished fire.
 @Suite struct LimitResumeSchedulerTests {
     let db: TBDDatabase
     let clock: TestPollerClock
@@ -92,15 +94,18 @@ final class OutcomeCollector: @unchecked Sendable {
             jitterProvider: { jitter }, onOutcome: onOutcome)
     }
 
-    /// Waits until `condition` holds, throwing a named timeout otherwise.
+    /// Waits until `condition` holds. A timeout throws a named diagnostic
+    /// carrying `observed`, read after the last failed probe; a cancellation
+    /// rethrows.
     private func loopEffect(
-        _ what: String, _ condition: () async -> Bool
+        _ what: String, observed: () async -> String, _ condition: () async -> Bool
     ) async throws {
         switch await pollUntilTrue(timeout: TestDeadlines.saturatedPass, condition) {
         case .satisfied: return
         case .cancelled: throw CancellationError()
         case .timedOut:
-            throw BoundedWaitTimeout(what: what, observed: nil, deadline: TestDeadlines.saturatedPass)
+            let seen = await observed()
+            throw BoundedWaitTimeout(what: what, observed: seen, deadline: TestDeadlines.saturatedPass)
         }
     }
 
@@ -113,7 +118,13 @@ final class OutcomeCollector: @unchecked Sendable {
     /// Waiting for "left pending" rather than for the expected status lets a
     /// wrong branch fail on the assertion at once instead of on the timeout.
     private func settledStatus(of id: UUID) async throws -> ScheduledResumeStatus? {
-        try await loopEffect("row \(id) leaving .pending") {
+        try await loopEffect(
+            "row \(id) leaving .pending",
+            observed: {
+                let current = await status(of: id)
+                return "status \(String(describing: current))"
+            }
+        ) {
             guard let current = await status(of: id) else { return false }
             return current != .pending
         }
@@ -154,7 +165,10 @@ final class OutcomeCollector: @unchecked Sendable {
         let scheduler = makeScheduler(actuator: actuator) { collector.record($0, $1) }
         await scheduler.start()
         // onOutcome runs after the status write, so it closes the fire.
-        try await loopEffect("the past-due row's outcome") { !collector.events.isEmpty }
+        try await loopEffect(
+            "the past-due row's outcome",
+            observed: { "\(actuator.calls.count) actuations, no outcome" }
+        ) { !collector.events.isEmpty }
         #expect(actuator.calls.count == 1)
         let rows = try await db.scheduledResumes.pending()
         #expect(rows.isEmpty)
@@ -219,7 +233,10 @@ final class OutcomeCollector: @unchecked Sendable {
             #expect(actuator.calls.count == attempt)
             await clock.advance(by: 130)
         }
-        try await loopEffect("the copy-mode cap's .failed outcome") {
+        try await loopEffect(
+            "the copy-mode cap's .failed outcome",
+            observed: { "\(actuator.calls.count) actuations, outcomes \(collector.events.map { $0.1 })" }
+        ) {
             collector.events.contains { if case .failed = $0.1 { return true }; return false }
         }
         #expect(actuator.calls.count == LimitResumeScheduler.maxCopyModeAttempts)
@@ -334,12 +351,17 @@ final class OutcomeCollector: @unchecked Sendable {
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(-120),
             limitType: "session", rawMessage: "m")
-        try await loopEffect("the copy-mode actuation") { !actuator.calls.isEmpty }
+        try await loopEffect("the copy-mode actuation", observed: { "no actuation" }) {
+            !actuator.calls.isEmpty
+        }
         _ = await scheduler.schedule(
             terminalID: barrierTerminal.id, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(-120),
             limitType: "session", rawMessage: "m")
-        try await loopEffect("the barrier row's outcome") { !collector.events.isEmpty }
+        try await loopEffect(
+            "the barrier row's outcome",
+            observed: { "actuated terminals \(actuator.calls), no outcome" }
+        ) { !collector.events.isEmpty }
 
         #expect(try await db.scheduledResumes.pending().isEmpty)
         #expect(actuator.calls == [terminalID, barrierTerminal.id])   // never re-actuated
