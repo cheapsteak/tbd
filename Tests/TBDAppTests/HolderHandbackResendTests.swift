@@ -13,11 +13,13 @@ import TestSupport
 ///
 /// A lost `pane.detach` leaves the session's viewer claim standing, and while
 /// this app lives nothing else clears it: every later attach is refused as
-/// owned by a viewer. The resends carry on across reconnects, which is safe
-/// because each daemon process numbers its attaches from a random base, so a
-/// generation names no claim in a successor; a successor answers a detach for
-/// it with success and an `attach.ready` for it with a refusal, and both are
-/// answers — neither is sent again.
+/// owned by a viewer. The resends carry on across reconnects, but only for a
+/// generation at or above `AttachRequestResult.uniqueGenerationFloor`: a
+/// daemon that mints those starts each process at a random base, so such a
+/// generation names no claim in any other daemon, which answers a detach for
+/// it with success and an `attach.ready` for it with a refusal — both answers,
+/// neither sent again. A generation below the floor came from an older daemon
+/// whose count restarts at 1, and is sent once.
 ///
 /// Tier 1 for the resends (an in-process stub and an injected clock); tier 2
 /// for the panel test, which runs the real reader over a `socketpair`.
@@ -25,8 +27,11 @@ import TestSupport
 @Suite("A holder handback lost in transit is resent in the background", .fastPassBounded)
 struct HolderHandbackResendTests {
 
-    // `nonisolated`: the stub below reads it off the main actor.
-    nonisolated private static let generation: UInt64 = 9
+    // `nonisolated`: the stub below reads it off the main actor. At or above
+    // the floor, the generations every resend in this suite relies on.
+    nonisolated private static let generation: UInt64 = AttachRequestResult.uniqueGenerationFloor + 9
+    /// A generation an older daemon, counting from 1, would mint.
+    nonisolated private static let legacyGeneration: UInt64 = 9
 
     /// Plays the daemon's holder RPCs from a script indexed by call number,
     /// logging every one in order.
@@ -86,20 +91,72 @@ struct HolderHandbackResendTests {
 
     private func handBack(
         _ daemon: ScriptedDaemon,
+        generation: UInt64 = HolderHandbackResendTests.generation,
         resendDelays: [Duration] = HolderAttachRetry.handbackResendDelays,
         clock: any Clock<Duration> = ImmediateClock<Duration>()
     ) async -> Task<Void, Never>? {
         await daemon.detachResendingInBackground(
-            worktreeID: UUID(), paneID: "", terminalID: UUID(), generation: Self.generation,
+            worktreeID: UUID(), paneID: "", terminalID: UUID(), generation: generation,
             snapshotPreamble: Data(), resendDelays: resendDelays, clock: clock)
     }
 
     private func release(
-        _ daemon: ScriptedDaemon, clock: any Clock<Duration> = ImmediateClock<Duration>()
+        _ daemon: ScriptedDaemon,
+        generation: UInt64 = HolderHandbackResendTests.generation,
+        clock: any Clock<Duration> = ImmediateClock<Duration>()
     ) async -> Task<Void, Never>? {
         await daemon.releaseUnconfirmedAttach(
-            worktreeID: UUID(), paneID: "", terminalID: UUID(), generation: Self.generation,
+            worktreeID: UUID(), paneID: "", terminalID: UUID(), generation: generation,
             kind: "abandoned", resendDelays: HolderAttachRetry.handbackResendDelays, clock: clock)
+    }
+
+    // MARK: - The generation floor
+
+    @Test("a lost handback whose generation is at or above the floor is resent")
+    func aHandbackAtTheFloorIsResent() async throws {
+        let daemon = ScriptedDaemon(detach: { call in
+            if call == 0 { throw DaemonClientError.connectionFailed("refused") }
+        })
+
+        let resending = try #require(await handBack(
+            daemon, generation: AttachRequestResult.uniqueGenerationFloor))
+        await resending.value
+
+        #expect(daemon.detaches == 2, "the floor itself is a unique generation: \(daemon.detaches)")
+    }
+
+    /// An older daemon numbers its attaches from 1 in every process, so a
+    /// resend that reached its successor could hand back a claim another
+    /// attach holds under the same number. Such a generation gets the one
+    /// attempt it always had.
+    @Test("a lost handback whose generation is below the floor is attempted once and never resent")
+    func aHandbackBelowTheFloorIsNotResent() async {
+        for generation in [Self.legacyGeneration, AttachRequestResult.uniqueGenerationFloor - 1] {
+            let daemon = ScriptedDaemon(detach: { _ in throw DaemonClientError.connectionFailed("refused") })
+
+            await handBack(daemon, generation: generation)?.value
+
+            #expect(daemon.detaches == 1, "generation \(generation) was resent: \(daemon.detaches)")
+        }
+    }
+
+    @Test("the release of an unconfirmed attach is resent above the floor and sent once below it")
+    func aReleaseFollowsTheFloor() async {
+        let lostBoth: @Sendable () -> ScriptedDaemon = {
+            ScriptedDaemon(
+                ready: { call in if call == 0 { throw DaemonClientError.sendFailed("short send") } },
+                detach: { call in if call == 0 { throw DaemonClientError.connectionFailed("refused") } })
+        }
+
+        let unique = lostBoth()
+        await release(unique)?.value
+        #expect(unique.events == ["ready", "detach", "ready", "detach"],
+                "a unique generation's lost release must be resent: \(unique.events)")
+
+        let legacy = lostBoth()
+        await release(legacy, generation: Self.legacyGeneration)?.value
+        #expect(legacy.events == ["ready", "detach"],
+                "a legacy generation's release must be sent once: \(legacy.events)")
     }
 
     // MARK: - The handback
@@ -400,7 +457,7 @@ struct HolderHandbackResendTests {
         state.terminals[worktreeID] = [Terminal(
             id: terminalID, worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
             label: "Shell", kind: .shell, transport: .holder)]
-        func makePanel(
+        @MainActor func makePanel(
             clock: EventDrivenTestClock, client: any HolderAttaching
         ) -> (TerminalPanelRepresentable.Coordinator, TBDTerminalView) {
             let view = TBDTerminalView(

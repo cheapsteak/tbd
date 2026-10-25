@@ -64,12 +64,12 @@ extension HolderAttaching {
     /// A handback that never reached the daemon leaves its claim standing, and
     /// nothing else clears a claim while this app lives: every later attach to
     /// the session is refused as owned by a viewer. So a failure in transit is
-    /// worth a resend, and the resends carry on across a reconnect. That is
-    /// safe because every daemon process numbers its attaches from a random
-    /// base below 2^48, so a generation from one daemon names no claim in a
-    /// successor, and a successor answers it the way it answers any generation
-    /// it never minted: a `pane.detach` with success and nothing done, an
-    /// `attach.ready` with a refusal.
+    /// worth a resend, and the resends carry on across a reconnect — but only
+    /// for a generation at or above `AttachRequestResult.uniqueGenerationFloor`
+    /// (the check below). Such a generation names no claim in any other daemon
+    /// process, and a daemon answers it the way it answers any generation it
+    /// never minted: a `pane.detach` with success and nothing done, an
+    /// `attach.ready` with a refusal. Below the floor the request is sent once.
     ///
     /// Returns once an attempt is accepted. An answer that is a refusal —
     /// anything `HolderAttachRetry.isTransportFailure` rejects — is rethrown
@@ -94,6 +94,21 @@ extension HolderAttaching {
             } catch where HolderAttachRetry.isTransportFailure(error) {
                 lastFailure = error
             }
+        }
+        // The resend contract, `AttachRequestResult.uniqueGenerationFloor`: a
+        // generation at or above it was minted by a daemon that starts each
+        // process at a random base, so it cannot match a claim in any other
+        // daemon, older or newer. Below it the generation came from an older
+        // daemon whose count restarts at 1 in every process, and a resend that
+        // reached a successor could hand back another attach's claim — so it
+        // gets the one attempt it had before resends existed.
+        guard generation >= AttachRequestResult.uniqueGenerationFloor else {
+            logger.info("""
+                holder \(request, privacy: .public) for attach \(generation, privacy: .public) of \
+                terminal \(terminalID, privacy: .public) never reached the daemon; not resent, \
+                because a generation below the unique floor may name a claim in another daemon
+                """)
+            throw lastFailure
         }
         for (index, delay) in resendDelays.enumerated() {
             let resend = index + 1
