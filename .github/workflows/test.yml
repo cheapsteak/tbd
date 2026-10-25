@@ -699,8 +699,8 @@ jobs:
       # all-per-file builds, default parallelism OOMed late in the build with
       # a bare `error: fatalError`, which is why a cap exists at all.
       #
-      # Every SwiftPM invocation in this job goes through `scripts/swift-safe`,
-      # which supplies `--jobs` from TBD_SWIFT_JOBS and refuses a command line
+      # Every compile in this job goes through `scripts/swift-safe`, which
+      # supplies `--jobs` from TBD_SWIFT_JOBS and refuses a command line
       # above it. That variable is pinned in this job's `env:` block, so the cap
       # above is stated explicitly here instead of riding on the wrapper's
       # default — raising that default would otherwise lift CI past the runner's
@@ -724,6 +724,18 @@ jobs:
       # untouched: `scripts/ci/watched-test-pass.sh` hands everything after its
       # `--` to `scripts/test.sh`, which consumes only `--fingerprint` and
       # `--no-fingerprint` and forwards the rest to `swift test`.
+      #
+      # WHAT `--skip-build` SKIPS IS THE BUILD, NOT THE PLANNING. A pass with it
+      # compiles and links nothing, but SwiftPM still loads the package and asks
+      # for the build description to find the test bundle, and that runs its
+      # `PackageStructure` step, whose signature hashes the build parameters and
+      # the whole process environment (`PackageStructureCommand` in SwiftPM's
+      # `LLBuildCommands.swift`). `scripts/test.sh` gives every run a fresh
+      # fenced environment, so every pass re-plans the build graph before it
+      # runs a test. Re-planning is part of what the 10–13 s above paid for, so
+      # the flag removes llbuild's walk over every compile and link command and
+      # keeps the planning; how much of the 10–13 s a pass still spends is for
+      # the step timings to show.
       #
       # `--build-tests` builds what the passes would have built for themselves.
       # SwiftPM maps it to the `allIncludingTests` subset, which is the subset
@@ -843,9 +855,11 @@ jobs:
       # across the run. Set against a step that already spends 139-404 s on the
       # compile, it is a good trade for halving the tail. Splitting again pays
       # that startup cost a third time for the same reason. That measurement
-      # included SwiftPM's no-op build check, which every pass here skips
-      # (`--skip-build`, against the build step above), so what each extra
-      # invocation re-pays is process startup.
+      # included SwiftPM's no-op build check. Every pass here runs with
+      # `--skip-build` against the build step above, which drops the build
+      # half of that check but not the re-planning before it (see "WHAT
+      # `--skip-build` SKIPS" above), so each extra invocation re-pays process
+      # startup and a re-plan of the build graph.
       #
       # This is NOT the "sharding across runners" that §1 considered and
       # rejected and §2 lists as a non-goal. That rejection was about extra
@@ -1009,8 +1023,9 @@ jobs:
         # condition that nothing before it failed.
         if: ${{ steps.build.outcome == 'success' }}
         # 15 and a 600 s budget, the same as 1b: the build step pays the
-        # compile, so this pass is test runtime alone, over the A–O half of
-        # TBDDaemonTests — predicted near 2,500 tests against 1b's 3,120 (see
+        # compile, so this pass is a re-plan of the build graph (see "WHAT
+        # `--skip-build` SKIPS" above) and then test runtime, over the A–O half
+        # of TBDDaemonTests — predicted near 2,500 tests against 1b's 3,120 (see
         # "The two daemon halves" above), and 1b measured 128 s of step time.
         # The watchdog budget bounds a wedge; this step bound is the platform
         # backstop behind it, sized to clear the budget with room for the
@@ -1036,10 +1051,12 @@ jobs:
         # here anyway so that no change to 1a's `if:` can ever let a
         # `--skip-build` pass run a stale bundle.
         if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
-        # 15: the build step pays the compile and `--skip-build` skips even
-        # SwiftPM's no-op build check, so this is test runtime alone — 128 s of
-        # step time on the split's first CI run, a figure that still included
-        # that check. The 600 s budget bounds a wedge; this clears it.
+        # 15: the build step pays the compile and `--skip-build` skips the
+        # build, so this is a re-plan of the build graph (see "WHAT
+        # `--skip-build` SKIPS" above) and then test runtime — 128 s of step
+        # time on the split's first CI run, a figure that included SwiftPM's
+        # whole no-op build check. The 600 s budget bounds a wedge; this clears
+        # it.
         timeout-minutes: 15
         run: |
           scripts/ci/watched-test-pass.sh \

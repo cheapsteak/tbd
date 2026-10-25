@@ -745,12 +745,11 @@ class ResultsVerdictTests(unittest.TestCase):
         # `brew install tmux`, `xcode-select`, toolchain capture, cache restore,
         # workspace repair, force rebuild, the build — so a `brew` flake means
         # zero tests ran, no xUnit file exists and no artifact was uploaded.
-        # Adopting 1
-        # there tells a caller its
-        # suite is red when nothing ever compiled, and `scripts/test.sh` has no
-        # local fallback for a 1. Every case that reaches here is answered by 78:
-        # setup died, the compile died, or the upload broke on a genuinely red run
-        # whose failures the local re-run finds properly.
+        # Adopting 1 there tells a caller its suite is red when nothing ever
+        # compiled, and `scripts/test.sh` has no local fallback for a 1. Every
+        # case that reaches here is answered by 78: setup died, the compile
+        # died, or the upload broke on a genuinely red run whose failures the
+        # local re-run finds properly.
         self.assertEqual(remote_verify.verdict_from_results(None), 78)
 
     def test_an_artifact_holding_no_result_file_is_no_verdict_either(self):

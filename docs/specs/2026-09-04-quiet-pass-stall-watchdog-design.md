@@ -278,7 +278,7 @@ reported get to report too.
 | Constant | Value | Basis |
 | --- | --- | --- |
 | build step `timeout-minutes` | 30 min | 1.45× the 1250 s cold-cache compile plus first pass, measured over 45 runs |
-| fast pass 1a budget | 600 s | tests only; same as 1b |
+| fast pass 1a budget | 600 s | no compile; same as 1b |
 | fast pass 1a `timeout-minutes` | 15 min | budget + sampling margin |
 | fast pass 1b budget | 600 s | tests only; 128 s of step time measured |
 | fast pass 1b `timeout-minutes` | 15 min | budget + sampling margin |
@@ -297,7 +297,11 @@ minutes short of the step timeout.
 
 The fast-pass budgets are sized against what those steps actually spend, and
 none of them pays the compile: the test job builds every target, test targets
-included, in a step of its own, and each pass runs with `--skip-build`. That
+included, in a step of its own, and each pass runs with `--skip-build`. The flag
+skips the build and not the planning — SwiftPM still re-plans the build graph
+on every pass, because its `PackageStructure` signature hashes the whole
+process environment and `scripts/test.sh` gives each run a fresh one — so a
+pass costs a re-plan plus its test runtime, and compiles nothing. That
 build step's 30-minute bound comes from the record of a first test step that
 compiled for itself. Measured over the 45 most recent concluded runs of
 `test.yml` (2026-09-05 to 2026-09-09), such a step took between 73 s and
