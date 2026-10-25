@@ -658,8 +658,8 @@ jobs:
       # seconds that run spent compiling — 89 TBDShared files and 265
       # TBDDaemonLib files recompiled, TestSupport and TBDDaemonTests re-emitted
       # on top, and a 38-second relink. Over the last 40 commits on `main`, 18
-      # touched neither library's sources nor the manifest and paid it for
-      # nothing. TBDTerminalSerialization adds little to that: it is five
+      # touched none of the compared paths and paid it for nothing.
+      # TBDTerminalSerialization adds little to that: it is five
       # files, and every module that imports it already depends on TBDShared,
       # so its wipe brings no new module into the rebuild — only its own files
       # and the few downstream files that import it but not TBDShared or
@@ -696,14 +696,16 @@ jobs:
             exit 0
           fi
           # These modules are exactly the library targets whose sources
-          # `WIPE_PATHS` in the script above compares, and the match runs both
-          # ways. Adding a module here means adding its sources — and the
-          # sources of every first-party target it depends on — to that list,
-          # or its wipe becomes conditional on unrelated files. A library whose
-          # sources are on that list belongs here, or a change confined to it
-          # answers `wipe` and still leaves its own stale objects in place.
-          # `scripts/ci/first-party-wipe-needed.test.sh` reddens if the two
-          # drift apart.
+          # `WIPE_PATHS` in the script above compares. Adding a module here
+          # means adding its sources — and the sources of every first-party
+          # target it depends on — to that list, or its wipe becomes conditional
+          # on unrelated files. A library whose sources are on that list belongs
+          # here, or a change confined to it answers `wipe` and still leaves its
+          # own stale objects in place. `scripts/ci/first-party-wipe-needed.test.sh`
+          # checks each module against its OWN sources, in both directions, and
+          # that every source directory on the list is one library target's.
+          # It does not check dependencies: that a module's first-party
+          # dependencies are on the list is for review to hold.
           for module in TBDShared TBDDaemonLib TBDTerminalSerialization; do
             echo "=== $module artifacts before wipe ==="
             ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"

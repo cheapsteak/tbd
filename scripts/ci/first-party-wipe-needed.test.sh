@@ -20,9 +20,11 @@
 # the list to the checkout the harness is running in for the same reason.
 #
 # ZERO BUILDS, AND THE ONLY REAL THINGS READ ARE THIS CHECKOUT'S GIT TREE AND
-# THE TEXT OF TWO OF ITS FILES. `test_compared_paths_resolve_in_this_repository`
+# THE TEXT OF THREE OF ITS FILES. `test_compared_paths_resolve_in_this_repository`
 # reads the tree, and `test_the_wipe_step_removes_exactly_the_compared_libraries`
-# reads `Package.swift` and `.github/workflows/test.yml`. Every other case mints
+# reads `Package.swift`, `.github/workflows/test.yml` and the `WIPE_PATHS` list
+# in the script under test, writing its mutated copies of the first two to a
+# temp directory. Every other case mints
 # a throwaway repository under `mktemp -d`, shaped like this one only in the
 # paths the decision reads. No case reads the network, `~/tbd`, or a real
 # `.build/`, and nothing is ever written outside a temp directory.
@@ -416,6 +418,13 @@ test_unknown_option_is_refused() {
 # and a name in the loop that is no library target at all removes nothing,
 # silently. So both lists are read out of the files CI runs and checked against
 # the targets `Package.swift` declares.
+#
+# The manifest is read by a line parser, not by SwiftPM, so a declaration it
+# does not recognise must turn this red rather than drop out of the comparison:
+# every source directory in `WIPE_PATHS` has to belong to exactly one library
+# target the parser found. What is checked is each module against its OWN
+# sources. That `WIPE_PATHS` also covers each module's first-party dependencies
+# is not read here, and is for review to hold.
 
 WIPE_STEP_NAME='Force-rebuild first-party libraries (workaround SPM #7715)'
 
@@ -445,12 +454,16 @@ wipe_paths() {
   ' "$SCRIPT"
 }
 
-# Every library target `Package.swift` declares — a `.target(`, not an
-# executable, test or system-library target — as `<name> <path>`, the path being
-# its `path:` argument or SwiftPM's default `Sources/<name>`. The manifest opens
-# each declaration on a line of its own, and only a target's own `name:` and
-# `path:` arguments start a line with those labels: a dependency's
-# `.product(name: ...)` starts with `.product`.
+# Every library target PACKAGE (or the manifest given as $1) declares — a
+# `.target(`, not an executable, test or system-library target — as
+# `<name> <path>`, the path being its `path:` argument or SwiftPM's default
+# `Sources/<name>`. It reads a declaration that opens on a line of its own and
+# closes with a `)` at the opener's indentation, which is how this manifest
+# writes every one, and takes `name:` and `path:` only from lines those labels
+# start: a dependency's `.product(name: ...)` starts with `.product`. Lines
+# outside a declaration it recognised are ignored, so a missed declaration
+# cannot lend its `path:` to the one before it. A declaration written any other
+# way is missed, which the `unclaimed` check below turns red.
 library_targets() {
   awk '
     function flush(  p) {
@@ -461,7 +474,13 @@ library_targets() {
       }
       kind = ""; name = ""; path = ""
     }
-    /^[ \t]*\.[A-Za-z]+\([ \t]*$/ { flush(); kind = $1; next }
+    /^[ \t]*\.[A-Za-z]+\([ \t]*$/ {
+      flush(); kind = $1
+      match($0, /^[ \t]*/)
+      closer = "^" substr($0, 1, RLENGTH) "\\),?[ \t]*$"
+      next
+    }
+    kind != "" && $0 ~ closer { flush(); next }
     kind != "" && name == "" && /^[ \t]*name: "/ {
       name = $0; sub(/^[ \t]*name: "/, "", name); sub(/".*/, "", name); next
     }
@@ -469,7 +488,7 @@ library_targets() {
       path = $0; sub(/^[ \t]*path: "/, "", path); sub(/".*/, "", path); next
     }
     END { flush() }
-  ' "$PACKAGE"
+  ' "${1:-$PACKAGE}"
 }
 
 # Whether $1 is one of the newline-separated lines of $2.
@@ -484,17 +503,20 @@ $1
   return 1
 }
 
-# Where the wipe step's module loop (in WORKFLOW, or the workflow file given as
-# $1) and `WIPE_PATHS` disagree, one line per disagreement, or nothing:
+# Where the wipe step's module loop, `WIPE_PATHS` and the manifest disagree, one
+# line per disagreement, or nothing. Reads WORKFLOW and PACKAGE, or the workflow
+# file given as $1 and the manifest given as $2.
 #   `unwiped <target>` – a library target whose sources `WIPE_PATHS` compares
 #     and whose artifacts the loop never removes;
 #   `uncompared <module>` – a module the loop removes that is not a library
-#     target whose sources `WIPE_PATHS` compares.
+#     target whose sources `WIPE_PATHS` compares;
+#   `unclaimed <path>` – a source directory in `WIPE_PATHS` that no library
+#     target the parser found claims, or that more than one does.
 wipe_loop_drift() {
-  local paths modules targets name path
+  local paths modules targets name path claims
   paths="$(wipe_paths)"
   modules="$(wiped_modules "${1:-$WORKFLOW}")"
-  targets="$(library_targets)"
+  targets="$(library_targets "${2:-$PACKAGE}")"
   while read -r name path; do
     [ -n "$name" ] || continue
     if is_listed "$path" "$paths" && ! is_listed "$name" "$modules"; then
@@ -511,6 +533,17 @@ EOF
     fi
   done <<EOF
 $modules
+EOF
+  while read -r path; do
+    case "$path" in
+      ''|Package.swift|Package.resolved) continue ;;
+    esac
+    claims="$(printf '%s\n' "$targets" | awk -v p="$path" '$2 == p { n++ } END { print n + 0 }')"
+    if [ "$claims" -ne 1 ]; then
+      echo "unclaimed $path"
+    fi
+  done <<EOF
+$paths
 EOF
 }
 
@@ -534,6 +567,20 @@ test_the_wipe_step_removes_exactly_the_compared_libraries() {
   sed '/for module in /s/TBDDaemonLib/TBDDaemonLib TBDAppIcon/' "$WORKFLOW" > "$d/uncompared.yml"
   assert_eq "mutation: a loop entry whose sources are not compared is caught" \
     "uncompared TBDAppIcon" "$(wipe_loop_drift "$d/uncompared.yml")"
+  # MUTATION: the case the first two cannot see. TBDTerminalSerialization is
+  # dropped from the loop AND declared in a way the parser misses — its opener
+  # carries a trailing comment — so it is in neither list being compared, and
+  # only its unclaimed directory in `WIPE_PATHS` is left to say so.
+  awk '
+    NR > 1 {
+      if ($0 ~ /^[ \t]*name: "TBDTerminalSerialization"/) sub(/\($/, "( // a comment the parser does not expect", held)
+      print held
+    }
+    { held = $0 }
+    END { print held }
+  ' "$PACKAGE" > "$d/Package.swift"
+  assert_eq "mutation: a compared library the manifest parser misses is caught" \
+    "unclaimed Sources/TBDTerminalSerialization" "$(wipe_loop_drift "$d/unwiped.yml" "$d/Package.swift")"
 }
 
 # ---------------------------------------------------------------------------

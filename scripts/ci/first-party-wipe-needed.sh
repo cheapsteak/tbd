@@ -30,7 +30,7 @@
 # seconds the first pass spent compiling: all 89 TBDShared files and 265
 # TBDDaemonLib files recompiled, TestSupport and TBDDaemonTests re-emitted on
 # top, and a 38-second relink. Over the last 40 commits on `main`, 18 touched
-# neither library's sources nor the manifest and paid that for nothing.
+# none of the compared paths and paid that for nothing.
 #
 # The bug's precondition is that a library's SOURCES differ from the sources its
 # cached artifacts were built from. When they are identical, the archive and the
@@ -108,8 +108,12 @@ set -uo pipefail
 # target whose sources are on it must be one of those modules: a change
 # confined to that library answers `wipe` here, and a wipe that leaves the
 # library's own artifacts in place has not removed the stale archive.
+#
 # `scripts/ci/first-party-wipe-needed.test.sh` reads both lists and
-# `Package.swift`, and reddens if they drift.
+# `Package.swift`, and holds part of that: each module against its OWN sources,
+# in both directions, and every source directory here belonging to exactly one
+# library target. It does not read dependencies, so that this list covers each
+# module's first-party dependencies is for review to hold.
 #
 # `Sources/TBDDaemon` does not name the `TBDDaemon` target: it is where the
 # TBDDaemonLib *library* lives (`path: "Sources/TBDDaemon"` in `Package.swift`),
