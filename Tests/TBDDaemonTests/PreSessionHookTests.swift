@@ -376,7 +376,10 @@ struct PreSessionHookTests {
         // Short injected timeout; the marker is never written. (The killed-pane
         // short-circuit can't fire under dryRun tmux — windowExists is always
         // true — so the timeout path covers the no-completion case here.)
-        let lifecycle = makeLifecycle(db: db, timeout: 0.3)
+        // 0.1 s leaves room for two polls at `makeLifecycle`'s 0.05 s interval,
+        // and the outcome is `.timedOut` however many run, since nothing ever
+        // writes the marker.
+        let lifecycle = makeLifecycle(db: db, timeout: 0.1)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
@@ -797,7 +800,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, timeout: 0.3)
+        let lifecycle = makeLifecycle(db: db, timeout: 0.1)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
@@ -817,7 +820,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, timeout: 0.3)
+        let lifecycle = makeLifecycle(db: db, timeout: 0.1)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
