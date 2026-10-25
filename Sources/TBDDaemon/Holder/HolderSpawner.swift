@@ -667,6 +667,8 @@ struct HolderSpawner {
     ///     payload lives in a socket buffer that the kernel frees when the last
     ///     descriptor closes, which happens on every path — the `defer` here, a
     ///     holder that never starts, and a holder SIGKILLed before it reads.
+    ///     Both ends are close-on-exec, so no other child of the daemon holds a
+    ///     copy that outlives those paths — see `makeLaunchSocketPair`.
     ///   - **A pipe** cannot be resized on darwin (`F_SETPIPE_SZ` is Linux
     ///     only), so a request larger than the pipe buffer could only be
     ///     delivered by writing *after* the spawn and blocking until the holder
@@ -682,13 +684,7 @@ struct HolderSpawner {
     /// still holds open. `EPIPE` cannot arise for the same reason.
     static func makeLaunchPayloadChannel(_ launch: HolderLaunchRequest) throws -> Int32 {
         let payload = try JSONEncoder().encode(launch)
-
-        var descriptors: [Int32] = [-1, -1]
-        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
-            throw Error.launchPayloadUndeliverable(bytes: payload.count, errno: errno)
-        }
-        let writeEnd = descriptors[0]
-        let readEnd = descriptors[1]
+        let (writeEnd, readEnd) = try makeLaunchSocketPair(payloadBytes: payload.count)
 
         // Sized to the payload plus slack on BOTH ends: a unix stream socket
         // queues what is sent onto the *receiver's* buffer, so the send end's
@@ -718,6 +714,41 @@ struct HolderSpawner {
         }
         close(writeEnd)
         return readEnd
+    }
+
+    /// The launch channel's two ends, both close-on-exec before anything else
+    /// touches them.
+    ///
+    /// Every other child the daemon starts — git, tmux probes, PR-status
+    /// fetchers, almost all through `Foundation.Process`, which closes nothing
+    /// that lacks `FD_CLOEXEC` — inherits whatever is inheritable at the moment
+    /// it runs, and either end is a hazard in its hands. A copy of the write
+    /// end withholds the holder's end of file, so the holder sits on a blocking
+    /// read until that unrelated child exits, past the bind timeout. A copy of
+    /// the read end holds the whole launch request, the session's credentials
+    /// included, in a buffer the child can read.
+    ///
+    /// The holder still gets its copy: a `posix_spawn` dup2 file action clears
+    /// `FD_CLOEXEC` on the descriptor it places, whatever the source carries.
+    /// Darwin has no `SOCK_CLOEXEC`, so the flag is set straight after
+    /// `socketpair` returns, and a failure to set it fails the spawn rather
+    /// than leaving an end inheritable.
+    static func makeLaunchSocketPair(
+        payloadBytes: Int
+    ) throws -> (writeEnd: Int32, readEnd: Int32) {
+        var descriptors: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors) == 0 else {
+            throw Error.launchPayloadUndeliverable(bytes: payloadBytes, errno: errno)
+        }
+        for descriptor in descriptors {
+            guard fcntl(descriptor, F_SETFD, FD_CLOEXEC) != -1 else {
+                let saved = errno
+                close(descriptors[0])
+                close(descriptors[1])
+                throw Error.launchPayloadUndeliverable(bytes: payloadBytes, errno: saved)
+            }
+        }
+        return (descriptors[0], descriptors[1])
     }
 
     private func launchHolder(
