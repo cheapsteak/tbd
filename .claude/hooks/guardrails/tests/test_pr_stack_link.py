@@ -135,7 +135,8 @@ class PRStackLinkMessageTests(unittest.TestCase):
             "ask a human",
             "gh workflow run test.yml",
             "gh stack merge <top> --squash",
-            "never PR by PR",
+            "bottom-up one PR at a time",
+            "never top-down",
             "stacked-prs",
             "nothing is blocked",
         ):

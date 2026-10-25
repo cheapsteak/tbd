@@ -26,7 +26,9 @@ What the rule reads:
 - **Trunk is `main`, fixed** — these guardrails run only for work on this
   repository, and reading the remote's default branch would need
   `refs/remotes/origin/HEAD`, which a clone does not always carry. A missing
-  base resolves to the default branch, so it stays silent as well.
+  base stays silent as well: it usually means the default branch, and the rule
+  does not read the `branch.<name>.gh-merge-base` setting that `gh pr create`
+  also honors.
 """
 
 from __future__ import annotations
@@ -59,8 +61,9 @@ _MESSAGE = (
     "4. Dispatch the test workflow for each upper PR "
     "(`gh workflow run test.yml --ref <branch> -f scope=full`): a PR based on "
     "another branch gets no test run on push.\n"
-    "5. Merge with `gh stack merge <top> --squash`, never PR by PR: merging PR "
-    "by PR folds the upper PRs into the bottom one's commit.\n"
+    "5. Merge with `gh stack merge <top> --squash`, or bottom-up one PR at a time; "
+    "never top-down, because a PR merged into the branch below it reaches main "
+    "only inside the bottom PR's squash commit.\n"
     "The `stacked-prs` skill covers restacking and the rest. "
     "(This is informational — nothing is blocked.)"
 )

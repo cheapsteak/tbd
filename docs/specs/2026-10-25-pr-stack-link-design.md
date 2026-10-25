@@ -16,7 +16,7 @@ Three changes, all informational. None blocks a call.
 
 - **A new guardrail rule, `pr-stack-link`** – nudges toward linking the chain natively whenever a PR is opened with a base other than `main`.
 - **The two existing PR rules also read the MCP tool** – `pr-user-story` and `pr-worktree-link` judge an MCP-created PR exactly as they judge a `gh pr create`.
-- **The `stacked-prs` skill gains two passages** – a copy-pasteable `gh api` form of the create-stack call, and the reason a stack is never merged PR by PR.
+- **The `stacked-prs` skill gains two passages** – a copy-pasteable `gh api` form of the create-stack call, and the reason a chain is never merged top-down.
 
 The rules live under `.claude/hooks/guardrails/`, the repo's user-land enforcement layer. They remind agents working on this repository and change nothing compiled.
 
@@ -27,7 +27,7 @@ It fires when a call opens a PR whose base is a branch other than `main`:
 - **Bash** – a `gh pr create` whose last `--base` or `-B` value, in either the spaced or the `=` form, names a branch other than `main`. Detection reuses the `gh pr create` tokenizer in `pr_worktree_link.py`, so a `gh pr create` that appears only inside a heredoc body or a quoted argument does not count, and each create in a chained command is judged on its own.
 - **MCP** – a `create_pull_request` call whose `base` field names a branch other than `main`.
 
-It stays silent when the base is `main` or absent, since an absent base resolves to the default branch. `gh stack link` and the other `gh stack` subcommands are already the native path and are never matched.
+It stays silent when the base is `main` or absent. An absent base usually means the default branch; `gh pr create` also honors a branch's `branch.<name>.gh-merge-base` git setting, which the rule does not read, because a miss costs one reminder while reading git config would add a subprocess to every `gh pr create`. `gh stack link` and the other `gh stack` subcommands are already the native path and are never matched.
 
 **Trunk is `main`, fixed.** These guardrails run only for work on this repository, and `main` is the branch its protection rules guard. Reading the remote's default branch instead would need `refs/remotes/origin/HEAD`, which a clone does not always carry.
 
@@ -41,7 +41,7 @@ The reminder states that the PR being opened belongs to a stack, then gives the 
 2. **Without the `gh-stack` extension, make the same call through `gh api`.** It is a `POST` to `repos/{owner}/{repo}/stacks` with the `X-GitHub-Api-Version: 2026-03-10` header and a body of `{"pull_requests":[<bottom>, …, <top>]}`.
 3. **When neither can reach GitHub, ask a human to run `gh stack link`.** Linking must not be left to chance.
 4. **Dispatch the test workflow for each upper PR.** A PR based on another branch gets no test run on push.
-5. **Merge the stack with `gh stack merge <top> --squash`, never PR by PR.** Merging PR by PR is what folds the upper PRs into the bottom one's commit.
+5. **Merge with `gh stack merge <top> --squash`, or bottom-up one PR at a time; never top-down.** A PR merged into the branch below it reaches `main` only inside the bottom PR's squash commit.
 
 It closes by pointing to the `stacked-prs` skill for restacking and the remaining detail, and says that nothing was blocked.
 
@@ -65,7 +65,7 @@ Each rule already separates detection from judgement, so the MCP input feeds the
 `.claude/skills/stacked-prs/SKILL.md` gains:
 
 - **Under "Create or link a stack"** – the `gh api` invocation that creates a stack from PR numbers, written out in full so an agent can paste it.
-- **Under "Merge in one go"** – one sentence on why a stack is never merged PR by PR: each merge lands in the PR's base branch, so every upper PR reaches `main` inside the bottom PR's squash commit.
+- **Under "Merge in one go"** – why a chain is never merged top-down: a PR merged into the branch below it reaches `main` only inside the bottom PR's squash commit. Merging bottom-up one PR at a time is fine, since GitHub re-targets the PRs above at trunk after each merge.
 
 The guardrails README lists `pr-stack-link` beside the other rules.
 
