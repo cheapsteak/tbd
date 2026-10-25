@@ -331,8 +331,14 @@ actor FDVendingServer {
         // that tells the two files apart.
         let identity = SocketFileIdentity(path: path)
         if Darwin.listen(fd, 1) < 0 {
+            let code = errno
             Darwin.close(fd)
-            throw FDVendingServerError.listenFailed(errno)
+            // The file `bind(2)` just made would otherwise outlive this failed
+            // listen, a socket nobody will ever accept on. Removed under the
+            // same identity check `stop()` makes, since a successor may have
+            // taken the path over in the meantime.
+            unlinkSocketFile(at: path, ifStillIdentity: identity)
+            throw FDVendingServerError.listenFailed(code)
         }
         listenerFD = fd
         socketPath = path
@@ -600,14 +606,18 @@ actor FDVendingServer {
     /// for connections accepted from then on.
     ///
     /// The socket file is removed only while it is still the one this server
-    /// bound (`unlinkOwnedSocketFile`). A daemon that is still stopping when
-    /// its successor has started — a restart that does not wait for the old
-    /// process — finds the successor's socket at the path, and deleting it
-    /// would leave the successor listening where no app can reach it.
+    /// bound (`unlinkSocketFile(at:ifStillIdentity:)`). A daemon that is still
+    /// stopping when its successor has started — a restart that does not wait
+    /// for the old process — finds the successor's socket at the path, and
+    /// deleting it would leave the successor listening where no app can reach
+    /// it.
     func stop() {
         stopped = true
         if listenerFD >= 0 { Darwin.close(listenerFD); listenerFD = -1 }
-        if let path = socketPath { unlinkOwnedSocketFile(at: path); socketPath = nil }
+        if let path = socketPath {
+            unlinkSocketFile(at: path, ifStillIdentity: boundSocketIdentity)
+            socketPath = nil
+        }
         boundSocketIdentity = nil
         disconnect()
     }
@@ -617,8 +627,8 @@ actor FDVendingServer {
     /// the same check for the RPC socket and records the microsecond window
     /// between the `lstat(2)` and the `unlink(2)` that no darwin primitive
     /// closes.
-    private func unlinkOwnedSocketFile(at path: String) {
-        guard let bound = boundSocketIdentity else {
+    private func unlinkSocketFile(at path: String, ifStillIdentity bound: SocketFileIdentity?) {
+        guard let bound else {
             // The `lstat(2)` after `bind(2)` found nothing, so this server can
             // name no file as its own and leaves whatever is there. Said at
             // error level, because a vend.sock left behind this way is
