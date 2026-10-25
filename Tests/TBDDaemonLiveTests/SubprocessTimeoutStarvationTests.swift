@@ -86,9 +86,20 @@ import Testing
 struct SubprocessTimeoutStarvationTests {
 
     /// Number of blocking work items to flood the default-QoS pool with. The
-    /// default-QoS worker-thread ceiling is ~64/process; 128 comfortably
-    /// exhausts it on this 12-core box and on 2-core CI runners.
+    /// default-QoS worker-thread ceiling is ~64/process
+    /// (`kern.wq_max_constrained_threads`); 128 comfortably exhausts it on this
+    /// 12-core box and on 2-core CI runners. The items past the ceiling queue
+    /// unstarted, which is the saturation this suite wants — and why the
+    /// warm-up below cannot wait for every item to start.
     private static let floodCount = 128
+
+    /// How long the started count must hold still before the warm-up calls
+    /// the pool saturated. Four times the kernel's longest spacing between
+    /// workqueue thread creations (`kern.wq_max_timer_interval_usecs`, 50 ms),
+    /// so a slow ramp is not mistaken for the ceiling. Measured with a C probe
+    /// on a 12-core box, all 64 workers started within 1 ms, never more than
+    /// 62 µs apart.
+    private static let saturationSettle: Duration = .milliseconds(200)
 
     /// Lock-guarded counter — `DispatchSemaphore.wait` is unavailable from an
     /// async context, so we track flood-item progress with a counter polled via
@@ -118,13 +129,25 @@ struct SubprocessTimeoutStarvationTests {
                 drained.increment()
             }
         }
-        // Best-effort: wait until the pool has spun up workers and parked them.
-        // Once every item is parked no free default-QoS thread remains to
-        // service a `DispatchSource(queue: .global())` timer handler — the
-        // pre-fix watchdog's scheduling dependency.
-        let startDeadline = ContinuousClock.now + .seconds(5)
-        while started.current < Self.floodCount, ContinuousClock.now < startDeadline {
-            try? await Task.sleep(for: .milliseconds(20))
+        // Best-effort: wait until the pool has spun up every worker it will and
+        // parked them. Once the pool is at its ceiling no free default-QoS
+        // thread remains to service a `DispatchSource(queue: .global())` timer
+        // handler — the pre-fix watchdog's scheduling dependency.
+        //
+        // The ceiling, not `floodCount`, is what `started` reaches, so the wait
+        // ends when the count stops climbing. A wait for `floodCount` would
+        // never succeed, and would spend the whole 5 s cap on every test.
+        var lastCount = -1
+        var unchangedSince = ContinuousClock.now
+        _ = await pollUntilTrue(timeout: .seconds(5), pollInterval: .milliseconds(20)) {
+            let count = started.current
+            let now = ContinuousClock.now
+            if count != lastCount {
+                lastCount = count
+                unchangedSince = now
+                return count >= Self.floodCount
+            }
+            return count > 0 && now - unchangedSince >= Self.saturationSettle
         }
 
         await body()
