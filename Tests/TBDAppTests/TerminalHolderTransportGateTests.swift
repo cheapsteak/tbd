@@ -552,7 +552,7 @@ struct TerminalHolderTransportGateTests {
     @Test("Retry advances the terminal's Retry count, which changes its pane's identity")
     func retryAdvancesTheRetryCount() {
         let state = AppState()
-        let row = Terminal(
+        let row = TBDShared.Terminal(
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             label: "Shell", kind: .shell, transport: .holder)
         let bystander = UUID()
@@ -583,8 +583,8 @@ struct TerminalHolderTransportGateTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let state = AppState(userDefaults: defaults)
         let worktreeID = UUID()
-        func row() -> Terminal {
-            Terminal(
+        func row() -> TBDShared.Terminal {
+            TBDShared.Terminal(
                 id: UUID(), worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
                 label: "Shell", kind: .shell, transport: .holder)
         }
