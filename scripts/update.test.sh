@@ -90,8 +90,8 @@ assert_eq() {
 # SIGPIPE (or, where SIGPIPE is ignored, exits 1 on `write error: Broken
 # pipe`). Under pipefail that status is the pipeline's, so a match reads as a
 # miss — and assert_not_contains passes with the text present. Which side wins
-# is timing, so it reddened about one run in a hundred;
-# `test_the_matchers_survive_output_longer_than_a_pipe` makes it certain.
+# is timing: the piped form measured about one failed run in a hundred, and
+# `test_the_matchers_survive_output_longer_than_a_pipe` makes it fail every time.
 assert_contains() {
     if grep -q -- "$2" <<< "$3"; then
         pass "$1"

@@ -165,9 +165,11 @@ struct HolderInvocationTests {
     /// parallel, and sibling suites spawn children that close nothing —
     /// `posix_spawn` with no attributes, SwiftTerm's `forkpty`,
     /// `Foundation.Process` — some of which live for the rest of the run. A
-    /// `socketpair` is inheritable, so a child spawned in this window took a
-    /// copy, kept the pair open after `parse` closed the one it was given, and
-    /// the read below answered EAGAIN for somebody else's child. Seen on CI.
+    /// `socketpair` is inheritable, so a child spawned in this window would
+    /// take a copy and keep the pair open after `parse` closed the one it was
+    /// given, and an immediate read would answer EAGAIN for somebody else's
+    /// child. Without the measures below, that failure measured 5 in about
+    /// 1,500 CI runs.
     ///
     /// Two measures, one for each kind of copy. Close-on-exec on both ends
     /// keeps them out of any image a sibling execs; darwin has no
