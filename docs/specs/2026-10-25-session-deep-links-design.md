@@ -35,12 +35,12 @@ A remote session is `tbd://open?remote=<provider>/<session>`, and its shareable 
 
 - **`tbd link`** – the current worktree, from `TBD_WORKTREE_ID`. It never reads `TBD_TERMINAL_ID`: a bare link stays a worktree link, so scripts that rely on its output keep getting the same thing.
 - **`tbd link <worktree>`** – a worktree UUID, name, or display name.
-- **`tbd link --terminal <uuid>`** – that terminal's tab. The daemon is the authority on which worktree a terminal belongs to, read through `terminal.list`, so no worktree argument is needed. Given one, it is resolved first, and a terminal that belongs to another worktree is refused with a message naming the terminal, the worktree as typed, and the worktree the terminal belongs to.
+- **`tbd link --terminal <uuid>`** – that terminal's tab. The daemon is the authority on which worktree a terminal belongs to, read through `terminal.list`, so no worktree argument is needed. Given one, it is resolved first, and a terminal that belongs to another worktree is refused with a message naming the terminal, the worktree the argument resolved to (with the name as typed, when a name was typed), and the worktree the terminal belongs to.
 - **`tbd link --this-terminal`** – the calling terminal, from `TBD_TERMINAL_ID`, looked up the same way. Outside a TBD terminal it is refused.
 - **`tbd link --remote <ref>`** – a remote session. `<ref>` takes the three forms `RemoteSessionRef` resolves: `<provider>/<session>`, the UUID of a lane bound to a session, or the name of one. It cannot be combined with a worktree argument, `--terminal`, or `--this-terminal`.
 - **`--https`** – prints the shareable form of any of the above instead of `tbd://`.
 
-The output is one line, the URL. A refusal is one line on stderr with a non-zero exit.
+The output is one line, the URL. A refusal is one line on stderr with a non-zero exit. Flags that cannot be combined are an argument error instead, which prints usage after its message, as for every `tbd` command.
 
 **The terminal lookup is scoped to one worktree whenever a worktree is known.** `terminal.list` reconciles every row it reports, so a fleet-wide call costs work and side effects across every session on the machine. For both `--terminal` and `--this-terminal`, the CLI lists one worktree's terminals when a worktree argument names it or, without one, when `TBD_WORKTREE_ID` does. It lists fleet-wide only when nothing names a worktree, or once after a scoped miss, to tell a terminal in another worktree apart from one that does not exist. `TBD_WORKTREE_ID` is only a hint: when the daemon puts the terminal in another worktree, the link follows the daemon. Only a worktree the caller typed turns that into a refusal.
 
