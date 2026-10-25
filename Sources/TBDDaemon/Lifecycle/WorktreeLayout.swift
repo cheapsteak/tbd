@@ -74,12 +74,14 @@ public struct WorktreeLayout: Sendable {
     /// The canonical base directory for fresh worktrees of the given repo.
     ///
     /// - Returns `repo.worktreeRoot` verbatim if the override is set.
-    /// - Otherwise returns `<TBDConstants.worktreesDir>/<slot>` — i.e.
-    ///   `~/tbd/worktrees/<slot>` in production, and a redirected base when
-    ///   `TBD_HOME` is set. Going through `TBDConstants` rather than
-    ///   re-deriving `~/tbd` by hand is what lets a test run point the whole
-    ///   process at a scratch home; a hand-built home path silently ignored
-    ///   the override and wrote real worktrees into the developer's `~/tbd`.
+    /// - Otherwise returns `<base>/<slot>`, where `<base>` is the injected
+    ///   `worktreesBase` if there is one and `TBDConstants.worktreesDir`
+    ///   otherwise — i.e. `~/tbd/worktrees/<slot>` in production, and a
+    ///   redirected base when `TBD_HOME` is set. Going through `TBDConstants`
+    ///   rather than re-deriving `~/tbd` by hand is what lets a test run point
+    ///   the whole process at a scratch home; a hand-built home path silently
+    ///   ignored the override and wrote real worktrees into the developer's
+    ///   `~/tbd`.
     public func basePath(for repo: Repo) -> String {
         if let override = repo.worktreeRoot, !override.isEmpty {
             return override
