@@ -90,7 +90,7 @@ struct PromptRailCardOverlay: View {
 ///   scrollers, behind 24pt fades over whichever edge clips a row.
 /// - **Opening** – the card is built afresh each time it opens, with its list
 ///   scrolled so the row for `pointedIndex` sits under `pointerY`, or as close
-///   as the list's ends allow.
+///   as the card's height and the list's ends allow.
 /// - **Updates** – a new outline while open updates the rows in place; the
 ///   card keeps its identity and its scroll position.
 /// - **Rows** – a click jumps through `state.onJump` and closes the card at
@@ -357,11 +357,11 @@ struct PromptRailCardView: View {
     }
 
     /// The list offset that puts the centre of `row` at `pointerY` in card
-    /// coordinates, clamped to the list's ends.
+    /// coordinates, or as close as the card's height and the list's ends
+    /// allow (`PromptRailCardMetrics.openOffset`).
     static func openOffset(row: Int, under pointerY: CGFloat, rowCount: Int, cardHeight: CGFloat) -> CGFloat {
-        let centre = Metrics.rowRect(row, width: 0).midY
-        let maxOffset = max(0, contentHeight(rowCount: rowCount) - cardHeight)
-        return min(max(0, centre - pointerY), maxOffset)
+        Metrics.openOffset(
+            row: row, pointerY: pointerY, contentHeight: contentHeight(rowCount: rowCount), cardHeight: cardHeight)
     }
 }
 

@@ -267,6 +267,34 @@ struct PromptRailAppKitTests {
         #expect(card.listScrollView.contentView.bounds.minY == 0)
     }
 
+    /// The card stops 60pt above the rail's bottom, so a pointer over that
+    /// stretch is below the card: its row goes as low as the card allows.
+    @Test("a pointer below the card's bottom keeps the pointed row inside the card")
+    func openKeepsPointedRowInsideCard() throws {
+        let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
+        card.update(entries: Self.entries(100), activeIndex: nil, earlier: nil)
+        let rail = CGSize(width: 680, height: 600)
+        let pointerY: CGFloat = 585
+        let pointed = try #require(
+            PromptRailLayout(count: 100, railHeight: rail.height).index(atRailY: pointerY, offset: 0))
+
+        card.open(pointedIndex: pointed, pointerY: pointerY, maxSize: rail)
+        try #require(card.frame.height == 540,
+                     Comment(rawValue: "precondition: the card stops 60pt above the rail's bottom "
+                         + "(\(card.frame.height) pt)"))
+        try #require(pointerY > card.frame.height, "precondition: the pointer is below the card")
+
+        let listOffset = card.listScrollView.contentView.bounds.minY
+        let row = PromptRailCardMetrics.rowRect(pointed, width: card.frame.width)
+            .offsetBy(dx: 0, dy: -listOffset)
+        #expect(row.minY >= 0 && row.maxY <= card.frame.height,
+                Comment(rawValue: "row \(pointed) sat at \(row.minY)…\(row.maxY) pt in a "
+                    + "\(card.frame.height) pt card (list offset \(listOffset) pt)"))
+        // As low as the card allows: its bottom edge on the card's.
+        #expect(abs(row.maxY - card.frame.height) <= 0.5,
+                Comment(rawValue: "row \(pointed) ended at \(row.maxY) pt, not the card's bottom"))
+    }
+
     // MARK: Container wiring
 
     @Test("the hover model opens the card with the rail's outline, and a row click closes it and stops Escape")

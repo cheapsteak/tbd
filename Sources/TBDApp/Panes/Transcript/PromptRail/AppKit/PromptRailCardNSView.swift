@@ -15,7 +15,7 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 ///   without scrollers, behind 24pt fades over whichever edge clips a row.
 /// - **Opening** – fades in over `PromptRailCardMetrics.fadeDuration`, easing
 ///   out, with the list scrolled so the row for the pointed notch sits under
-///   the pointer, or as close as the list's ends allow.
+///   the pointer, or as close as the card's height and the list's ends allow.
 /// - **Updates** – a new outline while open updates the rows in place; the
 ///   card neither closes nor moves its list.
 /// - **Rows** – drawn, not built: a flipped list view draws only the rows a
@@ -268,10 +268,13 @@ final class PromptRailCardNSView: NSView {
         max(0, listView.frame.height - listScrollView.contentView.bounds.height)
     }
 
-    /// Scrolls so the centre of `row` sits at `y` in card coordinates,
-    /// clamped to the list's ends.
+    /// Scrolls so the centre of `row` sits at `y` in card coordinates, or as
+    /// close as the card's height and the list's ends allow
+    /// (`PromptRailCardMetrics.openOffset`).
     private func scrollList(row: Int, under y: CGFloat) {
-        scrollList(toOffset: Metrics.rowRect(row, width: bounds.width).midY - y)
+        scrollList(toOffset: Metrics.openOffset(
+            row: row, pointerY: y, contentHeight: listView.frame.height,
+            cardHeight: listScrollView.contentView.bounds.height))
     }
 
     private func scrollList(toOffset offset: CGFloat) {

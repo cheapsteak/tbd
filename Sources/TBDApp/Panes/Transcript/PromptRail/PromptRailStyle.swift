@@ -70,6 +70,26 @@ enum PromptRailCardMetrics {
         max(0, min(contentHeight, railHeight - bottomClearance))
     }
 
+    /// Where the pointed row's centre goes when the card opens: the pointer's
+    /// y, in card coordinates (the rail's, since the card sits at its
+    /// top-left), held at least half a row inside the card's top and bottom.
+    /// The card stops `bottomClearance` short of the rail's bottom, so a
+    /// pointer over that stretch would otherwise put its row below the card.
+    static func pointedRowCentre(pointerY: CGFloat, cardHeight: CGFloat) -> CGFloat {
+        let half = rowHeight / 2
+        return max(half, min(pointerY, cardHeight - half))
+    }
+
+    /// The list offset that opens the card with `row`'s centre at
+    /// `pointedRowCentre(pointerY:cardHeight:)`, clamped to the list's ends:
+    /// the row sits under the pointer, or as close as the card's height and
+    /// the list's ends allow. Either clamp keeps the row inside the card.
+    static func openOffset(row: Int, pointerY: CGFloat, contentHeight: CGFloat, cardHeight: CGFloat) -> CGFloat {
+        let target = pointedRowCentre(pointerY: pointerY, cardHeight: cardHeight)
+        let maxOffset = max(0, contentHeight - cardHeight)
+        return min(max(0, rowRect(row, width: 0).midY - target), maxOffset)
+    }
+
     /// A row's rectangle in list coordinates.
     static func rowRect(_ row: Int, width: CGFloat) -> NSRect {
         NSRect(

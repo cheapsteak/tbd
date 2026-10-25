@@ -330,6 +330,30 @@ struct PromptRailSwiftUITests {
         #expect(PromptRailCardView.openOffset(row: 99, under: 10, rowCount: 100, cardHeight: 600) == 1612)
     }
 
+    /// The card stops 60pt above the rail's bottom, so a pointer over that
+    /// stretch is below the card: its row goes as low as the card allows.
+    @Test("a pointer below the card's bottom keeps the pointed row inside the card")
+    func openKeepsPointedRowInsideCard() throws {
+        let railHeight: CGFloat = 600
+        let pointerY: CGFloat = 585
+        let pointed = try #require(
+            PromptRailLayout(count: 100, railHeight: railHeight).index(atRailY: pointerY, offset: 0))
+        let cardHeight = PromptRailCardView.height(rowCount: 100, maxHeight: railHeight)
+        try #require(cardHeight == 540,
+                     Comment(rawValue: "precondition: the card stops 60pt above the rail's bottom (\(cardHeight) pt)"))
+        try #require(pointerY > cardHeight, "precondition: the pointer is below the card")
+
+        let listOffset = PromptRailCardView.openOffset(
+            row: pointed, under: pointerY, rowCount: 100, cardHeight: cardHeight)
+        let row = PromptRailCardMetrics.rowRect(pointed, width: 0).offsetBy(dx: 0, dy: -listOffset)
+        #expect(row.minY >= 0 && row.maxY <= cardHeight,
+                Comment(rawValue: "row \(pointed) sat at \(row.minY)…\(row.maxY) pt in a "
+                    + "\(cardHeight) pt card (list offset \(listOffset) pt)"))
+        // As low as the card allows: its bottom edge on the card's.
+        #expect(abs(row.maxY - cardHeight) <= 0.5,
+                Comment(rawValue: "row \(pointed) ended at \(row.maxY) pt, not the card's bottom"))
+    }
+
     // MARK: Escape and closing
 
     /// The rail reports hover with no prompts too, so the hover model can
