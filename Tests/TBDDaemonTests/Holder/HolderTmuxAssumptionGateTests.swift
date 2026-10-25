@@ -127,6 +127,40 @@ private final class RecordedHolderWrites: @unchecked Sendable {
 /// these branches is a `transport == .holder` comparison that an inverted one
 /// would satisfy just as well while disabling the mechanic for the transport
 /// that still needs it.
+/// Holds every adoption that reaches a registry's publish seam until the test
+/// lets it through — a hand-over that never finishes, without a holder or a
+/// wall clock. Suspends rather than blocking a thread.
+private actor HeldAdoption {
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var parked = 0
+
+    func park() async {
+        if released { return }
+        parked += 1
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+
+    nonisolated func hook() -> @Sendable () async -> Void {
+        { [self] in await self.park() }
+    }
+}
+
+/// What a wake running in its own task answered, once it has. Read by the
+/// test's bounded poll.
+private final class WakeOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: WakeResult?
+    func record(_ result: WakeResult) { lock.withLock { stored = result } }
+    var result: WakeResult? { lock.withLock { stored } }
+}
+
 @Suite("Holder rows and the tmux-window assumption")
 struct HolderTmuxAssumptionGateTests {
 
@@ -1039,6 +1073,137 @@ struct HolderTmuxAssumptionGateTests {
         #expect(await registry.attachRoundTripsStarted == 0)
         #expect(recorded.snapshot().isEmpty,
                 "the holder wake path reached tmux: \(recorded.snapshot())")
+    }
+
+    /// The same row, with a hand-over that does not finish: the adoption is
+    /// held at its publish step for as long as the test likes, which is a
+    /// holder busy and then silent for as long as it can be. The wake holds
+    /// its claim and its caller's RPC while it waits, so it waits no longer
+    /// than the attach budget, on the registry's injected clock, and then
+    /// un-parks the row over its live child, leaving the adoption to finish
+    /// on its own.
+    @Test("a wake waits for a live holder's adoption no longer than the attach budget",
+          .clockDriven)
+    func wakeWaitsForTheAdoptionNoLongerThanItsBudget() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9109] = .init(aliveInitially: true)
+        signaller.startTimes[9109] = childStartedAt
+        signaller.cmdlines[9109] = Self.holderChildCommand
+
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder,
+            childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+
+        let clock = EventDrivenTestClock()
+        let budget: Duration = .seconds(5)
+        let registry = HolderRegistry(
+            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            environment: ["TBD_HOME": "/tmp/tbd-hg-\(UUID().uuidString.prefix(8))"],
+            listTerminals: { [terminal] },
+            attachAdoptionBudget: budget,
+            clock: clock)
+        let hold = HeldAdoption()
+        await registry.setPublishBarrier(hold.hook())
+        let hibernation = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: signaller)
+        let woken = WakeOutcome()
+
+        let waking = Task {
+            let result = await hibernation.wake(terminalID: terminal.id)
+            woken.record(result)
+        }
+        let held = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await hold.parked == 1
+        }
+        guard held == .satisfied else {
+            await hold.release()
+            await waking.value
+            Issue.record(BoundedWaitTimeout(
+                what: "the wake's adoption to reach its publish step",
+                observed: "no adoption parked; the wake answered \(String(describing: woken.result))",
+                deadline: TestDeadlines.saturatedPass))
+            return
+        }
+        do {
+            try await clock.requireAdvanceWhenArmed(by: budget)
+        } catch {
+            await hold.release()
+            throw error
+        }
+        let returned = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            woken.result != nil
+        }
+        let parkedWhileHeld = try #require(try await db.terminals.get(id: terminal.id)).isParked
+        await hold.release()
+        await waking.value
+
+        if returned == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "the wake to return once the adoption budget passed",
+                observed: "it was still waiting on an adoption held at its publish step",
+                deadline: TestDeadlines.saturatedPass))
+        }
+        #expect(woken.result?.isOk == true,
+                "the wake did not un-park over the live holder: \(String(describing: woken.result))")
+        #expect(!parkedWhileHeld, "the row was still parked while the adoption was held")
+        #expect(recorded.snapshot().isEmpty,
+                "the holder wake path reached tmux: \(recorded.snapshot())")
+    }
+
+    /// A wake that un-parks a row over a live holder it could not adopt leaves
+    /// the adoption to the next attach — so it must clear the let-go mark a
+    /// park that reached `abandon` left, or that attach refuses the revived
+    /// session for the daemon's whole life.
+    @Test("a wake that revives a let-go session over a live holder lets the next attach adopt it")
+    func wakeRevivesALetGoSessionForTheNextAttach() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9109] = .init(aliveInitially: true)
+        signaller.startTimes[9109] = childStartedAt
+        signaller.cmdlines[9109] = Self.holderChildCommand
+
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder,
+            childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+
+        let registry = holderRegistry(listing: [terminal])
+        // The mark a park's escalation leaves. No pids, so nothing is signalled.
+        _ = await registry.abandon(terminalID: terminal.id, holderPID: nil, childPID: nil)
+        try await registry.adoptForAttach(terminal: terminal)
+        #expect(await registry.attachRoundTripsStarted == 0,
+                "the fixture's let-go mark did not refuse an attach, so this tests nothing")
+
+        let result = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: signaller)
+            .wake(terminalID: terminal.id)
+        #expect(result.isOk, "the wake did not un-park over the live holder: \(result)")
+        // The wake's own hand-over, which nothing answers at this rendezvous.
+        #expect(await registry.attachRoundTripsStarted == 1)
+
+        let woken = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(!woken.isParked)
+        try await registry.adoptForAttach(terminal: woken)
+        #expect(await registry.attachRoundTripsStarted == 2, """
+            the session the wake revived is still marked let go, so every attach refuses it and \
+            nothing will ever drain it
+            """)
     }
 
     /// An adopting wake launches nothing, so the live session still carries

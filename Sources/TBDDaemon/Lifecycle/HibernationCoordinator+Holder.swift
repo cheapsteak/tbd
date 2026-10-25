@@ -1109,10 +1109,15 @@ extension HibernationCoordinator {
     /// finish exiting — that no park can end, and that only an attach would
     /// adopt. So the wake takes the hand-over itself, and the row comes back
     /// awake with a reader on it and its pids checked against what the holder
-    /// reported. If the hand-over fails again the row is un-parked regardless:
-    /// a row parked over a live child is the state this transport treats as
-    /// worst, while an awake row names live pids every reconciler can judge,
-    /// and the next attach adopts on demand (`HolderRegistry.adoptForAttach`).
+    /// reported. The wait is bounded as an attach's is
+    /// (`HolderRegistry.adoptWithinAttachBudget`), and a hand-over still
+    /// running at the limit finishes on its own. If the hand-over fails, or is
+    /// still running, the row is un-parked regardless: a row parked over a
+    /// live child is the state this transport treats as worst, while an awake
+    /// row names live pids every reconciler can judge, and the next attach
+    /// adopts on demand (`HolderRegistry.adoptForAttach`). The wake clears the
+    /// session's let-go mark on those paths, because that attach refuses a
+    /// session this registry told to let go and the wake has just revived it.
     /// The one exception is a daemon that is shutting down, which adopts
     /// nothing: the row stays parked, and the next daemon's startup adoption
     /// picks the holder up.
@@ -1136,24 +1141,40 @@ extension HibernationCoordinator {
                     signaller: signaller) == .same {
             // Adopted before the row stops being parked, for the reason the
             // header gives: un-parked without a reader, nothing drains it.
-            do {
-                try await registry.adopt(terminal: terminal)
+            // Bounded like an attach's adoption, because this wake holds its
+            // claim and its caller's RPC for as long as it waits.
+            switch await registry.adoptWithinAttachBudget(terminal: terminal) {
+            case .success(_)?:
                 evidence = "its recorded child \(childPID) is identity-verified alive, and its "
                     + "holder is now adopted"
                 await restoreHolderPIDsFromRegistry(terminal, registry: registry)
-            } catch HolderRegistry.Error.daemonShuttingDown {
-                // Not a holder that refused: this daemon adopts nothing any
-                // more. The row stays parked, so the next daemon's startup
-                // adoption — which adopts parked rows too — finds the holder
-                // and the next wake un-parks over a reader instead of none.
-                logger.notice("wake: \(terminal.id, privacy: .public) is parked over a live holder, but the daemon is shutting down and adopts nothing; leaving the row parked for the next daemon to adopt")
-                return .respawnFailed(
-                    reason: "the daemon is shutting down, so this session stays parked; its holder "
-                        + "is still running and the next daemon will adopt it")
-            } catch {
+            case .failure(let error)?:
+                if let refusal = error as? HolderRegistry.Error,
+                   case .daemonShuttingDown = refusal {
+                    // Not a holder that refused: this daemon adopts nothing
+                    // any more. The row stays parked, so the next daemon's
+                    // startup adoption — which adopts parked rows too — finds
+                    // the holder and the next wake un-parks over a reader.
+                    logger.notice("wake: \(terminal.id, privacy: .public) is parked over a live holder, but the daemon is shutting down and adopts nothing; leaving the row parked for the next daemon to adopt")
+                    return .respawnFailed(
+                        reason: "the daemon is shutting down, so this session stays parked; its "
+                            + "holder is still running and the next daemon will adopt it")
+                }
                 evidence = "its recorded child \(childPID) is identity-verified alive, though its "
                     + "holder could not be adopted, so the next attach will adopt it"
                 logger.warning("wake: \(terminal.id, privacy: .public) is parked over a live holder that would not hand its pty over; un-parking it without a reader: \(error.localizedDescription, privacy: .public)")
+                // The wake revives this session on purpose, and it leaves the
+                // adoption to the next attach — which refuses a session this
+                // registry told to let go, as a park that reached `abandon`
+                // did. Cleared so that promise holds.
+                await registry.clearLetGo(terminalID: terminal.id)
+            case nil:
+                evidence = "its recorded child \(childPID) is identity-verified alive, and its "
+                    + "holder's adoption is still running"
+                logger.notice("wake: the adoption of \(terminal.id, privacy: .public)'s live holder outlasted its budget; un-parking the row while the adoption finishes on its own")
+                // As above: if the adoption fails after all, the next attach
+                // must be free to try.
+                await registry.clearLetGo(terminalID: terminal.id)
             }
         } else {
             return nil

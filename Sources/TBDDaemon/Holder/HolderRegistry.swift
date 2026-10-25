@@ -2141,6 +2141,35 @@ actor HolderRegistry {
         }
     }
 
+    // MARK: - Adopting for a wake
+
+    /// `adopt`, waited for no longer than `attachAdoptionBudget`: the result,
+    /// or nil when the budget passed first and the adoption is still running.
+    ///
+    /// For the wake that finds a parked row's holder already running. That
+    /// wake holds its claim and its caller's RPC for as long as it waits, and
+    /// a holder busy past `busyRetryBudget` and then silent for an
+    /// `adoptionReceiveTimeout` costs both several seconds. Bounded the way
+    /// the attach is, for the same reason and with the same consequence: an
+    /// adoption still running at the limit finishes in its own task and
+    /// publishes as any adoption does.
+    func adoptWithinAttachBudget(terminal: Terminal) async -> Result<HolderReader, Swift.Error>? {
+        let attempt = Task { try await self.adopt(terminal: terminal) }
+        return await Self.settlement(of: attempt, within: attachAdoptionBudget, clock: clock)
+    }
+
+    /// Drops the let-go mark on a session something has deliberately brought
+    /// back to life.
+    ///
+    /// The wake that un-parks a row over a live holder it did not adopt is the
+    /// caller: it leaves the adoption to the next attach, and an attach
+    /// refuses a session this registry told to let go — as a park that reached
+    /// `abandon` did. Without this, the row would be awake and refused by
+    /// every attach for the daemon's whole life.
+    func clearLetGo(terminalID: UUID) {
+        sessionsLetGo.remove(terminalID)
+    }
+
     /// The result of `work`, or nil when `limit` passes on `clock` first.
     ///
     /// `work` is not cancelled when the limit wins. It runs to its own end in
