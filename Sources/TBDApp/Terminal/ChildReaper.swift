@@ -49,20 +49,27 @@ final class ChildExitObservation: Sendable {
 /// SwiftTerm's `LocalProcess` calls `waitpid` from exactly one place: the
 /// `DispatchSourceProcess` (`.exit`) handler installed by
 /// `startProcessWithForkpty`. Both of its teardown paths cancel that source
-/// *before* the child has actually exited —
+/// before its handler can `waitpid` the child —
 ///
 /// - `deinit` cancels the monitor, then closes the master fd; the child only
 ///   notices the resulting `SIGHUP` afterwards.
 /// - `terminate()` cancels the monitor directly (`takeResourcesForShutdown()`
 ///   → `cancelMonitor()`), closes the write channel, and only then sends
-///   `SIGTERM` — the monitor is already gone before the signal can land.
+///   `SIGTERM` — the monitor is already gone before that signal can land.
+///   `LocalPTYTerminalRepresentable.Coordinator.cleanup()` sends its own
+///   `SIGTERM` just before calling `terminate()` (see the comment there), so
+///   that child can exit while the monitor is still armed. Even so, the
+///   monitor never reaps it: its handler runs on main, `cleanup()` holds
+///   main until `terminate()` has cancelled it and zeroed `shellPid`, and
+///   SwiftTerm's `processTerminated()` waits on nothing while `shellPid` is 0.
 ///
-/// — so on both paths the `.exit` event never fires, `waitpid` is never called,
-/// and the child stays a zombie under TBDApp for the life of the app. Observed
-/// in the field as 67 permanently-`<defunct>` `tmux … attach` children.
+/// — so on both paths the monitor never calls `waitpid`, and the child stays a
+/// zombie under TBDApp for the life of the app. Observed in the field as 67
+/// permanently-`<defunct>` `tmux … attach` children.
 ///
-/// The fix is to guarantee the `waitpid` ourselves at teardown, without
-/// changing *how* the child is asked to die. A blocking `waitpid` is the
+/// The fix is to guarantee the `waitpid` ourselves at teardown; the reaper
+/// only waits, and never itself changes *how* the child is asked to die —
+/// that stays with each `cleanup()`. A blocking `waitpid` is the
 /// deterministic instrument for that: it reaps whether the child is still
 /// running (it blocks until exit), already a zombie (returns immediately), or
 /// already reaped (`ECHILD`, immediately). Registering a second
@@ -85,45 +92,51 @@ final class ChildExitObservation: Sendable {
 /// collect is left exactly where it was. A `Thread` is a plain pthread outside
 /// that cap; it costs a stack and nothing else, and teardowns are rare.
 ///
-/// **Sole-waiter discipline — what is guaranteed, and what is not.** Never
-/// commit a `waitpid` for a pid another waiter may also claim: whoever wins
-/// frees the pid, the OS may recycle it for a newly forked child, and the loser
-/// can then steal that unrelated child's exit status. Two things narrow that to
-/// a residual, and the residual is real.
+/// **Sole-waiter discipline — what is guaranteed, and what it rests on.**
+/// Never commit a `waitpid` for a pid another waiter may also claim: whoever
+/// wins frees the pid, the OS may recycle it for a newly forked child, and the
+/// loser can then steal that unrelated child's exit status. Three things keep
+/// SwiftTerm's monitor from being that other waiter.
 ///
 /// - Each call site releases its `LocalProcess` inside `cleanup()`, so `deinit`
 ///   cancels `childMonitor` at a known moment rather than whenever ARC gets
-///   round to it. No exit handler is scheduled after that.
+///   round to it.
 /// - `ChildExitObservation` carries the monitor's claim to both of `reap`'s
 ///   checks, covering every case where the handler ran before teardown looked.
+/// - A handler that runs *after* teardown waits on nothing. Cancelling a
+///   dispatch source is not relied on to un-enqueue a handler invocation that
+///   is already queued, and a child that exits just before `cleanup()` cancels
+///   the monitor can leave one queued on main. But both teardown paths zero
+///   `shellPid` under SwiftTerm's session lock before cancelling the monitor
+///   (`takeResourcesForShutdown()`), and `processTerminated()` returns before
+///   its `waitpid` while `shellPid` is 0.
 ///
-/// **The residual, stated rather than glossed: this is not airtight.**
-/// Cancelling a dispatch source does *not* retroactively un-enqueue a handler
-/// invocation that is already queued. So a child that exits in the narrow
-/// window before `cleanup()` releases its `LocalProcess` can leave a handler
-/// queued on main that runs after we have already committed a `waitpid`, and
-/// then both of us have waited on one pid.
-///
-/// What that actually costs, so the risk is legible rather than alarming. The
-/// loser's `waitpid` returns `ECHILD` and SwiftTerm reports `exitCode` 0, so
-/// the terminal prints "[View detached — session is still running]" instead of
-/// naming the real exit code: one wrong message, no lost state. The serious
-/// outcome — reaping an unrelated child — additionally requires the pid to be
-/// recycled into a *new* child of this process inside the microseconds between
-/// the winner's `waitpid` and the loser's, which is a coincidence on top of a
-/// race. Note the common teardown path does not even enter this window:
+/// **The third point is a property of the pinned SwiftTerm, not of this type,
+/// and it is load-bearing.** The panel path seldom enters that window:
 /// `TmuxBridge.cleanupSession` kills the tmux session from a *detached* task,
 /// so the attach client normally exits after `cleanup()` has already cancelled
-/// the monitor, leaving this reaper as the only waiter.
+/// the monitor. `LocalPTYTerminalRepresentable`'s `cleanup()` can enter it on
+/// every teardown, because it signals its child before `terminate()` cancels
+/// the monitor. A revision that stopped zeroing `shellPid` ahead of that check
+/// would reopen a real double wait, so re-verify it on every bump along with
+/// the single `waitpid` call site.
 ///
-/// It is therefore a narrow race that is deliberately left open rather than
-/// closed by making cleanup depend on the main queue — see `reap`.
+/// What a double wait would cost, so the risk stays legible rather than
+/// alarming. The loser's `waitpid` returns `ECHILD` and SwiftTerm reports
+/// `exitCode` 0, so the terminal prints "[View detached — session is still
+/// running]" instead of naming the real exit code: one wrong message, no lost
+/// state. The serious outcome — reaping an unrelated child — additionally
+/// requires the pid to be recycled into a *new* child of this process inside
+/// the microseconds between the winner's `waitpid` and the loser's, which is a
+/// coincidence on top of a race. That cost is why the reap is not also ordered
+/// behind the main queue — see `reap`.
 ///
 /// **Known limitation, deliberately not handled here:** a child that ignores
 /// `SIGHUP` (and `SIGTERM`, on the path that sends one) never exits, so its
 /// reaper thread parks forever. Bounding that wait and escalating to `SIGKILL`
 /// is a separate change — it needs an injected clock per `CLAUDE.md` and it
-/// changes how the child is asked to die, which this fix deliberately does not.
+/// changes how the child is asked to die, which the reaper deliberately does
+/// not.
 enum ChildReaper {
     /// Which reaps are still parked, so `drainPendingReaps` can say when every
     /// reap started before a given moment has finished. Sequence numbers are
@@ -183,12 +196,14 @@ enum ChildReaper {
     /// monitor already did. Fire-and-forget; returns immediately.
     ///
     /// Deliberately not routed through the main queue. Hopping through main
-    /// before committing would resolve the residual race above, by ordering
-    /// this behind any exit handler already queued there — but it would make
-    /// every reap wait on main-queue liveness, and main is the thread this app
-    /// has a `HangWatchdog` for. Cleanup that stops working precisely when the
-    /// app is unhealthy is the wrong trade for a race whose realistic outcome
-    /// is one wrong exit code in one terminal message.
+    /// before committing would order this behind any exit handler already
+    /// queued there, closing the double wait above without relying on
+    /// SwiftTerm zeroing `shellPid` — but it would make every reap wait on
+    /// main-queue liveness, and main is the thread this app has a
+    /// `HangWatchdog` for. Cleanup that stops working precisely when the app is
+    /// unhealthy is the wrong trade for a race whose realistic outcome is one
+    /// wrong exit code in one terminal message, and which the pinned revision
+    /// already closes.
     static func reap(pid: pid_t, unless observation: ChildExitObservation) {
         // Cheap early-out, and the only check a control-mode panel (pid 0)
         // ever reaches — it keeps teardown from starting a pointless thread.
