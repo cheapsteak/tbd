@@ -38,19 +38,26 @@ import Testing
     /// Not every offset: cutting between two ordinary printable bytes exercises
     /// the same code as cutting between the two before them, and paying for
     /// tens of thousands of full renders to learn that costs half a minute per
-    /// run. What is *not* sampled is anything with internal structure — every
+    /// run. What is enumerated is everything with internal structure — every
     /// offset inside an escape sequence and inside a multi-byte UTF-8
     /// character is tried, because those are the cuts that leave the parser
-    /// holding half a token. The plain runs between them get a coarse stride
-    /// so a regression in the boring path still has somewhere to show up.
+    /// holding half a token. The plain runs between them are not cut singly
+    /// here; `aStreamFedInFixedSizeRunsPaintsTheSameScreen(stride: 1)` cuts
+    /// at every one of them in a single render.
     @Test func aSingleSplitAnywhereInTheStreamPaintsTheSameScreen() {
         let stream = Self.claudeShapedStream()
         let reference = Self.render(chunks: [stream[...]])
 
         let offsets = Self.interestingSplitOffsets(in: stream)
-        // Guards the sampler itself: a bug that returned only the stride would
-        // silently drop the cases this test exists for.
-        #expect(offsets.count > stream.count / 7 + 100)
+        // Guards the sampler itself: a bug that dropped a class of cut would
+        // silently drop the cases this test exists for. Every cut inside a
+        // multi-byte character and every cut right after an ESC must be kept.
+        let sampled = Set(offsets)
+        let missed = (1..<stream.count).filter { offset in
+            let structured = stream[offset] & 0xc0 == 0x80 || stream[offset - 1] == 0x1b
+            return structured && !sampled.contains(offset)
+        }
+        #expect(missed.isEmpty, "sampler skipped structured cuts at \(missed.prefix(8))")
 
         var firstFailure: (index: Int, screen: String)?
         for k in offsets {
@@ -314,21 +321,16 @@ import Testing
     // MARK: - Choosing where to cut
 
     /// The cuts worth paying for: every offset with structure on either side of
-    /// it, plus a coarse stride over everything else.
+    /// it.
     ///
     /// "Structure" is an escape sequence or a multi-byte UTF-8 character —
     /// anything the parser holds partial state across. Every offset inside one,
     /// and the offset immediately after it, is included; a cut between two
-    /// plain printable bytes exercises the same branch as its neighbours, so
-    /// those are sampled rather than enumerated.
+    /// plain printable bytes exercises the same branch as its neighbours, and
+    /// the fixed-run test at stride 1 already cuts at all of those.
     private static func interestingSplitOffsets(in stream: [UInt8]) -> [Int] {
         guard stream.count > 1 else { return [] }
         var interesting = [Bool](repeating: false, count: stream.count)
-
-        // The coarse pass, so the boring runs still have somewhere to fail.
-        for offset in Swift.stride(from: 1, to: stream.count, by: 7) {
-            interesting[offset] = true
-        }
 
         // Every cut inside an escape sequence, and the one just after it.
         var index = 0
