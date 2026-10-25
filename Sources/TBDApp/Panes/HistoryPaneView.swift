@@ -502,34 +502,37 @@ struct SessionTranscriptView: View {
                     sections: presentation.indexSections,
                     onOpen: openTranscriptItem
                 ) {
-                    TableTranscriptView(
-                        context: TranscriptCardContext(
-                            terminalID: nil,
-                            openTranscriptOverlay: openTranscriptItem,
-                            toggleActivityGroup: setActivityGroup,
-                            appState: appState,
-                            linkResolver: TranscriptLinkDestination.makeLinkResolver(
-                                worktreeRoot: { [appState, worktreeID] in
-                                    Self.historyWorktreePath(
-                                        in: appState, worktreeID: worktreeID)
-                                },
-                                cache: historyLinkCache),
-                            onLinkClicked: { target in
-                                switch TranscriptLinkDestination.history(target) {
-                                case .revealInFinder(let path):
-                                    NSWorkspace.shared.activateFileViewerSelecting(
-                                        [URL(fileURLWithPath: path)])
-                                case .openInBrowser(let url):
-                                    NSWorkspace.shared.open(url)
+                    PromptRailContainer { mount in
+                        TableTranscriptView(
+                            context: TranscriptCardContext(
+                                terminalID: nil,
+                                openTranscriptOverlay: openTranscriptItem,
+                                toggleActivityGroup: setActivityGroup,
+                                appState: appState,
+                                linkResolver: TranscriptLinkDestination.makeLinkResolver(
+                                    worktreeRoot: { [appState, worktreeID] in
+                                        Self.historyWorktreePath(
+                                            in: appState, worktreeID: worktreeID)
+                                    },
+                                    cache: historyLinkCache),
+                                onLinkClicked: { target in
+                                    switch TranscriptLinkDestination.history(target) {
+                                    case .revealInFinder(let path):
+                                        NSWorkspace.shared.activateFileViewerSelecting(
+                                            [URL(fileURLWithPath: path)])
+                                    case .openInBrowser(let url):
+                                        NSWorkspace.shared.open(url)
+                                    }
                                 }
-                            }
-                        ),
-                        atBottom: $atBottom,
-                        scrollToBottomToken: scrollToBottomToken,
-                        activityToggleToken: activityToggleToken,
-                        linkRoot: linkRoot,
-                        nodesProvider: { presentation.nodes }
-                    )
+                            ),
+                            atBottom: $atBottom,
+                            scrollToBottomToken: scrollToBottomToken,
+                            activityToggleToken: activityToggleToken,
+                            linkRoot: linkRoot,
+                            nodesProvider: { presentation.nodes },
+                            promptRail: mount
+                        )
+                    }
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom {
                             Button {

@@ -4572,6 +4572,33 @@ final class AppState {
         stored ?? shippedDefault
     }
 
+    /// UserDefaults key for which framework draws the transcript's prompt
+    /// rail: `PromptRailRenderer`'s raw values, `appkit` or `swiftui`. A
+    /// temporary switch for comparing the two renderers in a running build;
+    /// the follow-up that picks one deletes it.
+    ///
+    /// App-side `UserDefaults`, like `useMetalTerminalRendererKey`, because the
+    /// choice is pure app-side rendering, and on `.standard` for the same
+    /// reason: `PromptRailContainer` reads it through `@AppStorage`. Reads go
+    /// through `promptRailRenderer(defaults:)` or `promptRailRenderer(stored:)`,
+    /// so an unset key and an unknown value both land on the one default.
+    static let promptRailRendererKey = "promptRailRenderer"
+
+    /// The one default for `promptRailRendererKey`.
+    static let promptRailRendererDefault: PromptRailRenderer = .appKit
+
+    /// The prompt rail renderer chosen in `defaults`, or the default when the
+    /// key is unset or holds a value no renderer has.
+    static func promptRailRenderer(defaults: UserDefaults = .standard) -> PromptRailRenderer {
+        promptRailRenderer(stored: defaults.string(forKey: promptRailRendererKey))
+    }
+
+    /// The same decision over the raw stored string, for the `@AppStorage`
+    /// reader.
+    static func promptRailRenderer(stored: String?) -> PromptRailRenderer {
+        stored.flatMap(PromptRailRenderer.init(rawValue:)) ?? promptRailRendererDefault
+    }
+
     /// UserDefaults key for showing the sidebar's Scratch section (repo-less
     /// scratch spaces). Default on.
     static let showScratchSectionKey = "showScratchSection"

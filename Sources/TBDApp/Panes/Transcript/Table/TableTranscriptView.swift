@@ -59,6 +59,13 @@ struct TableTranscriptView: NSViewRepresentable {
     /// transition of that answer, whether a scroll or an update caused it. Nil
     /// where nobody loads earlier history.
     var onNearTop: (@MainActor (Bool) -> Void)?
+    /// The prompt rail renderer to mount, from `PromptRailContainer`.
+    /// `makeNSView` fixes the container's gutter from it for the life of the
+    /// view and attaches the renderer's presenter; a renderer change reaches
+    /// the table as a rebuild, because `PromptRailContainer` makes the renderer
+    /// part of its identity. `.none` (the default) mounts no rail and no
+    /// gutter.
+    var promptRail: PromptRailMount = .none
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
@@ -66,7 +73,7 @@ struct TableTranscriptView: NSViewRepresentable {
         Coordinator(context: context)
     }
 
-    func makeNSView(context ctx: Context) -> NSScrollView {
+    func makeNSView(context ctx: Context) -> TranscriptContainerView {
         // OPEN-PATH BOUNDARY TIMING (#129 freeze hunt). Permanent-but-off: emitted
         // at `.debug` so it is silent + free by default; re-enable with:
         //   log stream --level debug --predicate
@@ -116,6 +123,13 @@ struct TableTranscriptView: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
+
+        // The view SwiftUI holds: the scroll view right of a leading gutter that
+        // is fixed from here on, so the table's column width never changes on the
+        // rail's account (a width change discards every cached row height).
+        let container = TranscriptContainerView(
+            scrollView: scrollView, leadingGutter: promptRail.containerGutter)
+        container.coordinator = coordinator
 
         coordinator.tableView = tableView
         coordinator.scrollView = scrollView
@@ -185,11 +199,26 @@ struct TableTranscriptView: NSViewRepresentable {
         let makeNSViewMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
         Self.log.debug(
             "table.open.makeNSViewDone ms=\(makeNSViewMs, format: .fixed(precision: 1), privacy: .public) rows=\(nodes.count, privacy: .public)")
+        attachPromptRail(to: coordinator)
         onTableReady?(tableView)
-        return scrollView
+        return container
     }
 
-    func updateNSView(_ nsView: NSScrollView, context ctx: Context) {
+    /// Connects the mounted renderer to the coordinator. The SwiftUI renderer's
+    /// state becomes the presenter, which pushes it the current outline and
+    /// active prompt at once, and its jumps go to this table. The AppKit
+    /// renderer has only its gutter so far; `.none` has nothing.
+    private func attachPromptRail(to coordinator: Coordinator) {
+        switch promptRail {
+        case .none, .appKit:
+            break
+        case .swiftUI(let state):
+            coordinator.promptRailPresenter = state
+            state.onJump = { [weak coordinator] id in coordinator?.jump(toNodeID: id) }
+        }
+    }
+
+    func updateNSView(_ container: TranscriptContainerView, context ctx: Context) {
         let coordinator = ctx.coordinator
         if scrollToBottomToken != coordinator.lastScrollToken {
             coordinator.lastScrollToken = scrollToBottomToken

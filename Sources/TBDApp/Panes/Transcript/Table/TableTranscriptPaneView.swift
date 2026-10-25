@@ -283,23 +283,28 @@ struct TableTranscriptPaneView: View {
             onOpen: { itemID in openTranscriptOverlay?(itemID) }
         ) {
             VStack(spacing: 0) {
-                TableTranscriptView(
-                    context: cardContext,
-                    atBottom: $atBottom,
-                    scrollToBottomToken: scrollToBottomToken,
-                    scrollToItem: promptScroll,
-                    activityToggleToken: activityToggleToken,
-                    linkRoot: linkRoot,
-                    nodesProvider: { timedRenderNodes(presentation.nodes) },
-                    onTableReady: { [appState, terminalID, registeredTable] table in
-                        registeredTable.view = table
-                        appState.registerTranscriptView(table, for: terminalID)
-                    }
-                )
+                PromptRailContainer { mount in
+                    TableTranscriptView(
+                        context: cardContext,
+                        atBottom: $atBottom,
+                        scrollToBottomToken: scrollToBottomToken,
+                        scrollToItem: promptScroll,
+                        activityToggleToken: activityToggleToken,
+                        linkRoot: linkRoot,
+                        nodesProvider: { timedRenderNodes(presentation.nodes) },
+                        onTableReady: { [appState, terminalID, registeredTable] table in
+                            registeredTable.view = table
+                            appState.registerTranscriptView(table, for: terminalID)
+                        },
+                        promptRail: mount
+                    )
+                }
                 // Compose the terminal with its current Claude session so a session
                 // rollover within one terminal tears down and rebuilds the stateful
                 // Coordinator, re-resolving from a clean baseline rather than persisting
-                // the prior session's drilled-in subagent thread. (#129)
+                // the prior session's drilled-in subagent thread. (#129) On the rail
+                // container rather than the table, so the rollover rebuilds the
+                // prompt rail's state with it.
                 .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
                 .overlay(alignment: .bottomLeading) {
                     jumpToBottomButton
@@ -328,7 +333,7 @@ struct TableTranscriptPaneView: View {
                         // on top rather than left to stacking order.
                         //
                         // This lifts the WHOLE composer subtree, so an open menu
-                        // also paints over the table's own bottom-leading
+                        // also paints over the transcript's own bottom-leading
                         // `jumpToBottomButton` overlay when the transcript is
                         // scrolled up. That is intended: the menu is a transient
                         // popup and, while it is open, it owns the pane. Escape
@@ -411,6 +416,9 @@ struct TableTranscriptPaneView: View {
             }
             .buttonStyle(.plain)
             .padding(16)
+            // The overlay spans the prompt rail's leading gutter too; keep the
+            // button clear of the rail.
+            .padding(.leading, PromptRailLayout.width)
             .transition(.scale(scale: 0.5).combined(with: .opacity))
             .help("Scroll to bottom")
         }

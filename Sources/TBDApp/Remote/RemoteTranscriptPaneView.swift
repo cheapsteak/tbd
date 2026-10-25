@@ -250,32 +250,37 @@ struct RemoteTranscriptPaneView: View {
                 windowStartIDs: windowStartIDs,
                 memo: presentationMemo
             )
-            TableTranscriptView(
-                context: TranscriptCardContext(
-                    terminalID: nil,
-                    openTranscriptOverlay: openTranscriptItem,
-                    toggleActivityGroup: setActivityGroup,
-                    appState: appState,
-                    // No resolver: path tokens are never minted as links.
-                    linkResolver: nil,
-                    onLinkClicked: { target in
-                        if let url = TranscriptLinkDestination.remote(target) {
-                            NSWorkspace.shared.open(url)
+            PromptRailContainer(
+                earlier: PromptRailEarlierHistory(hasEarlier: hasEarlier, load: onLoadEarlier)
+            ) { mount in
+                TableTranscriptView(
+                    context: TranscriptCardContext(
+                        terminalID: nil,
+                        openTranscriptOverlay: openTranscriptItem,
+                        toggleActivityGroup: setActivityGroup,
+                        appState: appState,
+                        // No resolver: path tokens are never minted as links.
+                        linkResolver: nil,
+                        onLinkClicked: { target in
+                            if let url = TranscriptLinkDestination.remote(target) {
+                                NSWorkspace.shared.open(url)
+                            }
                         }
-                    }
-                ),
-                atBottom: $atBottom,
-                scrollToBottomToken: scrollToBottomToken,
-                scrollToItem: promptScroll,
-                activityToggleToken: activityToggleToken,
-                linkRoot: "",
-                nodesProvider: { presentation.nodes },
-                prependToken: prependToken,
-                onNearTop: { near in
-                    isNearTop = near
-                    onNearTop(near)
-                }
-            )
+                    ),
+                    atBottom: $atBottom,
+                    scrollToBottomToken: scrollToBottomToken,
+                    scrollToItem: promptScroll,
+                    activityToggleToken: activityToggleToken,
+                    linkRoot: "",
+                    nodesProvider: { presentation.nodes },
+                    prependToken: prependToken,
+                    onNearTop: { near in
+                        isNearTop = near
+                        onNearTop(near)
+                    },
+                    promptRail: mount
+                )
+            }
             .overlay(alignment: .top) {
                 let content = RemoteTranscriptEarlierHeader.Content.resolve(
                     state: earlier, hasEarlier: hasEarlier, nearTop: isNearTop)
@@ -301,7 +306,8 @@ struct RemoteTranscriptPaneView: View {
                 }
             }
             // A new session or a new conversation rebuilds the table's
-            // stateful coordinator rather than diffing across the reset.
+            // stateful coordinator, and the prompt rail's state with it,
+            // rather than diffing across the reset.
             .id("\(storeKey)#\(generation)")
         }
     }
