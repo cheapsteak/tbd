@@ -2487,7 +2487,8 @@ final class AppState {
     @ObservationIgnored private(set) var holderClaimSweepInFlight = false
     /// Set when the daemon answered `holder.reconcileClaims` with "unknown
     /// method", as a daemon older than the RPC does. Sweeps stop until the next
-    /// connect, which may reach a newer daemon.
+    /// connect or the next state subscription starts, either of which may
+    /// reach a newer daemon.
     @ObservationIgnored private(set) var holderClaimSweepUnsupported = false
     @ObservationIgnored private var subscriptionTask: Task<Void, Never>?
     let macNotificationManager = MacNotificationManager()
@@ -3034,6 +3035,13 @@ final class AppState {
     func startSubscription() {
         subscriptionTask?.cancel()
         resetDeltaOrdering()
+        // A new subscription is the visible sign of a possibly new daemon. RPCs
+        // ride one-shot connections, so a daemon replaced under a running app
+        // may never register as a disconnect, and an "unknown method" from the
+        // daemon it replaced would otherwise keep claim sweeps off for good.
+        // That verdict belongs to the old daemon, so it goes here as on a
+        // connect.
+        holderClaimSweepUnsupported = false
         // Same reason for program status: the daemon's `ProgramStatusStore` is
         // memory-only and counts revisions from zero after a restart. Re-seed
         // from the list; deltas from the new subscription keep it current.
@@ -3778,14 +3786,20 @@ final class AppState {
     /// The app never reads `holder_claim_reconcile_enabled`; the daemon decides
     /// whether to act. A failed call is ignored, and the next tick sends again.
     /// An "unknown method" answer means a daemon older than the RPC, so sweeps
-    /// stop until the next connect. One sweep at a time: while one waits on the
-    /// daemon, the next returns at once.
+    /// stop until the next connect or the next state subscription. One sweep
+    /// at a time: while one waits on the daemon, the next returns at once.
+    ///
+    /// Nothing is sent before this app has numbered its first attach: a sweep
+    /// through `throughSeq` 0 covers only claims with a seq at or below 0, and
+    /// every seq is 1 or more, so it could take nothing back. An app that has
+    /// never attached a holder session sends nothing at all.
     func sweepHolderClaims() async {
         guard isConnected, !holderClaimSweepInFlight, !holderClaimSweepUnsupported else { return }
         // The snapshot and the params are built in one main-actor step, before
         // the first suspension: every attach numbered at or below `throughSeq`
         // whose attempt has not ended is in `held`.
         let snapshot = holderHandbackLedger.reconcileSnapshot()
+        guard snapshot.throughSeq > 0 else { return }
         let params = HolderReconcileClaimsParams(
             appPID: getpid(), held: snapshot.held, throughSeq: snapshot.throughSeq)
         holderClaimSweepInFlight = true
@@ -3802,8 +3816,10 @@ final class AppState {
             }
         } catch DaemonClientError.rpcError(let message, _) where message.hasPrefix("Unknown method:") {
             holderClaimSweepUnsupported = true
-            holderClaimSweepLogger.notice(
-                "The daemon has no holder.reconcileClaims; claim sweeps stop until the next connect")
+            holderClaimSweepLogger.notice("""
+                The daemon has no holder.reconcileClaims; claim sweeps stop until the next connect \
+                or state subscription
+                """)
         } catch {
             holderClaimSweepLogger.debug(
                 "holder claim sweep failed; the next tick sends again: \(error, privacy: .public)")
@@ -3812,7 +3828,8 @@ final class AppState {
 
     /// What a successful connect does for the holder claim sweep. The new
     /// connection may reach a newer daemon than one that answered "unknown
-    /// method", so sweeps are allowed again.
+    /// method", so sweeps are allowed again. `startSubscription` allows them
+    /// again too, for a daemon replaced without a disconnect the app noticed.
     ///
     /// - Parameter sweepNow: Send a sweep at once. `connectAndLoadInitialState`
     ///   passes true. The poll tick's reconnect passes false, because the same

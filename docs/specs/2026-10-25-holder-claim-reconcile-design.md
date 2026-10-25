@@ -36,7 +36,7 @@ The sweep is compiled, not user-land: it decides who reads a pty, which is the i
   - Result `HolderReconcileClaimsResult`:
     - `takenBack: [UUID]` – the sessions the daemon took back;
     - `wouldTakeBack: [UUID]` – the sessions it would have taken back while the flag is off.
-- **App identity.** The daemon resolves `appPID` to a `ProcessIdentity` with the check it already applies to sidecar peers: pid, start time and executable. A pid it cannot resolve sweeps nothing, and a reused pid matches no claim owner.
+- **App identity.** Before it takes anything back, the daemon resolves `appPID` to a `ProcessIdentity` with the check it already applies to sidecar peers: pid, start time and executable. A pid it cannot resolve sweeps nothing, and a reused pid matches no claim owner. Resolving spawns `ps` twice and blocks, so the daemon first asks the registry whether any claim matched by pid alone meets the other conditions, and resolves only when one does and the flag is on. In the steady state every live panel's session is in `held`, and a sweep costs no database read and no `ps`.
 
 ### Why `throughSeq`
 
@@ -55,7 +55,9 @@ The sweep is compiled, not user-land: it decides who reads a pty, which is the i
 - The sweep covers acknowledged claims and sent-but-unacknowledged pending attaches alike. Its authority is the one a handback carries: the app's own statement that it holds no descriptor for the session, made only after it closed any it received.
 - A take-back goes through `takeBackFromViewer` with no preamble, the path the dead-app seizure uses. The reader resumes, and the job is jiggled so a program that repaints on SIGWINCH redraws.
 - Each take-back logs at `.notice` in category `holder`, naming the session, the attach generation and the app.
-- **Flag off:** the daemon computes the same set, logs each entry at `.notice` as "would take back", returns it in `wouldTakeBack`, and changes nothing.
+- **Flag off:** the daemon does not resolve the app's identity. A candidate is never taken back while the flag is off, so it stays one on every tick until the app quits, and resolving the pid on each tick would spawn `ps` twice every 2 s. The daemon selects by the same four conditions, the first matching the owner by pid alone. It returns the set in `wouldTakeBack` and changes nothing.
+  - Each attach is logged once per daemon life, at `.notice` in category `holder`, as "would take back". Every sweep's result still lists it in `wouldTakeBack`.
+  - Matching by pid can also list a claim whose owner is an earlier process that held the same pid. It is only listed: with the flag on, the resolved identity's start time tells the two apart, and that claim is left alone.
 
 ## App
 
@@ -66,12 +68,13 @@ The sweep is compiled, not user-land: it decides who reads a pty, which is the i
 - **Sending.** On every tick of `AppState`'s 2 s poll, and right after the app connects, while it is connected.
   - The app does not read the flag; the daemon decides whether to act.
   - A failed call is ignored; the next tick sends again.
-  - An "unknown method" answer from an older daemon stops the sweeps until the next connect.
+  - An "unknown method" answer from an older daemon stops the sweeps until the next connect or the next start of the state subscription. RPCs ride one-shot connections, so a daemon replaced under a running app may never register as a disconnect; a restarted subscription is the visible sign of a new daemon.
+  - Nothing is sent before the app numbers its first attach. A sweep through `throughSeq` 0 can cover no claim, since every `attachSeq` is 1 or more.
 - **Settings.** A toggle beside the pty-holder toggle in `SettingsView` reads the flag from `daemon.capabilities` and writes it with `config.setHolderClaimReconcileEnabled`.
 
 ## Flag and graduation
 
-- **Column.** A new migration, `<timestamp>_holder_claim_reconcile.sql`, runs `ALTER TABLE config ADD COLUMN holder_claim_reconcile_enabled INTEGER;`, with no SQL default, so NULL means nobody chose. `ConfigRecord.toModel()` resolves it with `?? Config.holderClaimReconcileEnabledDefault` (false), and `Models.swift` gains the optional field, all in one commit.
+- **Column.** A new migration, `20261025182152_config_holder_claim_reconcile.sql`, runs `ALTER TABLE config ADD COLUMN holder_claim_reconcile_enabled INTEGER;`, with no SQL default, so NULL means nobody chose. `ConfigRecord.toModel()` resolves it with `?? Config.holderClaimReconcileEnabledDefault` (false), and `Models.swift` gains the optional field, all in one commit.
 - **Soak.** Turn the flag on for the developer's install. Watch the `.notice` take-back lines and the reader census (`holder-reader-census violations=0`).
 - **Graduation.** Flip `holderClaimReconcileEnabledDefault` after a soak with at least one observed take-back and zero census violations. The same change deletes the app's handback resend:
   - the resend schedule;
@@ -93,7 +96,7 @@ The sweep is compiled, not user-land: it decides who reads a pty, which is the i
   - each of the four conditions refuses a take-back on its own;
   - an owned, unheld, covered claim is taken back and its job jiggled;
   - a sent pending attach is covered;
-  - flag off logs and changes nothing;
+  - flag off logs each attach once, changes nothing, and never resolves the app's pid;
   - flag on acts;
   - unset follows the default constant.
 - **Migration:** a pre-migration row reads NULL, not 0, and an explicit false survives a change to the default.
@@ -101,7 +104,8 @@ The sweep is compiled, not user-land: it decides who reads a pty, which is the i
   - a terminal is in `held` from before its request until its handback attempt ends;
   - `attachSeq` counts up;
   - a sweep goes out on each tick and after connect;
-  - an older daemon's "unknown method" stops the sweeps;
+  - an older daemon's "unknown method" stops the sweeps until a connect or a restarted subscription;
+  - no sweep goes out before the first attach is numbered;
   - an attach started after a sweep was built is never taken back by that sweep.
 
 ## Rejected alternatives

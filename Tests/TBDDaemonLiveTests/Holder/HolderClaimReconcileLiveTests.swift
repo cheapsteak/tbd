@@ -112,6 +112,7 @@ struct HolderClaimReconcileLiveTests {
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil)
         #expect(await fixture.registry.ptyReader(for: fixture.terminalID) == .daemon)
         #expect(await fixture.registry.takeBacksCompleted == 1)
+        #expect(await fixture.registry.readerCensusViolations == 0)
         let resumed = try #require(await fixture.registry.reader(for: fixture.terminalID))
         #expect(resumed === held, "the take-back opened a second hand-over")
         #expect(await resumed.isDraining, "the suspended reader was not put back on the pty")

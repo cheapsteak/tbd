@@ -14,6 +14,9 @@ import TBDShared
 /// `holderClaimReconcileFlagSetter`; there is no fake transport. Every
 /// `AppState` runs over its own throwaway `UserDefaults` suite — `.standard`
 /// on this unbundled executable is the developer's real `TBDApp.plist`.
+///
+/// An app that has numbered no attach sends no sweep, so every test that
+/// expects one numbers an attach first (`numberAnAttach`).
 @MainActor
 @Suite("Holder claim sweep")
 struct HolderClaimSweepTests {
@@ -26,6 +29,13 @@ struct HolderClaimSweepTests {
 
     private static let unknownMethod = DaemonClientError.rpcError(
         "Unknown method: \(RPCMethod.holderReconcileClaims)", code: nil)
+
+    /// Numbers one attach and ends its hold, the way a panel that attached and
+    /// closed leaves the ledger: `throughSeq` becomes 1 and nothing is held.
+    private static func numberAnAttach(_ state: AppState) {
+        let ledger = state.holderHandbackLedger
+        ledger.endHold(ledger.beginHold(terminalID: UUID()))
+    }
 
     @Test func aTickSendsTheSnapshot() async throws {
         try await withAppState { state in
@@ -61,6 +71,7 @@ struct HolderClaimSweepTests {
     @Test func connectSendsASweep() async {
         await withAppState { state in
             state.isConnected = true
+            Self.numberAnAttach(state)
             var sent = 0
             state.holderClaimSweepSender = { @MainActor _ in
                 sent += 1
@@ -78,6 +89,7 @@ struct HolderClaimSweepTests {
     @Test func aTickReconnectLeavesTheSweepToTheTick() async {
         await withAppState { state in
             state.isConnected = true
+            Self.numberAnAttach(state)
             var sent = 0
             state.holderClaimSweepSender = { @MainActor _ in
                 sent += 1
@@ -94,6 +106,7 @@ struct HolderClaimSweepTests {
 
     @Test func noSweepWhileDisconnected() async {
         await withAppState { state in
+            Self.numberAnAttach(state)
             var sent = 0
             state.holderClaimSweepSender = { @MainActor _ in
                 sent += 1
@@ -115,6 +128,7 @@ struct HolderClaimSweepTests {
     @Test func unknownMethodStopsSweepsUntilReconnect() async {
         await withAppState { state in
             state.isConnected = true
+            Self.numberAnAttach(state)
             var sent = 0
             state.holderClaimSweepSender = { @MainActor _ in
                 sent += 1
@@ -138,6 +152,72 @@ struct HolderClaimSweepTests {
         }
     }
 
+    /// A daemon replaced under a running app may never register as a
+    /// disconnect, since every RPC rides a one-shot connection, so "until the
+    /// next connect" could mean for good. The state subscription restarting
+    /// is the visible sign of a new daemon, and it allows sweeps again too.
+    @Test func aNewSubscriptionAllowsSweepsAgain() async {
+        await withAppState { state in
+            state.isConnected = true
+            Self.numberAnAttach(state)
+            // `startSubscription` re-seeds program status from the daemon;
+            // answered here, so the test sends no RPC of its own for it.
+            state.programStatusListFetcher = { @MainActor in [] }
+            var sent = 0
+            state.holderClaimSweepSender = { @MainActor _ in
+                sent += 1
+                if sent == 1 { throw Self.unknownMethod }
+                return HolderReconcileClaimsResult()
+            }
+
+            await state.sweepHolderClaims()
+            #expect(state.holderClaimSweepUnsupported)
+            await state.sweepHolderClaims()
+            #expect(sent == 1)
+
+            state.startSubscription()
+            // Only the flag is under test: the subscription it started has no
+            // daemon to reach, and is ended at once.
+            state.stopSubscription()
+
+            #expect(state.holderClaimSweepUnsupported == false, """
+                a restarted subscription left claim sweeps off, so a daemon replaced without a \
+                noticed disconnect never gets one
+                """)
+            await state.sweepHolderClaims()
+            #expect(sent == 2)
+        }
+    }
+
+    /// Before the app numbers its first attach, `throughSeq` is 0, and no
+    /// claim carries a seq at or below it, so a sweep could take nothing back
+    /// and none is sent — on a tick or on a connect. The first numbered
+    /// attach turns them on.
+    @Test func noSweepBeforeAnAttachIsNumbered() async throws {
+        try await withAppState { state in
+            state.isConnected = true
+            var sent: [HolderReconcileClaimsParams] = []
+            state.holderClaimSweepSender = { @MainActor params in
+                sent.append(params)
+                return HolderReconcileClaimsResult()
+            }
+
+            await state.sweepHolderClaims()
+            await state.holderClaimSweepDidConnect(sweepNow: true)
+            #expect(sent.isEmpty, "a sweep through seq 0 was sent, though it can cover no claim")
+            #expect(state.holderClaimSweepInFlight == false)
+
+            // The control: one numbered attach, and the same tick sends.
+            Self.numberAnAttach(state)
+            await state.sweepHolderClaims()
+
+            #expect(sent.count == 1)
+            let params = try #require(sent.first)
+            #expect(params.throughSeq == 1)
+            #expect(params.held.isEmpty)
+        }
+    }
+
     /// A transport error, and a daemon error that is not "unknown method",
     /// are both ignored: the next tick sends again.
     @Test(arguments: [
@@ -147,6 +227,7 @@ struct HolderClaimSweepTests {
     func aFailedSweepIsIgnored(failure: DaemonClientError) async {
         await withAppState { state in
             state.isConnected = true
+            Self.numberAnAttach(state)
             var sent = 0
             state.holderClaimSweepSender = { @MainActor _ in
                 sent += 1
@@ -167,6 +248,7 @@ struct HolderClaimSweepTests {
     @Test func aSlowSweepIsNotDoubled() async {
         await withAppState { state in
             state.isConnected = true
+            Self.numberAnAttach(state)
             let entered = HolderTestGate()
             let release = HolderTestGate()
             var sent = 0

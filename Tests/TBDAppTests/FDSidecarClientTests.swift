@@ -441,8 +441,12 @@ struct FDSidecarClientTests {
         let fd = try await awaited.value(timeout: TestDeadlines.saturatedPass)
         awaited.cancel()
         #expect(fd == taken.vended)
-        #expect(!taken.vendedIsClosed, "a cancel closed a descriptor its caller had already taken")
-        Darwin.close(fd)
+        let closedByCancel = taken.vendedIsClosed
+        #expect(!closedByCancel, "a cancel closed a descriptor its caller had already taken")
+        // Closed only if the cancel left it open. After a regression that closed
+        // it, the number may already belong to a descriptor a sibling test was
+        // just given, and closing it again would close theirs.
+        if !closedByCancel { Darwin.close(fd) }
     }
 
     @Test("a valid vend followed by a desync-tripping tail in one read still delivers the fd")

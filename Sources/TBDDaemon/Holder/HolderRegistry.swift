@@ -2562,7 +2562,10 @@ actor HolderRegistry {
     /// *write* to the pty — the one-reader invariant is about readers, and
     /// several writers on a pty master are fine. What it must never do is
     /// resume the drain without evidence the viewer is gone; `acceptHandback`
-    /// and `seizeFromDeadApp` are the only two callers that carry it.
+    /// (the viewer's own detach), `seizeFromDeadApp` (an app-liveness verdict)
+    /// and the claim sweep `reconcileClaims` (the app's own statement that it
+    /// holds no descriptor for the session) are the only three callers that
+    /// carry it.
     ///
     /// The jiggle goes here rather than at the vend, and that ordering is the
     /// point of it: a program repaints on `SIGWINCH` into the tty, and the ack
@@ -2660,8 +2663,10 @@ actor HolderRegistry {
     /// other arm deliberately leaves the session unread: that is the fail-closed
     /// direction, and it is not free, because a job that exits with unread
     /// output cannot finish exiting. Resuming is licensed by evidence that the
-    /// viewer is gone — either its own detach (`acceptHandback`) or an
-    /// app-liveness verdict (`seizeFromDeadApp`), and by nothing weaker.
+    /// viewer is gone — its own detach (`acceptHandback`), an app-liveness
+    /// verdict (`seizeFromDeadApp`), or its app's own statement that it holds
+    /// no descriptor for the session (`reconcileClaims`) — and by nothing
+    /// weaker.
     func cancelPendingAttach(
         terminalID: UUID, generation: UInt64, reason: AttachCancelReason
     ) async {
@@ -2730,8 +2735,10 @@ actor HolderRegistry {
             //
             // Refusing to read the pty while cheerfully duplicating it for
             // somebody else would be the same evidence answered two ways.
-            // What clears it is the viewer's own detach, or the app-liveness
-            // verdict the design spec names for app death — `seizeFromDeadApp`.
+            // What clears it is the viewer's own detach, the app-liveness
+            // verdict the design spec names for app death — `seizeFromDeadApp` —
+            // or the claim sweep, `reconcileClaims`, on the app's own statement
+            // that it holds no descriptor for this session.
             settleAsUnacknowledged(terminalID: terminalID, pending: pending)
             Self.logger.error(
                 """
