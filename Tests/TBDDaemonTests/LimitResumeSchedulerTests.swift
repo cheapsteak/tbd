@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 /// Scripted actuator: returns queued outcomes in order, records calls.
 final class FakeActuator: LimitResumeActuating, @unchecked Sendable {
@@ -48,6 +49,17 @@ final class OutcomeCollector: @unchecked Sendable {
     }
 }
 
+/// No step sleeps a fixed time. Each test uses one of two waits, whichever
+/// its next assertion needs:
+///
+/// - `clock.requireSleeperArmed()` when the loop still has a pending row. The
+///   loop parks on exactly one clock sleep per pending row, so once it is
+///   parked, everything the last advance made due has run, and a negative
+///   ("still sleeping, not actuated") is settled rather than sampled.
+/// - `loopEffect(_:)` when the row leaves pending and the loop goes idle,
+///   which the clock cannot see. It waits for the last write the branch makes
+///   (the row's status, or the outcome callback that follows it), so every
+///   assertion after it reads a finished fire.
 @Suite struct LimitResumeSchedulerTests {
     let db: TBDDatabase
     let clock: TestPollerClock
@@ -80,13 +92,32 @@ final class OutcomeCollector: @unchecked Sendable {
             jitterProvider: { jitter }, onOutcome: onOutcome)
     }
 
-    /// Let the actor loop cross its awaits (GRDB runs on its own threads,
-    /// so pure Task.yield isn't enough — mirror ClaudeUsagePollerTests' pump).
-    private func pump() async {
-        for _ in 0..<10 {
-            try? await Task.sleep(nanoseconds: 20_000_000)
-            await Task.yield()
+    /// Waits until `condition` holds, throwing a named timeout otherwise.
+    private func loopEffect(
+        _ what: String, _ condition: () async -> Bool
+    ) async throws {
+        switch await pollUntilTrue(timeout: TestDeadlines.saturatedPass, condition) {
+        case .satisfied: return
+        case .cancelled: throw CancellationError()
+        case .timedOut:
+            throw BoundedWaitTimeout(what: what, observed: nil, deadline: TestDeadlines.saturatedPass)
         }
+    }
+
+    private func status(of id: UUID) async -> ScheduledResumeStatus? {
+        try? await db.scheduledResumes.get(id: id)?.status
+    }
+
+    /// Waits for the row to leave `.pending`, the last store write of every
+    /// fire and early-cancel branch, and returns the status it landed on.
+    /// Waiting for "left pending" rather than for the expected status lets a
+    /// wrong branch fail on the assertion at once instead of on the timeout.
+    private func settledStatus(of id: UUID) async throws -> ScheduledResumeStatus? {
+        try await loopEffect("row \(id) leaving .pending") {
+            guard let current = await status(of: id) else { return false }
+            return current != .pending
+        }
+        return await status(of: id)
     }
 
     @Test func scheduleComputesFireAtWithSlackAndJitter() async throws {
@@ -122,12 +153,13 @@ final class OutcomeCollector: @unchecked Sendable {
         let collector = OutcomeCollector()
         let scheduler = makeScheduler(actuator: actuator) { collector.record($0, $1) }
         await scheduler.start()
-        await pump()
+        // onOutcome runs after the status write, so it closes the fire.
+        try await loopEffect("the past-due row's outcome") { !collector.events.isEmpty }
         #expect(actuator.calls.count == 1)
         let rows = try await db.scheduledResumes.pending()
         #expect(rows.isEmpty)
         #expect(collector.events.count == 1)
-        if case .sent = collector.events[0].1 {} else { Issue.record("expected .sent") }
+        if case .sent = collector.events.first?.1 {} else { Issue.record("expected .sent") }
         await scheduler.stop()
     }
 
@@ -135,14 +167,15 @@ final class OutcomeCollector: @unchecked Sendable {
         let actuator = FakeActuator([.sent])
         let scheduler = makeScheduler(actuator: actuator)
         await scheduler.start()
-        _ = await scheduler.schedule(
+        let scheduled = await scheduler.schedule(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(600),
             limitType: "session", rawMessage: "m")
-        await pump()
+        let id = try #require(scheduled?.id)
+        try await clock.requireSleeperArmed()
         #expect(actuator.calls.isEmpty)          // still sleeping
         await clock.advance(by: 700)             // past resetsAt + slack
-        await pump()
+        #expect(try await settledStatus(of: id) == .sent)
         #expect(actuator.calls.count == 1)
         await scheduler.stop()
     }
@@ -151,17 +184,19 @@ final class OutcomeCollector: @unchecked Sendable {
         let actuator = FakeActuator([.paneInCopyMode, .sent])
         let scheduler = makeScheduler(actuator: actuator)
         await scheduler.start()
-        _ = await scheduler.schedule(
+        let scheduled = await scheduler.schedule(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(-120),
             limitType: "session", rawMessage: "m")
-        await pump()
+        let id = try #require(scheduled?.id)
+        // The reschedule leaves the row pending, so the loop re-parks.
+        try await clock.requireSleeperArmed()
         #expect(actuator.calls.count == 1)
-        let row = try await db.scheduledResumes.pending(terminalID: terminalID)
-        #expect(row?.attemptCount == 1)
-        #expect(row!.fireAt.timeIntervalSince(clock.now()) > 100) // ~+120s
+        let row = try #require(try await db.scheduledResumes.pending(terminalID: terminalID))
+        #expect(row.attemptCount == 1)
+        #expect(row.fireAt.timeIntervalSince(clock.now()) > 100) // ~+120s
         await clock.advance(by: 130)
-        await pump()
+        #expect(try await settledStatus(of: id) == .sent)
         #expect(actuator.calls.count == 2)
         #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil)
         await scheduler.stop()
@@ -176,15 +211,20 @@ final class OutcomeCollector: @unchecked Sendable {
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(-120),
             limitType: "session", rawMessage: "m")
-        for _ in 0..<15 {
-            await pump()
+        // Every attempt below the cap reschedules +120 s and re-parks the
+        // loop, so each arming is the barrier before the next advance. The
+        // attempt that hits the cap leaves nothing pending.
+        for attempt in 1..<LimitResumeScheduler.maxCopyModeAttempts {
+            try await clock.requireSleeperArmed()
+            #expect(actuator.calls.count == attempt)
             await clock.advance(by: 130)
         }
-        await pump()
+        try await loopEffect("the copy-mode cap's .failed outcome") {
+            collector.events.contains { if case .failed = $0.1 { return true }; return false }
+        }
         #expect(actuator.calls.count == LimitResumeScheduler.maxCopyModeAttempts)
         let rows = try await db.scheduledResumes.pending()
         #expect(rows.isEmpty)
-        #expect(collector.events.contains { if case .failed = $0.1 { return true }; return false })
         await scheduler.stop()
     }
 
@@ -202,19 +242,17 @@ final class OutcomeCollector: @unchecked Sendable {
         let scheduled = await scheduler.schedule(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: resetsAt, limitType: "session", rawMessage: "m")
-        #expect(scheduled != nil)
-        await pump()
+        let id = try #require(scheduled?.id)
+        try await clock.requireSleeperArmed()
         #expect(actuator.calls.isEmpty)   // still parked, sleeping until fireAt
 
         // Completes fully before the clock advances below — no race.
         try await db.config.setAutoResumeOnLimitReset(false)
 
         await clock.advance(by: 700)      // past resetsAt + slack
-        await pump()
 
+        #expect(try await settledStatus(of: id) == .cancelled)
         #expect(actuator.calls.isEmpty)
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .cancelled)
         #expect(collector.events.isEmpty)
         await scheduler.stop()
     }
@@ -224,11 +262,12 @@ final class OutcomeCollector: @unchecked Sendable {
         let collector = OutcomeCollector()
         let scheduler = makeScheduler(actuator: actuator) { collector.record($0, $1) }
         await scheduler.start()
-        _ = await scheduler.schedule(
+        let scheduled = await scheduler.schedule(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(-120),
             limitType: "session", rawMessage: "m")
-        await pump()
+        let id = try #require(scheduled?.id)
+        #expect(try await settledStatus(of: id) == .cancelled)
         #expect(try await db.scheduledResumes.pending().isEmpty)
         #expect(collector.events.isEmpty)
         await scheduler.stop()
@@ -243,10 +282,9 @@ final class OutcomeCollector: @unchecked Sendable {
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(-120),
             limitType: "session", rawMessage: "m")
-        await pump()
+        let id = try #require(scheduled?.id)
+        #expect(try await settledStatus(of: id) == .cancelled)
         #expect(actuator.calls.count == 1)   // no retry
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .cancelled)
         #expect(collector.events.isEmpty)
         await scheduler.stop()
     }
@@ -255,17 +293,37 @@ final class OutcomeCollector: @unchecked Sendable {
     /// concurrent cancel) between actuation and the reschedule write,
     /// `store.reschedule` returns false. The scheduler must not resurrect
     /// the row into pending — it drops it from consideration instead.
+    ///
+    /// The row's cancel lands inside `actuate`, before the reschedule write
+    /// this test is about, so "nothing pending" alone could be read too early.
+    /// A second terminal's row, scheduled once the first actuation has begun,
+    /// is the barrier: the loop fires due rows in sequence and that row was not
+    /// in the batch being fired, so its outcome follows the first row's
+    /// reschedule attempt.
     @Test func copyModeRescheduleDropsRowNoLongerPending() async throws {
         final class CancellingActuator: LimitResumeActuating, @unchecked Sendable {
             let store: ScheduledResumeStore
-            init(store: ScheduledResumeStore) { self.store = store }
+            let barrierTerminalID: UUID
+            private let lock = NSLock()
+            private var _calls: [UUID] = []
+            /// Terminal IDs in actuation order.
+            var calls: [UUID] { lock.withLock { _calls } }
+            init(store: ScheduledResumeStore, barrierTerminalID: UUID) {
+                self.store = store
+                self.barrierTerminalID = barrierTerminalID
+            }
             func actuate(_ resume: ScheduledResume) async -> ResumeActuationOutcome {
+                lock.withLock { _calls.append(resume.terminalID) }
+                if resume.terminalID == barrierTerminalID { return .sent }
                 _ = try? await store.cancelPending(terminalID: resume.terminalID)
                 return .paneInCopyMode
             }
             func userAlreadyContinued(_ resume: ScheduledResume) async -> Bool { false }
         }
-        let actuator = CancellingActuator(store: db.scheduledResumes)
+        let barrierTerminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2")
+        let actuator = CancellingActuator(
+            store: db.scheduledResumes, barrierTerminalID: barrierTerminal.id)
         let collector = OutcomeCollector()
         let scheduler = LimitResumeScheduler(
             store: db.scheduledResumes, config: db.config,
@@ -276,9 +334,16 @@ final class OutcomeCollector: @unchecked Sendable {
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(-120),
             limitType: "session", rawMessage: "m")
-        await pump()
+        try await loopEffect("the copy-mode actuation") { !actuator.calls.isEmpty }
+        _ = await scheduler.schedule(
+            terminalID: barrierTerminal.id, worktreeID: worktreeID, claudeSessionID: nil,
+            resetsAt: clock.now().addingTimeInterval(-120),
+            limitType: "session", rawMessage: "m")
+        try await loopEffect("the barrier row's outcome") { !collector.events.isEmpty }
+
         #expect(try await db.scheduledResumes.pending().isEmpty)
-        #expect(collector.events.isEmpty)
+        #expect(actuator.calls == [terminalID, barrierTerminal.id])   // never re-actuated
+        #expect(collector.events.map { $0.0.terminalID } == [barrierTerminal.id])
         await scheduler.stop()
     }
 
@@ -297,24 +362,23 @@ final class OutcomeCollector: @unchecked Sendable {
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(600),
             limitType: "session", rawMessage: "m")
-        #expect(scheduled != nil)
-        await pump()
+        let id = try #require(scheduled?.id)
+        try await clock.requireSleeperArmed()
         #expect(actuator.calls.isEmpty)   // parked, nowhere near fireAt
 
         actuator.alreadyContinued = true
         await clock.advance(by: LimitResumeScheduler.earlyCheckInterval + 1)
-        await pump()
 
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .cancelled)
+        #expect(try await settledStatus(of: id) == .cancelled)
         // The UI mirror is nilled by the same write (setStatus).
         #expect(try await db.terminals.get(id: terminalID)?.pendingResumeAt == nil)
         #expect(actuator.calls.isEmpty)   // never actuated
         #expect(collector.events.isEmpty)
 
-        // Still cancelled past the original fireAt — no late fire.
+        // Still cancelled past the original fireAt — no late fire. Nothing is
+        // pending, so nothing is parked on the clock for an advance to wake.
+        #expect(clock.sleeperCount == 0)
         await clock.advance(by: 700)
-        await pump()
         #expect(actuator.calls.isEmpty)
         await scheduler.stop()
     }
@@ -329,20 +393,19 @@ final class OutcomeCollector: @unchecked Sendable {
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(600),
             limitType: "session", rawMessage: "m")
-        #expect(scheduled != nil)
-        await pump()
+        let id = try #require(scheduled?.id)
+        try await clock.requireSleeperArmed()
 
+        // The early pass runs, the row survives it, and the loop re-parks.
         await clock.advance(by: LimitResumeScheduler.earlyCheckInterval + 1)
-        await pump()
+        try await clock.requireSleeperArmed()
         #expect(!actuator.earlyProbes.isEmpty)   // the pass really ran
         #expect(try await db.scheduledResumes.pending(terminalID: terminalID) != nil)
         #expect(actuator.calls.isEmpty)
 
         await clock.advance(by: 700)             // past resetsAt + slack
-        await pump()
+        #expect(try await settledStatus(of: id) == .sent)
         #expect(actuator.calls.count == 1)
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .sent)
         await scheduler.stop()
     }
 
@@ -357,11 +420,10 @@ final class OutcomeCollector: @unchecked Sendable {
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(-120),
             limitType: "session", rawMessage: "m")
-        await pump()
+        let id = try #require(scheduled?.id)
+        #expect(try await settledStatus(of: id) == .sent)
         #expect(actuator.earlyProbes.isEmpty)
         #expect(actuator.calls.count == 1)
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .sent)
         await scheduler.stop()
     }
 
@@ -403,12 +465,11 @@ final class OutcomeCollector: @unchecked Sendable {
         let scheduled = await scheduler.scheduleTransient(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             delay: 60, rawMessage: "m")
-        #expect(scheduled != nil)
+        let id = try #require(scheduled?.id)
+        try await clock.requireSleeperArmed()
         await clock.advance(by: 65)
-        await pump()
+        #expect(try await settledStatus(of: id) == .sent)
         #expect(actuator.calls.count == 1)
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .sent)
         await scheduler.stop()
     }
 
@@ -421,12 +482,11 @@ final class OutcomeCollector: @unchecked Sendable {
         let scheduled = await scheduler.scheduleTransient(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             delay: 60, rawMessage: "m")
-        #expect(scheduled != nil)
+        let id = try #require(scheduled?.id)
+        try await clock.requireSleeperArmed()
         await clock.advance(by: 65)
-        await pump()
+        #expect(try await settledStatus(of: id) == .cancelled)
         #expect(actuator.calls.isEmpty)
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .cancelled)
         await scheduler.stop()
     }
 
@@ -441,12 +501,11 @@ final class OutcomeCollector: @unchecked Sendable {
         let scheduled = await scheduler.schedule(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(60), limitType: "session", rawMessage: "m")
-        #expect(scheduled != nil)
+        let id = try #require(scheduled?.id)
+        try await clock.requireSleeperArmed()
         await clock.advance(by: 130)
-        await pump()
+        #expect(try await settledStatus(of: id) == .sent)
         #expect(actuator.calls.count == 1)
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .sent)
         await scheduler.stop()
     }
 
@@ -459,12 +518,11 @@ final class OutcomeCollector: @unchecked Sendable {
         let scheduled = await scheduler.schedule(
             terminalID: terminalID, worktreeID: worktreeID, claudeSessionID: nil,
             resetsAt: clock.now().addingTimeInterval(60), limitType: "session", rawMessage: "m")
-        #expect(scheduled != nil)
+        let id = try #require(scheduled?.id)
+        try await clock.requireSleeperArmed()
         await clock.advance(by: 130)
-        await pump()
+        #expect(try await settledStatus(of: id) == .cancelled)
         #expect(actuator.calls.isEmpty)
-        let row = try await db.scheduledResumes.get(id: scheduled!.id)
-        #expect(row?.status == .cancelled)
         await scheduler.stop()
     }
 }
