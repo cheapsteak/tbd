@@ -9,6 +9,7 @@ if _HOOKS_DIR not in sys.path:
 
 from guardrails.rules import pr_user_story  # noqa: E402
 from guardrails.rules.pr_user_story import PRUserStoryRule  # noqa: E402
+from guardrails.rules.pr_worktree_link import MCP_CREATE_PR_TOOL  # noqa: E402
 
 _STORY = "## User story\n\nAs a reviewer, I want a story, so that I can judge the PR.\n\n## Summary\n\nx\n"
 _TEMPLATE_ONLY = "## User story\n\n<!-- As a <who>, I want <what>, so that <why>. -->\n\n## Summary\n\nx\n"
@@ -16,6 +17,12 @@ _TEMPLATE_ONLY = "## User story\n\n<!-- As a <who>, I want <what>, so that <why>
 
 def _check(command):
     return PRUserStoryRule().check({"command": command}, {"cwd": "/repo"})
+
+
+def _check_mcp(**fields):
+    tool_input = {"owner": "acme", "repo": "acme-prod", "head": "feat-b", "base": "main"}
+    tool_input.update(fields)
+    return PRUserStoryRule().check(tool_input, {"cwd": "/repo", "tool_name": MCP_CREATE_PR_TOOL})
 
 
 class PRUserStoryRuleTests(unittest.TestCase):
@@ -128,6 +135,40 @@ class PRUserStoryRuleTests(unittest.TestCase):
     def test_last_body_wins(self):
         command = f"gh pr create --title 'feat: x' --body '{_STORY}' --body 'replaced'"
         self._informs(command)
+
+
+class PRUserStoryMCPTests(unittest.TestCase):
+    def _informs(self, **fields):
+        decision = _check_mcp(**fields)
+        self.assertIsNotNone(decision, fields)
+        assert decision is not None
+        self.assertEqual(decision.action, "info", fields)
+        self.assertIn("## User story", decision.reason)
+        return decision
+
+    def test_feature_without_story_informs(self):
+        self._informs(title="feat: thing", body="## Summary\n\nx\n")
+        self._informs(title="feat: thing", body=_TEMPLATE_ONLY)
+
+    def test_feature_without_body_informs(self):
+        self._informs(title="feat: thing")
+
+    def test_exempt_title_silent(self):
+        self.assertIsNone(_check_mcp(title="fix: thing", body="no story"))
+        self.assertIsNone(_check_mcp(title="docs(app): thing", body="no story"))
+
+    def test_filled_story_silent(self):
+        self.assertIsNone(_check_mcp(title="feat: thing", body=_STORY))
+
+    def test_missing_or_empty_title_silent(self):
+        self.assertIsNone(_check_mcp(body="no story"))
+        self.assertIsNone(_check_mcp(title="", body="no story"))
+
+    def test_reads_fields_not_a_command(self):
+        # An MCP call has no command; a stray one must not be tokenized.
+        self.assertIsNone(
+            _check_mcp(title="fix: x", body="no story", command="gh pr create --title 'feat: x'")
+        )
 
 
 if __name__ == "__main__":

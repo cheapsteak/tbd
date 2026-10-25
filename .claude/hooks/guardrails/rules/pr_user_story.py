@@ -30,6 +30,9 @@ What the rule reads, and how it fails:
   the same deliberate generosity `pr_worktree_link` applies.
 - **Several creates in one call** — each is judged on its own; any one that
   needs a story and lacks it arms the nudge.
+- **The GitHub MCP server's `create_pull_request`** — its `title` and `body`
+  fields, read directly and judged by the same `_needs_story`. A missing or
+  empty title stays silent, as `--fill` does.
 """
 
 from __future__ import annotations
@@ -40,9 +43,12 @@ import stat
 
 from guardrails.lib.rule import Decision, Rule
 from guardrails.rules.pr_worktree_link import (
+    MCP_CREATE_PR_TOOL,
     _command_segments,
     _forge_create_tool,
+    _is_mcp_create,
     _last_flag_value,
+    _mcp_text,
     _split_heredoc_bodies,
 )
 
@@ -98,39 +104,58 @@ def _read_body_file(path: str) -> str:
         return ""
 
 
-def _segment_needs_story(check, words: list, heredoc_text: str) -> bool:
-    title = _last_flag_value(words, _TITLE_FLAGS)
+def _needs_story(check, title, bodies) -> bool:
+    """True when a PR with this title needs a story and none of `bodies` has one.
+
+    The judgement both tools share. A title that is None or built by a
+    substitution cannot be judged for exemption, so it needs nothing. `bodies`
+    is consumed lazily, so a body file is read only once the title says a story
+    is needed.
+    """
     if title is None or "$(" in title or "`" in title:
         return False
     if check.is_exempt(title):
         return False
-    bodies = [heredoc_text]
+    return not any(check.has_user_story(body) for body in bodies)
+
+
+def _segment_bodies(words: list, heredoc_text: str):
+    """Every body one `gh pr create` segment might send, read on demand."""
+    yield heredoc_text
     text = _last_flag_value(words, _BODY_TEXT_FLAGS)
     if text is not None:
-        bodies.append(text)
+        yield text
     path = _last_flag_value(words, _BODY_FILE_FLAGS)
     if path is not None and path != "-":
-        bodies.append(_read_body_file(path))
-    return not any(check.has_user_story(body) for body in bodies)
+        yield _read_body_file(path)
 
 
 class PRUserStoryRule(Rule):
     id = "pr-user-story"
     description = "Nudge toward a ## User story section in the body of a new feature PR."
-    tools = {"Bash"}
+    tools = {"Bash", MCP_CREATE_PR_TOOL}
 
     def check(self, tool_input: dict, ctx: dict) -> "Decision | None":
-        command = tool_input.get("command", "") or ""
-        if "pr" not in command or "create" not in command:
-            return None
-        command_text, heredoc_text = _split_heredoc_bodies(command)
-        segments = [w for w in _command_segments(command_text) if _forge_create_tool(w) == "gh"]
-        if not segments:
+        if _is_mcp_create(ctx):
+            # An empty title is as unjudgeable as a missing one.
+            title = _mcp_text(tool_input, "title") or None
+            creates = [(title, [_mcp_text(tool_input, "body")])]
+        else:
+            command = tool_input.get("command", "") or ""
+            if "pr" not in command or "create" not in command:
+                return None
+            command_text, heredoc_text = _split_heredoc_bodies(command)
+            creates = [
+                (_last_flag_value(words, _TITLE_FLAGS), _segment_bodies(words, heredoc_text))
+                for words in _command_segments(command_text)
+                if _forge_create_tool(words) == "gh"
+            ]
+        if not creates:
             return None
         check = _load_check()
         if check is None:
             return None
-        if any(_segment_needs_story(check, words, heredoc_text) for words in segments):
+        if any(_needs_story(check, title, bodies) for title, bodies in creates):
             return Decision.info(
                 "[pr-user-story] "
                 + check.MESSAGE

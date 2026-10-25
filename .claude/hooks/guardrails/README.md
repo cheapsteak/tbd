@@ -18,7 +18,7 @@ could not prevent it; a `PreToolUse` hook can. See `rules/background_jobs.py`.
 ## Architecture
 
 ```
-.claude/settings.json            ONE PreToolUse entry (matcher "Bash") → dispatch.py
+.claude/settings.json            one PreToolUse entry per matched tool → dispatch.py
 .claude/hooks/guardrails/
   dispatch.py                    entrypoint: read stdin JSON, run rules, aggregate, fail-open
   lib/rule.py                    Rule base class + Decision value
@@ -28,8 +28,8 @@ could not prevent it; a `PreToolUse` hook can. See `rules/background_jobs.py`.
   decisions.log                  runtime log (gitignored)
 ```
 
-The whole point: **adding a future rule never touches `settings.json`.** The single
-hook entry calls `dispatch.py`, which discovers all rule modules at runtime.
+The whole point: **adding a future rule never touches `settings.json`.** Every
+hook entry calls the same `dispatch.py`, which discovers all rule modules at runtime.
 
 Python 3, stdlib only (`json`, `re`, `os`, `importlib`, `pkgutil`, `unittest`,
 `datetime`). No third-party dependencies.
@@ -67,8 +67,10 @@ class Rule:
   non-blocking `additionalContext` (`permissionDecision: "allow"`). Use this for
   nudges/reminders where blocking would be wrong — e.g. `scratch_git_init.py`
   reminding the model to offer `tbd scratch promote` after `git init` in a scratch
-  space. Deny always takes precedence: if any rule denies, infos from other rules
-  on the same call are dropped for that call.
+  space, or `pr_stack_link.py` reminding it to link a chain of PRs as a GitHub
+  stack when one is opened on top of another branch. Deny always takes
+  precedence: if any rule denies, infos from other rules on the same call are
+  dropped for that call.
 
 `ctx` carries `session_id`, `cwd`, `permission_mode`, and `tool_name`.
 
@@ -98,15 +100,18 @@ class Rule:
 **Do NOT edit `settings.json`.** The registry auto-discovers the new module.
 
    **Exception:** adding a rule for a tool that has no `PreToolUse` matcher yet (as
-   `brainstorming-skill` did for `Skill`) does require one new matcher entry in
-   `settings.json` pointing at the same `dispatch.py`. Rules for already-matched
+   `brainstorming-skill` did for `Skill`, and the PR rules did for the GitHub MCP
+   server's `mcp__github__create_pull_request`) does require one new matcher entry
+   in `settings.json` pointing at the same `dispatch.py`. Rules for already-matched
    tools still need no settings change.
 
 ## Deny / allow contract (Claude Code hook protocol)
 
 - Hook reads JSON on **stdin**:
   `{session_id, transcript_path, cwd, permission_mode, hook_event_name, tool_name, tool_input}`.
-  For Bash, `tool_input.command` is the command string.
+  For Bash, `tool_input.command` is the command string. For
+  `mcp__github__create_pull_request`, `tool_input` carries `owner`, `repo`,
+  `title`, `body`, `head` and `base`.
 - **ALLOW**: `exit 0` with no stdout.
 - **BLOCK**: print
   `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`
