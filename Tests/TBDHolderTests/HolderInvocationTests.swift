@@ -163,8 +163,8 @@ struct HolderInvocationTests {
     /// closed, and this process is not the only place a copy can be. Every
     /// test target links into one process, Swift Testing runs suites in
     /// parallel, and sibling suites spawn children that close nothing —
-    /// `posix_spawn` with no attributes, SwiftTerm's `forkpty`, the holder
-    /// bootstrap shell — some of which live for the rest of the run. A
+    /// `posix_spawn` with no attributes, SwiftTerm's `forkpty`,
+    /// `Foundation.Process` — some of which live for the rest of the run. A
     /// `socketpair` is inheritable, so a child spawned in this window took a
     /// copy, kept the pair open after `parse` closed the one it was given, and
     /// the read below answered EAGAIN for somebody else's child. Seen on CI.

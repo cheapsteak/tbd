@@ -347,7 +347,20 @@ final class HolderFixture {
             for entry in argv { free(entry) }
             for entry in envp { free(entry) }
         }
-        let spawned = posix_spawn(&shellPID, "/bin/sh", &actions, nil, &argv, &envp)
+
+        // CLOEXEC_DEFAULT, as `HolderSpawner` asks for: the shell, and the
+        // holder it backgrounds, get the descriptors named by a file action
+        // above (0, 1, 2, the lock on 9, and the probe on 11 when asked for)
+        // and nothing else. The launch request on 3 is opened by the shell's
+        // own redirect after exec. Without it, every test holder inherited
+        // whatever any concurrent suite in this process had open without
+        // FD_CLOEXEC, and kept it for the holder's whole life.
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+
+        let spawned = posix_spawn(&shellPID, "/bin/sh", &actions, &attributes, &argv, &envp)
         guard spawned == 0 else { throw TestHolderError.spawnFailed(spawned) }
 
         // The holder now owns the lock through its own copy of the open file
