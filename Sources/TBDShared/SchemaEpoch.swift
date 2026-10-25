@@ -18,5 +18,5 @@
 ///
 /// Design: `docs/specs/2026-10-24-column-retirement-design.md`.
 public enum SchemaEpoch {
-    public static let current = 2
+    public static let current = 3
 }

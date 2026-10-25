@@ -1571,20 +1571,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// `auto_create_notes_enabled ?? Config.autoCreateNotesDefault`. NULL
     /// follows the shipped default; `0`/`1` remains an explicit choice.
     public var autoCreateNotesEnabled: Bool
-    /// The fleet brake for supervision
-    /// (`docs/specs/2026-07-26-fleet-supervision-design.md` §3, §8): one bit,
-    /// fleet-wide, ANDed over every project's mark and writing none of them.
-    /// Released (`true`) means TBD may act where a mark stands; engaged
-    /// (`false`, the shipped state) means TBD's authority is paused everywhere,
-    /// with the marks left exactly as they were.
-    ///
-    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
-    /// carries no SQL default and stays NULL until somebody touches the toggle,
-    /// so this property is
-    /// `supervision_enabled ?? Config.supervisionEnabledDefault`. NULL means
-    /// "never chose" and follows the shipped default wherever it goes; `0`/`1`
-    /// is an explicit gesture and is honored forever.
-    public var supervisionEnabled: Bool
     /// Gate for the orphan-GC phase that reclaims per-profile config
     /// directories under `~/tbd/profiles/`
     /// (`docs/specs/2026-08-15-profile-dir-gc-design.md`). Read on top of
@@ -1593,7 +1579,7 @@ public struct Config: Codable, Sendable, Equatable {
     /// other copy, so a brand-new orphan classifier over them soaks behind its
     /// own switch rather than riding the default-ON master switch.
     ///
-    /// **Resolved, not stored**, like `supervisionEnabled`: the backing column
+    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
     /// carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `gc_profile_dirs_enabled ?? Config.gcProfileDirsEnabledDefault`. NULL
@@ -1834,11 +1820,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `autoCreateNotesEnabled`. Existing behavior is
     /// preserved until a user explicitly turns automatic Notes tabs off.
     public static let autoCreateNotesDefault = true
-    /// The shipped default for `supervisionEnabled`, and the single place it
-    /// lives. Supervision ships with the brake engaged; graduating it is a
-    /// change to this constant — no forcing `UPDATE` migration, and an explicit
-    /// opt-out is left alone.
-    public static let supervisionEnabledDefault = false
     /// The shipped default for `gcProfileDirsEnabled`, and the single place it
     /// lives. The profile-dir collector ships off; graduating it is a change to
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
@@ -1956,7 +1937,6 @@ public struct Config: Codable, Sendable, Equatable {
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
-                supervisionEnabled: Bool = Config.supervisionEnabledDefault,
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
@@ -1997,7 +1977,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
         self.autoCreateNotesEnabled = autoCreateNotesEnabled
-        self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
@@ -2068,12 +2047,7 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
         autoCreateNotesEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .autoCreateNotesEnabled) ?? Config.autoCreateNotesDefault
-        // Same tri-state as above: absent means the sender knew nothing about
-        // the flag, which is the NULL column's situation — follow the shipped
-        // default rather than hardcoding `false` here as well.
-        supervisionEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .supervisionEnabled) ?? Config.supervisionEnabledDefault
-        // Same tri-state again: absent means the sender knew nothing about the
+        // Same tri-state as above: absent means the sender knew nothing about the
         // flag, which is the NULL column's situation — follow the shipped
         // default rather than hardcoding `false`.
         gcProfileDirsEnabled = try c.decodeIfPresent(
