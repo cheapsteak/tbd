@@ -48,8 +48,9 @@ struct ScratchPromoteReconcileTests {
 
     /// Makes `path` a repo with one empty commit, so promote's `hasCommits`
     /// guard passes and `repo.add` accepts it. `initTestRepo` copies a template
-    /// built through the hermetic `shell`, so no child is waited on here and a
-    /// failed setup throws instead of passing silently.
+    /// built once per process through the hermetic `shell`, so only the first
+    /// call in a process waits on a child, and a failed setup throws instead of
+    /// passing silently.
     private func gitInitCommit(at path: String) async throws {
         try await initTestRepo(at: URL(fileURLWithPath: path))
     }

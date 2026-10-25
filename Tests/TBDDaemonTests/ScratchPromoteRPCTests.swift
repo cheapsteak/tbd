@@ -21,9 +21,10 @@ struct ScratchPromoteRPCTests {
     }
 
     /// Makes the scratch folder a repo with one empty commit, so promote's
-    /// `hasCommits` guard passes. `initTestRepo` copies a template built
-    /// through the hermetic `shell`, so no child is waited on here and a
-    /// failed setup throws instead of passing silently.
+    /// `hasCommits` guard passes. `initTestRepo` copies a template built once
+    /// per process through the hermetic `shell`, so only the first call in a
+    /// process waits on a child, and a failed setup throws instead of passing
+    /// silently.
     private func gitInitCommit(at path: String) async throws {
         try await initTestRepo(at: URL(fileURLWithPath: path))
     }
