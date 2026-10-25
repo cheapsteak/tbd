@@ -481,8 +481,14 @@ public enum ClaudeHookOverlay {
     /// spawn paths (fresh create, resume, wake, profile swap) and edits made
     /// during a preSession hook wait are picked up. The per-spawn fragment is
     /// the terminal's own overlay, kept on its row
-    /// (`Terminal.claudeSpawnExtras`); a start reads it from the row it starts
-    /// from and passes it here.
+    /// (`Terminal.claudeSpawnExtras`). A create passes the one in its request
+    /// (a primary that recovery starts after a daemon restart during a
+    /// pre-session hook, the one the hook's row kept); a start that brings a
+    /// session back passes the stored one — from the history entry a reopen
+    /// starts from, or from the archived worktree's map for a revived or
+    /// carried-over session; nil for a spawn that carries none. Replacement
+    /// spawns (wake, account switch) read theirs from the row they replace or
+    /// copy, through `ReplacementSpawnOverlay.plan`.
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,

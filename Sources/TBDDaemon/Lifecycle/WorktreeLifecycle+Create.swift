@@ -26,13 +26,20 @@ public enum WorktreeCreateCompletion: Sendable {
 /// "you have been moved" context prompt as the spawn's trailing argument,
 /// which Claude answered immediately — an unwanted turn on every revive.
 /// Provenance lives solely in `notesSeed`, which seeds the Notes tab.
+///
+/// `claudeSpawnExtras` are the plugin folders and settings overlay the source
+/// session's terminal carried when its worktree was archived: the carried-over
+/// conversation starts with them and keeps them on its new row. Nil carries
+/// none.
 public struct ConversationCarryover: Sendable {
     let sourceSessionID: String
     let notesSeed: String
+    let claudeSpawnExtras: ClaudeSpawnExtras?
 
-    init(sourceSessionID: String, notesSeed: String) {
+    init(sourceSessionID: String, notesSeed: String, claudeSpawnExtras: ClaudeSpawnExtras? = nil) {
         self.sourceSessionID = sourceSessionID
         self.notesSeed = notesSeed
+        self.claudeSpawnExtras = claudeSpawnExtras
     }
 }
 
@@ -510,10 +517,12 @@ extension WorktreeLifecycle {
             // a background task so the caller's RepoSerializer lane is freed
             // immediately — never block it for the duration of the hook.
             //
-            // The hook's row carries a create's Claude values until phase 3
-            // starts the primary, so a primary started by recovery after a
-            // daemon restart — which has nothing but rows to go on — still
-            // gets them. Only a Claude primary has any use for them.
+            // The hook's row carries a create's Claude values, so a primary
+            // started by recovery after a daemon restart — which has nothing
+            // but rows to go on — still gets them. The row keeps them for as
+            // long as its tab lives (a failed hook's tab stays open); closed
+            // history and reopen ignore them, because the row is a shell, not
+            // Claude. Only a Claude primary has any use for them.
             if let preSession = try await spawnPreSessionTerminal(
                 worktree: spawnWorktree, repo: repo,
                 worktreePath: resultPath,
@@ -1332,7 +1341,12 @@ extension WorktreeLifecycle {
     ///
     /// `claudeSpawnExtras` are a create's Claude values: a fresh Claude primary
     /// gets them and keeps them on its row. A restored or carried-over
-    /// conversation, and any primary that is not Claude, gets none.
+    /// conversation never gets them, and nor does a primary that is not
+    /// Claude: each restored session reads its own values from
+    /// `archivedClaudeSpawnExtras` — the archived worktree's map, passed from
+    /// the same row as `archivedClaudeSessions` — and a carryover reads
+    /// `carryover.claudeSpawnExtras`. Every Claude row this spawns keeps the
+    /// values it started with.
     ///
     /// **It does not read or write `worktree.pending_prompt`.** Its whole
     /// involvement with a queued prompt is one notification, after the primary
@@ -1344,6 +1358,7 @@ extension WorktreeLifecycle {
         worktree: Worktree, repo: Repo?,
         worktreePath: String? = nil, skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil,
+        archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil,
         initialPrompt: String? = nil,
         cols: Int? = nil,
         rows: Int? = nil,
@@ -1367,6 +1382,7 @@ extension WorktreeLifecycle {
                 worktreePath: worktreePath,
                 skipClaude: skipClaude,
                 archivedClaudeSessions: archivedClaudeSessions,
+                archivedClaudeSpawnExtras: archivedClaudeSpawnExtras,
                 initialPrompt: initialPrompt,
                 cols: cols,
                 rows: rows,
@@ -1389,6 +1405,7 @@ extension WorktreeLifecycle {
         worktreePath: String?,
         skipClaude: Bool,
         archivedClaudeSessions: [String]?,
+        archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]?,
         initialPrompt: String?,
         cols: Int?,
         rows: Int?,
@@ -1536,9 +1553,10 @@ extension WorktreeLifecycle {
         // exports, written into its row. Nil for any other primary, and for a
         // Claude one with every feature off.
         var primarySessionIncarnationID: UUID? = nil
-        // The create's Claude values, applied to a fresh Claude primary and
-        // kept on its row. Nil for any other primary, and for a restored or
-        // carried-over conversation.
+        // The Claude primary's values, applied to its start and kept on its
+        // row: the create's for a fresh primary, the archived session's own
+        // for a restored one, the source session's for a carryover. Nil for
+        // any other primary.
         var primarySpawnExtras: ClaudeSpawnExtras? = nil
         switch primaryTerminalKind {
         case .shell:
@@ -1579,7 +1597,13 @@ extension WorktreeLifecycle {
             let sessionUUID = carryover?.sourceSessionID ?? archivedSession ?? UUID().uuidString
             primarySessionID = sessionUUID
             let isResume = archivedSession != nil || carryover != nil
-            primarySpawnExtras = isResume ? nil : claudeSpawnExtras
+            if let carryover {
+                primarySpawnExtras = carryover.claudeSpawnExtras
+            } else if let archivedSession {
+                primarySpawnExtras = archivedClaudeSpawnExtras?[archivedSession]
+            } else {
+                primarySpawnExtras = claudeSpawnExtras
+            }
             // `--resume` is what actually restores the prior conversation;
             // `--session-id` is for starting a NEW session with a pre-chosen
             // UUID (used on fresh create). Reviving with `--session-id` on an
@@ -1637,9 +1661,9 @@ extension WorktreeLifecycle {
                 // Repo fragment is file-backed config, read fresh at
                 // spawn time — applies on every spawn path, resume included.
                 repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                // The create's fragment, on a fresh primary only; a restored
-                // or carried-over conversation gets none here. The hooks
-                // overlay still resolves for those — only the fragment is nil.
+                // The primary's own fragment: the create's, the archived
+                // session's, or the carried-over source's. The hooks overlay
+                // resolves whether or not there is one.
                 extraSettingsJSON: primarySpawnExtras?.claudeSettingsOverlay
             )
             let spawnTitle = await ClaudeSessionTitle.forSpawn(
@@ -1884,6 +1908,9 @@ extension WorktreeLifecycle {
             for sessionID in additionalArchivedClaudeSessions {
                 let plannedID = UUID()
                 createdTerminalIDs.append(plannedID)
+                // This session's own values from the archive, applied to its
+                // start and kept on its new row.
+                let restoreSpawnExtras = archivedClaudeSpawnExtras?[sessionID]
                 let restoreProfileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
                 // Pre-accept the folder-trust dialog so restoring an extra
                 // archived session onto a fresh profile dir doesn't re-prompt.
@@ -1927,9 +1954,11 @@ extension WorktreeLifecycle {
                     settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                         fallbackModels: resolvedProfile?.fallbackModels,
                         sessionKey: plannedID.uuidString,
-                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                        extraSettingsJSON: restoreSpawnExtras?.claudeSettingsOverlay
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
+                    extraPluginDirs: restoreSpawnExtras?.pluginDirs ?? [],
                     envSettingOverrides: claudeEnvOverrides,
                     sessionName: restoreSpawnTitle.name,
                     sessionModEnvironment: restoreSessionMod?.environment ?? [:]
@@ -1962,7 +1991,8 @@ extension WorktreeLifecycle {
                         profileID: resolvedProfile?.profileID,
                         kind: .claude,
                         transport: transport,
-                        sessionIncarnationID: restoreSessionMod?.incarnationID)
+                        sessionIncarnationID: restoreSessionMod?.incarnationID,
+                        claudeSpawnExtras: restoreSpawnExtras)
                 } catch {
                     await sessionTitles.release(restoreSpawnTitle)
                     throw error

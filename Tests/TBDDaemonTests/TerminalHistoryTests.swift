@@ -519,7 +519,7 @@ import Testing
         }
         #expect(Set(columns) == Set([
             "id", "worktreeID", "label", "kind", "closedAt", "claudeSessionID", "lineCount",
-            "serverName", "exitCode"
+            "serverName", "exitCode", "claudeSpawnExtras"
         ]))
     }
 }

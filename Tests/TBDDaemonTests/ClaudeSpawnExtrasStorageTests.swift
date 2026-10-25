@@ -172,6 +172,30 @@ struct ClaudeSpawnExtrasStorageTests {
             db, table: "terminal_history", column: "claudeSpawnExtras", id: inserted.id) != nil)
     }
 
+    /// Only a Claude tab's values reach its history entry. A failed
+    /// pre-session hook's shell row keeps the create's values while its tab
+    /// lives, and a Codex row could carry some too; neither entry keeps them,
+    /// since a reopen of either has no use for them.
+    @Test(arguments: [TerminalKind.shell, .codex])
+    func historyEntryOfANonClaudeTerminalKeepsNoExtras(kind: TerminalKind) async throws {
+        let db = try makeDatabase()
+        let wt = try await makeWorktree(db)
+        let closing = try await db.terminals.create(
+            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
+            label: kind == .shell ? TerminalLabel.preSession : TerminalLabel.codex,
+            kind: kind, claudeSpawnExtras: Self.sample)
+        #expect(try await db.terminals.get(id: closing.id)?.claudeSpawnExtras == Self.sample)
+
+        await db.terminalHistory.recordOnClose(terminal: closing, capture: nil)
+
+        let entry = try #require(try await db.terminalHistory.list(worktreeID: wt.id).first)
+        #expect(entry.id == closing.id)
+        #expect(entry.kind == kind)
+        #expect(entry.claudeSpawnExtras == nil)
+        #expect(try await rawColumn(
+            db, table: "terminal_history", column: "claudeSpawnExtras", id: closing.id) == nil)
+    }
+
     @Test func historyEntryOfATerminalWithoutExtrasReadsNil() async throws {
         let db = try makeDatabase()
         let wt = try await makeWorktree(db)

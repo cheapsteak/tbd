@@ -390,13 +390,16 @@ extension WorktreeLifecycle {
     /// `claudeSpawnExtras` are the create's Claude values for the primary.
     /// When the caller passes none — recovery, which resumes a wait from rows
     /// alone — the hook's own row supplies them (`spawnPreSessionTerminal`
-    /// stored them there).
+    /// stored them there). `archivedClaudeSpawnExtras` is a revive's archived
+    /// map, passed from the same worktree row as `archivedClaudeSessions`:
+    /// each restored session starts with its own values from it.
     func runPreSessionPhase3(
         preSession: PreSessionSpawn,
         worktree: Worktree, repo: Repo,
         worktreePath: String,
         skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil,
+        archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil,
         initialPrompt: String? = nil,
         cols: Int? = nil, rows: Int? = nil,
         completionAction: PreSessionCompletionAction,
@@ -516,6 +519,7 @@ extension WorktreeLifecycle {
                 worktreePath: worktreePath,
                 skipClaude: skipClaude,
                 archivedClaudeSessions: archivedClaudeSessions,
+                archivedClaudeSpawnExtras: archivedClaudeSpawnExtras,
                 initialPrompt: initialPrompt,
                 cols: cols, rows: rows,
                 // On success the hook tab is about to be deleted — never splice

@@ -1181,9 +1181,11 @@ extension RPCRouter {
 
     /// Revive a closed terminal from its history entry into a NEW terminal in
     /// the same (live) worktree. Claude entries with a session id resume that
-    /// Claude session (no scrollback replay — Claude repaints its transcript);
-    /// every other kind opens a fresh shell with the raw capture (colors
-    /// intact) printed above the prompt. The history row is kept.
+    /// Claude session (no scrollback replay — Claude repaints its transcript),
+    /// with the plugin folders and settings overlay the entry kept; every
+    /// other kind opens a fresh shell with the raw capture (colors intact)
+    /// printed above the prompt, and ignores any stored values. The history
+    /// row is kept.
     func handleTerminalHistoryRevive(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -1253,6 +1255,10 @@ extension RPCRouter {
                 resolvedProfile = nil
             }
             let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
+            // The closed terminal's own plugin folders and settings overlay,
+            // copied onto its history entry when it closed: the reopened
+            // session starts with them and keeps them on its new row.
+            let spawnExtras = entry.claudeSpawnExtras
             // Reviving a closed terminal respawns claude in the same worktree,
             // so the same trust argument applies — including the seeder's
             // `foreignHead` refusal, which is why the flag lives on the row
@@ -1295,9 +1301,11 @@ extension RPCRouter {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                    extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: spawnExtras?.pluginDirs ?? [],
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: reviveSpawnTitle.name,
                 sessionModEnvironment: sessionMod?.environment ?? [:]
@@ -1327,7 +1335,8 @@ extension RPCRouter {
                         cols: resolvedCols,
                         rows: resolvedRows,
                         transport: transport,
-                        sessionIncarnationID: sessionMod?.incarnationID
+                        sessionIncarnationID: sessionMod?.incarnationID,
+                        claudeSpawnExtras: spawnExtras
                     )
                 }
             } catch {
@@ -1380,7 +1389,9 @@ extension RPCRouter {
     /// during revive: spawn it, insert the row, append it to the persisted tab
     /// order as the new active tab, and broadcast the same `.terminalCreated`
     /// delta the normal create path emits. `sessionIncarnationID` is the
-    /// session mod's, for a resumed Claude made with a feature on.
+    /// session mod's, for a resumed Claude made with a feature on;
+    /// `claudeSpawnExtras` are a reopened Claude session's stored values,
+    /// already applied to `spawnCommand` and written onto the new row.
     private func spawnRevivedTerminal(
         worktree: Worktree,
         plannedTerminalID: UUID,
@@ -1394,7 +1405,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         transport: TerminalSpawnTransport,
-        sessionIncarnationID: UUID? = nil
+        sessionIncarnationID: UUID? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil
     ) async throws -> Terminal {
         // The transport is decided like every other spawn's — once, by the
         // caller, from the same gate — and carried here rather than re-asked.
@@ -1418,7 +1430,8 @@ extension RPCRouter {
                 profileID: profileID,
                 kind: kind,
                 transport: transport,
-                sessionIncarnationID: sessionIncarnationID)
+                sessionIncarnationID: sessionIncarnationID,
+                claudeSpawnExtras: claudeSpawnExtras)
         }
         var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
         if !order.contains(terminal.id) { order.append(terminal.id) }

@@ -188,7 +188,10 @@ public struct TerminalHistoryStore: Sendable {
                 lineCount: text.map {
                     $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
                 } ?? 0,
-                claudeSpawnExtras: terminal.claudeSpawnExtras
+                // A Claude tab's values only. A failed pre-session hook's
+                // shell row keeps the create's values while its tab lives,
+                // and a reopen of a shell entry has no use for them.
+                claudeSpawnExtras: terminal.isClaudeTab ? terminal.claudeSpawnExtras : nil
             )
             let record = TerminalHistoryRecord(from: entry)
             let worktreeID = terminal.worktreeID

@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Testing
 import TestSupport
 @testable import TBDDaemonLib
@@ -12,9 +13,11 @@ extension TBDHomeSerialized {
 /// `terminal.create` and `worktree.create` with plugin folders and a settings
 /// overlay: what they refuse, what they store on the new rows, and what
 /// reaches the spawned command, fresh and resuming — and the later starts that
-/// read them back from the row: a wake from hibernation and each account
-/// switch arm. Tier 2: an in-memory database, a dry-run tmux and a real scratch
-/// directory (a real git repo for `worktree.create`); nothing is spawned.
+/// read them back: a wake from hibernation and each account switch arm from
+/// the row, a reopen from Closed Terminals from the history entry, and each
+/// worktree revive from the archived worktree's map. Tier 2: an in-memory
+/// database, a dry-run tmux and a real scratch directory (a real git repo for
+/// `worktree.create` and revive); nothing is spawned.
 @Suite("Starts of a Claude terminal keep its plugin folders and settings overlay")
 struct ClaudeSpawnExtrasSpawnPathTests {
     /// Every tmux argv the dry-run manager would have run.
@@ -40,6 +43,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
 
     struct Fixture {
         let router: RPCRouter
+        let lifecycle: WorktreeLifecycle
         let db: TBDDatabase
         let recorder: TmuxRecorder
         let repo: Repo
@@ -113,6 +117,49 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             try FileManager.default.removeItem(
                 atPath: ClaudeHookOverlay.perSessionOverlayPath(sessionKey: created.id.uuidString))
             return try #require(try await db.terminals.get(id: created.id))
+        }
+
+        func reopen(_ entryID: UUID) async throws -> RPCResponse {
+            await router.handle(try RPCRequest(
+                method: RPCMethod.terminalHistoryRevive,
+                params: TerminalHistoryReviveParams(worktreeID: worktree.id, id: entryID)))
+        }
+
+        /// A live Claude tab's row resuming `sessionID` in `worktreeID`,
+        /// carrying `extras`. Written straight to the database: nothing is
+        /// spawned for it.
+        func claudeTerminal(
+            in worktreeID: UUID, sessionID: String, extras: ClaudeSpawnExtras?
+        ) async throws -> Terminal {
+            try await db.terminals.create(
+                worktreeID: worktreeID, tmuxWindowID: "@\(sessionID)", tmuxPaneID: "%\(sessionID)",
+                label: TerminalLabel.claudeCode, claudeSessionID: sessionID, kind: .claude,
+                claudeSpawnExtras: extras)
+        }
+
+        /// A worktree with a real git checkout, made by the lifecycle with no
+        /// agent, and active — past its pre-session hook when one resolves.
+        func activeCheckout() async throws -> Worktree {
+            let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+            let completion = try await lifecycle.completeCreateWorktree(
+                worktreeID: pending.id, skipClaude: true)
+            if case .preSessionPending(let phase3) = completion {
+                // The hook's spawn removed any stale marker, so writing it now
+                // is safe.
+                try writeMarker(worktreeID: pending.id, exitCode: 0)
+                await phase3.value
+            }
+            return try #require(try await db.worktrees.get(id: pending.id))
+        }
+
+        /// Revives `worktreeID` and waits until it is done. Returns whether
+        /// the revive waited on a pre-session hook.
+        func revive(_ worktreeID: UUID) async throws -> Bool {
+            let completion = try await lifecycle.beginReviveWorktree(worktreeID: worktreeID)
+            guard case .preSessionPending(_, let phase3) = completion else { return false }
+            try writeMarker(worktreeID: worktreeID, exitCode: 0)
+            await phase3.value
+            return true
         }
 
         /// A second account to switch to. OAuth, so it needs no stored secret.
@@ -220,7 +267,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         }
         let lifecycle = WorktreeLifecycle(
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
-            configDirManager: configDirManager("lifecycle"))
+            configDirManager: configDirManager("lifecycle"),
+            preSessionPollInterval: 0.05)
         let router = RPCRouter(
             db: db,
             lifecycle: lifecycle,
@@ -252,7 +300,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             path: worktreePath, tmuxServer: "tbd-test")
 
         try await body(Fixture(
-            router: router, db: db, recorder: recorder, repo: repo, repoDir: repoDir,
+            router: router, lifecycle: lifecycle, db: db, recorder: recorder,
+            repo: repo, repoDir: repoDir,
             worktree: worktree, scratch: scratch, actuationLogPath: actuationLogPath))
     }
 
@@ -721,6 +770,243 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
             #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
             try expectHookOverlayApplied(terminal.id, command: command)
+        }
+    }
+
+    // MARK: - Reopen from Closed Terminals
+
+    /// A closed Claude terminal's entry keeps its values, and reopening it
+    /// passes the plugin folder again, merges the overlay into the new
+    /// terminal's settings file beside TBD's own hooks, and keeps both on the
+    /// new row.
+    @Test func reopenFromHistoryReappliesExtras() async throws {
+        try await withFixture { f in
+            let plug = try f.makePluginDir("plug")
+            let extras = ClaudeSpawnExtras(claudeSettingsOverlay: Self.hookOverlay, pluginDirs: [plug])
+            let sessionID = UUID().uuidString
+            let closing = try await f.claudeTerminal(
+                in: f.worktree.id, sessionID: sessionID, extras: extras)
+            await f.db.terminalHistory.recordOnClose(terminal: closing, capture: nil)
+            try await f.db.terminals.delete(id: closing.id)
+            let start = f.recorder.calls.count
+
+            let resp = try await f.reopen(closing.id)
+            #expect(resp.success, "\(resp.error ?? "")")
+            let reopened = try resp.decodeResult(Terminal.self)
+            #expect(reopened.id != closing.id)
+            #expect(reopened.kind == .claude)
+            #expect(reopened.claudeSpawnExtras == extras)
+            #expect(try await f.db.terminals.get(id: reopened.id)?.claudeSpawnExtras == extras)
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
+            try expectHookOverlayApplied(reopened.id, command: command)
+        }
+    }
+
+    /// Only a Claude entry's values are applied. A shell entry carrying some
+    /// — the shape a failed pre-session hook's row would leave if history
+    /// kept them — reopens as the plain shell it was, and the new row keeps
+    /// nothing.
+    @Test func reopenOfShellEntryIgnoresExtras() async throws {
+        try await withFixture { f in
+            let plug = try f.makePluginDir("plug")
+            let entry = TerminalHistoryEntry(
+                id: UUID(), worktreeID: f.worktree.id, label: TerminalLabel.preSession,
+                kind: .shell,
+                claudeSpawnExtras: ClaudeSpawnExtras(
+                    claudeSettingsOverlay: Self.overlay, pluginDirs: [plug]))
+            try await f.db.writerForTests.write { try TerminalHistoryRecord(from: entry).insert($0) }
+            let start = f.recorder.calls.count
+
+            let resp = try await f.reopen(entry.id)
+            #expect(resp.success, "\(resp.error ?? "")")
+            let reopened = try resp.decodeResult(Terminal.self)
+            #expect(reopened.kind == .shell)
+            #expect(reopened.claudeSpawnExtras == nil)
+            #expect(try await f.db.terminals.get(id: reopened.id)?.claudeSpawnExtras == nil)
+
+            let command = try #require(f.recorder.calls.dropFirst(start)
+                .filter { $0.contains("new-window") }.compactMap(\.last).last)
+            #expect(command.contains("restored from close on"), "\(command)")
+            #expect(!command.contains("claude --"), "\(command)")
+            #expect(!command.contains(plug), "\(command)")
+            #expect(!FileManager.default.fileExists(
+                atPath: ClaudeHookOverlay.perSessionOverlayPath(sessionKey: reopened.id.uuidString)))
+        }
+    }
+
+    // MARK: - Worktree revive
+
+    /// One Claude session's values: its own plugin folder and an overlay
+    /// naming it, so a restored session's settings file says whose it is.
+    struct SessionValues {
+        let sessionID: String
+        let name: String
+        let pluginDir: String
+        var extras: ClaudeSpawnExtras {
+            ClaudeSpawnExtras(
+                claudeSettingsOverlay: #"{"acmeSession":"\#(name)"}"#, pluginDirs: [pluginDir])
+        }
+    }
+
+    private static func sessionValues(_ f: Fixture, _ name: String) throws -> SessionValues {
+        SessionValues(sessionID: UUID().uuidString, name: name, pluginDir: try f.makePluginDir(name))
+    }
+
+    /// The terminal resuming `session` in `worktreeID` started with its own
+    /// values and keeps them: its command passes its plugin folder and not
+    /// `other`'s, and its settings file carries its overlay beside TBD's hooks.
+    private func expectRestored(
+        _ f: Fixture, worktreeID: UUID, _ session: SessionValues, notWith other: SessionValues
+    ) async throws {
+        let terminals = try await f.db.terminals.list(worktreeID: worktreeID)
+        let restored = try #require(terminals.first { $0.claudeSessionID == session.sessionID })
+        #expect(restored.kind == .claude)
+        #expect(restored.claudeSpawnExtras == session.extras)
+
+        let command = try #require(
+            f.recorder.newWindowCommands.last { $0.contains("claude --resume \(session.sessionID)") })
+        #expect(command.contains(Self.pluginFlag(session.pluginDir)), "\(command)")
+        #expect(!command.contains(other.pluginDir), "\(command)")
+        let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: restored.id.uuidString)
+        #expect(command.contains(" --settings \(SystemPromptBuilder.shellEscape(path))"), "\(command)")
+        let settings = try perSessionSettings(restored.id)
+        #expect(settings["acmeSession"] as? String == session.name)
+        #expect(settings["hooks"] != nil)
+    }
+
+    /// Archive keeps each Claude session's values under its own id, read from
+    /// the same terminals as the session list. A Claude session without values
+    /// is listed and keeps nothing; a shell row is neither — even one with a
+    /// session id and values, as a failed pre-session hook's row can have.
+    @Test func archiveCollectsPerSessionExtras() async throws {
+        try await withFixture { f in
+            let one = try Self.sessionValues(f, "one")
+            let two = try Self.sessionValues(f, "two")
+            let bare = UUID().uuidString
+            let shellSession = UUID().uuidString
+            _ = try await f.claudeTerminal(in: f.worktree.id, sessionID: one.sessionID, extras: one.extras)
+            _ = try await f.claudeTerminal(in: f.worktree.id, sessionID: two.sessionID, extras: two.extras)
+            _ = try await f.claudeTerminal(in: f.worktree.id, sessionID: bare, extras: nil)
+            _ = try await f.db.terminals.create(
+                worktreeID: f.worktree.id, tmuxWindowID: "@pre", tmuxPaneID: "%pre",
+                label: TerminalLabel.preSession, claudeSessionID: shellSession, kind: .shell,
+                claudeSpawnExtras: ClaudeSpawnExtras(claudeSettingsOverlay: Self.overlay))
+
+            _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktree.id)
+
+            let archived = try #require(try await f.db.worktrees.get(id: f.worktree.id))
+            #expect(archived.status == .archived)
+            #expect(Set(archived.archivedClaudeSessions ?? []) == [one.sessionID, two.sessionID, bare])
+            #expect(archived.archivedClaudeSpawnExtras
+                == [one.sessionID: one.extras, two.sessionID: two.extras])
+        }
+    }
+
+    /// Revive restores every archived session with its own values — the
+    /// primary and the extra restore alike — inline, and after a pre-session
+    /// hook; the map is cleared with the session list.
+    @Test(arguments: [false, true])
+    func reviveRestoresEachSessionsOwnExtras(withPreSessionHook: Bool) async throws {
+        try await withFixture(gitRepo: true) { f in
+            if withPreSessionHook {
+                try await installPreSessionHook(repoDir: f.repoDir)
+            }
+            let wt = try await f.activeCheckout()
+            let one = try Self.sessionValues(f, "one")
+            let two = try Self.sessionValues(f, "two")
+            _ = try await f.claudeTerminal(in: wt.id, sessionID: one.sessionID, extras: one.extras)
+            _ = try await f.claudeTerminal(in: wt.id, sessionID: two.sessionID, extras: two.extras)
+            try await f.lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+            #expect(try await f.db.worktrees.get(id: wt.id)?.archivedClaudeSpawnExtras
+                == [one.sessionID: one.extras, two.sessionID: two.extras])
+
+            #expect(try await f.revive(wt.id) == withPreSessionHook)
+
+            let revived = try #require(try await f.db.worktrees.get(id: wt.id))
+            #expect(revived.status == .active)
+            #expect(revived.archivedClaudeSessions == nil)
+            #expect(revived.archivedClaudeSpawnExtras == nil)
+            try await expectRestored(f, worktreeID: wt.id, one, notWith: two)
+            try await expectRestored(f, worktreeID: wt.id, two, notWith: one)
+        }
+    }
+
+    /// A daemon that died during a revive's pre-session hook: recovery resumes
+    /// the wait from rows alone, restores each archived session with its own
+    /// values from the worktree row, and clears them with the session list.
+    @Test func reviveAfterPreSessionAndRecoveryRestoresExtras() async throws {
+        try await withFixture(gitRepo: true) { f in
+            let one = try Self.sessionValues(f, "one")
+            let two = try Self.sessionValues(f, "two")
+            // What `beginReviveWorktree` leaves before phase 3: the archive
+            // fields still set, the row `.creating`, and the hook's shell row
+            // its only terminal.
+            try await f.db.worktrees.archive(
+                id: f.worktree.id, claudeSessionIDs: [one.sessionID, two.sessionID],
+                claudeSpawnExtras: [one.sessionID: one.extras, two.sessionID: two.extras])
+            try await f.db.worktrees.updateStatus(id: f.worktree.id, status: .creating)
+            _ = try await f.db.terminals.create(
+                worktreeID: f.worktree.id, tmuxWindowID: "@mock-rev", tmuxPaneID: "%mock-rev",
+                label: TerminalLabel.preSession, kind: .shell)
+
+            let resumed = await f.lifecycle.recoverCreatingWorktrees()
+            #expect(resumed.count == 1, "the stranded mid-revive wait must be resumed")
+            try writeMarker(worktreeID: f.worktree.id, exitCode: 0)
+            for task in resumed { await task.value }
+
+            let after = try #require(try await f.db.worktrees.get(id: f.worktree.id))
+            #expect(after.status == .active)
+            #expect(after.archivedClaudeSessions == nil)
+            #expect(after.archivedClaudeSpawnExtras == nil)
+            try await expectRestored(f, worktreeID: f.worktree.id, one, notWith: two)
+            try await expectRestored(f, worktreeID: f.worktree.id, two, notWith: one)
+        }
+    }
+
+    /// Control: sessions archived without values — every archive an older
+    /// daemon wrote — store no map and revive as they always have: TBD's
+    /// plugin folder alone, the shared settings file, and rows that keep
+    /// nothing.
+    @Test func reviveOfOldArchiveWithoutMapUnchanged() async throws {
+        try await withFixture(gitRepo: true) { f in
+            let wt = try await f.activeCheckout()
+            let sessions = [UUID().uuidString, UUID().uuidString]
+            for sessionID in sessions {
+                _ = try await f.claudeTerminal(in: wt.id, sessionID: sessionID, extras: nil)
+            }
+            try await f.lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
+            let archived = try #require(try await f.db.worktrees.get(id: wt.id))
+            #expect(Set(archived.archivedClaudeSessions ?? []) == Set(sessions))
+            #expect(archived.archivedClaudeSpawnExtras == nil)
+            #expect(try await rawArchivedMap(f, wt.id) == nil)
+
+            #expect(try await f.revive(wt.id) == false)
+
+            let terminals = try await f.db.terminals.list(worktreeID: wt.id)
+            for sessionID in sessions {
+                let restored = try #require(terminals.first { $0.claudeSessionID == sessionID })
+                #expect(restored.claudeSpawnExtras == nil)
+                let command = try #require(
+                    f.recorder.newWindowCommands.last { $0.contains("claude --resume \(sessionID)") })
+                let withoutOwn = command.replacingOccurrences(of: Self.ownPluginFlag, with: "")
+                #expect(!withoutOwn.contains("--plugin-dir"), "\(command)")
+                #expect(!command.contains("claude-overlay-session-"), "\(command)")
+                #expect(!FileManager.default.fileExists(
+                    atPath: ClaudeHookOverlay.perSessionOverlayPath(sessionKey: restored.id.uuidString)))
+            }
+        }
+    }
+
+    /// The archived worktree's raw map column: NULL, not an empty object,
+    /// when the archive kept no values.
+    private func rawArchivedMap(_ f: Fixture, _ worktreeID: UUID) async throws -> String? {
+        try await f.db.writerForTests.read { conn in
+            try String.fetchOne(
+                conn, sql: "SELECT archivedClaudeSpawnExtras FROM worktree WHERE id = ?",
+                arguments: [worktreeID.uuidString])
         }
     }
 }

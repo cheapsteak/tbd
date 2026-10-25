@@ -1523,9 +1523,11 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// per-session `--settings` overlay for the primary Claude terminal. General
     /// passthrough — TBD does not interpret the contents. Kept on that
     /// terminal's row with `pluginDirs` (`Terminal.claudeSpawnExtras`), and on
-    /// the pre-session hook's row until the primary starts. Ignored when the
-    /// primary is Codex. Optional/defaulted for backward compatibility (old
-    /// daemons ignore the unknown key; old clients omit it).
+    /// the pre-session hook's row for as long as that tab lives (a failed
+    /// hook's tab stays open); closed history and reopen ignore the hook row's
+    /// copy, because that row is a shell, not Claude. Ignored when the primary
+    /// is Codex. Optional/defaulted for backward compatibility (old daemons
+    /// ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
     /// GitHub PR number this worktree is being created from. Stamped on the row
     /// (with `useExistingBranch == true`) so `PRStatusManager` tracks it by
