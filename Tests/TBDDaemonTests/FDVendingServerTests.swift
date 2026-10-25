@@ -689,6 +689,39 @@ struct FDVendingServerTests {
 
         await server.stop()
     }
+
+    @Test("a stop leaves in place a socket file a successor has bound at the same path")
+    func aStopLeavesASuccessorsSocketInPlace() async throws {
+        // A daemon still stopping when its successor has already started — a
+        // restart that does not wait for the old process — shares one path
+        // with it. The successor's `listen` unlinks the old file and binds its
+        // own; the old server's `stop` must then leave that file alone, or
+        // every later attach fails against a successor nobody can reach.
+        let root = fencedScratchRoot(prefix: "tbd-fdv")
+        try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(atPath: root) }
+        let socketPath = "\(root)/vend.sock"
+        let dying = FDVendingServer(peerIdentity: Self.identifiedPeer)
+        let successor = FDVendingServer(peerIdentity: Self.identifiedPeer)
+
+        try await dying.listen(on: socketPath)
+        let dyingFile = try #require(SocketFileIdentity(path: socketPath))
+        try await successor.listen(on: socketPath)
+        let successorFile = try #require(SocketFileIdentity(path: socketPath))
+        #expect(successorFile != dyingFile, "the successor's listen reused the old socket file")
+
+        await dying.stop()
+
+        #expect(SocketFileIdentity(path: socketPath) == successorFile, """
+            stopping the old server removed the socket its successor had bound, so no app can \
+            reach the successor's sidecar
+            """)
+
+        // The positive control: a server does remove the file it bound.
+        await successor.stop()
+        #expect(SocketFileIdentity(path: socketPath) == nil,
+                "a stopped server left its own socket file behind")
+    }
 }
 
 /// Answers identity reads from a script: nil for the first `failing` reads,

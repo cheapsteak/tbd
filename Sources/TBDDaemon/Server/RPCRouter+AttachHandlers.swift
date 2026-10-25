@@ -23,10 +23,30 @@ extension RPCRouter {
         // transport is the whole gate: a row can only be `.holder` because the
         // holder flag was on when it was created, and flipping that flag off
         // afterwards must never strand a live session.
-        if let terminalID = params.terminalID,
-           let terminal = try? await db.terminals.get(id: terminalID),
-           terminal.transport == .holder {
-            return try await handleHolderAttachRequest(params: params, terminal: terminal)
+        //
+        // A read that throws is answered as an error, not swallowed into the
+        // control-mode path: that path answers "unavailable" with its gate
+        // off, which the app takes as permanent — no retry, no Retry button —
+        // for what is usually a moment of `SQLITE_BUSY` under a write. An
+        // error is what the app retries. A row that is simply absent still
+        // falls through, as before.
+        if let terminalID = params.terminalID {
+            let terminal: Terminal?
+            do {
+                terminal = try await db.terminals.get(id: terminalID)
+            } catch {
+                logger.error("""
+                    attach.request could not read terminal \
+                    \(terminalID.uuidString, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                return RPCResponse(
+                    error: "attach failed: the terminal could not be read: "
+                        + error.localizedDescription)
+            }
+            if let terminal, terminal.transport == .holder {
+                return try await handleHolderAttachRequest(params: params, terminal: terminal)
+            }
         }
         // Gate evaluated per attach (env || persisted flag): a Settings
         // toggle affects the next attach without a daemon restart.
@@ -175,6 +195,16 @@ extension RPCRouter {
     /// Failure is reported to the caller rather than degraded into a fallback:
     /// there is no second way to render a holder-backed session, so an attach
     /// that could not happen must say so.
+    ///
+    /// **A session the registry is not reading is adopted first, on demand.**
+    /// Startup adoption can leave a live session unadopted — a holder busy or
+    /// silent past its budget, a row deferred past the startup budget and not
+    /// yet reached, a take-back whose hand-over failed — and nothing else
+    /// would adopt it until somebody asked. An attach is that ask. The
+    /// registry rules out what it can see (`HolderRegistry.adoptForAttach`),
+    /// `mayAdoptForAttach` refuses early what only the row and the hibernation
+    /// coordinator can, and the wait is bounded, so the request cannot hang
+    /// on a holder that will not answer.
     private func handleHolderAttachRequest(
         params: AttachRequestParams, terminal: Terminal
     ) async throws -> RPCResponse {
@@ -198,6 +228,15 @@ extension RPCRouter {
                 FDVendHeader(
                     worktreeID: params.worktreeID, paneID: params.paneID,
                     attachID: params.attachID))
+            // One hop for a session already adopted, the common case: the
+            // registry answers that synchronously and asks the row-level gate
+            // only when an adoption could follow. When the adoption cannot
+            // happen, `beginAttach` below is what reports it: `noLiveReader`,
+            // read as "ended" when the holder is gone.
+            try await registry.adoptForAttach(
+                terminal: terminal,
+                holderIsLive: holderProcessIsLive,
+                rowPermits: { await self.mayAdoptForAttach(terminal) })
             vend = try await registry.beginAttach(terminalID: terminal.id)
         } catch let error as HolderRegistry.Error
             where attachRefusalMeansSessionEnded(error, terminal: terminal) {
@@ -268,6 +307,33 @@ extension RPCRouter {
                 status: "pending",
                 generation: vend.generation,
                 snapshotPreamble: vend.snapshotPreamble))
+    }
+
+    /// Whether an attach may adopt this session itself when the registry is
+    /// not reading it: the row, as the attach read it, is awake, and no park,
+    /// wake or in-place profile swap holds it right now.
+    ///
+    /// **A best-effort early refusal, not an exclusion.** It runs outside the
+    /// registry, on a row read at the top of the request, and takes no claim,
+    /// so a park, wake or swap that claims the row after it answers does not
+    /// stop the adoption that follows. Nothing locks across the two actors to
+    /// close that, because nothing needs to: the registry's own gates — a
+    /// reader being released, a holder it told to let go, an ended job, a
+    /// shutdown — are re-asked in the stretch that adopts, and a transition
+    /// that claims late meets an adopted session like any other. A park (and
+    /// so a swap, which starts with one) ends the job behind the reader it
+    /// finds, and refuses when there is none yet. A wake reaches the holder
+    /// only through the registry, which joins an adoption in flight and
+    /// refuses to spawn over an occupied slot, so it never stacks a second
+    /// reader beside this one.
+    ///
+    /// What the early refusal buys is not opening a hand-over at all for a
+    /// row that reads parked — its job was ended by its park — or while a
+    /// transition already owns the session's holder.
+    func mayAdoptForAttach(_ terminal: Terminal) async -> Bool {
+        guard !terminal.isParked else { return false }
+        let moving = await hibernationCoordinator.transitionInFlight(terminalID: terminal.id)
+        return !moving
     }
 
     /// Whether `beginAttach` refusing with `error` means the session has

@@ -83,6 +83,17 @@ actor HolderRegistry {
         /// attach has taken the pty, and clearing the successor's claim would
         /// put the daemon on a descriptor another process is reading.
         case handbackSuperseded(terminalID: UUID, generation: UInt64)
+        /// The daemon is shutting down: `releaseAll` has begun, so no session
+        /// may be adopted or attached. A reader adopted behind that release
+        /// would never be stopped, and a pty vended now would go to an app this
+        /// daemon is about to stop serving. The session itself is untouched
+        /// and keeps running; the next daemon adopts it. `spawn` is the one
+        /// path that still builds a reader — see `isShuttingDown`.
+        case daemonShuttingDown(terminalID: UUID)
+        /// This registry told the session's holder to let go, and the adoption
+        /// asked not to adopt such a session (`adopt(terminal:refusingLetGo:)`):
+        /// the startup pass refuses every let-go, a wake a teardown's.
+        case sessionLetGo(terminalID: UUID)
 
         var errorDescription: String? {
             switch self {
@@ -114,6 +125,13 @@ actor HolderRegistry {
             case .handbackSuperseded(let terminalID, let generation):
                 return "attach \(generation) for session \(terminalID.uuidString) is not the one "
                     + "holding that session's pty, so its detach hands nothing back"
+            case .daemonShuttingDown(let terminalID):
+                return "the daemon is shutting down, so it can neither attach nor adopt session "
+                    + "\(terminalID.uuidString); the session keeps running, and the next daemon "
+                    + "will adopt it"
+            case .sessionLetGo(let terminalID):
+                return "this daemon told the holder of session \(terminalID.uuidString) to let go, "
+                    + "so this adoption leaves it alone"
             }
         }
     }
@@ -222,6 +240,37 @@ actor HolderRegistry {
     /// budget at all.
     static let defaultAdoptAllBudget: Duration = .seconds(5)
 
+    /// How long an attach waits for the adoption it asked for before going on
+    /// without one (`adoptForAttach`).
+    ///
+    /// An adoption the attach opens is bounded already — `busyRetryBudget` of
+    /// busy answers plus one `adoptionReceiveTimeout` — so this sits above
+    /// that, and bites only on what the attach cannot see the end of: an
+    /// adoption it joined rather than started, or one wedged past its own
+    /// bounds. It is what keeps `attach.request` from waiting on a holder
+    /// indefinitely.
+    static let defaultAttachAdoptionBudget: Duration = .seconds(5)
+
+    /// The ceiling a registry's attach generations stay under: 2^48, far
+    /// enough below `UInt64.max` that the count never wraps, and below 2^53,
+    /// so a generation stays exact even through a `Double`.
+    static let attachGenerationBaseLimit: UInt64 = 1 << 48
+
+    /// A fresh base for one registry's attach generations, drawn uniformly
+    /// from [2^32, 2^48 − 2^32).
+    ///
+    /// The floor is `AttachRequestResult.uniqueGenerationFloor`, so every
+    /// generation this daemon mints says on its face that it came from a
+    /// randomizing daemon — the contract that floor offers clients, which may
+    /// safely resend a handback only for such a generation.
+    /// The 2^32 of headroom under `attachGenerationBaseLimit` is four billion
+    /// attaches, which no daemon process will ever mint. Why the base is
+    /// random at all is on `lastAttachGeneration`.
+    static func randomAttachGenerationBase() -> UInt64 {
+        let lowest = AttachRequestResult.uniqueGenerationFloor
+        return UInt64.random(in: lowest..<(attachGenerationBaseLimit - lowest))
+    }
+
     /// This installation's token, compared against every holder's before it is
     /// adopted.
     let owner: HolderOwnerToken
@@ -320,8 +369,9 @@ actor HolderRegistry {
     /// Unreachability arguments elsewhere in this type rest on it — notably
     /// `confirmAttach`'s second guard, which is argued dead by enumerating the
     /// writers of `slots`. That enumeration is `spawn`, `beginAdoption` (which
-    /// `adopt` and the take-back's no-reader arm both reach), `release` and its
-    /// `clearIfStillReleasing`, and it does **not** include `confirmAttach`:
+    /// `adopt`, `adoptForAttach` and the take-back's no-reader arm all reach),
+    /// `release` and its `clearIfStillReleasing`, and it does **not** include
+    /// `confirmAttach`:
     /// an acknowledgement leaves the slot exactly as it found it, `.adopted`
     /// with a suspended reader. **A new writer of `slots` or of
     /// either map has to keep this true**, because the next reader will reach
@@ -387,9 +437,111 @@ actor HolderRegistry {
     /// Mints attach generations. Monotonic for the daemon's life, so an ack or
     /// a cancel naming an older attach can always be told from one naming the
     /// current attach.
-    private var lastAttachGeneration: UInt64 = 0
+    ///
+    /// **It starts at a random base, not at zero, so generations do not repeat
+    /// across daemon processes.** An `attach.ready` or a `pane.detach` is
+    /// addressed by generation alone, and one sent to a daemon can be
+    /// delivered to its successor — a detach in flight across a restart, or an
+    /// app resending a handback after it reconnects. Were every daemon to
+    /// count from zero, that message could name a claim the successor minted
+    /// with the same number and hand it back while a panel is still reading
+    /// it: two readers on one pty. A base drawn from 48 bits makes such a
+    /// collision vanishingly unlikely, and leaves the count far from both
+    /// `UInt64`'s ceiling and the 2^53 past which a `Double` stops holding it
+    /// exactly. The base is never below `AttachRequestResult.uniqueGenerationFloor`,
+    /// which daemons that count from 1 never reach, so a generation also says
+    /// which kind of daemon minted it. See `randomAttachGenerationBase()`.
+    private var lastAttachGeneration: UInt64
+
+    /// The most recent attach generation minted, or the registry's base when
+    /// none has been. Test-facing: it is how a test sees the base without a
+    /// holder to attach to.
+    var lastMintedAttachGeneration: UInt64 { lastAttachGeneration }
 
     private var slots: [UUID: Slot] = [:]
+
+    /// Set when `releaseAll` begins, and never cleared: the daemon is shutting
+    /// down. From then on these refuse with `daemonShuttingDown`: `adopt` (on
+    /// every pass of its loop), `beginAdoption` (so the take-back's no-reader
+    /// arm too), `adoptForAttach` and `beginAttach`; and `adoptRemaining`
+    /// stops. `releaseAll` releases the slots it found when it began, so a
+    /// reader adopted after that would be stopped by nothing.
+    ///
+    /// **`spawn` is deliberately not refused.** A session created during
+    /// shutdown gets its holder like any other, and the holder outlives this
+    /// daemon by design — the successor adopts it at startup. The reader that
+    /// spawn publishes is the one reader built after `releaseAll` begins, and
+    /// it is left unstopped in a process that is about to exit.
+    ///
+    /// The window it covers is real and wide. `Daemon.stop()` releases every
+    /// reader long before it stops the fd sidecar and the RPC socket, and an
+    /// app relaunched by an update reaches the dying daemon inside it. Its
+    /// attach is refused either way; the refusal has to say the daemon is
+    /// going away, because `noLiveReader` reads as a session this daemon lost.
+    private(set) var isShuttingDown = false
+
+    /// Sessions whose holder this registry has told to let go — the session
+    /// was torn down, or its job was ended for a park — with nothing adopted
+    /// or spawned for them since. `abandon` and `abandonVerifiedJob` add a
+    /// session before they release its reader. `publish` removes any mark
+    /// for a freshly spawned holder, a new process for the session, but only
+    /// a park's mark for an adoption, which is the same holder the mark was
+    /// about (see `publish`); `clearLetGo` removes a park's mark for the wake
+    /// that deliberately revives a parked session it could not adopt.
+    ///
+    /// Two readers refuse these sessions: an attach's on-demand adoption
+    /// (`attachAdoption`) and the startup pass (`adoptOne`, through
+    /// `adopt(terminal:refusingLetGo:)`), and the wake refuses a teardown's
+    /// (the same call, `.teardown`). The general `adopt` does not, because
+    /// a wake adopts a parked row's live holder on purpose. `abandon` empties
+    /// the slot and forgets the session's status before it reaches the holder,
+    /// so without this mark a session being torn down would read exactly like
+    /// one whose adoption merely failed, and an adoption arriving in between
+    /// would take the pty of a holder about to be told to forget it. Grows by
+    /// one per holder session torn down for good, which is bounded by the
+    /// sessions one daemon ever runs.
+    ///
+    /// Each entry carries the mark it was given (`letGoMarks`), so a caller
+    /// that read the mark before suspending can tell a newer let-go from the
+    /// one it saw (`clearLetGo(terminalID:ifUnchangedSince:)`), and the reason
+    /// it was let go (`LetGoReason`), so a wake can tell the park it is undoing
+    /// from a teardown it must not.
+    private var sessionsLetGo: [UUID: LetGo] = [:]
+
+    /// One entry of `sessionsLetGo`: when, in mark order, and why.
+    struct LetGo: Sendable, Equatable {
+        let mark: UInt64
+        let reason: LetGoReason
+    }
+
+    /// Why this registry told a session's holder to let go.
+    enum LetGoReason: Sendable, Equatable {
+        /// A park ended the session's job, or a wake undid its own spawn and
+        /// left the row parked. The one let-go a wake may undo: a wake exists
+        /// to bring a parked session back.
+        case park
+        /// The session is being torn down — a delete, an archive, a transport
+        /// move, a create's spawn undone, a hook tab closed. No adoption may
+        /// bring it back, and a wake that finds this keeps the row parked;
+        /// only a fresh spawn for the same terminal clears it (`publish`).
+        case teardown
+    }
+
+    /// Mints let-go marks: one per insert into `sessionsLetGo`, increasing for
+    /// the daemon's life, so no two inserts share a mark.
+    private var letGoMarks: UInt64 = 0
+
+    /// The sessions whose remembered `.exitedStatusUnknown` was recorded
+    /// because nothing answered at the rendezvous — `ENOENT` or `ECONNREFUSED`
+    /// on the startup pass's connect — rather than because a holder said so.
+    ///
+    /// Kept beside `statuses` because the two answers are not the same
+    /// evidence. A holder that reports an unknown status has observed its own
+    /// child and is winding down; a refused connect is also what a live holder
+    /// with a full accept backlog or a stalled accept loop looks like, so only
+    /// this source may be second-guessed by an attach (`attachAdoption`).
+    /// Written only through `recordStatus`, which keeps the two in step.
+    private var statusesFromAbsentRendezvous: Set<UUID> = []
 
     /// What the hand-over said about each published session's processes.
     ///
@@ -486,6 +638,7 @@ actor HolderRegistry {
     /// How long the reclaimer keeps asking whether a child has exited; see
     /// `defaultExitConfirmationBudget`.
     private let exitConfirmationBudget: Duration
+    private let attachAdoptionBudget: Duration
     /// Where every reader this registry builds sends its Program Status
     /// Protocol (OSC 7501) reports, and whose gate decides whether it answers
     /// the probe. nil (tests that do not exercise the protocol) leaves OSC 7501
@@ -576,6 +729,8 @@ actor HolderRegistry {
         adoptAllBudget: Duration = HolderRegistry.defaultAdoptAllBudget,
         adoptionReceiveTimeout: Duration = HolderRegistry.defaultAdoptionReceiveTimeout,
         exitConfirmationBudget: Duration = HolderRegistry.defaultExitConfirmationBudget,
+        attachAdoptionBudget: Duration = HolderRegistry.defaultAttachAdoptionBudget,
+        attachGenerationBase: UInt64 = HolderRegistry.randomAttachGenerationBase(),
         programStatus: ProgramStatusStore? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
@@ -590,6 +745,8 @@ actor HolderRegistry {
         self.adoptAllBudget = adoptAllBudget
         self.adoptionReceiveTimeout = adoptionReceiveTimeout
         self.exitConfirmationBudget = exitConfirmationBudget
+        self.attachAdoptionBudget = attachAdoptionBudget
+        self.lastAttachGeneration = attachGenerationBase
         self.clock = clock
     }
 
@@ -686,8 +843,45 @@ actor HolderRegistry {
     ///
     /// `nil` clears the entry, which is the distinct "no holder ever reported"
     /// state rather than a fourth status.
-    func recordStatusForTesting(_ status: HolderChildStatus?, for terminalID: UUID) {
+    ///
+    /// `fromAbsentRendezvous: true` records it as the startup pass records an
+    /// `ENOENT` or `ECONNREFUSED` at the rendezvous — the one source an attach
+    /// may second-guess (`statusesFromAbsentRendezvous`).
+    func recordStatusForTesting(
+        _ status: HolderChildStatus?, for terminalID: UUID, fromAbsentRendezvous: Bool = false
+    ) {
+        recordStatus(status, for: terminalID, fromAbsentRendezvous: fromAbsentRendezvous)
+    }
+
+    /// The one writer of `statuses`, so `statusesFromAbsentRendezvous` can
+    /// never describe a status that has since been replaced.
+    private func recordStatus(
+        _ status: HolderChildStatus?, for terminalID: UUID, fromAbsentRendezvous: Bool = false
+    ) {
         statuses[terminalID] = status
+        if fromAbsentRendezvous {
+            statusesFromAbsentRendezvous.insert(terminalID)
+        } else {
+            statusesFromAbsentRendezvous.remove(terminalID)
+        }
+    }
+
+    /// The mark this session was let go under, or nil when it is not let go
+    /// (`sessionsLetGo`). A caller that suspends before acting on a let-go
+    /// reads this first and passes it to `clearLetGo(terminalID:ifUnchangedSince:)`.
+    func letGoMark(for terminalID: UUID) -> UInt64? {
+        sessionsLetGo[terminalID]?.mark
+    }
+
+    /// The let-go this session is under — its mark and its reason — or nil.
+    func letGo(for terminalID: UUID) -> LetGo? {
+        sessionsLetGo[terminalID]
+    }
+
+    /// Marks a session let go under a fresh mark, for `reason`.
+    private func markLetGo(_ terminalID: UUID, reason: LetGoReason) {
+        letGoMarks += 1
+        sessionsLetGo[terminalID] = LetGo(mark: letGoMarks, reason: reason)
     }
 
     /// Records the processes behind a session as an adoption's publish
@@ -834,6 +1028,9 @@ actor HolderRegistry {
     /// row: a holder that was spawned and then failed to be recorded is the
     /// caller's to `abandon`, because only the caller knows whether the record
     /// landed.
+    ///
+    /// Not refused while the daemon shuts down, unlike adoption — see
+    /// `isShuttingDown`.
     func spawn(terminalID: UUID, launch: HolderLaunchRequest) async throws -> HolderHandle {
         guard let spawner else { throw Error.holderExecutableUnavailable }
         guard slots[terminalID] == nil else {
@@ -864,7 +1061,7 @@ actor HolderRegistry {
             throw error
         }
 
-        publish(adoption, for: terminalID)
+        publish(adoption, for: terminalID, spawned: true)
         Self.logger.info(
             """
             spawned and adopted a holder for session \(terminalID.uuidString, privacy: .public): \
@@ -880,9 +1077,17 @@ actor HolderRegistry {
     /// Best-effort by nature — every step talks to something that may already
     /// be gone — and creation-time cleanup only. The standing guarantee for a
     /// holder nobody owns is the reconciler Milestone B adds.
-    func abandon(terminalID: UUID, handle: HolderHandle) async {
+    ///
+    /// Marked let go (`sessionsLetGo`) before anything suspends, so an
+    /// attach's on-demand adoption cannot reach for the holder in the gap
+    /// between the release and the `forget`. `reason` defaults to
+    /// `.teardown`, the let-go nothing may undo; only a park passes `.park`.
+    func abandon(
+        terminalID: UUID, handle: HolderHandle, reason: LetGoReason = .teardown
+    ) async {
+        markLetGo(terminalID, reason: reason)
         await release(terminalID: terminalID)
-        statuses[terminalID] = nil
+        recordStatus(nil, for: terminalID)
         await dispose(handle: handle)
     }
 
@@ -908,11 +1113,12 @@ actor HolderRegistry {
     /// unrepresentable rendezvous path, or a row that never recorded the child
     /// pid. Each one leaks a live process, so each is reported rather than
     /// swallowed.
-    func abandon(terminal: Terminal) async -> String? {
+    func abandon(terminal: Terminal, reason: LetGoReason = .teardown) async -> String? {
         await abandon(
             terminalID: terminal.id,
             holderPID: terminal.holderPID,
-            childPID: terminal.childPID)
+            childPID: terminal.childPID,
+            reason: reason)
     }
 
     /// The same teardown for a caller that no longer has a row to read the pids
@@ -923,7 +1129,9 @@ actor HolderRegistry {
     /// the descriptor phase 2b returned. The rendezvous still comes from this
     /// registry's own environment, so the caller needs nothing but the pids it
     /// was handed at spawn.
-    func abandon(terminalID: UUID, holderPID: Int32?, childPID: Int32?) async -> String? {
+    func abandon(
+        terminalID: UUID, holderPID: Int32?, childPID: Int32?, reason: LetGoReason = .teardown
+    ) async -> String? {
         let socketPath: String
         do {
             socketPath = try HolderRendezvous.socketPath(
@@ -942,7 +1150,8 @@ actor HolderRegistry {
             handle: HolderHandle(
                 holderPID: holderPID ?? 0,
                 childPID: childPID ?? 0,
-                socketPath: socketPath))
+                socketPath: socketPath),
+            reason: reason)
         guard childPID != nil else {
             return "terminal \(terminalID) recorded no child pid, so its holder was told to "
                 + "let go but the job it forked was not killed"
@@ -994,8 +1203,11 @@ actor HolderRegistry {
         } catch {
             return "\(error)"
         }
+        // Let go before anything suspends, as in `abandon`. A hook tab's
+        // teardown is never undone.
+        markLetGo(terminalID, reason: .teardown)
         await release(terminalID: terminalID)
-        statuses[terminalID] = nil
+        recordStatus(nil, for: terminalID)
 
         let client = HolderClient(socketPath: socketPath)
         try? await client.forget()
@@ -1222,8 +1434,46 @@ actor HolderRegistry {
     /// vacated by awaiting a task, and an actor's methods are not atomic across
     /// suspension, so the slot is re-read after every await instead of being
     /// remembered across one.
+    ///
+    /// Refused once the daemon is shutting down (`isShuttingDown`), on every
+    /// pass: a call that waited out a release has very likely waited out
+    /// `releaseAll`'s.
+    ///
+    /// A session this registry told to let go is adopted all the same; the
+    /// callers that must refuse one pass `refusingLetGo`.
     @discardableResult
     func adopt(terminal: Terminal) async throws -> HolderReader {
+        try await adopt(terminal: terminal, refusingLetGo: .none)
+    }
+
+    /// Which let-go marks an adoption refuses (`sessionsLetGo`).
+    enum LetGoRefusal: Sendable, Equatable {
+        /// None: the general `adopt`.
+        case none
+        /// A teardown's only. The wake that adopts a parked row's live holder
+        /// may revive a park's let-go — undoing a park is what it is for —
+        /// but never a teardown's.
+        case teardown
+        /// Every let-go: the startup pass.
+        case any
+    }
+
+    /// `adopt`, refusing the let-go marks `refusingLetGo` names, on every pass
+    /// of the loop, with `sessionLetGo`.
+    ///
+    /// The startup pass refuses `.any`: it adopts from a row list read when it
+    /// began, and `adoptRemaining` runs after the socket is bound, so a
+    /// terminal deleted or parked in the meantime is still on its list. The
+    /// wake refuses `.teardown`: a delete or an archive takes no hibernation
+    /// claim and can overlap it. Either way, adopting would take the pty of a
+    /// holder being told to forget it. Checked inside the loop rather than
+    /// once by the caller, because a call that waits out a release can find
+    /// the mark set by the teardown that release belonged to.
+    ///
+    /// Internal rather than private only so a test can see the refusal by
+    /// name: the startup pass (`adoptOne`) logs and swallows every error.
+    @discardableResult
+    func adopt(terminal: Terminal, refusingLetGo: LetGoRefusal) async throws -> HolderReader {
         guard terminal.transport == .holder else {
             throw Error.notAHolderSession(terminalID: terminal.id)
         }
@@ -1231,6 +1481,19 @@ actor HolderRegistry {
         adoptionCallsEntered += 1
 
         while true {
+            guard !isShuttingDown else {
+                throw Error.daemonShuttingDown(terminalID: terminalID)
+            }
+            if let letGo = sessionsLetGo[terminalID] {
+                switch refusingLetGo {
+                case .any:
+                    throw Error.sessionLetGo(terminalID: terminalID)
+                case .teardown where letGo.reason == .teardown:
+                    throw Error.sessionLetGo(terminalID: terminalID)
+                case .teardown, .none:
+                    break
+                }
+            }
             // Re-read on every pass, not once at the top: an actor's methods
             // are not atomic across suspension, and every branch below awaits.
             // An attach that completed while this call was parked must be seen
@@ -1300,9 +1563,15 @@ actor HolderRegistry {
     ///
     /// Reached only with the slot genuinely vacant — no reader adopted, none
     /// being adopted, and none still draining its way out of a release.
+    ///
+    /// Refused while the daemon shuts down, here as well as in its callers,
+    /// so that no adoption — the take-back's no-reader arm included — can open
+    /// a hand-over behind `releaseAll`. (`spawn` takes its hand-over without
+    /// coming through here; `isShuttingDown` says why it is not refused.)
     private func beginAdoption(
         of terminalID: UUID, seedingScreenWith preamble: Data = Data()
     ) async throws -> HolderReader {
+        guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
         let socketPath = try HolderRendezvous.socketPath(
             sessionID: terminalID, environment: environment)
         let expected = owner
@@ -1380,7 +1649,7 @@ actor HolderRegistry {
                 """)
             throw Error.superseded(terminalID: terminalID)
         }
-        publish(adoption, for: terminalID)
+        publish(adoption, for: terminalID, spawned: false)
         Self.logger.info(
             """
             adopted the holder for session \(terminalID.uuidString, privacy: .public): child \
@@ -1420,9 +1689,11 @@ actor HolderRegistry {
     /// one budget plus the row that was already running when it expired.
     ///
     /// **Rows the budget did not reach are returned, not dropped**, and the
-    /// caller is obliged to finish them: nothing else in the daemon ever calls
-    /// `adopt`, so a row abandoned here would stay undrained for the process's
-    /// whole life — and an undrained pty master does not merely cost a screen,
+    /// caller is obliged to finish them. Outside startup a session is adopted
+    /// only when something asks for it — an attach (`adoptForAttach`), or a
+    /// wake that finds the session's holder already running — so a row
+    /// abandoned here that nobody opens would stay undrained for the process's
+    /// whole life, and an undrained pty master does not merely cost a screen,
     /// it stops the job on it from finishing its exit. `Daemon` resumes them
     /// immediately after the socket is bound, where the wait costs no RPC
     /// caller — `adoptRemaining` documents what it does still cost. The result
@@ -1515,6 +1786,16 @@ actor HolderRegistry {
             budget did not reach
             """)
         for (index, terminal) in rows.enumerated() {
+            // A shutdown refuses every adoption, so the rest of the pass would
+            // only log one refusal per row. The next daemon adopts them.
+            guard !isShuttingDown else {
+                Self.logger.info(
+                    """
+                    stopped the deferred adoption with \(rows.count - index, privacy: .public) \
+                    holder sessions left: the daemon is shutting down
+                    """)
+                return
+            }
             Self.logger.debug(
                 """
                 adopting deferred holder session \(terminal.id.uuidString, privacy: .public) \
@@ -1562,11 +1843,12 @@ actor HolderRegistry {
     /// guess.
     private func adoptOne(_ terminal: Terminal) async {
         do {
-            _ = try await adopt(terminal: terminal)
+            _ = try await adopt(terminal: terminal, refusingLetGo: .any)
         } catch let error as Error {
             // A holder that named another installation answered correctly;
             // it is simply not ours. Left running, and not recorded as
-            // exited — it is somebody else's live session.
+            // exited — it is somebody else's live session. A session let go
+            // since the pass began, and a shutdown, land here too.
             Self.logger.info(
                 """
                 skipping session \(terminal.id.uuidString, privacy: .public): \
@@ -1588,7 +1870,7 @@ actor HolderRegistry {
                 // Nothing is bound at the rendezvous, so the holder is gone.
                 // The session is over, and the only honest thing to say about
                 // how it ended is that nobody collected the status.
-                statuses[terminal.id] = status
+                recordStatus(status, for: terminal.id, fromAbsentRendezvous: true)
                 Self.logger.info(
                     """
                     no holder answered for session \(terminal.id.uuidString, privacy: .public), so \
@@ -1791,6 +2073,315 @@ actor HolderRegistry {
         return Adoption(reader: reader, description: description, holderPID: holderPID)
     }
 
+    // MARK: - Adopting for an attach
+
+    /// Adopts a session an attach is asking for, when this registry is not
+    /// reading it yet and nothing says it should not be read.
+    ///
+    /// **Startup is not the only moment a session can be found unadopted.**
+    /// `adoptAll` walks away from a holder that is busy past its budget,
+    /// silent past its receive timeout, or unreachable for a reason that says
+    /// nothing about the job (`EMFILE`, a hang-up mid-frame); its budget
+    /// defers the rest to `adoptRemaining`; and a take-back whose hand-over
+    /// failed leaves a session with no reader at all. Each of those is a live
+    /// session nobody drains, and `beginAttach` can only refuse it as
+    /// `noLiveReader`. An attach is somebody asking to see that session, which
+    /// makes it the moment to try again.
+    ///
+    /// It never builds a reader for a session that is on its way out. Each
+    /// refusal is a quiet return rather than a throw, so `beginAttach` reports
+    /// `noLiveReader` — which the attach handler already turns into "ended"
+    /// when the holder is gone. `attachAdoption(for:holderIsLive:)` lists
+    /// them; they are asked synchronously, before any task, timer or
+    /// continuation exists, so the common answers — already adopted above all
+    /// — cost this call nothing more.
+    ///
+    /// `rowPermits` is the caller's own refusal, asked only before this call
+    /// would open a hand-over of its own: the attach handler passes the
+    /// row-level check only it can make (`mayAdoptForAttach`), so an
+    /// already-adopted session never pays for it, and joining an adoption
+    /// already in flight — a wake's, the startup pass's — never asks it,
+    /// because a join opens no hand-over. `holderIsLive` says
+    /// whether a pid names a running `TBDHolder`; `attachAdoption` says which
+    /// refusal it can lift.
+    ///
+    /// **Bounded.** The attach waits `attachAdoptionBudget` at most. An
+    /// adoption still running then is not abandoned: it finishes in its own
+    /// task and publishes as any adoption does, so the next attach finds its
+    /// reader. This one goes on without it.
+    ///
+    /// Throws `daemonShuttingDown`, and `notAHolderSession` for a row on
+    /// another transport. Any other failure to adopt is logged and left for
+    /// `beginAttach` to report.
+    func adoptForAttach(
+        terminal: Terminal,
+        holderIsLive: @escaping @Sendable (Int32) -> Bool = { _ in false },
+        rowPermits: @Sendable () async -> Bool = { true }
+    ) async throws {
+        let terminalID = terminal.id
+        guard terminal.transport == .holder else {
+            throw Error.notAHolderSession(terminalID: terminalID)
+        }
+        guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
+        let rowPermitted: Bool
+        switch attachAdoption(for: terminal, holderIsLive: holderIsLive) {
+        case .notNeeded:
+            return
+        case .declined(let reason):
+            Self.logger.debug(
+                """
+                an attach did not adopt session \(terminalID.uuidString, privacy: .public): \
+                \(reason, privacy: .public)
+                """)
+            return
+        case .join:
+            // Joining an adoption already in flight opens no hand-over, so
+            // the row gate has nothing to refuse: the wake or the startup pass
+            // that started it already decided this session may be read.
+            rowPermitted = false
+        case .begin:
+            guard await rowPermits() else { return }
+            rowPermitted = true
+        }
+
+        let attempt = Task {
+            try await self.adoptUnlessLeaving(
+                terminal, holderIsLive: holderIsLive, mayBegin: rowPermitted)
+        }
+        let budget = attachAdoptionBudget
+        guard let settled = await Self.settlement(of: attempt, within: budget, clock: clock) else {
+            Self.logger.notice(
+                """
+                an attach waited \(String(describing: budget), privacy: .public) for session \
+                \(terminalID.uuidString, privacy: .public) to be adopted and went on without it; \
+                the adoption finishes on its own
+                """)
+            return
+        }
+        switch settled {
+        case .success(let declined):
+            guard let declined else { return }
+            Self.logger.debug(
+                """
+                an attach did not adopt session \(terminalID.uuidString, privacy: .public): \
+                \(declined, privacy: .public)
+                """)
+        case .failure(let error):
+            if let refusal = error as? Error, case .daemonShuttingDown = refusal {
+                throw refusal
+            }
+            Self.logger.info(
+                """
+                an attach could not adopt session \(terminalID.uuidString, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+        }
+    }
+
+    /// What an attach's on-demand adoption should do about one session.
+    private enum AttachAdoption {
+        /// A reader is published; there is nothing to adopt.
+        case notNeeded
+        /// Something says this session must not be adopted now, and why.
+        case declined(String)
+        /// Another caller's adoption is in flight, past its own gates; join it.
+        case join(Task<Adoption, Swift.Error>)
+        /// The slot is vacant and nothing stands in the way; open a hand-over.
+        case begin
+    }
+
+    /// Every synchronous gate of the on-demand path, in one place, so that
+    /// `adoptForAttach` can answer the common cases before it builds anything
+    /// and `adoptUnlessLeaving` can re-ask the same questions in the stretch
+    /// that acts on them.
+    ///
+    ///   - A viewer claim or a pending attach: `beginAttach` refuses by name.
+    ///   - A reader being **released**: a teardown, a reclaim or a shutdown is
+    ///     stopping it.
+    ///   - A holder this registry **told to let go** (`sessionsLetGo`), with
+    ///     nothing adopted or spawned for the session since.
+    ///   - A job that has **ended** (`statuses`). A holder whose child has
+    ///     exited still hands its master over, to rescue the output nobody
+    ///     read, so an adoption would build a reader over a finished session.
+    ///
+    /// `.exited` is the holder's own report and always refuses, and so does
+    /// an `.exitedStatusUnknown` the holder reported: it observed its own
+    /// child, and is winding down. One exception, for the one status that is
+    /// not a report: an `.exitedStatusUnknown` the startup pass recorded
+    /// because nothing answered at the rendezvous
+    /// (`statusesFromAbsentRendezvous`). Darwin refuses a connect at once when
+    /// a live holder's accept backlog is full or its accept loop has stalled,
+    /// so read as final, that one refusal would make a running session
+    /// un-adoptable for the daemon's whole life. It is lifted only while the
+    /// row's holder pid verifiably names this session's running holder
+    /// (`holderVerifiablyRunning`); if the hand-over then fails as unreachable
+    /// too, the attach is refused exactly as before.
+    private func attachAdoption(
+        for terminal: Terminal, holderIsLive: (Int32) -> Bool
+    ) -> AttachAdoption {
+        let terminalID = terminal.id
+        if viewerAttachments[terminalID] != nil { return .declined("a viewer holds its pty") }
+        if pendingAttaches[terminalID] != nil {
+            return .declined("an attach of it is already pending")
+        }
+        switch slots[terminalID] {
+        case .adopted:
+            return .notNeeded
+        case .releasing:
+            return .declined("its reader is being released")
+        case .adopting(let task):
+            return .join(task)
+        case nil:
+            if sessionsLetGo[terminalID] != nil {
+                return .declined("this daemon told its holder to let go")
+            }
+            switch statuses[terminalID] {
+            case .exited:
+                return .declined("its holder reported the job exited")
+            case .exitedStatusUnknown:
+                guard statusesFromAbsentRendezvous.contains(terminalID) else {
+                    return .declined("its holder reported the job ended")
+                }
+                guard holderVerifiablyRunning(terminal, holderIsLive: holderIsLive) else {
+                    return .declined("its job has ended and its holder is not running")
+                }
+            case .alive, nil:
+                break
+            }
+            return .begin
+        }
+    }
+
+    /// The acting half of `adoptForAttach`: every gate again, then the
+    /// adoption, in one stretch on the actor, so nothing can change between
+    /// the gates and the slot they decide on. Answers why it adopted nothing,
+    /// or nil once the session has a published reader.
+    ///
+    /// Run from `adoptForAttach`'s own task rather than inline, which is why
+    /// it re-asks everything that call already asked: by the time the task is
+    /// scheduled, a release, an abandonment or a shutdown may have begun.
+    ///
+    /// `mayBegin` is whether the caller's row gate was asked and permitted an
+    /// adoption. A call that set out to join one in flight never asked it, so
+    /// if that adoption has ended by now it opens no hand-over of its own.
+    private func adoptUnlessLeaving(
+        _ terminal: Terminal, holderIsLive: (Int32) -> Bool, mayBegin: Bool
+    ) async throws -> String? {
+        let terminalID = terminal.id
+        guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
+        switch attachAdoption(for: terminal, holderIsLive: holderIsLive) {
+        case .notNeeded:
+            return nil
+        case .declined(let reason):
+            return reason
+        case .join(let task):
+            // Someone else's adoption, already past every gate of its own.
+            // Joining it opens no second hand-over.
+            _ = try await joinInFlightAdoption(task, for: terminalID)
+            return nil
+        case .begin:
+            guard mayBegin else {
+                return "the adoption it set out to join had ended, and the row gate was not asked"
+            }
+            _ = try await beginAdoption(of: terminalID)
+            return nil
+        }
+    }
+
+    // MARK: - Adopting for a wake
+
+    /// `adopt`, waited for no longer than `attachAdoptionBudget`: the result,
+    /// or nil when the budget passed first and the adoption is still running.
+    ///
+    /// For the wake that finds a parked row's holder already running. That
+    /// wake holds its claim and its caller's RPC for as long as it waits, and
+    /// a holder busy past `busyRetryBudget` and then silent for an
+    /// `adoptionReceiveTimeout` costs both several seconds. Bounded the way
+    /// the attach is, for the same reason and with the same consequence: an
+    /// adoption still running at the limit finishes in its own task and
+    /// publishes as any adoption does.
+    func adoptWithinAttachBudget(terminal: Terminal) async -> Result<HolderReader, Swift.Error>? {
+        let attempt = Task { try await self.adopt(terminal: terminal, refusingLetGo: .teardown) }
+        return await Self.settlement(of: attempt, within: attachAdoptionBudget, clock: clock)
+    }
+
+    /// Drops the let-go mark on a session something has deliberately brought
+    /// back to life.
+    ///
+    /// The wake that un-parks a row over a live holder it did not adopt is the
+    /// caller: it leaves the adoption to the next attach, and an attach
+    /// refuses a session this registry told to let go — as a park that reached
+    /// `abandon` did. Without this, the row would be awake and refused by
+    /// every attach for the daemon's whole life.
+    ///
+    /// **Only a park's let-go, and only the mark the caller saw, is cleared.**
+    /// `mark` is what `letGoMark(for:)` answered before the caller suspended,
+    /// nil if the session was not let go then. A newer let-go — a delete or an
+    /// archive whose `abandon` ran while the wake was adopting — carries a
+    /// newer mark and is left standing, and a `.teardown` let-go is never
+    /// cleared at all: either would let an attach or the startup pass adopt a
+    /// holder that is being told to forget its session.
+    func clearLetGo(terminalID: UUID, ifUnchangedSince mark: UInt64?) {
+        guard let mark, let current = sessionsLetGo[terminalID],
+              current.mark == mark, current.reason == .park else { return }
+        sessionsLetGo[terminalID] = nil
+    }
+
+    /// Whether `terminal`'s recorded holder pid names this session's running
+    /// holder: `holderIsLive` — a running `TBDHolder` by name, the attach
+    /// handler's own check — and a holder that started within
+    /// `AgentReaper.defaultHolderIdentityWindow` of the row's identity anchor
+    /// (`HolderChildIdentity.anchor(of:)`: when its job started, or the row's
+    /// creation for a row that never recorded that), the anchor every other
+    /// holder identity check measures against. A holder forks its job as it
+    /// starts, so the two instants sit together; a pid the kernel has handed
+    /// to some other holder does not. An unreadable start time is uncertainty,
+    /// and answers no.
+    private func holderVerifiablyRunning(
+        _ terminal: Terminal, holderIsLive: (Int32) -> Bool
+    ) -> Bool {
+        guard let holderPID = terminal.holderPID, holderPID > 1,
+              holderIsLive(holderPID) else { return false }
+        guard let holderStartedAt = signaller.startTime(holderPID) else { return false }
+        return abs(holderStartedAt.timeIntervalSince(HolderChildIdentity.anchor(of: terminal)))
+            <= AgentReaper.defaultHolderIdentityWindow
+    }
+
+    /// The result of `work`, or nil when `limit` passes on `clock` first.
+    ///
+    /// `work` is not cancelled when the limit wins. It runs to its own end in
+    /// its own task, which is what an adoption needs: walking away from a
+    /// hand-over mid-flight would strand the descriptor it is receiving. The
+    /// timer is cancelled when the work wins, so no sleep outlives the race.
+    ///
+    /// A race of two unstructured tasks onto one continuation rather than a
+    /// task group, because a group waits for every child before it returns,
+    /// and that would make the limit wait for the work.
+    static func settlement<Success: Sendable>(
+        of work: Task<Success, Swift.Error>,
+        within limit: Duration,
+        clock: any Clock<Duration>
+    ) async -> Result<Success, Swift.Error>? {
+        typealias Outcome = Result<Success, Swift.Error>?
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Outcome, Never>) in
+            let settled = ContinuationGuard()
+            let timer = Task {
+                do {
+                    try await clock.sleep(for: limit)
+                } catch {
+                    // Cancelled: the work settled first.
+                    return
+                }
+                if settled.claim() { continuation.resume(returning: nil) }
+            }
+            Task {
+                let result = await work.result
+                timer.cancel()
+                if settled.claim() { continuation.resume(returning: result) }
+            }
+        }
+    }
+
     // MARK: - Handing a session to a viewer
 
     /// Quiesces the session's drain, serializes its screen, and hands back a
@@ -1814,9 +2405,14 @@ actor HolderRegistry {
     ///
     /// The returned descriptor belongs to the caller, which closes it once it
     /// has been passed on.
+    ///
+    /// Refused first, and by name, once the daemon is shutting down: the
+    /// reader is being released, and the app should hear that this daemon is
+    /// going away rather than that the session has no reader.
     func beginAttach(
         terminalID: UUID, maxScrollbackLines: Int = HolderReader.scrollbackLines
     ) async throws -> HolderAttachVend {
+        guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
         guard viewerAttachments[terminalID] == nil else {
             throw Error.attachedToViewer(terminalID: terminalID)
         }
@@ -1949,10 +2545,11 @@ actor HolderRegistry {
     /// - The **second** guard (the slot no longer holds this attach's reader)
     ///   is unreachable. Every writer of `slots` that can change the reader
     ///   under a live pending entry clears `pendingAttaches` first (`release`),
-    ///   and the two that would install a different reader refuse outright
-    ///   while a pending entry exists (`adopt`, `beginAttach`). This method
-    ///   does not write `slots` at all — it leaves the slot exactly as it
-    ///   found it — so it is not itself one of the writers to enumerate.
+    ///   and the ones that would install a different reader refuse outright
+    ///   while a pending entry exists (`adopt`, `adoptForAttach`,
+    ///   `beginAttach`). This method does not write `slots` at all — it
+    ///   leaves the slot exactly as it found it — so it is not itself one of
+    ///   the writers to enumerate.
     /// - The **first** guard (the pending entry is already gone) is reachable
     ///   only through a clearer that has itself settled the question:
     ///   `cancelPendingAttach(.unacknowledged)` records the claim,
@@ -2473,10 +3070,11 @@ actor HolderRegistry {
                 reader = try await beginAdoption(
                     of: terminalID, seedingScreenWith: preamble ?? Data())
             case .adopting, .releasing:
-                // Unreachable while the claim above stands — `adopt` and
-                // `release` are the only writers of those states and the first
-                // refuses on the claim outright, while the second clears it
-                // before it takes the slot. Refused rather than assumed away:
+                // Unreachable while the claim above stands — the adoptions
+                // (`adopt`, `adoptForAttach`) and `release` are the only
+                // writers of those states, and the adoptions refuse on the
+                // claim outright, while `release` clears it before it takes
+                // the slot. Refused rather than assumed away:
                 // whatever put a task in that slot owns this session now, and a
                 // resume beside it would be the second reader.
                 throw Error.superseded(terminalID: terminalID)
@@ -2754,7 +3352,7 @@ actor HolderRegistry {
         guard let status else { return }
         guard case .adopted(let current) = slots[terminalID], current === reader else { return }
 
-        statuses[terminalID] = status
+        recordStatus(status, for: terminalID)
         // A SIGKILLed Claude sends no `state=clear`, so the session's end is
         // the only signal its Program Status entries are over (spec
         // "Liveness"). Dropped here, where the child's exit is confirmed,
@@ -3078,9 +3676,28 @@ actor HolderRegistry {
     /// `liveDrainLoops` negative for a spawned session, and
     /// `peakLiveDrainLoops` could not see a second loop running beside a
     /// spawned one — the exact byte theft that counter exists to catch.
-    private func publish(_ adoption: Adoption, for terminalID: UUID) {
+    ///
+    /// `spawned` says whether the reader is a freshly spawned holder's. It
+    /// decides what happens to a let-go mark, and the two answers differ on
+    /// purpose:
+    ///
+    /// - **A spawn clears any mark.** It is a new holder process — a wake's,
+    ///   or a transport move's for an existing row — so whatever let go of
+    ///   the one before it no longer describes this session. A teardown mark
+    ///   left on a live session would otherwise refuse every later attach and
+    ///   keep every later wake parked, the day its reader went away.
+    /// - **An adoption clears a park's mark only.** It is the same holder the
+    ///   mark was about. Every adoption path refuses a teardown's mark on each
+    ///   pass of its loop, so one that publishes over a teardown mark slipped
+    ///   past those checks, and erasing the mark would hide the teardown from
+    ///   the wake's own recheck (`refusalToUnpark`) and from every later
+    ///   attach.
+    private func publish(_ adoption: Adoption, for terminalID: UUID, spawned: Bool) {
         slots[terminalID] = .adopted(adoption.reader)
-        statuses[terminalID] = adoption.description.status
+        recordStatus(adoption.description.status, for: terminalID)
+        if spawned || sessionsLetGo[terminalID]?.reason == .park {
+            sessionsLetGo[terminalID] = nil
+        }
         // Recorded with the reader and cleared with it, so "the registry holds
         // a reader for this session" and "the registry can name that session's
         // processes" are the same fact rather than two that can disagree.
@@ -3142,7 +3759,17 @@ actor HolderRegistry {
 
     /// Releases every reader. The holders and their jobs are untouched — that
     /// is the whole design: a session outlives the daemon that was reading it.
+    ///
+    /// This is the daemon's shutdown, so it marks the registry shutting down
+    /// first (`isShuttingDown`), before it reads which slots to release and
+    /// with no suspension in between. Every adoption or attach that arrives
+    /// after that refuses rather than building a reader this loop has already
+    /// decided not to visit; one already in flight holds its slot, so the loop
+    /// releases it and the adoption finds itself superseded. A `spawn` after
+    /// this point still publishes a reader the loop never visits — by design,
+    /// see `isShuttingDown`.
     func releaseAll() async {
+        isShuttingDown = true
         for terminalID in Set(slots.keys).union(viewerAttachments.keys) {
             await release(terminalID: terminalID)
         }

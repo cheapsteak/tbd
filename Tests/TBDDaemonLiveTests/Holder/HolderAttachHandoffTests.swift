@@ -384,7 +384,7 @@ struct HolderAttachHandoffTests {
         let inFlight = Task { try await registry.beginAttach(terminalID: terminalID) }
         #expect(await pollUntil("the attach to reach the barrier") { await barrier.hasParked })
 
-        // Generations are minted from 1 for a fresh registry, and this call
+        // The fixture's registry mints generations from 1, and this call
         // claimed one before it suspended — which is exactly what lets an
         // acknowledgement land in this window at all.
         let acknowledging = Task { try await registry.confirmAttach(terminalID: terminalID, generation: 1) }
@@ -481,8 +481,8 @@ struct HolderAttachHandoffTests {
         let inFlight = Task { try await registry.beginAttach(terminalID: terminalID) }
         #expect(await pollUntil("the attach to reach the barrier") { await barrier.hasParked })
 
-        // The specific case, not merely "some error": generations are minted
-        // from 1 for a fresh registry, so the attach parked above holds 1.
+        // The specific case, not merely "some error": the fixture's registry
+        // mints generations from 1, so the attach parked above holds 1.
         await #expect(
             throws: HolderRegistry.Error.attachAlreadyPending(
                 terminalID: terminalID, generation: 1)
@@ -598,10 +598,13 @@ private struct AttachFixture {
         // be served: a holder serves one client at a time, and the adoption
         // below opens its own.
         await process.client.close()
+        // Generations counted from a fixed base of zero, so a test can name
+        // the generation an attach it parked has claimed: the first is 1.
         let registry = HolderRegistry(
             owner: process.owner,
             environment: HolderProcessFixture.environment(home: process.home),
-            listTerminals: { [] })
+            listTerminals: { [] },
+            attachGenerationBase: 0)
         let fixture = AttachFixture(
             process: process,
             registry: registry,

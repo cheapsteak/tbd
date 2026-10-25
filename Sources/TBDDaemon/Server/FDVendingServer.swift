@@ -100,6 +100,12 @@ actor FDVendingServer {
     /// running purely off adopted fds (unit tests).
     private var socketPath: String?
     private var listenerFD: Int32 = -1
+    /// The identity of the socket file `listen(on:)` created at `socketPath`,
+    /// read straight after `bind(2)`. It is what licenses the unlink in
+    /// `stop()`: every daemon generation binds the same path in turn, so a
+    /// file there proves nothing about whose socket it is — the same reason
+    /// `SocketServer` checks the RPC socket's identity before removing it.
+    private var boundSocketIdentity: SocketFileIdentity?
 
     /// How many times `send(fd:header:)` checks for an adopted client before
     /// giving up, and how long it waits between checks. `retryAttempts` checks
@@ -320,12 +326,23 @@ actor FDVendingServer {
             Darwin.close(fd)
             throw FDVendingServerError.bindFailed(errno)
         }
+        // As close to `bind(2)` as possible: a successor's `listen` unlinks
+        // this path and binds its own socket, and the inode is the only thing
+        // that tells the two files apart.
+        let identity = SocketFileIdentity(path: path)
         if Darwin.listen(fd, 1) < 0 {
+            let code = errno
             Darwin.close(fd)
-            throw FDVendingServerError.listenFailed(errno)
+            // The file `bind(2)` just made would otherwise outlive this failed
+            // listen, a socket nobody will ever accept on. Removed under the
+            // same identity check `stop()` makes, since a successor may have
+            // taken the path over in the meantime.
+            unlinkSocketFile(at: path, ifStillIdentity: identity)
+            throw FDVendingServerError.listenFailed(code)
         }
         listenerFD = fd
         socketPath = path
+        boundSocketIdentity = identity
         // The fresh lifetime described above. The floor is read before the
         // accept thread below exists, so every connection it stamps is above it.
         stopped = false
@@ -587,11 +604,60 @@ actor FDVendingServer {
     /// rather than installed (`adoptConnection(fd:stamp:)`) — and it stays
     /// refused after a later `listen(on:)`, which starts a fresh lifetime only
     /// for connections accepted from then on.
+    ///
+    /// The socket file is removed only while it is still the one this server
+    /// bound (`unlinkSocketFile(at:ifStillIdentity:)`). A daemon that is still
+    /// stopping when its successor has started — a restart that does not wait
+    /// for the old process — finds the successor's socket at the path, and
+    /// deleting it would leave the successor listening where no app can reach
+    /// it.
     func stop() {
         stopped = true
         if listenerFD >= 0 { Darwin.close(listenerFD); listenerFD = -1 }
-        if let path = socketPath { _ = unlink(path); socketPath = nil }
+        if let path = socketPath {
+            unlinkSocketFile(at: path, ifStillIdentity: boundSocketIdentity)
+            socketPath = nil
+        }
+        boundSocketIdentity = nil
         disconnect()
+    }
+
+    /// Removes the socket file at `path` only if it is still the inode this
+    /// server bound. `SocketServer.unlinkSocketFile(ifStillIdentity:)` makes
+    /// the same check for the RPC socket and records the microsecond window
+    /// between the `lstat(2)` and the `unlink(2)` that no darwin primitive
+    /// closes.
+    private func unlinkSocketFile(at path: String, ifStillIdentity bound: SocketFileIdentity?) {
+        guard let bound else {
+            // The `lstat(2)` after `bind(2)` found nothing, so this server can
+            // name no file as its own and leaves whatever is there. Said at
+            // error level, because a vend.sock left behind this way is
+            // otherwise indistinguishable from a successor's.
+            logger.error(
+                """
+                leaving the sidecar socket path \(path, privacy: .public) as it is: the socket \
+                file could not be identified when this server bound it, so it cannot be told \
+                from a successor's
+                """)
+            return
+        }
+        guard let current = SocketFileIdentity(path: path) else {
+            // Already gone — removed by hand, or by a successor's `listen`
+            // that then failed to bind.
+            return
+        }
+        guard current == bound else {
+            let boundInode = bound.inode
+            let currentInode = current.inode
+            logger.info(
+                """
+                leaving the sidecar socket at \(path, privacy: .public) in place: it is now inode \
+                \(currentInode, privacy: .public), not the \(boundInode, privacy: .public) this \
+                server bound
+                """)
+            return
+        }
+        _ = unlink(path)
     }
 
     /// Send `fd` plus `header` to the currently connected app client, wrapped in

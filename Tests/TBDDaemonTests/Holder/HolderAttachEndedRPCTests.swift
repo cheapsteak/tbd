@@ -7,7 +7,9 @@ import Testing
 /// Tier 1: `attach.request` for a holder row the registry holds no reader for.
 /// No holder is spawned — the registry simply never adopted the session, which
 /// is exactly the state a killed holder leaves behind — and holder liveness is
-/// the router's injected `holderProcessIsLive`.
+/// the router's injected `holderProcessIsLive`. The attach's on-demand adoption
+/// finds nothing at the rendezvous, because `TBD_HOME` names a directory that
+/// does not exist, so the refusal these tests read is still `beginAttach`'s.
 ///
 /// The app shows "the session keeps running, reopen the tab" for an attach
 /// error, and "this session has ended" for the ended status, so the status may
@@ -36,7 +38,7 @@ struct HolderAttachEndedRPCTests {
             supervisor: TmuxControlSupervisor(), environment: [:], fdVending: FDVendingServer())
         router.holderRegistry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
-            environment: [:],
+            environment: ["TBD_HOME": "/nonexistent/acme-tbd-home"],
             listTerminals: { [] })
         return (router, worktree.id, terminal.id)
     }
@@ -144,6 +146,9 @@ struct HolderAttachEndedRPCTests {
             .notAHolderSession(terminalID: id),
             .attachSuperseded(terminalID: id, generation: 7),
             .sessionAlreadyRegistered(terminalID: id),
+            // A shutting-down daemon says nothing about the session; the next
+            // daemon is the one to judge it.
+            .daemonShuttingDown(terminalID: id),
         ]
 
         router.holderProcessIsLive = { _ in false }

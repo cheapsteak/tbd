@@ -606,6 +606,114 @@ struct HolderHibernationLiveTests {
                 "the wake spawned a second holder instead of adopting the live one")
     }
 
+    /// The guard's other leg, with a holder on the other end: the row is
+    /// parked over a holder and a job that are both running, and this daemon
+    /// holds no reader for them — what a startup adoption that failed leaves.
+    ///
+    /// The wake must adopt the holder before it un-parks the row. Un-parked
+    /// without a reader, the session is awake and nobody drains it: its job
+    /// cannot finish exiting, no park can end it, and only an attach would
+    /// ever adopt it.
+    ///
+    /// The reader is released rather than never built, because a release is
+    /// the one way to take this daemon off a session while leaving its holder
+    /// and job untouched — exactly the state the leg exists for.
+    @Test func wakeAdoptsTheHolderOfARowParkedWithNoReader() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow()
+        let childPID = try #require(terminal.childPID)
+
+        await fixture.registry.release(terminalID: terminal.id)
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: HibernationFixture.sessionID)
+        #expect(await fixture.registry.reader(for: terminal.id) == nil,
+                "the fixture kept its reader, so this test would exercise the other leg")
+        #expect(holderProcessIsAlive(childPID))
+
+        let result = await fixture.coordinator.wake(terminalID: terminal.id)
+        #expect(result == .ok(sessionIncarnationID: nil),
+                "the wake did not stop at the live holder: \(result)")
+
+        let woken = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!woken.isParked)
+        let reader = try #require(
+            await fixture.registry.reader(for: terminal.id),
+            "the wake un-parked the row without adopting its holder, so nothing drains the session")
+        #expect(await reader.isDraining)
+        #expect(await fixture.registry.adoptedProcess(for: terminal.id)?.childPID == childPID,
+                "the wake adopted something other than the session's own job")
+        #expect(woken.childPID == childPID)
+        #expect(!FileManager.default.fileExists(atPath: fixture.launchArgvPath),
+                "the wake spawned a second holder instead of adopting the live one")
+    }
+
+    /// The wake's adoption waiting behind a release when a teardown lands.
+    ///
+    /// The row is parked over a live holder whose reader is on its way out,
+    /// held mid-release. The wake finds no reader, verifies the child, and its
+    /// adoption waits for the release. A delete's teardown arrives during that
+    /// wait — `abandon` marks the session let go and queues behind the same
+    /// release. When the release lands, the wake's adoption must see the
+    /// teardown on its next pass rather than open a fresh hand-over against a
+    /// holder being told to forget its session; a publish there would also
+    /// have erased the mark and let the wake un-park a torn-down row.
+    @Test func aTeardownWhileTheWakeWaitsOnAReleaseKeepsTheRowParked() async throws {
+        // A budget far past the test, so the wait the test controls is the
+        // only thing that ends the wake's adoption.
+        let fixture = try await HibernationFixture.make(attachAdoptionBudget: .seconds(600))
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow()
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: HibernationFixture.sessionID)
+        let loopsBefore = await fixture.registry.drainLoopsStarted
+        // The concurrent work below captures the two actors and the row, never
+        // the fixture: it is a non-Sendable class, and a task closure must be.
+        let registry = fixture.registry
+        let coordinator = fixture.coordinator
+
+        let hold = ReleaseHold()
+        await registry.setReleaseBarrier(hold.hook())
+        let releasing = Task { await registry.release(terminalID: terminal.id) }
+        let parked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await hold.parked == 1
+        }
+        let waking = Task { await coordinator.wake(terminalID: terminal.id) }
+        // The wake's adoption is the registry's first `adopt`; once it has
+        // consulted the slot it is waiting on the release.
+        let waiting = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await fixture.registry.adoptionCallsEntered == 1
+        }
+        let tearingDown = Task { await registry.abandon(terminal: terminal) }
+        let marked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await fixture.registry.letGo(for: terminal.id)?.reason == .teardown
+        }
+        await hold.release()
+        await releasing.value
+        _ = await tearingDown.value
+        let result = await waking.value
+
+        guard parked == .satisfied, waiting == .satisfied, marked == .satisfied else {
+            Issue.record(BoundedWaitTimeout(
+                what: "the release to park, the wake to wait on it, and the teardown to mark it",
+                observed: "parked \(parked), waiting \(waiting), marked \(marked); wake \(result)",
+                deadline: TestDeadlines.saturatedPass))
+            return
+        }
+        guard case .respawnFailed = result else {
+            Issue.record("the wake un-parked a row torn down while it waited: \(result)")
+            return
+        }
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "the wake un-parked a row a teardown let go")
+        #expect(await fixture.registry.reader(for: terminal.id) == nil,
+                "a reader was published for a holder being told to forget its session")
+        #expect(await fixture.registry.drainLoopsStarted == loopsBefore,
+                "the wake's adoption opened a fresh hand-over after the teardown")
+        #expect(await fixture.registry.letGo(for: terminal.id)?.reason == .teardown,
+                "the teardown's let-go was erased")
+    }
+
     /// Teardown's second pass, against the branch where the first one has
     /// nothing to read.
     ///
@@ -677,6 +785,30 @@ struct HolderHibernationLiveTests {
 /// "the escalation ran" into an untestable claim — and a `SIGTERM` rung that
 /// went through here must land nowhere, or the job would die and the branch
 /// under test would never be reached.
+/// Holds every release that reaches the registry's release seam until the
+/// test lets it through. Suspends rather than blocking a thread.
+private actor ReleaseHold {
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var parked = 0
+
+    func park() async {
+        if released { return }
+        parked += 1
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+
+    nonisolated func hook() -> @Sendable () async -> Void {
+        { [self] in await self.park() }
+    }
+}
+
 private struct AlwaysAliveSignaller: ProcessSignaller {
     func isAlive(_ pid: Int32) -> Bool { true }
     func terminate(_ pid: Int32) {}
@@ -911,7 +1043,8 @@ private final class HibernationFixture {
     static func make(
         holderTerminateAttempts: Int = 25,
         holderEscalationAttempts: Int = 100,
-        signaller: any ProcessSignaller = ProductionProcessSignaller()
+        signaller: any ProcessSignaller = ProductionProcessSignaller(),
+        attachAdoptionBudget: Duration = HolderRegistry.defaultAttachAdoptionBudget
     ) async throws -> HibernationFixture {
         let home = scratchHome()
         let shell = try writeGateShell(in: home)
@@ -931,7 +1064,8 @@ private final class HibernationFixture {
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: environment,
             listTerminals: { [] },
-            spawner: HolderSpawner(executableURL: executable))
+            spawner: HolderSpawner(executableURL: executable),
+            attachAdoptionBudget: attachAdoptionBudget)
 
         let (tempDir, repoDir) = try await createTestRepoResolvingSymlinks()
         let repo = try await db.repos.create(
