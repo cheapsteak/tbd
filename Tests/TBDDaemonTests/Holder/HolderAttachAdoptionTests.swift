@@ -252,6 +252,30 @@ import Testing
         #expect(!response.success)
     }
 
+    /// The park and wake branches of the same gate, each against its own
+    /// control: the row is adopted on demand once the claim is gone, so the
+    /// claim alone is what held the attach back.
+    @Test(arguments: [InFlightClaim.hibernate, .wake])
+    func anAttachDoesNotAdoptARowAParkOrWakeIsMoving(_ claim: InFlightClaim) async throws {
+        let harness = try await RouterHarness.make()
+        let coordinator = harness.router.hibernationCoordinator
+
+        await coordinator.holdForTesting(claim, terminalID: harness.terminalID)
+        #expect(await coordinator.transitionInFlight(terminalID: harness.terminalID))
+        _ = try await harness.attach()
+        #expect(await harness.registry.attachRoundTripsStarted == 0, """
+            an attach adopted a session a \(claim) in flight was moving
+            """)
+
+        await coordinator.releaseForTesting(claim, terminalID: harness.terminalID)
+        #expect(await !coordinator.transitionInFlight(terminalID: harness.terminalID))
+        _ = try await harness.attach()
+        #expect(await harness.registry.attachRoundTripsStarted == 1, """
+            with the \(claim) claim gone the attach still did not adopt, so the claim was not \
+            what held it back
+            """)
+    }
+
     /// An ended session is answered as ended, and without reaching for its
     /// holder first: the status gate stops the adoption, and the handler's
     /// own verdict on a dead holder and a gone job does the rest.
@@ -273,6 +297,36 @@ import Testing
 }
 
 // MARK: - Support
+
+/// The coordinator claims a test can stand up without running the park or
+/// wake that takes it. The swap's claim has its own entry points
+/// (`claimSwap`, `releaseSwap`).
+enum InFlightClaim: String, Sendable, CustomStringConvertible {
+    case hibernate = "park"
+    case wake
+
+    var description: String { rawValue }
+}
+
+extension HibernationCoordinator {
+    /// Records `claim` on a row as its own operation would on entry.
+    /// Test-facing: the real claims are taken inside `performHibernate` and
+    /// `wake`, which would also run what this test means to keep still.
+    func holdForTesting(_ claim: InFlightClaim, terminalID: UUID) {
+        switch claim {
+        case .hibernate: hibernatesInFlight.insert(terminalID)
+        case .wake: wakesInFlight.insert(terminalID)
+        }
+    }
+
+    /// Drops a claim `holdForTesting` recorded.
+    func releaseForTesting(_ claim: InFlightClaim, terminalID: UUID) {
+        switch claim {
+        case .hibernate: hibernatesInFlight.remove(terminalID)
+        case .wake: wakesInFlight.remove(terminalID)
+        }
+    }
+}
 
 /// A router with one awake holder row behind it and a registry that has
 /// adopted nothing.
