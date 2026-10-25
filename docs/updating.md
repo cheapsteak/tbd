@@ -352,7 +352,10 @@ table. Before its first drop the daemon copies the database to
 `~/tbd/state.db.pre-column-drop.<UTC-timestamp>`, which still holds the dropped
 columns and their data. The daemon keeps the newest three copies of each kind
 (`pre-column-drop` and `pre-migration`) beside the database and deletes older
-ones, so copy it elsewhere if you need it longer. See
+ones, so copy it elsewhere if you need it longer. It prunes a kind only after
+the step that writes it succeeds — migrations for `pre-migration`, a column-drop
+run with no failures for `pre-column-drop` — and never deletes the copy it has
+just written, so an upgrade that keeps failing keeps every copy. See
 [the design](specs/2026-10-24-column-retirement-design.md).
 
 ## Knowing what you are running

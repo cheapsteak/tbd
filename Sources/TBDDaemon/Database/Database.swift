@@ -89,17 +89,29 @@ public final class TBDDatabase: Sendable {
         // `grdb_migrations` holds timestamp identifiers while the bundle
         // yielded no `.sql` files at all.
         try pool.read { db in try SQLMigrationLoader.verifyResourceIntegrity(db) }
+        var snapshotPath: String?
         if fileExisted {
             let hasPending = try pool.read { db in
                 try !migrator.hasCompletedMigrations(db)
             }
             if hasPending {
-                Self.takePreMigrationSnapshot(pool: pool, path: path)
+                snapshotPath = Self.takePreMigrationSnapshot(pool: pool, path: path)
             }
-            // Every start, so a backlog clears at once. Never throws.
-            DatabaseSnapshotPruner.prune(databasePath: path)
         }
         try migrator.migrate(pool)
+        // Only once migrations succeed. A migration that keeps failing gets
+        // the daemon relaunched again and again, each start writing another
+        // copy of the half-migrated database; pruning then would push out the
+        // clean copy taken before the upgrade. Every start that gets here
+        // prunes, so a backlog clears at once. The copy just written is never
+        // deleted, even when the clock runs behind an older stamp. Never
+        // throws.
+        if fileExisted {
+            DatabaseSnapshotPruner.prune(
+                databasePath: path,
+                kinds: [.preMigration],
+                protecting: Set([snapshotPath].compactMap { $0 }))
+        }
     }
 
     /// Create an in-memory database for testing using DatabaseQueue.
@@ -154,7 +166,9 @@ public final class TBDDatabase: Sendable {
     /// Best-effort pre-migration snapshot. Failures are logged, not thrown —
     /// the migration must still be allowed to proceed even if e.g. the disk
     /// is full or the parent directory isn't writable.
-    internal static func takePreMigrationSnapshot(pool: DatabasePool, path: String) {
+    /// - Returns: the path of the copy written, or nil when it failed.
+    @discardableResult
+    internal static func takePreMigrationSnapshot(pool: DatabasePool, path: String) -> String? {
         let snapshotPath = "\(path).pre-migration.\(snapshotTimestamp(for: Date()))"
         do {
             // VACUUM INTO requires autocommit mode — it cannot run inside a
@@ -166,10 +180,12 @@ public final class TBDDatabase: Sendable {
                 try db.execute(sql: "VACUUM INTO ?", arguments: [snapshotPath])
             }
             logger.info("Pre-migration snapshot written to \(snapshotPath, privacy: .public)")
+            return snapshotPath
         } catch {
             logger.error(
                 "Pre-migration snapshot failed at \(snapshotPath, privacy: .public): \(String(describing: error), privacy: .public)"
             )
+            return nil
         }
     }
 

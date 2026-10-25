@@ -55,21 +55,35 @@ size of the table. It changes no behavior.
 ### Database copies
 
 TBD keeps the newest 3 copies of each kind — `state.db.pre-migration.*` and
-`state.db.pre-column-drop.*`, counted separately — and deletes older ones:
+`state.db.pre-column-drop.*`, counted separately — and deletes older ones. Each kind is
+pruned by the code that writes it, and only once that code's step has succeeded:
 
-- **Only TBD's own names are touched.** A file is a copy only if its whole name matches
-  `state.db.pre-migration.\d{8}T\d{6}Z` or `state.db.pre-column-drop.\d{8}T\d{6}Z` (the format
-  `snapshotTimestamp` writes). Anything else beside the database — backups made by hand, files
-  with suffixes, other tools' files — is never touched.
+- **Only TBD's own names are touched.** A file is a copy only if its whole name, from first
+  character to last, is `state.db.pre-migration.<stamp>` or `state.db.pre-column-drop.<stamp>`,
+  where the stamp is the `YYYYMMDDTHHMMSSZ` form `snapshotTimestamp` writes, in ASCII digits.
+  Anything else beside the database — backups made by hand, files with suffixes (a trailing
+  newline included), other tools' files — is never touched.
 - **Newest is read from the name's timestamp**, not the file date.
-- **The prune runs at every daemon start, right after the pre-migration snapshot step**,
-  whether or not a copy was written, and again right after `RetiredColumnReconciler` writes a
-  copy. Running it at each start clears a backlog at once rather than at the next migration.
-  It only lists one directory and deletes files, so it adds little to startup.
+- **The copy just written is never deleted.** It takes one of the 3 places and the newest of
+  the others fill the rest, so a clock running behind an older stamp cannot delete the newest
+  copy of the database.
+- **Pre-migration copies are pruned at daemon start, once migrations have succeeded**, whether
+  or not the start wrote a copy. A start whose migration fails prunes nothing: the app keeps
+  relaunching a daemon that cannot come up, each start writes another copy of the
+  half-migrated database, and pruning then would push out the clean copy taken before the
+  upgrade. Those copies accumulate, one per attempted start, until the migration is fixed.
+- **Pre-column-drop copies are pruned at the end of every `RetiredColumnReconciler` run in
+  which nothing failed**, whether or not the run wrote a copy. A run with any failure prunes
+  nothing: a drop that fails at every start writes a fresh copy each time, and pruning then
+  would push out the copy that still holds a column an earlier run dropped. Those copies
+  accumulate, one per start, until the failure, logged at error level each time, is fixed.
+- **Pruning at every start clears a backlog at once** rather than at the next copy. It only
+  lists one directory and deletes files, so it adds little to startup.
 - **A failed delete is logged and skipped**; it never blocks startup or a migration.
 
 This is cleanup at creation time, which the named-reconciler doctrine allows when a spec
-chooses it: copies only accumulate when TBD writes one, and every write path prunes.
+chooses it: copies only accumulate when TBD writes one, and every write path prunes once its
+step succeeds.
 
 ### The file's size
 
@@ -93,9 +107,17 @@ the sweep takes `now`.
   worktree are deleted; the leg runs when `lsof` fails.
 - **Index:** the migration creates it; old rows read unchanged.
 - **Prune:** with 5 copies of each kind, the newest 3 of each remain; a file that merely starts
-  with the prefix, or has a suffix, is untouched; a hand-named backup is untouched; ordering
-  follows the name's timestamp when file dates disagree; a delete failure is logged and the
-  rest continue; the startup step clears a backlog without a new copy being written.
+  with the prefix, or has a suffix, is untouched; a hand-named backup is untouched; a name with
+  another character in place of the database name's `.`, a trailing newline, or a stamp in
+  non-ASCII digits is untouched; ordering follows the name's timestamp when file dates
+  disagree; the protected copy survives when its stamp sorts oldest; a delete failure is
+  logged and the rest continue.
+- **Startup:** it clears a backlog of pre-migration copies without a new copy being written
+  and leaves pre-column-drop copies alone; a start whose migration fails leaves every copy; the
+  copy a start just wrote survives when every other copy carries a later stamp.
+- **Reconciler:** a run in which nothing failed leaves 3 copies, its own among them even when
+  every seeded copy is stamped later; a run whose drop fails prunes nothing; a run with
+  nothing to drop still clears a backlog.
 
 ## Rejected alternatives
 

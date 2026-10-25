@@ -66,7 +66,10 @@ struct KeptBundle: Equatable, Sendable {
 /// back for data someone still needed. When that copy fails it drops nothing
 /// in the run. A drop that fails — SQLite refuses a column in a key, a
 /// constraint, an index, a view or a trigger — is logged and skipped, and the
-/// run carries on. Nothing here throws: startup continues whatever happens.
+/// run carries on. A run in which nothing failed ends by pruning the
+/// pre-column-drop copies to the newest `DatabaseSnapshotPruner.keepPerKind`,
+/// never deleting the one it just wrote; a run with any failure prunes
+/// nothing. Nothing here throws: startup continues whatever happens.
 ///
 /// Drops happen only here; the `.sql` migration allowlist refuses
 /// `DROP COLUMN`. Design: `docs/specs/2026-10-24-column-retirement-design.md`.
@@ -89,6 +92,15 @@ struct RetiredColumnReconciler: Sendable {
         case snapshotFailed
         /// Checking for the column, or dropping it, failed with this error.
         case failed(String)
+
+        /// Whether this entry failed in the run. A run with any failure
+        /// prunes no copies.
+        var isFailure: Bool {
+            switch self {
+            case .absent, .held, .dropped: return false
+            case .snapshotFailed, .failed: return true
+            }
+        }
     }
 
     struct Report: Equatable, Sendable {
@@ -179,38 +191,49 @@ struct RetiredColumnReconciler: Sendable {
             }
         }
 
-        guard !due.isEmpty else { return report }
-
-        // VACUUM INTO cannot run inside a transaction, hence
-        // writeWithoutTransaction, as for the pre-migration snapshot.
-        let snapshot = snapshotPath(at: date)
-        do {
-            try await writer.writeWithoutTransaction { db in
-                try db.execute(sql: "VACUUM INTO ?", arguments: [snapshot])
-            }
-            Self.logger.notice(
-                "Pre-column-drop snapshot written to \(snapshot, privacy: .public)")
-            report.snapshotPath = snapshot
-            DatabaseSnapshotPruner.prune(databasePath: databasePath)
-        } catch {
-            Self.logger.error(
-                "Pre-column-drop snapshot failed at \(snapshot, privacy: .public), so no retired column is dropped this run: \(String(describing: error), privacy: .public)")
-            for entry in due { report.outcomes[entry] = .snapshotFailed }
-            return report
-        }
-
-        for entry in due {
-            let sql = "ALTER TABLE \(entry.table.quotedDatabaseIdentifier) DROP COLUMN \(entry.column.quotedDatabaseIdentifier)"
+        if !due.isEmpty {
+            // VACUUM INTO cannot run inside a transaction, hence
+            // writeWithoutTransaction, as for the pre-migration snapshot.
+            let snapshot = snapshotPath(at: date)
             do {
-                try await writer.write { db in try db.execute(sql: sql) }
+                try await writer.writeWithoutTransaction { db in
+                    try db.execute(sql: "VACUUM INTO ?", arguments: [snapshot])
+                }
                 Self.logger.notice(
-                    "Dropped retired column \(entry.description, privacy: .public) (retired at schema epoch \(entry.epoch, privacy: .public))")
-                report.outcomes[entry] = .dropped
+                    "Pre-column-drop snapshot written to \(snapshot, privacy: .public)")
+                report.snapshotPath = snapshot
             } catch {
                 Self.logger.error(
-                    "Could not drop retired column \(entry.description, privacy: .public), leaving it: \(String(describing: error), privacy: .public)")
-                report.outcomes[entry] = .failed(String(describing: error))
+                    "Pre-column-drop snapshot failed at \(snapshot, privacy: .public), so no retired column is dropped this run: \(String(describing: error), privacy: .public)")
+                for entry in due { report.outcomes[entry] = .snapshotFailed }
+                return report
             }
+
+            for entry in due {
+                let sql = "ALTER TABLE \(entry.table.quotedDatabaseIdentifier) DROP COLUMN \(entry.column.quotedDatabaseIdentifier)"
+                do {
+                    try await writer.write { db in try db.execute(sql: sql) }
+                    Self.logger.notice(
+                        "Dropped retired column \(entry.description, privacy: .public) (retired at schema epoch \(entry.epoch, privacy: .public))")
+                    report.outcomes[entry] = .dropped
+                } catch {
+                    Self.logger.error(
+                        "Could not drop retired column \(entry.description, privacy: .public), leaving it: \(String(describing: error), privacy: .public)")
+                    report.outcomes[entry] = .failed(String(describing: error))
+                }
+            }
+        }
+
+        // Only after a run in which nothing failed. A drop that fails at
+        // every start writes a fresh copy each time, and pruning then would
+        // push out the copy that still holds a column an earlier run dropped.
+        // Every such run prunes, whether or not it wrote a copy, so a backlog
+        // clears at once. The copy this run wrote is never deleted.
+        if !report.outcomes.values.contains(where: \.isFailure) {
+            DatabaseSnapshotPruner.prune(
+                databasePath: databasePath,
+                kinds: [.preColumnDrop],
+                protecting: Set([report.snapshotPath].compactMap { $0 }))
         }
         return report
     }
