@@ -692,8 +692,15 @@ struct ModelProfileRPCTests {
     /// dispatched. The real evidence for these branches is that the handler
     /// contains no dispatch at all; this guards against one being added
     /// silently, and pairs with an exact count at the call site.
-    private func settleProbes(_ seconds: Double = 1) async {
-        try? await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
+    ///
+    /// A quarter second, because the window can only ever catch a stray probe
+    /// on a quiet machine, and there one lands in milliseconds: a dispatched
+    /// probe is a task hop, a database read and a call into the counting
+    /// fetcher, with no sleeper in between (`sleeper: { _ in }`). Under load no
+    /// fixed window is long enough to be evidence, so a longer one buys only
+    /// wall time.
+    private func settleProbes(_ window: Duration = .milliseconds(250)) async {
+        try? await Task.sleep(for: window)
     }
 
     /// A bad paste must be caught at creation — the row shows a rejected token
