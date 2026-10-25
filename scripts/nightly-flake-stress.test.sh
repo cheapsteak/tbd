@@ -748,6 +748,122 @@ test_every_skip_build_pass_is_gated_on_the_build() {
   rm -rf "$d"
 }
 
+# CI's build flags are the other word every pass carries that this harness must
+# never inherit: CI compiles with less debug information than SwiftPM's default,
+# this script builds with the default, and its iterations run without
+# `--skip-build`, so an iteration carrying the flags would compile the whole
+# package again. The parser drops the word, and the mutation proves the drop is
+# what keeps the real test.yml in agreement rather than the word being absent.
+test_the_pass_table_drops_the_ci_build_flags() {
+  local wf="$HERE/../.github/workflows/test.yml" mutant rc
+  assert_eq "every CI pass in test.yml carries the flags right after --skip-build" "4" \
+    "$(grep -c -F -e "-- --fingerprint --skip-build $CI_SWIFTPM_FLAGS_WORD " "$wf")"
+  assert_eq "no parsed pass carries them" "0" \
+    "$(pass_table_from_workflow "$wf" | grep -c -F -e "$CI_SWIFTPM_FLAGS_WORD")"
+  assert_eq "and none of CI_PASSES does" "0" \
+    "$(printf '%s\n' "${CI_PASSES[@]}" | grep -c -F -e 'swiftpm_flags')"
+  # MUTATION: stop dropping the flags word. The real test.yml then disagrees.
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  mutant="$(mutant_of '/^ *"\$CI_SWIFTPM_FLAGS_WORD"\) ;;$/d')"
+  # shellcheck disable=SC2016 # the script's own text, matched literally
+  assert_eq "the mutant really stopped dropping them" "0" \
+    "$(grep -c -F -e '"$CI_SWIFTPM_FLAGS_WORD") ;;' "$mutant")"
+  rc=0
+  bash -c "source '$mutant'; check_pass_table '$wf'" >/dev/null 2>&1 || rc=$?
+  assert_eq "mutation: without the drop, test.yml no longer agrees" "1" "$rc"
+}
+
+# The CI build flags are defined once, as the `test` job's CI_SWIFTPM_FLAGS, and
+# must reach every command in that job that reaches SwiftPM: the build and every
+# pass, which re-plans the build graph from its own command line. A step that
+# leaves them out builds or plans with SwiftPM's defaults, and nothing red says
+# so. This lives here for the reason `skip_build_gates` does: this harness
+# already reads test.yml's pass invocations and owns the drop above, and
+# `plans-guard` runs it.
+#
+# One line per command in the `test` job that runs `scripts/swift-safe`,
+# `scripts/test.sh` or `scripts/ci/watched-test-pass.sh`, continuation lines
+# joined: `carries <step>` when the step has read the variable into
+# `swiftpm_flags` with the `:?` guard before that command and the command
+# expands the array, `DROPS <step>` otherwise. Expanding the array without the
+# read would pass nothing, which is why the read is required too. Comment lines
+# are ignored, so prose that names a script does not count as running it.
+swiftpm_flag_carriers() {
+  awk -v word="$CI_SWIFTPM_FLAGS_WORD" -v sq="'" '
+    function new_step() { reads = 0; acc = "" }
+    /^  [^ #]/ { job = $1; sub(/:.*$/, "", job); name = ""; new_step(); next }
+    /^[^ #]/ { job = ""; name = ""; new_step(); next }
+    /^      - / { name = $0; sub(/^      - (name: )?/, "", name); new_step(); next }
+    job != "test" || name == "" || /^[ \t]*#/ { next }
+    {
+      line = $0
+      cont = sub(/\\[ \t]*$/, "", line)
+      acc = acc " " line
+      if (cont) next
+      if (index(acc, "read -r -a swiftpm_flags <<< \"${CI_SWIFTPM_FLAGS:?")) reads = 1
+      n = split(acc, w, /[ \t]+/)
+      runs = 0; carries = 0
+      for (i = 1; i <= n; i++) {
+        if (w[i] == word) carries = 1
+        t = w[i]; gsub(/"/, "", t); gsub(sq, "", t)
+        if (t ~ /(^|\/)scripts\/(swift-safe|test\.sh|ci\/watched-test-pass\.sh)$/) runs = 1
+      }
+      acc = ""
+      if (runs) print ((reads && carries) ? "carries" : "DROPS"), name
+    }
+  ' "$1"
+}
+
+# The `CI_SWIFTPM_FLAGS:` lines of the `test` job's env block whose value is
+# quoted and non-blank.
+ci_flags_definitions() {
+  awk '/^  [^ #]/ { job = $1 } job == "test:" && /^      CI_SWIFTPM_FLAGS: "[^" ]/' "$1"
+}
+
+test_every_swiftpm_command_in_the_test_job_carries_the_ci_build_flags() {
+  local wf="$HERE/../.github/workflows/test.yml" d
+  assert_eq "the test job defines CI_SWIFTPM_FLAGS, non-empty" "1" \
+    "$(ci_flags_definitions "$wf" | grep -c .)"
+  assert_eq "five commands in the test job reach SwiftPM: the build and four passes" "5" \
+    "$(swiftpm_flag_carriers "$wf" | grep -c .)"
+  assert_eq "every one carries the flags" "" "$(swiftpm_flag_carriers "$wf" | grep '^DROPS')"
+  assert_contains "the build step is one of them" "$(swiftpm_flag_carriers "$wf")" "carries Build ("
+  d="$(mktmpd)"
+  # MUTATION: the definition emptied. Every step's `:?` would then fail it at
+  # run time; this says so before a run.
+  sed 's/^      CI_SWIFTPM_FLAGS: ".*"$/      CI_SWIFTPM_FLAGS: ""/' "$wf" > "$d/empty.yml"
+  assert_eq "mutation: an empty definition is caught" "0" \
+    "$(ci_flags_definitions "$d/empty.yml" | grep -c .)"
+  # MUTATION: no command expands the array.
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  sed 's/ "\${swiftpm_flags\[@\]}"//' "$wf" > "$d/unexpanded.yml"
+  assert_eq "mutation: every command without the expansion is caught" "5" \
+    "$(swiftpm_flag_carriers "$d/unexpanded.yml" | grep -c '^DROPS')"
+  # MUTATION: the build alone loses them, which would leave every pass planning
+  # flags the build never compiled with.
+  # shellcheck disable=SC2016 # the sed expression must reach sed unexpanded
+  sed 's/-j "\$TBD_SWIFT_JOBS" "\${swiftpm_flags\[@\]}"/-j "$TBD_SWIFT_JOBS"/' "$wf" > "$d/build.yml"
+  assert_contains "mutation: the build step without them is caught" \
+    "$(swiftpm_flag_carriers "$d/build.yml" | grep '^DROPS')" "DROPS Build ("
+  # MUTATION: the array expanded but never read — it would expand to nothing.
+  sed '/read -r -a swiftpm_flags/d' "$wf" > "$d/unread.yml"
+  assert_eq "mutation: expanding an array no step read is caught" "5" \
+    "$(swiftpm_flag_carriers "$d/unread.yml" | grep -c '^DROPS')"
+  # MUTATION: a retry step added after the passes, copied without the flags.
+  { cat "$wf"
+    cat <<'RETRY'
+      - name: Retry the quiet pass
+        run: |
+          scripts/ci/watched-test-pass.sh \
+            --name quiet-retry --budget-seconds 720 --floor 35 --floor-message 'x' \
+            -- --fingerprint --skip-build --filter '^TBDDaemonLiveTests\.' --no-parallel
+RETRY
+  } > "$d/retry.yml"
+  assert_eq "mutation: a retry without the flags is caught" "DROPS Retry the quiet pass" \
+    "$(swiftpm_flag_carriers "$d/retry.yml" | grep '^DROPS')"
+  rm -rf "$d"
+}
+
 test_pass_of_filters_match_test_yml_verbatim() {
   # The pass map must not drift from CI. Each filter string, as CI spells it
   # inside single quotes, has to appear in test.yml along with its floor.
