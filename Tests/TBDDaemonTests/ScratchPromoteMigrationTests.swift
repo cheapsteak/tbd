@@ -45,11 +45,13 @@ struct ScratchPromoteMigrationTests {
         )
     }
 
-    private func gitInitCommit(at path: String) throws {
-        for args in [["init"], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"]] {
-            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            p.arguments = ["-C", path] + args; try p.run(); p.waitUntilExit()
-        }
+    /// Makes the scratch folder a repo with one empty commit, so promote's
+    /// `hasCommits` guard passes. `initTestRepo` copies a template built once
+    /// per process through the hermetic `shell`, so only the first call in a
+    /// process waits on a child, and a failed setup throws instead of passing
+    /// silently.
+    private func gitInitCommit(at path: String) async throws {
+        try await initTestRepo(at: URL(fileURLWithPath: path))
     }
 
     private func writeFile(_ text: String, to url: URL, mtime: Date? = nil) throws {
@@ -69,7 +71,7 @@ struct ScratchPromoteMigrationTests {
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
         // clear it so this test controls its own terminal fixture.
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
@@ -129,7 +131,7 @@ struct ScratchPromoteMigrationTests {
         let created = await router.handle(try RPCRequest(
             method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
         // clear it so this test controls its own terminal fixture.
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)

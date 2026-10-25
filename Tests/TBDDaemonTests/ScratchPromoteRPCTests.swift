@@ -20,11 +20,13 @@ struct ScratchPromoteRPCTests {
                   tmux: TmuxManager(dryRun: true), startTime: Date(), actuationLog: makeTestActuationLog())
     }
 
-    private func gitInitCommit(at path: String) throws {
-        for args in [["init"], ["-c","user.email=t@t","-c","user.name=t","commit","--allow-empty","-m","init"]] {
-            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-            p.arguments = ["-C", path] + args; try p.run(); p.waitUntilExit()
-        }
+    /// Makes the scratch folder a repo with one empty commit, so promote's
+    /// `hasCommits` guard passes. `initTestRepo` copies a template built once
+    /// per process through the hermetic `shell`, so only the first call in a
+    /// process waits on a child, and a failed setup throws instead of passing
+    /// silently.
+    private func gitInitCommit(at path: String) async throws {
+        try await initTestRepo(at: URL(fileURLWithPath: path))
     }
 
     @Test func happyPathMovesRegistersAndMarksPromoted() async throws {
@@ -33,7 +35,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
 
         let dest = home.appendingPathComponent("projects/myapp").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
@@ -71,7 +73,7 @@ struct ScratchPromoteRPCTests {
         var wt = try created.decodeResult(Worktree.self)
         try await db.worktrees.rename(id: wt.id, displayName: "My Cool App")  // displayName != name now
         wt = try await db.worktrees.get(id: wt.id)!
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
 
         let dest = home.appendingPathComponent("projects/folder-name").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
@@ -88,7 +90,7 @@ struct ScratchPromoteRPCTests {
         var wt = try created.decodeResult(Worktree.self)
         try await db.worktrees.rename(id: wt.id, displayName: "Renamed Scratch")
         wt = try await db.worktrees.get(id: wt.id)!
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
 
         let dest = home.appendingPathComponent("projects/folder-name").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
@@ -103,7 +105,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)   // displayName == name (still default)
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
 
         let dest = home.appendingPathComponent("projects/coolfolder").path
         let resp = await router.handle(try RPCRequest(method: RPCMethod.scratchPromote,
@@ -138,7 +140,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
         let repoCountBefore = try await db.repos.list().count
 
         let dest = home.appendingPathComponent("projects/already-here").path
@@ -162,8 +164,7 @@ struct ScratchPromoteRPCTests {
         let wt = try created.decodeResult(Worktree.self)
         // git init WITHOUT a commit — distinct from the no-git-at-all case,
         // exercises the hasCommits guard specifically.
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["-C", wt.localPath, "init"]; try p.run(); p.waitUntilExit()
+        try await shell("git init", at: URL(fileURLWithPath: wt.localPath))
         let repoCountBefore = try await db.repos.list().count
 
         let dest = home.appendingPathComponent("projects/no-commits-yet").path
@@ -184,7 +185,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
         let repoCountBefore = try await db.repos.list().count
 
         // Dest is another path under the scratch base — must be rejected
@@ -215,7 +216,7 @@ struct ScratchPromoteRPCTests {
         let router = makeRouter(db)
         let created = await router.handle(try RPCRequest(method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
         let wt = try created.decodeResult(Worktree.self)
-        try gitInitCommit(at: wt.localPath)
+        try await gitInitCommit(at: wt.localPath)
         // The scratch.create RPC now auto-spawns a default primary agent terminal;
         // clear it so this test controls its own terminal fixture.
         try await db.terminals.deleteForWorktree(worktreeID: wt.id)
