@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TestSupport
 import Testing
 @testable import TBDDaemonLib
 
@@ -32,7 +33,15 @@ struct TmuxControlConnectionTeardownTests {
 
         let connection = TmuxControlConnection(serverName: server)
         try connection.start()
-        try await Task.sleep(for: .milliseconds(300))
+        // Stop a client that is fully attached rather than one still starting:
+        // its first notification, the attach greeting, says it is.
+        let box = TeardownEventBox()
+        let collector = Task {
+            for await event in connection.events { await box.append(event) }
+            await box.markFinished()
+        }
+        defer { collector.cancel() }
+        await awaitBox(box, "the attach greeting") { await $0.eventCount > 0 }
 
         let started = Date()
         connection.stop()
@@ -56,9 +65,9 @@ struct TmuxControlConnectionTeardownTests {
             for await event in connection.events { await box.append(event) }
             await box.markFinished()
         }
-        try await Task.sleep(for: .milliseconds(400))
+        await awaitBox(box, "the attach greeting") { await $0.eventCount > 0 }
         tmux(["-L", server, "send-keys", "echo trailing-marker-\(UUID().uuidString.prefix(6))", "Enter"])
-        try await Task.sleep(for: .milliseconds(300))
+        await awaitBox(box, "an %output from the marker") { await $0.outputEventCount > 0 }
         connection.stop()
 
         // Give the collector up to 1 s to observe the finished stream.
@@ -75,10 +84,37 @@ struct TmuxControlConnectionTeardownTests {
 }
 
 private actor TeardownEventBox {
+    private(set) var eventCount = 0
     private(set) var outputEventCount = 0
     private(set) var finished = false
     func append(_ event: TmuxControlEvent) {
+        eventCount += 1
         if case .output = event { outputEventCount += 1 }
     }
     func markFinished() { finished = true }
+}
+
+/// Waits until `condition` holds of the box, and reports which wait expired if
+/// it never does. A hang guard rather than pacing: a live tmux server answers
+/// in milliseconds, and the wait ends on its first satisfying probe.
+private func awaitBox(
+    _ box: TeardownEventBox,
+    _ what: String,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    until condition: (TeardownEventBox) async -> Bool
+) async {
+    let outcome = await pollUntilTrue(timeout: .seconds(10), pollInterval: .milliseconds(20)) {
+        await condition(box)
+    }
+    if outcome == .timedOut {
+        Issue.record(TeardownEventsNeverArrived(what: what), sourceLocation: sourceLocation)
+    }
+}
+
+/// A bounded wait for tmux notifications expired. An `Error` so its text lands
+/// on the primary failure line a CI summary keeps.
+private struct TeardownEventsNeverArrived: Error, CustomStringConvertible {
+    let what: String
+
+    var description: String { "tmux -CC never delivered \(what) within 10 s" }
 }
