@@ -816,6 +816,55 @@ struct TableTranscriptPaneTests {
                     + "height (moved=\(moved) inserted=\(inserted))"))
     }
 
+    /// A held prepend anchor keeps the reader's place until the reader moves
+    /// it. A reader scroll is a move of the clip's origin the coordinator did
+    /// not make; a change to the viewport's size leaves the origin, and the
+    /// reader's place, where they were.
+    @Test("a reader scroll releases a held prepend anchor, and a viewport resize does not")
+    func readerScrollReleasesPrependAnchor() async throws {
+        let suiteName = "table-harness-prepend-release-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let (before, after) = Self.prependArrays()
+        let scene = TableTranscriptScene(items: [], appState: appState, nodes: before)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        scene.prime(nodes: before)
+        scene.coordinator.startObservingScroll()
+        scene.park(row: 20, below: 150)
+        try #require(scene.gapToBottom > 120,
+                     Comment(rawValue: "precondition: the viewport must be clear of the tail-follow "
+                         + "threshold (gap=\(scene.gapToBottom))"))
+
+        scene.coordinator.update(
+            nodes: after, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
+            prependToken: 1)
+        scene.tableView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        scene.settle()
+        let anchor = try #require(scene.coordinator.pendingPrependAnchor,
+                                  "precondition: the prepend still holds its anchor once its rows settled")
+        try #require(anchor.id == before[20].id)
+
+        let clip = scene.scrollView.contentView
+        let origin = clip.bounds.minY
+        scene.scrollView.frame = NSRect(
+            x: 0, y: 0, width: TableTranscriptScene.width, height: TableTranscriptScene.viewportHeight - 100)
+        scene.settle()
+        try #require(clip.bounds.height < TableTranscriptScene.viewportHeight - 50,
+                     Comment(rawValue: "precondition: the viewport got shorter (\(clip.bounds.height) pt)"))
+        try #require(abs(clip.bounds.minY - origin) <= 0.5,
+                     Comment(rawValue: "precondition: the origin stayed (\(origin) → \(clip.bounds.minY))"))
+        // Whether or not the resize itself posted one, the observer hears a
+        // bounds change against the new size, as it would from AppKit.
+        NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: clip)
+        #expect(scene.coordinator.pendingPrependAnchor == anchor, "a viewport resize released the prepend anchor")
+
+        scene.scroll(toY: clip.bounds.minY + 120)
+        #expect(scene.coordinator.pendingPrependAnchor == nil, "a reader scroll left the prepend anchor held")
+    }
+
     @Test("near-top reports transitions only")
     func nearTopReportsTransitions() throws {
         let suiteName = "table-harness-neartop-\(UUID().uuidString)"

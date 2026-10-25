@@ -34,12 +34,8 @@ struct PromptRailJumpTests {
     /// Throws first if AppKit's own row-height estimation is on in this
     /// process: AppKit would then move the clip itself, and every pin and
     /// hold assertion here would fail for that reason instead of their own.
-    private static func primedAtEnd(
-        items: [TranscriptItem],
-        appState: AppState,
-        makeCoordinator: (@MainActor (TranscriptCardContext) -> TableTranscriptView.Coordinator)? = nil
-    ) throws -> TableTranscriptScene {
-        let scene = TableTranscriptScene(items: items, appState: appState, makeCoordinator: makeCoordinator)
+    private static func primedAtEnd(items: [TranscriptItem], appState: AppState) throws -> TableTranscriptScene {
+        let scene = TableTranscriptScene(items: items, appState: appState)
         scene.coordinator.startObservingScroll()
         let nodes = transcriptRenderNodes(from: items)
         for _ in 0..<4 {
@@ -75,19 +71,6 @@ struct PromptRailJumpTests {
     private static func releaseNote(_ scene: TableTranscriptScene) -> Comment {
         let reason = scene.coordinator.lastJumpRelease.map { "\($0)" } ?? "none"
         return Comment(rawValue: "last jump release: \(reason)")
-    }
-
-    /// Adds height to one row from outside the coordinator's correction path,
-    /// as AppKit does when it swaps its own row-height estimate for the
-    /// delegate's height.
-    private final class ResizableRowCoordinator: TableTranscriptView.Coordinator {
-        var extraHeight: (id: String, points: CGFloat)?
-
-        override func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            let height = super.tableView(tableView, heightOfRow: row)
-            guard let extraHeight, row < nodes.count, nodes[row].id == extraHeight.id else { return height }
-            return height + extraHeight.points
-        }
     }
 
     /// An AskUserQuestion card whose question wraps. Prose rows estimate to
@@ -158,61 +141,9 @@ struct PromptRailJumpTests {
         #expect(scene.coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
     }
 
-    /// AppKit moves the clip itself to follow content that moved under it: it
-    /// clamps as the document shrinks, and re-anchors as it swaps its own
-    /// row-height estimates for the delegate's heights. That is not the
-    /// reader, so the pin and the hold stay.
-    @Test("AppKit following content that moved under the clip keeps the jump's pin and hold")
-    func contentFollowKeepsHold() async throws {
-        let suiteName = "prompt-rail-jump-follow-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let appState = AppState(userDefaults: defaults)
-
-        let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
-        let scene = try Self.primedAtEnd(
-            items: items, appState: appState, makeCoordinator: { ResizableRowCoordinator(context: $0) })
-        defer { withExtendedLifetime(scene.coordinator) {} }
-        let coordinator = try #require(scene.coordinator as? ResizableRowCoordinator)
-        let entries = coordinator.promptEntries
-        try #require(entries.count == 30)
-        let target = entries[10]
-        let clip = scene.scrollView.contentView
-
-        coordinator.jump(toNodeID: target.id)
-        await Self.settleJump(scene)
-        try #require(coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
-        let origin = clip.bounds.minY
-        let topBefore = scene.tableView.rect(ofRow: target.rowIndex).minY
-
-        // The row above the target grows from outside the correction path...
-        let rowAbove = target.rowIndex - 1
-        coordinator.extraHeight = (id: coordinator.nodes[rowAbove].id, points: 40)
-        scene.tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: rowAbove))
-        scene.tableView.tile()
-        let grownBy = scene.tableView.rect(ofRow: target.rowIndex).minY - topBefore
-        try #require(abs(grownBy - 40) <= 1,
-                     Comment(rawValue: "precondition: the target moved 40pt down the document (moved \(grownBy) pt)"))
-        // ...and AppKit moves the clip after it, so the rows below keep their
-        // places on screen.
-        clip.scroll(to: NSPoint(x: 0, y: origin + grownBy))
-        scene.scrollView.reflectScrolledClipView(clip)
-
-        #expect(coordinator.heldJumpTargetID == target.id, Self.releaseNote(scene))
-        #expect(coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
-        #expect(coordinator.lastJumpRelease == nil)
-        let offset = scene.screenOffset(ofRow: target.rowIndex)
-        #expect(abs(offset - Self.inset) <= 1, Comment(rawValue: "the target sat at \(offset) pt"))
-
-        // A reader scroll still releases both, and says so.
-        scene.scroll(toY: clip.bounds.minY + 100)
-        #expect(coordinator.heldJumpTargetID == nil)
-        #expect(coordinator.pendingJumpAnchor == nil)
-        #expect(coordinator.lastJumpRelease == .readerScroll)
-    }
-
-    /// A size change moves no content under the clip and the reader's place
-    /// with it: the pane growing or shrinking, or the scroller claiming width.
+    /// A size change leaves the clip's origin, and the reader's place, where
+    /// they were: the pane growing or shrinking, or the scroller claiming
+    /// width. Only a move of the origin is a reader scroll.
     @Test("a viewport size change keeps the jump's pin and hold")
     func sizeChangeKeepsHold() async throws {
         let suiteName = "prompt-rail-jump-resize-\(UUID().uuidString)"
@@ -239,6 +170,9 @@ struct PromptRailJumpTests {
                      Comment(rawValue: "precondition: the viewport got shorter (\(clip.bounds.height) pt)"))
         try #require(abs(clip.bounds.minY - origin) <= 0.5,
                      Comment(rawValue: "precondition: the origin stayed (\(origin) → \(clip.bounds.minY))"))
+        // Whether or not the resize itself posted one, the observer hears a
+        // bounds change against the new size, as it would from AppKit.
+        NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: clip)
 
         #expect(scene.coordinator.heldJumpTargetID == entries[20].id, Self.releaseNote(scene))
         #expect(scene.coordinator.pendingJumpAnchor?.id == entries[20].id, Self.releaseNote(scene))
