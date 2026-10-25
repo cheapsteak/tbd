@@ -1060,6 +1060,8 @@ public final class RPCRouter: Sendable {
                 return try await handleAgentsBackground(request.paramsData)
             case RPCMethod.configSetStartAdmissionEnabled:
                 return try await handleConfigSetStartAdmissionEnabled(request.paramsData)
+            case RPCMethod.configSetHolderClaimReconcileEnabled:
+                return try await handleConfigSetHolderClaimReconcileEnabled(request.paramsData)
             case RPCMethod.configSetAgentBackgroundEnabled:
                 return try await handleConfigSetAgentBackgroundEnabled(request.paramsData)
             case RPCMethod.configSetSessionModUsageEnabled:
@@ -1203,6 +1205,7 @@ public final class RPCRouter: Sendable {
         result.composerDraftRequiredByAutoPark = config.composerDraftRequiredByAutoPark
         result.agentBackgroundEnabled = config.agentBackgroundEnabled
         result.startAdmissionEnabled = config.startAdmissionEnabled
+        result.holderClaimReconcileEnabled = config.holderClaimReconcileEnabled
         result.sessionModUsageEnabled = config.sessionModUsageEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds

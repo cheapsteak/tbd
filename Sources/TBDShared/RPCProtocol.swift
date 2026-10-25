@@ -187,6 +187,12 @@ public enum RPCMethod {
     public static let attachReady = "attach.ready"
     public static let paneDetach = "pane.detach"
     public static let paneResize = "pane.resize"
+    /// The holder viewer-claim sweep: the app names the terminals it holds a
+    /// descriptor for, and the daemon takes back that app's viewer claims on
+    /// every other session — or, while `holder_claim_reconcile_enabled` is off,
+    /// only reports what it would take back. Design:
+    /// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+    public static let holderReconcileClaims = "holder.reconcileClaims"
     public static let daemonCapabilities = "daemon.capabilities"
     public static let terminalRecreateWindow = "terminal.recreateWindow"
     public static let noteCreate = "note.create"
@@ -354,6 +360,11 @@ public enum RPCMethod {
     /// The start admission gate (`start_admission_enabled`). Reading needs no method of its
     /// own: `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetStartAdmissionEnabled = "config.setStartAdmissionEnabled"
+    /// The holder viewer-claim reconcile gate (`holder_claim_reconcile_enabled`):
+    /// whether `holder.reconcileClaims` takes claims back or only reports what it
+    /// would take back. Reading needs no method of its own: `config.get` and
+    /// `daemon.capabilities` carry the resolved value.
+    public static let configSetHolderClaimReconcileEnabled = "config.setHolderClaimReconcileEnabled"
     /// Turns agent background priority on (with a lease), off, or reports it.
     /// Not an actuation row: it changes no session's input, pty or lifecycle,
     /// and its effect lives in `agent-background.json`. Design:
@@ -3563,6 +3574,14 @@ public struct ConfigSetStartAdmissionEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setHolderClaimReconcileEnabled` — the holder viewer-claim
+/// reconcile gate (default OFF during soak). Design:
+/// `docs/specs/2026-10-25-holder-claim-reconcile-design.md`.
+public struct ConfigSetHolderClaimReconcileParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// What `agents.background` does.
 public enum AgentBackgroundAction: String, Codable, Sendable {
     case on
@@ -3727,15 +3746,27 @@ public struct AttachRequestParams: Codable, Sendable {
     /// transport. Optional so an older app, which only ever attaches panes,
     /// still encodes and decodes.
     public let terminalID: UUID?
+    /// This request's place in the app's attach count: the app numbers every
+    /// `attach.request` it sends, from 1 and up by one, per app process.
+    ///
+    /// Holder transport only. The daemon records it on the pending attach and
+    /// keeps it on the claim that attach becomes, and `holder.reconcileClaims`
+    /// sweeps only claims whose seq is at or below the sweep's `throughSeq` —
+    /// so a sweep can never take back an attach the app numbered after it
+    /// built its held set, whichever of the two RPCs arrives first. Optional
+    /// for wire compatibility: an older app sends none, and a claim without
+    /// one is never swept.
+    public let attachSeq: UInt64?
     public init(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil
+        terminalID: UUID? = nil, attachSeq: UInt64? = nil
     ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.windowID = windowID
         self.attachID = attachID
         self.terminalID = terminalID
+        self.attachSeq = attachSeq
     }
 }
 
@@ -3788,6 +3819,42 @@ public struct AttachRequestResult: Codable, Sendable {
         self.status = status
         self.generation = generation
         self.snapshotPreamble = snapshotPreamble
+    }
+}
+
+/// Params for `holder.reconcileClaims` — the app's statement of which holder
+/// sessions it holds, sent on every poll tick. Design:
+/// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+public struct HolderReconcileClaimsParams: Codable, Sendable, Equatable {
+    /// The app's process. The daemon resolves it to a process identity (pid,
+    /// start time and executable) before comparing it with any claim's owner,
+    /// so a pid it cannot resolve, or one that was reused, sweeps nothing.
+    public let appPID: Int32
+    /// The terminals the app holds a descriptor for, or has an attach in
+    /// flight for. The daemon never takes back a claim on one of these.
+    public let held: [UUID]
+    /// The highest `AttachRequestParams.attachSeq` the app had sent when it
+    /// built `held`. A claim whose seq is above it, or that has none, is
+    /// outside this sweep.
+    public let throughSeq: UInt64
+    public init(appPID: Int32, held: [UUID], throughSeq: UInt64) {
+        self.appPID = appPID
+        self.held = held
+        self.throughSeq = throughSeq
+    }
+}
+
+/// Result of `holder.reconcileClaims`. At most one of the two lists is
+/// non-empty: which one depends on `holder_claim_reconcile_enabled`.
+public struct HolderReconcileClaimsResult: Codable, Sendable, Equatable {
+    /// The sessions the daemon took back (flag on).
+    public let takenBack: [UUID]
+    /// The sessions the daemon would have taken back, while the flag is off.
+    /// Nothing was changed for them.
+    public let wouldTakeBack: [UUID]
+    public init(takenBack: [UUID] = [], wouldTakeBack: [UUID] = []) {
+        self.takenBack = takenBack
+        self.wouldTakeBack = wouldTakeBack
     }
 }
 
@@ -4024,6 +4091,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the start admission gate is on (`start_admission_enabled`). Default OFF.
     /// Resolved through `Config.startAdmissionDefault`.
     public var startAdmissionEnabled: Bool = Config.startAdmissionDefault
+    /// Whether the holder viewer-claim reconcile acts (`holder_claim_reconcile_enabled`).
+    /// Default OFF while it soaks. Resolved through
+    /// `Config.holderClaimReconcileEnabledDefault`. The app does not gate its
+    /// sweeps on this; Settings reads the toggle back from it.
+    public var holderClaimReconcileEnabled: Bool = Config.holderClaimReconcileEnabledDefault
     /// Whether session usage recording is on (`session_mod_usage_enabled`).
     /// Default OFF while it soaks. Resolved through
     /// `Config.sessionModUsageDefault`.
@@ -4171,6 +4243,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             Bool.self, forKey: .agentBackgroundEnabled) ?? Config.agentBackgroundDefault
         startAdmissionEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .startAdmissionEnabled) ?? Config.startAdmissionDefault
+        // A daemon that does not send it knows nothing about the sweep, so fall
+        // through to the shipped default.
+        holderClaimReconcileEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .holderClaimReconcileEnabled)
+            ?? Config.holderClaimReconcileEnabledDefault
         sessionModUsageEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.

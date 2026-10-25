@@ -1756,6 +1756,13 @@ public struct Config: Codable, Sendable, Equatable {
     /// `start_admission_enabled ?? Config.startAdmissionDefault`. Assigned after construction by
     /// the daemon, like `composerDraftEnabled`.
     public var startAdmissionEnabled: Bool = Config.startAdmissionDefault
+    /// The holder viewer-claim reconcile (`holder_claim_reconcile_enabled`):
+    /// whether `holder.reconcileClaims` takes back the claims an app no longer
+    /// holds, or only reports them. Resolved as
+    /// `holder_claim_reconcile_enabled ?? Config.holderClaimReconcileEnabledDefault`.
+    /// Assigned after construction by the daemon, like `composerDraftEnabled`.
+    /// Design: docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+    public var holderClaimReconcileEnabled: Bool = Config.holderClaimReconcileEnabledDefault
     /// Session usage recorded through the session mod: each Claude session's
     /// context window, rate limits and cost, written to its session folder.
     /// Resolved as `session_mod_usage_enabled ?? Config.sessionModUsageDefault`.
@@ -1899,6 +1906,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// lives. Ships off; graduation is a change to this constant, with no
     /// forcing `UPDATE` migration and every explicit opt-out left alone.
     public static let startAdmissionDefault = false
+    /// The shipped default for `holderClaimReconcileEnabled`, and the single
+    /// place it lives. Ships off; graduation is a change to this constant, with
+    /// no forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let holderClaimReconcileEnabledDefault = false
     /// The shipped default for `sessionModUsageEnabled`, and the single place
     /// it lives. Ships off; graduation is a change to this constant, with no
     /// forcing `UPDATE` migration and every explicit opt-out left alone.
@@ -2114,6 +2125,9 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .agentBackgroundEnabled) ?? Config.agentBackgroundDefault
         startAdmissionEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .startAdmissionEnabled) ?? Config.startAdmissionDefault
+        holderClaimReconcileEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .holderClaimReconcileEnabled)
+            ?? Config.holderClaimReconcileEnabledDefault
         sessionModUsageEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         cloneCheckoutEnabled = try c.decodeIfPresent(
