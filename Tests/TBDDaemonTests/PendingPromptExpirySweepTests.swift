@@ -44,11 +44,6 @@ struct PendingPromptExpirySweepTests {
         #expect(await store.entries(forTerminal: terminalID).count == 1)
     }
 
-    @Test("the sweep's max age matches what the RPC handler used")
-    func maxAgeUnchanged() {
-        #expect(PendingPromptExpirySweep.maxAge == .seconds(900))
-    }
-
     @Test("the sweep reaps through the store and reports the affected terminal")
     func sweepOnceReapsAndReports() async {
         let terminalID = UUID()

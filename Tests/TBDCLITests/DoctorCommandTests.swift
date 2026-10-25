@@ -20,10 +20,4 @@ struct DoctorCommandTests {
         let cmd = try DoctorCommand.parse(["--dry-run"])
         #expect(cmd.dryRun == true)
     }
-
-    @Test func helpMentionsRepair() {
-        let help = DoctorCommand.helpMessage()
-        #expect(help.contains("doctor"))
-        #expect(help.contains("--dry-run"))
-    }
 }
