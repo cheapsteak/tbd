@@ -98,11 +98,11 @@ struct WorkbenchSnapshotTests {
             .deletingLastPathComponent()   // <root>
     }
 
-    /// Load the workbench.jsonl fixture and parse it into TranscriptItem.
+    /// Load the workbench.jsonl fixture through the production parser.
     private func loadWorkbenchFixture() throws -> [TranscriptItem] {
         let fixture = Self.repoRoot
             .appendingPathComponent("Tests/Fixtures/mock-state/transcripts/workbench.jsonl")
-        return TranscriptCompareRealSessions.parse(filePath: fixture.path)
+        return TranscriptParser.parse(filePath: fixture.path)
     }
 
     /// Find the first activity group ID in the presentation for forcing expansion.
