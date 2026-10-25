@@ -327,9 +327,10 @@ struct HandbackFixture {
     /// vended descriptor, with the daemon's preamble already on its screen —
     /// which is what a real panel does before it acks. The delivery is
     /// recorded against `viewerApp`, as the attach handler records it against
-    /// whichever app the sidecar wrote to.
-    func attachAViewer() async throws -> Viewer {
-        let vend = try await registry.beginAttach(terminalID: terminalID)
+    /// whichever app the sidecar wrote to. `attachSeq` is the app's number for
+    /// the request, which only a claim sweep reads.
+    func attachAViewer(attachSeq: UInt64? = nil) async throws -> Viewer {
+        let vend = try await registry.beginAttach(terminalID: terminalID, attachSeq: attachSeq)
         await registry.recordAttachRecipient(
             Self.viewerApp, terminalID: terminalID, generation: vend.generation)
         let terminal = ViewerTerminal(columns: 80, rows: 24)
