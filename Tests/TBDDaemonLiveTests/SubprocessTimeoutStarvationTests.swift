@@ -98,7 +98,7 @@ struct SubprocessTimeoutStarvationTests {
     /// workqueue thread creations (`kern.wq_max_timer_interval_usecs`, 50 ms),
     /// so a slow ramp is not mistaken for the ceiling. Measured with a C probe
     /// on a 12-core box, all 64 workers started within 1 ms, never more than
-    /// 62 µs apart — but a 2-core runner was not measured, and a warm-up that
+    /// 62 µs apart — but a small CI runner was not measured, and a warm-up that
     /// ends early fails silently: an unsaturated pool lets the pre-fix
     /// watchdog's timer run, and the test passes without proving anything.
     /// So the margin is generous where it costs a fraction of the 5 s cap.

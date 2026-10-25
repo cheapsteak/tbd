@@ -42,12 +42,16 @@ struct HolderReclaimTests {
     ///
     /// The job exits on a cue, and the cue is given only once the handshake
     /// connection is closed. A holder pushes the exit at whichever client is
-    /// connected when it reaps and then winds down, unlinking its rendezvous —
-    /// so an exit that beat the `close()` below would leave nothing to adopt.
-    /// Ordering the two by hand makes that impossible rather than unlikely,
-    /// where a fixed sleep only made it a race the sleep usually won. The wait
-    /// for the cue is counted, so a job this test can no longer reach ends on
-    /// its own.
+    /// connected when it reaps, and once that push is delivered it winds down
+    /// and unlinks its rendezvous — so an exit pushed down a live handshake
+    /// connection would leave nothing to adopt. The holder need not have
+    /// noticed the hang-up by the time it reaps: once `close()` has returned
+    /// the kernel has disconnected that socket, so a push still aimed at it
+    /// fails with `EPIPE`, the holder drops the client, and nothing counts as
+    /// collected. Ordering the cue after the close makes the bad case
+    /// impossible rather than unlikely, where a fixed sleep only made it a race
+    /// the sleep usually won. The wait for the cue is counted, so a job this
+    /// test can no longer reach ends on its own.
     @Test func releasesTheReaderForAJobThatEndedDuringTheOutage() async throws {
         let cueDirectory = HolderProcessFixture.scratchHome()
         try FileManager.default.createDirectory(
