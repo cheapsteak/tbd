@@ -831,7 +831,7 @@ struct ContinueInClaudeTransactionTests {
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true)
-        try run("/usr/bin/git", ["init", root.path])
+        try await run("/usr/bin/git", ["init", root.path])
         let rollout = root.appendingPathComponent("rollout.jsonl")
         let sessionMeta = """
             {"type":"session_meta","payload":{"id":"codex-thread","cwd":\(json(root.path))}}
@@ -990,15 +990,15 @@ struct ContinueInClaudeTransactionTests {
         return String(array.dropFirst().dropLast())
     }
 
-    private func run(_ executable: String, _ arguments: [String]) throws {
+    /// Runs `executable` to completion, discarding its output, and waits
+    /// through `collectOutput(of:)` so the wait parks no cooperative-pool
+    /// thread.
+    private func run(_ executable: String, _ arguments: [String]) async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        let output = try await collectOutput(of: process)
+        guard output.status == 0 else {
             throw CocoaError(.executableRuntimeMismatch)
         }
     }
