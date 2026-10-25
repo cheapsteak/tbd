@@ -1687,7 +1687,17 @@ public final class Daemon: Sendable {
         // Wire the live connected-client count into daemon.status (the router
         // is built above, before the server exists, so it can't be an init dep).
         rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
-        try await sock.start()
+        do {
+            try await sock.start()
+        } catch {
+            // The sidecar is already bound (step 8h), and a failed start ends
+            // in `main.swift`'s `exit(1)` without `stop()`. Left running, it
+            // would leave a vend.sock nobody serves for the next daemon to
+            // find; stopping it removes the file, but only while it is still
+            // the one this daemon bound.
+            await fdVendingServer.stop()
+            throw error
+        }
 
         // Pending provider replacements recover only after the socket is live:
         // Codex readiness arrives through the SessionStart hook RPC, so a
