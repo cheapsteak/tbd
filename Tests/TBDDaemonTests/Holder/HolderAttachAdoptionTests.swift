@@ -182,8 +182,12 @@ import Testing
     @Test func anUnknownExitFromAnAbsentRendezvousWithALiveHolderGetsAHandOver() async throws {
         var row = Self.holderRow()
         row.holderPID = 4242
+        // A holder that started with the row: no job start is recorded, so
+        // the row's creation is the identity anchor, as everywhere else.
+        let startedWithTheRow = FakeProcessSignaller()
+        startedWithTheRow.startTimes[4242] = HolderChildIdentity.anchor(of: row)
 
-        let live = Self.registry()
+        let live = Self.registry(signaller: startedWithTheRow)
         await live.recordStatusForTesting(
             .exitedStatusUnknown, for: row.id, fromAbsentRendezvous: true)
         try await live.adoptForAttach(terminal: row, holderIsLive: { $0 == 4242 })
@@ -197,6 +201,91 @@ import Testing
             .exitedStatusUnknown, for: row.id, fromAbsentRendezvous: true)
         try await dead.adoptForAttach(terminal: row, holderIsLive: { _ in false })
         #expect(await dead.attachRoundTripsStarted == 0)
+
+        // A `TBDHolder` by name that started a day after the row: some other
+        // session's holder on a reissued pid. With no job start recorded, the
+        // row's creation is the anchor it is measured against.
+        let startedLater = FakeProcessSignaller()
+        startedLater.startTimes[4242] = HolderChildIdentity.anchor(of: row).addingTimeInterval(86_400)
+        let stranger = Self.registry(signaller: startedLater)
+        await stranger.recordStatusForTesting(
+            .exitedStatusUnknown, for: row.id, fromAbsentRendezvous: true)
+        try await stranger.adoptForAttach(terminal: row, holderIsLive: { _ in true })
+        #expect(await stranger.attachRoundTripsStarted == 0, """
+            a holder that did not start with the row was taken for this session's
+            """)
+    }
+
+    // MARK: - Joining an adoption in flight
+
+    /// An adoption already in flight — a wake's, the startup pass's — opens
+    /// the session's only hand-over; an attach that joins it opens none, so
+    /// the row gate has nothing to refuse and is not asked. Here the gate
+    /// would refuse, and the attach joins anyway.
+    @Test func anAttachJoinsAnAdoptionInFlightWithoutAskingTheRowGate() async throws {
+        let registry = Self.registry()
+        let hold = PublishHold()
+        await registry.setPublishBarrier(hold.hook())
+        let row = Self.holderRow()
+        let inFlight = Task { try await registry.adopt(terminal: row) }
+        let parked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await hold.parked == 1
+        }
+        guard parked == .satisfied else {
+            await hold.release()
+            _ = try? await inFlight.value
+            Issue.record(BoundedWaitTimeout(
+                what: "the adoption in flight to reach its publish step",
+                observed: "no adoption parked", deadline: TestDeadlines.saturatedPass))
+            return
+        }
+        let asked = AskedRows()
+
+        try await registry.adoptForAttach(
+            terminal: row, rowPermits: { asked.record(row.id); return false })
+        await hold.release()
+        _ = try? await inFlight.value
+
+        #expect(asked.ids.isEmpty, """
+            an attach asked the row gate before joining an adoption already in flight, so a gate \
+            that refuses would turn it away from a session another caller is adopting
+            """)
+        #expect(await registry.attachRoundTripsStarted == 1, "joining opened a second hand-over")
+    }
+
+    // MARK: - Let-go marks
+
+    /// A clear made with an old mark leaves a newer let-go standing, the
+    /// matching mark clears it, and a teardown's let-go is never cleared —
+    /// the comparison the wake relies on to revive only the park it found.
+    @Test func aLetGoClearsOnlyUnderTheMarkItWasGivenAndOnlyForAPark() async throws {
+        let registry = Self.registry()
+        let session = UUID()
+        _ = await registry.abandon(
+            terminalID: session, holderPID: nil, childPID: nil, reason: .park)
+        let older = try #require(await registry.letGoMark(for: session))
+        _ = await registry.abandon(
+            terminalID: session, holderPID: nil, childPID: nil, reason: .park)
+        let newer = try #require(await registry.letGoMark(for: session))
+        #expect(newer != older)
+
+        await registry.clearLetGo(terminalID: session, ifUnchangedSince: older)
+        #expect(await registry.letGoMark(for: session) == newer,
+                "a clear under an older mark erased a newer let-go")
+        await registry.clearLetGo(terminalID: session, ifUnchangedSince: nil)
+        #expect(await registry.letGoMark(for: session) == newer)
+
+        await registry.clearLetGo(terminalID: session, ifUnchangedSince: newer)
+        #expect(await registry.letGoMark(for: session) == nil,
+                "the matching mark did not clear the park's let-go")
+
+        let tornDown = UUID()
+        _ = await registry.abandon(terminalID: tornDown, holderPID: nil, childPID: nil)
+        let teardownMark = try #require(await registry.letGo(for: tornDown))
+        #expect(teardownMark.reason == .teardown)
+        await registry.clearLetGo(terminalID: tornDown, ifUnchangedSince: teardownMark.mark)
+        #expect(await registry.letGo(for: tornDown) == teardownMark,
+                "a teardown's let-go was cleared, so a revived wake could adopt a holder going away")
     }
 
     /// An exit the holder itself reported — a code, or a status it could not
@@ -514,10 +603,16 @@ private struct RouterHarness {
             transport: .holder, holderPID: 4242, childPID: 4243)
         router.controlMode = TmuxControlModeBridge(
             supervisor: TmuxControlSupervisor(), environment: [:], fdVending: FDVendingServer())
+        // The recorded holder started with the row, as far as this registry's
+        // process table can tell, for the tests that need it verifiably
+        // running.
+        let processTable = FakeProcessSignaller()
+        processTable.startTimes[4242] = HolderChildIdentity.anchor(of: terminal)
         let registry = HolderRegistry(
             owner: HolderOwnerToken(rawValue: "acme-installation"),
             environment: ["TBD_HOME": "/nonexistent/acme-tbd-home"],
-            listTerminals: { [] })
+            listTerminals: { [] },
+            signaller: processTable)
         router.holderRegistry = registry
         // A live holder, so a refused attach stays an error rather than an
         // ended status — except where a test says otherwise.

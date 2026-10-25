@@ -1192,6 +1192,57 @@ struct HolderTmuxAssumptionGateTests {
         try await fixture.registry.adoptForAttach(terminal: after)
         #expect(await fixture.registry.attachRoundTripsStarted == 1,
                 "an attach reached for the holder of a session being torn down")
+        #expect(await fixture.registry.reader(for: fixture.terminal.id) == nil,
+                "a reader was left published for a session being torn down")
+    }
+
+    /// A teardown that reached `abandon` just before the wake read the let-go.
+    /// Delete and archive take no hibernation claim, so nothing orders them
+    /// against a wake; what the wake reads is a teardown's mark, not a park's,
+    /// and it is not the wake's to undo. The wake does not reach for the
+    /// holder at all, and the row stays parked.
+    @Test("a teardown just before a wake keeps the row parked and adopts nothing")
+    func aTeardownJustBeforeTheWakeKeepsTheRowParked() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let childStartedAt = Date().addingTimeInterval(-3600)
+        let signaller = FakeProcessSignaller()
+        signaller.behaviors[9109] = .init(aliveInitially: true)
+        signaller.startTimes[9109] = childStartedAt
+        signaller.cmdlines[9109] = Self.holderChildCommand
+
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder,
+            childPID: 9109, holderChildStartedAt: childStartedAt)
+        try await db.terminals.setHibernated(
+            id: terminal.id, sessionID: "sess-holdergate", reason: .manual)
+        let before = RowFingerprint(try #require(try await db.terminals.get(id: terminal.id)))
+
+        let registry = holderRegistry(listing: [terminal])
+        // A delete's teardown, as `disposeHolder` runs it. No pids, so
+        // nothing is signalled.
+        _ = await registry.abandon(terminalID: terminal.id, holderPID: nil, childPID: nil)
+
+        let result = await coordinator(
+            db, tmux: tmux, registry: registry, signaller: signaller)
+            .wake(terminalID: terminal.id)
+
+        guard case .respawnFailed = result else {
+            Issue.record("expected the wake to leave the row parked, got \(result)")
+            return
+        }
+        let after = try #require(try await db.terminals.get(id: terminal.id))
+        #expect(after.isParked, "the wake un-parked a row a teardown had let go")
+        #expect(RowFingerprint(after) == before, "the wake mutated a row being torn down")
+        #expect(await registry.attachRoundTripsStarted == 0,
+                "the wake reached for the holder of a session being torn down")
+        #expect(await registry.reader(for: terminal.id) == nil)
+        #expect(await registry.letGo(for: terminal.id)?.reason == .teardown,
+                "the wake cleared a teardown's let-go")
     }
 
     /// A shutdown that begins while the wake is adopting reaches the wake as
@@ -1313,7 +1364,8 @@ struct HolderTmuxAssumptionGateTests {
 
         let registry = holderRegistry(listing: [terminal])
         // The mark a park's escalation leaves. No pids, so nothing is signalled.
-        _ = await registry.abandon(terminalID: terminal.id, holderPID: nil, childPID: nil)
+        _ = await registry.abandon(
+            terminalID: terminal.id, holderPID: nil, childPID: nil, reason: .park)
         try await registry.adoptForAttach(terminal: terminal)
         #expect(await registry.attachRoundTripsStarted == 0,
                 "the fixture's let-go mark did not refuse an attach, so this tests nothing")

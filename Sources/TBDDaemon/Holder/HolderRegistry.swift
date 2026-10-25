@@ -261,7 +261,8 @@ actor HolderRegistry {
     ///
     /// The floor is `AttachRequestResult.uniqueGenerationFloor`, so every
     /// generation this daemon mints says on its face that it came from a
-    /// randomizing daemon — the contract the app's handback resend relies on.
+    /// randomizing daemon — the contract that floor offers clients, which may
+    /// safely resend a handback only for such a generation.
     /// The 2^32 of headroom under `attachGenerationBaseLimit` is four billion
     /// attaches, which no daemon process will ever mint. Why the base is
     /// random at all is on `lastAttachGeneration`.
@@ -484,8 +485,8 @@ actor HolderRegistry {
     /// or spawned for them since. `abandon` and `abandonVerifiedJob` add a
     /// session before they release its reader; `publish` removes it, because a
     /// holder that has just handed over a pty is a live session again, and so
-    /// does `clearLetGo`, for the wake that deliberately revives a session it
-    /// could not adopt.
+    /// does `clearLetGo`, for the wake that deliberately revives a parked
+    /// session it could not adopt — a park's let-go only.
     ///
     /// Two readers refuse these sessions: an attach's on-demand adoption
     /// (`attachAdoption`) and the startup pass (`adoptOne`, through
@@ -500,8 +501,27 @@ actor HolderRegistry {
     ///
     /// Each entry carries the mark it was given (`letGoMarks`), so a caller
     /// that read the mark before suspending can tell a newer let-go from the
-    /// one it saw (`clearLetGo(terminalID:ifUnchangedSince:)`).
-    private var sessionsLetGo: [UUID: UInt64] = [:]
+    /// one it saw (`clearLetGo(terminalID:ifUnchangedSince:)`), and the reason
+    /// it was let go (`LetGoReason`), so a wake can tell the park it is undoing
+    /// from a teardown it must not.
+    private var sessionsLetGo: [UUID: LetGo] = [:]
+
+    /// One entry of `sessionsLetGo`: when, in mark order, and why.
+    struct LetGo: Sendable, Equatable {
+        let mark: UInt64
+        let reason: LetGoReason
+    }
+
+    /// Why this registry told a session's holder to let go.
+    enum LetGoReason: Sendable, Equatable {
+        /// A park ended the session's job. The one let-go a wake may undo: a
+        /// wake exists to bring a parked session back.
+        case park
+        /// The session is being torn down — a delete, an archive, a transport
+        /// move, a spawn undone, a hook tab closed. Nothing may bring it back,
+        /// and a wake that finds this keeps the row parked.
+        case teardown
+    }
 
     /// Mints let-go marks: one per insert into `sessionsLetGo`, increasing for
     /// the daemon's life, so no two inserts share a mark.
@@ -846,13 +866,18 @@ actor HolderRegistry {
     /// (`sessionsLetGo`). A caller that suspends before acting on a let-go
     /// reads this first and passes it to `clearLetGo(terminalID:ifUnchangedSince:)`.
     func letGoMark(for terminalID: UUID) -> UInt64? {
+        sessionsLetGo[terminalID]?.mark
+    }
+
+    /// The let-go this session is under — its mark and its reason — or nil.
+    func letGo(for terminalID: UUID) -> LetGo? {
         sessionsLetGo[terminalID]
     }
 
-    /// Marks a session let go under a fresh mark.
-    private func markLetGo(_ terminalID: UUID) {
+    /// Marks a session let go under a fresh mark, for `reason`.
+    private func markLetGo(_ terminalID: UUID, reason: LetGoReason) {
         letGoMarks += 1
-        sessionsLetGo[terminalID] = letGoMarks
+        sessionsLetGo[terminalID] = LetGo(mark: letGoMarks, reason: reason)
     }
 
     /// Records the processes behind a session as an adoption's publish
@@ -1051,9 +1076,12 @@ actor HolderRegistry {
     ///
     /// Marked let go (`sessionsLetGo`) before anything suspends, so an
     /// attach's on-demand adoption cannot reach for the holder in the gap
-    /// between the release and the `forget`.
-    func abandon(terminalID: UUID, handle: HolderHandle) async {
-        markLetGo(terminalID)
+    /// between the release and the `forget`. `reason` defaults to
+    /// `.teardown`, the let-go nothing may undo; only a park passes `.park`.
+    func abandon(
+        terminalID: UUID, handle: HolderHandle, reason: LetGoReason = .teardown
+    ) async {
+        markLetGo(terminalID, reason: reason)
         await release(terminalID: terminalID)
         recordStatus(nil, for: terminalID)
         await dispose(handle: handle)
@@ -1081,11 +1109,12 @@ actor HolderRegistry {
     /// unrepresentable rendezvous path, or a row that never recorded the child
     /// pid. Each one leaks a live process, so each is reported rather than
     /// swallowed.
-    func abandon(terminal: Terminal) async -> String? {
+    func abandon(terminal: Terminal, reason: LetGoReason = .teardown) async -> String? {
         await abandon(
             terminalID: terminal.id,
             holderPID: terminal.holderPID,
-            childPID: terminal.childPID)
+            childPID: terminal.childPID,
+            reason: reason)
     }
 
     /// The same teardown for a caller that no longer has a row to read the pids
@@ -1096,7 +1125,9 @@ actor HolderRegistry {
     /// the descriptor phase 2b returned. The rendezvous still comes from this
     /// registry's own environment, so the caller needs nothing but the pids it
     /// was handed at spawn.
-    func abandon(terminalID: UUID, holderPID: Int32?, childPID: Int32?) async -> String? {
+    func abandon(
+        terminalID: UUID, holderPID: Int32?, childPID: Int32?, reason: LetGoReason = .teardown
+    ) async -> String? {
         let socketPath: String
         do {
             socketPath = try HolderRendezvous.socketPath(
@@ -1115,7 +1146,8 @@ actor HolderRegistry {
             handle: HolderHandle(
                 holderPID: holderPID ?? 0,
                 childPID: childPID ?? 0,
-                socketPath: socketPath))
+                socketPath: socketPath),
+            reason: reason)
         guard childPID != nil else {
             return "terminal \(terminalID) recorded no child pid, so its holder was told to "
                 + "let go but the job it forked was not killed"
@@ -1167,8 +1199,9 @@ actor HolderRegistry {
         } catch {
             return "\(error)"
         }
-        // Let go before anything suspends, as in `abandon`.
-        markLetGo(terminalID)
+        // Let go before anything suspends, as in `abandon`. A hook tab's
+        // teardown is never undone.
+        markLetGo(terminalID, reason: .teardown)
         await release(terminalID: terminalID)
         recordStatus(nil, for: terminalID)
 
@@ -2040,10 +2073,12 @@ actor HolderRegistry {
     /// continuation exists, so the common answers — already adopted above all
     /// — cost this call nothing more.
     ///
-    /// `rowPermits` is the caller's own refusal, asked only once the
-    /// registry's gates would let an adoption through: the attach handler
-    /// passes the row-level check only it can make (`mayAdoptForAttach`), so
-    /// an already-adopted session never pays for it. `holderIsLive` says
+    /// `rowPermits` is the caller's own refusal, asked only before this call
+    /// would open a hand-over of its own: the attach handler passes the
+    /// row-level check only it can make (`mayAdoptForAttach`), so an
+    /// already-adopted session never pays for it, and joining an adoption
+    /// already in flight — a wake's, the startup pass's — never asks it,
+    /// because a join opens no hand-over. `holderIsLive` says
     /// whether a pid names a running `TBDHolder`; `attachAdoption` says which
     /// refusal it can lift.
     ///
@@ -2065,6 +2100,7 @@ actor HolderRegistry {
             throw Error.notAHolderSession(terminalID: terminalID)
         }
         guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
+        let rowPermitted: Bool
         switch attachAdoption(for: terminal, holderIsLive: holderIsLive) {
         case .notNeeded:
             return
@@ -2075,12 +2111,20 @@ actor HolderRegistry {
                 \(reason, privacy: .public)
                 """)
             return
-        case .join, .begin:
-            break
+        case .join:
+            // Joining an adoption already in flight opens no hand-over, so
+            // the row gate has nothing to refuse: the wake or the startup pass
+            // that started it already decided this session may be read.
+            rowPermitted = false
+        case .begin:
+            guard await rowPermits() else { return }
+            rowPermitted = true
         }
-        guard await rowPermits() else { return }
 
-        let attempt = Task { try await self.adoptUnlessLeaving(terminal, holderIsLive: holderIsLive) }
+        let attempt = Task {
+            try await self.adoptUnlessLeaving(
+                terminal, holderIsLive: holderIsLive, mayBegin: rowPermitted)
+        }
         let budget = attachAdoptionBudget
         guard let settled = await Self.settlement(of: attempt, within: budget, clock: clock) else {
             Self.logger.notice(
@@ -2193,8 +2237,12 @@ actor HolderRegistry {
     /// Run from `adoptForAttach`'s own task rather than inline, which is why
     /// it re-asks everything that call already asked: by the time the task is
     /// scheduled, a release, an abandonment or a shutdown may have begun.
+    ///
+    /// `mayBegin` is whether the caller's row gate was asked and permitted an
+    /// adoption. A call that set out to join one in flight never asked it, so
+    /// if that adoption has ended by now it opens no hand-over of its own.
     private func adoptUnlessLeaving(
-        _ terminal: Terminal, holderIsLive: (Int32) -> Bool
+        _ terminal: Terminal, holderIsLive: (Int32) -> Bool, mayBegin: Bool
     ) async throws -> String? {
         let terminalID = terminal.id
         guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
@@ -2209,6 +2257,9 @@ actor HolderRegistry {
             _ = try await joinInFlightAdoption(task, for: terminalID)
             return nil
         case .begin:
+            guard mayBegin else {
+                return "the adoption it set out to join had ended, and the row gate was not asked"
+            }
             _ = try await beginAdoption(of: terminalID)
             return nil
         }
@@ -2240,32 +2291,36 @@ actor HolderRegistry {
     /// `abandon` did. Without this, the row would be awake and refused by
     /// every attach for the daemon's whole life.
     ///
-    /// **Only the mark the caller saw is cleared.** `mark` is what
-    /// `letGoMark(for:)` answered before the caller suspended, nil if the
-    /// session was not let go then. A newer let-go — a delete or an archive
-    /// whose `abandon` ran while the wake was adopting — carries a newer mark
-    /// and is left standing: clearing it would let an attach or the startup
-    /// pass adopt a holder that is being told to forget its session.
+    /// **Only a park's let-go, and only the mark the caller saw, is cleared.**
+    /// `mark` is what `letGoMark(for:)` answered before the caller suspended,
+    /// nil if the session was not let go then. A newer let-go — a delete or an
+    /// archive whose `abandon` ran while the wake was adopting — carries a
+    /// newer mark and is left standing, and a `.teardown` let-go is never
+    /// cleared at all: either would let an attach or the startup pass adopt a
+    /// holder that is being told to forget its session.
     func clearLetGo(terminalID: UUID, ifUnchangedSince mark: UInt64?) {
-        guard let mark, sessionsLetGo[terminalID] == mark else { return }
+        guard let mark, let current = sessionsLetGo[terminalID],
+              current.mark == mark, current.reason == .park else { return }
         sessionsLetGo[terminalID] = nil
     }
 
     /// Whether `terminal`'s recorded holder pid names this session's running
     /// holder: `holderIsLive` — a running `TBDHolder` by name, the attach
-    /// handler's own check — and, when the row records when its job started,
-    /// a holder that started within `AgentReaper.defaultHolderIdentityWindow`
-    /// of it. A holder forks its job as it starts, so the two instants sit
-    /// together; a pid the kernel has handed to some other holder does not.
-    /// An unreadable start time is uncertainty, and answers no.
+    /// handler's own check — and a holder that started within
+    /// `AgentReaper.defaultHolderIdentityWindow` of the row's identity anchor
+    /// (`HolderChildIdentity.anchor(of:)`: when its job started, or the row's
+    /// creation for a row that never recorded that), the anchor every other
+    /// holder identity check measures against. A holder forks its job as it
+    /// starts, so the two instants sit together; a pid the kernel has handed
+    /// to some other holder does not. An unreadable start time is uncertainty,
+    /// and answers no.
     private func holderVerifiablyRunning(
         _ terminal: Terminal, holderIsLive: (Int32) -> Bool
     ) -> Bool {
         guard let holderPID = terminal.holderPID, holderPID > 1,
               holderIsLive(holderPID) else { return false }
-        guard let jobStartedAt = terminal.holderChildStartedAt else { return true }
         guard let holderStartedAt = signaller.startTime(holderPID) else { return false }
-        return abs(holderStartedAt.timeIntervalSince(jobStartedAt))
+        return abs(holderStartedAt.timeIntervalSince(HolderChildIdentity.anchor(of: terminal)))
             <= AgentReaper.defaultHolderIdentityWindow
     }
 
