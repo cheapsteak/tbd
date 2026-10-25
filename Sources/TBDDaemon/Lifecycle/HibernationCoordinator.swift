@@ -1832,6 +1832,11 @@ public actor HibernationCoordinator {
             profile: resolvedProfile?.envOverrides
         )
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
+        // The terminal's own plugin folders and settings overlay, kept on its
+        // row so every start of its session reapplies them — a wake included.
+        // A folder that has gone since is skipped by the builder, with a
+        // warning, and the wake goes on: a wake can run with nobody watching.
+        let spawnExtras = terminal.claudeSpawnExtras
         // Planned, not written: a wake that adopts a holder still running
         // launches nothing at all, and must leave the running process's overlay
         // alone. Each launch writes the overlay just before it starts
@@ -1840,7 +1845,8 @@ public actor HibernationCoordinator {
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: terminal.id.uuidString,
             // Repo fragment is file-backed config, read fresh — reapplied on wake.
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
         )
         // Pre-accept Claude's folder-trust dialog so a wake onto a fresh
         // isolated profile dir (never seeded before) doesn't re-prompt — the
@@ -1892,6 +1898,7 @@ public actor HibernationCoordinator {
             shellFallback: defaultShell,
             settingsOverlayPath: overlay.path,
             pluginDirPath: PluginDirWriter.pluginDirPath,
+            extraPluginDirs: spawnExtras?.pluginDirs ?? [],
             envSettingOverrides: claudeEnvOverrides,
             sessionName: spawnTitle.name,
             // The overlay is written at launch, so its path counts as present.

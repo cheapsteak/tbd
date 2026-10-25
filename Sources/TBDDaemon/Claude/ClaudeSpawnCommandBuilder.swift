@@ -1,5 +1,8 @@
 import Foundation
 import TBDShared
+import os
+
+private let pluginDirLogger = Logger(subsystem: "com.tbd.daemon", category: "claude-overlay")
 
 /// Builds the shell command string for spawning (or respawning) a claude terminal.
 ///
@@ -107,6 +110,7 @@ enum ClaudeSpawnCommandBuilder {
         shellFallback: String,
         settingsOverlayPath: String? = nil,
         pluginDirPath: String? = nil,
+        extraPluginDirs: [String] = [],
         envSettingOverrides: [String: ClaudeEnvValue] = [:],
         sessionName: String? = nil,
         sessionModEnvironment: [String: String] = [:],
@@ -126,12 +130,26 @@ enum ClaudeSpawnCommandBuilder {
             settingsFlag = ""
         }
 
-        let pluginFlag: String
+        let ownPluginFlag: String
         if let p = pluginDirPath, fileExists(p) {
-            pluginFlag = " --plugin-dir \(SystemPromptBuilder.shellEscape(p))"
+            ownPluginFlag = " --plugin-dir \(SystemPromptBuilder.shellEscape(p))"
         } else {
-            pluginFlag = ""
+            ownPluginFlag = ""
         }
+
+        // A terminal's own plugin folders follow TBD's, in order. A folder that
+        // vanished is skipped with a warning (a stale entry must not stop the
+        // session from starting); repeats and TBD's own folder are dropped.
+        var extraPluginFlag = ""
+        var seenPluginDirs: Set<String> = pluginDirPath.map { [$0] } ?? []
+        for dir in extraPluginDirs where seenPluginDirs.insert(dir).inserted {
+            if fileExists(dir) {
+                extraPluginFlag += " --plugin-dir \(SystemPromptBuilder.shellEscape(dir))"
+            } else {
+                pluginDirLogger.warning("skipping missing plugin folder: \(dir, privacy: .public)")
+            }
+        }
+        let pluginFlag = ownPluginFlag + extraPluginFlag
 
         // Session name for Claude Code's cross-session peer registry. Blank,
         // whitespace-only and control-character-only names are dropped rather

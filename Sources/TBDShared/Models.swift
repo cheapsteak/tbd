@@ -233,6 +233,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var archivedAt: Date?
     public var tmuxServer: String
     public var archivedClaudeSessions: [String]?
+    /// The Claude spawn values each archived session's terminal carried, keyed
+    /// by Claude session id. Written in the archive transaction beside
+    /// `archivedClaudeSessions` and cleared with it on revive, so a revived
+    /// session starts with the values it had. Nil when no archived session
+    /// carried any, and on rows written before the column.
+    public var archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]?
     public var sortOrder: Int = 0
     /// HEAD SHA captured at archive time. Used as a fallback when reviving a
     /// worktree whose branch was renamed or deleted before archive ran.
@@ -390,7 +396,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 pendingPrompt: String? = nil,
                 pendingPromptSubmit: Bool? = nil,
                 prObservation: PRObservation? = nil,
-                remoteParentAssigned: Bool = false) {
+                remoteParentAssigned: Bool = false,
+                archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -424,6 +431,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.pendingPromptSubmit = pendingPromptSubmit
         self.prObservation = prObservation
         self.remoteParentAssigned = remoteParentAssigned
+        self.archivedClaudeSpawnExtras = archivedClaudeSpawnExtras
     }
 
     enum CodingKeys: String, CodingKey {
@@ -435,6 +443,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
         case locationKind, providerName, providerSessionID, pendingPrompt, pendingPromptSubmit
         case prObservation, remoteParentAssigned
+        case archivedClaudeSpawnExtras
     }
 
     public init(from decoder: Decoder) throws {
@@ -500,6 +509,9 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         // nothing recorded that adoption placed them; `false` is what the
         // column's own backfill then corrects for the rows it can.
         remoteParentAssigned = try c.decodeIfPresent(Bool.self, forKey: .remoteParentAssigned) ?? false
+        // Absent in JSON from a daemon that predates the column.
+        archivedClaudeSpawnExtras = try c.decodeIfPresent(
+            [String: ClaudeSpawnExtras].self, forKey: .archivedClaudeSpawnExtras)
     }
 
     /// Hand-written because `location` is an enum with an associated value that
@@ -544,6 +556,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         try c.encodeIfPresent(pendingPromptSubmit, forKey: .pendingPromptSubmit)
         try c.encodeIfPresent(prObservation, forKey: .prObservation)
         try c.encode(remoteParentAssigned, forKey: .remoteParentAssigned)
+        try c.encodeIfPresent(archivedClaudeSpawnExtras, forKey: .archivedClaudeSpawnExtras)
     }
 }
 
@@ -609,6 +622,42 @@ public enum TerminalTransport: String, Codable, Sendable, Equatable {
     /// relaxed, so such a row carries empty strings there and must be
     /// discriminated by this value alone — never by those columns.
     case holder
+}
+
+/// The Claude spawn values a terminal's starter passed — a settings overlay
+/// and plugin folders — stored unchanged so TBD can apply them to the starts
+/// the starter does not make: wake, account switch, reopen, revive
+/// (docs/specs/2026-10-24-terminal-plugin-dirs-design.md, "What TBD stores").
+///
+/// Stored as the JSON object
+/// `{"claudeSettingsOverlay": <string>, "pluginDirs": [<path>, ...]}`, with a
+/// key omitted when it is nil — on the terminal row, on its history entry, and
+/// as the values of an archived worktree's session-id-keyed map. Unknown keys
+/// are ignored on decode, so later keys can join the object without a
+/// migration. The overlay is stored as plain text and must not hold secrets.
+public struct ClaudeSpawnExtras: Codable, Sendable, Equatable {
+    /// JSON object text merged into the session's settings file.
+    public var claudeSettingsOverlay: String?
+    /// Absolute plugin folder paths, each passed as `--plugin-dir`.
+    public var pluginDirs: [String]?
+
+    public init(claudeSettingsOverlay: String? = nil, pluginDirs: [String]? = nil) {
+        self.claudeSettingsOverlay = claudeSettingsOverlay
+        self.pluginDirs = pluginDirs
+    }
+
+    /// These values with an empty field normalized to nil — an overlay that is
+    /// nil or whitespace only, a `pluginDirs` that is nil or empty — or nil
+    /// when both fields are empty, so "nothing passed" has one spelling. A
+    /// non-blank overlay is kept verbatim, not trimmed.
+    public var nonEmpty: ClaudeSpawnExtras? {
+        let overlay = claudeSettingsOverlay.flatMap {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        }
+        let dirs = pluginDirs.flatMap { $0.isEmpty ? nil : $0 }
+        guard overlay != nil || dirs != nil else { return nil }
+        return ClaudeSpawnExtras(claudeSettingsOverlay: overlay, pluginDirs: dirs)
+    }
 }
 
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
@@ -728,6 +777,12 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     public var startHeldReason: String?
     public var startHeldAt: Date?
 
+    /// The Claude spawn values this terminal's starter passed, reapplied on
+    /// every later start of its session. Nil when nothing was passed, on rows
+    /// written before the column existed, and when the stored object does not
+    /// decode.
+    public var claudeSpawnExtras: ClaudeSpawnExtras?
+
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
     /// Nil whenever either provenance column is missing, deliberately: a bare
@@ -797,7 +852,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 transport: TerminalTransport = .tmux,
                 holderPID: Int32? = nil,
                 childPID: Int32? = nil,
-                holderChildStartedAt: Date? = nil) {
+                holderChildStartedAt: Date? = nil,
+                claudeSpawnExtras: ClaudeSpawnExtras? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -831,6 +887,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.holderPID = holderPID
         self.childPID = childPID
         self.holderChildStartedAt = holderChildStartedAt
+        self.claudeSpawnExtras = claudeSpawnExtras
     }
 
     enum CodingKeys: String, CodingKey {
@@ -845,6 +902,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case transport, holderPID, childPID, holderChildStartedAt
         case serverName
         case startHeldReason, startHeldAt
+        case claudeSpawnExtras
     }
 
     public init(from decoder: Decoder) throws {
@@ -901,6 +959,8 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         serverName = try c.decodeIfPresent(String.self, forKey: .serverName)
         startHeldReason = try c.decodeIfPresent(String.self, forKey: .startHeldReason)
         startHeldAt = try c.decodeIfPresent(Date.self, forKey: .startHeldAt)
+        // Absent in JSON from a daemon that predates the column.
+        claudeSpawnExtras = try c.decodeIfPresent(ClaudeSpawnExtras.self, forKey: .claudeSpawnExtras)
     }
 }
 
@@ -2277,11 +2337,16 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     public var serverName: String?
     /// That server's exit status; nil when the transport could not observe it.
     public var exitCode: Int32?
+    /// The closed terminal's `claudeSpawnExtras`, copied when it closed, so a
+    /// reopen from Closed Terminals starts with the same values. Absent in
+    /// JSON and rows written before the column, which read as nil.
+    public var claudeSpawnExtras: ClaudeSpawnExtras?
 
     public init(id: UUID, worktreeID: UUID, label: String? = nil,
                 kind: TerminalKind? = nil, closedAt: Date = Date(),
                 claudeSessionID: String? = nil, lineCount: Int = 0,
-                serverName: String? = nil, exitCode: Int32? = nil) {
+                serverName: String? = nil, exitCode: Int32? = nil,
+                claudeSpawnExtras: ClaudeSpawnExtras? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.label = label
@@ -2291,6 +2356,7 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         self.lineCount = lineCount
         self.serverName = serverName
         self.exitCode = exitCode
+        self.claudeSpawnExtras = claudeSpawnExtras
     }
 }
 

@@ -114,9 +114,12 @@ extension WorktreeLifecycle {
         | Source session | `\(sessionID)` |
 
         """
+        // The source session's plugin folders and settings overlay, from the
+        // map the archive kept beside its session list; nil when it kept none.
         let carryover = ConversationCarryover(
             sourceSessionID: sessionID,
-            notesSeed: notesSeed
+            notesSeed: notesSeed,
+            claudeSpawnExtras: archived.archivedClaudeSpawnExtras?[sessionID]
         )
         let completion = try await completeCreateWorktree(
             worktreeID: pending.id,

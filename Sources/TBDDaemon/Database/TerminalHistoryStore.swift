@@ -18,6 +18,8 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
     var lineCount: Int
     var serverName: String?
     var exitCode: Int32?
+    /// JSON-encoded `ClaudeSpawnExtras` copied from the closing terminal row.
+    var claudeSpawnExtras: String?
 
     init(from entry: TerminalHistoryEntry) {
         self.id = entry.id.uuidString
@@ -29,6 +31,7 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
         self.lineCount = entry.lineCount
         self.serverName = entry.serverName
         self.exitCode = entry.exitCode
+        self.claudeSpawnExtras = ClaudeSpawnExtrasColumn.encode(entry.claudeSpawnExtras)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -51,7 +54,9 @@ struct TerminalHistoryRecord: Codable, FetchableRecord, PersistableRecord, Senda
             claudeSessionID: claudeSessionID,
             lineCount: lineCount,
             serverName: serverName,
-            exitCode: exitCode
+            exitCode: exitCode,
+            claudeSpawnExtras: ClaudeSpawnExtrasColumn.decode(
+                claudeSpawnExtras, table: Self.databaseTableName, rowID: id)
         )
     }
 }
@@ -182,7 +187,11 @@ public struct TerminalHistoryStore: Sendable {
                 claudeSessionID: terminal.claudeSessionID,
                 lineCount: text.map {
                     $0.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline).count
-                } ?? 0
+                } ?? 0,
+                // A Claude tab's values only. A failed pre-session hook's
+                // shell row keeps the create's values while its tab lives,
+                // and a reopen of a shell entry has no use for them.
+                claudeSpawnExtras: terminal.isClaudeTab ? terminal.claudeSpawnExtras : nil
             )
             let record = TerminalHistoryRecord(from: entry)
             let worktreeID = terminal.worktreeID

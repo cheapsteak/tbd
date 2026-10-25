@@ -75,11 +75,22 @@ extension WorktreeLifecycle {
 
         // Collect Claude session IDs before archiving so they survive terminal deletion
         let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        let oldestFirst = terminals.sorted(by: { $0.createdAt < $1.createdAt })
         // Each id is resumed when the worktree is revived, so the list is what
         // `claudeResumeDecision` would let a wake resume — never a shell tab's.
-        let claudeSessionIDs = terminals
-            .sorted(by: { $0.createdAt < $1.createdAt })
+        let claudeSessionIDs = oldestFirst
             .compactMap(\.claudeResumeDecision.resumableSessionID)
+        // The plugin folders and settings overlay each of those sessions'
+        // terminal carried, keyed by session id, so a revive restores every
+        // session with its own. Read from the same terminals as the list; when
+        // two terminals name one session, the oldest that carries values wins.
+        let claudeSpawnExtras = Dictionary(
+            oldestFirst.compactMap { terminal -> (String, ClaudeSpawnExtras)? in
+                guard let sessionID = terminal.claudeResumeDecision.resumableSessionID,
+                      let extras = terminal.claudeSpawnExtras?.nonEmpty else { return nil }
+                return (sessionID, extras)
+            },
+            uniquingKeysWith: { oldest, _ in oldest })
 
         // Sync the branch in DB with what git reports for the worktree path,
         // so a rename done inside the worktree (e.g. `git branch -m`) is
@@ -120,6 +131,7 @@ extension WorktreeLifecycle {
         try await db.worktrees.archive(
             id: worktreeID,
             claudeSessionIDs: claudeSessionIDs,
+            claudeSpawnExtras: claudeSpawnExtras,
             archivedHeadSHA: capturedSHA
         )
 
@@ -536,6 +548,7 @@ extension WorktreeLifecycle {
                     worktreePath: worktree.localPath,
                     skipClaude: skipClaude,
                     archivedClaudeSessions: sessions,
+                    archivedClaudeSpawnExtras: worktree.archivedClaudeSpawnExtras,
                     cols: cols, rows: rows,
                     // Only clear archivedClaudeSessions if Claude was actually
                     // restored — otherwise preserve them so a subsequent
@@ -555,6 +568,7 @@ extension WorktreeLifecycle {
             worktreePath: worktree.localPath,
             skipClaude: skipClaude,
             archivedClaudeSessions: sessions,
+            archivedClaudeSpawnExtras: worktree.archivedClaudeSpawnExtras,
             cols: cols, rows: rows,
             preSessionTerminalID: nil
         )

@@ -14,6 +14,27 @@ extension RPCRouter {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
         let useExistingBranch = params.useExistingBranch ?? false
 
+        // The primary Claude terminal's own values, kept on its row so later
+        // starts of its session can reapply them. Plugin folders are checked
+        // here, before phase 1 inserts the row and so before phase 2 adds a git
+        // worktree or a branch, because the starter is there to see a bad path;
+        // a later start that finds one gone skips it instead. They are checked
+        // whatever the primary turns out to be: the lifecycle resolves that,
+        // and ignores these values for a Codex primary. Like the repo lookup
+        // below, this is validation, so it precedes the actuation row.
+        let claudeSpawnExtras: ClaudeSpawnExtras?
+        do {
+            let pluginDirs = try ClaudePluginDirs.validated(
+                params.pluginDirs ?? [],
+                homeDirectory: NSHomeDirectory(),
+                fileExists: { FileManager.default.fileExists(atPath: $0) })
+            claudeSpawnExtras = ClaudeSpawnExtras(
+                claudeSettingsOverlay: params.claudeSettingsOverlay,
+                pluginDirs: pluginDirs).nonEmpty
+        } catch {
+            return RPCResponse(error: "\(error)")
+        }
+
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
         let pending = try await lifecycle.beginCreateWorktree(
             repoID: params.repoID,
@@ -130,9 +151,6 @@ extension RPCRouter {
         // Explicit primary agent for this creation. nil preserves the global
         // preference resolved by the lifecycle.
         let primaryAgentPreference = params.primaryAgentPreference
-        // General Claude settings passthrough, deep-merged into the per-session
-        // --settings overlay on the fresh-primary spawn (see ClaudeHookOverlay).
-        let claudeSettingsOverlay = params.claudeSettingsOverlay
         // handleWorktreeCreate is always repo-scoped (scratch creation uses a
         // separate RPC), so params.repoID is the reliable non-optional source
         // — pending.repoID mirrors it but is now UUID? on the shared model.
@@ -143,7 +161,7 @@ extension RPCRouter {
                 // fetch from phase 1.5, or is a no-op if cached within the 60s TTL.
                 await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
 
-                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay, rollBackOnFailure: false)
+                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSpawnExtras: claudeSpawnExtras, rollBackOnFailure: false)
                 switch completion {
                 case .ready:
                     subs.broadcast(delta: .worktreeCreated(WorktreeDelta(

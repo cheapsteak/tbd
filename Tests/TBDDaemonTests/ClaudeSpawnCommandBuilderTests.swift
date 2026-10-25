@@ -1188,4 +1188,43 @@ struct ClaudeSpawnCommandBuilderEnvTests {
         )
         #expect(r.command == "claude --resume abc-123 --dangerously-skip-permissions")
     }
+
+    // MARK: - extraPluginDirs
+
+    private func buildWithExtras(
+        resume: Bool, tbd: String? = "/tbd", extras: [String], exists: @escaping (String) -> Bool = { _ in true },
+        cmd: String? = nil
+    ) -> String {
+        ClaudeSpawnCommandBuilder.build(
+            resumeID: cmd == nil && resume ? "abc-123" : nil, freshSessionID: cmd == nil && !resume ? "sid-1" : nil,
+            appendSystemPrompt: nil, initialPrompt: nil, profileSecret: nil,
+            cmd: cmd, shellFallback: "/bin/zsh",
+            pluginDirPath: tbd, extraPluginDirs: extras, fileExists: exists
+        ).command
+    }
+
+    @Test func extraPluginDirsFollowTBDsOwn() {
+        for resume in [true, false] {
+            let c = buildWithExtras(resume: resume, extras: ["/a", "/b"])
+            #expect(c.contains("--plugin-dir '/tbd' --plugin-dir '/a' --plugin-dir '/b'"))
+        }
+    }
+
+    @Test func missingExtraPluginDirSkipped() {
+        let c = buildWithExtras(resume: false, extras: ["/a", "/b"], exists: { $0 != "/b" })
+        #expect(c.contains("--plugin-dir '/a'"))
+        #expect(!c.contains("/b"))
+    }
+
+    @Test func duplicateExtraPluginDirsDropped() {
+        let c = buildWithExtras(resume: false, extras: ["/a", "/a", "/tbd"])
+        #expect(c.components(separatedBy: "'/a'").count == 2)
+        #expect(c.components(separatedBy: "'/tbd'").count == 2)
+    }
+
+    @Test func shellCommandIgnoresExtraPluginDirs() {
+        let c = buildWithExtras(resume: false, extras: ["/a"], cmd: "htop")
+        #expect(c == "htop")
+    }
 }
+

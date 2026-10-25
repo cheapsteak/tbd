@@ -59,6 +59,9 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for the primary terminal when it is Codex, passed as -c model=<id>. Ignored for Claude and shell primaries.")
     var codexModel: String?
 
+    @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) for the primary Claude terminal to load on every start. Repeatable. Relative paths resolve against the current folder. Ignored when the primary is Codex.")
+    var pluginDirs: [String] = []
+
     @Option(
         name: .customLong("position"),
         help: ArgumentHelp(
@@ -81,11 +84,21 @@ struct WorktreeCreate: AsyncParsableCommand {
     @Flag(name: .long, help: "Auto-archive this worktree when its PR merges (arms the per-worktree override; overrides the global default off).")
     var archiveOnMerge = false
 
+    /// The `pluginDirs` param this invocation sends: each `--plugin-dir` made
+    /// absolute against `cwd`, or none when the flag was not given.
+    func pluginDirsParam(cwd: String) -> [String]? {
+        pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd)
+    }
+
     mutating func validate() throws {
         if let codexModel,
            codexModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ValidationError("--codex-model must not be empty.")
         }
+        // No agent check: the primary's agent is settled by the daemon (a
+        // configured preference may make it Codex), which ignores plugin
+        // folders for a Codex primary.
+        try CLIPluginDirs.validateNotBlank(pluginDirs)
         if let folder = folder {
             if folder.isEmpty {
                 throw ValidationError("Folder name must not be empty.")
@@ -141,7 +154,8 @@ struct WorktreeCreate: AsyncParsableCommand {
                 suppressAutoParent: parentingFields.suppressAutoParent,
                 claudeSettingsOverlay: claudeSettings,
                 autoArchiveOnMerge: archiveOnMerge ? true : nil,
-                codexModel: codexModel
+                codexModel: codexModel,
+                pluginDirs: pluginDirsParam(cwd: FileManager.default.currentDirectoryPath)
             ),
             resultType: Worktree.self
         )

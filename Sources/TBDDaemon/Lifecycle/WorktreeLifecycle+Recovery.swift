@@ -185,9 +185,10 @@ extension WorktreeLifecycle {
             // `.markActive` and no sessions would spawn a FRESH Claude
             // session, and the next archive would unconditionally overwrite
             // `archivedClaudeSessions` — silently losing the old transcript.
-            // So: restore the archived sessions and finish with revive
-            // semantics (flip `.active`, clear `archivedAt`, clear the
-            // session list). The other original params (skipClaude,
+            // So: restore the archived sessions, each with the plugin folders
+            // and settings overlay the archive kept for it, and finish with
+            // revive semantics (flip `.active`, clear `archivedAt`, clear the
+            // session list and its values). The other original params (skipClaude,
             // initialPrompt, cols/rows) died with the previous daemon
             // process — spawn with defaults.
             let archivedSessions = worktree.archivedClaudeSessions ?? []
@@ -205,6 +206,7 @@ extension WorktreeLifecycle {
                     worktreePath: worktree.path,
                     skipClaude: false,
                     archivedClaudeSessions: isMidRevive ? archivedSessions : nil,
+                    archivedClaudeSpawnExtras: isMidRevive ? worktree.archivedClaudeSpawnExtras : nil,
                     completionAction: isMidRevive ? .revive(clearSessions: true) : .markActive
                 )
             }

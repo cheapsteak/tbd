@@ -44,6 +44,8 @@ that the new session can make judgment calls rather than follow narrow steps.
 EOF
 ```
 
+Add `--plugin-dir <path>` (repeatable) to a `--type claude` terminal to load an extra Claude Code plugin folder in that session; TBD keeps it, with any `--claude-settings`, and applies both again on every later start of the session (wake, account switch, reopen, revive). `tbd worktree create --plugin-dir <path>` does the same for the new worktree's primary Claude terminal.
+
 Use `--type codex` to spawn Codex instead of Claude:
 
 ```bash

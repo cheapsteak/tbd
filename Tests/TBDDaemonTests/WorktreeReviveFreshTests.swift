@@ -377,6 +377,85 @@ struct WorktreeReviveFreshTests {
         #expect(order.last == note.id)
     }
 
+    /// The source session's plugin folders and settings overlay, kept by the
+    /// archive under its session id, reach the carried-over conversation: its
+    /// command passes its folder and not its sibling's, its settings file
+    /// carries its overlay beside TBD's hooks, and its new row keeps them. The
+    /// archived source keeps its map.
+    @Test func reviveFreshBranchCarriesSourceExtras() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let plugA = tempDir.appendingPathComponent("plugins/plug-a", isDirectory: true)
+        let plugB = tempDir.appendingPathComponent("plugins/plug-b", isDirectory: true)
+        for dir in [plugA, plugB] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let extrasA = ClaudeSpawnExtras(
+            claudeSettingsOverlay: #"{"acmeSession":"A"}"#, pluginDirs: [plugA.path])
+        let extrasB = ClaudeSpawnExtras(
+            claudeSettingsOverlay: #"{"acmeSession":"B"}"#, pluginDirs: [plugB.path])
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db,
+            repo: repo,
+            tempDir: tempDir,
+            sessions: ["A", "B"],
+            claudeSpawnExtras: ["A": extrasA, "B": extrasB],
+            archivedHeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try writeSourceTranscript(sessionID: "A")
+
+        let outcome = try await lifecycle.reviveConversationOnFreshBranch(
+            archivedWorktreeID: archived.id,
+            sessionID: "A",
+            date: operationDate
+        )
+        guard case .ready = outcome.completion else {
+            Issue.record("expected the fresh revive to complete synchronously")
+            return
+        }
+
+        let created = outcome.result.worktree
+        let claude = try #require(
+            try await db.terminals.list(worktreeID: created.id).first { $0.kind == .claude })
+        #expect(claude.claudeSessionID == "A")
+        #expect(claude.claudeSpawnExtras == extrasA)
+        #expect(try await db.terminals.get(id: claude.id)?.claudeSpawnExtras == extrasA)
+
+        let command = try #require(
+            recorder.snapshot()
+                .filter { $0.contains("new-window") }
+                .compactMap(\.last)
+                .first { $0.contains("claude ") }
+        )
+        #expect(command.contains("--resume A"), "\(command)")
+        #expect(command.contains("--fork-session"), "\(command)")
+        #expect(
+            command.contains(" --plugin-dir \(SystemPromptBuilder.shellEscape(plugA.path))"),
+            "\(command)")
+        #expect(!command.contains(plugB.path), "\(command)")
+
+        let settingsPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: claude.id.uuidString)
+        #expect(
+            command.contains(" --settings \(SystemPromptBuilder.shellEscape(settingsPath))"),
+            "\(command)")
+        let settingsData = try Data(contentsOf: URL(fileURLWithPath: settingsPath))
+        let settings = try #require(
+            try JSONSerialization.jsonObject(with: settingsData) as? [String: Any])
+        #expect(settings["acmeSession"] as? String == "A")
+        #expect(settings["hooks"] != nil)
+
+        #expect(
+            try await db.worktrees.get(id: archived.id)?.archivedClaudeSpawnExtras
+                == ["A": extrasA, "B": extrasB])
+    }
+
     @Test func fetchFailureCreatesFromLocalBaseAndReturnsStaleWarning() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
@@ -906,6 +985,7 @@ struct WorktreeReviveFreshTests {
         repo: Repo,
         tempDir: URL,
         sessions: [String],
+        claudeSpawnExtras: [String: ClaudeSpawnExtras] = [:],
         archivedHeadSHA: String
     ) async throws -> Worktree {
         let source = try await db.worktrees.create(
@@ -919,6 +999,7 @@ struct WorktreeReviveFreshTests {
         try await db.worktrees.archive(
             id: source.id,
             claudeSessionIDs: sessions,
+            claudeSpawnExtras: claudeSpawnExtras,
             archivedHeadSHA: archivedHeadSHA
         )
         try await db.writerForTests.write { database in
