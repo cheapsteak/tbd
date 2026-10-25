@@ -136,9 +136,12 @@ struct HolderAttachClientReleaseTests {
         let daemon = try FakeDaemonRPC(generation: Self.generation)
         defer { daemon.stop() }
         // The sidecar is never connected, so no descriptor can arrive; the
-        // short timeout is the vend that never lands.
+        // short timeout is the vend that never lands. Its socket path is one
+        // nothing listens on, so the attach's own sidecar reconnect fails too
+        // rather than reaching whatever the ambient vend path holds.
         let client = HolderAttachClient(
-            daemonClient: DaemonClient(socketPath: daemon.socketPath),
+            daemonClient: DaemonClient(
+                socketPath: daemon.socketPath, vendSocketPath: daemon.socketPath + ".vend"),
             fdTimeout: .milliseconds(100))
         let worktreeID = UUID()
         let terminalID = UUID()
