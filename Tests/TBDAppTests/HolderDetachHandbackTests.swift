@@ -230,6 +230,10 @@ struct HolderDetachHandbackTests {
             coordinator.appState = state
             coordinator.panelID = terminalID
             coordinator.holderAttachClient = stub
+            // One attempt per attach: these tests are about what a single
+            // attempt hands back, and the stub vends the same descriptor every
+            // time it is asked, so a retry would reuse one its reader closed.
+            coordinator.holderAttachRetryDelays = []
             // Both halves of what `makeNSView` wires, and both are
             // load-bearing here: the coordinator serializes the view it holds,
             // and the view routes its terminal's replies back to the
@@ -823,6 +827,8 @@ struct HolderDetachHandbackTests {
             attachment: HolderAttachment(ptyFD: -1, generation: 99, snapshotPreamble: Data()),
             attachFails: true, log: fixture.stub.log, label: "successor ")
         successor.holderAttachClient = successorStub
+        // Refused once and done: a retry's backoff would only delay the end.
+        successor.holderAttachRetryDelays = []
         defer { successor.cleanup() }
 
         // The predecessor is torn down mid-vend, and the successor starts

@@ -832,7 +832,17 @@ final class AppState {
     @ObservationIgnored private var mainAreaSizeBroadcastTask: Task<Void, Never>?
     @ObservationIgnored private var lastBroadcastCols: Int = 0
     @ObservationIgnored private var lastBroadcastRows: Int = 0
-    var isConnected: Bool = false
+    var isConnected: Bool = false {
+        didSet {
+            if isConnected && !oldValue { daemonConnectionEpoch &+= 1 }
+        }
+    }
+    /// Advanced every time the app (re)gains its daemon connection, so work
+    /// that spans a reconnect can tell. Every terminal panel is rebuilt across
+    /// one — the detail area is replaced while `isConnected` is false — so a
+    /// holder attach still retrying from before it is retrying for a panel
+    /// that is being replaced, and stops.
+    @ObservationIgnored private(set) var daemonConnectionEpoch: UInt64 = 0
     var layouts: [UUID: LayoutNode] = [:] {
         didSet { persistLayouts() }
     }

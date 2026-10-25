@@ -18,8 +18,9 @@ import Foundation
 /// one in the same update. The old coordinator's handback is asynchronous: it
 /// stops its reader, serializes the screen, and only then sends `pane.detach`,
 /// which is what releases the daemon's viewer claim. An attach sent before
-/// that RPC returns is refused as "attached to viewer", and a refusal has no
-/// retry, so the new panel would paint a placard over a healthy session.
+/// that RPC returns is refused as "attached to viewer", which costs the new
+/// panel a retry's backoff — or, if the handback outlasts the retries, a
+/// placard over a healthy session.
 ///
 /// The ledger makes the wait deterministic instead of timed: the predecessor
 /// registers its task, and the successor awaits it. When the detach RPC has

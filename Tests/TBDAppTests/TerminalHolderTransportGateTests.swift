@@ -567,6 +567,9 @@ struct TerminalHolderTransportGateTests {
         let stub = attachStub(
             panel, fd: pty.readEnd,
             ready: { throw DaemonClientError.rpcError("attach.ready refused", code: nil) })
+        // One attempt: this is about how a refused ack ends, and the stub
+        // would hand a retry the descriptor the first reader closed.
+        panel.coordinator.holderAttachRetryDelays = []
 
         await panel.coordinator.startTmuxClient(
             terminalView: panel.view,

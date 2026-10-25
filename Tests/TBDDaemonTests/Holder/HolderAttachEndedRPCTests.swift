@@ -11,9 +11,10 @@ import Testing
 /// finds nothing at the rendezvous, because `TBD_HOME` names a directory that
 /// does not exist, so the refusal these tests read is still `beginAttach`'s.
 ///
-/// The app shows "the session keeps running, reopen the tab" for an attach
-/// error, and "this session has ended" for the ended status, so the status may
-/// be answered only when the row's holder is positively gone.
+/// The app retries an attach error and then shows "the session keeps running,
+/// retry", and shows "this session has ended" for the ended status without
+/// retrying, so the status may be answered only when the row's holder is
+/// positively gone.
 @Suite("A holder attach with no reader reports an ended session only when its holder is gone")
 struct HolderAttachEndedRPCTests {
 
