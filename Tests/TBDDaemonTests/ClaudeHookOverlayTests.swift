@@ -639,6 +639,76 @@ extension TBDHomeSerialized {
         #expect(overrides?["heavy-skill"] as? String == "off")
     }
 
+    private func mergedOverlay(repo: String? = nil, extra: String? = nil, fallbackModels: [String]? = nil) throws -> [String: Any] {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")
+        let priorTBDHome = setTBDHome(tmp.path)
+        defer {
+            restoreTBDHome(priorTBDHome)
+            try? FileManager.default.removeItem(at: tmp)
+        }
+        let path = ClaudeHookOverlay.resolveOverlayPath(
+            fallbackModels: fallbackModels,
+            sessionKey: UUID().uuidString,
+            repoSettingsJSON: repo,
+            extraSettingsJSON: extra
+        )
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    @Test func repoFragmentPreToolUseJoinsTBDHooks() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"guard"}]}]}}"#
+        )
+        let pre = try #require((parsed["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]])
+        #expect(pre.count == 2)
+        #expect(pre.first?["matcher"] as? String == "AskUserQuestion")
+        #expect(pre.last?["matcher"] as? String == "Bash")
+        let cmd = (pre.last?["hooks"] as? [[String: Any]])?.first?["command"] as? String
+        #expect(cmd == "guard")
+    }
+
+    @Test func perSpawnPostToolUseKeepsTBDEntries() throws {
+        let parsed = try mergedOverlay(
+            extra: #"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"fmt"}]}]}}"#
+        )
+        let post = try #require((parsed["hooks"] as? [String: Any])?["PostToolUse"] as? [[String: Any]])
+        let matchers = post.compactMap { $0["matcher"] as? String }
+        #expect(matchers.contains("AskUserQuestion"))
+        #expect(matchers.contains("Bash"))
+        #expect(matchers.last == "Edit")
+        #expect(post.count == 3)
+    }
+
+    @Test func denyListsJoinAcrossFragments() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"permissions":{"deny":["WebFetch"]}}"#,
+            extra: #"{"permissions":{"deny":["Bash(curl:*)"]}}"#
+        )
+        let deny = (parsed["permissions"] as? [String: Any])?["deny"] as? [String]
+        #expect(deny == ["WebFetch", "Bash(curl:*)"])
+    }
+
+    @Test func duplicateListEntriesDropped() throws {
+        let parsed = try mergedOverlay(
+            repo: #"{"permissions":{"deny":["WebFetch"]}}"#,
+            extra: #"{"permissions":{"deny":["WebFetch"]}}"#
+        )
+        let deny = (parsed["permissions"] as? [String: Any])?["deny"] as? [String]
+        #expect(deny == ["WebFetch"])
+    }
+
+    @Test func scalarStillReplaced() throws {
+        let parsed = try mergedOverlay(repo: #"{"model":"a"}"#, extra: #"{"model":"b"}"#)
+        #expect(parsed["model"] as? String == "b")
+    }
+
+    @Test func fallbackModelListJoins() throws {
+        let parsed = try mergedOverlay(extra: #"{"fallbackModel":["m2"]}"#, fallbackModels: ["m1"])
+        #expect(parsed["fallbackModel"] as? [String] == ["m1", "m2"])
+    }
+
     @Test func repoAndPerSpawnFragmentsMergeWithPerSpawnWinningCollisions() throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-overlay-test-\(UUID().uuidString)")

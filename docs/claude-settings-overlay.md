@@ -7,7 +7,7 @@ fragment contents beyond "is it a JSON object".
 
 ## Scopes and precedence
 
-Merged in order (later wins key collisions; object-valued keys recurse):
+Merged in order (later wins key collisions; object-valued keys recurse; lists join, earlier entries first, exact duplicates dropped):
 
 1. **TBD hooks base** — the generated overlay body (hooks, optional
    `fallbackModel`).

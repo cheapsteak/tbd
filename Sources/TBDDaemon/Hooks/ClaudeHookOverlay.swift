@@ -371,18 +371,47 @@ public enum ClaudeHookOverlay {
         )
     }
 
-    /// Recursive dict merge: for a key present in both, if BOTH values are
-    /// `[String: Any]` recurse; otherwise the `overlay` value wins.
+    /// Recursive merge of settings layers, for a key present in both:
+    /// - both values `[String: Any]` → recurse;
+    /// - both values `[Any]` → join: `base` entries first, then `overlay`
+    ///   entries not already present (exact duplicates dropped), so a fragment's
+    ///   hooks or permission lists add to TBD's rather than replace them;
+    /// - anything else → the `overlay` value wins.
     private static func deepMerge(_ base: inout [String: Any], _ overlay: [String: Any]) {
         for (key, overlayValue) in overlay {
             if var baseChild = base[key] as? [String: Any],
                let overlayChild = overlayValue as? [String: Any] {
                 deepMerge(&baseChild, overlayChild)
                 base[key] = baseChild
+            } else if let baseList = base[key] as? [Any],
+                      let overlayList = overlayValue as? [Any] {
+                var seen = Set(baseList.compactMap(canonicalJSON))
+                var joined = baseList
+                for entry in overlayList {
+                    guard let canonical = canonicalJSON(entry) else {
+                        joined.append(entry)
+                        continue
+                    }
+                    if seen.insert(canonical).inserted {
+                        joined.append(entry)
+                    }
+                }
+                base[key] = joined
             } else {
                 base[key] = overlayValue
             }
         }
+    }
+
+    /// Stable serialization of one JSON value (keys sorted), used to compare
+    /// list entries for exact equality. Wrapping in an array makes scalars
+    /// serializable. nil when the value cannot be serialized.
+    private static func canonicalJSON(_ entry: Any) -> Data? {
+        guard JSONSerialization.isValidJSONObject([entry]) else { return nil }
+        return try? JSONSerialization.data(
+            withJSONObject: [entry],
+            options: [.sortedKeys, .fragmentsAllowed]
+        )
     }
 
     /// Parse an `extraSettingsJSON` fragment into a settings dict. Returns nil
