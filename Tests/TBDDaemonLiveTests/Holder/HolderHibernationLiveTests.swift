@@ -667,20 +667,24 @@ struct HolderHibernationLiveTests {
         try await fixture.db.terminals.setHibernated(
             id: terminal.id, sessionID: HibernationFixture.sessionID)
         let loopsBefore = await fixture.registry.drainLoopsStarted
+        // The concurrent work below captures the two actors and the row, never
+        // the fixture: it is a non-Sendable class, and a task closure must be.
+        let registry = fixture.registry
+        let coordinator = fixture.coordinator
 
         let hold = ReleaseHold()
-        await fixture.registry.setReleaseBarrier(hold.hook())
-        let releasing = Task { await fixture.registry.release(terminalID: terminal.id) }
+        await registry.setReleaseBarrier(hold.hook())
+        let releasing = Task { await registry.release(terminalID: terminal.id) }
         let parked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await hold.parked == 1
         }
-        let waking = Task { await fixture.coordinator.wake(terminalID: terminal.id) }
+        let waking = Task { await coordinator.wake(terminalID: terminal.id) }
         // The wake's adoption is the registry's first `adopt`; once it has
         // consulted the slot it is waiting on the release.
         let waiting = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await fixture.registry.adoptionCallsEntered == 1
         }
-        let tearingDown = Task { await fixture.registry.abandon(terminal: terminal) }
+        let tearingDown = Task { await registry.abandon(terminal: terminal) }
         let marked = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             await fixture.registry.letGo(for: terminal.id)?.reason == .teardown
         }
