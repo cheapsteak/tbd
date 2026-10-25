@@ -146,6 +146,14 @@ public final class RPCRouter: Sendable {
     /// keychain on profile delete. Injected so tests can record the requested
     /// service name instead of touching the real keychain.
     public let claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting
+    /// Where profile secrets (`<uuid>.token`) are stored and read back: every
+    /// model-profile handler and the profile resolver this router builds go
+    /// through it, never through `ModelProfileKeychain`'s statics. The default
+    /// resolves `TBD_HOME` from the process environment on every call, exactly
+    /// as the statics do; a test injects a store bound to a scratch environment
+    /// so seeding a secret and reading it back never depend on the
+    /// process-global variable holding still.
+    public let modelProfileKeychain: ModelProfileKeychain.Store
     /// Login-completion watching for profile login sessions. Injected so
     /// tests can shrink the watcher's poll timings.
     public let loginSessions: LoginSessionCoordinator
@@ -508,9 +516,11 @@ public final class RPCRouter: Sendable {
         sessionsDir: URL = TBDConstants.sessionsDir(),
         actuationLog: ActuationLog,
         remoteTranscriptEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        modelProfileKeychain: ModelProfileKeychain.Store = ModelProfileKeychain.Store(),
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.sessionsDir = sessionsDir
+        self.modelProfileKeychain = modelProfileKeychain
         self.recordedAppIdentity = recordedAppIdentity
         self.processSignaller = processSignaller
         self.clock = clock
@@ -574,6 +584,7 @@ public final class RPCRouter: Sendable {
             profiles: db.modelProfiles,
             repos: db.repos,
             config: db.config,
+            keychain: { [modelProfileKeychain] id in try modelProfileKeychain.load(id: id) },
             candidateSource: resolvedCandidateSource,
             reservations: ProfilePickReservations(),
             staleAlerts: StaleAccountAlerts(
