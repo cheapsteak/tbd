@@ -3785,6 +3785,12 @@ final class AppState {
                     }
                     if !self.isConnected { return }
                 }
+                // The reconnect above runs only once an RPC has failed, so it
+                // never sees a sidecar that dropped on its own while RPC stayed
+                // up. This does, and it is paced inside — free while the
+                // sidecar is up, and backed off so a second app instance
+                // cannot make the two take it from each other every tick.
+                await self.daemonClient.reconnectSidecarIfDown()
                 // Guard the whole refresh cycle (refreshAll + the every-15th
                 // pr.list) so a slow daemon can never stack overlapping cycles or
                 // run them concurrently. pollCycle is advanced only when a cycle

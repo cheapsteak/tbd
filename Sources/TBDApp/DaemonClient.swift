@@ -70,7 +70,12 @@ struct AttachFDVendError: LocalizedError {
 /// Uses one-shot POSIX socket connections per RPC call (same approach as the CLI).
 actor DaemonClient {
     private let socketPath: String
+    /// Where the FD sidecar connects. Resolved once, at init, like
+    /// `socketPath`.
+    private let vendSocketPath: String
     private(set) var connected: Bool = false
+    /// Paces `reconnectSidecarIfDown`.
+    private var sidecarReconnectBackoff = SidecarReconnectBackoff()
 
     /// Sidecar for receiving vended pane fds. Connected eagerly right after
     /// the RPC socket, so the daemon's accept has completed long before the
@@ -90,9 +95,10 @@ actor DaemonClient {
     /// returns in milliseconds and never approaches this ceiling.
     nonisolated static let rpcRecvDeadlineSeconds: TimeInterval = 300
 
-    init(socketPath: String? = nil) {
+    init(socketPath: String? = nil, vendSocketPath: String? = nil) {
         // See HookResolver — resolve here, not at the caller's site.
         self.socketPath = socketPath ?? TBDConstants.socketPath
+        self.vendSocketPath = vendSocketPath ?? TBDConstants.vendSocketPath
     }
 
     // MARK: - Connection
@@ -100,6 +106,10 @@ actor DaemonClient {
     /// Attempt to connect to the daemon (verifies socket exists and is reachable).
     /// If the daemon is not running, tries to find and launch `tbdd` automatically.
     func connect() async -> Bool {
+        // A reconnect to the daemon is a fresh start for the sidecar too: the
+        // run of reconnects `reconnectSidecarIfDown` was pacing, if any, was
+        // about a connection this one replaces.
+        sidecarReconnectBackoff = SidecarReconnectBackoff()
         // First try to connect directly
         if tryConnect() {
             connectSidecar()
@@ -139,11 +149,44 @@ actor DaemonClient {
     /// connected, so reconnect retries are safe.
     private func connectSidecar() {
         do {
-            try fdSidecar.connect(path: TBDConstants.vendSocketPath)
+            try fdSidecar.connect(path: vendSocketPath)
         } catch {
             daemonClientLogger.warning(
                 "FD sidecar connect failed (control-mode attach unavailable): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Reconnect the FD sidecar if it is down, paced by
+    /// `SidecarReconnectBackoff`. For a caller that knows the RPC socket is
+    /// up — the poll tick, and a holder attach about to send its request.
+    ///
+    /// `connect()` reconnects the sidecar only after an RPC has failed, so it
+    /// never sees a sidecar that drops on its own: the daemon handing it to a
+    /// second app instance, the frame scanner desyncing, or a daemon restart
+    /// quick enough that no RPC failed in between. Until something reconnects
+    /// it, every new holder tab fails to attach and every control-mode
+    /// keystroke is dropped.
+    ///
+    /// - Parameter now: When this is asked, for the pacing; a test passes its
+    ///   own.
+    /// - Returns: Whether the sidecar is connected afterwards.
+    @discardableResult
+    func reconnectSidecarIfDown(at now: Date = Date()) -> Bool {
+        if let connection = fdSidecar.currentConnection {
+            sidecarReconnectBackoff.noteConnected(connection, at: now)
+            return true
+        }
+        guard sidecarReconnectBackoff.allowsReconnect(at: now) else { return false }
+        connectSidecar()
+        let connection = fdSidecar.currentConnection
+        sidecarReconnectBackoff.noteReconnect(connection, at: now)
+        let reconnects = sidecarReconnectBackoff.reconnects
+        let outcome = connection == nil ? "failed" : "succeeded"
+        daemonClientLogger.info("""
+            FD sidecar was down while the daemon was up; reconnect \
+            \(reconnects, privacy: .public) of this run \(outcome, privacy: .public)
+            """)
+        return connection != nil
     }
 
     /// Try a single connection attempt (non-async).

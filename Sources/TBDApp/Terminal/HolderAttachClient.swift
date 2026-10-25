@@ -246,6 +246,11 @@ struct HolderAttachClient: HolderAttaching {
         // Fresh nonce per attach: the daemon echoes it in the vend header, so a
         // superseded attach's stale fd can never be delivered to this one.
         let attachID = UUID()
+        // The descriptor comes back over the sidecar, so a sidecar that
+        // dropped on its own has to come back first: the daemon would refuse
+        // this attach for want of somewhere to vend it. Paced inside, so a
+        // panel's retries cannot turn this into a reconnect loop.
+        await daemonClient.reconnectSidecarIfDown()
         // Read before the request, and confirmed after the descriptor lands:
         // the same connection on both sides of the vend is one with no
         // reconnect in between, so it is the one the descriptor came over.

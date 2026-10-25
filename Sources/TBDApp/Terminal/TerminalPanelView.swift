@@ -3118,14 +3118,16 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // `connectSidecar()` (`DaemonClient.swift:105`/`121`), and
                 // `FDSidecarClient.connect` proceeds rather than no-opping
                 // because the receive loop already set `socketFD = -1` on EOF
-                // (`FDSidecarClient.swift:264`). What has no recovery is a
-                // *sidecar-only* death with the RPC socket intact — the frame
-                // scanner desyncing, or the protocol-violation `break` — since
-                // nothing clears `isConnected` for those. So the drop is an
-                // episode of a few seconds in the common case and permanent
-                // only in the narrow one; either way it is an episode the app
-                // cannot see the end of from in here, which is why the ack
-                // must not be fabricated.
+                // (`FDSidecarClient.swift:264`). A *sidecar-only* death with
+                // the RPC socket intact — the frame scanner desyncing, the
+                // protocol-violation `break`, a second app instance taking the
+                // sidecar — clears no `isConnected`, and is reconnected by the
+                // same poll through `DaemonClient.reconnectSidecarIfDown`
+                // instead, which backs off when the drops keep coming. So the
+                // drop is an episode of a few seconds in the common case and
+                // can stretch to minutes in a fight; either way it is an
+                // episode the app cannot see the end of from in here, which is
+                // why the ack must not be fabricated.
                 //
                 // It narrows the window without closing it: the socket is
                 // read again on the client's own send queue, so a
