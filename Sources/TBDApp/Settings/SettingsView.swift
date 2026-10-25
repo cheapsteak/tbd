@@ -428,14 +428,7 @@ struct GeneralSettingsTab: View {
         .help("The fleet-wide switch for supervision. On releases TBD's autonomous processes to act on sessions it supervises; off engages the fleet brake and pauses that authority, leaving every per-project mark untouched. Off by default. Turning it on has no visible effect by itself yet — the rest of supervision (turning projects on, choosing their conduct) is shipping in the same series of changes, and nothing acts on this column until that lands.")
     }
 
-    /// How TBD updates itself. Reads the persisted mode from
-    /// `daemon.capabilities` and writes via `config.setUpdateMode`. Off by
-    /// default — `check` makes a periodic network call and `auto` rebuilds and
-    /// replaces the whole installation, so neither happens without a gesture.
-    ///
-    /// A picker rather than a toggle because the middle state is the one worth
-    /// having: watching for updates and installing them are different
-    /// decisions, and most people want the first without the second.
+    /// Which framework draws the transcript's prompt rail: a temporary switch for comparing the two.
     @ViewBuilder
     private var promptRailRendererPicker: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -452,6 +445,14 @@ struct GeneralSettingsTab: View {
         }
     }
 
+    /// How TBD updates itself. Reads the persisted mode from
+    /// `daemon.capabilities` and writes via `config.setUpdateMode`. Off by
+    /// default — `check` makes a periodic network call and `auto` rebuilds and
+    /// replaces the whole installation, so neither happens without a gesture.
+    ///
+    /// A picker rather than a toggle because the middle state is the one worth
+    /// having: watching for updates and installing them are different
+    /// decisions, and most people want the first without the second.
     @ViewBuilder
     private var updateModePicker: some View {
         let capabilities = appState.daemonCapabilities
