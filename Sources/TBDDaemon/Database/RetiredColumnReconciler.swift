@@ -191,6 +191,7 @@ struct RetiredColumnReconciler: Sendable {
             Self.logger.notice(
                 "Pre-column-drop snapshot written to \(snapshot, privacy: .public)")
             report.snapshotPath = snapshot
+            DatabaseSnapshotPruner.prune(databasePath: databasePath)
         } catch {
             Self.logger.error(
                 "Pre-column-drop snapshot failed at \(snapshot, privacy: .public), so no retired column is dropped this run: \(String(describing: error), privacy: .public)")

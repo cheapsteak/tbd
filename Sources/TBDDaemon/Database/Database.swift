@@ -96,6 +96,8 @@ public final class TBDDatabase: Sendable {
             if hasPending {
                 Self.takePreMigrationSnapshot(pool: pool, path: path)
             }
+            // Every start, so a backlog clears at once. Never throws.
+            DatabaseSnapshotPruner.prune(databasePath: path)
         }
         try migrator.migrate(pool)
     }

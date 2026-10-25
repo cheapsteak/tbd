@@ -87,8 +87,10 @@ column, which matters only if a developer makes that build the kept bundle.
 
 Before its first drop in a run, the reconciler copies the database to
 `~/tbd/state.db.pre-column-drop.<UTC-timestamp>` with `VACUUM INTO`, the way
-back for data someone still needed; like the pre-migration snapshot below, it
-is reclaimed by hand. A run whose snapshot fails drops nothing, and a drop that
+back for data someone still needed. `DatabaseSnapshotPruner` keeps the newest
+three copies of each kind (this one and the pre-migration snapshot below) and
+deletes older ones, right after this copy is written and at every daemon start.
+A run whose snapshot fails drops nothing, and a drop that
 fails is logged at error level and skipped without stopping startup.
 
 Design and rationale: [`docs/specs/2026-10-24-column-retirement-design.md`](../../../docs/specs/2026-10-24-column-retirement-design.md).
@@ -303,5 +305,8 @@ disagreement means one side's framing code drifted, not that SQLite changed.
 `~/tbd/state.db.pre-migration.<UTC-timestamp>` (e.g.
 `state.db.pre-migration.20260513T143055Z`) via `VACUUM INTO` whenever migration
 work is pending AND the database file already existed. Failures log at error
-level but do not block the migration — best effort only. Safe to delete the
-snapshot once the upgrade looks clean.
+level but do not block the migration — best effort only. `DatabaseSnapshotPruner`
+keeps the newest three `pre-migration` copies (counted apart from the
+`pre-column-drop` ones) and deletes older ones at every daemon start, matching
+only whole names of the exact form above; other files beside the database are
+never touched. Safe to delete a copy yourself once the upgrade looks clean.
