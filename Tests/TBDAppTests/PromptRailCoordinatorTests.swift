@@ -77,6 +77,71 @@ struct PromptRailCoordinatorTests {
         #expect(presenter.entryLists.last == scene.coordinator.promptEntries)
     }
 
+    /// A streaming tick re-renders only the last row. Rebuilding the outline on
+    /// every tick would re-read every prompt for nothing, so `.updateLast`
+    /// rebuilds it only when the last row is a prompt.
+    @Test("a streamed reply leaves the outline alone; a re-rendered trailing prompt rebuilds it")
+    func updateLastRebuildsOutlineOnlyForAPrompt() throws {
+        let suiteName = "prompt-rail-updatelast-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = PromptRailFixtures.conversation(prompts: 5, replySentences: Self.tallReplies)
+        let scene = TableTranscriptScene(items: items, appState: appState)
+        let presenter = RecordingPresenter()
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        defer { withExtendedLifetime(presenter) {} }
+        scene.coordinator.startObservingScroll()
+        scene.prime(nodes: transcriptRenderNodes(from: items))
+        let entries = scene.coordinator.promptEntries
+        try #require(entries.count == 5)
+        scene.coordinator.promptRailPresenter = presenter
+
+        // Equal outlines never notify, so a rebuild would be invisible. Seed a
+        // stale outline one entry short: a rebuild then shows up as a new list.
+        scene.coordinator.promptEntries = Array(entries.dropLast())
+        let listsBeforeReply = presenter.entryLists.count
+
+        var streamed = items
+        streamed[streamed.count - 1] = .assistantText(
+            id: "a-4",
+            text: String(repeating: "A reply sentence whose prose wraps across the column. ", count: 30),
+            timestamp: nil,
+            usage: nil)
+        let streamedNodes = transcriptRenderNodes(from: streamed)
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: streamedNodes)
+                         == .updateLast,
+                     "precondition: the grown reply arrives as a tail re-render")
+        scene.coordinator.update(
+            nodes: streamedNodes, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+
+        #expect(presenter.entryLists.count == listsBeforeReply,
+                Comment(rawValue: "a streamed reply rebuilt the outline (lists: \(presenter.entryLists.map(\.count)))"))
+        #expect(scene.coordinator.promptEntries.count == 4)
+
+        // A trailing prompt arrives (an append rebuilds the outline), then
+        // re-renders with new text.
+        let withPrompt = streamed + [.userPrompt(id: "p-5", text: "Prompt 5", timestamp: nil)]
+        scene.coordinator.update(
+            nodes: transcriptRenderNodes(from: withPrompt), atBottom: .constant(false),
+            activityToggleToken: 0, linkRoot: "")
+        try #require(scene.coordinator.promptEntries.count == 6)
+        let listsBeforeEdit = presenter.entryLists.count
+
+        var edited = withPrompt
+        edited[edited.count - 1] = .userPrompt(id: "p-5", text: "Prompt 5, edited", timestamp: nil)
+        let editedNodes = transcriptRenderNodes(from: edited)
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: editedNodes)
+                         == .updateLast,
+                     "precondition: the edited prompt arrives as a tail re-render")
+        scene.coordinator.update(
+            nodes: editedNodes, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+
+        #expect(presenter.entryLists.count == listsBeforeEdit + 1)
+        #expect(scene.coordinator.promptEntries.last?.firstLine == "Prompt 5, edited")
+    }
+
     @Test("the active prompt follows the scroll position")
     func activeFollowsScroll() throws {
         let suiteName = "prompt-rail-scroll-\(UUID().uuidString)"
@@ -214,6 +279,10 @@ struct PromptRailCoordinatorTests {
         defer { withExtendedLifetime(scene.coordinator) {} }
         scene.coordinator.startObservingScroll()
         scene.prime(nodes: transcriptRenderNodes(from: items))
+        // Priming's own update must already pick the last prompt, so the
+        // update hook is pinned and not only the manual refresh below.
+        #expect(scene.coordinator.activePromptIndex == 2,
+                "the update hook did not pick the last prompt")
         // Re-read against the settled layout rather than the one priming's
         // update saw.
         scene.coordinator.refreshActivePrompt()

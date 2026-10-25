@@ -1,13 +1,26 @@
 import AppKit
 
-/// Prompt rail tracking: the outline of prompts in `nodes` and which one is
-/// active for the current scroll position, reported to `promptRailPresenter`.
+/// Prompt rail tracking and navigation: the outline of prompts in `nodes`,
+/// which one is active for the current scroll position (reported to
+/// `promptRailPresenter`), and jumps to a prompt.
 ///
-/// Both refreshes read node data and `rect(ofRow:)` only. `rect(ofRow:)` sums
+/// Everything here reads node data and `rect(ofRow:)` only. `rect(ofRow:)` sums
 /// row heights the table already holds (cached exact heights or per-kind
 /// estimates), so nothing here builds or measures a cell.
 @MainActor
 extension TableTranscriptView.Coordinator {
+    /// How far below the viewport top a jump puts its target row's top.
+    static let jumpTopInset: CGFloat = 16
+
+    /// Slack on Previous's "inside the exchange" test. A jump leaves its target
+    /// at `jumpTopInset` only to within the re-pin's tolerance, so without it a
+    /// Previous pressed right after a jump could read the reader as inside the
+    /// exchange and jump to the same prompt again instead of the one before.
+    private static let insideExchangeSlack: CGFloat = 1
+
+    /// The Previous Prompt and Next Prompt commands.
+    enum PromptStep { case previous, next }
+
     /// Rebuilds the outline from `nodes`, tells the presenter if it changed,
     /// then re-derives the active prompt. `update(...)` calls it once the table
     /// holds the new rows.
@@ -45,6 +58,22 @@ extension TableTranscriptView.Coordinator {
         promptRailPresenter?.promptRail(activeIndexDidChange: index)
     }
 
+    /// Whether an `.updateLast` can change the outline: only when the last row
+    /// is a prompt or peer message now, or was an entry of the outline being
+    /// replaced. A streaming reply is neither, so its ticks skip the rebuild.
+    /// Call once `nodes` holds the new array; `.updateLast` keeps the row count,
+    /// so the old outline's row indices still name the same rows.
+    func updateLastCanChangeOutline() -> Bool {
+        if let last = promptEntries.last, last.rowIndex == nodes.count - 1 { return true }
+        guard let node = nodes.last, case .chatBubble(let item) = node.kind else { return false }
+        switch item {
+        case .userPrompt, .peerMessage:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Whether the entries still name the rows they were built from. A
     /// clip-bounds change can post from inside `update(...)` — a reload that
     /// clamps the clip, or the prepend restore — after `nodes` moved and before
@@ -59,5 +88,98 @@ extension TableTranscriptView.Coordinator {
         return [first, last].allSatisfy { entry in
             entry.rowIndex < rowCount && nodes[entry.rowIndex].id == entry.id
         }
+    }
+
+    // MARK: Jumping
+
+    /// Scrolls at once, unanimated, so the row for `id` has its top
+    /// `jumpTopInset` below the viewport top, clamped to the scrollable range,
+    /// and holds it there: the row becomes `pendingJumpAnchor`, re-pinned
+    /// whenever a row above it corrects an estimated height, and
+    /// `heldJumpTargetID`, which keeps it the active prompt. Nothing above the
+    /// target is measured; the pin absorbs those rows' corrections as they
+    /// realize. See `pendingJumpAnchor` for what releases the hold.
+    ///
+    /// An id with no row is ignored, unlike `scrollToRow(withNodeID:)`, whose
+    /// fallback to the end suits the composer hint that uses it.
+    func jump(toNodeID id: String) {
+        guard let tableView, let scrollView,
+              let row = nodes.firstIndex(where: { $0.id == id }),
+              row < tableView.numberOfRows
+        else { return }
+        let clip = scrollView.contentView
+        let rowTop = tableView.rect(ofRow: row).minY
+        let maxOrigin = max(0, tableView.frame.height - clip.bounds.height)
+        let origin = min(max(0, rowTop - Self.jumpTopInset), maxOrigin)
+
+        // The jump moves the reader, so a held prepend anchor no longer says
+        // where they are looking: a later correction above it would pull the
+        // viewport back. The previous jump's anchor is replaced below.
+        pendingPrependAnchor = nil
+        // Held before the move, so the active prompt the move reports through
+        // the bounds observer is already the target.
+        heldJumpTargetID = id
+        do {
+            isRestoringAnchor = true
+            defer { isRestoringAnchor = false }
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: origin))
+            scrollView.reflectScrolledClipView(clip)
+        }
+        pendingJumpAnchor = PrependAnchor(
+            id: id, offset: rowTop - origin, gapToBottom: viewportGapToBottom())
+        refreshActivePrompt()
+        // Re-assert once more on the next turn, after AppKit has laid out the
+        // rows the move brought on screen and corrected their heights — the
+        // same double pin the prepend path and the initial open use.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let held = self.pendingJumpAnchor else { return }
+            self.restorePrependAnchor(held)
+        }
+    }
+
+    /// Previous Prompt and Next Prompt.
+    ///
+    /// - Previous jumps to the active prompt itself when the reader is inside
+    ///   its exchange, its top more than `jumpTopInset` above the viewport top,
+    ///   and otherwise to the prompt before it. From the top of the first
+    ///   prompt it does nothing.
+    /// - Next jumps to the prompt after the active one. From the last prompt it
+    ///   scrolls to the end of the transcript and stops holding the target.
+    /// - With no active prompt, Next jumps to the first and Previous does
+    ///   nothing.
+    func jumpToPrompt(_ step: PromptStep) {
+        let entries = promptEntries
+        guard !entries.isEmpty else { return }
+        guard let active = activePromptIndex, entries.indices.contains(active) else {
+            if step == .next { jump(toNodeID: entries[0].id) }
+            return
+        }
+        switch step {
+        case .previous:
+            guard let tableView, let scrollView else { return }
+            let rowTop = tableView.rect(ofRow: entries[active].rowIndex).minY
+            let depth = scrollView.contentView.bounds.minY - rowTop
+            let target = depth > Self.jumpTopInset + Self.insideExchangeSlack ? active : active - 1
+            guard target >= 0 else { return }
+            jump(toNodeID: entries[target].id)
+        case .next:
+            if active + 1 < entries.count {
+                jump(toNodeID: entries[active + 1].id)
+                return
+            }
+            // From the last prompt. Released before the scroll: when the clip
+            // is already at the end the scroll posts nothing, so the observer
+            // would not release it.
+            releaseJumpAnchor()
+            scrollToEnd(animated: false)
+            refreshActivePrompt()
+        }
+    }
+
+    /// Stops holding the last jump's target, as an anchor and as the active
+    /// prompt. Every caller re-derives the active prompt on its own path.
+    func releaseJumpAnchor() {
+        pendingJumpAnchor = nil
+        heldJumpTargetID = nil
     }
 }

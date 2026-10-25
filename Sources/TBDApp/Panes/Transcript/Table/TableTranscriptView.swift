@@ -267,11 +267,22 @@ struct TableTranscriptView: NSViewRepresentable {
         /// width changes, or an update changes the rows again. While held, a realize-time height correction of
         /// a row ABOVE the anchor (an estimated row realizing in AppKit's overdraw
         /// region) re-pins the anchor, so heights settling above the reader never
-        /// drag the rows they are reading.
-        private(set) var pendingPrependAnchor: PrependAnchor?
-        /// Set while the coordinator itself moves the clip to restore an anchor,
-        /// so the bounds observer can tell that scroll from the reader's.
-        private var isRestoringAnchor = false
+        /// drag the rows they are reading. A jump to a prompt moves the reader
+        /// and releases it too, which is why the setter is internal: `jump(toNodeID:)`
+        /// lives in TableTranscriptView+PromptRail.swift.
+        var pendingPrependAnchor: PrependAnchor?
+        /// The anchor of the last jump to a prompt (`jump(toNodeID:)`): the target
+        /// row and where it landed in the viewport. Re-pinned exactly as
+        /// `pendingPrependAnchor` is, and held until the reader scrolls, the width
+        /// changes, the rows rebuild or history is prepended. Appends, tail
+        /// re-renders and `.noop`s add or change rows below it and keep it.
+        /// Released together with `heldJumpTargetID`. Set only by the jump; the
+        /// setter is internal for the same reason as `pendingPrependAnchor`'s.
+        var pendingJumpAnchor: PrependAnchor?
+        /// Set while the coordinator itself moves the clip — restoring an anchor
+        /// or jumping — so the bounds observer can tell that scroll from the
+        /// reader's.
+        var isRestoringAnchor = false
 
         // MARK: Prompt rail state (see TableTranscriptView+PromptRail.swift)
 
@@ -292,6 +303,7 @@ struct TableTranscriptView: NSViewRepresentable {
         /// `refreshActivePrompt()` and written only there. Nil with no entries.
         var activePromptIndex: Int?
         /// Node id of a jump target that stays active until the reader scrolls.
+        /// Set by `jump(toNodeID:)` and released with `pendingJumpAnchor`.
         var heldJumpTargetID: String?
 
         /// The worktree root the entries in `composedCache` were composed
@@ -701,10 +713,14 @@ struct TableTranscriptView: NSViewRepresentable {
                 ctx.duration = 0
                 tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
             }
-            // A row above a held prepend anchor just changed height, which moved
-            // the anchor by the same amount: re-pin it. Rows at or below the
-            // anchor cannot move it, and outside a prepend nothing is held.
+            // A row above a held prepend or jump anchor just changed height,
+            // which moved the anchor by the same amount: re-pin it. Rows at or
+            // below the anchor cannot move it, and outside a prepend or a jump
+            // nothing is held.
             if let anchor = pendingPrependAnchor, row < anchorRowIndex(anchor) {
+                restorePrependAnchor(anchor)
+            }
+            if let anchor = pendingJumpAnchor, row < anchorRowIndex(anchor) {
                 restorePrependAnchor(anchor)
             }
         }
@@ -1988,6 +2004,11 @@ struct TableTranscriptView: NSViewRepresentable {
             // `onNearTop` — leaves it held so heights still settling above the
             // reader keep re-pinning it.
             if step != .noop || isPrepend { pendingPrependAnchor = nil }
+            // A jump anchor is held by row identity, so appended rows and a
+            // re-rendered tail, which only add or change rows below it, keep it.
+            // A rebuild re-lays the rows around it, and a prepend brings its own
+            // anchor for where the reader is looking.
+            if step == .rebuild || isPrepend { releaseJumpAnchor() }
 
             // Worktree-root change: the composed blocks carry the `.link` ranges
             // the link pass baked in, and `composedCache` is keyed by
@@ -2012,6 +2033,7 @@ struct TableTranscriptView: NSViewRepresentable {
             if abs(width - cachedColumnWidth) > 0.5 {
                 cachedColumnWidth = width
                 pendingPrependAnchor = nil
+                releaseJumpAnchor()
                 heightCache.removeAll(keepingCapacity: true)
                 estimateCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
@@ -2031,6 +2053,9 @@ struct TableTranscriptView: NSViewRepresentable {
                 // Nothing about the content moved, but a root change means every
                 // realized cell holds prose composed against the old root.
                 if rootChanged { tableView.reloadData() }
+                // A prepend token on an unchanged array still released a held
+                // jump target above, so the rule picks the active prompt again.
+                if isPrepend { refreshActivePrompt() }
                 return
             }
 
@@ -2122,8 +2147,15 @@ struct TableTranscriptView: NSViewRepresentable {
             }
 
             // After the table ops and any anchor restore, so the active prompt
-            // is read off the rows and clip the reader will see.
-            refreshPromptOutline()
+            // is read off the rows and clip the reader will see. A streaming
+            // tick re-renders only the last row: unless that row is or was a
+            // prompt, the outline cannot have changed, so skip rebuilding it
+            // and re-read the active prompt against the grown document.
+            if step == .updateLast, !updateLastCanChangeOutline() {
+                refreshActivePrompt()
+            } else {
+                refreshPromptOutline()
+            }
 
             // Follow the tail only for content the SESSION produced. A user-driven
             // disclosure toggle keeps the viewport exactly where it is, so the row
@@ -2227,10 +2259,15 @@ struct TableTranscriptView: NSViewRepresentable {
         }
 
         @objc private func clipBoundsDidChange() {
-            // The reader moved the viewport: a held prepend anchor no longer
-            // describes where they are looking, so stop re-pinning it. The
-            // coordinator's own restore scroll is the one move that keeps it.
-            if !isRestoringAnchor { pendingPrependAnchor = nil }
+            // The reader moved the viewport: a held prepend or jump anchor no
+            // longer describes where they are looking, so stop re-pinning it,
+            // and a jump target stops overriding the active-prompt rule. The
+            // coordinator's own restore and jump scrolls are the moves that
+            // keep them.
+            if !isRestoringAnchor {
+                pendingPrependAnchor = nil
+                releaseJumpAnchor()
+            }
             reportNearTopIfChanged()
             if let binding = atBottomBinding {
                 let value = isViewportAtBottomForButton()
@@ -2290,7 +2327,8 @@ struct TableTranscriptView: NSViewRepresentable {
         /// so the viewport keeps its recorded distance from the bottom. Reads
         /// `rect(ofRow:)` NOW, so it accounts for whatever heights (exact or
         /// estimated) the rows above currently have; calling it again after any
-        /// of them changes is what keeps the anchor pinned. Idempotent.
+        /// of them changes is what keeps the anchor pinned. Idempotent. A jump
+        /// anchor (`pendingJumpAnchor`) is restored the same way.
         func restorePrependAnchor(_ anchor: PrependAnchor) {
             guard !isRestoringAnchor, let tableView, let scrollView else { return }
             let clip = scrollView.contentView
@@ -2336,7 +2374,7 @@ struct TableTranscriptView: NSViewRepresentable {
         /// Vertical gap between the viewport's bottom edge and the document
         /// bottom, in points (≤0 when the last content is flush with or above the
         /// viewport bottom).
-        private func viewportGapToBottom() -> CGFloat {
+        func viewportGapToBottom() -> CGFloat {
             guard let scrollView, let documentView = scrollView.documentView else { return 0 }
             let clip = scrollView.contentView
             let visibleMaxY = clip.bounds.origin.y + clip.bounds.height
