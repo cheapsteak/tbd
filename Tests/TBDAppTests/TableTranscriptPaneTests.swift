@@ -836,6 +836,14 @@ struct TableTranscriptPaneTests {
         try #require(scene.gapToBottom > 120,
                      Comment(rawValue: "precondition: the viewport must be clear of the tail-follow "
                          + "threshold (gap=\(scene.gapToBottom))"))
+        // The prepend anchors the first visible row with a stable id. Every
+        // id here is stable, and row 20 is parked 150pt down, so that is a
+        // row above it, read the way `capturePrependAnchor` reads it.
+        let clip = scene.scrollView.contentView
+        let firstVisible = scene.tableView.rows(in: clip.documentVisibleRect).location
+        try #require(firstVisible != NSNotFound && firstVisible < 20,
+                     Comment(rawValue: "precondition: rows above row 20 are on screen (first \(firstVisible))"))
+        let anchorID = before[firstVisible].id
 
         scene.coordinator.update(
             nodes: after, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
@@ -844,10 +852,12 @@ struct TableTranscriptPaneTests {
         await drainMainQueue()
         scene.settle()
         let anchor = try #require(scene.coordinator.pendingPrependAnchor,
-                                  "precondition: the prepend still holds its anchor once its rows settled")
-        try #require(anchor.id == before[20].id)
+                                  Comment(rawValue: "precondition: the prepend still holds its anchor once its rows "
+                                      + "settled; \(scene.heldReaderMoveNote)"))
+        try #require(anchor.id == anchorID,
+                     Comment(rawValue: "precondition: the prepend anchored the first visible row, \(anchorID); "
+                         + scene.heldReaderMoveNote))
 
-        let clip = scene.scrollView.contentView
         let origin = clip.bounds.minY
         scene.scrollView.frame = NSRect(
             x: 0, y: 0, width: TableTranscriptScene.width, height: TableTranscriptScene.viewportHeight - 100)
@@ -855,11 +865,13 @@ struct TableTranscriptPaneTests {
         try #require(clip.bounds.height < TableTranscriptScene.viewportHeight - 50,
                      Comment(rawValue: "precondition: the viewport got shorter (\(clip.bounds.height) pt)"))
         try #require(abs(clip.bounds.minY - origin) <= 0.5,
-                     Comment(rawValue: "precondition: the origin stayed (\(origin) → \(clip.bounds.minY))"))
+                     Comment(rawValue: "precondition: the origin stayed (\(origin) → \(clip.bounds.minY)); "
+                         + scene.heldReaderMoveNote))
         // Whether or not the resize itself posted one, the observer hears a
         // bounds change against the new size, as it would from AppKit.
         NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: clip)
-        #expect(scene.coordinator.pendingPrependAnchor == anchor, "a viewport resize released the prepend anchor")
+        #expect(scene.coordinator.pendingPrependAnchor == anchor,
+                Comment(rawValue: "a viewport resize released the prepend anchor; \(scene.heldReaderMoveNote)"))
 
         scene.scroll(toY: clip.bounds.minY + 120)
         #expect(scene.coordinator.pendingPrependAnchor == nil, "a reader scroll left the prepend anchor held")
