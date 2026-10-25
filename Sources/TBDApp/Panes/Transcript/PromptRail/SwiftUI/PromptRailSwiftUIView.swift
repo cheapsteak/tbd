@@ -114,7 +114,7 @@ struct PromptRailSwiftUIView: View {
         return ZStack(alignment: .topLeading) {
             ForEach(entries.indices, id: \.self) { index in
                 let entry = entries[index]
-                Button(PromptRailNSView.accessibilityLabel(for: entry, now: now)) {
+                Button(PromptRailAccessibility.label(for: entry, now: now)) {
                     state.onJump?(entry.id)
                 }
                 .frame(width: PromptRailLayout.width, height: layout.pitch)
@@ -220,11 +220,10 @@ final class PromptRailPointer {
 }
 
 extension PromptRailFade {
-    /// The SwiftUI spelling of `configure(_:height:fadesTop:fadesBottom:)`:
-    /// fades the top and/or bottom `PromptRailLayout.fadeHeight` of a view
-    /// `height` tall, used as a mask.
+    /// The SwiftUI spelling of the fade: fades the top and/or bottom
+    /// `PromptRailLayout.fadeHeight` of a view `height` tall, used as a mask.
     static func gradient(height: CGFloat, fadesTop: Bool, fadesBottom: Bool) -> LinearGradient {
-        let fraction = height > 0 ? min(0.5, PromptRailLayout.fadeHeight / height) : 0
+        let fraction = edgeFraction(height: height)
         return LinearGradient(
             stops: [
                 Gradient.Stop(color: fadesTop ? .clear : .black, location: 0),

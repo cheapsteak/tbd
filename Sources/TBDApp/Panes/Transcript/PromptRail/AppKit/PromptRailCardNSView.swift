@@ -8,12 +8,13 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 /// notches. `TranscriptContainerView` opens and closes it as
 /// `PromptRailHoverModel` says.
 ///
-/// - **Size** – `maxWidth` wide, capped at the pane's width minus `paneInset`,
-///   and at most as tall as the rail. A longer list scrolls inside, without
-///   scrollers, behind 24pt fades over whichever edge clips a row.
-/// - **Opening** – fades in over `fadeDuration`, easing out, with the list
-///   scrolled so the row for the pointed notch sits under the pointer, or as
-///   close as the list's ends allow.
+/// - **Size** – `PromptRailCardMetrics.maxWidth` wide, capped at the pane's
+///   width minus `PromptRailCardMetrics.paneInset`, and at most as tall as the
+///   rail. A longer list scrolls inside, without scrollers, behind 24pt fades
+///   over whichever edge clips a row.
+/// - **Opening** – fades in over `PromptRailCardMetrics.fadeDuration`, easing
+///   out, with the list scrolled so the row for the pointed notch sits under
+///   the pointer, or as close as the list's ends allow.
 /// - **Updates** – a new outline while open updates the rows in place; the
 ///   card neither closes nor moves its list.
 /// - **Rows** – drawn, not built: a flipped list view draws only the rows a
@@ -24,25 +25,7 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 ///   row reads "Earlier prompts not loaded" beside a Load button that calls the
 ///   pane's load-earlier action. Nothing else here loads history.
 final class PromptRailCardNSView: NSView {
-    static let maxWidth: CGFloat = 320
-    /// The card leaves this much of the pane's width uncovered.
-    static let paneInset: CGFloat = 24
-    static let rowHeight: CGFloat = 22
-    static let fontSize: CGFloat = 13
-    /// Starts at the rail's notch leading edge, so the dashes sit over the notches.
-    static let dashColumnLeading: CGFloat = PromptRailLayout.notchLeading
-    static let dashColumnWidth: CGFloat = 18
-    static let dashGap: CGFloat = 8
-    static let verticalPadding: CGFloat = 6
-    static let trailingPadding: CGFloat = 10
-    static let timeGap: CGFloat = 8
-    static let hoverCornerRadius: CGFloat = 6
-    static let cornerRadius: CGFloat = 8
-    static let fadeDuration: TimeInterval = 0.15
-    static let earlierRowText = "Earlier prompts not loaded"
-
-    /// Where row text starts: after the dash column and its gap.
-    static var textLeading: CGFloat { dashColumnLeading + dashColumnWidth + dashGap }
+    private typealias Metrics = PromptRailCardMetrics
 
     private let hover: PromptRailHoverModel
     private let onJump: @MainActor (String) -> Void
@@ -73,7 +56,7 @@ final class PromptRailCardNSView: NSView {
     private let listHost = PromptRailFlippedView()
     private let listView = PromptRailCardListView()
     private let fadeMask = CAGradientLayer()
-    private let earlierLabel = NSTextField(labelWithString: PromptRailCardNSView.earlierRowText)
+    private let earlierLabel = NSTextField(labelWithString: PromptRailCardMetrics.earlierRowText)
     private let loadButton = NSButton(title: "Load", target: nil, action: nil)
     private var hoverTrackingArea: NSTrackingArea?
     private var pointerInside = false
@@ -85,7 +68,7 @@ final class PromptRailCardNSView: NSView {
         isHidden = true
         alphaValue = 0
         wantsLayer = true
-        layer?.cornerRadius = Self.cornerRadius
+        layer?.cornerRadius = Metrics.cornerRadius
         layer?.borderWidth = 0.5
         layer?.masksToBounds = false
         layer?.shadowOpacity = 1
@@ -93,7 +76,7 @@ final class PromptRailCardNSView: NSView {
         layer?.shadowOffset = .zero
 
         listHost.wantsLayer = true
-        listHost.layer?.cornerRadius = Self.cornerRadius
+        listHost.layer?.cornerRadius = Metrics.cornerRadius
         listHost.layer?.masksToBounds = true
         addSubview(listHost)
 
@@ -113,7 +96,7 @@ final class PromptRailCardNSView: NSView {
             name: NSView.boundsDidChangeNotification,
             object: listScrollView.contentView)
 
-        earlierLabel.font = .systemFont(ofSize: Self.fontSize)
+        earlierLabel.font = .systemFont(ofSize: Metrics.fontSize)
         earlierLabel.textColor = .secondaryLabelColor
         earlierLabel.lineBreakMode = .byTruncatingTail
         loadButton.target = self
@@ -157,7 +140,7 @@ final class PromptRailCardNSView: NSView {
     }
 
     private var contentHeight: CGFloat {
-        Self.verticalPadding * 2 + CGFloat(rowCount) * Self.rowHeight
+        Metrics.verticalPadding * 2 + CGFloat(rowCount) * Metrics.rowHeight
     }
 
     /// Takes a new outline, active entry and earlier-history state. Rows
@@ -210,7 +193,7 @@ final class PromptRailCardNSView: NSView {
         alphaValue = 0
         applyVisibility()
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = Self.fadeDuration
+            context.duration = Metrics.fadeDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = 1
         }
@@ -234,12 +217,12 @@ final class PromptRailCardNSView: NSView {
         onShownChange?(!hidden)
     }
 
-    /// Sizes the card against the pane: `maxWidth` capped at the pane's width
-    /// minus `paneInset`, as tall as its rows up to the pane's height, at the
-    /// rail's top-left.
+    /// Sizes the card against the pane: `PromptRailCardMetrics.maxWidth`
+    /// capped at the pane's width minus `PromptRailCardMetrics.paneInset`, as
+    /// tall as its rows up to the pane's height, at the rail's top-left.
     func layoutCard(maxSize: CGSize) {
         self.maxSize = maxSize
-        let width = max(0, min(Self.maxWidth, maxSize.width - Self.paneInset))
+        let width = max(0, min(Metrics.maxWidth, maxSize.width - Metrics.paneInset))
         let height = max(0, min(contentHeight, maxSize.height))
         let widthChanged = width != frame.width
         let cardFrame = NSRect(x: 0, y: 0, width: width, height: height)
@@ -253,7 +236,7 @@ final class PromptRailCardNSView: NSView {
         layoutEarlierRow(width: width)
         if widthChanged || listView.toolTipsStale { listView.rebuildToolTips() }
         // CGPath traps on a corner larger than half the rectangle.
-        let radius = max(0, min(Self.cornerRadius, bounds.width / 2, bounds.height / 2))
+        let radius = max(0, min(Metrics.cornerRadius, bounds.width / 2, bounds.height / 2))
         layer?.shadowPath = CGPath(
             roundedRect: bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
         updateFades()
@@ -261,18 +244,18 @@ final class PromptRailCardNSView: NSView {
 
     private func layoutEarlierRow(width: CGFloat) {
         guard showsEarlierRow else { return }
-        let row = Self.rowRect(0, width: width)
+        let row = Metrics.rowRect(0, width: width)
         let buttonSize = loadButton.fittingSize
         loadButton.frame = NSRect(
-            x: row.maxX - Self.trailingPadding - buttonSize.width,
+            x: row.maxX - Metrics.trailingPadding - buttonSize.width,
             y: row.midY - buttonSize.height / 2,
             width: buttonSize.width,
             height: buttonSize.height)
         let labelHeight = earlierLabel.fittingSize.height
         earlierLabel.frame = NSRect(
-            x: Self.textLeading,
+            x: Metrics.textLeading,
             y: row.midY - labelHeight / 2,
-            width: max(0, loadButton.frame.minX - Self.timeGap - Self.textLeading),
+            width: max(0, loadButton.frame.minX - Metrics.timeGap - Metrics.textLeading),
             height: labelHeight)
     }
 
@@ -285,7 +268,7 @@ final class PromptRailCardNSView: NSView {
     /// Scrolls so the centre of `row` sits at `y` in card coordinates,
     /// clamped to the list's ends.
     private func scrollList(row: Int, under y: CGFloat) {
-        scrollList(toOffset: Self.rowRect(row, width: bounds.width).midY - y)
+        scrollList(toOffset: Metrics.rowRect(row, width: bounds.width).midY - y)
     }
 
     private func scrollList(toOffset offset: CGFloat) {
@@ -397,16 +380,9 @@ final class PromptRailCardNSView: NSView {
 
     // MARK: Geometry
 
-    /// A row's rectangle in list coordinates.
-    static func rowRect(_ row: Int, width: CGFloat) -> NSRect {
-        NSRect(
-            x: 0, y: verticalPadding + CGFloat(row) * rowHeight,
-            width: width, height: rowHeight)
-    }
-
     /// The row containing list y `y`, or nil above the first or below the last.
     static func row(atY y: CGFloat, rowCount: Int) -> Int? {
-        let raw = ((y - verticalPadding) / rowHeight).rounded(.down)
+        let raw = ((y - Metrics.verticalPadding) / Metrics.rowHeight).rounded(.down)
         guard raw >= 0, raw < CGFloat(rowCount) else { return nil }
         return Int(raw)
     }
@@ -424,11 +400,7 @@ private final class PromptRailFlippedView: NSView {
 /// the data and layout.
 private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
     private typealias Card = PromptRailCardNSView
-
-    /// Characters of a first line that are laid out at all. Far more than a
-    /// 320pt row can show, so a longer line still truncates at the tail, and
-    /// a first line of a large paste costs no more to draw than a short one.
-    private static let drawnPrefix = 400
+    private typealias Metrics = PromptRailCardMetrics
 
     private(set) var entries: [PromptOutlineEntry] = []
     private(set) var showsEarlierRow = false
@@ -449,9 +421,9 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
     /// rebuilds the tooltips.
     private(set) var toolTipsStale = true
 
-    private let regularFont = NSFont.systemFont(ofSize: Card.fontSize)
-    private let activeFont = NSFont.systemFont(ofSize: Card.fontSize, weight: .medium)
-    private let timeFont = NSFont.monospacedDigitSystemFont(ofSize: Card.fontSize, weight: .regular)
+    private let regularFont = NSFont.systemFont(ofSize: Metrics.fontSize)
+    private let activeFont = NSFont.systemFont(ofSize: Metrics.fontSize, weight: .medium)
+    private let timeFont = NSFont.monospacedDigitSystemFont(ofSize: Metrics.fontSize, weight: .regular)
     private let truncating: NSParagraphStyle = {
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byTruncatingTail
@@ -493,7 +465,7 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
     }
 
     private func invalidateRow(_ row: Int) {
-        setNeedsDisplay(Card.rowRect(row, width: bounds.width))
+        setNeedsDisplay(Metrics.rowRect(row, width: bounds.width))
     }
 
     /// The entry row under `point`, or nil off the rows or on the earlier row.
@@ -509,8 +481,8 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
 
     override func draw(_ dirtyRect: NSRect) {
         guard rowCount > 0 else { return }
-        let first = max(0, Int(((dirtyRect.minY - Card.verticalPadding) / Card.rowHeight).rounded(.down)))
-        let last = min(rowCount - 1, Int(((dirtyRect.maxY - Card.verticalPadding) / Card.rowHeight).rounded(.down)))
+        let first = max(0, Int(((dirtyRect.minY - Metrics.verticalPadding) / Metrics.rowHeight).rounded(.down)))
+        let last = min(rowCount - 1, Int(((dirtyRect.maxY - Metrics.verticalPadding) / Metrics.rowHeight).rounded(.down)))
         guard first <= last else { return }
         for row in first...last { drawRow(row) }
     }
@@ -519,19 +491,19 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
         guard let index = entryIndex(forRow: row) else { return }
         let entry = entries[index]
         let active = index == activeIndex
-        let rect = Card.rowRect(row, width: bounds.width)
+        let rect = Metrics.rowRect(row, width: bounds.width)
 
         if row == hoveredRow {
             NSColor.quaternarySystemFill.setFill()
             NSBezierPath(
                 roundedRect: rect.insetBy(dx: 1, dy: 0),
-                xRadius: Card.hoverCornerRadius, yRadius: Card.hoverCornerRadius
+                xRadius: Metrics.hoverCornerRadius, yRadius: Metrics.hoverCornerRadius
             ).fill()
         }
 
         let dashSize = active ? PromptRailLayout.activeNotch : PromptRailLayout.inactiveNotch
         let dash = NSRect(
-            x: Card.dashColumnLeading, y: rect.midY - dashSize.height / 2,
+            x: Metrics.dashColumnLeading, y: rect.midY - dashSize.height / 2,
             width: dashSize.width, height: dashSize.height)
         PromptRailNotchStyle.color(for: entry.kind, active: active).setFill()
         NSBezierPath(roundedRect: dash, xRadius: dashSize.height / 2, yRadius: dashSize.height / 2).fill()
@@ -541,14 +513,14 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
             let size = time.size()
             time.draw(
                 with: NSRect(
-                    x: rect.maxX - Card.trailingPadding - size.width, y: rect.midY - size.height / 2,
+                    x: rect.maxX - Metrics.trailingPadding - size.width, y: rect.midY - size.height / 2,
                     width: size.width, height: size.height),
                 options: [.usesLineFragmentOrigin])
         }
         let lineHeight = ceil(regularFont.ascender - regularFont.descender + regularFont.leading)
         layout.title.draw(
             with: NSRect(
-                x: Card.textLeading, y: rect.midY - lineHeight / 2,
+                x: Metrics.textLeading, y: rect.midY - lineHeight / 2,
                 width: max(0, layout.titleWidth), height: lineHeight),
             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
@@ -568,7 +540,7 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
                 .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: truncating,
             ]))
         }
-        title.append(NSAttributedString(string: String(entry.firstLine.prefix(Self.drawnPrefix)), attributes: [
+        title.append(NSAttributedString(string: String(entry.firstLine.prefix(Metrics.drawnPrefix)), attributes: [
             .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: truncating,
         ]))
 
@@ -576,9 +548,9 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
         let time = label.isEmpty ? nil : NSAttributedString(string: label, attributes: [
             .font: timeFont, .foregroundColor: NSColor.secondaryLabelColor,
         ])
-        var trailing = rowWidth - Card.trailingPadding
-        if let time { trailing -= time.size().width + Card.timeGap }
-        return (title, time, trailing - Card.textLeading)
+        var trailing = rowWidth - Metrics.trailingPadding
+        if let time { trailing -= time.size().width + Metrics.timeGap }
+        return (title, time, trailing - Metrics.textLeading)
     }
 
     private func timeLabel(for entry: PromptOutlineEntry) -> String {
@@ -602,7 +574,7 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
         for index in entries.indices {
             let layout = textLayout(index, rowWidth: width)
             guard layout.title.size().width > layout.titleWidth else { continue }
-            _ = addToolTip(Card.rowRect(rowFor(index), width: width), owner: self, userData: nil)
+            _ = addToolTip(Metrics.rowRect(rowFor(index), width: width), owner: self, userData: nil)
         }
     }
 

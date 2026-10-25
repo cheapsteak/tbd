@@ -12,7 +12,7 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 /// - **Shown** – while the hover model has the card open and it has at least
 ///   one row. A rail with no prompts opens no empty card, and an open card
 ///   shows as soon as a prompt arrives.
-/// - **Fade** – the card fades in over `PromptRailCardNSView.fadeDuration`,
+/// - **Fade** – the card fades in over `PromptRailCardMetrics.fadeDuration`,
 ///   easing out, and leaves at once: Escape, a row click and app deactivation
 ///   close it at once, and the hover grace has already been spent by then.
 /// - **Escape** – the monitor runs exactly while the card is shown. It is
@@ -56,7 +56,7 @@ struct PromptRailCardOverlay: View {
         // The overlay spans the pane; with no card it must take no clicks
         // from the table under it.
         .allowsHitTesting(shown)
-        .animation(.easeOut(duration: PromptRailCardNSView.fadeDuration), value: shown)
+        .animation(.easeOut(duration: PromptRailCardMetrics.fadeDuration), value: shown)
         .onChange(of: shown, initial: true) { _, shown in
             if shown {
                 escape.start { hover.dismiss(.escape) }
@@ -78,12 +78,12 @@ struct PromptRailCardOverlay: View {
 
 /// The SwiftUI renderer's hover card: every prompt by first line and time,
 /// anchored at the rail's top-left with its dash column over the rail's
-/// notches. Geometry, typography and colours are the AppKit card's
-/// (`PromptRailCardNSView`'s constants), so the two renderers differ in
-/// framework alone.
+/// notches. Geometry, typography and colours are shared with the AppKit card
+/// (`PromptRailCardMetrics`, `PromptRailNotchStyle`), so the two renderers
+/// differ in framework alone.
 ///
-/// - **Size** – `PromptRailCardNSView.maxWidth` wide, capped at `maxWidth`
-///   (the pane's width) minus `PromptRailCardNSView.paneInset`, and at most
+/// - **Size** – `PromptRailCardMetrics.maxWidth` wide, capped at `maxWidth`
+///   (the pane's width) minus `PromptRailCardMetrics.paneInset`, and at most
 ///   `maxHeight` (the rail's height) tall. A longer list scrolls inside,
 ///   without scrollers, behind 24pt fades over whichever edge clips a row.
 /// - **Opening** – the card is built afresh each time it opens, with its list
@@ -101,13 +101,7 @@ struct PromptRailCardOverlay: View {
 /// It lives outside the transcript's row list and is never measured as a
 /// row, which is why its `ScrollView` is allowed in this directory.
 struct PromptRailCardView: View {
-    private typealias Metrics = PromptRailCardNSView
-
-    /// Characters of a first line that are laid out at all, as the AppKit
-    /// card's list draws them: far more than a 320pt row can show, so a long
-    /// line still truncates at the tail, while the first line of a large
-    /// paste costs no more to lay out than a short one.
-    static let drawnPrefix = 400
+    private typealias Metrics = PromptRailCardMetrics
 
     let state: PromptRailState
     let hover: PromptRailHoverModel
@@ -295,7 +289,7 @@ struct PromptRailCardView: View {
     /// The first line, after "sender: " in amber for a peer; medium weight
     /// for the active row.
     static func title(_ entry: PromptOutlineEntry, active: Bool) -> Text {
-        let line = String(entry.firstLine.prefix(drawnPrefix))
+        let line = String(entry.firstLine.prefix(Metrics.drawnPrefix))
         let text: Text
         switch entry.kind {
         case .prompt:
@@ -338,8 +332,8 @@ struct PromptRailCardView: View {
 
     // MARK: Geometry
 
-    /// `PromptRailCardNSView.maxWidth`, capped at the pane's width minus
-    /// `PromptRailCardNSView.paneInset`.
+    /// `PromptRailCardMetrics.maxWidth`, capped at the pane's width minus
+    /// `PromptRailCardMetrics.paneInset`.
     static func width(paneWidth: CGFloat) -> CGFloat {
         max(0, min(Metrics.maxWidth, paneWidth - Metrics.paneInset))
     }

@@ -276,7 +276,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
                 self?.onJump(id)
             }
             button.setAccessibilityRole(.button)
-            button.setAccessibilityLabel(Self.accessibilityLabel(for: entry, now: now))
+            button.setAccessibilityLabel(PromptRailAccessibility.label(for: entry, now: now))
             button.setAccessibilityParent(self)
             button.setAccessibilityFrameInParentSpace(accessibilityFrame(index, layout: layout))
             return button
@@ -298,11 +298,6 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
             y: layout.notchCenterY(index) - layout.pitch / 2 - offset,
             width: bounds.width,
             height: layout.pitch)
-    }
-
-    static func accessibilityLabel(for entry: PromptOutlineEntry, now: Date) -> String {
-        let time = PromptOutline.timeLabel(entry.timestamp, now: now, calendar: .current, locale: .current)
-        return time.isEmpty ? entry.firstLine : "\(entry.firstLine), \(time)"
     }
 }
 
@@ -329,30 +324,12 @@ final class PromptRailAccessibilityButton: NSAccessibilityElement {
     }
 }
 
-/// Notch and dash colours, shared by the rail and the card so the card's
-/// dashes match the notches they sit over.
-enum PromptRailNotchStyle {
-    /// Alpha of an inactive peer notch: amber at reduced opacity.
-    static let inactivePeerAlpha: CGFloat = 0.5
-
-    /// A dynamic colour; resolve it inside the drawing appearance.
-    static func color(for kind: PromptOutlineEntry.Kind, active: Bool) -> NSColor {
-        switch kind {
-        case .prompt:
-            return active ? .controlAccentColor : .tertiaryLabelColor
-        case .peer:
-            return AttentionAmber.nsColor(alpha: active ? 1 : inactivePeerAlpha)
-        }
-    }
-}
-
-/// The 24pt edge fade both the rail and the card put over a clipped edge.
-enum PromptRailFade {
-    /// Fades the top and/or bottom `PromptRailLayout.fadeHeight` of a layer
-    /// `height` tall. The mask lives in a flipped layer tree, so y 0 is the
-    /// top edge.
+extension PromptRailFade {
+    /// The Core Animation spelling of the fade both AppKit views use: fades
+    /// the top and/or bottom `PromptRailLayout.fadeHeight` of a layer `height`
+    /// tall. The mask lives in a flipped layer tree, so y 0 is the top edge.
     static func configure(_ mask: CAGradientLayer, height: CGFloat, fadesTop: Bool, fadesBottom: Bool) {
-        let fraction = height > 0 ? min(0.5, PromptRailLayout.fadeHeight / height) : 0
+        let fraction = edgeFraction(height: height)
         let opaque = CGColor(gray: 0, alpha: 1)
         let clear = CGColor(gray: 0, alpha: 0)
         mask.startPoint = CGPoint(x: 0.5, y: 0)
