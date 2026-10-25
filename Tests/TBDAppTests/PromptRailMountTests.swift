@@ -183,8 +183,10 @@ struct PromptRailMountTests {
             #expect(container.scrollView.frame.minX == 20)
             #expect(container.scrollView.frame.width == 660)
             let coordinator = try #require(container.coordinator, "the container has no coordinator")
-            #expect(coordinator.promptRailPresenter == nil,
-                    "the AppKit mount attached the SwiftUI renderer's state")
+            let rail = try #require(container.railView as? PromptRailNSView, "the AppKit mount installed no rail")
+            #expect(coordinator.promptRailPresenter === rail,
+                    "the AppKit mount did not make its rail the presenter")
+            #expect(container.cardView is PromptRailCardNSView, "the AppKit mount installed no card")
         }
 
         // "swiftui": the table sits right of the SwiftUI rail column, with no

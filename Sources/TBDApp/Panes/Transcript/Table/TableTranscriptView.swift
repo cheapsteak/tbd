@@ -199,22 +199,38 @@ struct TableTranscriptView: NSViewRepresentable {
         let makeNSViewMs = Double(DispatchTime.now().uptimeNanoseconds &- makeStart) / 1_000_000
         Self.log.debug(
             "table.open.makeNSViewDone ms=\(makeNSViewMs, format: .fixed(precision: 1), privacy: .public) rows=\(nodes.count, privacy: .public)")
-        attachPromptRail(to: coordinator)
+        attachPromptRail(to: coordinator, container: container)
         onTableReady?(tableView)
         return container
     }
 
-    /// Connects the mounted renderer to the coordinator. The SwiftUI renderer's
-    /// state becomes the presenter, which pushes it the current outline and
-    /// active prompt at once, and its jumps go to this table. The AppKit
-    /// renderer has only its gutter so far; `.none` has nothing.
-    private func attachPromptRail(to coordinator: Coordinator) {
+    /// Connects the mounted renderer to the coordinator; either renderer's
+    /// jumps go to this table.
+    ///
+    /// - **AppKit** – one hover model shared by a rail view in the gutter and
+    ///   a card view above everything. The rail becomes the presenter and the
+    ///   container hands its outline on to the card.
+    /// - **SwiftUI** – the renderer's state becomes the presenter.
+    /// - **None** – nothing.
+    ///
+    /// Attaching a presenter pushes it the current outline and active prompt
+    /// at once.
+    private func attachPromptRail(to coordinator: Coordinator, container: TranscriptContainerView) {
+        let onJump: @MainActor (String) -> Void = { [weak coordinator] id in
+            coordinator?.jump(toNodeID: id)
+        }
         switch promptRail {
-        case .none, .appKit:
+        case .none:
             break
+        case .appKit(let earlier):
+            let hover = PromptRailHoverModel()
+            let rail = PromptRailNSView(hover: hover, onJump: onJump)
+            let card = PromptRailCardNSView(hover: hover, onJump: onJump)
+            container.installPromptRail(rail: rail, card: card, hover: hover, earlier: earlier)
+            coordinator.promptRailPresenter = rail
         case .swiftUI(let state):
             coordinator.promptRailPresenter = state
-            state.onJump = { [weak coordinator] id in coordinator?.jump(toNodeID: id) }
+            state.onJump = onJump
         }
     }
 
@@ -236,6 +252,11 @@ struct TableTranscriptView: NSViewRepresentable {
         if let request = scrollToItem, request.token != coordinator.lastScrollItemToken {
             coordinator.lastScrollItemToken = request.token
             coordinator.scrollToRow(withNodeID: request.itemID)
+        }
+        // The Remote pane's earlier-history state changes as pages load; the
+        // AppKit card's Load row follows it.
+        if case .appKit(let earlier) = promptRail {
+            container.promptRailEarlier = earlier
         }
     }
 
