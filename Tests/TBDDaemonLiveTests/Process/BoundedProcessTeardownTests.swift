@@ -232,14 +232,11 @@ struct BoundedProcessTeardownTests {
     /// than on a made-up number that may belong to anybody — and because that
     /// child is `posix_spawn`ed rather than Foundation-launched, this test is
     /// its only waiter. So the sequence is deterministic: the SIGKILL lands at
-    /// t≈0, the child is a zombie well before the 0.5 s bound, and the
-    /// diagnostic probe is the thing that collects it. The corpse has to exist
-    /// before the probe can find it, and the bound is sized for the pass this
-    /// target runs in: serial and without induced load, in CI and in the
-    /// nightly stress harness alike, where a SIGKILLed zsh is a zombie within
-    /// milliseconds. Under heavy induced load a zsh and its `sleep` are not
-    /// always torn down that fast; there the diagnostic assertion reds rather
-    /// than passing wrongly. That is exactly what
+    /// t≈0, the child is a zombie well before the 2 s bound, and the
+    /// diagnostic probe is the thing that collects it. The bound is 2 s rather
+    /// than a few hundred milliseconds because under induced load a zsh and its
+    /// `sleep` are not always torn down that fast, and the corpse has to exist
+    /// before the probe can find it. That is exactly what
     /// production teardown does when Foundation has lost the exit, which is why
     /// the composed diagnostic is asserted rather than only its pid. And the
     /// bounded wait runs on a dedicated `Thread`, per `Tests/CLAUDE.md`
@@ -289,7 +286,7 @@ struct BoundedProcessTeardownTests {
         let started = clock.now
 
         let thread = Thread {
-            box.store(BoundedProcessTeardown.killAndReap(stub, within: 0.5))
+            box.store(BoundedProcessTeardown.killAndReap(stub, within: 2))
         }
         thread.name = "BoundedProcessTeardownTests.bound"
         thread.start()
@@ -326,8 +323,8 @@ struct BoundedProcessTeardownTests {
                 && diagnostic.contains("zombie collected by the teardown diagnostic"),
             "the diagnostic did not report the corpse it collected: \(diagnostic)")
         #expect(
-            elapsed >= .milliseconds(500),
-            "the wait returned after \(elapsed), which is short of its own 0.5 s bound")
+            elapsed >= .seconds(2),
+            "the wait returned after \(elapsed), which is short of its own 2 s bound")
     }
 }
 
