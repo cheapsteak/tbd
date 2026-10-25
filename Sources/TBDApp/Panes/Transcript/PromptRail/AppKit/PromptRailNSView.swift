@@ -278,7 +278,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
             button.setAccessibilityRole(.button)
             button.setAccessibilityLabel(Self.accessibilityLabel(for: entry, now: now))
             button.setAccessibilityParent(self)
-            button.accessibilityFrameInParentSpace = accessibilityFrame(index, layout: layout)
+            button.setAccessibilityFrameInParentSpace(accessibilityFrame(index, layout: layout))
             return button
         }
         return buttons
@@ -287,7 +287,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     private func updateAccessibilityFrames(_ layout: PromptRailLayout) {
         guard let accessibilityButtons else { return }
         for (index, button) in accessibilityButtons.enumerated() {
-            button.accessibilityFrameInParentSpace = accessibilityFrame(index, layout: layout)
+            button.setAccessibilityFrameInParentSpace(accessibilityFrame(index, layout: layout))
         }
     }
 
