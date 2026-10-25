@@ -125,6 +125,29 @@ import Testing
         }
     }
 
+    /// The fast path's question: an attach looks no further — no coordinator
+    /// hop, no task, no timer — when a viewer claim or a pending attach means
+    /// `beginAttach` will refuse anyway. (The commonest no, a published
+    /// reader, needs a holder; `HolderAttachOnDemandAdoptionLiveTests` asks
+    /// it there.)
+    @Test func anAttachLooksFurtherOnlyWhenNothingAlreadyAnswersIt() async throws {
+        let registry = Self.registry()
+        let unread = UUID()
+        let claimed = UUID()
+        let pending = UUID()
+        await registry.recordViewerClaimForTesting(terminalID: claimed, generation: 1, owner: nil)
+        await registry.recordPendingAttachForTesting(
+            terminalID: pending, generation: 2,
+            reader: HolderReader(
+                sessionID: pending, ptyFD: -1, columns: 80, rows: 24,
+                observedChildFromStart: true),
+            recipient: nil)
+
+        #expect(await registry.needsAdoptionForAttach(terminalID: unread))
+        #expect(await !registry.needsAdoptionForAttach(terminalID: claimed))
+        #expect(await !registry.needsAdoptionForAttach(terminalID: pending))
+    }
+
     @Test func aShuttingDownRegistryRefusesTheAdoptionByName() async throws {
         let registry = Self.registry()
         let row = Self.holderRow()

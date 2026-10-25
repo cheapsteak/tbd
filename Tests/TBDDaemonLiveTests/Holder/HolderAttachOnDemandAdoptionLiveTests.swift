@@ -83,6 +83,9 @@ struct HolderAttachOnDemandAdoptionLiveTests {
             transport: .holder)
         _ = try await registry.adopt(terminal: row)
         #expect(await registry.attachRoundTripsStarted == 1)
+        // The attach handler's fast path: an adopted session has nothing to
+        // adopt, so the handler asks nothing further.
+        #expect(await !registry.needsAdoptionForAttach(terminalID: row.id))
 
         // The release is held with its reader still on the pty: the slot reads
         // `.releasing` for as long as the test keeps it there.

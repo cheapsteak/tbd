@@ -1922,6 +1922,9 @@ actor HolderRegistry {
             throw Error.notAHolderSession(terminalID: terminalID)
         }
         guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
+        // The common case, an adopted session, settled before any task or
+        // timer exists.
+        guard needsAdoptionForAttach(terminalID: terminalID) else { return }
 
         let attempt = Task { try await self.adoptUnlessLeaving(terminalID) }
         let budget = attachAdoptionBudget
@@ -1952,6 +1955,23 @@ actor HolderRegistry {
                 \(error.localizedDescription, privacy: .public)
                 """)
         }
+    }
+
+    /// Whether an attach could have anything to adopt for this session: false
+    /// while a reader is published, and while a viewer claim or a pending
+    /// attach would have `beginAttach` refuse whatever an adoption did.
+    ///
+    /// Synchronous, and asked before anything else the on-demand path costs.
+    /// Nearly every attach is to a session already adopted, and for those the
+    /// attach handler pays this one hop and skips the hibernation
+    /// coordinator, the adoption task and its timer entirely. A true answer
+    /// is only permission to look further: `adoptUnlessLeaving` re-asks
+    /// everything in the stretch that acts on it.
+    func needsAdoptionForAttach(terminalID: UUID) -> Bool {
+        guard viewerAttachments[terminalID] == nil,
+              pendingAttaches[terminalID] == nil else { return false }
+        if case .adopted = slots[terminalID] { return false }
+        return true
     }
 
     /// The decision half of `adoptForAttach`: every gate, then the adoption,
