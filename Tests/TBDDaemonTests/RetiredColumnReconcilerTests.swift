@@ -154,11 +154,7 @@ import Testing
     @Test func aFailingDropIsReportedAndTheRunCarriesOn() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
-        try await fixture.db.writerForTests.write { db in
-            try db.execute(sql: "CREATE TABLE retirement_probe (id INTEGER PRIMARY KEY, indexed TEXT)")
-            try db.execute(sql: "CREATE INDEX retirement_probe_indexed ON retirement_probe(indexed)")
-        }
-        let indexed = RetiredColumn(table: "retirement_probe", column: "indexed", epoch: 1)
+        let indexed = try await fixture.addIndexedColumn()
 
         let report = await fixture.db.reconcileRetiredColumns(
             fixture.reconciler(columns: [indexed, Self.nightwatchMode]), at: Self.firstRun)
@@ -195,17 +191,13 @@ import Testing
         ])
     }
 
-    /// A run whose drop fails prunes nothing. Such a drop fails at every
-    /// start, each writing a fresh copy, and pruning then would push out the
-    /// copy that still holds a column an earlier run dropped.
-    @Test func aRunWhoseDropFailsPrunesNothing() async throws {
+    /// A run that drops one column and fails on another keeps its copy, which
+    /// still holds the column it dropped, and prunes nothing, so every older
+    /// copy stays too.
+    @Test func aRunThatDropsOneColumnAndFailsAnotherKeepsItsCopyAndPrunesNothing() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
-        try await fixture.db.writerForTests.write { db in
-            try db.execute(sql: "CREATE TABLE retirement_probe (id INTEGER PRIMARY KEY, indexed TEXT)")
-            try db.execute(sql: "CREATE INDEX retirement_probe_indexed ON retirement_probe(indexed)")
-        }
-        let indexed = RetiredColumn(table: "retirement_probe", column: "indexed", epoch: 1)
+        let indexed = try await fixture.addIndexedColumn()
         let later = (1...5).map { String(format: "202611%02dT000000Z", $0) }
         fixture.seedSnapshots(later)
 
@@ -217,8 +209,59 @@ import Testing
             return
         }
         #expect(report.outcomes[Self.nightwatchMode] == .dropped)
+        let ownCopy = fixture.databasePath + ".pre-column-drop.20261024T123456Z"
+        #expect(report.snapshotPath == ownCopy)
+        #expect(FileManager.default.fileExists(atPath: ownCopy))
         #expect(fixture.snapshots()
             == (["20261024T123456Z"] + later).map { "state.db.pre-column-drop.\($0)" })
+    }
+
+    /// A run whose only due drop fails dropped nothing, so the copy it wrote
+    /// holds nothing the database lacks. It deletes that copy and reports
+    /// none, so a run like it at every start leaves no copy behind.
+    @Test func aRunWhoseOnlyDropFailsLeavesNoCopy() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let indexed = try await fixture.addIndexedColumn()
+
+        let report = await fixture.db.reconcileRetiredColumns(
+            fixture.reconciler(columns: [indexed]), at: Self.firstRun)
+
+        guard case .failed(_)? = report.outcomes[indexed] else {
+            Issue.record("expected the indexed column's drop to fail, got \(String(describing: report.outcomes[indexed]))")
+            return
+        }
+        #expect(report.snapshotPath == nil)
+        #expect(fixture.snapshots().isEmpty)
+        #expect(try await fixture.columns(of: "retirement_probe").contains("indexed"))
+    }
+
+    /// The next start after a run that dropped a column and failed on another
+    /// has only the failing drop left. It deletes the copy it wrote and no
+    /// other: the earlier run's copy, which still holds the column that run
+    /// dropped, stays, and so does every older copy, unpruned.
+    @Test func aRunWithAFailingDropDeletesOnlyItsOwnCopy() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let indexed = try await fixture.addIndexedColumn()
+        let earlier = (1...5).map { String(format: "202601%02dT000000Z", $0) }
+        fixture.seedSnapshots(earlier)
+        let reconciler = fixture.reconciler(columns: [indexed, Self.nightwatchMode])
+        let first = await fixture.db.reconcileRetiredColumns(reconciler, at: Self.firstRun)
+        #expect(first.outcomes[Self.nightwatchMode] == .dropped)
+        #expect(first.snapshotPath == reconciler.snapshotPath(at: Self.firstRun))
+
+        let second = await fixture.db.reconcileRetiredColumns(reconciler, at: Self.secondRun)
+
+        #expect(second.outcomes[Self.nightwatchMode] == .absent)
+        guard case .failed(_)? = second.outcomes[indexed] else {
+            Issue.record("expected the indexed column's drop to fail, got \(String(describing: second.outcomes[indexed]))")
+            return
+        }
+        #expect(second.snapshotPath == nil)
+        #expect(FileManager.default.fileExists(atPath: reconciler.snapshotPath(at: Self.secondRun)) == false)
+        #expect(fixture.snapshots()
+            == (earlier + ["20261024T123456Z"]).map { "state.db.pre-column-drop.\($0)" })
     }
 
     /// A run with nothing to drop and nothing failed still prunes, so a
@@ -365,6 +408,16 @@ import Testing
             try await db.writerForTests.read { conn in
                 try RetiredColumnReconcilerTests.columnNames(of: table, in: conn)
             }
+        }
+
+        /// Add a table whose column sits in an index, which SQLite refuses to
+        /// drop, and return that column as a retired entry.
+        func addIndexedColumn() async throws -> RetiredColumn {
+            try await db.writerForTests.write { conn in
+                try conn.execute(sql: "CREATE TABLE retirement_probe (id INTEGER PRIMARY KEY, indexed TEXT)")
+                try conn.execute(sql: "CREATE INDEX retirement_probe_indexed ON retirement_probe(indexed)")
+            }
+            return RetiredColumn(table: "retirement_probe", column: "indexed", epoch: 1)
         }
 
         /// Lay down a pre-column-drop copy beside the database for each stamp.

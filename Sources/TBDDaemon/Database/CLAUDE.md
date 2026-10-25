@@ -89,11 +89,15 @@ Before its first drop in a run, the reconciler copies the database to
 `~/tbd/state.db.pre-column-drop.<UTC-timestamp>` with `VACUUM INTO`, the way
 back for data someone still needed. A run whose snapshot fails drops nothing,
 and a drop that fails is logged at error level and skipped without stopping
-startup. Every run in which nothing failed, whether or not it wrote a copy,
+startup. A run that wrote a copy and then dropped nothing, because every due
+drop failed, deletes that copy and no other file, since the database still
+holds everything in it; so a drop that fails at every start leaves a copy
+only from a run in which some other column dropped. Every run in which nothing failed, whether or not it wrote a copy,
 ends with `DatabaseSnapshotPruner` keeping the newest three `pre-column-drop`
 copies and deleting older ones, never the one the run just wrote. A run with
-any failure prunes nothing, so a drop that fails at every start cannot push out
-the copy that still holds a column an earlier run dropped.
+any failure prunes nothing, so it never pushes out the copy that still holds a
+column an earlier run dropped, and a run that drops some columns and fails on
+others keeps its own copy too.
 
 Design and rationale: [`docs/specs/2026-10-24-column-retirement-design.md`](../../../docs/specs/2026-10-24-column-retirement-design.md).
 
