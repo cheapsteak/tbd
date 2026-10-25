@@ -770,7 +770,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// minted. Nil until `attach.ready` has been accepted, because before
         /// that the daemon has not handed the pty over and there is nothing to
         /// hand back.
-        private var holderAttach: (worktreeID: UUID, generation: UInt64)?
+        private var holderAttach:
+            (worktreeID: UUID, generation: UInt64, connection: FDSidecarClient.ConnectionID?)?
         /// While non-nil, terminal replies are collected here instead of being
         /// routed to the session.
         ///
@@ -1372,7 +1373,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Darwin.close(attachment.ptyFD)
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation, reader: nil)
+                    generation: attachment.generation,
+                    connection: attachment.daemonConnection, reader: nil)
                 return nil
             }
             if !attachment.snapshotPreamble.isEmpty {
@@ -1390,7 +1392,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 Darwin.close(attachment.ptyFD)
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation, reader: nil)
+                    generation: attachment.generation,
+                    connection: attachment.daemonConnection, reader: nil)
                 return nil
             }
             // Feed OFF-MAIN, through the view holder, exactly as the local-PTY
@@ -1476,7 +1479,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 removeLatencyTap()
                 releaseAbandonedHolderAttach(
                     client: client, ledger: ledger, worktreeID: worktreeID,
-                    generation: attachment.generation, reader: reader)
+                    generation: attachment.generation,
+                    connection: attachment.daemonConnection, reader: reader)
                 return HolderAttachAttemptFailure(error: error, step: "attach.ready refused")
             }
             // Torn down while the ack was in flight: the daemon has confirmed
@@ -1502,7 +1506,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // drain beside it, two readers on one pty.
             guard !isTornDown else {
                 removeLatencyTap()
-                holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
+                holderAttach = (
+                    worktreeID: worktreeID, generation: attachment.generation,
+                    connection: attachment.daemonConnection)
                 detachHolderSession(stoppedReader: reader)
                 return nil
             }
@@ -1520,7 +1526,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // it is confirmed hands it back through
             // `releaseAbandonedHolderAttach`; the teardown that lands just
             // after the ack sets this itself and takes the live path.
-            holderAttach = (worktreeID: worktreeID, generation: attachment.generation)
+            holderAttach = (
+                worktreeID: worktreeID, generation: attachment.generation,
+                connection: attachment.daemonConnection)
             // Claimed only once the attach is live: before the ack the daemon
             // is still the session's writer, and an injection routed here in
             // that window would be written to a pty the daemon has not yet
@@ -1618,7 +1626,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// The release itself is `HolderAttaching.releaseUnconfirmedAttach` —
         /// `attach.ready`, then `pane.detach` with an empty preamble — shared
         /// with the client's release of an attach whose descriptor never
-        /// arrived; its doc carries why the ack goes first.
+        /// arrived; its doc carries why the ack goes first, and when a request
+        /// that failed in transit is resent.
         ///
         /// **The caller must already be off the descriptor**, exactly as for
         /// `detachHolderSession`: the daemon resumes its drain on receipt. A
@@ -1632,14 +1641,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         private func releaseAbandonedHolderAttach(
             client: any HolderAttaching, ledger: HolderHandbackLedger,
             worktreeID: UUID, generation: UInt64,
+            connection: FDSidecarClient.ConnectionID?,
             reader: HolderStreamReader?
         ) {
             let panelID = self.panelID
+            let clock = self.clock
             let release = Task { @MainActor in
                 await reader?.awaitClosed()
                 await client.releaseUnconfirmedAttach(
                     worktreeID: worktreeID, paneID: "", terminalID: panelID,
-                    generation: generation, kind: "abandoned")
+                    generation: generation, kind: "abandoned",
+                    connection: connection, clock: clock)
             }
             ledger.register(terminalID: panelID, task: release)
         }
@@ -1814,13 +1826,14 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // here would drop the preamble — and, worse, the detach — whenever
             // SwiftUI released the coordinator inside the poll interval, which
             // is exactly the tab-close case. It is bounded: one poll interval,
-            // one main-queue turn, one RPC.
+            // one main-queue turn, and the detach with its resends.
             //
             // Registered with the ledger so a successor panel for this same
             // terminal — the one SwiftUI builds when the tab's layout changes
             // shape — waits for the detach to return before it attaches,
             // instead of being refused for a viewer claim this task is about
             // to release.
+            let clock = self.clock
             let handback = Task { @MainActor in
                 await reader?.awaitClosed()
                 var preamble = Data()
@@ -1828,15 +1841,22 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 self.viewHolder.clear()
                 self.holderHandbackInFlight = false
                 do {
-                    try await client.detach(
+                    // A detach lost in transit leaves the claim standing, and
+                    // with it every later attach to this session refused until
+                    // the app quits — so it is resent, but only to the daemon
+                    // that holds the claim: `resendingInTransit` says why.
+                    try await client.detachResendingInTransit(
                         worktreeID: attach.worktreeID, paneID: "", terminalID: panelID,
-                        generation: attach.generation, snapshotPreamble: preamble)
+                        generation: attach.generation, snapshotPreamble: preamble,
+                        connection: attach.connection, clock: clock)
                 } catch {
-                    // Logged and dropped: there is no retry that helps. The
-                    // daemon still holds this session's viewer claim, and what
-                    // releases it then is the app-liveness verdict that covers
-                    // an app which died mid-detach — the same path, reached by
-                    // a different failure.
+                    // Not delivered: out of resends, or the daemon that held
+                    // the claim is gone. A successor daemon holds none of the
+                    // old one's claims; otherwise the daemon still holds this
+                    // session's viewer claim, and what releases it then is the
+                    // app-liveness verdict that covers an app which died
+                    // mid-detach — the same path, reached by a different
+                    // failure.
                     logger.error("""
                         holder pane.detach failed for terminal \(panelID, privacy: .public): \
                         \(error.localizedDescription, privacy: .public)

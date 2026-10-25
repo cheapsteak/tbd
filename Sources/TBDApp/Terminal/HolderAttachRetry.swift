@@ -36,4 +36,23 @@ enum HolderAttachRetry {
         if case HolderAttachError.missingGeneration = error { return false }
         return true
     }
+
+    /// Whether a request that failed with `error` got no answer from the
+    /// daemon: it never reached it, or the reply never came back.
+    ///
+    /// The only failures a handback's requests are resent for. The daemon
+    /// answers every `pane.detach` ok and refuses an `attach.ready` for good,
+    /// so any other error is an answer a resend would only repeat. A resend
+    /// after a lost reply is safe as long as it reaches the same daemon: if
+    /// the first copy arrived, the claim it named is gone, and generations
+    /// never repeat within one daemon process, so the second names nothing.
+    static func isTransportFailure(_ error: any Error) -> Bool {
+        guard let error = error as? DaemonClientError else { return false }
+        switch error {
+        case .daemonNotRunning, .connectionFailed, .sendFailed, .receiveFailed, .invalidResponse:
+            return true
+        case .rpcError, .attachUnavailable:
+            return false
+        }
+    }
 }

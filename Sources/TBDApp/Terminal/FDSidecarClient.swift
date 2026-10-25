@@ -62,7 +62,31 @@ final class FDSidecarClient: @unchecked Sendable {
     /// emulator instead of waiting out its bound.
     private var screenRequestHandler: (@Sendable (SidecarScreenRequest) -> Void)?
 
+    /// Names one connection of this client's socket, and with it one daemon
+    /// process: the identity a holder claim is held under.
+    ///
+    /// Every adopted socket mints a new one, so a reconnect — to the same
+    /// daemon or to its successor — never reuses one. And a daemon that exits
+    /// ends its end of the connection, which the receive loop sees as EOF at
+    /// once, so the identity stops being current before any successor can
+    /// have vended this app anything. An identity that is still `current` is
+    /// therefore a connection to the daemon that held it when it was read;
+    /// that is what lets a lost handback be resent to the daemon whose
+    /// generation it names, and never to one whose generations restarted.
+    struct ConnectionID: Hashable, Sendable {
+        let rawValue: UInt64
+    }
+
+    /// How many sockets have been adopted. Guarded by `lock`.
+    private var connectionCount: UInt64 = 0
+
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return socketFD >= 0 }
+
+    /// The live connection, or nil while disconnected.
+    var currentConnection: ConnectionID? {
+        lock.lock(); defer { lock.unlock() }
+        return socketFD >= 0 ? ConnectionID(rawValue: connectionCount) : nil
+    }
 
     /// Install the daemon → app injection handler. The handler is read per
     /// frame rather than captured per connection, so installing it once at
@@ -142,6 +166,7 @@ final class FDSidecarClient: @unchecked Sendable {
         // (`FDVendingServer`); this is the app's end.
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         socketFD = fd
+        connectionCount &+= 1
         lock.unlock()
 
         let thread = Thread { [weak self] in self?.receiveLoop(fd) }
