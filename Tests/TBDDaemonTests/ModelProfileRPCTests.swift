@@ -111,24 +111,46 @@ final class ProfileRowPresenceProbe: ClaudeCredentialsKeychainDeleting, @uncheck
     }
 }
 
-// Nested under TBDHomeSerialized: this suite does not *mutate* `TBD_HOME`, it
-// depends on the value staying put. `ModelProfileKeychain` is a file store
-// under `$TBD_HOME/claude-tokens` and resolves that directory from the
-// process-global environment on every call, so a test that seeds a token and
-// then drives a handler which reads it back straddles two independent
-// resolutions. Run concurrently with a suite that points `TBD_HOME` at its own
-// temp directory, the seed and the read land in different homes and the
-// handler answers "Secret missing from keychain" — the observed failure. The
-// gap is seconds wide in the fast parallel pass, where a test spends most of
-// its wall time suspended between awaits.
-//
-// See `TBDHomeSerializedSuites.swift`: the serialized domain is the only
-// mutual exclusion available here, because the handlers reach
-// `ModelProfileKeychain` through static members with no injection seam.
-extension TBDHomeSerialized {
-
+// Runs outside TBDHomeSerialized, which is safe only while nothing here reads
+// `TBD_HOME`, `TBD_CLAUDE_HOST_HOME` or `TBD_TEST_CODEX_HOME`, directly or
+// through a production default. Every path the handlers resolve is named
+// explicitly, by `home` below or by a config-dir manager a test roots in a temp
+// dir of its own: secrets go through the router's injected
+// `ModelProfileKeychain.Store` (never the statics, which read the
+// process-global `TBD_HOME` on every call), and the router and lifecycle get
+// explicit config-dir managers, hooks dir, sessions dir and remote-transcript
+// environment instead of the defaults that resolve those variables. (The
+// store's read-only legacy fallback follows `HOME`, not any of the three; under
+// `scripts/test.sh` that is the fake home.) A test added here that calls a
+// `ModelProfileKeychain` static, builds a default `ClaudeProfileConfigDirManager`
+// or relies on another `TBD_HOME`-derived default puts this suite back in the
+// race `TBDHomeSerializedSuites.swift` describes: a seed and a read straddling
+// a concurrent `setenv` land in different homes ("Secret missing from
+// keychain"), or a write lands in another suite's home.
 @Suite("ModelProfile RPC Handlers")
 struct ModelProfileRPCTests {
+
+    /// Per-test scratch home. Swift Testing builds a fresh suite instance for
+    /// every test, so each test gets its own. It has no in-process teardown:
+    /// under `scripts/test.sh`, `fencedScratchRoot` mints it inside the run root
+    /// the wrapper removes on exit, the same reclaim the fenced `TBD_HOME` gets.
+    /// Not `$TMPDIR`, which the wrapper leaves pointing at the real per-user temp
+    /// dir, where every secret file, profile dir and host mirror written here
+    /// would outlive the run. A bare `swift test` falls back to `/tmp` and
+    /// leaks, as `fencedScratchRoot` documents.
+    private let home = URL(
+        fileURLWithPath: fencedScratchRoot(prefix: "tbdmp"), isDirectory: true)
+
+    /// The environment every `TBD_HOME`-derived path in this suite resolves
+    /// from — never the process-global one.
+    private var scratchEnvironment: [String: String] { ["TBD_HOME": home.path] }
+
+    /// The secret store the router's handlers read through. Tests seed and read
+    /// secrets through it too, so a seed and the handler's read can only ever
+    /// name the same directory.
+    private var keychain: ModelProfileKeychain.Store {
+        ModelProfileKeychain.Store(environment: scratchEnvironment)
+    }
 
     private static let oauthPrefix = "sk-ant-oat01-"
     private static let apiPrefix = "sk-ant-api03-"
@@ -137,27 +159,41 @@ struct ModelProfileRPCTests {
         prefix + UUID().uuidString
     }
 
+    /// `configDirManager` defaults to one rooted in `home`; a test that passes
+    /// its own must give it both a base and a host directory, or the manager
+    /// falls back to `TBD_HOME` / `TBD_CLAUDE_HOST_HOME`.
     private func makeRouter(
         stub: StubClaudeUsageFetcher = StubClaudeUsageFetcher(),
-        configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
+        configDirManager: ClaudeProfileConfigDirManager? = nil,
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain()
     )
         -> (RPCRouter, TBDDatabase, StubClaudeUsageFetcher)
     {
         let db = try! TBDDatabase(inMemory: true)
+        let manager = configDirManager ?? ClaudeProfileConfigDirManager(
+            baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
+            hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
+        )
+        let sessionsDir = home.appendingPathComponent("sessions", isDirectory: true)
         let router = RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(),
                 tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()
+                hooks: HookResolver(
+                    globalHooksDir: home.appendingPathComponent("hooks/default").path),
+                configDirManager: manager,
+                sessionsDir: sessionsDir
             ),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             usageFetcher: stub,
-            configDirManager: configDirManager,
+            configDirManager: manager,
             claudeCredentialsKeychain: claudeCredentialsKeychain,
-            actuationLog: makeTestActuationLog()
+            sessionsDir: sessionsDir,
+            actuationLog: makeTestActuationLog(),
+            remoteTranscriptEnvironment: scratchEnvironment,
+            modelProfileKeychain: keychain
         )
         return (router, db, stub)
     }
@@ -175,7 +211,7 @@ struct ModelProfileRPCTests {
     private func cleanupKeychain(_ db: TBDDatabase) async {
         let tokens = (try? await db.modelProfiles.list()) ?? []
         for t in tokens {
-            try? ModelProfileKeychain.delete(id: t.id.uuidString)
+            try? keychain.delete(id: t.id.uuidString)
         }
     }
 
@@ -197,7 +233,7 @@ struct ModelProfileRPCTests {
         let listed = try await db.modelProfiles.list()
         #expect(listed.count == 1)
         // Verify no keychain entry was written
-        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        let kc = try? keychain.load(id: result.profile.id.uuidString)
         #expect(kc == nil)
     }
 
@@ -217,7 +253,7 @@ struct ModelProfileRPCTests {
         let listed = try await db.modelProfiles.list()
         #expect(listed.count == 1)
         // No keychain entry
-        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        let kc = try? keychain.load(id: result.profile.id.uuidString)
         #expect(kc == nil)
         // Fetcher should never be called for OAuth
         #expect(stub.callCount == 0)
@@ -242,7 +278,7 @@ struct ModelProfileRPCTests {
         let listed = try await db.modelProfiles.list()
         #expect(listed.count == 1)
         // OAuth token provided but not stored per Phase 3
-        let kc = try? ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        let kc = try? keychain.load(id: result.profile.id.uuidString)
         #expect(kc == nil)
         // Fetcher should never be called for OAuth
         #expect(stub.callCount == 0)
@@ -262,7 +298,7 @@ struct ModelProfileRPCTests {
         #expect(stub.callCount == 0)
         #expect(result.profile.kind == .apiKey)
         #expect(try await db.modelProfileUsage.get(profileID: result.profile.id) == nil)
-        try? ModelProfileKeychain.delete(id: result.profile.id.uuidString)
+        try? keychain.delete(id: result.profile.id.uuidString)
     }
 
     @Test("add: bad prefix rejected")
@@ -401,7 +437,7 @@ struct ModelProfileRPCTests {
         #expect(result.profile.kind == .oauthToken)
         // No warning: unlike the signed-in path, the token was kept.
         #expect(result.warning == nil)
-        let stored = try ModelProfileKeychain.load(id: result.profile.id.uuidString)
+        let stored = try keychain.load(id: result.profile.id.uuidString)
         #expect(stored == token)
         // The legacy api-key usage endpoint is never consulted for this kind.
         #expect(stub.callCount == 0)
@@ -466,7 +502,7 @@ struct ModelProfileRPCTests {
             method: RPCMethod.modelProfileUpdateToken,
             params: ModelProfileUpdateTokenParams(id: profile.id, token: second)))
         #expect(rotate.success)
-        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        let stored = try keychain.load(id: profile.id.uuidString)
         #expect(stored == second)
         // Rotation keeps the row: the profile's id, config dir and history all
         // survive, which is the whole point of not delete-and-recreating.
@@ -487,7 +523,7 @@ struct ModelProfileRPCTests {
             method: RPCMethod.modelProfileUpdateToken,
             params: ModelProfileUpdateTokenParams(id: profile.id, token: "   ")))
         #expect(!rotate.success)
-        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        let stored = try keychain.load(id: profile.id.uuidString)
         #expect(stored == original)
     }
 
@@ -511,7 +547,7 @@ struct ModelProfileRPCTests {
         #expect(!resp.success)
         #expect(resp.error == "Can only replace the token on a token profile")
         // Nothing was written for a kind that authenticates by /login.
-        let stored = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        let stored = try keychain.load(id: profile.id.uuidString)
         #expect(stored == nil)
         // ...and no billed probe was spent on the rejected call.
         await settleProbes()
@@ -539,14 +575,14 @@ struct ModelProfileRPCTests {
 
         let resp = try await addTokenProfile(router, name: "Acme (token)", token: freshToken())
         let profile = try resp.decodeResult(ModelProfileAddResult.self).profile
-        let beforeDelete = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        let beforeDelete = try keychain.load(id: profile.id.uuidString)
         #expect(beforeDelete != nil, "the secret really was stored — otherwise this proves nothing")
 
         let del = await router.handle(try RPCRequest(
             method: RPCMethod.modelProfileDelete,
             params: ModelProfileDeleteParams(id: profile.id)))
         #expect(del.success)
-        let afterDelete = try ModelProfileKeychain.load(id: profile.id.uuidString)
+        let afterDelete = try keychain.load(id: profile.id.uuidString)
         #expect(afterDelete == nil)
     }
 
@@ -593,7 +629,7 @@ struct ModelProfileRPCTests {
 
     /// A poller wired the way `Daemon.swift` wires the real one — profiles read
     /// from this router's database, the secret read back through the same
-    /// `ModelProfileKeychain` the add handler wrote it to — with both fetchers
+    /// secret store the add handler wrote it to — with both fetchers
     /// replaced by counters. Never `start()`ed: these tests exercise the
     /// targeted creation probe, not the cadence loop.
     private func makeCountingPoller(
@@ -601,13 +637,14 @@ struct ModelProfileRPCTests {
         fetcher: CountingProfileUsageFetcher,
         tokenFetcher: CountingProfileUsageFetcher
     ) -> OAuthProfileUsagePoller {
-        OAuthProfileUsagePoller(
+        let keychain = self.keychain
+        return OAuthProfileUsagePoller(
             profilesProvider: { try await db.modelProfiles.list() },
             loginIdentity: { _ in nil },
             configDirPath: { id in "/tmp/profiles/\(id.uuidString)/claude" },
             fetcher: fetcher,
             tokenFetcher: tokenFetcher,
-            profileSecret: { id in try? ModelProfileKeychain.load(id: id.uuidString) },
+            profileSecret: { id in try? keychain.load(id: id.uuidString) },
             broadcast: {},
             sleeper: { _ in }
         )
@@ -662,8 +699,15 @@ struct ModelProfileRPCTests {
     /// dispatched. The real evidence for these branches is that the handler
     /// contains no dispatch at all; this guards against one being added
     /// silently, and pairs with an exact count at the call site.
-    private func settleProbes(_ seconds: Double = 1) async {
-        try? await Task.sleep(for: .milliseconds(Int(seconds * 1000)))
+    ///
+    /// A quarter second, because the window can only ever catch a stray probe
+    /// on a quiet machine, and there one lands in milliseconds: a dispatched
+    /// probe is a task hop, a database read and a call into the counting
+    /// fetcher, with no sleeper in between (`sleeper: { _ in }`). Under load no
+    /// fixed window is long enough to be evidence, so a longer one buys only
+    /// wall time.
+    private func settleProbes(_ window: Duration = .milliseconds(250)) async {
+        try? await Task.sleep(for: window)
     }
 
     /// A bad paste must be caught at creation — the row shows a rejected token
@@ -818,7 +862,7 @@ struct ModelProfileRPCTests {
         // Use an API-key profile (the only kind that stores keychain entries)
         let tok = try await db.modelProfiles.create(name: "Solo", kind: .apiKey)
         let token = freshToken(Self.apiPrefix)
-        try ModelProfileKeychain.store(id: tok.id.uuidString, token: token)
+        try keychain.store(id: tok.id.uuidString, token: token)
         try await db.modelProfileUsage.upsert(ModelProfileUsage(profileID: tok.id, fetchedAt: Date()))
         try await db.config.setDefaultProfileID(tok.id)
 
@@ -828,7 +872,7 @@ struct ModelProfileRPCTests {
         #expect(try await db.modelProfiles.get(id: tok.id) == nil)
         #expect(try await db.modelProfileUsage.get(profileID: tok.id) == nil)
         #expect(try await db.config.get().defaultProfileID == nil)
-        #expect(try ModelProfileKeychain.load(id: tok.id.uuidString) == nil)
+        #expect(try keychain.load(id: tok.id.uuidString) == nil)
     }
 
     @Test("delete clears repo override")
@@ -880,7 +924,9 @@ struct ModelProfileRPCTests {
         try FileManager.default.createDirectory(at: tempBaseDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempBaseDir) }
 
-        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir)
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: tempBaseDir,
+            hostBaseDirectory: tempBaseDir.appendingPathComponent("host-claude", isDirectory: true))
         let (router, db, _) = makeRouter(configDirManager: manager)
 
         // Create an OAuth profile and ensure its config dir is created with temp base
@@ -908,14 +954,16 @@ struct ModelProfileRPCTests {
         try FileManager.default.createDirectory(at: tempBaseDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempBaseDir) }
 
-        let manager = ClaudeProfileConfigDirManager(baseDirectory: tempBaseDir)
+        let manager = ClaudeProfileConfigDirManager(
+            baseDirectory: tempBaseDir,
+            hostBaseDirectory: tempBaseDir.appendingPathComponent("host-claude", isDirectory: true))
         let (router, db, _) = makeRouter(configDirManager: manager)
         defer { Task { await cleanupKeychain(db) } }
 
         // Create an API key profile and ensure its config dir is created with temp base
         let apiKeyProfile = try await db.modelProfiles.create(name: "APIKey", kind: .apiKey)
         let token = freshToken(Self.apiPrefix)
-        try ModelProfileKeychain.store(id: apiKeyProfile.id.uuidString, token: token)
+        try keychain.store(id: apiKeyProfile.id.uuidString, token: token)
 
         let _ = try await manager.ensureAPIKeyDir(forProfileID: apiKeyProfile.id, apiKey: token)
         let profileDir = manager.profileDirectory(forProfileID: apiKeyProfile.id)
@@ -1185,8 +1233,8 @@ struct ModelProfileRPCTests {
         let stub = StubClaudeUsageFetcher()
         let (router, db, _) = makeRouter(stub: stub)
         let tok = try await db.modelProfiles.create(name: "A", kind: .apiKey)
-        try ModelProfileKeychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
-        defer { try? ModelProfileKeychain.delete(id: tok.id.uuidString) }
+        try keychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
+        defer { try? keychain.delete(id: tok.id.uuidString) }
         try await db.modelProfileUsage.upsert(ModelProfileUsage(
             profileID: tok.id, fiveHourPct: 0.7, sevenDayPct: 0.2, fetchedAt: Date()
         ))
@@ -1211,7 +1259,7 @@ struct ModelProfileRPCTests {
         defer { Task { await cleanupKeychain(db) } }
 
         let tok = try await db.modelProfiles.create(name: "A", kind: .apiKey)
-        try ModelProfileKeychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
+        try keychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
         try await db.modelProfileUsage.upsert(ModelProfileUsage(
             profileID: tok.id, fiveHourPct: 0.1, sevenDayPct: 0.0,
             fetchedAt: Date().addingTimeInterval(-120)
@@ -1225,7 +1273,7 @@ struct ModelProfileRPCTests {
         #expect(stub.callCount == 1)
         let cached = try await db.modelProfileUsage.get(profileID: tok.id)
         #expect(cached?.fiveHourPct == 0.99)
-        try? ModelProfileKeychain.delete(id: tok.id.uuidString)
+        try? keychain.delete(id: tok.id.uuidString)
     }
 
     @Test("fetchUsage propagates 401")
@@ -1235,12 +1283,12 @@ struct ModelProfileRPCTests {
         defer { Task { await cleanupKeychain(db) } }
 
         let tok = try await db.modelProfiles.create(name: "A", kind: .apiKey)
-        try ModelProfileKeychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
+        try keychain.store(id: tok.id.uuidString, token: freshToken(Self.apiPrefix))
         let resp = await router.handle(try RPCRequest(method: RPCMethod.modelProfileFetchUsage,
                                                       params: ModelProfileFetchUsageParams(id: tok.id)))
         #expect(!resp.success)
         #expect(resp.error?.lowercased().contains("invalid") == true)
-        try? ModelProfileKeychain.delete(id: tok.id.uuidString)
+        try? keychain.delete(id: tok.id.uuidString)
     }
 
     // MARK: - bedrock add
@@ -1274,7 +1322,7 @@ struct ModelProfileRPCTests {
         #expect(stored.first?.awsRegion == "us-west-2")
         #expect(stored.first?.awsProfile == "acme-prod")
         // No keychain entry should be written for bedrock profiles
-        #expect(try ModelProfileKeychain.load(id: result.profile.id.uuidString) == nil)
+        #expect(try keychain.load(id: result.profile.id.uuidString) == nil)
         // Usage fetcher must not be called
         #expect(stub.callCount == 0)
     }
@@ -1675,7 +1723,7 @@ struct ModelProfileRPCTests {
         let profile = try await db.modelProfiles.create(
             name: "Reviewer", kind: .oauthToken, model: "claude-sonnet-4-5")
         let token = freshToken()
-        try ModelProfileKeychain.store(id: profile.id.uuidString, token: token)
+        try keychain.store(id: profile.id.uuidString, token: token)
 
         let resp = try await execEnvironment(router, id: profile.id)
         #expect(resp.success)
@@ -1735,7 +1783,7 @@ struct ModelProfileRPCTests {
         let profile = try await db.modelProfiles.create(
             name: "Proxy", kind: .apiKey, baseURL: "https://models.acme.example")
         let key = freshToken(Self.apiPrefix)
-        try ModelProfileKeychain.store(id: profile.id.uuidString, token: key)
+        try keychain.store(id: profile.id.uuidString, token: key)
 
         let result = try (try await execEnvironment(router, id: profile.id))
             .decodeResult(ModelProfileExecEnvironmentResult.self)
@@ -1788,7 +1836,7 @@ struct ModelProfileRPCTests {
 
         let profile = try await db.modelProfiles.create(name: "Layered", kind: .oauthToken)
         let token = freshToken()
-        try ModelProfileKeychain.store(id: profile.id.uuidString, token: token)
+        try keychain.store(id: profile.id.uuidString, token: token)
         try await db.config.setEnvOverrides([
             "GLOBAL_ONLY": "g",
             "SHARED": "from-global",
@@ -1818,7 +1866,7 @@ struct ModelProfileRPCTests {
 
         let profile = try await db.modelProfiles.create(name: "Reviewer", kind: .oauthToken)
         let token = freshToken()
-        try ModelProfileKeychain.store(id: profile.id.uuidString, token: token)
+        try keychain.store(id: profile.id.uuidString, token: token)
 
         let portFilePath = "/tmp/tbd-http-socketonly-\(UUID().uuidString.prefix(8)).port"
         defer { unlink(portFilePath) }
@@ -1861,6 +1909,4 @@ struct ModelProfileRPCTests {
         #expect(!resp.success)
         #expect(resp.error == "Profile not found")
     }
-}
-
 }

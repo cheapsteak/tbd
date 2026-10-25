@@ -44,8 +44,10 @@ func modelProfileSecretRejectionReason(_ secret: String) -> String? {
 /// four characters: a two-character "tail" would be a larger fraction of the
 /// credential than the caption is worth. The whole secret never leaves the
 /// daemon, and this value is computed per list call, never persisted.
-func modelProfileTokenTail(forProfileID id: UUID) -> String? {
-    guard let secret = try? ModelProfileKeychain.load(id: id.uuidString) else { return nil }
+func modelProfileTokenTail(
+    forProfileID id: UUID, keychain: ModelProfileKeychain.Store
+) -> String? {
+    guard let secret = try? keychain.load(id: id.uuidString) else { return nil }
     let trimmed = secret.trimmingCharacters(in: .whitespacesAndNewlines)
     guard trimmed.count >= 4 else { return nil }
     return String(trimmed.suffix(4))
@@ -78,7 +80,7 @@ extension RPCRouter {
             // for the same reason: it is a fact about the credential store,
             // and the app is never handed the token itself.
             let tokenTail: String? = profile.kind == .oauthToken
-                ? modelProfileTokenTail(forProfileID: profile.id)
+                ? modelProfileTokenTail(forProfileID: profile.id, keychain: modelProfileKeychain)
                 : nil
             return ModelProfileWithUsage(
                 profile: profile,
@@ -182,7 +184,7 @@ extension RPCRouter {
                 fallbackModels: fallbackModels
             )
             do {
-                try ModelProfileKeychain.store(id: profileRow.id.uuidString, token: token)
+                try modelProfileKeychain.store(id: profileRow.id.uuidString, token: token)
             } catch {
                 // Roll the row back: a token profile whose secret was never
                 // written cannot authenticate at all, and the row is the only
@@ -276,7 +278,7 @@ extension RPCRouter {
         var warning: String? = nil
         if !isOAuth {
             do {
-                try ModelProfileKeychain.store(id: profileRow.id.uuidString, token: trimmed)
+                try modelProfileKeychain.store(id: profileRow.id.uuidString, token: trimmed)
             } catch {
                 try? await db.modelProfiles.delete(id: profileRow.id)
                 return RPCResponse(error: "Failed to store secret in keychain")
@@ -325,7 +327,7 @@ extension RPCRouter {
         // a secret outliving its profile is a credential nothing owns.
         if profile.kind == .apiKey || profile.kind == .oauthToken {
             do {
-                try ModelProfileKeychain.delete(id: params.id.uuidString)
+                try modelProfileKeychain.delete(id: params.id.uuidString)
             } catch {
                 logger.warning("Failed to delete secret file for \(params.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
@@ -432,7 +434,7 @@ extension RPCRouter {
             return RPCResponse(error: reason)
         }
         do {
-            try ModelProfileKeychain.store(id: params.id.uuidString, token: token)
+            try modelProfileKeychain.store(id: params.id.uuidString, token: token)
         } catch {
             // Generic on purpose — an error string must never carry token bytes.
             return RPCResponse(error: "Failed to store secret in keychain")
@@ -568,7 +570,7 @@ extension RPCRouter {
 
         let bytes: String?
         do {
-            bytes = try ModelProfileKeychain.load(id: params.id.uuidString)
+            bytes = try modelProfileKeychain.load(id: params.id.uuidString)
         } catch {
             return RPCResponse(error: "Failed to read secret: \(error)")
         }
