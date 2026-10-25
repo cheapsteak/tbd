@@ -17,7 +17,7 @@ Every transcript pane gets a **prompt rail**: a 20pt column at its leading edge 
 
 ## Prior art: Claude desktop's rail
 
-These parameters were read from the shipped claude.ai web bundle that renders Claude desktop's Code-tab file viewer. The design below adopts most of them.
+These parameters describe the rail in Claude desktop's Code-tab file viewer. The design below adopts most of them.
 
 - **Ticks** – one per heading, stacked at a fixed 8px pitch rather than placed by scroll position. A dash is 14px wide and 2px tall at the top level; the active heading's dash is 18px wide, 3px tall and accent-colored. When the ticks overflow, the rail scrolls itself to keep the active tick in view with a 40px margin, behind fade masks.
 - **Active heading** – the last heading whose top is above a probe line 20% down the viewport; the first heading at the very top; the last heading within 8px of the bottom. After a jump, the target stays active until it moves.
@@ -75,7 +75,7 @@ The coordinator recomputes the active entry on the clip view's bounds notificati
 
 - **Opening** – 80ms after the pointer enters the rail, the card fades in over 150ms, easing out.
 - **Closing** – 100ms after the pointer leaves both rail and card, so a jittery pointer does not snap it shut. Escape, a click on a row and app deactivation close it at once; hover alone cannot be the only dismissal, because a backgrounded app receives no pointer-exit event. After Escape or a click, hovering does not reopen it until the pointer has left the rail.
-- **Placement** – anchored at the rail's top-left, its dash column lined up over the rail's notches. It is 320pt wide, capped at the pane's width minus 24pt, and at most as tall as the rail. A longer list scrolls inside the card behind 24pt edge fades. On opening, the list is scrolled so the row for the notch under the pointer sits under the pointer, or as close as the list's ends allow.
+- **Placement** – anchored at the rail's top-left, its dash column lined up over the rail's notches. It is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height less 60pt, which keeps the pane's bottom-corner jump-to-bottom button clear of it. A longer list scrolls inside the card behind 24pt edge fades. On opening, the list is scrolled so the row for the notch under the pointer sits under the pointer, or as close as the list's ends allow.
 - **Rows** – 22pt tall, 13pt system text: an 18pt dash column, an 8pt gap, the first line truncated at the tail, and the time right-aligned in the secondary label color with monospaced digits.
   - The active row is medium weight, with its accent or amber dash.
   - The row under the pointer gets a quaternary-fill background with a 6pt corner radius.
