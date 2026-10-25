@@ -4093,16 +4093,17 @@ public struct AttachRequestResult: Codable, Sendable {
     /// The least holder-attach generation a daemon that randomizes its
     /// generations ever mints: 2^32.
     ///
-    /// **The contract.** A holder attach `generation` at or above this floor
-    /// came from a daemon that starts each process's count at a random base
-    /// drawn from [2^32, 2^48 − 2^32). Such a generation never matches a claim
-    /// in an older daemon process, which counts from 1 and never reaches the
-    /// floor, and matches one in another randomizing daemon process only if
-    /// two random 48-bit bases land within a session's few attaches of each
-    /// other — so a message carrying it, delivered to the wrong daemon, finds
-    /// no claim to act on. A generation below the floor came from an older
-    /// daemon and may repeat across processes. The app resends a lost
-    /// handback (`pane.detach`) only for generations at or above it.
+    /// **The contract it offers clients: a client may safely resend a
+    /// handback (`pane.detach`) for a holder attach generation at or above
+    /// this floor, and only for such a generation.** A daemon that mints one
+    /// starts each process's count at a random base drawn from
+    /// [2^32, 2^48 − 2^32), so the generation never matches a claim in a daemon
+    /// process that counts from 1 — those never reach the floor — and matches
+    /// one in another randomizing process only if two random 48-bit bases land
+    /// within a session's few attaches of each other. A resend that reaches a
+    /// daemon other than the one that minted it therefore finds no claim to
+    /// hand back. A generation below the floor may repeat across daemon
+    /// processes, and resending it could hand back a different viewer's claim.
     ///
     /// Holder attaches only: a control-mode attach's generation is the tmux
     /// fanout's own count, which starts small in every process.
