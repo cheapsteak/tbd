@@ -18,7 +18,9 @@ rejected-alternatives entries are the case files
 [sweep program](specs/2026-08-01-fleet-supervision-sweep-program-design.md),
 [wake program](specs/2026-07-26-fleet-supervision-wake-program.md)). This
 document states each case in one line and points; the specs hold the full
-arguments.
+arguments. Fleet supervision itself is retired and TBD contains no
+implementation of it; the specs remain as the design record, so the examples
+draw on their reasoning, not on code in the tree.
 
 ## What a theory is
 

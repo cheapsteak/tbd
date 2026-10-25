@@ -167,7 +167,6 @@ final class AppStateEmissionTracker {
         _ = state.autoCreateNotesEnabled
         _ = state.autoHibernateEnabled
         _ = state.hibernateIdleMinutes
-        _ = state.supervisionEnabled
         _ = state.autoResumeOnLimitReset
         _ = state.autoResumeOnApiError
         _ = state.dismissedProxyWarnings
@@ -296,7 +295,6 @@ final class AppStateEmissionTracker {
         "autoCreateNotesEnabled",
         "autoHibernateEnabled",
         "hibernateIdleMinutes",
-        "supervisionEnabled",
         "autoResumeOnLimitReset",
         "autoResumeOnApiError",
         "dismissedProxyWarnings",

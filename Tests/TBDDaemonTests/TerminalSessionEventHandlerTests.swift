@@ -937,12 +937,9 @@ struct TerminalSessionEventHandlerTests {
             sessionID: "live-session",
             transcriptPath: transcript.path,
             observedAt: Date(timeIntervalSinceReferenceDate: 10)))
-        _ = await isolatedRouter.sessionCounters.sample(
-            terminalID: terminal.id,
-            worktreeID: worktree.id,
-            transcriptPath: transcript.path,
-            commitsUnchangedSince: nil,
-            at: Date(timeIntervalSinceReferenceDate: 11))
+        // The activity ledger is stamped right after the handler's terminal
+        // fetch, so it is how this test sees the handler get that far.
+        await isolatedRouter.activityLedger.setEnabled(true)
 
         let updateGate = BlockingTerminalUpdateTrigger()
         let pauseUpdate = DatabaseFunction(
@@ -999,8 +996,7 @@ struct TerminalSessionEventHandlerTests {
         let handlerTask = gateHoldingTask { await isolatedRouter.handle(request) }
         let passedTerminalFetch = await waitForHookEvent(
             router: isolatedRouter,
-            terminal: terminal,
-            transcriptPath: transcript.path)
+            terminal: terminal)
         #expect(passedTerminalFetch,
                 "SessionStart never passed its terminal fetch while recreation was paused")
 
@@ -1032,18 +1028,12 @@ struct TerminalSessionEventHandlerTests {
 
     private func waitForHookEvent(
         router: RPCRouter,
-        terminal: Terminal,
-        transcriptPath: String
+        terminal: Terminal
     ) async -> Bool {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: ciSafeDeadline)
         while true {
-            let counters = await router.sessionCounters.sample(
-                terminalID: terminal.id,
-                worktreeID: terminal.worktreeID,
-                transcriptPath: transcriptPath,
-                commitsUnchangedSince: nil)
-            if counters?.hookEventsInWindow == 1 { return true }
+            if await router.activityLedger.snapshot().hooks[terminal.id] != nil { return true }
             guard clock.now < deadline else { return false }
             await Task.yield()
         }

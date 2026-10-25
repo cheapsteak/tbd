@@ -5742,7 +5742,6 @@ extension RPCRouter {
             return .ok()
         }
         let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
         // Any hook event marks the worktree active for the PR schedule.
         await activityLedger.recordHookEvent(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
@@ -5954,7 +5953,6 @@ extension RPCRouter {
             logger.debug("notificationEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
         await activityLedger.recordHookEvent(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
@@ -6185,17 +6183,12 @@ extension RPCRouter {
             return .ok()
         }
 
-        // §13's hook-event rate. Counted here — before the unchanged-state
-        // early return below — because a session emitting the same state over
-        // and over is exactly the shape the counter exists to make visible, and
-        // a count taken after that guard would report zero for it. One actor
-        // hop and an integer add, which is the whole per-event budget.
-        // An app-originated interrupt shares this RPC but is a user action, not
-        // an agent hook, so it must not inflate the hook-event counter.
+        // Any agent hook marks the worktree active for the PR schedule.
+        // Recorded here, before the unchanged-state early return below, so a
+        // session repeating the same state still counts as active. An
+        // app-originated interrupt shares this RPC but is a user action, not
+        // agent activity, so it does not count.
         if params.origin == nil {
-            await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
-            // The same rule for the PR schedule's activity: a user interrupt is
-            // not agent activity.
             await activityLedger.recordHookEvent(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
         }

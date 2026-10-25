@@ -489,11 +489,9 @@ actor DeliveryVerifier: DeliveryVerificationArming {
             observedAt: now(), detail: observation.detail)
     }
 
-    /// The anomaly, in the two halves it has until the ledger exists (§7 builds
-    /// no supervision storage yet): the observed outcome row — already written
-    /// by `record`, carrying the detail — and a loud `.fault` line. When the
-    /// ledger slice lands its `anomaly` line joins these; the row is the
-    /// durable half either way.
+    /// The anomaly, in its two halves: the observed outcome row — already
+    /// written by `record`, carrying the detail — and a loud `.fault` line. The
+    /// row is the durable half.
     /// `note` carries something the log line should say that the *record* must
     /// not — a failed re-delivery, whose synchronous outcome row already stands
     /// on its own. Diagnostics may narrate; the record may only attest.

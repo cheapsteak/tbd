@@ -8,16 +8,16 @@ import Foundation
 /// the daemon writes it down at the moment it acts, so the record says plainly
 /// which door an act came through, including "nobody said".
 ///
-/// **Always a JSON object, never a bare string.** Several kinds inherently
-/// carry fields (an identified session carries its coordinates; a supervisor
-/// carries its project), so the object form is required anyway; keeping it
-/// uniform means every consumer query reads `.actor.kind` and growing a kind
-/// later never changes its JSON type.
+/// **Always a JSON object, never a bare string.** Some kinds inherently carry
+/// fields (an identified session carries its coordinates; a daemon act names
+/// its rail), so the object form is required anyway; keeping it uniform means
+/// every consumer query reads `.actor.kind` and growing a kind later never
+/// changes its JSON type.
 ///
-/// `kind` is a `String` rather than an enum on purpose: kinds reserved for
-/// later work (`supervisor`) must decode on a daemon that predates them
-/// instead of failing the whole row. Use the static constructors and the
-/// `Kind` namespace below rather than spelling literals at call sites.
+/// `kind` is a `String` rather than an enum on purpose: a kind declared by a
+/// newer client must decode on a daemon that predates it instead of failing
+/// the whole row. Use the static constructors and the `Kind` namespace below
+/// rather than spelling literals at call sites.
 public struct ActuationActor: Codable, Sendable, Equatable {
     /// Known kind names. Not an enum — see the type's doc comment.
     public enum Kind {
@@ -25,8 +25,6 @@ public struct ActuationActor: Codable, Sendable, Equatable {
         public static let app = "app"
         public static let session = "session"
         public static let anonymous = "anonymous"
-        /// Reserved for fleet supervisors; nothing writes it yet.
-        public static let supervisor = "supervisor"
     }
 
     public var kind: String
@@ -38,21 +36,17 @@ public struct ActuationActor: Codable, Sendable, Equatable {
     public var worktree: String?
     /// Uppercase terminal UUID string, for `kind == "session"`.
     public var terminal: String?
-    /// Reserved for `kind == "supervisor"`; nothing writes it yet.
-    public var project: String?
 
     public init(
         kind: String,
         rail: String? = nil,
         worktree: String? = nil,
-        terminal: String? = nil,
-        project: String? = nil
+        terminal: String? = nil
     ) {
         self.kind = kind
         self.rail = rail
         self.worktree = worktree
         self.terminal = terminal
-        self.project = project
     }
 
     /// The daemon acting on its own behalf, optionally naming the internal rail.
@@ -97,9 +91,9 @@ public struct ActuationActor: Codable, Sendable, Equatable {
     /// transcript receipt and outcome join on. So a session says plainly
     /// `session` and spends no envelope width on coordinates.
     ///
-    /// The kinds that have a meaningful sub-identity qualify it after a colon —
-    /// `daemon:<rail>`, `supervisor:<project>` — and every kind falls back to
-    /// its bare name when the qualifier is absent or unspellable.
+    /// A kind that has a meaningful sub-identity qualifies it after a colon —
+    /// `daemon:<rail>` — and every kind falls back to its bare name when the
+    /// qualifier is absent or unspellable.
     ///
     /// Sanitized, always: see `sanitizedDispatchLabelComponent`.
     public var dispatchLabel: String {
@@ -111,7 +105,6 @@ public struct ActuationActor: Codable, Sendable, Equatable {
         let qualifier: String?
         switch kind {
         case Kind.daemon: qualifier = rail
-        case Kind.supervisor: qualifier = project
         default: qualifier = nil
         }
         let sanitizedQualifier = qualifier.map(Self.sanitizedDispatchLabelComponent) ?? ""
@@ -120,7 +113,7 @@ public struct ActuationActor: Codable, Sendable, Equatable {
     }
 
     /// The longest label an envelope will carry. The envelope opens a payload a
-    /// human is about to read; a rail or project name that ran away would push
+    /// human is about to read; a rail name that ran away would push
     /// the message itself off the first screen, and nothing downstream parses
     /// the label, so truncating it loses no fact anyone joins on.
     static let dispatchLabelLimit = 64
@@ -129,9 +122,9 @@ public struct ActuationActor: Codable, Sendable, Equatable {
     /// replaced with `_`.
     ///
     /// A whitelist rather than a blacklist of dangerous characters, because the
-    /// hazard is structural, not lexical. Every one of `rail`, `project` and
-    /// `kind` is a string some caller chose, and the label is interpolated into
-    /// an XML-ish attribute the receiving agent reads: a `"` would close the
+    /// hazard is structural, not lexical. Both `rail` and `kind` are strings
+    /// some caller chose, and the label is interpolated into an XML-ish
+    /// attribute the receiving agent reads: a `"` would close the
     /// attribute, a space would open a second one, and `/>` or `<` would close
     /// or open the tag. Whitelisting makes all of those impossible at once —
     /// including the ones nobody thought of — rather than one at a time.

@@ -20,8 +20,7 @@ TBD runs it with a 10 second limit, the daemon's own environment, and:
 
 - **`TBD_START_KIND`** – `create` or `wake`.
 - **`TBD_AGENT`** – `claude` or `codex`.
-- **`TBD_ACTOR`** – who asked: `session`, `anonymous`, `supervisor`, or a kind a newer client
-  declared.
+- **`TBD_ACTOR`** – who asked: `session`, `anonymous`, or a kind a newer client declared.
 - **`TBD_WORKTREE_ID`** – the worktree the start belongs to.
 - **`TBD_TERMINAL_ID`** – the terminal, when the start names one.
 

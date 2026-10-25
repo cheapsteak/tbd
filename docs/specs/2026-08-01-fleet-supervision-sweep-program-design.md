@@ -1,6 +1,9 @@
 # Fleet supervision — the sweep program and desk briefing
 
-Status: **normative sub-document of the fleet-supervision design.** Sibling of
+Status: **retired.** Fleet supervision is retired: its implementation has been
+removed from TBD, and this document is kept as the design record.
+
+A normative sub-document of the fleet-supervision design. Sibling of
 the [wake-program sub-document](2026-07-26-fleet-supervision-wake-program.md),
 with the same authority as the design sections it details; `design §N` below
 refers to

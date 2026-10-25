@@ -42,12 +42,7 @@ extension RPCRouter {
         )
         await pendingQuestions.set(terminalID: p.terminalID, pending)
         await broadcastPendingPrompts(terminalID: p.terminalID)
-        // §13's hook-event rate. Keyed on the claimed terminal ID rather than a
-        // resolved row: this is a count of hook traffic, and traffic naming a
-        // terminal that has since been deleted still happened. `retain` drops
-        // the bookkeeping when the terminal leaves the fleet.
         let observedAt = now()
-        await sessionCounters.recordHookEvent(terminalID: p.terminalID, at: observedAt)
         askUserQuestionLog.debug("pending stored terminalID=\(p.terminalID.uuidString, privacy: .public) toolUseID=\(p.toolUseID, privacy: .public)")
 
         // Resolve the worktree this terminal belongs to. If the terminal row
@@ -99,7 +94,6 @@ extension RPCRouter {
     func handleTerminalAskUserQuestionCleared(_ paramsData: Data) async throws -> RPCResponse {
         let p = try decoder.decode(TerminalAskUserQuestionClearedParams.self, from: paramsData)
         let observedAt = now()
-        await sessionCounters.recordHookEvent(terminalID: p.terminalID, at: observedAt)
         askUserQuestionLog.debug("cleared received terminalID=\(p.terminalID.uuidString, privacy: .public) toolUseID=\(p.toolUseID, privacy: .public)")
 
         if let terminal = try? await db.terminals.get(id: p.terminalID) {

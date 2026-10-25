@@ -43,7 +43,6 @@ struct StartAdmissionGateTests {
             (ActuationActor.Kind.daemon, false),
             (ActuationActor.Kind.session, true),
             (ActuationActor.Kind.anonymous, true),
-            (ActuationActor.Kind.supervisor, true),
             ("declared-by-a-newer-client", true),
         ])
     func actorRule(kind: String, checked: Bool) {

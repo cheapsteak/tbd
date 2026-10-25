@@ -288,51 +288,6 @@ struct SessionStatesRPCTests {
         #expect(try await states(fixture).count == 2)
     }
 
-    @Test func aWorktreeScopedCallLeavesCountersOutsideTheScopeIntact() async throws {
-        let fixture = try await makeFixture()
-        defer { fixture.cleanUp() }
-        let repo = try #require(try await fixture.db.repos.list().first)
-        let other = try await fixture.db.worktrees.create(
-            repoID: repo.id, name: "other", branch: "other",
-            path: fixture.scratch.appendingPathComponent("other").path,
-            tmuxServer: "tbd-states-test")
-
-        let here = try await fixture.db.terminals.create(
-            worktreeID: fixture.worktreeID, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "here", kind: .claude)
-        let elsewhere = try await fixture.db.terminals.create(
-            worktreeID: other.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "elsewhere", kind: .claude)
-        let herePath = try writeTranscript(fixture, name: "here.jsonl", lines: ["{}"])
-        let elsewherePath = try writeTranscript(fixture, name: "elsewhere.jsonl", lines: ["{}"])
-        try await fixture.db.terminals.updateSession(
-            id: here.id, sessionID: "sess-here", transcriptPath: herePath)
-        try await fixture.db.terminals.updateSession(
-            id: elsewhere.id, sessionID: "sess-elsewhere", transcriptPath: elsewherePath)
-
-        _ = try await states(fixture)  // fleet-wide: both baselines established
-
-        // Give the out-of-scope session something to lose: one hook event and
-        // three appended records inside its observation window.
-        let request = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(terminalID: elsewhere.id, activityState: .working))
-        _ = await fixture.router.handle(request)
-        let handle = try #require(FileHandle(forWritingAtPath: elsewherePath))
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data("{}\n{}\n{}\n".utf8))
-        try handle.close()
-
-        // A call about the *other* worktree enumerates only its terminals, and
-        // must not treat that narrowed list as the whole fleet.
-        _ = try await states(fixture, worktreeID: fixture.worktreeID)
-
-        let report = try #require(try await states(fixture).first { $0.terminalID == elsewhere.id })
-        let counters = try #require(report.counters)
-        #expect(counters.turnsInWindow == 3)
-        #expect(counters.hookEventsInWindow == 1)
-    }
-
     @Test func contextLoadReportsAnUnknownWindowForAFleetSession() async throws {
         let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
@@ -393,68 +348,6 @@ struct SessionStatesRPCTests {
         #expect(used.value == 1_000)
         #expect(used.observedAt == pinned,
                 "the numerator's fallback stamp came from wall time, not the injected seam: \(used.observedAt)")
-    }
-
-    @Test func countersAppearForASessionWithAReadableTranscriptAndNotForOneWithout() async throws {
-        let fixture = try await makeFixture()
-        defer { fixture.cleanUp() }
-
-        let withTranscript = try await fixture.db.terminals.create(
-            worktreeID: fixture.worktreeID, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", kind: .claude)
-        // An agent whose session has not started yet: it is reported on, and
-        // its counters are absent rather than zero. (A plain shell would not be
-        // reported at all — see `aPlainShellIsNotReportedOnAtAll`.)
-        let withoutTranscript = try await fixture.db.terminals.create(
-            worktreeID: fixture.worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "claude", kind: .claude)
-        let path = try writeTranscript(fixture, name: "session.jsonl", lines: ["{}"])
-        try await fixture.db.terminals.updateSession(
-            id: withTranscript.id, sessionID: "sess-1", transcriptPath: path)
-
-        let reports = try await states(fixture)
-        let counted = try #require(reports.first { $0.terminalID == withTranscript.id })
-        let counters = try #require(counted.counters)
-        // First sighting baselines at the file's end — history is never a burst.
-        #expect(counters.turnsInWindow == 0)
-        // No sweep has run in this fixture, so the commits fact is not
-        // established. nil, never "unchanged".
-        #expect(counters.commitsUnchangedSince == nil)
-
-        let uncounted = try #require(reports.first { $0.terminalID == withoutTranscript.id })
-        #expect(uncounted.counters == nil)
-    }
-
-    @Test func hookEventsRaiseTheCountAndAppendedRecordsRaiseTheTurns() async throws {
-        let fixture = try await makeFixture()
-        defer { fixture.cleanUp() }
-
-        let terminal = try await fixture.db.terminals.create(
-            worktreeID: fixture.worktreeID, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", kind: .claude)
-        let path = try writeTranscript(fixture, name: "session.jsonl", lines: ["{}"])
-        try await fixture.db.terminals.updateSession(
-            id: terminal.id, sessionID: "sess-1", transcriptPath: path)
-        _ = try await states(fixture)  // establish the baseline
-
-        // Two hook-driven RPCs, one of which repeats a state the row already
-        // holds — the shape the activity handler's unchanged-state early
-        // return skips. The counter must still see it.
-        for state in [TerminalActivityState.working, .working] {
-            let request = try RPCRequest(
-                method: RPCMethod.terminalActivityEvent,
-                params: TerminalActivityEventParams(terminalID: terminal.id, activityState: state))
-            _ = await fixture.router.handle(request)
-        }
-
-        let handle = try #require(FileHandle(forWritingAtPath: path))
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data("{}\n{}\n{}\n".utf8))
-        try handle.close()
-
-        let counters = try #require(try await states(fixture).first?.counters)
-        #expect(counters.hookEventsInWindow == 2)
-        #expect(counters.turnsInWindow == 3)
     }
 
     @Test func aScheduledResumeMirrorSurfacesAsRateLimited() async throws {

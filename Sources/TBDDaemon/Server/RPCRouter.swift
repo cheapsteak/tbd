@@ -39,32 +39,6 @@ public final class RPCRouter: Sendable {
     /// `nil` in mock mode / unit tests, where a poll simply refreshes statuses
     /// and judges nothing.
     public nonisolated(unsafe) var mergeTrigger: AllResolvedMergeTrigger?
-    /// Fleet supervision's single writer of `~/tbd/supervision/` — the
-    /// operator's file, the ledger beside it, and the coverage decisions that
-    /// connect them. Wired post-construction by `Daemon.swift` (mirrors
-    /// `orphanGC`); `nil` in mock mode / unit tests that don't need it, where
-    /// the `supervise.*` handlers refuse with a named condition rather than
-    /// crashing. Never defaulted to a store built on `TBDConstants`: that
-    /// default is the "helper ignores its caller's injected seam" shape, and
-    /// every router a test constructs would share the developer's real
-    /// `~/tbd/supervision`.
-    public nonisolated(unsafe) var supervision: SupervisionStore?
-    /// The out-of-band `status.json` heartbeat. The brake handler publishes an
-    /// edge through it and arms or disarms its timer to match, so the timer's
-    /// lifetime is tied to the brake rather than to daemon boot. Wired
-    /// post-construction by `Daemon.swift` like `supervision`; `nil` in mock
-    /// mode and in tests, where the brake still moves and simply publishes
-    /// nothing.
-    public nonisolated(unsafe) var supervisionHeartbeat: SupervisionHeartbeat?
-    /// The last leg of the brief pipe — the seam briefing delivery plugs into
-    /// in slice 5. Overridable post-construction like `supervision`, but not an
-    /// optional: the shipped deliverer resolves the project's supervisor, finds
-    /// none, and answers `no-live-supervisor`, which is the honest answer today
-    /// and safe in mock mode and in every test that never touches it. A test
-    /// injects its own to reach `transport-failed`, which nothing else can
-    /// produce.
-    public nonisolated(unsafe) var supervisionBriefingDeliverer:
-        any SupervisionBriefingDelivering = SupervisorBriefingDeliverer()
     /// Orphan-GC actor. `nil` in mock mode / unit tests that don't need it;
     /// set post-construction by `Daemon.swift` (mirrors `claudeUsagePoller`).
     /// The `gc.*` handlers return an error response rather than crashing when
@@ -196,14 +170,6 @@ public final class RPCRouter: Sendable {
             title: title)
     }
 
-    /// Runaway-detection counters (design §13): turns appended per session and
-    /// hook events received per session, over one observation window. The
-    /// hook-driven handlers increment it; `session.states` samples it. An actor
-    /// reference held here so the whole daemon keeps one set of books.
-    ///
-    /// It reports numbers and nothing acts on them — see the actor's doc
-    /// comment for why no threshold lives in compiled TBD.
-    let sessionCounters = SessionCountersTracker()
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
     let prListCoordinator = PRListCoordinator()
@@ -1102,8 +1068,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetRemoteTranscriptLiveSyncEnabled(request.paramsData)
             case RPCMethod.configSetCloneCheckoutEnabled:
                 return try await handleConfigSetCloneCheckoutEnabled(request.paramsData)
-            case RPCMethod.configSetSupervisionEnabled:
-                return try await handleConfigSetSupervisionEnabled(request.paramsData)
             case RPCMethod.remoteProviders:
                 return try await handleRemoteProviders()
             case RPCMethod.remoteSessions:
@@ -1167,30 +1131,6 @@ public final class RPCRouter: Sendable {
                 return try await handleGCRestore(request.paramsData)
             case RPCMethod.gcSweepNow:
                 return try await handleGCSweepNow(request.paramsData)
-            case RPCMethod.superviseStatus:
-                return try await handleSuperviseStatus()
-            case RPCMethod.superviseSetProjectMark:
-                return try await handleSuperviseSetProjectMark(request.paramsData)
-            case RPCMethod.superviseSetMode:
-                return try await handleSuperviseSetMode(request.paramsData)
-            case RPCMethod.superviseProjectList:
-                return try await handleSuperviseProjectList()
-            case RPCMethod.superviseProjectCreate:
-                return try await handleSuperviseProjectCreate(request.paramsData)
-            case RPCMethod.superviseProjectDelete:
-                return try await handleSuperviseProjectDelete(request.paramsData)
-            case RPCMethod.superviseProjectMove:
-                return try await handleSuperviseProjectMove(request.paramsData)
-            case RPCMethod.supervisePlaybook:
-                return try await handleSupervisePlaybook(request.paramsData)
-            case RPCMethod.supervisePlaybookCustomize:
-                return try await handleSupervisePlaybookCustomize(request.paramsData)
-            case RPCMethod.superviseReadout:
-                return try await handleSuperviseReadout(request.paramsData)
-            case RPCMethod.superviseLedger:
-                return try await handleSuperviseLedger(request.paramsData)
-            case RPCMethod.superviseBrief:
-                return try await handleSuperviseBrief(request.paramsData)
             case RPCMethod.panelGet:
                 return try await handlePanelGet(request.paramsData)
             case RPCMethod.panelApply:

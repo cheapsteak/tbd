@@ -72,15 +72,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` means "never chose" and resolves through
     /// `Config.autoCreateNotesDefault`.
     var auto_create_notes_enabled: Bool?
-    /// The fleet supervision brake (design 2026-07-26 §3, §7). **Genuinely
-    /// tri-state**, same shape as `queued_prompt_enabled`: the
-    /// `v75_config_supervision_enabled` column carries no SQL default, so
-    /// `nil` here means "never chose" rather than "off". Resolve it through
-    /// `Config.supervisionEnabledDefault`, never through `?? false`.
-    var supervision_enabled: Bool?
     /// Gate for the profile-dir collector
     /// (design 2026-08-15). **Genuinely tri-state**, same shape as
-    /// `supervision_enabled`: the `v78_config_gc_profile_dirs` column carries
+    /// `queued_prompt_enabled`: the `v78_config_gc_profile_dirs` column carries
     /// no SQL default, so `nil` here means "never chose" rather than "off".
     /// Resolve it through `Config.gcProfileDirsEnabledDefault`, never through
     /// `?? false`.
@@ -225,11 +219,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter autoCreateNotesDefault: same shape, for
     ///   `auto_create_notes_enabled` — the parameter proves that an untouched
     ///   preference follows the shipped default while explicit choices stick.
-    /// - Parameter supervisionEnabledDefault: same shape, for
-    ///   `supervision_enabled` — the parameter exists so tests can prove the
-    ///   same NULL-follows/explicit-sticks property for the fleet brake
-    ///   without waiting for the real `Config.supervisionEnabledDefault`
-    ///   constant to change.
     /// - Parameter gcProfileDirsDefault: same shape again, for
     ///   `gc_profile_dirs_enabled` — the profile-dir collector's own soak gate.
     /// - Parameter claudeCloudEnabledDefault: same shape again, for the Claude
@@ -289,7 +278,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
-        supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault,
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
@@ -357,10 +345,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // that is the whole point of v70_config_queued_prompt.
             queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault,
             autoCreateNotesEnabled: auto_create_notes_enabled ?? autoCreateNotesDefault,
-            // Same reasoning, for the fleet supervision brake — NOT `?? false`.
-            supervisionEnabled: supervision_enabled ?? supervisionEnabledDefault,
-            // Same reasoning again, for the profile-dir collector's gate —
-            // NOT `?? false`.
+            // Same reasoning, for the profile-dir collector's gate — NOT
+            // `?? false`.
             gcProfileDirsEnabled: gc_profile_dirs_enabled ?? gcProfileDirsDefault,
             // Same reasoning again, for the Claude cloud gate — NOT `?? false`.
             claudeCloudEnabled: claude_cloud_enabled ?? claudeCloudEnabledDefault,
@@ -728,40 +714,6 @@ public struct ConfigStore: Sendable {
                 sql: "UPDATE config SET auto_create_notes_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
-        }
-    }
-
-    /// Persist the fleet supervision brake (design 2026-07-26 §3, §7). Off is
-    /// the shipped default; releasing it hands TBD's autonomous processes the
-    /// authority to act, but nothing in the daemon reads this column to
-    /// actually act yet — the rest of the supervision subsystem lands in the
-    /// same series of changes. Writing either value is an explicit gesture
-    /// that leaves the column non-NULL forever after — including `false`,
-    /// which is the point: an operator who pulls the brake stays braked when
-    /// the shipped default eventually graduates.
-    ///
-    /// The read and the write share one transaction on purpose. Read-then-write
-    /// across two calls lets two concurrent toggles observe the same previous
-    /// value, and each then believes it caused the transition: the supervision
-    /// ledger gets two identical brake lines for one change, and the record
-    /// claims something happened twice. Serializing them here is what makes
-    /// "did this call move the brake" answerable at all.
-    ///
-    /// - Returns: the **resolved** brake as it stood immediately before this
-    ///   write — the column when it was set, the shipped default when it was
-    ///   NULL — so a caller can tell a real transition from a gesture that
-    ///   changed nothing.
-    @discardableResult
-    public func setSupervisionEnabled(enabled: Bool) async throws -> Bool {
-        try await writer.write { db -> Bool in
-            let previous = try Bool.fetchOne(
-                db, sql: "SELECT supervision_enabled FROM config WHERE id = ?",
-                arguments: [Self.singletonID])
-            try db.execute(
-                sql: "UPDATE config SET supervision_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-            return previous ?? Config.supervisionEnabledDefault
         }
     }
 

@@ -88,7 +88,7 @@ struct StartAdmissionRouterTests {
 
     private static let actorKinds = [
         ActuationActor.Kind.app, ActuationActor.Kind.daemon, ActuationActor.Kind.session,
-        ActuationActor.Kind.anonymous, ActuationActor.Kind.supervisor, "declared-by-a-newer-client",
+        ActuationActor.Kind.anonymous, "declared-by-a-newer-client",
     ]
 
     @Test("each actor kind against create and wake, flag on", arguments: actorKinds)

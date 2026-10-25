@@ -388,49 +388,6 @@ struct GitStatusTests {
         #expect(try await db.worktrees.get(id: wt.id)?.hasConflicts == true)
     }
 
-    /// The sweep's branch-tip observation instant is **persisted and compared**
-    /// — it is reported as `SessionCounters.commitsUnchangedSince` — so it is
-    /// data and goes through the date seam. Built from a bare `Date()` it
-    /// defeated `BranchTipTracker`'s own seam, and no test could pin the fact
-    /// end to end. This one does exactly that.
-    @Test func theSweepStampsBranchTipsThroughTheInjectedDateSeam() async throws {
-        let tempBase = URL(fileURLWithPath: NSTemporaryDirectory())
-        let repoDir = tempBase.appendingPathComponent("tbd-test-tipstamp-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: repoDir) }
-
-        try await runSteps([
-            "git init -b main",
-            "echo 'line1' > f.txt && git add . && git commit -m 'initial'",
-            "git checkout -b tbd/stamped",
-        ], at: repoDir)
-
-        let db = try TBDDatabase(inMemory: true)
-        let repo = try await db.repos.create(
-            path: repoDir.path, displayName: "test", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "stamped", branch: "tbd/stamped",
-            path: repoDir.path + "/.tbd/worktrees/stamped", tmuxServer: "tbd-test")
-
-        let pinned = Date(timeIntervalSince1970: 1_700_000_000)
-        let lifecycle = WorktreeLifecycle(
-            db: db, git: GitManager(), tmux: TmuxManager(dryRun: true),
-            hooks: HookResolver(), subscriptions: StateSubscriptionManager(),
-            now: { pinned }
-        )
-
-        // Two sweeps: the first sighting establishes the tip, the second is the
-        // first evidence that it stopped moving and is what carries the stamp.
-        await lifecycle.refreshGitStatuses(repoID: repo.id)
-        #expect(await lifecycle.branchTipTracker.unchangedSince(
-            repoID: repo.id, worktreeID: wt.id) == nil)
-        await lifecycle.refreshGitStatuses(repoID: repo.id)
-
-        #expect(await lifecycle.branchTipTracker.unchangedSince(
-            repoID: repo.id, worktreeID: wt.id) == pinned,
-                "the sweep stamped a tip with something other than its injected clock")
-    }
-
     /// The PR-poll remote-tip trigger end to end over a real repo and a bare
     /// origin: the first sweep is a baseline, a local commit with no push does
     /// not fire, and a push fires exactly once for that worktree.

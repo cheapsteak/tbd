@@ -29,5 +29,7 @@ enum RetiredColumns {
         // The keystroke veto's soak flag, added by `v51_config_hibernate_input_veto`
         // as `BOOLEAN DEFAULT 0`. The session mod is the only park draft guard.
         RetiredColumn(table: "config", column: "hibernate_input_veto_enabled", epoch: 2),
+        // Fleet supervision's brake, added by `v77_config_supervision_enabled` as `BOOLEAN`.
+        RetiredColumn(table: "config", column: "supervision_enabled", epoch: 3),
     ]
 }

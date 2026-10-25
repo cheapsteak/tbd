@@ -16,11 +16,11 @@ import Foundation
 // source (`.unavailable`) and an observed-at like any other, not an error and
 // not an excuse to substitute a confident value that happens to be at hand.
 //
-// This is the state-model half of the fleet-supervision design
-// (`docs/specs/2026-07-26-fleet-supervision-design.md` §2). It defines shapes
-// and says nothing about policy: no thresholds, no verdicts, no actions. What
-// counts as too long, too many, or too full is a project's convention and lives
-// in its sweep program.
+// The vocabulary was first set out in the fleet-supervision design
+// (`docs/specs/2026-07-26-fleet-supervision-design.md` §2), which is retired and
+// kept as the design record. It defines shapes and says nothing about policy:
+// no thresholds, no verdicts, no actions. What counts as too long, too many, or
+// too full is for whoever reads these facts to decide.
 
 // MARK: - FactSource
 
@@ -235,9 +235,9 @@ public enum FactTimestamp {
 ///
 /// The class is a *label on a recorded fact*, not a branch in a decision. What
 /// a class means — whether `promptOnScreen` warrants waking someone, whether
-/// `informational` is worth a line in a briefing — is a project's convention
-/// and lives in its sweep program, exactly as the thresholds in this file's
-/// other types do.
+/// `informational` is worth a line in a briefing — is for whoever reads the
+/// fact to decide, as is every threshold this file's other types decline to
+/// hold.
 public enum AwaitingInputClass: String, Sendable, Equatable, Codable {
     /// A prompt is on screen now and a human has to answer it.
     case promptOnScreen = "prompt_on_screen"
@@ -448,7 +448,7 @@ extension AwaitingInputReason: FactValueSummarizable {
 ///
 /// `.unknown` is a real answer, not an error path. Every other case asserts
 /// something about the session, and asserting one of them wrongly is worse than
-/// admitting ignorance — a supervisor that is told `idle` about a session
+/// admitting ignorance — a caller that is told `idle` about a session
 /// nobody could read will act on a session it cannot see. So `unknown` carries
 /// `why`, rides the same triple as every other value, and is what a decoder
 /// produces when it meets a tag it does not recognize. It is never repaired
@@ -470,7 +470,7 @@ public enum SessionStateValue: Sendable, Equatable, Codable {
     case rateLimited(until: Date?)
     /// Parked by TBD — the agent's process was torn down deliberately. The
     /// reason is free text because who-parked-and-why is TBD's own vocabulary
-    /// (`HibernateReason`) plus whatever a wake program adds.
+    /// (`HibernateReason`), which grows on its own schedule.
     case parked(reason: String)
     /// The session no longer exists: the pane, the window, or the process is
     /// gone.
@@ -808,75 +808,30 @@ public struct PRObservation: Codable, Sendable, Equatable {
     }
 }
 
-// MARK: - Counters
-
-/// Runaway-input counters for one session: how much has happened lately, and
-/// how long the working tree has stood still.
-///
-/// Every number here is a count of *events*, never of content. `turnsInWindow`
-/// counts records appended to the session's transcript JSONL without parsing a
-/// single one of them — the file is a version-unstable internal format, and
-/// counting appended lines is the one thing that stays true across its changes.
-///
-/// **Crossing any of these numbers causes nothing to happen here.** There are
-/// no thresholds in this type and there will not be any: what counts as a
-/// runaway is a project's convention and lives in its shipped sweep program.
-/// This type reports numbers; something else decides what they mean.
-public struct SessionCounters: Codable, Sendable, Equatable {
-    /// Transcript JSONL records appended since `windowStart`.
-    public let turnsInWindow: Int
-    /// Hook events received since `windowStart`.
-    public let hookEventsInWindow: Int
-    /// Start of the window both counts are taken over.
-    public let windowStart: Date
-    /// When the counts were read.
-    public let observedAt: Date
-    /// Since when the worktree's commits have not changed. nil when that was
-    /// not established — distinct from "changed just now".
-    public let commitsUnchangedSince: Date?
-
-    public init(
-        turnsInWindow: Int,
-        hookEventsInWindow: Int,
-        windowStart: Date,
-        observedAt: Date,
-        commitsUnchangedSince: Date? = nil
-    ) {
-        self.turnsInWindow = turnsInWindow
-        self.hookEventsInWindow = hookEventsInWindow
-        self.windowStart = windowStart
-        self.observedAt = observedAt
-        self.commitsUnchangedSince = commitsUnchangedSince
-    }
-}
-
 // MARK: - Report
 
 /// Everything the state model knows about one terminal, at one moment.
 ///
-/// The optionals are optional because their sources are separately fallible,
-/// not because they are unimportant: a session whose transcript could not be
-/// read still has a state, and reporting the state without the context load is
-/// the honest shape. A caller that needs one of them must handle its absence
-/// rather than receiving a filled-in default.
+/// The context load is optional because its source is separately fallible, not
+/// because it is unimportant: a session whose transcript could not be read
+/// still has a state, and reporting the state without the context load is the
+/// honest shape. A caller that needs it must handle its absence rather than
+/// receiving a filled-in default.
 public struct SessionStateReport: Codable, Sendable, Equatable {
     public let terminalID: UUID
     public let worktreeID: UUID
     public let state: SessionState
     public let contextLoad: ContextLoad?
-    public let counters: SessionCounters?
 
     public init(
         terminalID: UUID,
         worktreeID: UUID,
         state: SessionState,
-        contextLoad: ContextLoad? = nil,
-        counters: SessionCounters? = nil
+        contextLoad: ContextLoad? = nil
     ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.state = state
         self.contextLoad = contextLoad
-        self.counters = counters
     }
 }

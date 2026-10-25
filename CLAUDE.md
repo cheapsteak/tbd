@@ -10,12 +10,10 @@ Use the `tbd-project` skill for architecture, conventions, and file reference.
 
 ## Fleet supervision
 
-Supervising a fleet of agent sessions follows
-[`docs/specs/2026-07-26-fleet-supervision-design.md`](docs/specs/2026-07-26-fleet-supervision-design.md)
-(requirements: [`docs/specs/2026-07-26-fleet-supervision-requirements.md`](docs/specs/2026-07-26-fleet-supervision-requirements.md)).
-New supervision features land in that design's structures, and usually as
-user-land — a playbook, sweep-program, or wake-program change — rather than
-compiled (see "Compile only what user-land cannot do well" below).
+Fleet supervision is retired, and TBD contains no implementation of it. Its
+specs — [`docs/specs/2026-07-26-fleet-supervision-design.md`](docs/specs/2026-07-26-fleet-supervision-design.md)
+and [`docs/specs/2026-07-26-fleet-supervision-requirements.md`](docs/specs/2026-07-26-fleet-supervision-requirements.md),
+with their sub-documents — remain as the design record.
 
 ## Main Session Agent
 

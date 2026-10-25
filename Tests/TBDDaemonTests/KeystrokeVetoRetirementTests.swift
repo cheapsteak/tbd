@@ -10,12 +10,14 @@ import Testing
 /// uses it. See "Retiring a column" in `Sources/TBDDaemon/Database/CLAUDE.md`.
 @Suite struct KeystrokeVetoRetirementTests {
 
-    @Test func theVetoColumnIsRetiredAtEpochTwo() {
-        #expect(SchemaEpoch.current == 2)
+    @Test func theVetoColumnIsRetiredAtEpochTwo() throws {
+        #expect(SchemaEpoch.current >= 2)
         let retired = RetiredColumn(
             table: "config", column: "hibernate_input_veto_enabled", epoch: 2)
-        #expect(RetiredColumns.all.contains(retired))
-        #expect(RetiredColumns.all.last == retired, "a retirement is appended, never inserted")
+        let index = try #require(RetiredColumns.all.firstIndex(of: retired))
+        // Appended, never inserted: nothing before it was retired later.
+        #expect(RetiredColumns.all[..<index].allSatisfy { $0.epoch <= retired.epoch },
+                "a retirement is appended, never inserted")
         #expect(RetiredColumns.all.allSatisfy { $0.epoch <= SchemaEpoch.current },
                 "an entry names an epoch this tree has not reached")
     }
