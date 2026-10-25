@@ -35,7 +35,6 @@ struct TBDCommand: AsyncParsableCommand {
             CleanupCommand.self,
             LinkCommand.self,
             DoctorCommand.self,
-            SuperviseCommand.self,
             GCCommand.self,
             PRCommand.self,
         ]
