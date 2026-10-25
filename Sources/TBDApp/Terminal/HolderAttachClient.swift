@@ -58,8 +58,8 @@ protocol HolderAttaching: Sendable {
 
 extension HolderAttaching {
     /// Send `send` — one holder request naming `generation` — and send it
-    /// again while it fails in transit, waiting out each of
-    /// `HolderAttachRetry.delays` first.
+    /// again while it fails in transit, waiting out each of `resendDelays`
+    /// first (production passes `HolderAttachRetry.handbackResendDelays`).
     ///
     /// A handback that never reached the daemon leaves its claim standing, and
     /// nothing else clears a claim while this app lives: every later attach to
@@ -80,7 +80,8 @@ extension HolderAttaching {
     ///   so the first send here waits its turn; nil sends at once.
     func resendingInTransit(
         _ request: String, terminalID: UUID, generation: UInt64,
-        after failure: (any Error)? = nil, clock: any Clock<Duration>,
+        after failure: (any Error)? = nil,
+        resendDelays: [Duration], clock: any Clock<Duration>,
         _ send: () async throws -> Void
     ) async throws {
         var lastFailure: any Error
@@ -94,7 +95,7 @@ extension HolderAttaching {
                 lastFailure = error
             }
         }
-        for (index, delay) in HolderAttachRetry.delays.enumerated() {
+        for (index, delay) in resendDelays.enumerated() {
             let resend = index + 1
             let cause = lastFailure.localizedDescription
             logger.info("""
@@ -133,7 +134,7 @@ extension HolderAttaching {
     @discardableResult
     func detachResendingInBackground(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
-        snapshotPreamble: Data, clock: any Clock<Duration>
+        snapshotPreamble: Data, resendDelays: [Duration], clock: any Clock<Duration>
     ) async -> Task<Void, Never>? {
         do {
             try await detach(
@@ -146,7 +147,7 @@ extension HolderAttaching {
                 do {
                     try await self.resendingInTransit(
                         "pane.detach", terminalID: terminalID, generation: generation,
-                        after: failure, clock: clock
+                        after: failure, resendDelays: resendDelays, clock: clock
                     ) {
                         try await self.detach(
                             worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
@@ -199,13 +200,14 @@ extension HolderAttaching {
     /// - Parameters:
     ///   - kind: Names the release in the log lines — what kind of attach this
     ///     was ("undelivered", "abandoned").
+    ///   - resendDelays: The waits between the background resends.
     ///   - clock: What the background resends wait on.
     /// - Returns: The background resend, when a first attempt never reached
     ///   the daemon; nil otherwise.
     @discardableResult
     func releaseUnconfirmedAttach(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64,
-        kind: String, clock: any Clock<Duration>
+        kind: String, resendDelays: [Duration], clock: any Clock<Duration>
     ) async -> Task<Void, Never>? {
         var lostReady: (any Error)?
         do {
@@ -262,7 +264,7 @@ extension HolderAttaching {
                 do {
                     try await self.resendingInTransit(
                         "attach.ready", terminalID: terminalID, generation: generation,
-                        after: readyFailure, clock: clock, sendReady)
+                        after: readyFailure, resendDelays: resendDelays, clock: clock, sendReady)
                 } catch where HolderAttachRetry.isTransportFailure(error) {
                     logger.error("""
                         holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
@@ -279,7 +281,7 @@ extension HolderAttaching {
             do {
                 try await self.resendingInTransit(
                     "pane.detach", terminalID: terminalID, generation: generation,
-                    after: detachAfter, clock: clock, sendDetach)
+                    after: detachAfter, resendDelays: resendDelays, clock: clock, sendDetach)
             } catch {
                 logger.error("""
                     holder \(kind, privacy: .public) attach \(generation, privacy: .public) for \
@@ -306,6 +308,9 @@ struct HolderAttachClient: HolderAttaching {
     /// How long to wait for the vended descriptor. Matches the control-mode
     /// path's bound.
     var fdTimeout: Duration = .seconds(5)
+    /// The waits between resends of an undelivered attach's release. A panel
+    /// passes its own seam, so a test paces both the same way.
+    var resendDelays: [Duration] = HolderAttachRetry.handbackResendDelays
     /// What the resends of an undelivered attach's release wait on. A panel
     /// passes its own, so one retry sequence runs on one clock.
     var clock: any Clock<Duration> = ContinuousClock()
@@ -326,7 +331,7 @@ struct HolderAttachClient: HolderAttaching {
         // dropped on its own has to come back first: the daemon would refuse
         // this attach for want of somewhere to vend it. Paced inside, so a
         // panel's retries cannot turn this into a reconnect loop.
-        await daemonClient.reconnectSidecarIfDown()
+        await daemonClient.reconnectSidecarIfDown(.attach)
         let promise = daemonClient.fdSidecar.expectFD(
             worktreeID: worktreeID, paneID: paneID, attachID: attachID)
         let result: AttachRequestResult
@@ -396,7 +401,8 @@ struct HolderAttachClient: HolderAttaching {
         await Task {
             _ = await client.releaseUnconfirmedAttach(
                 worktreeID: worktreeID, paneID: paneID, terminalID: terminalID,
-                generation: generation, kind: "undelivered", clock: client.clock)
+                generation: generation, kind: "undelivered",
+                resendDelays: client.resendDelays, clock: client.clock)
         }.value
     }
 

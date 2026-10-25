@@ -67,15 +67,30 @@ enum TerminalPanePresentation {
     /// stays advanced after the record clears, so clearing it does not rebuild
     /// the pane a second time.
     ///
-    /// `attachRetry` is the attach-failed placard's Retry count
-    /// (`AppState.terminalAttachRetries`), kept apart from `attachEpoch` so a
-    /// Retry rebuilds the pane without touching the count the switch reads.
+    /// Built on `attachIdentity`, which every host of a terminal view shares;
+    /// a pane adds its parked state because it is the host that renders the
+    /// parked placeholder.
     static func identity(
         for terminal: Terminal, switching: SwitchingAccount?, attachEpoch: Int,
-        attachRetry: Int = 0
+        attachRetry: Int
     ) -> String {
         let parked = switching == nil ? terminal.isParked : false
-        return "\(terminal.id)-\(terminal.tmuxWindowID)-\(parked)-\(attachEpoch)-\(attachRetry)"
+        let attach = attachIdentity(for: terminal, attachEpoch: attachEpoch, attachRetry: attachRetry)
+        return "\(attach)-\(parked)"
+    }
+
+    /// The part of a terminal view's identity every host shares: the
+    /// terminal, its window, and the two counts that rebuild the view into a
+    /// fresh attach — an account switch's `attachEpoch`, and `attachRetry`, the
+    /// attach-failed placard's Retry count (`AppState.terminalAttachRetries`),
+    /// kept apart so a Retry never moves the count the switch reads.
+    ///
+    /// The pinned dock uses this alone: it renders no parked placeholder, and
+    /// rebuilding it on a park would only start an attach to a session that
+    /// is not there. `attachRetry` has no default so no host can leave Retry
+    /// unable to rebuild it.
+    static func attachIdentity(for terminal: Terminal, attachEpoch: Int, attachRetry: Int) -> String {
+        "\(terminal.id)-\(terminal.tmuxWindowID)-\(attachEpoch)-\(attachRetry)"
     }
 
     /// The notice composed into a parked pane's frozen snapshot, or nil.

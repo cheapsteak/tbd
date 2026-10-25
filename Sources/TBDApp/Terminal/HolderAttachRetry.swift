@@ -23,6 +23,17 @@ enum HolderAttachRetry {
         .milliseconds(500), .seconds(1), .seconds(2), .seconds(4), .seconds(4),
     ]
 
+    /// The waits between resends of a handback or release that never reached
+    /// the daemon: 0.25, 0.5, 1, 2 and 4 seconds, 7.75 s in all.
+    ///
+    /// Shorter than `delays` on purpose. A successor panel refused while this
+    /// handback's claim stands is retrying on `delays`, and the last resend
+    /// has to land well inside that budget, or the successor paints its
+    /// placard just before the claim clears.
+    static let handbackResendDelays: [Duration] = [
+        .milliseconds(250), .milliseconds(500), .seconds(1), .seconds(2), .seconds(4),
+    ]
+
     /// Whether `error` is the daemon answering that it will never serve this
     /// attach, so neither a retry nor the user's Retry can help.
     ///

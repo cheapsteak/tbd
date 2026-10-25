@@ -427,8 +427,8 @@ final class FDSidecarClient: @unchecked Sendable {
             }
         }
         // EOF: fail everything pending, mark disconnected. Reconnecting is
-        // `DaemonClient`'s: `connect()` after an RPC failure, and
-        // `reconnectSidecarIfDown` when the RPC socket stayed up.
+        // `DaemonClient`'s: `connect()` while the app is disconnected, and
+        // `reconnectSidecarIfDown` while it stays connected.
         lock.lock()
         let pending = waiters; waiters = [:]
         socketFD = -1

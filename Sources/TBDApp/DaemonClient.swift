@@ -76,6 +76,9 @@ actor DaemonClient {
     private(set) var connected: Bool = false
     /// Paces `reconnectSidecarIfDown`.
     private var sidecarReconnectBackoff = SidecarReconnectBackoff()
+    /// How far the injected clock has moved since init: the timestamps
+    /// `sidecarReconnectBackoff` paces on.
+    private let elapsed: @Sendable () -> Duration
 
     /// Sidecar for receiving vended pane fds. Connected eagerly right after
     /// the RPC socket, so the daemon's accept has completed long before the
@@ -95,10 +98,14 @@ actor DaemonClient {
     /// returns in milliseconds and never approaches this ceiling.
     nonisolated static let rpcRecvDeadlineSeconds: TimeInterval = 300
 
-    init(socketPath: String? = nil, vendSocketPath: String? = nil) {
+    init(
+        socketPath: String? = nil, vendSocketPath: String? = nil,
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
         // See HookResolver — resolve here, not at the caller's site.
         self.socketPath = socketPath ?? TBDConstants.socketPath
         self.vendSocketPath = vendSocketPath ?? TBDConstants.vendSocketPath
+        self.elapsed = SidecarReconnectBackoff.stopwatch(on: clock)
     }
 
     // MARK: - Connection
@@ -156,35 +163,36 @@ actor DaemonClient {
         }
     }
 
-    /// Reconnect the FD sidecar if it is down, paced by
-    /// `SidecarReconnectBackoff`. For a caller that knows the RPC socket is
-    /// up — the poll tick, and a holder attach about to send its request.
+    /// Reconnect the FD sidecar if it is down, paced for `caller` by
+    /// `SidecarReconnectBackoff`: the poll tick on an escalating backoff, a
+    /// holder attach about to send its request on a fixed minimum interval
+    /// that leaves the poll's backoff alone.
     ///
-    /// `connect()` reconnects the sidecar only after an RPC has failed, so it
-    /// never sees a sidecar that drops on its own: the daemon handing it to a
-    /// second app instance, the frame scanner desyncing, or a daemon restart
-    /// quick enough that no RPC failed in between. Until something reconnects
-    /// it, every new holder tab fails to attach and every control-mode
-    /// keystroke is dropped.
+    /// `connect()` runs only while the app believes itself disconnected, so
+    /// it never sees a sidecar that drops on its own while the app stays
+    /// connected: the daemon handing it to a second app instance, the frame
+    /// scanner desyncing, or a daemon restart quick enough that no RPC failed
+    /// in between. Until something reconnects it, every new holder tab fails
+    /// to attach and every control-mode keystroke is dropped.
     ///
-    /// - Parameter now: When this is asked, for the pacing; a test passes its
-    ///   own.
     /// - Returns: Whether the sidecar is connected afterwards.
     @discardableResult
-    func reconnectSidecarIfDown(at now: Date = Date()) -> Bool {
+    func reconnectSidecarIfDown(_ caller: SidecarReconnectBackoff.Caller) -> Bool {
+        let now = elapsed()
         if fdSidecar.isConnected {
             sidecarReconnectBackoff.noteConnected(at: now)
             return true
         }
-        guard sidecarReconnectBackoff.allowsReconnect(at: now) else { return false }
+        guard sidecarReconnectBackoff.allowsReconnect(caller, at: now) else { return false }
         connectSidecar()
         let connected = fdSidecar.isConnected
-        sidecarReconnectBackoff.noteReconnect(at: now)
+        sidecarReconnectBackoff.noteReconnect(caller, at: now)
         let reconnects = sidecarReconnectBackoff.reconnects
         let outcome = connected ? "succeeded" : "failed"
+        let asker = caller == .poll ? "the poll tick" : "a holder attach"
         daemonClientLogger.info("""
-            FD sidecar was down while the daemon was up; reconnect \
-            \(reconnects, privacy: .public) of this run \(outcome, privacy: .public)
+            FD sidecar was down; a reconnect for \(asker, privacy: .public) \
+            \(outcome, privacy: .public) (poll reconnects this run: \(reconnects, privacy: .public))
             """)
         return connected
     }

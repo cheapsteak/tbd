@@ -575,6 +575,31 @@ struct TerminalHolderTransportGateTests {
         #expect(state.terminalAttachRetries[row.id] == 2, "every Retry must be a fresh attempt")
     }
 
+    @MainActor
+    @Test("a terminal's Retry count goes with the terminal")
+    func retryCountIsForgottenWithItsTerminal() {
+        let suiteName = "TBDAppTests.HolderTransportGate.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let state = AppState(userDefaults: defaults)
+        let worktreeID = UUID()
+        func row() -> Terminal {
+            Terminal(
+                id: UUID(), worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+                label: "Shell", kind: .shell, transport: .holder)
+        }
+        let removed = row()
+        let kept = row()
+        state.terminals[worktreeID] = [removed, kept]
+        state.retryTerminalAttach(terminalID: removed.id)
+        state.retryTerminalAttach(terminalID: kept.id)
+
+        state.removeDeletedTerminalFromState(terminalID: removed.id, worktreeID: worktreeID)
+
+        #expect(state.terminalAttachRetries[removed.id] == nil, "a removed terminal's count must not linger")
+        #expect(state.terminalAttachRetries[kept.id] == 1, "only the removed terminal's count goes")
+    }
+
     @Test("only the ended status maps to the session-ended copy, and only a resumable Claude tab is promised a resume")
     func holderAttachFailureMessageMapping() {
         typealias Copy = TerminalPreparationPresentation

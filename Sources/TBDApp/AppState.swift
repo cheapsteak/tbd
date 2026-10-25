@@ -986,7 +986,8 @@ final class AppState {
     /// Separate from `terminalAttachEpochs` on purpose: an in-place account
     /// switch reads that epoch to decide whether it still owes the pane its
     /// one rebuild, and a Retry landing mid-switch must not answer that
-    /// question for it. Absent reads as zero.
+    /// question for it. Absent reads as zero; a terminal's entry goes with
+    /// the terminal (`recordTerminalRemoval`).
     var terminalAttachRetries: [UUID: Int] = [:]
 
     /// The attach-failed placard's Retry: rebuild this terminal's panel so it
@@ -3782,12 +3783,13 @@ final class AppState {
                     }
                     if !self.isConnected { return }
                 }
-                // The reconnect above runs only once an RPC has failed, so it
-                // never sees a sidecar that dropped on its own while RPC stayed
-                // up. This does, and it is paced inside — free while the
-                // sidecar is up, and backed off so a second app instance
-                // cannot make the two take it from each other every tick.
-                await self.daemonClient.reconnectSidecarIfDown()
+                // The block above runs only while `isConnected` is false, so it
+                // never sees a sidecar that dropped on its own while the app
+                // stayed connected. This does, and it is paced inside — free
+                // while the sidecar is up, and backed off so a second app
+                // instance cannot make the two take it from each other every
+                // tick.
+                await self.daemonClient.reconnectSidecarIfDown(.poll)
                 // Guard the whole refresh cycle (refreshAll + the every-15th
                 // pr.list) so a slow daemon can never stack overlapping cycles or
                 // run them concurrently. pollCycle is advanced only when a cycle

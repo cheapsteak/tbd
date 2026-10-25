@@ -825,6 +825,11 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// A seam for pacing: a test about a single attempt empties it, and a
         /// test about the backoff drives `clock` through it.
         var holderAttachRetryDelays: [Duration] = HolderAttachRetry.delays
+        /// The waits between resends of this panel's handback, or of an
+        /// attach release, that never reached the daemon; see
+        /// `HolderAttachRetry.handbackResendDelays`. The same kind of seam as
+        /// `holderAttachRetryDelays`, and on the same `clock`.
+        var holderHandbackResendDelays: [Duration] = HolderAttachRetry.handbackResendDelays
         /// What the holder attach's retry backoff sleeps on.
         private let clock: any Clock<Duration>
         /// Seam for the handback ledger. Nil means "use the one on AppState",
@@ -1189,21 +1194,22 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// not on it — and a caller that knows the session has ended passes
         /// the ended copy instead, because there the default would be false.
         ///
-        /// The attach-failed copy points at a Retry button, so painting it
-        /// raises the banner that carries one; the ended copies do not.
+        /// `offersRetry` raises the banner that carries the Retry button the
+        /// attach-failed copy points at. The caller decides it from what
+        /// failed, never from the copy: a permanent refusal — the session
+        /// ended, or a daemon that can never serve the attach — offers none.
         @MainActor
         private func feedHolderAttachFailure(
             reason: String, into terminalView: TerminalView,
-            message: String = TerminalPreparationPresentation.holderAttachFailedMessage
+            message: String = TerminalPreparationPresentation.holderAttachFailedMessage,
+            offersRetry: Bool
         ) {
             let worktreeID = worktreeIDForDiagnostics()?.uuidString ?? "unknown"
             logger.error(
                 "holder attach failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=holderAttachFailed reason=\(reason, privacy: .public)"
             )
             feedPreparationMessage(message, into: terminalView)
-            if message == TerminalPreparationPresentation.holderAttachFailedMessage {
-                onHolderAttachRetryOffered?()
-            }
+            if offersRetry { onHolderAttachRetryOffered?() }
         }
 
         /// The ledger this panel registers its handback with and waits on.
@@ -1251,14 +1257,17 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             guard !isTornDown else { return }
             guard let appState, let worktreeID = worktreeIDForDiagnostics() else {
                 feedHolderAttachFailure(
-                    reason: "the panel's terminal is not loaded in AppState", into: terminalView)
+                    reason: "the panel's terminal is not loaded in AppState", into: terminalView,
+                    offersRetry: true)
                 return
             }
-            // The coordinator's clock goes into the client too, so every wait
-            // in one retry sequence — the backoff here and the client's
-            // release resends — runs on the same injected clock.
+            // The coordinator's clock and resend schedule go into the client
+            // too, so every wait in one retry sequence — the backoff here and
+            // the client's release resends — runs on the same injected pacing.
             let client = holderAttachClient
-                ?? HolderAttachClient(daemonClient: appState.daemonClient, clock: clock)
+                ?? HolderAttachClient(
+                    daemonClient: appState.daemonClient,
+                    resendDelays: holderHandbackResendDelays, clock: clock)
             let ledger = handbackLedger(appState)
             var retries = 0
             while let failure = await attemptHolderAttach(
@@ -1286,7 +1295,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     reason: "\(failure.step): \(failure.error.localizedDescription)",
                     into: terminalView,
                     message: TerminalPreparationPresentation.holderAttachFailureMessage(
-                        for: failure.error, terminal: panelTerminal()))
+                        for: failure.error, terminal: panelTerminal()),
+                    offersRetry: !HolderAttachRetry.isPermanentRefusal(failure.error))
                 return
             }
         }
@@ -1658,13 +1668,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         ) {
             let panelID = self.panelID
             let clock = self.clock
+            let resendDelays = holderHandbackResendDelays
             // Settles once each request has been sent once; a resend of one
             // that never reached the daemon carries on outside the ledger.
             let release = Task { @MainActor in
                 await reader?.awaitClosed()
                 await client.releaseUnconfirmedAttach(
                     worktreeID: worktreeID, paneID: "", terminalID: panelID,
-                    generation: generation, kind: "abandoned", clock: clock)
+                    generation: generation, kind: "abandoned",
+                    resendDelays: resendDelays, clock: clock)
             }
             ledger.register(terminalID: panelID, task: release)
         }
@@ -1830,8 +1842,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                     """)
             }
             let clock = self.clock
+            let resendDelays = holderHandbackResendDelays
             let client = holderAttachClient
-                ?? HolderAttachClient(daemonClient: appState.daemonClient, clock: clock)
+                ?? HolderAttachClient(
+                    daemonClient: appState.daemonClient, resendDelays: resendDelays, clock: clock)
             let panelID = self.panelID
             let ledger = handbackLedger(appState)
             holderHandbackInFlight = true
@@ -1861,12 +1875,15 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // resend: this panel is off the descriptor already, a successor
                 // refused while the claim stands retries on its own, and a
                 // resend of this generation cannot touch the successor's newer
-                // one. If every resend fails, what releases the claim is the
+                // one. The resend schedule ends well inside the successor's
+                // retry budget, so a claim cleared by the last resend is still
+                // seen. If every resend fails, what releases the claim is the
                 // app-liveness verdict that covers an app which died
                 // mid-detach — the same path, reached by a different failure.
                 await client.detachResendingInBackground(
                     worktreeID: attach.worktreeID, paneID: "", terminalID: panelID,
-                    generation: attach.generation, snapshotPreamble: preamble, clock: clock)
+                    generation: attach.generation, snapshotPreamble: preamble,
+                    resendDelays: resendDelays, clock: clock)
             }
             ledger.register(terminalID: panelID, task: handback)
         }
@@ -3127,7 +3144,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 // the RPC socket intact — the frame scanner desyncing, the
                 // protocol-violation `break`, a second app instance taking the
                 // sidecar — clears no `isConnected`, and is reconnected by the
-                // same poll through `DaemonClient.reconnectSidecarIfDown`
+                // same poll through `DaemonClient.reconnectSidecarIfDown(.poll)`
                 // instead, which backs off when the drops keep coming. So the
                 // drop is an episode of a few seconds in the common case and
                 // can stretch to minutes in a fight; either way it is an

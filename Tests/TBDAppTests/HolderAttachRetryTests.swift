@@ -333,6 +333,10 @@ struct HolderAttachRetryTests {
     /// panel being rebuilt. A retry loop that gave up on that would paint the
     /// placard over a healthy session; a real reconnect tears the panel down,
     /// and the teardown test above covers that.
+    ///
+    /// The connection is held down across one wake and restored across the
+    /// next, so a loop that checked `isConnected` after its sleep stops at
+    /// the first, and one that watched for the reconnect stops at the second.
     @Test("a flicker of the daemon connection during the backoff does not stop the retries")
     func aConnectionFlickerDoesNotStopTheRetries() async throws {
         let pty = FakePTY()
@@ -340,22 +344,30 @@ struct HolderAttachRetryTests {
         let clock = EventDrivenTestClock()
         let attachment = pty.attachment()
         let stub = ScriptedAttach(attach: { call in
-            if call == 0 { throw DaemonClientError.connectionFailed("refused") }
+            if call < 2 { throw DaemonClientError.connectionFailed("refused") }
             return attachment
         })
         let fixture = makeFixture(clock: clock, stub: stub)
         defer { fixture.tearDown() }
+        fixture.state.isConnected = true
 
         let attaching = Task { @MainActor in
             await fixture.coordinator.startHolderClient(terminalView: fixture.view)
         }
         try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
         fixture.state.isConnected = false
+        // Wakes with the connection down; must ask again, fail, and sleep.
+        try await clock.requireAdvanceWhenArmed(
+            by: HolderAttachRetry.delays[0], timeout: TestDeadlines.saturatedPass)
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        #expect(stub.attaches == 2, "the loop gave up while the connection was down: \(stub.events)")
         fixture.state.isConnected = true
-        await clock.advance(by: HolderAttachRetry.delays[0])
+        // Wakes after the connection came back; must ask again and attach.
+        try await clock.requireAdvanceWhenArmed(
+            by: HolderAttachRetry.delays[1], timeout: TestDeadlines.saturatedPass)
         await attaching.value
 
-        #expect(stub.events == ["attach", "attach", "ready"],
+        #expect(stub.events == ["attach", "attach", "attach", "ready"],
                 "the retry must survive a connection flicker: \(stub.events)")
         #expect(!fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage))
     }

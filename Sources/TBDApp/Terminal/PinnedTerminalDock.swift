@@ -163,9 +163,13 @@ private struct PinnedTerminalCell: View {
                         await appState.requestAutomaticTerminalRecreation(terminalID: terminal.id)
                     }
                 )
-                // The Retry count is part of the identity so the attach-failed
-                // placard's Retry rebuilds this panel too, as it does a pane's.
-                .id("\(terminal.id)-\(terminal.tmuxWindowID)-\(appState.terminalAttachRetries[terminal.id] ?? 0)")
+                // The identity every terminal host shares, so the attach-failed
+                // placard's Retry, and an account switch's wake, rebuild this
+                // panel too, as they do a pane's.
+                .id(TerminalPanePresentation.attachIdentity(
+                    for: terminal,
+                    attachEpoch: appState.terminalAttachEpochs[terminal.id] ?? 0,
+                    attachRetry: appState.terminalAttachRetries[terminal.id] ?? 0))
             } else {
                 ZStack {
                     Color(nsColor: .textBackgroundColor)
