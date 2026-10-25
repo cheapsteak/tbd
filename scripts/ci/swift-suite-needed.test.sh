@@ -10,14 +10,19 @@
 #     `--no-renames`, the event short-circuit, and every can't-answer-honestly
 #     shape answering `run=true` with exactly one `run=` line.
 #   - THE DRIFT CHECK, against THIS checkout: every script the suite can reach
-#     — named by the `test` job or by `scripts/test.sh` / `scripts/swift-safe`,
-#     a `"scripts/…"` literal in a Swift file, or loaded with `source` / `.`
-#     from any of those, all the way down — must be on the gate's list of suite
-#     scripts. The skip is only as good as that list: a script the suite came
-#     to depend on without being added would let a PR that changes only that
-#     script skip the suite that would have caught it. The gatherer itself is
-#     proven on a fixture tree first, so a broken gatherer cannot pass the real
-#     check by gathering nothing.
+#     — the two wrappers, a script named by the `test` job, a `"scripts/…"`
+#     literal in a Swift file, and then whatever any of those names or loads
+#     with `source` / `.`, all the way down, except through the two stops
+#     below — must be on the gate's list of suite scripts. The skip is only as
+#     good as that list: a script the suite came to depend on without being
+#     added would let a PR that changes only that script skip the suite that
+#     would have caught it. The gatherer itself is proven on a fixture tree
+#     first, so a broken gatherer cannot pass the real check by gathering
+#     nothing. The same case fails on a local action in the `test` job, whose
+#     files would sit under the skip-listed `.github/**`.
+#   - THE WIRING, read out of the real workflow: `needs`, the `if:`, the job's
+#     missing `name:`, and the gate's output. No fixture can execute a GitHub
+#     expression, and these are what make the gate fail closed.
 #
 # RUN WITH `/bin/bash`, WHICH ON MACOS IS 3.2 — the Lint job does. Every nested
 # run of the script under test goes through `$BASH`, this harness's own
@@ -354,8 +359,10 @@ test_git_swift_change_runs() {
   assert_eq "a PR touching a Swift file writes exactly one line, run=true" "run=true" "$GATE_OUT"
 }
 
-# The spec's case. It cannot fail on `--no-renames` alone: rename detection
-# lists the NEW path, which is under `Sources/` either way.
+# A rename INTO `Sources/` runs with or without `--no-renames`: rename
+# detection lists the new path, which is under `Sources/` either way. It pins
+# only that a rename is judged at all; the reverse move below is the spec's
+# case and the one that proves the flag.
 test_git_rename_from_docs_into_sources_runs() {
   local d; d="$(mkrepo)"
   (
@@ -367,8 +374,8 @@ test_git_rename_from_docs_into_sources_runs() {
   assert_eq "a rename from docs/ into Sources/ runs" "run=true" "$GATE_OUT"
 }
 
-# The case that does prove `--no-renames`: with rename detection on,
-# `--name-only` prints only `docs/App.swift`, which would skip.
+# The spec's case, and the one that proves `--no-renames`: with rename
+# detection on, `--name-only` prints only `docs/App.swift`, which would skip.
 test_git_rename_out_of_sources_runs() {
   local d; d="$(mkrepo)"
   (
@@ -465,25 +472,74 @@ test_git_merge_commit_checkout() {
 }
 
 # ---------------------------------------------------------------------------
-# 8. The drift check
+# 8. The drift check and the workflow wiring
 # ---------------------------------------------------------------------------
 
 # Lines that are not `#` comments.
 code_lines() { grep -v '^[[:space:]]*#' "$1" 2>/dev/null; }
 
-# The lines of the `test` job in ROOT's test.yml: after `  test:`, up to the
-# next job key or top-level key.
-test_job_lines() {
-  awk '
-    /^  test:[[:space:]]*$/ { inside = 1; next }
+# The lines of job JOB in ROOT's test.yml: after `  JOB:`, up to the next job
+# key or top-level key.
+job_lines() {
+  awk -v head="  $2:" '
+    { line = $0; sub(/[[:space:]]+$/, "", line) }
+    line == head { inside = 1; next }
     inside && /^(  )?[^[:space:]#]/ { inside = 0 }
     inside { print }
   ' "$1/.github/workflows/test.yml" 2>/dev/null
 }
 
+suite_job_lines() { job_lines "$1" test; }
+
+# The lines of the step whose `id:` is ID in job JOB of ROOT's test.yml, from
+# its `      - ` line up to the next step or job-level key.
+step_lines() {
+  job_lines "$1" "$2" | awk -v id="$3" '
+    /^      - / { if (hit) exit; block = "" }
+    /^    [^[:space:]#]/ { if (hit) exit; block = ""; next }
+    { block = block $0 "\n" }
+    $0 ~ ("^      (- |  )id: " id "[[:space:]]*$") { hit = 1 }
+    END { if (hit) printf "%s", block }
+  '
+}
+
+# Succeeds when TEXT holds LINE as one whole line.
+has_line() {
+  case "
+$1
+" in
+    *"
+$2
+"*) return 0 ;;
+  esac
+  return 1
+}
+assert_line() {
+  if has_line "$2" "$3"; then echo "ok   - $1"; else echo "FAIL - $1: no line [$3] in [$2]"; FAIL=1; fi
+}
+
 # A line that loads a file into the running shell: `source` or `.` at the
 # start of a command.
 LOAD_LINE='(^|;|&&|\|\||[[:space:]]then|[[:space:]]do|[[:space:]]else)[[:space:]]*(source|\.)[[:space:]]+[^[:space:]]'
+
+# The stops: gathered scripts whose names are NOT followed, because the suite
+# never runs them. What they load is still followed, and a file reached only
+# through a stop's loads is part of that stop — its loads are followed, its
+# names are not. Each entry is here for a reason that has to stay true:
+#
+#   - scripts/restart.sh: `DaemonBuildSkewTests` reads it as text and the suite
+#     never runs it. It runs `reclaim-build.sh` and `sweep-scratchpads.sh`,
+#     and `restart-bundle-lib.sh`, which only it loads, names `update.sh` —
+#     none of them a suite input.
+#   - scripts/remote-verify.sh: the remote verification valve. CI never arms
+#     it, so CI never runs what it runs: `remote_verify.py`, and through that
+#     the pre-push hook, the preflight-ref sweep and the nightly stress script.
+is_name_stop() {
+  case "$1" in
+    scripts/restart.sh|scripts/remote-verify.sh) return 0 ;;
+  esac
+  return 1
+}
 
 # The scripts named on the lines read from stdin: a full `scripts/…` path that
 # exists under ROOT, or the bare file name of a file under ROOT/scripts (INDEX
@@ -513,33 +569,47 @@ record_found() {
   printf '%s\t%s\n' "$2" "$3" >> "$1"
 }
 
+# Record PATH, found by ORIGIN, in WORK and queue it if it is new: for names
+# and loads (WORK/run.next) unless MODE is `read` or PATH is a stop, in which
+# case for loads only (WORK/read.next).
+gather_one() {
+  local work="$1" path="$2" origin="$3" mode="$4"
+  record_found "$work/found" "$path" "$origin" || return 0
+  if [ "$mode" = read ] || is_name_stop "$path"; then
+    echo "$path" >> "$work/read.next"
+  else
+    echo "$path" >> "$work/run.next"
+  fi
+}
+
 # One `<path><TAB><where it was found>` line per script the suite can reach in
-# the tree at ROOT. Names are followed one level, from the `test` job and the
-# two wrappers; loads are followed all the way down.
+# the tree at ROOT.
+#
+# Two phases, in this order. The first follows names and loads from every
+# gathered script but the stops, to a fixpoint. Only then does the second
+# follow loads alone, from the stops and from what they load. The order is
+# what lets a script that both a stop loads and a followed script names —
+# `restart-build-lib.sh`, which `restart.sh` loads and `swift-safe` names — be
+# followed as the second, rather than recorded first as part of the stop.
 gather_suite_scripts() {
-  local root="$1" work index found path file hit
+  local root="$1" work index path file hit
   work="$(scratch)"
   index="$work/index"
-  found="$work/found"
   ( cd "$root" && find scripts -type f ) > "$index" 2>/dev/null
-  : > "$found"
+  : > "$work/found"
+  : > "$work/run.next"
+  : > "$work/read.next"
 
   for file in scripts/test.sh scripts/swift-safe; do
     if [ -f "$root/$file" ]; then
-      record_found "$found" "$file" "the wrapper every pass runs through"
+      gather_one "$work" "$file" "the wrapper every pass runs through" run
     fi
   done
 
-  test_job_lines "$root" | grep -v '^[[:space:]]*#' | names_in "$root" "$index" |
+  suite_job_lines "$root" | grep -v '^[[:space:]]*#' | names_in "$root" "$index" |
     while IFS= read -r path; do
-      record_found "$found" "$path" "named by the test job in .github/workflows/test.yml"
+      gather_one "$work" "$path" "named by the test job in .github/workflows/test.yml" run
     done
-
-  for file in scripts/test.sh scripts/swift-safe; do
-    code_lines "$root/$file" | names_in "$root" "$index" | while IFS= read -r path; do
-      record_found "$found" "$path" "named by $file"
-    done
-  done
 
   ( cd "$root" && grep -roE '"scripts/[^"]*"' --include='*.swift' Sources Tests 2>/dev/null ) |
     while IFS= read -r hit; do
@@ -548,25 +618,38 @@ gather_suite_scripts() {
       path="${path#\"}"
       path="${path%\"}"
       if [ -f "$root/$path" ]; then
-        record_found "$found" "$path" "a string literal in $file"
+        gather_one "$work" "$path" "a string literal in $file" run
       fi
     done
 
-  cut -f1 "$found" > "$work/queue"
-  while [ -s "$work/queue" ]; do
-    : > "$work/next"
+  # Loads before names within each file, so a loaded file's origin says so.
+  while [ -s "$work/run.next" ]; do
+    mv "$work/run.next" "$work/run.now"
+    : > "$work/run.next"
     while IFS= read -r file; do
       code_lines "$root/$file" | grep -E "$LOAD_LINE" | names_in "$root" "$index" |
         while IFS= read -r path; do
-          if record_found "$found" "$path" "loaded by $file"; then
-            echo "$path" >> "$work/next"
-          fi
+          gather_one "$work" "$path" "loaded by $file" run
         done
-    done < "$work/queue"
-    mv "$work/next" "$work/queue"
+      code_lines "$root/$file" | names_in "$root" "$index" |
+        while IFS= read -r path; do
+          gather_one "$work" "$path" "named by $file" run
+        done
+    done < "$work/run.now"
   done
 
-  cat "$found"
+  while [ -s "$work/read.next" ]; do
+    mv "$work/read.next" "$work/read.now"
+    : > "$work/read.next"
+    while IFS= read -r file; do
+      code_lines "$root/$file" | grep -E "$LOAD_LINE" | names_in "$root" "$index" |
+        while IFS= read -r path; do
+          gather_one "$work" "$path" "loaded by $file" read
+        done
+    done < "$work/read.now"
+  done
+
+  cat "$work/found"
 }
 
 # The gathered scripts in the tree at ROOT that no pattern in PATTERNS (a file,
@@ -583,6 +666,13 @@ uncovered_scripts() {
     done < "$patterns"
     [ "$covered" -eq 1 ] || printf '%s\t%s\n' "$path" "$origin"
   done
+}
+
+# Code lines of ROOT's `test` job that use a local composite action or
+# reusable workflow. Its files would live under `.github/`, which the gate
+# skips, so they would have to become suite inputs first.
+local_uses_in_test_job() {
+  suite_job_lines "$1" | grep -v '^[[:space:]]*#' | grep -E "uses:[[:space:]]*[\"']?\\./"
 }
 
 # A tree shaped to exercise every leg of the gatherer and every boundary of it.
@@ -611,10 +701,12 @@ EOF
 # scripts/comment-only.sh is named only in a comment.
 source "$(dirname "${BASH_SOURCE[0]}")/bare-lib.sh"
 scripts/wrapper-named.sh "$@"
+scripts/remote-verify.sh
 EOF
   cat > "$d/scripts/swift-safe" <<'EOF'
 #!/usr/bin/env python3
-"""A docstring line naming python-named.py counts: it is not a `#` comment."""
+"""A docstring line naming python-named.py counts: it is not a `#` comment.
+It also names shared-lib.sh, which a stop loads as well."""
 # comment-only.sh in a comment does not.
 EOF
   cat > "$d/scripts/bare-lib.sh" <<'EOF'
@@ -626,42 +718,86 @@ if true; then source "$X/deepest-lib.sh"; fi
 EOF
   cat > "$d/scripts/wrapper-named.sh" <<'EOF'
 source scripts/loaded-by-named.sh
-bash scripts/one-level-too-far.sh
+bash scripts/two-levels-down.sh
+EOF
+  cat > "$d/scripts/two-levels-down.sh" <<'EOF'
+python3 scripts/three-levels-down.py
+EOF
+  cat > "$d/scripts/remote-verify.sh" <<'EOF'
+python3 scripts/valve-only.py
+EOF
+  cat > "$d/scripts/restart.sh" <<'EOF'
+source "$SCRIPT_DIR/stop-lib.sh"
+source "$SCRIPT_DIR/shared-lib.sh"
+bash scripts/run-by-a-stop.sh
+EOF
+  cat > "$d/scripts/stop-lib.sh" <<'EOF'
+. "$SCRIPT_DIR/stop-deep-lib.sh"
+echo "source this from restart.sh or named-by-a-stop-lib.sh"
+EOF
+  cat > "$d/scripts/shared-lib.sh" <<'EOF'
+bash scripts/named-by-shared-lib.sh
 EOF
   cat > "$d/Sources/App/Paths.swift" <<'EOF'
 let here = "scripts/swift-literal.sh"
 let gone = "scripts/not-a-file.sh"
+let read = "scripts/restart.sh"
 EOF
   cat > "$d/Tests/AppTests/PathTests.swift" <<'EOF'
 let path = "scripts/test-literal.sh"
 EOF
   local f
-  for f in deepest-lib.sh loaded-by-named.sh one-level-too-far.sh named-by-a-lib.sh \
+  for f in deepest-lib.sh loaded-by-named.sh three-levels-down.py named-by-a-lib.sh \
            python-named.py comment-only.sh lint-only.sh after-only.sh \
-           swift-literal.sh test-literal.sh ci/job-named.sh; do
+           swift-literal.sh test-literal.sh ci/job-named.sh valve-only.py \
+           run-by-a-stop.sh stop-deep-lib.sh named-by-a-stop-lib.sh \
+           named-by-shared-lib.sh; do
     echo "true" > "$d/scripts/$f"
   done
   echo "$d"
 }
 
+# Reached: the wrappers; a job name; both Swift literals that name a file;
+# names and loads of every followed script, all the way down; the two stops;
+# and loads, but not names, below a stop — except in a file a followed script
+# also names (`shared-lib.sh`). Not reached: comments, other jobs,
+# a literal naming no file, what a stop names (`valve-only.py`,
+# `run-by-a-stop.sh`), and what a file only a stop loads names
+# (`named-by-a-stop-lib.sh`).
 DRIFT_EXPECTED='scripts/bare-lib.sh
 scripts/ci/job-named.sh
 scripts/deepest-lib.sh
 scripts/loaded-by-named.sh
+scripts/named-by-a-lib.sh
+scripts/named-by-shared-lib.sh
 scripts/nested/deep-lib.sh
 scripts/python-named.py
+scripts/remote-verify.sh
+scripts/restart.sh
+scripts/shared-lib.sh
+scripts/stop-deep-lib.sh
+scripts/stop-lib.sh
 scripts/swift-literal.sh
 scripts/swift-safe
 scripts/test-literal.sh
 scripts/test.sh
+scripts/three-levels-down.py
+scripts/two-levels-down.sh
 scripts/wrapper-named.sh'
 
 test_gatherer_follows_each_leg_and_stops_at_each_boundary() {
   local d gathered; d="$(mkdrift)"
-  gathered="$(gather_suite_scripts "$d" | cut -f1 | LC_ALL=C sort)"
-  assert_eq "the gatherer reaches exactly the fixture's suite scripts" "$DRIFT_EXPECTED" "$gathered"
+  gathered="$(gather_suite_scripts "$d")"
+  assert_eq "the gatherer reaches exactly the fixture's suite scripts" "$DRIFT_EXPECTED" \
+    "$(printf '%s\n' "$gathered" | cut -f1 | LC_ALL=C sort)"
   assert_contains "a load is attributed to the file that loads it" \
-    "$(gather_suite_scripts "$d")" "scripts/deepest-lib.sh${TAB}loaded by scripts/nested/deep-lib.sh"
+    "$gathered" "scripts/deepest-lib.sh${TAB}loaded by scripts/nested/deep-lib.sh"
+  assert_contains "a name is followed past the first level" \
+    "$gathered" "scripts/three-levels-down.py${TAB}named by scripts/two-levels-down.sh"
+  assert_contains "a stop's loads are followed" \
+    "$gathered" "scripts/stop-deep-lib.sh${TAB}loaded by scripts/stop-lib.sh"
+  assert_contains "a file a stop loads and a followed script names is followed" \
+    "$gathered" "scripts/named-by-shared-lib.sh${TAB}named by scripts/shared-lib.sh"
 }
 
 # The check reddens when one entry goes missing, and names where the script
@@ -673,17 +809,35 @@ test_drift_check_names_a_missing_script() {
   printf '%s\n' "$DRIFT_EXPECTED" > "$patterns"
   assert_eq "a list covering every gathered script leaves nothing uncovered" "" \
     "$(uncovered_scripts "$d" "$patterns")"
-  grep -vxF 'scripts/nested/deep-lib.sh' "$d/patterns" > "$d/patterns.less"
+  grep -vxF 'scripts/three-levels-down.py' "$d/patterns" > "$d/patterns.less"
   missing="$(uncovered_scripts "$d" "$d/patterns.less")"
   assert_eq "dropping one entry leaves exactly it uncovered, with its origin" \
-    "scripts/nested/deep-lib.sh${TAB}loaded by scripts/bare-lib.sh" "$missing"
+    "scripts/three-levels-down.py${TAB}named by scripts/two-levels-down.sh" "$missing"
   printf 'scripts/*\n' > "$d/patterns.glob"
   assert_eq "a pattern entry covers what it matches" "" "$(uncovered_scripts "$d" "$d/patterns.glob")"
 }
 
+test_local_action_detector() {
+  local d; d="$(mkdrift)"
+  assert_eq "a test job without a local action reports nothing" "" "$(local_uses_in_test_job "$d")"
+  cat > "$d/.github/workflows/test.yml" <<'EOF'
+jobs:
+  test:
+    steps:
+      # - uses: ./.github/actions/commented-out
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+  after:
+    steps:
+      - uses: ./.github/actions/elsewhere
+EOF
+  assert_eq "a local action in the test job is reported, and only that one" \
+    "      - uses: ./.github/actions/setup" "$(local_uses_in_test_job "$d")"
+}
+
 # THE CHECK ITSELF, on this checkout.
 test_every_script_the_suite_reaches_is_on_the_list() {
-  local d path origin missing job_code
+  local d path origin missing job_code local_uses
   d="$(scratch)"
   if ! "$BASH" "$SCRIPT" --list-suite-scripts > "$d/patterns" 2>/dev/null || [ ! -s "$d/patterns" ]; then
     echo "FAIL - --list-suite-scripts printed no list to check against"
@@ -692,7 +846,7 @@ test_every_script_the_suite_reaches_is_on_the_list() {
   fi
   # The structure the gatherer assumes. If any of it moves, the check below
   # would pass by gathering nothing.
-  job_code="$(test_job_lines "$REPO_ROOT" | grep -v '^[[:space:]]*#')"
+  job_code="$(suite_job_lines "$REPO_ROOT" | grep -v '^[[:space:]]*#')"
   if [ -z "$job_code" ]; then
     echo "FAIL - found no \`  test:\` job in .github/workflows/test.yml to read"
     FAIL=1
@@ -708,6 +862,16 @@ test_every_script_the_suite_reaches_is_on_the_list() {
     fi
   done
 
+  local_uses="$(local_uses_in_test_job "$REPO_ROOT")"
+  if [ -z "$local_uses" ]; then
+    echo "ok   - the test job uses no local action or reusable workflow"
+  else
+    echo "FAIL - the test job uses a local action or reusable workflow, whose files the gate skips as .github/**:"
+    printf '%s\n' "$local_uses" | sed 's/^/       /'
+    echo "     Make its files suite inputs in scripts/ci/swift-suite-needed.sh, then update this check."
+    FAIL=1
+  fi
+
   echo "     the suite reaches:"
   gather_suite_scripts "$REPO_ROOT" | while IFS="$TAB" read -r path origin; do
     echo "       $path ($origin)"
@@ -721,7 +885,35 @@ test_every_script_the_suite_reaches_is_on_the_list() {
     printf '%s\n' "$missing" | while IFS="$TAB" read -r path origin; do
       echo "       $path ($origin)"
     done
-    echo "     Add each to SUITE_SCRIPTS in scripts/ci/swift-suite-needed.sh."
+    echo "     Add each to SUITE_SCRIPTS in scripts/ci/swift-suite-needed.sh,"
+    echo "     or, if the suite never runs it, give the script that names it a stop here."
+    FAIL=1
+  fi
+}
+
+# THE WIRING, on this checkout. The gate fails closed only because of how the
+# workflow consumes its answer, and no fixture can execute a GitHub expression,
+# so the pieces are pinned as written.
+test_the_workflow_wiring_fails_closed() {
+  local keys named outputs step
+  keys="$(job_lines "$REPO_ROOT" test | grep -E '^    [^[:space:]#]')"
+  assert_line "the test job waits for the gate" "$keys" "    needs: changes"
+  assert_line "the test job skips only on an explicit false, and still runs after a failed gate" \
+    "$keys" "    if: \${{ !cancelled() && needs.changes.outputs.run != 'false' }}"
+  named="$(printf '%s\n' "$keys" | grep -E '^    name:')"
+  assert_eq "the test job has no name:, so the required check stays \`test\`" "" "$named"
+
+  outputs="$(job_lines "$REPO_ROOT" changes |
+    awk '/^    outputs:/ { inside = 1; next } inside && /^    [^[:space:]]/ { exit } inside')"
+  assert_line "the gate's run output is the decide step's" "$outputs" \
+    "      run: \${{ steps.decide.outputs.run }}"
+
+  step="$(step_lines "$REPO_ROOT" changes decide | grep -v '^[[:space:]]*#' |
+    grep -E '^[[:space:]]+(- )?run:.*scripts/ci/swift-suite-needed\.sh')"
+  if [ -n "$step" ]; then
+    echo "ok   - the step with id: decide runs scripts/ci/swift-suite-needed.sh"
+  else
+    echo "FAIL - no step with id: decide in the changes job runs scripts/ci/swift-suite-needed.sh"
     FAIL=1
   fi
 }

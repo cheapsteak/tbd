@@ -186,15 +186,17 @@ jobs:
 
       # The harness for the Swift suite gate (the `changes` job below), and the
       # one check that keeps its skip honest: a drift check that gathers every
-      # script the `test` job can reach — named by the job or by
-      # `scripts/test.sh` / `scripts/swift-safe`, a `"scripts/…"` literal in a
-      # Swift file, or loaded from any of those — and fails if the gate's list
-      # of suite scripts is missing one. A PR that makes the suite depend on a
-      # new script edits one of those files, so it runs the suite and this
-      # step reddens until the script is listed. It lives in this job because
-      # Lint is never skipped, and under `/bin/bash` because the gate has to
-      # stay runnable by hand on a Mac, where it is replayed over merged PRs'
-      # file lists. Fixture repos in temp dirs, no build, a few seconds.
+      # script the `test` job can reach — the two wrappers, what the job names,
+      # a `"scripts/…"` literal in a Swift file, and whatever any of those
+      # names or loads in turn — and fails if the gate's list of suite scripts
+      # is missing one, or if the job uses a local action. A PR that makes the
+      # suite depend on a new script edits one of those files, so it runs the
+      # suite and this step reddens until the script is listed. It also pins
+      # the `needs:`/`if:` wiring below that makes the gate fail closed. It
+      # lives in this job because Lint is never skipped, and under `/bin/bash`
+      # because the gate has to stay runnable by hand on a Mac, where it is
+      # replayed over merged PRs' file lists. Fixture repos in temp dirs, no
+      # build, a few seconds.
       # `!cancelled()` for the same reason as the stall watchdog below: an
       # earlier red guard in this job must not cost this one its verdict.
       # docs/specs/2026-10-25-skip-swift-suite-for-non-code-prs-design.md
