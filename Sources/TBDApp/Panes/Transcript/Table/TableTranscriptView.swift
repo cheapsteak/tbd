@@ -334,6 +334,30 @@ struct TableTranscriptView: NSViewRepresentable {
         /// jumping or following the tail — so the bounds observer can tell that
         /// scroll from the reader's.
         var isRestoringAnchor = false
+        /// What last ended a jump's pin or hold, kept for diagnostics; tests
+        /// name it when a hold ends early. Cleared by each jump.
+        var lastJumpRelease: JumpRelease?
+
+        /// What `classifyClipMove()` found moved the clip.
+        private enum ClipMove {
+            case coordinator, unmoved, contentFollow, reader
+        }
+        /// A row at the top of the viewport at the last clip-bounds change, and
+        /// its document top then.
+        private struct ClipReferenceRow {
+            let row: Int
+            let id: String
+            let top: CGFloat
+        }
+        /// How far below the viewport's top edge a row may start and still be
+        /// recorded as a reference for `classifyClipMove()`.
+        private static let clipReferenceBand: CGFloat = 48
+        /// At most this many rows are recorded per bounds change.
+        private static let clipReferenceRowLimit = 8
+        /// The clip's origin at the last clip-bounds change.
+        private var lastClipOriginY: CGFloat?
+        /// The rows at the top of the viewport at the last clip-bounds change.
+        private var lastVisibleRowTops: [ClipReferenceRow] = []
 
         // MARK: Prompt rail state (see TableTranscriptView+PromptRail.swift)
 
@@ -2062,7 +2086,7 @@ struct TableTranscriptView: NSViewRepresentable {
             // re-rendered tail, which only add or change rows below it, keep it.
             // A rebuild re-lays the rows around it, and a prepend brings its own
             // anchor for where the reader is looking.
-            if step == .rebuild || isPrepend { releaseJumpAnchor() }
+            if step == .rebuild || isPrepend { releaseJumpAnchor(isPrepend ? .prepend : .rebuild) }
 
             // Worktree-root change: the composed blocks carry the `.link` ranges
             // the link pass baked in, and `composedCache` is keyed by
@@ -2087,7 +2111,7 @@ struct TableTranscriptView: NSViewRepresentable {
             if abs(width - cachedColumnWidth) > 0.5 {
                 cachedColumnWidth = width
                 pendingPrependAnchor = nil
-                releaseJumpAnchor()
+                releaseJumpAnchor(.widthChange)
                 heightCache.removeAll(keepingCapacity: true)
                 estimateCache.removeAll(keepingCapacity: true)
                 composedCache.removeAll(keepingCapacity: true)
@@ -2310,17 +2334,34 @@ struct TableTranscriptView: NSViewRepresentable {
                 name: NSView.boundsDidChangeNotification,
                 object: clip
             )
+            recordClipPosition()
         }
 
         @objc private func clipBoundsDidChange() {
-            // The reader moved the viewport: a held prepend or jump anchor no
-            // longer describes where they are looking, so stop re-pinning it,
-            // and a jump target stops overriding the active-prompt rule. The
-            // coordinator's own scrolls — restores, jumps and the tail-follow —
-            // keep them; the tail-follow ends the pins itself.
-            if !isRestoringAnchor {
+            let move = classifyClipMove()
+            // An unmoved origin keeps the last record: AppKit can post a bounds
+            // change when only the document's frame changed, and refreshing the
+            // row tops then would hide the content move a following re-anchor
+            // is made against.
+            if move != .unmoved { recordClipPosition() }
+            switch move {
+            case .reader:
+                // The reader moved the viewport: a held prepend or jump anchor
+                // no longer describes where they are looking, so stop re-pinning
+                // it, and a jump target stops overriding the active-prompt rule.
                 pendingPrependAnchor = nil
-                releaseJumpAnchor()
+                releaseJumpAnchor(.readerScroll)
+            case .contentFollow:
+                // AppKit moved the clip after content that moved under it. The
+                // reader's place is unchanged, so the held rows go back to where
+                // their anchors put them.
+                if let anchor = pendingPrependAnchor { restorePrependAnchor(anchor) }
+                if let anchor = pendingJumpAnchor { restorePrependAnchor(anchor) }
+            case .coordinator, .unmoved:
+                // The coordinator's own scrolls (restores, jumps, the
+                // tail-follow, which ends the pins itself) and size-only changes
+                // keep what is held.
+                break
             }
             reportNearTopIfChanged()
             if let binding = atBottomBinding {
@@ -2332,6 +2373,65 @@ struct TableTranscriptView: NSViewRepresentable {
                 }
             }
             refreshActivePrompt()
+        }
+
+        /// What moved the clip since the last bounds change. Only `.reader`
+        /// releases what the coordinator holds.
+        ///
+        /// - `.coordinator` – the coordinator's own scroll (`isRestoringAnchor`).
+        /// - `.unmoved` – the origin did not move: a size change, such as the
+        ///   pane resizing or the autohiding scroller claiming its width, or a
+        ///   bounds change AppKit posts when only the document's frame changed.
+        /// - `.contentFollow` – the origin moved by the same amount as a row
+        ///   that was at the top of the viewport at the last change moved in the
+        ///   document, so that row kept its place on screen. That is AppKit following
+        ///   content that moved under the clip: clamping as the document
+        ///   shrinks, or re-anchoring as NSTableView swaps its own row-height
+        ///   estimates for the delegate's heights, which it does wherever
+        ///   `NSTableViewCanEstimateRowHeights` is in effect. Not the reader.
+        /// - `.reader` – the clip moved over content that stayed where it was.
+        private func classifyClipMove() -> ClipMove {
+            guard !isRestoringAnchor else { return .coordinator }
+            guard let tableView, let clip = scrollView?.contentView, let lastOrigin = lastClipOriginY else {
+                return .reader
+            }
+            let clipDelta = clip.bounds.minY - lastOrigin
+            guard abs(clipDelta) > 0.25 else { return .unmoved }
+            let rowCount = min(nodes.count, tableView.numberOfRows)
+            for reference in lastVisibleRowTops
+            where reference.row < rowCount && nodes[reference.row].id == reference.id {
+                let rowDelta = tableView.rect(ofRow: reference.row).minY - reference.top
+                if abs(rowDelta) > 0.25, abs(rowDelta - clipDelta) <= 1 { return .contentFollow }
+            }
+            return .reader
+        }
+
+        /// Records the clip's origin and the document tops of the rows at the
+        /// top of the viewport, for `classifyClipMove()`: the row just above,
+        /// and every row starting within `clipReferenceBand` of the top edge,
+        /// which covers the reader's place and a jump target's placement. Rows
+        /// further down are left out on purpose, because their realize-time
+        /// corrections move rows below them without any clip change, and a
+        /// reader's next scroll could match one of those moves by chance. Reads
+        /// row rectangles only; builds no cell.
+        private func recordClipPosition() {
+            lastVisibleRowTops.removeAll(keepingCapacity: true)
+            guard let tableView, let clip = scrollView?.contentView else {
+                lastClipOriginY = nil
+                return
+            }
+            lastClipOriginY = clip.bounds.minY
+            let visible = tableView.rows(in: clip.documentVisibleRect)
+            guard visible.location != NSNotFound else { return }
+            let rowCount = min(nodes.count, tableView.numberOfRows)
+            let bandBottom = clip.bounds.minY + Self.clipReferenceBand
+            var row = max(0, visible.location - 1)
+            while row < rowCount, lastVisibleRowTops.count < Self.clipReferenceRowLimit {
+                let top = tableView.rect(ofRow: row).minY
+                guard row < visible.location || top < bandBottom else { break }
+                lastVisibleRowTops.append(ClipReferenceRow(row: row, id: nodes[row].id, top: top))
+                row += 1
+            }
         }
 
         // MARK: Prepend anchor / near top
@@ -2496,6 +2596,7 @@ struct TableTranscriptView: NSViewRepresentable {
         /// pulling the clip to the end would fight over it.
         private func followTail() {
             pendingPrependAnchor = nil
+            if pendingJumpAnchor != nil { lastJumpRelease = .tailFollow }
             pendingJumpAnchor = nil
             isRestoringAnchor = true
             defer { isRestoringAnchor = false }

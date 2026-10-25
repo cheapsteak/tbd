@@ -30,8 +30,12 @@ struct PromptRailJumpTests {
     /// drops every height measured before it, so afterwards only the bottom
     /// window and the rows realized at the end are exact; rows far above carry
     /// estimates, which is what a jump has to pin against.
-    private static func primedAtEnd(items: [TranscriptItem], appState: AppState) -> TableTranscriptScene {
-        let scene = TableTranscriptScene(items: items, appState: appState)
+    private static func primedAtEnd(
+        items: [TranscriptItem],
+        appState: AppState,
+        makeCoordinator: (@MainActor (TranscriptCardContext) -> TableTranscriptView.Coordinator)? = nil
+    ) -> TableTranscriptScene {
+        let scene = TableTranscriptScene(items: items, appState: appState, makeCoordinator: makeCoordinator)
         scene.coordinator.startObservingScroll()
         let nodes = transcriptRenderNodes(from: items)
         for _ in 0..<4 {
@@ -59,11 +63,31 @@ struct PromptRailJumpTests {
         scene.settle()
     }
 
-    /// An AskUserQuestion card whose question wraps. The estimator models chat
-    /// bubbles exactly, so prose rows realize without correcting, but this card
-    /// it under-reserves by construction (`card/askUserQuestion-wrapping` in
-    /// `TranscriptEstimatorAccuracyTests`, 36pt at the calibrated text size), so
-    /// the card's correction when it realizes moves every row below it.
+    /// Names what last ended the jump's pin or hold, so a hold that ended early
+    /// says why in the failure.
+    private static func releaseNote(_ scene: TableTranscriptScene) -> Comment {
+        let reason = scene.coordinator.lastJumpRelease.map { "\($0)" } ?? "none"
+        return Comment(rawValue: "last jump release: \(reason)")
+    }
+
+    /// Adds height to one row from outside the coordinator's correction path,
+    /// as AppKit does when it swaps its own row-height estimate for the
+    /// delegate's height.
+    private final class ResizableRowCoordinator: TableTranscriptView.Coordinator {
+        var extraHeight: (id: String, points: CGFloat)?
+
+        override func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+            let height = super.tableView(tableView, heightOfRow: row)
+            guard let extraHeight, row < nodes.count, nodes[row].id == extraHeight.id else { return height }
+            return height + extraHeight.points
+        }
+    }
+
+    /// An AskUserQuestion card whose question wraps. Prose rows estimate to
+    /// within a line of their measurement, often exactly, but this card the
+    /// estimator under-reserves by construction (`card/askUserQuestion-wrapping`
+    /// in `TranscriptEstimatorAccuracyTests`, 36pt at the calibrated text size),
+    /// so the card's correction when it realizes moves every row below it.
     private static let wrappingAskCardJSON =
         #"{"questions":[{"question":"This question is deliberately very long indeed, so long that it must wrap across at least three separate lines inside the card at either of the column widths the transcript pane is ever laid out at, which is the shape a count-based model cannot see.","header":"Sizing","multiSelect":false,"options":[{"label":"A","description":"first"},{"label":"B","description":"second"}]}]}"#
 
@@ -108,7 +132,8 @@ struct PromptRailJumpTests {
         scene.tableView.layoutSubtreeIfNeeded()
         let afterLayout = scene.screenOffset(ofRow: target.rowIndex)
         #expect(abs(afterLayout - Self.inset) <= 1,
-                Comment(rawValue: "after layout, before the deferred re-pin, the target sat at \(afterLayout) pt"))
+                Comment(rawValue: "after layout, before the deferred re-pin, the target sat at \(afterLayout) pt; "
+                    + Self.releaseNote(scene).rawValue))
 
         await drainMainQueue()
         scene.settle()
@@ -120,8 +145,96 @@ struct PromptRailJumpTests {
                          + "tolerance, so holding it took a re-pin (it moved \(moved) pt in the document)"))
         let settled = scene.screenOffset(ofRow: target.rowIndex)
         #expect(abs(settled - Self.inset) <= 1,
-                Comment(rawValue: "the target drifted to \(settled) pt as rows around it realized"))
-        #expect(scene.coordinator.activePromptIndex == 5)
+                Comment(rawValue: "the target drifted to \(settled) pt as rows around it realized; "
+                    + Self.releaseNote(scene).rawValue))
+        #expect(scene.coordinator.activePromptIndex == 5, Self.releaseNote(scene))
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+    }
+
+    /// AppKit moves the clip itself to follow content that moved under it: it
+    /// clamps as the document shrinks, and re-anchors as it swaps its own
+    /// row-height estimates for the delegate's heights. That is not the
+    /// reader, so the pin and the hold stay.
+    @Test("AppKit following content that moved under the clip keeps the jump's pin and hold")
+    func contentFollowKeepsHold() async throws {
+        let suiteName = "prompt-rail-jump-follow-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
+        let scene = Self.primedAtEnd(
+            items: items, appState: appState, makeCoordinator: { ResizableRowCoordinator(context: $0) })
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        let coordinator = try #require(scene.coordinator as? ResizableRowCoordinator)
+        let entries = coordinator.promptEntries
+        try #require(entries.count == 30)
+        let target = entries[10]
+        let clip = scene.scrollView.contentView
+
+        coordinator.jump(toNodeID: target.id)
+        await Self.settleJump(scene)
+        try #require(coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+        let origin = clip.bounds.minY
+        let topBefore = scene.tableView.rect(ofRow: target.rowIndex).minY
+
+        // The row above the target grows from outside the correction path...
+        let rowAbove = target.rowIndex - 1
+        coordinator.extraHeight = (id: coordinator.nodes[rowAbove].id, points: 40)
+        scene.tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: rowAbove))
+        scene.tableView.tile()
+        let grownBy = scene.tableView.rect(ofRow: target.rowIndex).minY - topBefore
+        try #require(abs(grownBy - 40) <= 1,
+                     Comment(rawValue: "precondition: the target moved 40pt down the document (moved \(grownBy) pt)"))
+        // ...and AppKit moves the clip after it, so the rows below keep their
+        // places on screen.
+        clip.scroll(to: NSPoint(x: 0, y: origin + grownBy))
+        scene.scrollView.reflectScrolledClipView(clip)
+
+        #expect(coordinator.heldJumpTargetID == target.id, Self.releaseNote(scene))
+        #expect(coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+        #expect(coordinator.lastJumpRelease == nil)
+        let offset = scene.screenOffset(ofRow: target.rowIndex)
+        #expect(abs(offset - Self.inset) <= 1, Comment(rawValue: "the target sat at \(offset) pt"))
+
+        // A reader scroll still releases both, and says so.
+        scene.scroll(toY: clip.bounds.minY + 100)
+        #expect(coordinator.heldJumpTargetID == nil)
+        #expect(coordinator.pendingJumpAnchor == nil)
+        #expect(coordinator.lastJumpRelease == .readerScroll)
+    }
+
+    /// A size change moves no content under the clip and the reader's place
+    /// with it: the pane growing or shrinking, or the scroller claiming width.
+    @Test("a viewport size change keeps the jump's pin and hold")
+    func sizeChangeKeepsHold() async throws {
+        let suiteName = "prompt-rail-jump-resize-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
+        let scene = Self.primedAtEnd(items: items, appState: appState)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        let entries = scene.coordinator.promptEntries
+        try #require(entries.count == Self.promptCount)
+        let clip = scene.scrollView.contentView
+
+        scene.coordinator.jump(toNodeID: entries[20].id)
+        await Self.settleJump(scene)
+        try #require(scene.coordinator.pendingJumpAnchor != nil, Self.releaseNote(scene))
+        let origin = clip.bounds.minY
+
+        scene.scrollView.frame = NSRect(
+            x: 0, y: 0, width: TableTranscriptScene.width, height: TableTranscriptScene.viewportHeight - 100)
+        scene.settle()
+        try #require(clip.bounds.height < TableTranscriptScene.viewportHeight - 50,
+                     Comment(rawValue: "precondition: the viewport got shorter (\(clip.bounds.height) pt)"))
+        try #require(abs(clip.bounds.minY - origin) <= 0.5,
+                     Comment(rawValue: "precondition: the origin stayed (\(origin) → \(clip.bounds.minY))"))
+
+        #expect(scene.coordinator.heldJumpTargetID == entries[20].id, Self.releaseNote(scene))
+        #expect(scene.coordinator.pendingJumpAnchor?.id == entries[20].id, Self.releaseNote(scene))
     }
 
     @Test("a reader scroll releases the jump anchor and the held target")
@@ -140,13 +253,14 @@ struct PromptRailJumpTests {
         scene.coordinator.jump(toNodeID: entries[20].id)
         await Self.settleJump(scene)
         // The coordinator's own re-pins while rows realized did not release it.
-        #expect(scene.coordinator.pendingJumpAnchor?.id == entries[20].id)
-        #expect(scene.coordinator.heldJumpTargetID == entries[20].id)
+        #expect(scene.coordinator.pendingJumpAnchor?.id == entries[20].id, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == entries[20].id, Self.releaseNote(scene))
 
         scene.scroll(toY: scene.scrollView.contentView.bounds.minY + 200)
 
-        #expect(scene.coordinator.pendingJumpAnchor == nil)
-        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.lastJumpRelease == .readerScroll)
     }
 
     /// Away from the bottom nothing tail-follows, so this isolates what an
@@ -180,8 +294,8 @@ struct PromptRailJumpTests {
         scene.coordinator.update(
             nodes: replyNodes, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
 
-        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id)
-        #expect(scene.coordinator.heldJumpTargetID == target.id)
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == target.id, Self.releaseNote(scene))
         #expect(scene.coordinator.activePromptIndex == 20)
         let afterReply = scene.screenOffset(ofRow: target.rowIndex)
         #expect(abs(afterReply - offsetBefore) <= 1,
@@ -197,8 +311,8 @@ struct PromptRailJumpTests {
         scene.coordinator.update(
             nodes: withPrompt, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
 
-        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id)
-        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
         #expect(scene.coordinator.promptEntries.count == Self.promptCount + 1)
         #expect(scene.coordinator.activePromptIndex == 20)
         let firstFrame = scene.screenOffset(ofRow: target.rowIndex)
@@ -210,7 +324,7 @@ struct PromptRailJumpTests {
         let settled = scene.screenOffset(ofRow: target.rowIndex)
         #expect(abs(settled - offsetBefore) <= 1,
                 Comment(rawValue: "the target moved once the appends settled: before=\(offsetBefore) after=\(settled)"))
-        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id)
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
     }
 
     /// Short replies on the last two exchanges, so both fit on the last screen
@@ -229,8 +343,8 @@ struct PromptRailJumpTests {
         await settleJump(scene)
         try #require(scene.gapToBottom <= 1,
                      Comment(rawValue: "precondition: prompt 58 clamps at the end (gap \(scene.gapToBottom) pt)"))
-        try #require(scene.coordinator.heldJumpTargetID == "p-58")
-        try #require(scene.coordinator.pendingJumpAnchor != nil)
+        try #require(scene.coordinator.heldJumpTargetID == "p-58", Self.releaseNote(scene))
+        try #require(scene.coordinator.pendingJumpAnchor != nil, Self.releaseNote(scene))
         return (scene, items)
     }
 
@@ -269,9 +383,10 @@ struct PromptRailJumpTests {
 
         #expect(scene.gapToBottom <= 1,
                 Comment(rawValue: "the tail-follow did not reach the end (gap \(scene.gapToBottom) pt)"))
-        #expect(scene.coordinator.heldJumpTargetID == "p-58")
-        #expect(scene.coordinator.activePromptIndex == 58)
-        #expect(scene.coordinator.pendingJumpAnchor == nil)
+        #expect(scene.coordinator.heldJumpTargetID == "p-58", Self.releaseNote(scene))
+        #expect(scene.coordinator.activePromptIndex == 58, Self.releaseNote(scene))
+        #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.lastJumpRelease == .tailFollow)
     }
 
     @Test("a new prompt after a held jump target ends the hold")
@@ -292,6 +407,7 @@ struct PromptRailJumpTests {
         scene.coordinator.update(
             nodes: grown, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "")
         #expect(scene.coordinator.heldJumpTargetID == nil, "the outline rebuild must end the hold at once")
+        #expect(scene.coordinator.lastJumpRelease == .newPrompt)
         scene.tableView.layoutSubtreeIfNeeded()
         await drainMainQueue()
 
@@ -299,9 +415,9 @@ struct PromptRailJumpTests {
         #expect(scene.coordinator.promptEntries.last?.id == "p-60")
         #expect(scene.gapToBottom <= 1,
                 Comment(rawValue: "the tail-follow did not reach the end (gap \(scene.gapToBottom) pt)"))
-        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
         #expect(scene.coordinator.activePromptIndex == lastIndex)
-        #expect(scene.coordinator.pendingJumpAnchor == nil)
+        #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
     }
 
     @Test("a prepend and a width change each release the jump anchor")
@@ -321,7 +437,7 @@ struct PromptRailJumpTests {
         // Prepend: earlier history lands at the front while the jump is held.
         scene.coordinator.jump(toNodeID: entries[20].id)
         await Self.settleJump(scene)
-        try #require(scene.coordinator.pendingJumpAnchor != nil)
+        try #require(scene.coordinator.pendingJumpAnchor != nil, Self.releaseNote(scene))
         let front: [TranscriptItem] = (0..<2).map { index in
             .assistantText(
                 id: "front-\(index)",
@@ -334,8 +450,9 @@ struct PromptRailJumpTests {
             nodes: prepended, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
             prependToken: 1)
 
-        #expect(scene.coordinator.pendingJumpAnchor == nil)
-        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.lastJumpRelease == .prepend)
         // The prepend holds the reader's place with its own anchor instead, and
         // a jump moves the reader away from it, so a jump supersedes it.
         try #require(scene.coordinator.pendingPrependAnchor != nil)
@@ -344,24 +461,25 @@ struct PromptRailJumpTests {
         scene.coordinator.jump(toNodeID: shifted[30].id)
         #expect(scene.coordinator.pendingPrependAnchor == nil)
 
-        // Width change. The resize moves the clip's bounds, which may already
-        // release the hold through the bounds observer; jump again afterwards
-        // so only the update's width-change path can release it.
+        // Width change. The resize changes the clip's size, not its origin, so
+        // the bounds observer keeps the hold; jump again afterwards anyway, so
+        // only the update's width-change path can release it.
         scene.scrollView.frame = NSRect(
             x: 0, y: 0, width: TableTranscriptScene.width - 120, height: TableTranscriptScene.viewportHeight)
         scene.settle()
         try #require(scene.tableView.bounds.width < primedWidth - 60,
                      Comment(rawValue: "precondition: the column narrowed (\(scene.tableView.bounds.width) pt)"))
         scene.coordinator.jump(toNodeID: shifted[30].id)
-        try #require(scene.coordinator.pendingJumpAnchor != nil)
+        try #require(scene.coordinator.pendingJumpAnchor != nil, Self.releaseNote(scene))
 
         // Same nodes and the same prepend token: only the width moved.
         scene.coordinator.update(
             nodes: prepended, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
             prependToken: 1)
 
-        #expect(scene.coordinator.pendingJumpAnchor == nil)
-        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.lastJumpRelease == .widthChange)
     }
 
     @Test("a jump to an unknown id leaves the scroll and any held jump alone")
@@ -382,16 +500,16 @@ struct PromptRailJumpTests {
         let parked = clip.bounds.minY
         scene.coordinator.jump(toNodeID: "nope")
         #expect(clip.bounds.minY == parked)
-        #expect(scene.coordinator.pendingJumpAnchor == nil)
-        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
 
         scene.coordinator.jump(toNodeID: entries[30].id)
         await Self.settleJump(scene)
         let jumped = clip.bounds.minY
         scene.coordinator.jump(toNodeID: "nope")
         #expect(clip.bounds.minY == jumped)
-        #expect(scene.coordinator.heldJumpTargetID == entries[30].id)
-        #expect(scene.coordinator.pendingJumpAnchor?.id == entries[30].id)
+        #expect(scene.coordinator.heldJumpTargetID == entries[30].id, Self.releaseNote(scene))
+        #expect(scene.coordinator.pendingJumpAnchor?.id == entries[30].id, Self.releaseNote(scene))
     }
 
     /// The last prompts cannot be scrolled to the top. The jump clamps at the
@@ -428,7 +546,7 @@ struct PromptRailJumpTests {
         // A reader scroll that stays within the bottom slack hands the choice
         // back to the rule.
         scene.scroll(toY: clip.bounds.minY - 1)
-        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
         #expect(scene.coordinator.activePromptIndex == 59)
     }
 
@@ -474,17 +592,22 @@ struct PromptRailJumpTests {
         coordinator.jump(toNodeID: entries[0].id)
         await Self.settleJump(scene)
         let atFirst = clip.bounds.minY
+        // The first prompt is the first row, so the jump clamps to the very top
+        // and nothing after it should move the clip.
+        #expect(atFirst == 0,
+                Comment(rawValue: "the clip left the top after the jump (\(atFirst) pt); "
+                    + Self.releaseNote(scene).rawValue))
         coordinator.jumpToPrompt(.previous)
-        #expect(clip.bounds.minY == atFirst)
-        #expect(coordinator.activePromptIndex == 0)
+        #expect(clip.bounds.minY == atFirst, Self.releaseNote(scene))
+        #expect(coordinator.activePromptIndex == 0, Self.releaseNote(scene))
 
         // From the last prompt, Next scrolls to the end and stops holding it.
         coordinator.jump(toNodeID: entries[59].id)
         await Self.settleJump(scene)
         coordinator.jumpToPrompt(.next)
         #expect(scene.gapToBottom <= 1, Comment(rawValue: "Next from the last prompt left \(scene.gapToBottom) pt"))
-        #expect(coordinator.heldJumpTargetID == nil)
-        #expect(coordinator.pendingJumpAnchor == nil)
+        #expect(coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
+        #expect(coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
 
         // Just short of the end the bottom rule makes the last prompt active;
         // Next still reaches the end.
@@ -515,10 +638,10 @@ struct PromptRailJumpTests {
 
         scene.coordinator.jumpToPrompt(.previous)
         #expect(clip.bounds.minY == origin)
-        #expect(scene.coordinator.heldJumpTargetID == nil)
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
 
         scene.coordinator.jumpToPrompt(.next)
-        #expect(scene.coordinator.heldJumpTargetID == entries[0].id)
+        #expect(scene.coordinator.heldJumpTargetID == entries[0].id, Self.releaseNote(scene))
         #expect(scene.coordinator.activePromptIndex == 0)
         #expect(clip.bounds.minY == 0)
     }
@@ -548,7 +671,7 @@ struct PromptRailJumpTests {
         scene.coordinator.jumpToPrompt(.next)
 
         #expect(clip.bounds.minY == origin)
-        #expect(scene.coordinator.heldJumpTargetID == nil)
-        #expect(scene.coordinator.pendingJumpAnchor == nil)
+        #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
+        #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
     }
 }

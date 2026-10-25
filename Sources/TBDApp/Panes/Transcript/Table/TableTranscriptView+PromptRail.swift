@@ -21,6 +21,24 @@ extension TableTranscriptView.Coordinator {
     /// The Previous Prompt and Next Prompt commands.
     enum PromptStep { case previous, next }
 
+    /// What ended a jump's pin, its hold, or both (`lastJumpRelease`).
+    enum JumpRelease: Equatable {
+        /// Both: the reader scrolled.
+        case readerScroll
+        /// Both: the column width changed.
+        case widthChange
+        /// Both: the rows were rebuilt.
+        case rebuild
+        /// Both: history was prepended.
+        case prepend
+        /// Both: Next from the last prompt scrolled to the end.
+        case nextFromLast
+        /// The pin only: the coordinator followed the tail.
+        case tailFollow
+        /// The hold only: a prompt arrived after the target.
+        case newPrompt
+    }
+
     /// Rebuilds the outline from `nodes`, tells the presenter if it changed,
     /// then re-derives the active prompt. `update(...)` calls it once the table
     /// holds the new rows.
@@ -31,7 +49,10 @@ extension TableTranscriptView.Coordinator {
     func refreshPromptOutline() {
         let entries = PromptOutline.entries(from: nodes)
         if entries != promptEntries {
-            if gainsEntryAfterHeldJumpTarget(entries) { heldJumpTargetID = nil }
+            if gainsEntryAfterHeldJumpTarget(entries) {
+                heldJumpTargetID = nil
+                lastJumpRelease = .newPrompt
+            }
             promptEntries = entries
             promptRailPresenter?.promptRail(entriesDidChange: entries)
         }
@@ -137,6 +158,7 @@ extension TableTranscriptView.Coordinator {
         // Held before the move, so the active prompt the move reports through
         // the bounds observer is already the target.
         heldJumpTargetID = id
+        lastJumpRelease = nil
         do {
             isRestoringAnchor = true
             defer { isRestoringAnchor = false }
@@ -188,17 +210,17 @@ extension TableTranscriptView.Coordinator {
             // From the last prompt. Released before the scroll: when the clip
             // is already at the end the scroll posts nothing, so the observer
             // would not release it.
-            releaseJumpAnchor()
+            releaseJumpAnchor(.nextFromLast)
             scrollToEnd(animated: false)
             refreshActivePrompt()
         }
     }
 
     /// Stops holding the last jump's target, as a pin and as the active
-    /// prompt: the release for a reader scroll, a width change, a rebuild, a
-    /// prepend, and Next from the last prompt. Every caller re-derives the
-    /// active prompt on its own path.
-    func releaseJumpAnchor() {
+    /// prompt, and records why when something was held. Every caller
+    /// re-derives the active prompt on its own path.
+    func releaseJumpAnchor(_ reason: JumpRelease) {
+        if pendingJumpAnchor != nil || heldJumpTargetID != nil { lastJumpRelease = reason }
         pendingJumpAnchor = nil
         heldJumpTargetID = nil
     }
