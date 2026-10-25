@@ -122,6 +122,44 @@ struct PromptRailSwiftUITests {
         #expect(unlaid.offset == 0)
     }
 
+    /// The rail lays its fade mask and accessibility bands out from the
+    /// height it was laid out at, not only the Canvas size. A resize that
+    /// leaves the offset where it was — a rail growing back to fit, or
+    /// shrinking into overflow with the active notch near the top, or the
+    /// first layout arriving after the first outline — must still re-render
+    /// it, or the fade and the bands stay those of the old height.
+    @Test("a new rail height re-renders the rail's readers even when the offset stays put, and an unchanged one does not")
+    func railHeightIsObserved() throws {
+        let pointer = PromptRailPointer()
+        pointer.railLaidOut(height: 600, count: 10, active: 0)
+        try #require(pointer.offset == 0)
+
+        let unchanged = FireRecorder<Bool>()
+        withObservationTracking {
+            _ = Self.railLayoutInputs(pointer)
+        } onChange: {
+            unchanged.record(true)
+        }
+        pointer.railLaidOut(height: 600, count: 10, active: 0)
+        #expect(unchanged.values.isEmpty, "laying the rail out at the height it already had re-rendered it")
+
+        let resized = FireRecorder<Bool>()
+        withObservationTracking {
+            _ = Self.railLayoutInputs(pointer)
+        } onChange: {
+            resized.record(true)
+        }
+        pointer.railLaidOut(height: 500, count: 10, active: 0)
+        #expect(pointer.offset == 0, "the offset moved, so this no longer isolates the height")
+        #expect(resized.values == [true], "a resize that left the offset alone did not re-render the rail")
+    }
+
+    /// What `PromptRailSwiftUIView`'s body reads from the pointer to lay out
+    /// its mask and accessibility bands.
+    private static func railLayoutInputs(_ pointer: PromptRailPointer) -> (height: CGFloat, offset: CGFloat) {
+        (pointer.railHeight, pointer.offset)
+    }
+
     // MARK: Rail hover
 
     /// SwiftUI hover follows hit-testing: a handler on the rail itself would

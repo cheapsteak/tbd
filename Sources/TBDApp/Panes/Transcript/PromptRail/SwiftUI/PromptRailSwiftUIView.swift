@@ -4,9 +4,9 @@ import SwiftUI
 
 /// The SwiftUI renderer's rail: one notch per prompt in a 20pt column beside
 /// the transcript, the active prompt's notch accented. It reads the outline
-/// and the active prompt from `PromptRailState` and the overflow offset from
-/// `PromptRailPointer`, and nothing else; the pane around it never reads
-/// either.
+/// and the active prompt from `PromptRailState` and its laid-out height and
+/// overflow offset from `PromptRailPointer`, and nothing else; the pane
+/// around it never reads either.
 ///
 /// - **Notches** – drawn in a `Canvas` with the AppKit rail's geometry
 ///   (`PromptRailLayout`) and colours (`PromptRailNotchStyle`). Only notches
@@ -133,8 +133,10 @@ struct PromptRailSwiftUIView: View {
 ///   `PromptRailContainer`'s hover handler writes the pointer, from a handler
 ///   on the whole pane so that the open card, which covers the rail, cannot
 ///   occlude it; the card overlay writes whether the window is key.
-/// - **Who reads it** – the rail draws with `offset`, the only observed
-///   property. The card reads `pointedIndex` and `pointerY` once, when it
+/// - **Who reads it** – the rail draws with `offset` and `railHeight`, the
+///   only observed properties: its fade mask and accessibility bands are
+///   laid out from them, so a resize that leaves the offset alone must still
+///   re-render it. The card reads `pointedIndex` and `pointerY` once, when it
 ///   opens, so a pointer moving over the rail re-renders nothing.
 @MainActor
 @Observable
@@ -142,8 +144,8 @@ final class PromptRailPointer {
     /// How far the notches are shifted up to keep the active one in view.
     private(set) var offset: CGFloat = 0
 
-    /// The rail's height, as last laid out.
-    @ObservationIgnored private(set) var railHeight: CGFloat = 0
+    /// The rail's height, as last laid out. Written only when it changes.
+    private(set) var railHeight: CGFloat = 0
     /// The notch nearest the pointer while it is over the rail column; nil
     /// otherwise.
     @ObservationIgnored private(set) var pointedIndex: Int?
