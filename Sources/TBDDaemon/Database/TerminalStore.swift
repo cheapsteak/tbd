@@ -792,6 +792,11 @@ public struct TerminalStore: Sendable {
     /// equals the row's: a row written without it would drop every hook its
     /// own process sends. Nil, the default, is the row every other spawn has
     /// always written.
+    ///
+    /// `claudeSpawnExtras` is the plugin folders and settings overlay the
+    /// starter passed for a Claude terminal, stored as given so later starts
+    /// of its session can reapply them. Callers pass it through
+    /// `ClaudeSpawnExtras.nonEmpty`; nil, the default, stores nothing.
     public func create(
         id: UUID = UUID(),
         worktreeID: UUID,
@@ -806,7 +811,8 @@ public struct TerminalStore: Sendable {
         childPID: Int32? = nil,
         holderChildStartedAt: Date? = nil,
         serverName: String? = nil,
-        sessionIncarnationID: UUID? = nil
+        sessionIncarnationID: UUID? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil
     ) async throws -> Terminal {
         var terminal = Terminal(
             id: id,
@@ -826,6 +832,7 @@ public struct TerminalStore: Sendable {
         // already at the Swift type-checker's expression budget here.
         terminal.serverName = serverName
         terminal.sessionIncarnationID = sessionIncarnationID
+        terminal.claudeSpawnExtras = claudeSpawnExtras
         let record = TerminalRecord(from: terminal)
         try await writer.write { db in
             if let worktree = try WorktreeRecord.fetchOne(db, key: worktreeID.uuidString),

@@ -2645,7 +2645,8 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let worktreeID: UUID
     public let cmd: String?
     public let type: TerminalCreateType?
-    /// Session ID to resume from (for forking a Claude session).
+    /// Claude session ID to resume: the new terminal runs `claude --resume`
+    /// on that same id. It does not fork the session.
     public let resumeSessionID: String?
     /// Initial prompt for a fresh Claude or Codex session.
     public let prompt: String?
@@ -2665,7 +2666,9 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let colorFgBg: String?
     /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
     /// per-session `--settings` overlay for this spawn's Claude agent. General
-    /// passthrough — TBD does not interpret the contents. Optional/defaulted for
+    /// passthrough — TBD does not interpret the contents. Applied on a resume
+    /// as well as a fresh start, and kept on the terminal's row with
+    /// `pluginDirs` (`Terminal.claudeSpawnExtras`). Optional/defaulted for
     /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
     /// Codex model for this fresh Codex terminal, passed to Codex as
@@ -2674,12 +2677,22 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// persisted, so a later recreate falls back to the profile's model.
     /// Optional/defaulted for backward compatibility.
     public let model: String?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil) {
+    /// Claude Code plugin folders for this terminal — a plugin, a folder of
+    /// plugins, or a `.zip`, whatever `--plugin-dir` accepts — each passed as
+    /// `--plugin-dir` after TBD's own. Each path must be absolute or start
+    /// with `~/`, and must exist, or the create is refused. `~/` is expanded
+    /// once, at create, and the absolute paths are kept on the terminal's row
+    /// with `claudeSettingsOverlay` (`Terminal.claudeSpawnExtras`). Claude
+    /// terminals only: any other kind with a non-empty list is refused.
+    /// Optional/defaulted for backward compatibility.
+    public let pluginDirs: [String]?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, pluginDirs: [String]? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.model = model
+        self.pluginDirs = pluginDirs
     }
 
     /// Shared by the CLI's argument validation and the daemon's refusal so a

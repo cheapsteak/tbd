@@ -150,6 +150,21 @@ extension RPCRouter {
             return RPCResponse(error: TerminalCreateParams.modelRequiresCodexMessage)
         }
 
+        // Which agent this call spawns, decided once: the plugin-folder check
+        // below, the admission gate and the spawn all read the same answer.
+        // Codex wins; otherwise a Claude type or any resume of a session is
+        // Claude; everything else is a shell.
+        let isCodexType = params.type == .codex
+        let isClaudeType = !isCodexType
+            && (params.type == .claude || params.resumeSessionID != nil)
+
+        // Plugin folders are Claude Code's `--plugin-dir`. Refuse them for
+        // every other kind rather than silently dropping them, as a model is
+        // refused above.
+        if !isClaudeType, !(params.pluginDirs ?? []).isEmpty {
+            return RPCResponse(error: "pluginDirs require a Claude terminal")
+        }
+
         // Look up the worktree to get tmux server and path
         guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
@@ -199,12 +214,6 @@ extension RPCRouter {
         // spawn.
         let plannedTerminalID = UUID()
 
-        // Which agent this call spawns, decided once: the admission gate and the
-        // spawn below read the same answer. Codex wins; otherwise a Claude type
-        // or any resume of a session is Claude; everything else is a shell.
-        let isCodexType = params.type == .codex
-        let isClaudeType = !isCodexType
-            && (params.type == .claude || params.resumeSessionID != nil)
         let startAgent: StartAdmissionAgent? = isCodexType ? .codex : (isClaudeType ? .claude : nil)
 
         // Request row before the first mutating step. `profile` is deliberately
@@ -216,6 +225,30 @@ extension RPCRouter {
             target: .local(worktree: params.worktreeID, terminal: plannedTerminalID),
             prompt: params.prompt,
             agent: startAgent?.rawValue ?? (params.type ?? .shell).rawValue)
+
+        // A Claude terminal's own values, kept on its row so later starts of
+        // its session can reapply them; a resume honors the ones it is given
+        // and copies none from an older row. Plugin folders are checked here,
+        // before any spawn work, because the starter is there to see a bad
+        // path; a later start that finds one gone skips it instead.
+        let spawnExtras: ClaudeSpawnExtras?
+        if isClaudeType {
+            do {
+                let pluginDirs = try ClaudePluginDirs.validated(
+                    params.pluginDirs ?? [],
+                    homeDirectory: NSHomeDirectory(),
+                    fileExists: { FileManager.default.fileExists(atPath: $0) })
+                spawnExtras = ClaudeSpawnExtras(
+                    claudeSettingsOverlay: params.claudeSettingsOverlay,
+                    pluginDirs: pluginDirs).nonEmpty
+            } catch {
+                let message = "\(error)"
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+        } else {
+            spawnExtras = nil
+        }
 
         // Start admission: an agent start only. A shell tab starts no agent.
         if let startAgent,
@@ -478,10 +511,9 @@ extension RPCRouter {
                 // Repo fragment is file-backed config, read fresh at
                 // spawn time — applies on every spawn path, resume included.
                 repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                // Per-spawn fragment applies to FRESH spawns only; a
-                // resume must not reapply it. Hooks overlay still resolves
-                // for resumes — only extraSettingsJSON goes nil.
-                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
+                // The terminal's own overlay, on a fresh start and a resume
+                // alike.
+                extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
               )
             : nil
 
@@ -535,6 +567,7 @@ extension RPCRouter {
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
             settingsOverlayPath: overlayPath,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
+            extraPluginDirs: spawnExtras?.pluginDirs ?? [],
             envSettingOverrides: claudeEnvOverrides,
             sessionName: spawnTitle?.name,
             sessionModEnvironment: sessionMod?.environment ?? [:]
@@ -572,7 +605,8 @@ extension RPCRouter {
                         profileID: spawnProfileID,
                         kind: terminalKind,
                         transport: transport,
-                        sessionIncarnationID: sessionMod?.incarnationID)
+                        sessionIncarnationID: sessionMod?.incarnationID,
+                        claudeSpawnExtras: spawnExtras)
                     return spawned
                 }
             }

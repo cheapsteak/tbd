@@ -43,8 +43,20 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
     var model: String?
 
+    @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) to load in this terminal on every start. Repeatable. Relative paths resolve against the current folder.")
+    var pluginDirs: [String] = []
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
+
+    /// The params this invocation sends, with each `--plugin-dir` made
+    /// absolute against `cwd`, or none sent when the flag was not given.
+    func createParams(worktreeID: UUID, prompt: String?, cwd: String) -> TerminalCreateParams {
+        TerminalCreateParams(
+            worktreeID: worktreeID, cmd: cmd, type: type, prompt: prompt,
+            claudeSettingsOverlay: claudeSettings, model: model,
+            pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd))
+    }
 
     mutating func validate() throws {
         guard let model else { return }
@@ -62,7 +74,10 @@ struct TerminalCreate: AsyncParsableCommand {
 
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings, model: model),
+            params: createParams(
+                worktreeID: worktreeID,
+                prompt: try resolvePrompt(inline: prompt, file: promptFile),
+                cwd: FileManager.default.currentDirectoryPath),
             resultType: Terminal.self
         )
 

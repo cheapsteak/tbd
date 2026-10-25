@@ -92,6 +92,10 @@ extension WorktreeLifecycle {
     ///     into the row so its process's hooks match it. Nil for every other
     ///     spawn — shells, Codex, dev servers, forks, and Claude with every
     ///     feature off.
+    ///   - claudeSpawnExtras: a Claude terminal's own plugin folders and
+    ///     settings overlay, written onto the new row so later starts of its
+    ///     session can reapply them. Already applied to `command` by the
+    ///     caller; nil stores nothing.
     func spawnTerminal(
         id: UUID,
         worktreeID: UUID,
@@ -108,7 +112,8 @@ extension WorktreeLifecycle {
         kind: TerminalKind?,
         transport: TerminalSpawnTransport,
         serverName: String? = nil,
-        sessionIncarnationID: UUID? = nil
+        sessionIncarnationID: UUID? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil
     ) async throws -> Terminal {
         // The two transports diverge for exactly this one spawn, and converge
         // again on the row below.
@@ -169,7 +174,8 @@ extension WorktreeLifecycle {
                 // test has to be able to pin end to end.
                 holderChildStartedAt: holderHandle == nil ? nil : now(),
                 serverName: serverName,
-                sessionIncarnationID: sessionIncarnationID
+                sessionIncarnationID: sessionIncarnationID,
+                claudeSpawnExtras: claudeSpawnExtras
             )
         } catch {
             // Best-effort creation-time cleanup on both transports: a resource
