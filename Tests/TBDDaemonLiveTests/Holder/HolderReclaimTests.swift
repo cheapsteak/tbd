@@ -39,8 +39,17 @@ struct HolderReclaimTests {
     /// adoption, so the status rides the hand-over and no probe is needed —
     /// which makes this the leg that proves the reclaimer does not depend on
     /// one.
+    ///
+    /// The job's short sleep is what keeps the exit *after* the handshake
+    /// connection is closed. A holder pushes the exit at whichever client is
+    /// connected when it reaps and then winds down, unlinking its rendezvous —
+    /// so an exit that beat the `close()` below would leave nothing to adopt.
+    /// The job is forked the moment the holder binds, the spawner's handshake
+    /// lands within one 20 ms bind poll of that, and the holder notices the
+    /// close as soon as its poll wakes on the hang-up — so the margin is the
+    /// sleep less one poll interval and a handshake.
     @Test func releasesTheReaderForAJobThatEndedDuringTheOutage() async throws {
-        let fixture = try await HolderProcessFixture.start(command: "sleep 1; exit 7")
+        let fixture = try await HolderProcessFixture.start(command: "sleep 0.3; exit 7")
         defer { fixture.tearDown() }
         await fixture.client.close()
 
@@ -182,7 +191,9 @@ struct HolderReclaimTests {
         defer { fixture.tearDown() }
         await fixture.client.close()
 
-        let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
+        let registry = makeRegistry(
+            owner: fixture.owner, home: fixture.home,
+            exitConfirmationBudget: Self.shortExitConfirmationBudget)
         defer { releaseInBackground(registry) }
 
         let reader = try await registry.adopt(
@@ -195,7 +206,7 @@ struct HolderReclaimTests {
         // Long enough to outlast the reclaimer's own confirmation budget, so a
         // registry that released on quiet rather than on end of file has had
         // every chance to do so.
-        try await Task.sleep(for: HolderRegistry.exitConfirmationBudget)
+        try await Task.sleep(for: Self.negativeWindow)
 
         let stored = await registry.reader(for: fixture.sessionID)
         #expect(stored === reader, "the reader for a running job was released")
@@ -230,7 +241,9 @@ struct HolderReclaimTests {
         defer { fixture.tearDown() }
         await fixture.client.close()
 
-        let registry = makeRegistry(owner: fixture.owner, home: fixture.home)
+        let registry = makeRegistry(
+            owner: fixture.owner, home: fixture.home,
+            exitConfirmationBudget: Self.shortExitConfirmationBudget)
         defer { releaseInBackground(registry) }
 
         let reader = try await registry.adopt(
@@ -260,7 +273,7 @@ struct HolderReclaimTests {
 
         // Longer than the confirmation budget, so a registry that released on a
         // failed probe has had every chance to do so.
-        try await Task.sleep(for: HolderRegistry.exitConfirmationBudget + .seconds(1))
+        try await Task.sleep(for: Self.negativeWindow)
 
         let stored = await registry.reader(for: fixture.sessionID)
         #expect(
@@ -419,12 +432,34 @@ struct HolderReclaimTests {
 
     /// A registry whose rendezvous paths come from an explicit environment, so
     /// nothing here can reach the developer's real `~/tbd` even for an instant.
-    private func makeRegistry(owner: HolderOwnerToken, home: String) -> HolderRegistry {
+    ///
+    /// The confirmation budget defaults to production's, because the tests
+    /// that *release* depend on it outlasting the gap between end of file and
+    /// the holder's `waitpid`. Only the two keep-the-reader tests shorten it,
+    /// since their negative window has to outlast it and they never wait on a
+    /// confirmation that succeeds.
+    private func makeRegistry(
+        owner: HolderOwnerToken,
+        home: String,
+        exitConfirmationBudget: Duration = HolderRegistry.defaultExitConfirmationBudget
+    ) -> HolderRegistry {
         HolderRegistry(
             owner: owner,
             environment: HolderProcessFixture.environment(home: home),
-            listTerminals: { [] })
+            listTerminals: { [] },
+            exitConfirmationBudget: exitConfirmationBudget)
     }
+
+    /// The confirmation budget the two keep-the-reader tests run under: still
+    /// six of the holder's 50 ms poll slices, so the probe loop it bounds makes
+    /// several real attempts before it gives up.
+    private static let shortExitConfirmationBudget: Duration = .milliseconds(300)
+
+    /// How long those tests watch for a release that must not happen. Past the
+    /// short budget by the probe loop's last interval and then some, so a
+    /// registry that released on a failed or merely quiet probe has had every
+    /// chance to.
+    private static let negativeWindow: Duration = shortExitConfirmationBudget + .milliseconds(500)
 }
 
 /// Releases a registry's readers from a `defer`, which cannot `await`.
