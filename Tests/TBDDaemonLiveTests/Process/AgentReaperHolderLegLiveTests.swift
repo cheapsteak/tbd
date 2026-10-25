@@ -376,8 +376,11 @@ struct AgentReaperHolderLegLiveTests {
             // A 100 ms grace rather than the production 3 seconds, so the job
             // that declines SIGTERM reaches SIGKILL at once. The escalation
             // path is the same at any length: the grace only decides how long
-            // the reaper waits before it re-decides. A job that does die of the
-            // SIGTERM is collected by Foundation well inside it.
+            // the reaper waits before it re-decides. A Foundation-launched job
+            // that dies of the SIGTERM but is not yet collected when the grace
+            // ends is a zombie that still answers `kill(pid, 0)`; the
+            // re-decision then keeps it or SIGKILLs the corpse, and no
+            // assertion on such a job reads `killed`.
             graceAttempts: 5, pollInterval: .milliseconds(20),
             holderSessions: { records })
     }
@@ -515,11 +518,13 @@ struct AgentReaperHolderLegLiveTests {
         // SIGTERM from `ProductionProcessSignaller`, which already widens to the
         // group, leaves both of them running. Without it this would also pass
         // against a process that simply died of SIGTERM — which is the thing it
-        // exists to rule out. A signal is delivered at once, so 0.2 s is far
-        // past the point where a job without the trap would be gone.
+        // exists to rule out. A signal is delivered at once, but the corpse
+        // has to be scheduled through its exit before `ps` reports it, and
+        // that is slow under load; half a second keeps the premise from
+        // reading a dying job as a surviving one.
         ProductionProcessSignaller().terminate(job)
         #expect(
-            await Self.staysRunning(grandchild, for: 0.2),
+            await Self.staysRunning(grandchild, for: 0.5),
             "pid \(grandchild) died of the group SIGTERM; SIGKILL would prove nothing")
         #expect(
             Self.isRunning(job),
