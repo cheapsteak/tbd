@@ -40,12 +40,15 @@ extension TableTranscriptView.Coordinator {
     }
 
     /// Rebuilds the outline from `nodes`, tells the presenter if it changed,
-    /// then re-derives the active prompt. `update(...)` calls it once the table
-    /// holds the new rows.
+    /// then calls `refreshActivePrompt()`. `update(...)` calls it once the table
+    /// holds the new rows. While a tail-follow is queued
+    /// (`isAwaitingTailFollow`) that call re-derives nothing: the entries are
+    /// delivered now, and the follow re-derives the active prompt once the clip
+    /// has reached the end.
     ///
     /// A prompt arriving after a held jump target ends the hold before the
-    /// active prompt is re-derived, so the rule can pick the new prompt. The
-    /// jump's pin is unaffected: a row added below cannot move the target.
+    /// active prompt is next re-derived, so the rule can pick the new prompt.
+    /// The jump's pin is unaffected: a row added below cannot move the target.
     ///
     /// Projects only the prompts `promptOutlineCache` has not seen at their
     /// current content, so an append reads the new prompts' text and no other.
