@@ -419,6 +419,8 @@ struct TerminalHolderTransportGateTests {
         let stub = StubHolderAttach(
             attach: { throw DaemonClientError.attachUnavailable("unavailable") })
         panel.coordinator.holderAttachClient = stub
+        var retryOffers = 0
+        panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
         await panel.coordinator.startTmuxClient(
             terminalView: panel.view,
@@ -440,11 +442,13 @@ struct TerminalHolderTransportGateTests {
         let recorded = await panel.runner.recorded()
         #expect(recorded.isEmpty,
                 "a refused holder attach must not fall back into tmux, ran \(recorded)")
+        #expect(retryOffers == 1,
+                "the attach-failed placard points at a Retry button, so it must raise the banner that carries it")
     }
 
-    /// The attach-failed copy says the session keeps running and that
-    /// reopening the tab retries. When the daemon reports the holder gone,
-    /// both claims are false, so the ended copy must replace it.
+    /// The attach-failed copy says the session keeps running and that Retry
+    /// attaches again. When the daemon reports the holder gone, both claims
+    /// are false, so the ended copy must replace it.
     @MainActor
     @Test("a holder attach the daemon reports as ended shows the session-ended placard")
     func startTmuxClientShowsEndedPlacardWhenTheHolderIsGone() async throws {
@@ -456,6 +460,8 @@ struct TerminalHolderTransportGateTests {
             throw DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus)
         })
         panel.coordinator.holderAttachClient = stub
+        var retryOffers = 0
+        panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
         await panel.coordinator.startTmuxClient(
             terminalView: panel.view,
@@ -471,6 +477,54 @@ struct TerminalHolderTransportGateTests {
                 "an ended session must say it has ended")
         #expect(!didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
                 "an ended session must not claim it keeps running")
+        #expect(retryOffers == 0,
+                "an ended session has nothing to attach to, so it must not be offered a Retry")
+    }
+
+    /// Closing a tab ends its session, so the placard for a session that
+    /// keeps running must never send the user there. Its remedy is the Retry
+    /// button the panel shows, and the copy must name it by the button's own
+    /// title so the two cannot drift apart. The ended copies keep their close
+    /// advice: there, closing is right.
+    @Test("the attach-failed placard points at Retry and never at closing the tab")
+    func attachFailedCopyPointsAtRetry() {
+        typealias Copy = TerminalPreparationPresentation
+        let copy = Copy.holderAttachFailedMessage.lowercased()
+        #expect(!copy.contains("close"), "closing the tab ends the session this copy says keeps running")
+        #expect(!copy.contains("reopen"), "reopening means closing first, which ends the session")
+        #expect(Copy.holderAttachFailedMessage.contains(Copy.holderAttachRetryTitle),
+                "the copy must name the button that retries, by its own title")
+        #expect(copy.contains("keeps running"))
+        #expect(Copy.holderSessionEndedMessage.contains("Close the tab"),
+                "the ended copy's close advice is correct and must stay")
+        #expect(Copy.holderClaudeSessionEndedMessage.contains("Close the tab"))
+    }
+
+    /// Retry is a fresh panel, not a reach into the failed one: the attach
+    /// epoch is part of the pane's identity, so advancing it is what makes
+    /// SwiftUI tear the failed panel down and build one that attaches again.
+    @MainActor
+    @Test("Retry advances the terminal's attach epoch, which changes its pane's identity")
+    func retryAdvancesTheAttachEpoch() {
+        let state = AppState()
+        let row = Terminal(
+            id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            label: "Shell", kind: .shell, transport: .holder)
+        let bystander = UUID()
+        func identity() -> String {
+            TerminalPanePresentation.identity(
+                for: row, switching: nil, attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
+        }
+        let before = identity()
+
+        state.retryTerminalAttach(terminalID: row.id)
+
+        #expect(state.terminalAttachEpochs[row.id] == 1)
+        #expect(identity() != before, "a Retry that leaves the identity alone rebuilds nothing")
+        #expect(state.terminalAttachEpochs[bystander] == nil,
+                "only the retried terminal's panel may be rebuilt")
+        state.retryTerminalAttach(terminalID: row.id)
+        #expect(state.terminalAttachEpochs[row.id] == 2, "every Retry must be a fresh attempt")
     }
 
     @Test("only the ended status maps to the session-ended copy, and only a resumable Claude tab is promised a resume")

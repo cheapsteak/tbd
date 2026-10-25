@@ -977,9 +977,22 @@ final class AppState {
     /// per successful switch: by the wake's delta when it un-parks a switching
     /// row, or by the swap's reply when nothing did (`applySwitchedTerminalWake`). A switching pane's identity leaves
     /// out the parked state, so this is what rebuilds it into a fresh attach —
-    /// once. Never reset: dropping back to zero when the record clears would
-    /// rebuild the pane a second time. Absent reads as zero.
+    /// once. Also advanced by the attach-failed placard's Retry
+    /// (`retryTerminalAttach`). Never reset: dropping back to zero when the
+    /// record clears would rebuild the pane a second time. Absent reads as zero.
     var terminalAttachEpochs: [UUID: Int] = [:]
+
+    /// The attach-failed placard's Retry: rebuild this terminal's panel so it
+    /// attaches again from scratch.
+    ///
+    /// Advancing the attach epoch changes the panel's SwiftUI identity — a
+    /// pane's and the pinned dock's both carry it — so the failed panel is torn
+    /// down and a fresh one built, and the fresh one waits out anything the old
+    /// one still has in flight for this terminal before it asks. Unlike closing
+    /// the tab, it leaves the session alone.
+    func retryTerminalAttach(terminalID: UUID) {
+        terminalAttachEpochs[terminalID, default: 0] += 1
+    }
 
     func setSuspendingSnapshot(_ image: NSImage, for id: UUID) {
         suspendingSnapshots[id] = image

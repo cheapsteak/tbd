@@ -40,17 +40,25 @@ enum TerminalPreparationPresentation {
     ///
     /// Distinct from `holderTransportMessage` because that copy is false here:
     /// the app renders holder sessions, and this one merely failed to attach
-    /// to one. It names a remedy because there is one — a fresh panel retries
-    /// the attach — and says the session is fine because it is: a refused
-    /// attach leaves the daemon's reader on the pty and the session running.
+    /// to one. It names a remedy because there is one — the Retry button the
+    /// panel shows above the terminal builds a fresh panel, which attaches
+    /// again — and says the session is fine because it is: a refused attach
+    /// leaves the daemon's reader on the pty and the session running.
+    ///
+    /// It must never send the user to close the tab. Closing a tab ends its
+    /// session, which is the one thing this failure did not do.
     static let holderAttachFailedMessage =
-        "TBD couldn't attach to this session's terminal. The session is unaffected and keeps running. Close and reopen the tab to try again."
+        "TBD couldn't attach to this session's terminal. The session is unaffected and keeps running. Click \(holderAttachRetryTitle) above to attach again."
+    /// The banner above a panel showing `holderAttachFailedMessage`, which
+    /// carries the Retry button that copy points at.
+    static let holderAttachRetryBannerMessage = "Not attached to this session's terminal."
+    static let holderAttachRetryTitle = "Retry"
     /// Shown when the daemon reports the holder session ended: no reader, and
     /// the holder process the row records is no longer running.
     ///
     /// Distinct from `holderAttachFailedMessage` because both of that copy's
-    /// claims are false here — the session is not running, and reopening the
-    /// tab attaches to nothing. Only a Claude tab with a recorded session id
+    /// claims are false here — the session is not running, and retrying the
+    /// attach reaches nothing. Only a Claude tab with a recorded session id
     /// is promised a way back: closing the tab records it under Closed
     /// Terminals in Session History, and reviving it there resumes that
     /// session — the revive resumes only when the entry carries one. Every
@@ -149,6 +157,10 @@ struct TerminalPanelView: View {
     /// during one panel's stall would otherwise emit an observation to every
     /// reader of that object.
     @State private var pendingOutgoingBytes: Int?
+    /// Whether this panel's holder attach ended at the attach-failed placard,
+    /// which shows the Retry banner. Never lowered: Retry replaces this view,
+    /// and this state goes with it.
+    @State private var holderAttachRetryOffered = false
 
     /// Profile id pinned to this terminal (if any). Used as the `.task` id so
     /// the probe re-fires once AppState populates. `nil` while AppState hasn't
@@ -211,6 +223,28 @@ struct TerminalPanelView: View {
                         Task {
                             await appState.recreateTerminalWindow(terminalID: terminalID)
                         }
+                    }
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color.orange.opacity(0.18))
+            }
+            // The Retry the attach-failed placard points at; the placard itself
+            // is written into the terminal. Retry advances the terminal's
+            // attach epoch, which is part of this panel's identity, so SwiftUI
+            // builds a fresh panel that attaches again. A sibling in this
+            // VStack rather than an overlay, for the backpressure banner's
+            // reason below: it never covers the terminal.
+            if holderAttachRetryOffered {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    Text(TerminalPreparationPresentation.holderAttachRetryBannerMessage)
+                        .font(.caption)
+                    Spacer()
+                    Button(TerminalPreparationPresentation.holderAttachRetryTitle) {
+                        appState.retryTerminalAttach(terminalID: terminalID)
                     }
                     .controlSize(.small)
                 }
@@ -297,6 +331,7 @@ struct TerminalPanelView: View {
                 onMissingWindow: onMissingWindow,
                 onRecoveryGuidance: { recoveryGuidanceMessage = $0 },
                 onOutgoingBackpressureChange: { pendingOutgoingBytes = $0 },
+                onHolderAttachRetryOffered: { holderAttachRetryOffered = true },
                 initialSnapshot: initialSnapshot,
                 isSuspendedSnapshot: isSuspendedSnapshot,
                 parkedNoticeMessage: parkedNoticeMessage,
@@ -382,6 +417,8 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
     var onRecoveryGuidance: (@MainActor (String) -> Void)?
     /// Carries this panel's queued-byte count to the parent's `@State` banner.
     var onOutgoingBackpressureChange: (@MainActor (Int?) -> Void)?
+    /// Raises the parent's Retry banner once the attach-failed placard is up.
+    var onHolderAttachRetryOffered: (@MainActor () -> Void)?
     var initialSnapshot: String?
     var isSuspendedSnapshot: Bool = false
     var parkedNoticeMessage: String? = nil
@@ -461,6 +498,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.onMissingWindow = onMissingWindow
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
         context.coordinator.onOutgoingBackpressureChange = onOutgoingBackpressureChange
+        context.coordinator.onHolderAttachRetryOffered = onHolderAttachRetryOffered
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
         // Program Status Protocol (OSC 7501): the probe is answered only by a
         // holder-transport panel with the flag on — whatever agent the session
@@ -570,6 +608,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // parent's CURRENT `@State` setter, and a coordinator still holding the
         // one from `makeNSView` writes into a stale view identity.
         context.coordinator.onOutgoingBackpressureChange = onOutgoingBackpressureChange
+        context.coordinator.onHolderAttachRetryOffered = onHolderAttachRetryOffered
     }
 
     static func dismantleNSView(_ nsView: TBDTerminalView, coordinator: Coordinator) {
@@ -605,6 +644,10 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         var tabCloseContext: TabCloseContext?
         var onMissingWindow: (@MainActor () async -> AutomaticTerminalRecreationOutcome)?
         var onRecoveryGuidance: (@MainActor (String) -> Void)?
+        /// Called when this panel paints the attach-failed placard, whose
+        /// remedy is the Retry banner this raises. Not for the session-ended
+        /// placards: there is nothing to attach to, and closing is the advice.
+        var onHolderAttachRetryOffered: (@MainActor () -> Void)?
         /// Returns `true` when a SwiftUI overlay (e.g. transcript card) is open
         /// over this terminal and should receive scroll-wheel events and
         /// Cmd+clicks instead of the terminal. Set by
@@ -1117,6 +1160,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         /// to the attach-failed placard — the session is fine, this panel is
         /// not on it — and a caller that knows the session has ended passes
         /// the ended copy instead, because there the default would be false.
+        ///
+        /// The attach-failed copy points at a Retry button, so painting it
+        /// raises the banner that carries one; the ended copies do not.
         @MainActor
         private func feedHolderAttachFailure(
             reason: String, into terminalView: TerminalView,
@@ -1127,6 +1173,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
                 "holder attach failed terminal=\(self.panelID, privacy: .public) worktree=\(worktreeID, privacy: .public) category=holderAttachFailed reason=\(reason, privacy: .public)"
             )
             feedPreparationMessage(message, into: terminalView)
+            if message == TerminalPreparationPresentation.holderAttachFailedMessage {
+                onHolderAttachRetryOffered?()
+            }
         }
 
         /// The ledger this panel registers its handback with and waits on.
