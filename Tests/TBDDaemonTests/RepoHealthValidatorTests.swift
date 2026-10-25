@@ -1,27 +1,23 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
 @Suite struct RepoHealthValidatorTests {
 
-    /// Make a real git repo at a tmp path. Returns the path.
-    private func makeGitRepo() throws -> URL {
+    /// Make a real git repo at a tmp path, with one empty commit on `main`.
+    /// Returns the path.
+    private func makeGitRepo() async throws -> URL {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("phase-b-health-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-        for args in [["init", "-b", "main"], ["commit", "--allow-empty", "-m", "init"]] {
-            let p = Process()
-            p.launchPath = "/usr/bin/env"
-            p.arguments = ["git", "-C", tmp.path] + args
-            try p.run()
-            p.waitUntilExit()
-        }
+        try await initTestRepo(at: tmp)
         return tmp
     }
 
     @Test func validatesExistingGitRepo() async throws {
-        let url = try makeGitRepo()
+        let url = try await makeGitRepo()
         defer { try? FileManager.default.removeItem(at: url) }
         var repo = Repo(path: url.path, displayName: "real")
         repo.worktreeSlot = "real"
