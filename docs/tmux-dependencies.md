@@ -253,7 +253,7 @@ was written for.
   nicety: "pane IDs are reused, and keys sent to a stale coordinate land in a
   different live session … so target identity is verified by deliberate
   comparison before typing"
-  (`docs/specs/2026-07-26-fleet-supervision-design.md:2762-2765`).
+  (`docs/specs/2026-07-26-fleet-supervision-design.md:2754-2756`).
 - **Reconciliation.** The sweep uses the same query to tell an owned dead pane
   (preserve) from a recycled coordinate now belonging to someone else (repair) —
   `Reconcile.swift:589`, and the `PaneSendTarget.dead(terminalID:)` doc comment
@@ -367,23 +367,18 @@ not because it is currently load-bearing.
 
 ## Which capabilities exist only to serve supervision
 
-**None.** Fleet supervision reads no pane and owns no tmux primitive of its own.
+*Re-read against the tree on 2026-10-25.*
 
-Its fact surface is specified to make **zero** tmux calls per agent:
-"Per agent this costs at most what `session.states` already costs: database reads
-plus byte-bounded transcript tails, and zero subprocesses, tmux calls, pane reads
-and model calls. That is a constraint, not an aspiration"
-(`SupervisionReadoutBuilder.swift:11-16`). `SessionStateResolver` refuses to add
-a liveness probe for the same reason and takes liveness as an input instead
-(`:233-248`).
+**None.** Fleet supervision is retired and has no implementation in the tree;
+its specs remain as the design record, and nothing in `Sources/` invokes tmux on
+its behalf.
 
-Supervision does **not** shed tmux, though. It needs exactly two things from it,
-both named in its spec: pane and process liveness to identify gone agents
-(`design.md:139-140`), and act-time pane liveness plus identity verification on
-the send path (`design.md:2757-2766`). Those are `paneSendTarget`,
-`windowExists` and `serverExists` — the queries the send path and the reconcile
-sweep already depend on. So supervision's tmux needs are a subset of what paths
-with nothing to do with supervision already require.
+`session.states`, the state surface its readout was built on and which TBD
+keeps, makes **zero** tmux calls per agent: "per terminal it costs database
+reads plus bounded file tails, and no subprocess, tmux call, pane read or model
+call" (`RPCRouter+SessionStateHandlers.swift:209-213`). `SessionStateResolver`
+refuses to add a liveness probe for the same reason and takes liveness as an
+input instead (`SessionStateResolver.swift:250-265`).
 
 ## What breaks if the app stops seeing the byte stream
 

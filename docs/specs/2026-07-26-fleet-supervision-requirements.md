@@ -1,5 +1,10 @@
 # Design brief: fleet supervision for TBD
 
+Status: **retired.** Fleet supervision is retired: its implementation has been
+removed from TBD, and this document is kept as the design record. The
+**Built/Enabled** ratchet it defines still governs how capability moves into
+compiled TBD (see the root `CLAUDE.md`).
+
 You are designing, from scratch, the fleet-supervision subsystem of TBD — a macOS tool for
 running many Claude Code agents in parallel. A first implementation of this subsystem ran
 over real fleets and worked after a fashion; the requirements below are its useful residue,

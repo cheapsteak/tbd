@@ -1,9 +1,10 @@
-# Fleet supervision — design (living draft)
+# Fleet supervision — design
 
-Status: **complete draft, pending operator review.** Captures the decisions
-settled in the design conversation of 2026-07-26. The wake decision for parked
-sessions lives outside the daemon, in a project-authored wake program specified
-in the sub-document
+Status: **retired.** Fleet supervision is retired: its implementation has been
+removed from TBD, and this document is kept as the design record.
+
+The wake decision for parked sessions lives outside the daemon, in a
+project-authored wake program specified in the sub-document
 [`2026-07-26-fleet-supervision-wake-program.md`](2026-07-26-fleet-supervision-wake-program.md);
 TBD's obligation to programs it does not run is sufficient public surfaces,
 never guardrails. Case detection for live agents is likewise authored — a
