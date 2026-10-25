@@ -162,7 +162,7 @@ extension RPCRouter {
         // every other kind rather than silently dropping them, as a model is
         // refused above.
         if !isClaudeType, !(params.pluginDirs ?? []).isEmpty {
-            return RPCResponse(error: "pluginDirs require a Claude terminal")
+            return RPCResponse(error: TerminalCreateParams.pluginDirsRequireClaudeMessage)
         }
 
         // Look up the worktree to get tmux server and path

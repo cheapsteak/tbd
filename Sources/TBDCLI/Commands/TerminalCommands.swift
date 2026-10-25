@@ -59,6 +59,15 @@ struct TerminalCreate: AsyncParsableCommand {
     }
 
     mutating func validate() throws {
+        if !pluginDirs.isEmpty {
+            // The daemon's rule: a Claude type, or any resume, is a Claude
+            // terminal. This command sends no resume id, so only `--type
+            // claude` qualifies; no type, with or without `--cmd`, is a shell.
+            guard type == .claude else {
+                throw ValidationError(TerminalCreateParams.pluginDirsRequireClaudeMessage)
+            }
+            try CLIPluginDirs.validateNotBlank(pluginDirs)
+        }
         guard let model else { return }
         guard type == .codex else {
             throw ValidationError(TerminalCreateParams.modelRequiresCodexMessage)

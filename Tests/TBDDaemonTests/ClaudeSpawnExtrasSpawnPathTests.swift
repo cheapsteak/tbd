@@ -34,6 +34,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         let recorder: TmuxRecorder
         let worktree: Worktree
         let scratch: URL
+        let actuationLogPath: String
 
         /// A real folder under this test's scratch directory, never under `~`.
         func makePluginDir(_ name: String) throws -> String {
@@ -44,6 +45,31 @@ struct ClaudeSpawnExtrasSpawnPathTests {
 
         func create(_ params: TerminalCreateParams) async throws -> RPCResponse {
             await router.handle(try RPCRequest(method: RPCMethod.terminalCreate, params: params))
+        }
+
+        /// Every row the router appended to its actuation log, in order.
+        func actuationRows() throws -> [[String: Any]] {
+            guard let contents = try? String(contentsOfFile: actuationLogPath, encoding: .utf8) else {
+                return []
+            }
+            return try contents
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { line in
+                    try #require(
+                        try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+                }
+        }
+
+        /// The create wrote its request row and closed it as a not-eligible
+        /// refusal carrying the error the caller got.
+        func expectRefusedActuation(_ resp: RPCResponse) throws {
+            let written = try actuationRows()
+            #expect(written.count == 2)
+            #expect(written.first?["method"] as? String == "terminal.create")
+            let outcome = try #require(written.last)
+            #expect(outcome["result"] as? String == "refused")
+            #expect(outcome["reason"] as? String == "not-eligible")
+            #expect(outcome["error"] as? String == resp.error)
         }
     }
 
@@ -65,6 +91,11 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             try? FileManager.default.removeItem(at: scratch)
         }
 
+        let actuationDirectory = scratch.appendingPathComponent("actuations", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: actuationDirectory, withIntermediateDirectories: true)
+        let actuationLogPath = actuationDirectory.appendingPathComponent("actuations.jsonl").path
+
         let recorder = TmuxRecorder()
         let tmux = TmuxManager(dryRun: true, dryRunRecorder: { args in recorder.record(args) })
         let db = try TBDDatabase(inMemory: true)
@@ -85,7 +116,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             usageFetcher: StubClaudeUsageFetcher(),
             configDirManager: configDirManager("router"),
             sessionsDir: scratch.appendingPathComponent("sessions", isDirectory: true),
-            actuationLog: makeTestActuationLog())
+            actuationLog: ActuationLog(path: actuationLogPath))
 
         let repo = try await db.repos.create(
             path: scratch.appendingPathComponent("repo").path,
@@ -100,7 +131,8 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             path: worktreePath, tmuxServer: "tbd-test")
 
         try await body(Fixture(
-            router: router, db: db, recorder: recorder, worktree: worktree, scratch: scratch))
+            router: router, db: db, recorder: recorder, worktree: worktree, scratch: scratch,
+            actuationLogPath: actuationLogPath))
     }
 
     /// The per-session settings file a spawn wrote for `terminalID`, parsed.
@@ -210,6 +242,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(resp.error == "plugin folder path must be absolute or start with ~/: rel")
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
             #expect(f.recorder.newWindowCommands.isEmpty)
+            try f.expectRefusedActuation(resp)
         }
     }
 
@@ -223,6 +256,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(resp.error == "plugin folder does not exist: \(missing)")
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
             #expect(f.recorder.newWindowCommands.isEmpty)
+            try f.expectRefusedActuation(resp)
         }
     }
 
@@ -233,9 +267,13 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             let resp = try await f.create(TerminalCreateParams(
                 worktreeID: f.worktree.id, type: type, pluginDirs: [plug]))
             #expect(!resp.success)
+            #expect(resp.error == TerminalCreateParams.pluginDirsRequireClaudeMessage)
             #expect(resp.error == "pluginDirs require a Claude terminal")
             #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).isEmpty)
             #expect(f.recorder.newWindowCommands.isEmpty)
+            // Refused as a bad request, beside the model refusal, before any
+            // actuation row is written.
+            #expect(try f.actuationRows().isEmpty)
         }
     }
 

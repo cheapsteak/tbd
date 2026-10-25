@@ -4,8 +4,9 @@ import Foundation
 ///
 /// Pure: the only filesystem access is the injected `fileExists` closure.
 enum ClaudePluginDirs {
-    struct InvalidPath: Error, CustomStringConvertible {
+    struct InvalidPath: LocalizedError, CustomStringConvertible {
         let description: String
+        var errorDescription: String? { description }
     }
 
     /// Expands a leading `~/` against `homeDirectory`, requires each result to

@@ -2699,6 +2699,11 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// caller sees the same explanation whichever layer stops it.
     public static let modelRequiresCodexMessage =
         "--model requires --type codex: Claude models come from TBD model profiles, and shell terminals have no model."
+
+    /// The refusal for plugin folders on a terminal that is not Claude, shared
+    /// by the CLI's `--plugin-dir` validation and the daemon for the same
+    /// reason as `modelRequiresCodexMessage`.
+    public static let pluginDirsRequireClaudeMessage = "pluginDirs require a Claude terminal"
 }
 
 public struct TerminalContinueInCodexParams: Codable, Sendable {
