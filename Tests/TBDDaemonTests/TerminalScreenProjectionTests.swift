@@ -122,10 +122,15 @@ import struct TBDShared.TerminalScreen
     /// `HolderScreenContractTests` pins the other one (past the end of
     /// `lines`); no holder suite cuts inside the viewport, so this case lives
     /// here.
+    ///
+    /// Thirty lines on an eight-row grid hold thirty rows, the last eight the
+    /// viewport. Cutting to two keeps the newest two and drops twenty-eight, so
+    /// the viewport's first row sits 30 − 8 − 28 = −6 rows before `lines[0]`.
     @Test("a tail cut inside the viewport puts viewportStart below zero")
     func tailCutInsideTheViewportGoesNegative() {
         let fixture = Fixture(feeding: (1...30).map { "r\($0)" }.joined(separator: "\r\n"))
         let projected = TerminalScreenProjection.project(fixture.terminal, maxLines: 2)
-        #expect(projected.viewportStart < 0, "viewportStart was \(projected.viewportStart)")
+        #expect(projected.lines == ["r29", "r30"])
+        #expect(projected.viewportStart == -6, "viewportStart was \(projected.viewportStart)")
     }
 }
