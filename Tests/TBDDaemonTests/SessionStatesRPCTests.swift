@@ -167,7 +167,7 @@ struct SessionStatesRPCTests {
             worktreeID: fixture.worktreeID, tmuxWindowID: "@1", tmuxPaneID: "%1",
             label: "shell", kind: .shell)
         // A pre-`kind` row carries nil and is treated as an agent: dropping a
-        // real agent from the fleet's readout is the worse of the two errors.
+        // real agent from the report is the worse of the two errors.
         let legacy = try await fixture.db.terminals.create(
             worktreeID: fixture.worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2", label: "legacy")
 
@@ -264,7 +264,7 @@ struct SessionStatesRPCTests {
         // recorder — the mutating commands and, separately wired, every
         // read-only query and pane capture. An empty recorder is the proof
         // that the pass costs no subprocess and reads no pane, which is what
-        // lets this method be called every cycle for the whole fleet.
+        // lets this method be called on a cadence for every agent at once.
         #expect(fixture.recorder.recorded.isEmpty,
                 "session.states touched tmux: \(fixture.recorder.recorded)")
     }

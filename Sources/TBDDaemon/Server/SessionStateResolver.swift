@@ -458,7 +458,7 @@ struct SessionStateResolver: Sendable {
     ///
     /// **Never the prompt's `message`.** That text may quote repo content, and
     /// it is carried on the `.awaitingInput` value for readers entitled to it;
-    /// a `why` string is composed into briefings and logs. The classification
+    /// a `why` string is composed into reports and logs. The classification
     /// and the verbatim `notification_type` are TBD's own closed vocabulary and
     /// Claude Code's, so both are safe to name.
     private func ambiguousPromptWhy(

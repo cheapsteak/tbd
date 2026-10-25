@@ -132,8 +132,10 @@ theories ship as authored defaults, not as compiled law.
 ## What legitimately stays compiled
 
 The placement rule cuts both ways, and a doc about melting theories must
-say plainly what does not melt. Five things stay compiled because
-user-land cannot do them well:
+say plainly what does not melt. The supervision design kept five things
+compiled because user-land cannot do them well. The first three hold for
+TBD as it stands; the clock and the brake were that design's own, and
+TBD, which has no supervision, compiles neither:
 
 - **Facts and their timestamps** — a wrong fact poisons every consumer
   downstream, and per-event derivation across a fleet is a cost argument
@@ -154,10 +156,10 @@ Two structural principles govern the theories TBD *does* hold:
 
 - **Content, not law.** A shipped default is a theory — the reference
   sweep program's thresholds, the default transition ceremony, the
-  shipped continuation policy are all opinions. TBD holds them as
-  editable artifacts: shipped inside the install, improving with
-  releases, seeded exactly once into a project's ownership on the
-  customize gesture, and never rewritten after. What TBD declines is
+  shipped continuation policy are all opinions. The supervision design
+  held them as editable artifacts: shipped inside the install, improving
+  with releases, seeded exactly once into a project's ownership on a
+  customize gesture, and never rewritten after. What it declined is
   holding a theory as behavior only a rebuild can change (sweep program
   §7).
 - **The floor principle.** A theory that moves out leaves a fact-shaped

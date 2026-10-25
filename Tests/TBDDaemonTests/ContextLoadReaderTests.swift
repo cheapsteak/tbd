@@ -4,9 +4,9 @@ import Testing
 import TBDShared
 
 /// Tier 2 — real files in a temp directory, because the reader's contract
-/// includes file modification times and a byte-bounded tail read, neither of
-/// which survives being mocked away. No `TBD_HOME` involved: every path is
-/// passed in.
+/// includes a byte-bounded tail read, and the `FileHandle.modificationDate()`
+/// stamp defined beside it reads a real descriptor; neither survives being
+/// mocked away. No `TBD_HOME` involved: every path is passed in.
 @Suite struct ContextLoadReaderTests {
 
     private struct Scratch {
@@ -172,9 +172,10 @@ import TBDShared
     /// can land between them, and `attributesOfItem` does not even follow a
     /// symlink — so the pair can hand back one file's bytes with another's
     /// modification time. That produces an `ObservedFact` whose observed-at is
-    /// newer than the value it labels, which is the one thing this file's
-    /// opening comment forbids. `modificationDate()` asks the descriptor the
-    /// bytes are read through: one open, one inode, both halves.
+    /// newer than the value it labels — a stale fact made to look fresh, which
+    /// is what `ObservedFact`'s provenance exists to rule out.
+    /// `modificationDate()` asks the descriptor the bytes are read through: one
+    /// open, one inode, both halves.
     @Test func theStampComesFromTheFileTheHandleHasOpen() throws {
         let scratch = try Scratch()
         defer { scratch.cleanUp() }

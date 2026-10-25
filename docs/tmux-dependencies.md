@@ -6,6 +6,11 @@ what invokes tmux, which user-visible capability each invocation backs, and what
 would break without it. Every claim is cited to `file:line` in this worktree. If
 the code and this document disagree, the code wins; then fix the document.
 
+*Re-read against the tree on 2026-10-25 in the entries for the key-name
+`send-keys`, `capture-pane -p -e -J`, `windowExists`, `pane_current_command`
+and `pane_pid`: those cite that tree. Every other citation is from the
+2026-08-26 reading.*
+
 It is an inventory, not a proposal. It does not argue for or against any change
 to how terminals are driven.
 
@@ -126,16 +131,13 @@ tmux's environment plumbing.
 - **`send-keys -l`** (literal text) — `sendKeysCommand` (`:487-489`). Path:
   **default**. One caller: the rate-limit auto-continue rail
   (`LimitResumeActuator.swift:424`).
-- **`send-keys`** (key names) — `sendKeyCommand` (`:492-494`). Path: **default**.
+- **`send-keys`** (key names) — `sendKeyCommand` (`:736-738`). Path: **default**.
   Callers: the auto-continue rail's Escape/Enter bracket
-  (`LimitResumeActuator.swift:422, 426`), the graceful pane interrupt used before
-  parking (`HibernationCoordinator.swift:1162-1166` and the twin at
-  `RPCRouter+TerminalHandlers.swift:2103-2108`), and the trailing Enter after a
-  `terminal.send` paste (`:2392, 2405`) and after a verified re-delivery
-  (`:2554`).
-- **`send-keys … Enter`** (command form) — `sendCommandArgs` (`:727-729`), one
-  caller: typing `/exit` when parking a Claude session politely
-  (`HibernationCoordinator.swift:1129`).
+  (`LimitResumeActuator.swift:772, 776`), the named keys of
+  `terminal.send --keys` (`RPCRouter+TerminalHandlers.swift:4222`), and the
+  trailing Enter after a `terminal.send` paste (`:4209, 4330`) and after a
+  verified re-delivery (`:5057`). A park types nothing: it ends the session by
+  signal (`TmuxSignalEnding`, `ComposerDraftParkGate.swift:78`).
 - **`load-buffer` + `paste-buffer -d -p` + `delete-buffer`** — `pasteText`
   (`:950-996`), building on `loadBufferCommand` (`:498-500`),
   `pasteBufferCommand` (`:512-514`) and `deleteBufferCommand` (`:518-520`).
@@ -152,21 +154,18 @@ send paths; and the rate-limit rail.
 
 ### Reading a pane's text
 
-Three capture shapes exist. Under the "No TUI screen-scraping" rule, only one of
-them classifies what it reads, and it is a named exception.
+Three capture shapes exist. Under the "No TUI screen-scraping" rule, none of
+them classifies what it reads.
 
 - **`capture-pane -p`** — `capturePaneCommand` (`:526-528`). Path: **default**.
   One caller: `handleTerminalOutput` (`:1324-1344`) passes the text through
   verbatim as the result of the `terminal.output` RPC, which is what
   `tbd terminal output` prints — sanctioned pass-through.
-- **`capture-pane -p -e -J`** — `capturePaneWithAnsiCommand` (`:531-533`). Path:
-  **default**. One caller: `performHibernate`
-  (`HibernationCoordinator.swift:375`), which uses it twice over. The capture is
-  stored as the parked pane's display snapshot (verbatim), *and* it is fed to
-  `HibernationSafetyChecks.hasPendingInput` (`:379`) — **the sanctioned scraper**,
-  exempted at `.swiftlint.yml:334`, the rail that refuses to park a session with
-  unsent text in its composer. The `-e` is load-bearing: dimness is the only
-  thing distinguishing a ghost suggestion from typed input.
+- **`capture-pane -p -e -J`** — `capturePaneWithAnsiCommand` (`:775-777`). Path:
+  **default**. One caller: the tmux park
+  (`HibernationCoordinator.swift:1305`), which reads it once and stores it
+  verbatim as the parked pane's display snapshot; nothing it shows refuses the
+  park. The `-e` keeps the styling the parked tab shows as its backdrop.
 - **`capture-pane -p -e -J -S -10000`** — `capturePaneScrollbackCommand`
   (`:541-546`). Path: **default**. Archival, verbatim, never parsed. Three
   callers, all snapshotting a pane into closed-terminal history immediately
@@ -181,25 +180,31 @@ This is the largest read surface and the one with the most consumers.
 - **`list-sessions`** — `serverExists` (`:1192-1203`). Path: **both**. Callers:
   the reconcile sweep (`WorktreeLifecycle+Reconcile.swift:454, 572, 666`) and
   startup hibernation reconciliation (`HibernationCoordinator.swift:1095`).
-- **`list-panes -t <window>`** — `windowExists` (`:1177-1189`). Path: **both**.
-  Eight callers: the reconcile sweep (`Reconcile.swift:583, 669`), pre-session
-  completion polling (`PreSession.swift:247`), wake (`HibernationCoordinator.swift:883`)
-  and startup reconciliation (`:1098`), `terminal.delete` (`:700`), window
-  recreation (`:1071`), and the rate-limit rail's eligibility check
-  (`LimitResumeActuator.swift:265`).
+- **`list-panes -t <window>`** — `windowExists` (`:1717-1729`). Path: **both**.
+  Four callers: pre-session completion polling (`PreSession.swift:328`), the
+  tmux park's liveness check (`HibernationCoordinator.swift:1286`), startup
+  reconciliation (`:2437`), and the rate-limit rail's eligibility check
+  (`LimitResumeActuator.swift:508`).
 - **`list-panes -F '#{pane_current_command}'`** — `paneCurrentCommandQuery`
-  (`:552-554`). Path: **both**. Answers "is an agent in the foreground of this
-  pane". Callers: reconcile (`Reconcile.swift:622`), hibernation's
-  took-effect verification (`HibernationCoordinator.swift:468`), startup
-  reconciliation (`:1102`), and the polite-exit poll (`:1144`). The
-  classification itself is
+  (`:796-798`). Path: **both**. Answers "is an agent in the foreground of this
+  pane". Callers: reconcile (`Reconcile.swift:871`), the tmux park's liveness
+  check (`HibernationCoordinator.swift:1292`), hibernation's took-effect
+  verification (`:1516`), startup reconciliation (`:2441`), and
+  `TmuxSignalEnding`'s poll for Claude to leave after its SIGTERM
+  (`ComposerDraftParkGate.swift:122`). The classification itself is
   `ClaudeStateDetector.isClaudeProcess` (`:10-12`), a version-string regex over
   the command name — a process fact, not screen text.
-- **`list-panes -F '#{pane_pid}'`** — `panePIDQuery` (`:705-707`). Path: **both**.
-  Callers: session-ID recapture (`ClaudeStateDetector.swift:69`), the rate-limit
-  rail (`LimitResumeActuator.swift:317`), the two graceful-interrupt paths
-  (`HibernationCoordinator.swift:1169`, `RPCRouter+TerminalHandlers.swift:2112`),
-  and `killWindowAndReap` (`WorktreeLifecycle.swift:228`).
+- **`list-panes -F '#{pane_pid}'`** — `panePIDQuery` (`:1041-1043`). Path:
+  **both**. Callers: session-ID recapture (`ClaudeStateDetector.swift:79`), the
+  rate-limit rail (`LimitResumeActuator.swift:560`), `TmuxSignalEnding`'s
+  lookup of the Claude process under the pane, for the park and the profile
+  swap alike (`ComposerDraftParkGate.swift:112`), the pane-foreground probe
+  behind the exit-stamped guard and the running-shell move
+  (`HibernationCoordinator.swift:667`), `terminal.send`'s foreground-agent rail
+  (`RPCRouter+TerminalHandlers.swift:4001`), `terminal.completions`'
+  executable pin (`RPCRouter+CompletionHandlers.swift:79`), the tmux arm of
+  `AgentBackgroundRoots` (`AgentBackgroundRoots.swift:53`), and
+  `killWindowAndReap`'s window teardown (`WorktreeLifecycle.swift:334`).
 - **`list-panes -a -F '#{pane_pid}'`** — `listAllPanePIDsCommand` (`:722-724`),
   paired with **`display-message -p '#{pid}'`** (`serverPIDQuery`, `:718-720`).
   Path: **both**. One consumer, `AgentReaper` (`:37-39`, `:118`): everything
@@ -460,9 +465,10 @@ usually told.
   that is the normal state for most of a fleet. Without tmux there is no process
   to keep the pty alive between views.
 - **Every actuation into a session.** `send-keys` and `paste-buffer` are how the
-  daemon types. Without tmux, `tbd terminal send`, cross-session agent messaging,
-  the rate-limit auto-continue, and the polite `/exit` before
-  parking lose their transport. There is no second path.
+  daemon types. Without tmux, `tbd terminal send`, cross-session agent messaging
+  and the rate-limit auto-continue lose their transport. There is no second
+  path. A park types nothing, so it needs no `send-keys`; it needs tmux for
+  `panePID` and `respawn-window`.
 - **Bracketed-paste correctness.** tmux is the sole wrapping authority
   (`PasteInterception.swift:8-19`); `-p` wrapping is what keeps a trailing Enter
   outside the paste, which is what stopped large `--submit` messages being
@@ -482,8 +488,9 @@ usually told.
   orphan-reclamation doctrine would need an entirely different ground truth.
 - **Process-tree reclamation.** `AgentReaper` finds structural orphans by
   the tmux server being their parent (`:37-39`).
-- **Scrollback for closed-terminal history and parked snapshots.**
-  `capture-pane -S -10000` is where both come from.
+- **Closed-terminal history and parked snapshots.** History comes from
+  `capture-pane -S -10000`, and a parked tab's snapshot from
+  `capture-pane -p -e -J`.
 - **Sizing detached panes.** `resize-window` is what stops a never-viewed
   terminal rendering into hard-wrapped 80x24 scrollback that cannot be reflowed
   when a wider view finally attaches.

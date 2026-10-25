@@ -47,8 +47,10 @@ draft and Enter sends the half-written prompt to the model, and a daemon-sent
 Ctrl+C clears it.
 
 **Goal:** a park never loses unsent composer text the session mod has saved,
-automatic parking parks only sessions the mod protects, and nothing in that
-guarantee reads the screen.
+and nothing in that guarantee reads the screen. Automatic parking skips only a
+session spawned with the feature whose mod cannot vouch for its draft. A
+session spawned without the feature is parked, and with automatic parking on
+it exists only until its next spawn.
 
 ## Facts this design rests on
 

@@ -37,8 +37,9 @@ import os
 /// expiry means the daemon answers from the emulator it suspended at attach,
 /// which is what every consumer's policy was already written against. An app
 /// that is napping, wedged or mid-paste was never going to answer in five
-/// seconds either, and those are exactly the moments supervision most wants to
-/// act — so the read must not be the thing that blocks it.
+/// seconds either, and a send — an agent's `tbd terminal send`, the queued
+/// prompt — can arrive at exactly those moments, so the read must not be the
+/// thing that blocks it.
 ///
 /// It is the default rather than the rule: a caller whose wait is spent
 /// somewhere costlier can tighten it per request, and the disposal path does,

@@ -80,8 +80,8 @@ public enum HolderInputTiming {
     /// nothing is lost by waiting, the fallback writes the same bytes, and the
     /// generous margin buys safety. This bound sits on a *read* that is on the
     /// critical path of every holder send to an open tab — the input path asks
-    /// the oracle before it composes, so a supervision nudge to a session
-    /// somebody has open pays this wait and then, in the worst case, the
+    /// the oracle before it composes, so an agent's `tbd terminal send` to a
+    /// session somebody has open pays this wait and then, in the worst case, the
     /// injection ack's as well. It also has a correct fallback to land on: a
     /// bound that expires answers `staleDaemon` from the emulator retained
     /// since the attach, which is what every consumer's policy was already
@@ -90,8 +90,9 @@ public enum HolderInputTiming {
     /// Half a second is therefore a latency budget rather than a safety margin.
     /// It is many main-actor turns for an app that is awake, and an app that is
     /// napping, wedged or mid-paste was never going to answer in five seconds
-    /// either — and those are exactly the moments supervision most wants to
-    /// act, so the read must not be the thing that blocks it.
+    /// either — and a send, an agent's `tbd terminal send` or the queued
+    /// prompt, can arrive at exactly those moments, so the read must not be
+    /// the thing that blocks it.
     ///
     /// **Ordering against the other two carries no invariant.** The write-side
     /// pair constrain each other because the app holds an injection the daemon

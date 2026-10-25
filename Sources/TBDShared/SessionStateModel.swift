@@ -321,13 +321,12 @@ public struct TranscriptFingerprint: Codable, Sendable, Equatable {
 /// The structured reason an agent is waiting, carried verbatim from Claude
 /// Code's `Notification` hook.
 ///
-/// **TBD never branches on `message`.** It is carried into a briefing, into a
-/// question raised on a project's question route, and into the one-minute
-/// re-check — and read by a human or by a project's own program, both of which
-/// may interpret it however they like. Compiled TBD may not, because matching
-/// on that text would be screen-scraping with an extra hop: the string is a
-/// display artifact of one Claude Code version, and a reworded prompt would
-/// silently change TBD's behavior.
+/// **TBD never branches on `message`.** It is carried to a caller of
+/// `session.states` and to the app — and read by a human or by a caller's own
+/// program, both of which may interpret it however they like. Compiled TBD
+/// may not, because matching on that text would be screen-scraping with an
+/// extra hop: the string is a display artifact of one Claude Code version, and
+/// a reworded prompt would silently change TBD's behavior.
 ///
 /// `raw` keeps the payload JSON as it arrived, so a later consumer can read a
 /// field this build does not model without waiting for a TBD release.
@@ -353,9 +352,9 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
     /// decode** rather than trusted from the wire, so the pair can never
     /// disagree: a stored row cannot claim a class its own type does not
     /// support, and this build's vocabulary is always the one that decides.
-    /// It is encoded anyway, because a reader outside TBD — a briefing, a
-    /// project's own program — should not have to reimplement the grouping to
-    /// read the record.
+    /// It is encoded anyway, because a reader outside TBD — a caller of
+    /// `session.states` — should not have to reimplement the grouping to read
+    /// the record.
     public let classification: AwaitingInputClass
     /// The block Claude Code announced over OSC 7501, when the wait was
     /// reported that way rather than by the `Notification` hook. Absent on

@@ -446,28 +446,21 @@ custom_rules:
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+PreSession\\.swift"  # hook-terminal spawn and close; covered by worktree.rerunPreSession / create
       - "Sources/TBDDaemon/Lifecycle/WorktreeLifecycle\\+Reconcile\\.swift"   # the reconcile rail; one row per act at its own entry point
       - "Sources/TBDDaemon/Claude/LimitResumeActuator\\.swift"                # the limit-resume rail: Escape / continue / Enter
-    # Call sites only, which decides both odd-looking pieces of this regex:
-    #
-    #   - `(?<!func )` skips DECLARATIONS. TmuxManager's `public func
-    #     killWindow`, TerminalStore's `setHibernated`, and the protocol
-    #     witnesses LimitResumeActuator declares are the primitives being
-    #     defined, not acts being performed — and skipping them keeps
-    #     TerminalStore.swift (a DB layer that must never actuate) fully
-    #     covered instead of allowlisted for a declaration.
-    #   - `sendCommand` requires a `server:` label ahead of it, via a zero-width
-    #     lookahead so the label stays outside the matched range. Control mode's
-    #     `TmuxControlConnection.sendCommand(_ command: String)` is an unrelated
-    #     method that happens to share the name: it writes a line to the tmux
-    #     control socket. Matching on the label distinguishes the two by shape
-    #     rather than allowlisting the control-mode plumbing, which would blind
-    #     the rule to a real actuation added there later.
+    # Call sites only, which decides the odd-looking piece of this regex:
+    # `(?<!func )` skips DECLARATIONS. TmuxManager's `public func killWindow`,
+    # TerminalStore's `setHibernated`, and the protocol witnesses
+    # LimitResumeActuator declares are the primitives being defined, not acts
+    # being performed — and skipping them keeps TerminalStore.swift (a DB layer
+    # that must never actuate) fully covered instead of allowlisted for a
+    # declaration.
     #
     # Raw `kill(` is deliberately NOT in this list: no regex can separate a
     # signal sent to a session's process from ordinary subprocess reaping, and a
-    # rule that fired on both would be one people disable. The two
-    # session-relevant sites (HibernationCoordinator, RPCRouter+TerminalHandlers)
-    # already sit in allowlisted files above and are covered by the manual audit.
-    regex: '(?<!func )\b(?:killWindowAndReap|captureThenKillWindow|killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\(|(?<!func )\bsendCommand\s*\((?=\s*server:)'
+    # rule that fired on both would be one people disable. The park and the
+    # profile swap signal a session through `ProcessSignaller`
+    # (Sources/TBDDaemon/Process/ProcessSignaller.swift) rather than a raw
+    # `kill(`, and are covered by the manual audit.
+    regex: '(?<!func )\b(?:killWindowAndReap|captureThenKillWindow|killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\('
     # Code only. Several doc comments name these primitives while explaining the
     # boundary (`ClaudeSpawnCommandBuilder` points at `createWindow(sensitiveEnv:)`),
     # and firing on the prose that documents the rule is how a rule gets disabled.

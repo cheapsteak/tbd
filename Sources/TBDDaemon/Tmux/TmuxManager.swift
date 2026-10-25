@@ -1104,11 +1104,6 @@ public struct TmuxManager: Sendable {
         ["-L", server, "list-panes", "-a", "-F", "#{pane_pid}"]
     }
 
-    /// send-keys without -l so "Enter" is interpreted as a key name, not literal text.
-    public static func sendCommandArgs(server: String, paneID: String, command: String) -> [String] {
-        ["-L", server, "send-keys", "-t", paneID, command, "Enter"]
-    }
-
     // MARK: - Instance Execution Methods
 
     /// Ensures a tmux server and session exist.
@@ -1703,15 +1698,6 @@ public struct TmuxManager: Sendable {
             if let pid = Int32(line.trimmingCharacters(in: .whitespaces)) { pids.insert(pid) }
         }
         return pids
-    }
-
-    public func sendCommand(server: String, paneID: String, command: String) async throws {
-        let args = Self.sendCommandArgs(server: server, paneID: paneID, command: command)
-        if dryRun {
-            dryRunRecorder?(args)
-            return
-        }
-        try await runTmux(args)
     }
 
     public func listWindows(server: String, session: String) async throws -> [(windowID: String, paneID: String)] {

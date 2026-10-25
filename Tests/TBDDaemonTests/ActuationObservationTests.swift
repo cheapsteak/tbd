@@ -261,7 +261,7 @@ struct ActuationObservationTests {
 
     @Test("a non-ASCII or whitespace label is replaced, never passed through")
     func dispatchLabelReplacesEverythingOutsideTheAlphabet() {
-        #expect(ActuationActor.daemon(rail: "night watch").dispatchLabel == "daemon:night_watch")
+        #expect(ActuationActor.daemon(rail: "limit resume").dispatchLabel == "daemon:limit_resume")
         #expect(ActuationActor.daemon(rail: "rail\nid").dispatchLabel == "daemon:rail_id")
         #expect(ActuationActor.daemon(rail: "réveil").dispatchLabel == "daemon:r_veil")
         // Sanitizing to nothing is not possible, but supplying nothing is:

@@ -257,9 +257,10 @@ struct HolderInPlaceSwapTests {
     }
 
     /// The field report: "Swap profile" on a tab whose holder was killed with
-    /// its job. The park finalizes without the screen rail — nothing is left
-    /// to hold unsent input — so the swap goes on to re-home the row and try
-    /// the wake, where it used to refuse for a reader that cannot come back.
+    /// its job. The park finalizes without the reader check and the
+    /// transcript rail — no process is left to end — so the swap goes on to
+    /// re-home the row and try the wake rather than refusing for a reader
+    /// that cannot come back.
     ///
     /// The pids are above macOS's pid range, so the real process table this
     /// fixture's coordinator asks answers "nothing runs there" for the child;

@@ -143,8 +143,8 @@ struct HolderScreenResolver: Sendable {
         case .refused, .undeliverable, .timedOut:
             // The honest re-read: whatever the reader says *now*. A viewer that
             // detached while the pull was in flight has left the reader
-            // draining again, and calling that stale would make the
-            // hibernation rail refuse a park it could safely take.
+            // draining again, and calling that stale would have
+            // `terminal.output` label a live screen stale.
             return try await store.screen(maxLines)
         }
     }

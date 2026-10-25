@@ -1069,8 +1069,9 @@ public extension Terminal {
     ///
     ///
     /// The rails are the same on every transport. Park and wake on the holder
-    /// transport do not go through tmux at all — the park writes `/exit` to the
-    /// holder's pty, confirms the child is gone, and clears the row's pids, and
+    /// transport do not go through tmux at all — the park ends the child by
+    /// SIGTERM (abandoning the holder if that does not end it), confirms the
+    /// child is gone, and clears the row's pids, and
     /// the wake spawns a fresh holder running `claude --resume`. A holder row's
     /// `tmuxWindowID`/`tmuxPaneID` are empty strings by construction and
     /// neither path reads them.

@@ -209,9 +209,8 @@ public enum TerminalScreenProjection {
     /// the cursor past the cells it is leaving alone rather than overwriting
     /// them with blanks, so the skipped cells become invisible NULs scattered
     /// through the line — and which cells get skipped changes with every
-    /// repaint, so the holes appear to move. Consumers of this string match on
-    /// text (fleet supervision, the login driver), and a NUL is a missing
-    /// character nothing displays. `tmux
+    /// repaint, so the holes appear to move. A reader of this string matches
+    /// on text, and a NUL is a missing character nothing displays. `tmux
     /// capture-pane`, which this replaces for machine reads, returns spaces;
     /// so does the styled serializer in `TerminalCellWalk`.
     ///

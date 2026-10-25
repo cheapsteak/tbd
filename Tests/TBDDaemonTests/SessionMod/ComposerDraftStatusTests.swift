@@ -104,10 +104,4 @@ import Testing
             == .unknown(.staleHeartbeat))
         #expect(ComposerDraftStatus.evaluate(liveness: .legacy, draft: .unreadable) == .legacy)
     }
-
-    @Test func spawnedWithFeatureIsFalseOnlyForLegacy() {
-        #expect(!ComposerDraftStatus.legacy.spawnedWithFeature)
-        #expect(ComposerDraftStatus.confirmed(hasDraft: false).spawnedWithFeature)
-        #expect(ComposerDraftStatus.unknown(.noAliveFile).spawnedWithFeature)
-    }
 }

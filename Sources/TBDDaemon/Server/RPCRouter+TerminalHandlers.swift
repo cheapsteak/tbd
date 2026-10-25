@@ -4433,9 +4433,10 @@ extension RPCRouter {
     /// viewer attached. The window is then the whole attach, because that
     /// emulator stopped consuming bytes when the viewer took the pty, so a mode
     /// the child changed since is invisible here for as long as the viewer
-    /// holds it — possibly hours. It stays reachable forever — a napping,
-    /// wedged or mid-paste app is exactly the moment supervision wants to send
-    /// — which is why the rule below is not going anywhere.
+    /// holds it — possibly hours. It stays reachable forever — nothing stops an
+    /// agent's `tbd terminal send` or the queued prompt from arriving while the
+    /// app is napping, wedged or mid-paste — which is why the rule below is not
+    /// going anywhere.
     ///
     /// **So a stale reading is trusted in one direction only.** A viewer
     /// ordinarily takes the pty within milliseconds of a spawn or a wake,
@@ -4468,9 +4469,10 @@ extension RPCRouter {
     ///
     /// What remains is accepted by ruling: the design's "Proceeding on stale
     /// modes" section weighs a rare wrong composition against rails that fail
-    /// closed exactly when supervision most needs to send. What a wrong reading
-    /// costs is a wrong composition, and a wrong composition is visible in the
-    /// composer or diagnosable from the row — never a send that vanished. A
+    /// closed whenever the app is napping or wedged, which no sender waits
+    /// out. What a wrong reading costs is a wrong composition, and a wrong
+    /// composition is visible in the composer or diagnosable from the row —
+    /// never a send that vanished. A
     /// stale "on" for a child that has since turned bracketing off prints the
     /// `ESC[200~` and `ESC[201~` markers around the text; a shell that did so
     /// runs the line it made of them. A stale "off" for a shell that has since
@@ -4493,9 +4495,10 @@ extension RPCRouter {
         //
         // **An explicit `--verify` is the only thing that arms an observation**,
         // here as on tmux. Arming on the sender's behalf — giving the daemon's
-        // own supervision rails an observation they did not ask for — is a
-        // separate change, and one this transport cannot make on its own: the
-        // rails that would benefit do not pass through this handler at all.
+        // own rails, the limit resume and the queued prompt, an observation
+        // they did not ask for — is a separate change, and one this transport
+        // cannot make on its own: the rails that would benefit do not pass
+        // through this handler at all.
         // `LimitResumeActuator`'s holder path writes to `HolderInjectionCourier`
         // itself, and `sendQueuedPromptVerbatim` — the one rail that does route
         // through here — sends `.suppressed` so the operator's words arrive
@@ -4651,10 +4654,11 @@ extension RPCRouter {
         // the courier's write is about to fail and say so with the right cause.
         // Refusing here would put a second, wronger refusal in front of that,
         // and more importantly it would make every rail's send fail closed
-        // whenever the daemon cannot see a store: the moments that correlate
-        // exactly with supervision needing to send. The composition step's job
-        // is to record what it composed against, not to decide whether delivery
-        // is possible — the courier decides that, and it fails open.
+        // whenever the daemon cannot see a store, and no sender — an agent's
+        // `tbd terminal send`, the queued prompt — waits for one to appear. The
+        // composition step's job is to record what it composed against, not to
+        // decide whether delivery is possible — the courier decides that, and
+        // it fails open.
         let reading = await holderModeReading(terminalID: terminal.id)
         let modeSource = reading.map { ActuationModeSource($0.source) } ?? .unavailable
         // Both absent for `unavailable`: nothing answered, so there is no store
@@ -5077,8 +5081,8 @@ extension RPCRouter {
     /// `id` is the actuation row's own id — there is no second identifier
     /// namespace, so dispatch, transcript receipt and outcome all join on one
     /// string. `from` comes from `ActuationActor.dispatchLabel`, which is
-    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail or project name
-    /// can close the tag or open a second attribute.
+    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail name can close
+    /// the tag or open a second attribute.
     static func dispatchEnvelope(id: String, from label: String) -> String {
         "<tbd-dispatch id=\"\(id)\" from=\"\(label)\"/>"
     }

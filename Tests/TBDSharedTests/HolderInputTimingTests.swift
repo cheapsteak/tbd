@@ -49,7 +49,7 @@ struct HolderInputTimingTests {
         #expect(
             HolderInputTiming.screenPullBound < HolderInputTiming.injectionAckDeadline,
             """
-            a supervision nudge to an open tab pays the pull's \
+            a `tbd terminal send` to an open tab pays the pull's \
             \(HolderInputTiming.screenPullBound) and then, in the worst case, the ack's \
             \(HolderInputTiming.injectionAckDeadline) as well.
             """)

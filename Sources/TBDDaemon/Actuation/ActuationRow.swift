@@ -202,8 +202,9 @@ enum ActuationOutcome: Sendable, Equatable {
 /// modes can mis-paste — markers printed by a child that has turned
 /// bracketing off since an "on" was frozen, or by an agent session that a
 /// stale "off" was not trusted for and so got wrapped — and that is accepted,
-/// because refusing would make every supervision send fail closed exactly when
-/// the app is napping or wedged, which is when supervision most needs to send. What makes
+/// because refusing would make every send — an agent's `tbd terminal send`,
+/// the queued prompt — fail closed exactly when the app is napping or wedged,
+/// and those senders do not wait for it to wake. What makes
 /// it honest rather than merely optimistic is that the guess is recorded: a row
 /// reading `dispatched, modeSource: staleDaemon` tells whoever reads the record
 /// afterwards that the composition was a guess, and the age says how old.
@@ -298,8 +299,8 @@ struct ActuationRow: Codable, Sendable, Equatable {
     var message: String?
     var submit: Bool?
     /// Set on a request row when the caller armed delivery verification, and
-    /// only then. Without it the startup replay and the account cannot tell
-    /// which sends owe an observation from the ones that never asked for one.
+    /// only then. Without it the startup replay cannot tell which sends owe
+    /// an observation from the ones that never asked for one.
     var verify: Bool?
     var prompt: String?
     var agent: String?

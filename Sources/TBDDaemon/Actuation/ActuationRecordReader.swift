@@ -45,9 +45,11 @@ struct ActuationRecordReader: Sendable {
     /// `actuations-<day>-1.jsonl`, and `-` (0x2D) sorts before `.` (0x2E), so
     /// name order puts the later segment first. That writer chose a numeric
     /// suffix over concatenation precisely so nobody's record would be silently
-    /// reordered; reading it back by name would reorder it anyway. The rule is
-    /// cheap to state and the cost of being wrong is no longer cosmetic —
-    /// `DeliveryRecord.statuses` reads outcomes in record order.
+    /// reordered; reading it back by name would reorder it anyway. Production
+    /// reads only the active file (`DeliveryVerifier.replayMissedObservations`);
+    /// this walk serves tests and offline reading of the whole record, where
+    /// order is not cosmetic — `DeliveryRecord.statuses` reads outcomes in
+    /// record order.
     func segmentPaths() -> [String] {
         let directory = (activePath as NSString).deletingLastPathComponent
         let names = (try? fileManager.contentsOfDirectory(atPath: directory)) ?? []
@@ -154,8 +156,7 @@ struct DeliveryAssessment: Sendable, Equatable {
 /// The query-time delivery rule of §12, as a pure function over parsed rows.
 ///
 /// No daemon, no filesystem, no clock: rows in, `now` in, assessments out. The
-/// startup replay is its first consumer and the account will be its second,
-/// and both want the same answer from the same evidence.
+/// startup replay is its consumer.
 enum DeliveryRecord {
     /// How long after a request row's timestamp an observation is owed.
     ///

@@ -521,13 +521,13 @@ actor DeliveryVerifier: DeliveryVerificationArming {
     /// honestly. The writer's own daily rotation therefore bounds both the read
     /// and the work, with no new threshold to pick.
     ///
-    /// **It never re-delivers.** §12 puts "what to *do* about an unconfirmed
-    /// act — re-send, journal, shrug" in playbook judgment, never compiled
-    /// repair, and a payload whose premise is an unbounded interval old is
-    /// exactly the stale-premise send §3 forbids. It also cannot conclude
-    /// `not-landed` at all — `mayConcludeNotLanded: false` — because a bounded
-    /// tail cannot span an interval of unknown length. It records what it can
-    /// establish, writes the anomaly, and stops.
+    /// **It never re-delivers.** What to *do* about an unconfirmed act —
+    /// re-send, journal, shrug — is left to the operator or the caller that
+    /// sent it, never to compiled repair (§12), and a payload whose premise is
+    /// an unbounded interval old is exactly the stale-premise send §3 forbids.
+    /// It also cannot conclude `not-landed` at all — `mayConcludeNotLanded:
+    /// false` — because a bounded tail cannot span an interval of unknown
+    /// length. It records what it can establish, writes the anomaly, and stops.
     ///
     /// `.awaitingObservation` acts are left alone: their deadline has not
     /// passed, so nothing is owed yet.
@@ -568,7 +568,7 @@ actor DeliveryVerifier: DeliveryVerificationArming {
                     \(terminalID.uuidString, privacy: .public) observed late at startup as \
                     \(observation.result.rawValue, privacy: .public) — \
                     \(observation.detail ?? "no detail", privacy: .public); not re-delivered \
-                    (§12 leaves repair to playbook judgment)
+                    (repair is left to the operator or the caller)
                     """)
             }
         }

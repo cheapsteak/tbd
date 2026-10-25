@@ -26,12 +26,14 @@ enum HibernateEligibilityPolicy: Sendable {
     ///
     /// A fourth policy rather than a switch on the others, because it is the
     /// only one that deliberately bypasses the live rails: the user asked for
-    /// this session to move accounts, the tmux arm of the same action has
-    /// never honoured any of them, and a "Switch account" that refuses on a
-    /// re-adopted row until its screen has been observed again would refuse
-    /// exactly the case a user reaching for it after a daemon restart is in.
+    /// this session to move accounts, so neither a mid-write transcript tail
+    /// (`honoursLiveRails`) nor a turn in flight or a raised permission hand
+    /// (`hibernationRefusal`) refuses it, and the tmux arm of the same action
+    /// has never honoured any of them.
     /// See `docs/specs/2026-09-22-holder-in-place-profile-swap-design.md`,
-    /// "The swap interrupts regardless, matching tmux".
+    /// "The swap interrupts regardless, matching tmux", and
+    /// `docs/specs/2026-10-24-mod-only-park-guard-design.md`, "Which parks go
+    /// ahead".
     ///
     /// Like every park, it ends by SIGTERM and types nothing into the session.
     case profileSwap
@@ -342,8 +344,8 @@ public actor HibernationCoordinator {
     /// through the reader the spawn path registered.
     ///
     /// Nil in mock mode and in any composition with no holder transport, where
-    /// the park path refuses by name rather than pretending it could have read
-    /// a screen.
+    /// the park path refuses by name: with no registry there is no way to
+    /// abandon the holder, so nothing in this daemon could end the job.
     var holderRegistry: HolderRegistry?
 
     /// Answers a holder-backed session's screen, for the park's display
@@ -495,7 +497,8 @@ public actor HibernationCoordinator {
         holderProcessIsLive = isLive
     }
 
-    /// Wire the park rail's screen seam. Tests only — see `holderScreenOracle`.
+    /// Wire the park snapshot's screen seam. Tests only — see
+    /// `holderScreenOracle`.
     func setHolderScreenOracle(
         _ oracle: (@Sendable (UUID) async throws -> TerminalScreen?)?
     ) {
@@ -629,7 +632,9 @@ public actor HibernationCoordinator {
     /// wait for the session mod to vouch for an unsent draft
     /// (`ComposerDraftParkGate`). No new policy case is added.
     /// See `docs/specs/2026-10-11-holder-transport-migration-design.md`,
-    /// "The park honours every live rail".
+    /// "The park honours every live rail", and
+    /// `docs/specs/2026-10-24-mod-only-park-guard-design.md`, "Which parks go
+    /// ahead", for how a manual park treats an unsent draft.
     func parkForTransportMigration(terminalID: UUID) async -> HibernateResult {
         guard let terminal = try? await db.terminals.get(id: terminalID) else {
             return .notFound
