@@ -556,7 +556,7 @@ struct TerminalHolderTransportGateTests {
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             label: "Shell", kind: .shell, transport: .holder)
         let bystander = UUID()
-        func identity() -> String {
+        @MainActor func identity() -> String {
             TerminalPanePresentation.identity(
                 for: row, switching: nil,
                 attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,

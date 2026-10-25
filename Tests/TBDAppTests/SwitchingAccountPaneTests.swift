@@ -313,7 +313,9 @@ struct SwitchingAccountPaneTests {
             let row = Self.holderRow(parked: false)
             let worktreeID = row.worktreeID
             state.terminals[worktreeID] = [row]
-            func identity() -> String {
+            // `@MainActor`: a function local to this closure is not isolated
+            // with it, and everything it reads is the main actor's.
+            @MainActor func identity() -> String {
                 let current = state.terminals[worktreeID]!.first { $0.id == row.id }!
                 return TerminalPanePresentation.identity(
                     for: current, switching: state.switchingAccountTerminals[row.id],
