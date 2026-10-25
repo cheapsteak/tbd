@@ -268,6 +268,7 @@ struct GeneralSettingsTab: View {
                     .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 controlModeToggle
                 ptyHolderToggle
+                holderClaimReconcileToggle
                 transcriptStreamingToggle
                 transcriptPromptAnswerToggle
                 composerDraftToggle
@@ -333,6 +334,23 @@ struct GeneralSettingsTab: View {
                 .foregroundStyle(.secondary)
         }
     }
+
+    /// Holder viewer-claim reconcile. Reads `daemon.capabilities`, writes
+    /// `config.setHolderClaimReconcileEnabled`. Off by default (soaking). The
+    /// app sweeps on every poll tick in either position; the flag decides
+    /// whether the daemon takes back what a sweep finds or only logs it.
+    @ViewBuilder
+    private var holderClaimReconcileToggle: some View {
+        let capabilities = appState.daemonCapabilities
+        Toggle("Reclaim sessions after a lost handback", isOn: Binding(
+            get: { capabilities?.holderClaimReconcileEnabled ?? Config.holderClaimReconcileEnabledDefault },
+            set: { newValue in Task { await appState.setHolderClaimReconcileEnabled(newValue) } }
+        ))
+        .help(Self.holderClaimReconcileHelp)
+    }
+
+    static let holderClaimReconcileHelp = "Lets the daemon take back a session the app has stopped showing "
+        + "when the handback to the daemon was lost, and is off by default while it soaks."
 
     /// Moves the sessions that already exist onto the holder. Sits beside the
     /// toggle because that is where someone who just turned it on looks for what

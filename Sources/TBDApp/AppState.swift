@@ -17,6 +17,9 @@ private let shadowCompareLogger = Logger(subsystem: "com.tbd.app", category: "pa
 /// Silent by default; activate with `log stream --level debug`.
 private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
 private let perfRPCSignposter = OSSignposter(subsystem: "com.tbd.app", category: "perf-rpc")
+/// The holder claim sweep (`sweepHolderClaims`). Same category as the
+/// daemon's take-back lines, so one predicate streams both sides.
+private let holderClaimSweepLogger = Logger(subsystem: "com.tbd.app", category: "holder")
 
 /// Transition state for a worktree being revived from the archived view.
 /// Holds a snapshot of the `Worktree` so the row can keep rendering even
@@ -2005,6 +2008,20 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var ptyHolderFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPtyHolderEnabled(enabled: enabled) }
+    /// How `setHolderClaimReconcileEnabled` persists the holder claim-reconcile
+    /// soak flag — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setHolderClaimReconcileEnabled(enabled) }
+    /// How `sweepHolderClaims` sends `holder.reconcileClaims` — injectable for
+    /// the same reason as `controlModeSetter`, so the sweep's cadence and its
+    /// answers are testable without a daemon.
+    @ObservationIgnored
+    lazy var holderClaimSweepSender:
+        @MainActor (HolderReconcileClaimsParams) async throws -> HolderReconcileClaimsResult =
+        { [daemonClient] params in
+            try await daemonClient.reconcileHolderClaims(
+                held: params.held, throughSeq: params.throughSeq, appPID: params.appPID)
+        }
     /// How `hibernateTerminals` reaches the daemon — injectable so the batch
     /// and its failure alert are testable without a daemon.
     @ObservationIgnored
@@ -2464,6 +2481,14 @@ final class AppState {
     /// Count of poll ticks skipped because a previous cycle was still in flight.
     /// Storm indicator for observability and tests.
     @ObservationIgnored private(set) var skippedPollCycles = 0
+    /// True while a holder claim sweep waits on the daemon. A sweep is skipped
+    /// while it is set, so a stalled daemon never collects one more open
+    /// connection per tick.
+    @ObservationIgnored private(set) var holderClaimSweepInFlight = false
+    /// Set when the daemon answered `holder.reconcileClaims` with "unknown
+    /// method", as a daemon older than the RPC does. Sweeps stop until the next
+    /// connect, which may reach a newer daemon.
+    @ObservationIgnored private(set) var holderClaimSweepUnsupported = false
     @ObservationIgnored private var subscriptionTask: Task<Void, Never>?
     let macNotificationManager = MacNotificationManager()
 
@@ -3744,11 +3769,69 @@ final class AppState {
         return true
     }
 
+    /// Tells the daemon which holder sessions this app holds, so it can take
+    /// back the viewer claims this app owns on every other session: the
+    /// reconciler for a handback or an attach reply lost in transit
+    /// (docs/specs/2026-10-25-holder-claim-reconcile-design.md). Sent on every
+    /// poll tick and once right after a connect, while connected.
+    ///
+    /// The app never reads `holder_claim_reconcile_enabled`; the daemon decides
+    /// whether to act. A failed call is ignored, and the next tick sends again.
+    /// An "unknown method" answer means a daemon older than the RPC, so sweeps
+    /// stop until the next connect. One sweep at a time: while one waits on the
+    /// daemon, the next returns at once.
+    func sweepHolderClaims() async {
+        guard isConnected, !holderClaimSweepInFlight, !holderClaimSweepUnsupported else { return }
+        // The snapshot and the params are built in one main-actor step, before
+        // the first suspension: every attach numbered at or below `throughSeq`
+        // whose attempt has not ended is in `held`.
+        let snapshot = holderHandbackLedger.reconcileSnapshot()
+        let params = HolderReconcileClaimsParams(
+            appPID: getpid(), held: snapshot.held, throughSeq: snapshot.throughSeq)
+        holderClaimSweepInFlight = true
+        defer { holderClaimSweepInFlight = false }
+        do {
+            let result = try await holderClaimSweepSender(params)
+            if !result.takenBack.isEmpty || !result.wouldTakeBack.isEmpty {
+                holderClaimSweepLogger.debug("""
+                    holder claim sweep: takenBack=\(result.takenBack.count, privacy: .public) \
+                    wouldTakeBack=\(result.wouldTakeBack.count, privacy: .public) \
+                    held=\(params.held.count, privacy: .public) \
+                    throughSeq=\(params.throughSeq, privacy: .public)
+                    """)
+            }
+        } catch DaemonClientError.rpcError(let message, _) where message.hasPrefix("Unknown method:") {
+            holderClaimSweepUnsupported = true
+            holderClaimSweepLogger.notice(
+                "The daemon has no holder.reconcileClaims; claim sweeps stop until the next connect")
+        } catch {
+            holderClaimSweepLogger.debug(
+                "holder claim sweep failed; the next tick sends again: \(error, privacy: .public)")
+        }
+    }
+
+    /// What a successful connect does for the holder claim sweep. The new
+    /// connection may reach a newer daemon than one that answered "unknown
+    /// method", so sweeps are allowed again.
+    ///
+    /// - Parameter sweepNow: Send a sweep at once. `connectAndLoadInitialState`
+    ///   passes true. The poll tick's reconnect passes false, because the same
+    ///   tick's own sweep follows, and one tick never sends two.
+    func holderClaimSweepDidConnect(sweepNow: Bool) async {
+        holderClaimSweepUnsupported = false
+        if sweepNow { await sweepHolderClaims() }
+    }
+
     /// Poll daemon for state changes every 2 seconds.
     private func startPolling() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Whether this tick connected through `startDaemonAndConnect`,
+                // whose `connectAndLoadInitialState` sends a claim sweep of its
+                // own. This tick's sweep then stays out, so one tick never
+                // sends two.
+                var connectSentSweep = false
                 // Connection/reconnection stays OUTSIDE the in-flight guard so a
                 // dropped socket is retried every tick even while a slow refresh
                 // is still draining; only the refresh (the list RPCs) is guarded.
@@ -3756,10 +3839,12 @@ final class AppState {
                     // Try to start the daemon if socket doesn't exist
                     if !FileManager.default.fileExists(atPath: TBDConstants.socketPath) {
                         await self.startDaemonAndConnect()
+                        connectSentSweep = true
                     } else {
                         let didConnect = await self.daemonClient.connect()
                         self.isConnected = didConnect
                         if didConnect {
+                            await self.holderClaimSweepDidConnect(sweepNow: false)
                             self.pushClaudeSpawnPreferences()
                             self.pushForegroundState()
                         } else if !AppState.pidFilePointsAtLiveDaemon() {
@@ -3771,6 +3856,7 @@ final class AppState {
                             // transient connect failures with a healthy pid
                             // stay on the plain retry path above.
                             await self.startDaemonAndConnect()
+                            connectSentSweep = true
                         }
                     }
                     if !self.isConnected { return }
@@ -3782,6 +3868,13 @@ final class AppState {
                 // instance cannot make the two take it from each other every
                 // tick.
                 await self.daemonClient.reconnectSidecarIfDown(.poll)
+                // The holder claim sweep runs beside the refresh, outside its
+                // guard and under its own single-flight flag: a slow refresh
+                // cannot starve it, and a slow sweep cannot hold up the
+                // refresh.
+                if !connectSentSweep {
+                    Task { @MainActor [weak self] in await self?.sweepHolderClaims() }
+                }
                 // Guard the whole refresh cycle (refreshAll + the every-15th
                 // pr.list) so a slow daemon can never stack overlapping cycles or
                 // run them concurrently. pollCycle is advanced only when a cycle
@@ -3845,6 +3938,8 @@ final class AppState {
             await refreshDevServerSummary()
             pushClaudeSpawnPreferences()
             pushForegroundState()
+            // Last, so the initial load never waits on it.
+            await holderClaimSweepDidConnect(sweepNow: true)
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }
