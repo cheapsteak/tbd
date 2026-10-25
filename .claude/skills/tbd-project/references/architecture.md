@@ -187,6 +187,6 @@ See `Sources/TBDCLI/Commands/`. Highlights:
 - `tbd hooks status` — show the Claude overlay + legacy hook state; `tbd hooks stop-rename-check` — internal Stop-hook
 - `tbd session-event`, `tbd terminal-activity`, `tbd ask-user-question pre|post` — internal hooks fired by the settings overlay
 - `tbd config get|set` — show/set global settings (e.g. auto-archive-on-merge default, env overrides)
-- `tbd link` — print a `tbd://` deep link for the current worktree
+- `tbd link [<worktree>] [--terminal <uuid> | --this-terminal] [--https]` — print a `tbd://` deep link for a worktree (default: current), optionally anchored to one terminal's tab; `--https` prints the shareable redirector form
 - `tbd doctor [--dry-run]` — diagnose and repair the `~/.local/bin/tbd` CLI install (checks that it is a hard link to the TBDCLI binary sibling of the running daemon; repairs stale or missing links)
 - `tbd notify`, `tbd daemon status`, `tbd cleanup`, `tbd setup-hooks` (deprecated)

@@ -219,6 +219,7 @@ tbd notify --type {response_complete|error|task_complete|attention_needed} --mes
 
 ```bash
 tbd link [<worktree>]   # no arg = current
+tbd link --this-terminal [--https]   # this tab; also --terminal <uuid>; --https = shareable form
 ```
 
 ### Pull requests
