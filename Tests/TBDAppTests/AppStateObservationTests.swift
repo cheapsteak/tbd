@@ -5,9 +5,9 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
-// Tier 2: hosts real SwiftUI in an `NSHostingView` and pumps the run loop in
-// bounded slices. No subprocesses, no `~/tbd`; every `AppState` and every
-// `@AppStorage` store is a throwaway `UserDefaults` suite.
+// Tier 2: hosts real SwiftUI in an `NSHostingView` and turns the run loop a
+// bounded number of times. No subprocesses, no `~/tbd`; every `AppState` and
+// every `@AppStorage` store is a throwaway `UserDefaults` suite.
 //
 // WHAT THIS FILE PINS
 //
@@ -131,13 +131,35 @@ private struct HostedProbe {
         window.contentView = host
     }
 
+    /// Turns of the run loop one `pump()` spends.
+    private static let pumpTurns = 5
+
     /// Let SwiftUI's scheduled update land, then force layout so any pending
-    /// body evaluation actually runs. Bounded slices — never an unbounded wait.
+    /// body evaluation actually runs.
+    ///
+    /// A fixed number of turns, each capped at
+    /// `OffscreenHostDefaults.runLoopSpin`, because this is also the window an
+    /// assertion that something did NOT happen gets: there is no condition to
+    /// wait on when the claim is that a view stayed put.
     func pump() {
-        for _ in 0..<5 {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
+        for _ in 0..<Self.pumpTurns { RunLoopPump.turn() }
         host.layoutSubtreeIfNeeded()
+    }
+
+    /// `pump()`, then keep turning the run loop until `condition` holds,
+    /// bounded by `OffscreenHostDefaults.maxPumps` turns.
+    ///
+    /// For a change the test asserts DID happen: a slow update costs turns
+    /// rather than a longer fixed wait, and one that never comes still fails
+    /// the assertion after it. The full `pump()` comes first so that every
+    /// evaluation one write causes lands before a caller reads a new baseline
+    /// from the counter.
+    func pump(until condition: () -> Bool) {
+        pump()
+        RunLoopPump.until {
+            host.layoutSubtreeIfNeeded()
+            return condition()
+        }
     }
 
     func tearDown() {
@@ -224,7 +246,7 @@ struct AppStatePerPropertyTrackingTests {
 
             // `repos` is.
             probe.state.repos = [Repo(id: UUID(), path: "/tmp/acme", displayName: "acme")]
-            probe.pump()
+            probe.pump(until: { counter.count > baseline })
             #expect(counter.count > baseline,
                     "a write to a property this view DOES read did not re-evaluate it")
         })
@@ -259,7 +281,7 @@ struct AppStatePerPropertyTrackingTests {
             probe.state.worktrees[repoID]?.append(
                 makeWorktree(repoID: repoID, parentWorktreeID: parentID, name: "child")
             )
-            probe.pump()
+            probe.pump(until: { counter.count > baseline })
             #expect(counter.count > baseline,
                     "adding a child did not re-evaluate the view that renders children")
         })
@@ -320,7 +342,7 @@ struct AppStateCacheDependencyTests {
                 !AppState.chevronBeforeProjectNameDefault,
                 forKey: AppState.chevronBeforeProjectNameKey
             )
-            probe.pump()
+            probe.pump(until: { storageCounter.count > beforeFlip })
             #expect(storageCounter.count > beforeFlip,
                     "the defaults flip invalidated nothing, so the cache was never re-served")
 
@@ -328,7 +350,7 @@ struct AppStateCacheDependencyTests {
             probe.state.worktrees[repoID]?.append(
                 makeWorktree(repoID: repoID, parentWorktreeID: parentID, name: "child")
             )
-            probe.pump()
+            probe.pump(until: { probe.host.fittingSize.height > coldHeight })
 
             #expect(probe.host.fittingSize.height > coldHeight,
                     "the new child row never appeared: the warm cache severed the worktrees dependency")
@@ -378,7 +400,7 @@ struct AppStateWarmCacheDependencySourceTests {
             #expect(cold > 0, "the probe never evaluated; the harness is not measuring anything")
 
             probe.state.alertMessage = "forced"
-            probe.pump()
+            probe.pump(until: { counter.count > cold })
             let warm = counter.count
             #expect(warm > cold,
                     "the forced re-evaluation did not happen, so the cache was never re-served")
@@ -386,7 +408,7 @@ struct AppStateWarmCacheDependencySourceTests {
             probe.state.worktrees[repoID]?.append(
                 makeWorktree(repoID: repoID, parentWorktreeID: parentID, name: "child")
             )
-            probe.pump()
+            probe.pump(until: { counter.count > warm })
             #expect(counter.count > warm,
                     "a worktrees write did not reach a view whose last evaluation was cache-served")
         })

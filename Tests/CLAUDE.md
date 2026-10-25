@@ -793,15 +793,19 @@ because it orders test *bodies* and this work escaped one.
 
 **What a nested run loop legitimately does** is run-loop-scheduled work only:
 `NSTimer`, `CFRunLoopSource`, AppKit display and layout. Driving those from a
-synchronous body is its one honest use, and the two `pump()` helpers in
-`Tests/TBDAppTests` exist for it. It is never a synchronization primitive for
-`DispatchQueue.main.async` or Swift concurrency — if a helper's docstring claims
-to "drain" either, the claim is false.
+synchronous body is its one honest use, and `RunLoopPump`
+(`Tests/TBDAppTests/Support/OffscreenHost.swift`) exists for it: one turn capped
+at `OffscreenHostDefaults.runLoopSpin`, and a turn-bounded `until`. It is never a
+synchronization primitive for `DispatchQueue.main.async` or Swift concurrency —
+if a helper's docstring claims to "drain" either, the claim is false.
 
 **And it can be a silent no-op.** `run(until:)` returns immediately when no
 input source or timer is attached to the loop — measured 0.000 s bare against
 0.321 s once a timer was added. A pump that appears to be doing something may be
-doing nothing at all, at either end of the range.
+doing nothing at all, at either end of the range. So a pump waits on a
+condition and counts turns, never elapsed time: `TableTranscriptScene.settle()`
+turns until the table's geometry holds still, and `AppStateObservationTests`'
+probe turns until the evaluation it asserts has happened.
 
 The compiler already closes the worst half. `NSRunLoop.h` annotates every
 spinning method — `run`, `run(until:)`, `run(_:before:)`,

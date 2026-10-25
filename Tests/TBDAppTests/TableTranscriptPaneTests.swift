@@ -1094,26 +1094,61 @@ struct TableTranscriptScene {
 
     // MARK: Settling
 
-    /// Drains the deferred async height corrections to a fixed point: each async
-    /// `noteHeightOfRows` invalidates row heights, which only take effect on the
-    /// NEXT layout pass, which may realize more cells that schedule more
-    /// corrections. Pump + relayout until `rect(ofRow:)` stops changing.
+    /// Turns of the run loop the table's geometry has to hold still across
+    /// before `settle()` calls it settled.
+    private static let settledTurns = 3
+
+    /// Drives the table to a layout fixed point.
+    ///
+    /// Realizing a row measures it exactly, and a measurement that differs from
+    /// the estimate the row was laid out at calls `noteHeightOfRows`, which takes
+    /// effect only on the NEXT layout pass — which may realize more rows, which
+    /// may correct again. Settling is that loop run until it stops: one bounded
+    /// turn of the run loop, for whatever AppKit schedules there, a layout pass,
+    /// and a comparison, until the table's width, document height and every row
+    /// height have held across `settledTurns` consecutive turns. The width is in
+    /// the comparison because `primeScene` waits on it: the autohiding scroller
+    /// claims its 17pt only after the first reload outgrows the viewport.
+    ///
+    /// Bounded by turns, never by elapsed time: a table that never settles
+    /// spends `OffscreenHostDefaults.maxPumps` turns and returns, and the
+    /// caller's own geometry assertions say what is wrong.
+    ///
+    /// Synchronous on purpose. It never suspends, so a block the coordinator
+    /// deferred with `DispatchQueue.main.async` — the tail-follow
+    /// `scrollToEnd`, the prepend re-pin — stays queued until a test hands the
+    /// main actor back (`TableTranscriptPaneTests.drainMainQueue()`); a nested
+    /// run loop cannot run it (see `Tests/CLAUDE.md`, "`@MainActor` tests:
+    /// suspend to drain, never pump").
     func settle() {
-        var previous = (0..<tableView.numberOfRows).map { tableView.rect(ofRow: $0).height }
-        for _ in 0..<8 {
-            Self.pump()
+        var previous = geometry
+        var unchangedTurns = 0
+        for _ in 0..<OffscreenHostDefaults.maxPumps {
+            RunLoopPump.turn()
             tableView.layoutSubtreeIfNeeded()
-            Self.pump()
-            let current = (0..<tableView.numberOfRows).map { tableView.rect(ofRow: $0).height }
-            if current == previous { return }
-            previous = current
+            let current = geometry
+            if current == previous {
+                unchangedTurns += 1
+                if unchangedTurns >= Self.settledTurns { return }
+            } else {
+                unchangedTurns = 0
+                previous = current
+            }
         }
     }
 
-    private static func pump() {
-        for _ in 0..<5 {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
+    /// What `settle()` waits on.
+    private struct Geometry: Equatable {
+        let width: CGFloat
+        let documentHeight: CGFloat
+        let rowHeights: [CGFloat]
+    }
+
+    private var geometry: Geometry {
+        Geometry(
+            width: tableView.bounds.width,
+            documentHeight: tableView.frame.height,
+            rowHeights: (0..<tableView.numberOfRows).map { tableView.rect(ofRow: $0).height })
     }
 
     // MARK: Oracle
