@@ -240,14 +240,38 @@ struct LocalPTYTerminalRepresentable: NSViewRepresentable {
             // nil and drops instead of feeding a view whose session is being
             // torn down.
             viewHolder.clear()
+            // SIGTERM goes out HERE, before terminate(), because terminate()
+            // signals last: it first joins SwiftTerm's IO threads
+            // (`stopPipeline` → `TerminalIOPipeline.shutdown()`) with no bound,
+            // so if that join stalls, a kill left to terminate() waits —
+            // holding the main thread — until the child exits on its own.
+            // Signalled first, the child dies whatever the join does, and the
+            // pty hang-up that follows ends the IO threads. terminate()'s own
+            // SIGTERM is then a harmless repeat to the same pid, which nothing
+            // has reaped yet and so cannot have been recycled before
+            // `ChildReaper.reap` below.
+            //
+            // `pid > 0`: `kill(0, …)` would signal this app's whole process
+            // group. `!wasObserved`: an observed exit means SwiftTerm's monitor
+            // already `waitpid`ed the pid, which may now name another process.
+            // That check cannot race the monitor: its handler runs on main and
+            // records the observation before returning, so either it ran
+            // before this line, or it runs after terminate() has zeroed the
+            // `shellPid` it would `waitpid` — and SwiftTerm's
+            // `processTerminated()` returns without waiting when that is 0.
+            if pid > 0, !childExitObservation.wasObserved {
+                kill(pid, SIGTERM)
+            }
             localProcess?.terminate()
             localProcess = nil
             // terminate() cancels `LocalProcess`'s exit monitor directly
-            // (`takeResourcesForShutdown()` → `cancelMonitor()`) before it
-            // even sends SIGTERM, so
-            // nothing left will `waitpid` this child — that cancellation is
-            // also what makes `ChildReaper` its sole waiter. Without the reap
-            // it stays `<defunct>` under TBDApp forever.
+            // (`takeResourcesForShutdown()` → `cancelMonitor()`) and zeroes its
+            // `shellPid`, and the child signalled above cannot reach that
+            // monitor first: its handler runs on main, which this method holds
+            // until then, and finds no pid to wait on if it runs at all. So
+            // nothing left will `waitpid` this child — which is also what makes
+            // `ChildReaper` its sole waiter. Without the reap it stays
+            // `<defunct>` under TBDApp forever.
             ChildReaper.reap(pid: pid, unless: childExitObservation)
         }
 

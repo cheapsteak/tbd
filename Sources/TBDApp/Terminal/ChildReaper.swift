@@ -56,10 +56,16 @@ final class ChildExitObservation: Sendable {
 /// - `terminate()` cancels the monitor directly (`takeResourcesForShutdown()`
 ///   → `cancelMonitor()`), closes the write channel, and only then sends
 ///   `SIGTERM` — the monitor is already gone before the signal can land.
+///   `LocalPTYTerminalRepresentable.Coordinator.cleanup()` sends its own
+///   `SIGTERM` just before calling `terminate()` (see the comment there), so
+///   that child can exit while the monitor is still armed. Even so, the
+///   monitor never reaps it: its handler runs on main, `cleanup()` holds
+///   main until `terminate()` has cancelled it and zeroed `shellPid`, and
+///   SwiftTerm's `processTerminated()` waits on nothing while `shellPid` is 0.
 ///
-/// — so on both paths the `.exit` event never fires, `waitpid` is never called,
-/// and the child stays a zombie under TBDApp for the life of the app. Observed
-/// in the field as 67 permanently-`<defunct>` `tmux … attach` children.
+/// — so on both paths the monitor never calls `waitpid`, and the child stays a
+/// zombie under TBDApp for the life of the app. Observed in the field as 67
+/// permanently-`<defunct>` `tmux … attach` children.
 ///
 /// The fix is to guarantee the `waitpid` ourselves at teardown, without
 /// changing *how* the child is asked to die. A blocking `waitpid` is the

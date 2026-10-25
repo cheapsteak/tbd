@@ -112,6 +112,14 @@ struct TerminalTeardownReapTests {
         let cleanupTook: Duration
     }
 
+    /// `OneShotRun` plus how long the first, real `cleanup()` took. The
+    /// LocalPTY one-shot test owes the same promptness check as the kill test,
+    /// since its first teardown is the same `sleep 120` kill.
+    private struct TimedOneShotRun {
+        let run: OneShotRun
+        let firstCleanupTook: Duration
+    }
+
     /// How long `cleanup()` may take before the kill it owes is reported as
     /// late. The drain's hang guard, reused so the suite keeps one dial: a
     /// healthy `cleanup()` returns in milliseconds, and 30 s is a quarter of
@@ -127,11 +135,21 @@ struct TerminalTeardownReapTests {
         let bound: Duration
         var description: String {
             "LocalPTYTerminalRepresentable cleanup() took \(cleanupTook) to return for PTY "
-                + "child \(pid) (bound \(bound)). LocalProcess.terminate() sends SIGTERM only "
-                + "after it has joined SwiftTerm's IO threads, so for that long the main thread "
-                + "was held and the child was not signalled; near the child's 120 s lifetime "
-                + "that means it exited on its own and teardown killed nothing. The drain and "
+                + "child \(pid) (bound \(bound)). cleanup() is meant to SIGTERM the child before "
+                + "LocalProcess.terminate() joins SwiftTerm's IO threads, so a cleanup() this slow "
+                + "means the join stalled and no signal ended the child first — near the child's "
+                + "120 s lifetime, it exited on its own and teardown killed nothing. The drain and "
                 + "reap assertions passed because the child is gone — for the wrong reason."
+        }
+    }
+
+    /// Throws ``TeardownSignalledLate`` when the real `cleanup()` took longer
+    /// than ``cleanupHangGuard``. Call it last, after the reap assertions: by
+    /// then the child is gone and reaped, so nothing is left to dispose of.
+    private func requireSignalledPromptly(pid: pid_t, cleanupTook: Duration) throws {
+        guard cleanupTook < Self.cleanupHangGuard else {
+            throw TeardownSignalledLate(
+                pid: pid, cleanupTook: cleanupTook, bound: Self.cleanupHangGuard)
         }
     }
 
@@ -449,35 +467,38 @@ struct TerminalTeardownReapTests {
         ChildReaper.reapBlocking(pid: pid)
     }
 
-    /// The remote path *does* end its child — `cleanup()` calls
-    /// `LocalProcess.terminate()`, which sends SIGTERM — so a long-lived child
-    /// is production-faithful here. `terminate()` cancels the exit monitor
-    /// directly (`takeResourcesForShutdown()` → `cancelMonitor()`) before it
-    /// even sends that signal, so the reap is the
-    /// only thing standing between this teardown and a permanent zombie.
+    /// The remote path *does* end its child: `cleanup()` sends SIGTERM itself,
+    /// then calls `LocalProcess.terminate()`, which sends another. So a
+    /// long-lived child is production-faithful here. `terminate()` cancels the
+    /// exit monitor directly (`takeResourcesForShutdown()` → `cancelMonitor()`)
+    /// and zeroes the pid it would wait on, so the reap is the only thing
+    /// standing between this teardown and a permanent zombie.
     ///
     /// **"Gone" does not prove "killed", so `cleanup()` is also timed.** A
     /// `sleep 120` that is gone is also what a teardown that never ended it
     /// leaves after two minutes, and the drain's 30 s guard covers only the
-    /// time *after* `cleanup()` returns. `terminate()` signals last, after
-    /// joining SwiftTerm's IO threads (`stopPipeline` →
-    /// `TerminalIOPipeline.shutdown()`), so a join that stalls holds the main
-    /// thread inside `cleanup()`, and the SIGTERM lands only after the child
-    /// has exited on its own. Measured: in a serial CI pass
-    /// (`swift test --no-parallel`, run 40151483724) this test passed after
-    /// 120.022 s, the child's entire lifetime, while its three siblings took
-    /// 0.009–0.032 s. The drain and reap assertions cannot tell that apart from
-    /// a kill. The measurement brackets the synchronous call alone, inside the
+    /// time *after* `cleanup()` returns. `terminate()` signals last, after an
+    /// unbounded join of SwiftTerm's IO threads (`stopPipeline` →
+    /// `TerminalIOPipeline.shutdown()`). With only that signal, a join that
+    /// stalls holds the main thread inside `cleanup()` until the child exits
+    /// on its own. Measured: in a serial CI pass (`swift test --no-parallel`,
+    /// run 40151483724) this test passed after 120.022 s, the child's entire
+    /// lifetime, while its three siblings took 0.009–0.032 s. That is why
+    /// `cleanup()` signals before calling `terminate()`, and why this bound
+    /// exists: the drain and reap assertions cannot tell a natural exit from a
+    /// kill. The measurement brackets the synchronous call alone, inside the
     /// single main hop, so it excludes the wait for main that dominates this
     /// test's duration in the parallel pass.
     ///
-    /// **What this does not pin: SIGTERM specifically.** Closing the master fd,
-    /// which `terminate()` and `deinit` both do, hangs up the child's
-    /// controlling terminal, and `sleep` dies of that SIGHUP just as promptly.
-    /// The panel tests send no signal at all, and in that same pass they reaped
-    /// their 0.4 s children within 0.009–0.032 s by exactly that route.
-    /// Deleting the `terminate()` call would therefore leave this test green.
-    /// What it pins is that teardown ends the child promptly, by either route.
+    /// **What this does not pin: which route ends the child.** Closing the
+    /// master fd, which `terminate()` and `deinit` both do, hangs up the
+    /// child's controlling terminal, and `sleep` dies of that SIGHUP as promptly
+    /// as of SIGTERM. The panel tests send no signal at all, and in that same
+    /// pass they reaped their 0.4 s children within 0.009–0.032 s by exactly
+    /// that route. Removing either SIGTERM leaves this test green while the
+    /// other routes still fire. Removing the early one reddens it only on a run
+    /// where the join stalls — once in the serial pass, and in none of the
+    /// parallel-pass timings examined.
     @Test("LocalPTYTerminalRepresentable teardown kills AND reaps its child")
     func localPTYCleanupReapsChild() async throws {
         // Coordinator constructed inside the single main hop — MainActor
@@ -497,10 +518,7 @@ struct TerminalTeardownReapTests {
         try await requireDrainedAndReaped(run.child.pid)
         // Last, so every disposal above has already happened: the child is gone
         // and reaped by this point, and the question left is only how promptly.
-        guard run.cleanupTook < Self.cleanupHangGuard else {
-            throw TeardownSignalledLate(
-                pid: run.child.pid, cleanupTook: run.cleanupTook, bound: Self.cleanupHangGuard)
-        }
+        try requireSignalledPromptly(pid: run.child.pid, cleanupTook: run.cleanupTook)
     }
 
     // MARK: - cleanup() is one-shot
@@ -566,22 +584,29 @@ struct TerminalTeardownReapTests {
 
     @Test("a second LocalPTYTerminalRepresentable cleanup() tears nothing down")
     func localPTYCleanupIsOneShot() async throws {
-        let run = await MainActor.run { () -> OneShotRun in
+        let timed = await MainActor.run { () -> TimedOneShotRun in
             // Constructed and released in the single main hop — see the
             // sibling test above for both rationales.
             let coordinator = LocalPTYTerminalRepresentable.Coordinator()
             let first = startChild(delegate: coordinator, lifetime: "120") {
                 coordinator.localProcess = $0
             }
+            // Timed for the reason `localPTYCleanupReapsChild` gives: a child
+            // that is gone does not prove teardown killed it.
+            let firstCleanupStarted = ContinuousClock.now
             coordinator.cleanup()
+            let firstCleanupTook = ContinuousClock.now - firstCleanupStarted
             let probe = startChild(delegate: coordinator, lifetime: "120") {
                 coordinator.localProcess = $0
             }
             coordinator.cleanup()
             let stillHeld = coordinator.localProcess != nil
             coordinator.localProcess = nil
-            return OneShotRun(first: first, probe: probe, stillHeld: stillHeld)
+            return TimedOneShotRun(
+                run: OneShotRun(first: first, probe: probe, stillHeld: stillHeld),
+                firstCleanupTook: firstCleanupTook)
         }
+        let run = timed.run
         // Observe, then dispose, then assert — see the sibling test above.
         let drain = await drainPendingReaps()
         let probeAlive = processExists(run.probe.pid)
@@ -597,7 +622,9 @@ struct TerminalTeardownReapTests {
         #expect(probeAlive,
                 "a second cleanup() must not terminate a process it never started")
 
-        // The real teardown must still have killed and reaped its own child.
+        // The real teardown must still have killed and reaped its own child,
+        // and killed it promptly rather than outlasted it.
         try requireReaped(run.first.pid)
+        try requireSignalledPromptly(pid: run.first.pid, cleanupTook: timed.firstCleanupTook)
     }
 }
