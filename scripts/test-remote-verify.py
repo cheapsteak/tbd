@@ -692,7 +692,7 @@ class VerdictTests(unittest.TestCase):
 class ResultsVerdictTests(unittest.TestCase):
     """What the RESULT FILES say a red run means, which is not the conclusion.
 
-    `test.yml` holds four jobs with no `needs:` between them and a `swift build`
+    `test.yml` holds jobs the test job does not wait on, and a `swift build`
     step after the results upload, so the run goes red for a SwiftLint violation
     or a committed plan file while every test passed — none of which
     `scripts/test.sh` runs locally.
@@ -1087,7 +1087,7 @@ class DriverTests(unittest.TestCase):
         self.assertIn("Test run with 9 tests failed", rendered)
 
     def test_a_red_run_whose_tests_all_passed_is_no_verdict(self):
-        # THE FOUR JOBS OF `test.yml` HAVE NO `needs:` BETWEEN THEM, and a `swift
+        # THE TEST JOB DOES NOT WAIT ON `test.yml`'S OTHER JOBS, and a `swift
         # build` step follows the results upload — so a SwiftLint violation or a
         # committed plan file turns the run red while every test passed.
         # `scripts/test.sh` runs none of that locally, so adopting 1 here would
