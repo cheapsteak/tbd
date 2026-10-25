@@ -1963,22 +1963,20 @@ actor HolderRegistry {
     /// `noLiveReader`. An attach is somebody asking to see that session, which
     /// makes it the moment to try again.
     ///
-    /// It never builds a reader for a session that is on its way out. Each of
-    /// these is a quiet return rather than a throw, so `beginAttach` reports
+    /// It never builds a reader for a session that is on its way out. Each
+    /// refusal is a quiet return rather than a throw, so `beginAttach` reports
     /// `noLiveReader` — which the attach handler already turns into "ended"
-    /// when the holder is gone:
+    /// when the holder is gone. `attachAdoption(for:holderIsLive:)` lists
+    /// them; they are asked synchronously, before any task, timer or
+    /// continuation exists, so the common answers — already adopted above all
+    /// — cost this call nothing more.
     ///
-    ///   - a reader is being **released**: a teardown, a reclaim or a shutdown
-    ///     is stopping it;
-    ///   - this registry **told the holder to let go** (`sessionsLetGo`) and
-    ///     nothing has been adopted or spawned for the session since;
-    ///   - the job has **ended** (`statuses`). A holder whose child has exited
-    ///     still hands its master over, to rescue the output nobody read, so
-    ///     an adoption here would build a reader over a finished session.
-    ///
-    /// A viewer claim or a pending attach is left for `beginAttach` to refuse
-    /// by name. What this cannot see — a parked row, or one a park, a wake or
-    /// a profile swap is moving — is the caller's to rule out first.
+    /// `rowPermits` is the caller's own refusal, asked only once the
+    /// registry's gates would let an adoption through: the attach handler
+    /// passes the row-level check only it can make (`mayAdoptForAttach`), so
+    /// an already-adopted session never pays for it. `holderIsLive` says
+    /// whether a pid names a running `TBDHolder`; `attachAdoption` says which
+    /// refusal it can lift.
     ///
     /// **Bounded.** The attach waits `attachAdoptionBudget` at most. An
     /// adoption still running then is not abandoned: it finishes in its own
@@ -1988,17 +1986,32 @@ actor HolderRegistry {
     /// Throws `daemonShuttingDown`, and `notAHolderSession` for a row on
     /// another transport. Any other failure to adopt is logged and left for
     /// `beginAttach` to report.
-    func adoptForAttach(terminal: Terminal) async throws {
+    func adoptForAttach(
+        terminal: Terminal,
+        holderIsLive: @escaping @Sendable (Int32) -> Bool = { _ in false },
+        rowPermits: @Sendable () async -> Bool = { true }
+    ) async throws {
         let terminalID = terminal.id
         guard terminal.transport == .holder else {
             throw Error.notAHolderSession(terminalID: terminalID)
         }
         guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
-        // The common case, an adopted session, settled before any task or
-        // timer exists.
-        guard needsAdoptionForAttach(terminalID: terminalID) else { return }
+        switch attachAdoption(for: terminal, holderIsLive: holderIsLive) {
+        case .notNeeded:
+            return
+        case .declined(let reason):
+            Self.logger.debug(
+                """
+                an attach did not adopt session \(terminalID.uuidString, privacy: .public): \
+                \(reason, privacy: .public)
+                """)
+            return
+        case .join, .begin:
+            break
+        }
+        guard await rowPermits() else { return }
 
-        let attempt = Task { try await self.adoptUnlessLeaving(terminalID) }
+        let attempt = Task { try await self.adoptUnlessLeaving(terminal, holderIsLive: holderIsLive) }
         let budget = attachAdoptionBudget
         guard let settled = await Self.settlement(of: attempt, within: budget, clock: clock) else {
             Self.logger.notice(
@@ -2029,55 +2042,100 @@ actor HolderRegistry {
         }
     }
 
-    /// Whether an attach could have anything to adopt for this session: false
-    /// while a reader is published, and while a viewer claim or a pending
-    /// attach would have `beginAttach` refuse whatever an adoption did.
-    ///
-    /// Synchronous, and asked before anything else the on-demand path costs.
-    /// Nearly every attach is to a session already adopted, and for those the
-    /// attach handler pays this one hop and skips the hibernation
-    /// coordinator, the adoption task and its timer entirely. A true answer
-    /// is only permission to look further: `adoptUnlessLeaving` re-asks
-    /// everything in the stretch that acts on it.
-    func needsAdoptionForAttach(terminalID: UUID) -> Bool {
-        guard viewerAttachments[terminalID] == nil,
-              pendingAttaches[terminalID] == nil else { return false }
-        if case .adopted = slots[terminalID] { return false }
-        return true
+    /// What an attach's on-demand adoption should do about one session.
+    private enum AttachAdoption {
+        /// A reader is published; there is nothing to adopt.
+        case notNeeded
+        /// Something says this session must not be adopted now, and why.
+        case declined(String)
+        /// Another caller's adoption is in flight, past its own gates; join it.
+        case join(Task<Adoption, Swift.Error>)
+        /// The slot is vacant and nothing stands in the way; open a hand-over.
+        case begin
     }
 
-    /// The decision half of `adoptForAttach`: every gate, then the adoption,
-    /// in one stretch on the actor, so nothing can change between the gates
-    /// and the slot they decide on. Answers why it adopted nothing, or nil
-    /// once the session has a published reader.
+    /// Every synchronous gate of the on-demand path, in one place, so that
+    /// `adoptForAttach` can answer the common cases before it builds anything
+    /// and `adoptUnlessLeaving` can re-ask the same questions in the stretch
+    /// that acts on them.
+    ///
+    ///   - A viewer claim or a pending attach: `beginAttach` refuses by name.
+    ///   - A reader being **released**: a teardown, a reclaim or a shutdown is
+    ///     stopping it.
+    ///   - A holder this registry **told to let go** (`sessionsLetGo`), with
+    ///     nothing adopted or spawned for the session since.
+    ///   - A job that has **ended** (`statuses`). A holder whose child has
+    ///     exited still hands its master over, to rescue the output nobody
+    ///     read, so an adoption would build a reader over a finished session.
+    ///
+    /// `.exited` is the holder's own report and always refuses.
+    /// `.exitedStatusUnknown` refuses unless the row's holder pid verifiably
+    /// names a running `TBDHolder` (`holderIsLive`), because it is not always
+    /// a report: the startup pass records it on an `ECONNREFUSED` at the
+    /// rendezvous, and Darwin refuses a connect at once when a live holder's
+    /// accept backlog is full or its accept loop has stalled. Read as final,
+    /// that one refusal would make a running session un-adoptable for the
+    /// daemon's whole life. A live holder gets a hand-over attempt instead;
+    /// if that fails as unreachable too, the attach is refused exactly as
+    /// before.
+    private func attachAdoption(
+        for terminal: Terminal, holderIsLive: (Int32) -> Bool
+    ) -> AttachAdoption {
+        let terminalID = terminal.id
+        if viewerAttachments[terminalID] != nil { return .declined("a viewer holds its pty") }
+        if pendingAttaches[terminalID] != nil {
+            return .declined("an attach of it is already pending")
+        }
+        switch slots[terminalID] {
+        case .adopted:
+            return .notNeeded
+        case .releasing:
+            return .declined("its reader is being released")
+        case .adopting(let task):
+            return .join(task)
+        case nil:
+            if sessionsLetGo.contains(terminalID) {
+                return .declined("this daemon told its holder to let go")
+            }
+            switch statuses[terminalID] {
+            case .exited:
+                return .declined("its holder reported the job exited")
+            case .exitedStatusUnknown:
+                guard let holderPID = terminal.holderPID, holderPID > 1,
+                      holderIsLive(holderPID) else {
+                    return .declined("its job has ended and its holder is not running")
+                }
+            case .alive, nil:
+                break
+            }
+            return .begin
+        }
+    }
+
+    /// The acting half of `adoptForAttach`: every gate again, then the
+    /// adoption, in one stretch on the actor, so nothing can change between
+    /// the gates and the slot they decide on. Answers why it adopted nothing,
+    /// or nil once the session has a published reader.
     ///
     /// Run from `adoptForAttach`'s own task rather than inline, which is why
     /// it re-asks everything that call already asked: by the time the task is
     /// scheduled, a release, an abandonment or a shutdown may have begun.
-    private func adoptUnlessLeaving(_ terminalID: UUID) async throws -> String? {
+    private func adoptUnlessLeaving(
+        _ terminal: Terminal, holderIsLive: (Int32) -> Bool
+    ) async throws -> String? {
+        let terminalID = terminal.id
         guard !isShuttingDown else { throw Error.daemonShuttingDown(terminalID: terminalID) }
-        if viewerAttachments[terminalID] != nil { return "a viewer holds its pty" }
-        if pendingAttaches[terminalID] != nil { return "an attach of it is already pending" }
-        switch slots[terminalID] {
-        case .adopted:
+        switch attachAdoption(for: terminal, holderIsLive: holderIsLive) {
+        case .notNeeded:
             return nil
-        case .releasing:
-            return "its reader is being released"
-        case .adopting(let task):
+        case .declined(let reason):
+            return reason
+        case .join(let task):
             // Someone else's adoption, already past every gate of its own.
             // Joining it opens no second hand-over.
             _ = try await joinInFlightAdoption(task, for: terminalID)
             return nil
-        case nil:
-            if sessionsLetGo.contains(terminalID) {
-                return "this daemon told its holder to let go"
-            }
-            switch statuses[terminalID] {
-            case .exited, .exitedStatusUnknown:
-                return "its job has ended"
-            case .alive, nil:
-                break
-            }
+        case .begin:
             _ = try await beginAdoption(of: terminalID)
             return nil
         }

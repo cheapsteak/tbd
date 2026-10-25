@@ -208,15 +208,15 @@ extension RPCRouter {
                 FDVendHeader(
                     worktreeID: params.worktreeID, paneID: params.paneID,
                     attachID: params.attachID))
-            // Skipped outright for a session already adopted, the common case:
-            // the registry answers that in one synchronous hop, before the
-            // hibernation coordinator is asked anything. When the adoption
-            // cannot happen, `beginAttach` below is what reports it:
-            // `noLiveReader`, read as "ended" when the holder is gone.
-            if await registry.needsAdoptionForAttach(terminalID: terminal.id),
-               await mayAdoptForAttach(terminal) {
-                try await registry.adoptForAttach(terminal: terminal)
-            }
+            // One hop for a session already adopted, the common case: the
+            // registry answers that synchronously and asks the row-level gate
+            // only when an adoption could follow. When the adoption cannot
+            // happen, `beginAttach` below is what reports it: `noLiveReader`,
+            // read as "ended" when the holder is gone.
+            try await registry.adoptForAttach(
+                terminal: terminal,
+                holderIsLive: holderProcessIsLive,
+                rowPermits: { await self.mayAdoptForAttach(terminal) })
             vend = try await registry.beginAttach(terminalID: terminal.id)
         } catch let error as HolderRegistry.Error
             where attachRefusalMeansSessionEnded(error, terminal: terminal) {

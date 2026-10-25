@@ -125,27 +125,81 @@ import Testing
         }
     }
 
-    /// The fast path's question: an attach looks no further — no coordinator
-    /// hop, no task, no timer — when a viewer claim or a pending attach means
-    /// `beginAttach` will refuse anyway. (The commonest no, a published
-    /// reader, needs a holder; `HolderAttachOnDemandAdoptionLiveTests` asks
-    /// it there.)
-    @Test func anAttachLooksFurtherOnlyWhenNothingAlreadyAnswersIt() async throws {
+    /// The fast path: an attach that the registry can already answer goes no
+    /// further — the caller's row gate (in production, the hibernation
+    /// coordinator hop) is never asked, and no task or timer is built. A
+    /// viewer claim and a pending attach are two such answers; the commonest,
+    /// a published reader, needs a holder, so
+    /// `HolderAttachOnDemandAdoptionLiveTests` asks it there.
+    @Test func anAttachTheRegistryCanAnswerNeverAsksTheRowGate() async throws {
         let registry = Self.registry()
-        let unread = UUID()
-        let claimed = UUID()
-        let pending = UUID()
-        await registry.recordViewerClaimForTesting(terminalID: claimed, generation: 1, owner: nil)
+        let unread = Self.holderRow()
+        let claimed = Self.holderRow()
+        let pending = Self.holderRow()
+        await registry.recordViewerClaimForTesting(
+            terminalID: claimed.id, generation: 1, owner: nil)
         await registry.recordPendingAttachForTesting(
-            terminalID: pending, generation: 2,
+            terminalID: pending.id, generation: 2,
             reader: HolderReader(
-                sessionID: pending, ptyFD: -1, columns: 80, rows: 24,
+                sessionID: pending.id, ptyFD: -1, columns: 80, rows: 24,
                 observedChildFromStart: true),
             recipient: nil)
+        let asked = AskedRows()
 
-        #expect(await registry.needsAdoptionForAttach(terminalID: unread))
-        #expect(await !registry.needsAdoptionForAttach(terminalID: claimed))
-        #expect(await !registry.needsAdoptionForAttach(terminalID: pending))
+        try await registry.adoptForAttach(
+            terminal: claimed, rowPermits: { asked.record(claimed.id); return true })
+        try await registry.adoptForAttach(
+            terminal: pending, rowPermits: { asked.record(pending.id); return true })
+        try await registry.adoptForAttach(
+            terminal: unread, rowPermits: { asked.record(unread.id); return true })
+
+        #expect(asked.ids == [unread.id], """
+            the row gate was asked for a session the registry could already answer, or not asked \
+            for the one it could not
+            """)
+        #expect(await registry.attachRoundTripsStarted == 1)
+    }
+
+    /// The row gate's refusal is final for this attach: no hand-over opens.
+    @Test func aRowGateRefusalOpensNoHandOver() async throws {
+        let registry = Self.registry()
+
+        try await registry.adoptForAttach(terminal: Self.holderRow(), rowPermits: { false })
+
+        #expect(await registry.attachRoundTripsStarted == 0)
+    }
+
+    // MARK: - An unknown exit status from a holder that is still running
+
+    /// `.exitedStatusUnknown` is not always a report. The startup pass records
+    /// it on an `ECONNREFUSED`, and Darwin refuses a connect at once when a
+    /// live holder's accept backlog is full or its accept loop has stalled.
+    /// While the row's holder pid verifiably names a running holder, the
+    /// attach tries a hand-over anyway; a holder that is not running, or one
+    /// that said outright its job exited, still refuses.
+    @Test func anUnknownExitWithALiveHolderStillGetsAHandOver() async throws {
+        var row = Self.holderRow()
+        row.holderPID = 4242
+
+        let live = Self.registry()
+        await live.recordStatusForTesting(.exitedStatusUnknown, for: row.id)
+        try await live.adoptForAttach(terminal: row, holderIsLive: { $0 == 4242 })
+        #expect(await live.attachRoundTripsStarted == 1, """
+            a session whose holder is running was refused adoption over an unknown exit status, \
+            which one refused connect is enough to record
+            """)
+
+        let dead = Self.registry()
+        await dead.recordStatusForTesting(.exitedStatusUnknown, for: row.id)
+        try await dead.adoptForAttach(terminal: row, holderIsLive: { _ in false })
+        #expect(await dead.attachRoundTripsStarted == 0)
+
+        let reported = Self.registry()
+        await reported.recordStatusForTesting(.exited(code: 0), for: row.id)
+        try await reported.adoptForAttach(terminal: row, holderIsLive: { _ in true })
+        #expect(await reported.attachRoundTripsStarted == 0, """
+            a holder that reported its job exited was adopted anyway
+            """)
     }
 
     @Test func aShuttingDownRegistryRefusesTheAdoptionByName() async throws {
@@ -305,6 +359,23 @@ import Testing
             """)
     }
 
+    /// The handler's half of the unknown-exit exception: it hands the registry
+    /// the same holder-liveness check its ended verdict uses, so a session
+    /// whose holder is running gets a hand-over attempt. Nothing answers at
+    /// this fixture's rendezvous, so the attach is then refused as before —
+    /// an error, not "ended", because the holder is live.
+    @Test func anAttachToAnUnknownExitWithALiveHolderTriesAHandOver() async throws {
+        let harness = try await RouterHarness.make()
+        await harness.registry.recordStatusForTesting(.exitedStatusUnknown, for: harness.terminalID)
+
+        let response = try await harness.attach()
+
+        #expect(await harness.registry.attachRoundTripsStarted == 1, """
+            an attach did not try to adopt a session whose holder the router could see running
+            """)
+        #expect(!response.success)
+    }
+
     /// An ended session is answered as ended, and without reaching for its
     /// holder first: the status gate stops the adoption, and the handler's
     /// own verdict on a dead holder and a gone job does the rest.
@@ -433,6 +504,14 @@ private actor PublishHold {
     nonisolated func hook() -> @Sendable () async -> Void {
         { [self] in await self.park() }
     }
+}
+
+/// The rows a row gate was asked about, in order.
+private final class AskedRows: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [UUID] = []
+    func record(_ id: UUID) { lock.withLock { stored.append(id) } }
+    var ids: [UUID] { lock.withLock { stored } }
 }
 
 /// Set once by the task under test, read by the test's bounded poll.

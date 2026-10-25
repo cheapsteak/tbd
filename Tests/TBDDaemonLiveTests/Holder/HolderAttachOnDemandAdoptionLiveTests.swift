@@ -87,8 +87,12 @@ struct HolderAttachOnDemandAdoptionLiveTests {
         _ = try await registry.adopt(terminal: row)
         #expect(await registry.attachRoundTripsStarted == 1)
         // The attach handler's fast path: an adopted session has nothing to
-        // adopt, so the handler asks nothing further.
-        #expect(await !registry.needsAdoptionForAttach(terminalID: row.id))
+        // adopt, so the row gate (the hibernation coordinator hop, in
+        // production) is never asked and no hand-over opens.
+        let asked = RowGateAsked()
+        try await registry.adoptForAttach(terminal: row, rowPermits: { asked.set(); return true })
+        #expect(!asked.isSet, "the row gate was asked about a session already adopted")
+        #expect(await registry.attachRoundTripsStarted == 1)
 
         // The release is held with its reader still on the pty: the slot reads
         // `.releasing` for as long as the test keeps it there.
@@ -169,6 +173,14 @@ private struct SidecarRouter {
     func tearDown() {
         Darwin.close(appSide)
     }
+}
+
+/// Whether a row gate was asked at all.
+private final class RowGateAsked: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.withLock { value = true } }
+    var isSet: Bool { lock.withLock { value } }
 }
 
 /// Holds every release that reaches the release seam until the test lets it
