@@ -86,16 +86,7 @@ import Testing
     func aStreamFedInFixedSizeRunsPaintsTheSameScreen(stride: Int) {
         let stream = Self.claudeShapedStream()
         let reference = Self.render(chunks: [stream[...]])
-
-        var chunks: [ArraySlice<UInt8>] = []
-        var start = 0
-        while start < stream.count {
-            let end = min(start + stride, stream.count)
-            chunks.append(stream[start..<end])
-            start = end
-        }
-
-        let painted = Self.render(chunks: chunks)
+        let painted = Self.render(chunks: Self.fixedRuns(of: stream, stride: stride))
         #expect(
             painted == reference,
             """
@@ -121,7 +112,9 @@ import Testing
     /// of one *character* — not one sequence — decides how many cells get used.
     ///
     /// Sampled the same way, and nothing is given up by it: every offset inside
-    /// every multi-byte character here is one of the offsets the sampler keeps.
+    /// every multi-byte character here is one of the offsets the sampler keeps,
+    /// and the plain cuts between them are covered by
+    /// `theWideCharacterStreamFedInFixedSizeRunsPaintsTheSameScreen` below.
     @Test func wideAndCombiningCharactersSurviveEverySplit() {
         let stream = Self.wideCharacterStream()
         let reference = Self.render(chunks: [stream[...]])
@@ -144,6 +137,33 @@ import Testing
                 """)
         }
         #expect(firstFailure == nil)
+    }
+
+    /// The wide/combining stream cut into uniform runs. The single-split test
+    /// above cuts only inside and just after its multi-byte characters; these
+    /// runs also cut at every plain byte, including the one just before each
+    /// wide glyph that has to wrap at the right margin.
+    @Test(arguments: [1, 2, 3])
+    func theWideCharacterStreamFedInFixedSizeRunsPaintsTheSameScreen(stride: Int) {
+        let stream = Self.wideCharacterStream()
+        let reference = Self.render(chunks: [stream[...]])
+        let painted = Self.render(chunks: Self.fixedRuns(of: stream, stride: stride))
+        #expect(
+            painted == reference,
+            """
+            Feeding the wide/combining stream in runs of \(stride) changed the screen.
+            \(Self.diff(reference: reference, actual: painted))
+            """)
+    }
+
+    /// The sampler itself, against offsets worked out by hand, so a scanner
+    /// bug cannot quietly shrink what the single-split tests cut. In
+    /// `ab ESC [ 1 m c ✻ d` the cuts kept are inside the CSI and just after
+    /// it (3–6), and inside the three-byte `✻` and just after it (8–10). An
+    /// OSC is kept through its BEL terminator and the cut after it.
+    @Test func theSamplerKeepsEveryCutInsideAndJustAfterAStructure() {
+        #expect(Self.interestingSplitOffsets(in: Array("ab\(Self.esc)[1mc✻d".utf8)) == [3, 4, 5, 6, 8, 9, 10])
+        #expect(Self.interestingSplitOffsets(in: Array("\(Self.esc)]0;t\u{07}x".utf8)) == [1, 2, 3, 4, 5, 6])
     }
 
     /// A chunk larger than the drain thread's 64 KB read buffer, to rule out a
@@ -327,7 +347,7 @@ import Testing
     /// anything the parser holds partial state across. Every offset inside one,
     /// and the offset immediately after it, is included; a cut between two
     /// plain printable bytes exercises the same branch as its neighbours, and
-    /// the fixed-run test at stride 1 already cuts at all of those.
+    /// each stream's fixed-run test at stride 1 already cuts at all of those.
     private static func interestingSplitOffsets(in stream: [UInt8]) -> [Int] {
         guard stream.count > 1 else { return [] }
         var interesting = [Bool](repeating: false, count: stream.count)
@@ -367,6 +387,19 @@ import Testing
         }
 
         return (1..<stream.count).filter { interesting[$0] }
+    }
+
+    /// `stream` cut into consecutive runs of `stride` bytes, the last one
+    /// possibly shorter.
+    private static func fixedRuns(of stream: [UInt8], stride: Int) -> [ArraySlice<UInt8>] {
+        var chunks: [ArraySlice<UInt8>] = []
+        var start = 0
+        while start < stream.count {
+            let end = min(start + stride, stream.count)
+            chunks.append(stream[start..<end])
+            start = end
+        }
+        return chunks
     }
 
     // MARK: - Reporting
