@@ -160,7 +160,8 @@ private actor GitLabFake {
     ///
     /// `nonisolated` so the poll's condition can read the actor with `await`
     /// instead of being an actor-isolated closure handed off the actor. A
-    /// cancelled wait reports nothing: attribution belongs to the canceller.
+    /// cancelled wait returns true, so the caller's `#expect` reports nothing:
+    /// attribution belongs to the canceller.
     nonisolated func waitForRecheck(within timeout: Duration = ciSafeDeadline) async -> Bool {
         await pollUntilTrue(timeout: timeout) { await self.sawRecheck } != .timedOut
     }
@@ -235,8 +236,9 @@ private actor GHCallLog {
 ///
 /// The waits below are `nonisolated` so `pollUntilTrue`'s condition reads the
 /// actor with `await` rather than being an actor-isolated closure handed off
-/// the actor. A cancelled wait reports nothing: attribution belongs to whatever
-/// cancelled the test.
+/// the actor. A cancelled wait returns the answer that passes the caller's
+/// `#expect`, so it reports nothing: attribution belongs to whatever cancelled
+/// the test.
 private actor HangingRecheck {
     private var entered = false
     private var released = false
