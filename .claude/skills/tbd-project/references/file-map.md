@@ -61,6 +61,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `ComposerDraftParkGate.swift` — the park decision the session mod answers (proceed or skip, per policy), and the tmux signal ending every tmux park uses
 - `SkillFileWriter.swift` — writes the failsafe copy of the skill body
 - `RetiredRuntimeFiles.swift` — at daemon startup, removes files under `~/tbd/runtime` that no current build writes (a statusline tee script, its capture files, a lease-credential directory), matched by exact name or shape; skipped in mock mode
+- `RetiredLaunchAgent.swift` — at daemon startup, off the socket-bind path, boots out (`launchctl bootout gui/<uid>/com.nightwatch-tick`) and deletes `~/Library/LaunchAgents/com.nightwatch-tick.plist`, the job Nightwatch's removed scheduler installed, only when its label and `…/skills/nightwatch/scripts/tick-cron.sh` program match and that script is gone; `launchctl` runs through the `LaunchctlRunning` seam; skipped in mock mode
 - `ArchivedWorktreeBackfill.swift` — repairs archived worktree rows with missing branches
 - `RepoHealthValidator.swift` — flips repos with stale paths to `.missing`
 
