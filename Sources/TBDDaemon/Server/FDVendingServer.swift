@@ -620,7 +620,15 @@ actor FDVendingServer {
     private func unlinkOwnedSocketFile(at path: String) {
         guard let bound = boundSocketIdentity else {
             // The `lstat(2)` after `bind(2)` found nothing, so this server can
-            // name no file as its own.
+            // name no file as its own and leaves whatever is there. Said at
+            // error level, because a vend.sock left behind this way is
+            // otherwise indistinguishable from a successor's.
+            logger.error(
+                """
+                leaving the sidecar socket path \(path, privacy: .public) as it is: the socket \
+                file could not be identified when this server bound it, so it cannot be told \
+                from a successor's
+                """)
             return
         }
         guard let current = SocketFileIdentity(path: path) else {
