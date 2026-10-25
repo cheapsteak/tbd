@@ -116,9 +116,18 @@ public struct NotificationStore: Sendable {
 
     /// The rows the retention sweep removes: a read row created before the
     /// cutoff, and every row, read or unread, on an archived worktree. Unread
-    /// rows on any other worktree never match, so a badge someone can still see
-    /// never vanishes on its own. One predicate for the count and the delete,
-    /// so a dry run reports exactly what a real run removes.
+    /// rows on any other worktree never match, so an unread badge on a worktree
+    /// that is not archived never vanishes on its own. One predicate for the
+    /// count and the delete, so a dry run reports exactly what a real run
+    /// removes.
+    ///
+    /// The archived arm deletes unread rows on purpose, including the
+    /// "Archived <name> — PR #N merged" notice `AutoArchiveOnMergeCoordinator`
+    /// writes on the worktree it has just archived: once a worktree is
+    /// archived, its notifications no longer matter. That notice reaches a
+    /// running app as a live event when it is written; this removes only the
+    /// stored row. The maintainer chose this rule; do not narrow it to read
+    /// rows or exempt a producer.
     private static let expiredPredicate = """
         (read = 1 AND createdAt < ?)
         OR worktreeID IN (SELECT id FROM worktree WHERE status = ?)

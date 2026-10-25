@@ -26,6 +26,10 @@ Measured read-only on one machine after seven months of use:
 
 Unbounded growth is a bug, so this ships as a fix with no feature flag.
 
+The maintainer chose the values in this spec while brainstorming it: the 7-day window for read
+notifications, deleting every notification on an archived worktree, keeping 3 copies of each
+kind, and shipping with no flag.
+
 ## Design
 
 ### Notification sweep
@@ -34,10 +38,15 @@ A new OrphanGC leg, run on every hourly sweep while `gcEnabled` is on:
 
 - **Read notifications older than 7 days are deleted.** The window is one named constant; the
   sweep takes the current date from its injected `now`, like the retained-transcript leg.
-- **Every notification on an archived worktree is deleted**, read or unread. Nobody can see
-  those badges, and a revived worktree comes back without them.
-- **Unread notifications on active worktrees are never deleted**, so a badge someone can still
-  see never vanishes on its own.
+- **Every notification on an archived worktree is deleted**, read or unread, at the next
+  sweep. Once a worktree is archived its notifications no longer matter: nobody sees its
+  badges, and a revived worktree comes back without them. This includes the unread
+  "Archived <name> — PR #N merged" notice that auto-archive writes on the worktree it has
+  just archived. A running app gets that notice as a live event when it is written, and posts
+  it as a macOS notification when those are on; the sweep removes only the stored row. Do not
+  narrow this rule to read rows or exempt that notice.
+- **Unread notifications on active worktrees are never deleted**, so an unread badge on a
+  worktree that is not archived never vanishes on its own.
 
 Notifications of a deleted worktree need no rule: `notification.worktreeID` references
 `worktree(id)` with `ON DELETE CASCADE`.
