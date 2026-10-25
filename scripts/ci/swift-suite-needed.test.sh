@@ -2,7 +2,7 @@
 # Tests for scripts/ci/swift-suite-needed.sh — run:
 #   /bin/bash scripts/ci/swift-suite-needed.test.sh
 #
-# Three kinds of case, all needed:
+# Four kinds of case, all needed:
 #
 #   - THE RULE, through `--classify`: each skip rule alone skips, each of the
 #     suite's own scripts alone runs, and anything the rules do not name runs.
@@ -19,10 +19,13 @@
 #     would have caught it. The gatherer itself is proven on a fixture tree
 #     first, so a broken gatherer cannot pass the real check by gathering
 #     nothing. The same case fails on a local action in the `test` job, whose
-#     files would sit under the skip-listed `.github/**`.
+#     files would sit under the skip-listed `.github/**`, and on a `test` job
+#     that runs a stop or arms the remote verification valve, which would make
+#     that stop's reason false.
 #   - THE WIRING, read out of the real workflow: `needs`, the `if:`, the job's
-#     missing `name:`, and the gate's output. No fixture can execute a GitHub
-#     expression, and these are what make the gate fail closed.
+#     missing `name:`, the gate's output, and its full-history checkout. No
+#     fixture can execute a GitHub expression, and these are what make the
+#     gate fail closed and let it skip at all.
 #
 # RUN WITH `/bin/bash`, WHICH ON MACOS IS 3.2 — the Lint job does. Every nested
 # run of the script under test goes through `$BASH`, this harness's own
@@ -491,14 +494,16 @@ job_lines() {
 
 suite_job_lines() { job_lines "$1" test; }
 
-# The lines of the step whose `id:` is ID in job JOB of ROOT's test.yml, from
-# its `      - ` line up to the next step or job-level key.
+# The lines of the first step in job JOB of ROOT's test.yml that has a key
+# line matching KEY — an ERE for what follows the step's indentation, such as
+# `id: decide[[:space:]]*$` — from its `      - ` line up to the next step or
+# job-level key.
 step_lines() {
-  job_lines "$1" "$2" | awk -v id="$3" '
+  job_lines "$1" "$2" | awk -v key="$3" '
     /^      - / { if (hit) exit; block = "" }
     /^    [^[:space:]#]/ { if (hit) exit; block = ""; next }
     { block = block $0 "\n" }
-    $0 ~ ("^      (- |  )id: " id "[[:space:]]*$") { hit = 1 }
+    $0 ~ ("^      (- |  )" key) { hit = 1 }
     END { if (hit) printf "%s", block }
   '
 }
@@ -675,6 +680,29 @@ local_uses_in_test_job() {
   suite_job_lines "$1" | grep -v '^[[:space:]]*#' | grep -E "uses:[[:space:]]*[\"']?\\./"
 }
 
+# Code lines that would make a stop's reason false: lines of ROOT's `test` job,
+# or of the workflow's top level above `jobs:`, whose settings reach every job,
+# that name either stop — the job would then run it — or `TBD_REMOTE_VERIFY`,
+# which arms the valve `remote-verify.sh` is.
+stop_breaches_in_test_job() {
+  {
+    awk '/^jobs:/ { exit } { print }' "$1/.github/workflows/test.yml" 2>/dev/null
+    suite_job_lines "$1"
+  } | grep -v '^[[:space:]]*#' |
+    grep -E '(^|[^A-Za-z0-9_.-])(restart|remote-verify)\.sh([^A-Za-z0-9_.-]|$)|(^|[^A-Za-z0-9_])TBD_REMOTE_VERIFY([^A-Za-z0-9_]|$)'
+}
+
+# Write a workflow into fixture D with HEAD above `jobs:` and STEP as the test
+# job's steps, and print what the stop guard reports for it.
+breaches_with() {
+  local d="$1" head="$2" step="$3"
+  {
+    if [ -n "$head" ]; then printf '%s\n' "$head"; fi
+    printf 'jobs:\n  test:\n    steps:\n%s\n  after:\n    steps:\n      - run: true\n' "$step"
+  } > "$d/.github/workflows/test.yml"
+  stop_breaches_in_test_job "$d"
+}
+
 # A tree shaped to exercise every leg of the gatherer and every boundary of it.
 mkdrift() {
   local d; d="$(scratch)"
@@ -835,9 +863,42 @@ EOF
     "      - uses: ./.github/actions/setup" "$(local_uses_in_test_job "$d")"
 }
 
+test_stop_reason_guard() {
+  local d; d="$(mkdrift)"
+  assert_eq "a test job that runs neither stop breaches nothing" "" "$(stop_breaches_in_test_job "$d")"
+  cat > "$d/.github/workflows/test.yml" <<'EOF'
+# scripts/restart.sh named at the top, in a comment only
+jobs:
+  lint:
+    steps:
+      - run: bash scripts/restart.sh
+      - run: TBD_REMOTE_VERIFY=1 scripts/test.sh
+  test:
+    # scripts/remote-verify.sh and TBD_REMOTE_VERIFY, in a comment only
+    env:
+      TBD_REMOTE_VERIFY_YIELD_SECONDS: "600"
+    steps:
+      - run: bash scripts/my-restart.sh
+EOF
+  assert_eq "comments, other jobs, a longer variable and a longer file name breach nothing" "" \
+    "$(stop_breaches_in_test_job "$d")"
+  assert_eq "the test job running restart.sh breaches its stop" \
+    "      - run: bash scripts/restart.sh" \
+    "$(breaches_with "$d" "" "      - run: bash scripts/restart.sh")"
+  assert_eq "the test job running remote-verify.sh by its bare name breaches its stop" \
+    "      - run: cd scripts && ./remote-verify.sh" \
+    "$(breaches_with "$d" "" "      - run: cd scripts && ./remote-verify.sh")"
+  assert_eq "the test job arming the valve breaches the remote-verify.sh stop" \
+    '          TBD_REMOTE_VERIFY: "1"' \
+    "$(breaches_with "$d" "" $'      - run: scripts/test.sh\n        env:\n          TBD_REMOTE_VERIFY: "1"')"
+  assert_eq "a workflow-level env arming the valve breaches it too" \
+    '  TBD_REMOTE_VERIFY: "1"' \
+    "$(breaches_with "$d" $'env:\n  TBD_REMOTE_VERIFY: "1"' "      - run: scripts/test.sh")"
+}
+
 # THE CHECK ITSELF, on this checkout.
 test_every_script_the_suite_reaches_is_on_the_list() {
-  local d path origin missing job_code local_uses
+  local d path origin missing job_code local_uses breaches
   d="$(scratch)"
   if ! "$BASH" "$SCRIPT" --list-suite-scripts > "$d/patterns" 2>/dev/null || [ ! -s "$d/patterns" ]; then
     echo "FAIL - --list-suite-scripts printed no list to check against"
@@ -872,6 +933,16 @@ test_every_script_the_suite_reaches_is_on_the_list() {
     FAIL=1
   fi
 
+  breaches="$(stop_breaches_in_test_job "$REPO_ROOT")"
+  if [ -z "$breaches" ]; then
+    echo "ok   - the test job runs neither stop and does not arm the remote verification valve"
+  else
+    echo "FAIL - the test job runs what a stop hides, so that stop's reason in this harness is false:"
+    printf '%s\n' "$breaches" | sed 's/^/       /'
+    echo "     Drop the stop in is_name_stop, or keep the job from running it."
+    FAIL=1
+  fi
+
   echo "     the suite reaches:"
   gather_suite_scripts "$REPO_ROOT" | while IFS="$TAB" read -r path origin; do
     echo "       $path ($origin)"
@@ -895,7 +966,7 @@ test_every_script_the_suite_reaches_is_on_the_list() {
 # workflow consumes its answer, and no fixture can execute a GitHub expression,
 # so the pieces are pinned as written.
 test_the_workflow_wiring_fails_closed() {
-  local keys named outputs step
+  local keys named outputs step checkout
   keys="$(job_lines "$REPO_ROOT" test | grep -E '^    [^[:space:]#]')"
   assert_line "the test job waits for the gate" "$keys" "    needs: changes"
   assert_line "the test job skips only on an explicit false, and still runs after a failed gate" \
@@ -908,12 +979,23 @@ test_the_workflow_wiring_fails_closed() {
   assert_line "the gate's run output is the decide step's" "$outputs" \
     "      run: \${{ steps.decide.outputs.run }}"
 
-  step="$(step_lines "$REPO_ROOT" changes decide | grep -v '^[[:space:]]*#' |
+  step="$(step_lines "$REPO_ROOT" changes 'id: decide[[:space:]]*$' | grep -v '^[[:space:]]*#' |
     grep -E '^[[:space:]]+(- )?run:.*scripts/ci/swift-suite-needed\.sh')"
   if [ -n "$step" ]; then
     echo "ok   - the step with id: decide runs scripts/ci/swift-suite-needed.sh"
   else
     echo "FAIL - no step with id: decide in the changes job runs scripts/ci/swift-suite-needed.sh"
+    FAIL=1
+  fi
+
+  # Without the history, `origin/<base>` does not resolve and the gate answers
+  # `run=true` every time: no red anywhere, and no PR ever skips again.
+  checkout="$(step_lines "$REPO_ROOT" changes 'uses: actions/checkout@' | grep -v '^[[:space:]]*#' |
+    grep -E '^[[:space:]]+fetch-depth:[[:space:]]*0[[:space:]]*$')"
+  if [ -n "$checkout" ]; then
+    echo "ok   - the gate's checkout keeps full history (fetch-depth: 0)"
+  else
+    echo "FAIL - the changes job's checkout lacks fetch-depth: 0, so the gate could never skip"
     FAIL=1
   fi
 }
