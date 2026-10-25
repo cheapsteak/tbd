@@ -430,18 +430,18 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: macos-26
-    # 110, deliberately NOT sized to this job's 15.3-minute observed worst case
-    # (10.7 median). The build step and the four test steps below carry
-    # `timeout-minutes` of 30, 15, 15, 15 and 15 — a 90-minute step budget —
-    # and they exist so that a wedged run dies on a step that names what hung:
-    # the compile, or which pass, after that pass's own watchdog has captured
-    # the stacks. A job bound at or below 90 would pre-empt them and kill the
-    # run with the uninformative message those step bounds were written to
-    # avoid. 110 clears the step budget with room for checkout,
-    # `brew install tmux`, the cache restore and the cache save — none of which
-    # is individually timed — while cutting worst-case occupancy of one of the
-    # five macOS slots from six hours to under two.
-    timeout-minutes: 110
+    # 120, deliberately NOT sized to this job's 15.3-minute observed worst case
+    # (10.7 median). The build step, the cache save and the four test steps
+    # below carry `timeout-minutes` of 30, 10, 15, 15, 15 and 15 — a
+    # 100-minute step budget — and they exist so that a wedged run dies on a
+    # step that names what hung: the compile, the save, or which pass, after
+    # that pass's own watchdog has captured the stacks. A job bound at or below
+    # 100 would pre-empt them and kill the run with the uninformative message
+    # those step bounds were written to avoid. 120 clears the step budget with
+    # room for checkout, `brew install tmux`, the cache restore and the result
+    # uploads — none of which is individually timed — while cutting worst-case
+    # occupancy of one of the five macOS slots from six hours to two.
+    timeout-minutes: 120
     # All four test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
     # produces one artifact covering all three fast passes and the quiet pass
@@ -576,10 +576,12 @@ jobs:
       # The measurement that shapes the policy, taken over the 30 days to
       # 2026-09-21: this workflow ran 849 times — 516 on `pull_request`, 195 on
       # `workflow_dispatch`, 138 on `push` to main — and 475 of those runs
-      # concluded successfully, which is the set that writes an entry, since
-      # `actions/cache` saves under `post-if: success()`. The store held six
-      # entries at that moment, 9.4 GB in all: two on `refs/heads/main` and four
-      # on `refs/pull/<n>/merge`, every one of them created or last read within
+      # concluded successfully. Every one of those built successfully, and a
+      # run whose build succeeds may write an entry whether or not its tests
+      # then pass or the run is cancelled, so the 475 are a lower bound on the
+      # runs the event policy below has to sort. The store held six entries at
+      # that moment, 9.4 GB in all: two on `refs/heads/main` and four on
+      # `refs/pull/<n>/merge`, every one of them created or last read within
       # the previous hour. The whole store turns over in under an hour. Three
       # consequences follow, and together they are the save policy.
       #
@@ -905,11 +907,21 @@ jobs:
       # runs that built and then went red or were cancelled, each costing the
       # same 1.5 GB of the 10 GB store as any other.
       #
-      # The save serves the next run, so it must never cost this one its tests:
-      # pass 1a runs on `!cancelled()` and a successful build, and so still runs
-      # after a failed recording or save, which reddens the job on its own.
+      # The save serves the next run, so it must never cost this one its tests.
+      # Pass 1a runs on `!cancelled()` and a successful build, so it still runs
+      # after a failed recording, which reddens the job, or a failed save,
+      # which only warns: `actions/cache/save@v4` catches every error in the
+      # save and logs it as a warning, and its step exits 0.
+      #
+      # 10 minutes, against 26-49 s of measured upload: the one way left for a
+      # save to cost the tests is to stall. It sits before every pass, so a
+      # stalled upload would hold the job to its own bound with nothing tested.
+      # `continue-on-error` so a save ended by that bound warns like any other
+      # failed save rather than reddening a run whose tests then pass.
       - name: Save SwiftPM build artifacts and dependencies
         if: ${{ steps.build.outcome == 'success' && steps.spm-cache.outputs.cache-hit != 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && steps.cache_policy.outputs.library_touched == 'true')) }}
+        timeout-minutes: 10
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: |
@@ -1130,9 +1142,10 @@ jobs:
         # STEP'S SUCCESS" above. `!cancelled()` in place of the implicit
         # `success()` because the only steps between the build and here are the
         # marker recording and the cache save, which serve the next run: a
-        # failure in either reddens the job, and must not also cost this run
-        # its tests. Every setup step comes before the build, so a failure
-        # there still skips this pass through the build clause.
+        # failed recording reddens the job and a failed save only warns, and
+        # neither may cost this run its tests. Every setup step comes before
+        # the build, so a failure there still skips this pass through the build
+        # clause.
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # 15 and a 600 s budget, the same as 1b: the build step pays the
         # compile, so this pass is a re-plan of the build graph (see "WHAT
