@@ -104,12 +104,12 @@ public enum HandoverDecision: Equatable, Sendable {
 public struct DaemonHandover: Sendable {
     /// How long to wait for a polite exit before escalating.
     ///
-    /// **30 s is sized to `stop()`, and the alternative is what went wrong.**
-    /// `restart.sh` sends the daemon `SIGTERM`, sleeps **0.5 s**, and then
-    /// deletes the pid, socket and port files and starts the new daemon
-    /// regardless of whether the old one has finished — so a shutdown that
-    /// takes longer than half a second overlaps its successor and loses its own
-    /// files out from under it. Half a second is not a budget, it is a hope.
+    /// **30 s is sized to `stop()`, not to a guess at how long it takes.** A
+    /// successor that starts before its predecessor's shutdown has finished
+    /// overlaps it: the predecessor goes on answering on its socket after it
+    /// has let go of its sessions, and its teardown removes files the
+    /// successor has just created. So the wait is for the shutdown to end.
+    /// `scripts/restart.sh` gives a daemon it replaces the same two budgets.
     ///
     /// The real shutdown is a sequence of awaits: the usage pollers and the
     /// limit-resume scheduler stop, every holder reader is released one at a

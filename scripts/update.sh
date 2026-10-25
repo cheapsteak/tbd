@@ -42,9 +42,11 @@ UPDATE_HOME="${TBD_HOME:-$HOME/tbd}/updates"
 # dev loop. `--debug` overrides it.
 BUILD_CONFIG=release
 
-# How long to wait for the successor daemon to report itself, in seconds. A
-# cold start behind a release build has taken tens of seconds; two minutes is
-# generously past that and still bounded.
+# How long the handover gets, in seconds: for the predecessor daemon to exit
+# and the successor to report itself, one budget across both. The successor
+# gives its predecessor 35 seconds at most before it gives up, and a cold
+# start behind a release build has taken tens of seconds; two minutes is
+# generously past the two together and still bounded.
 HANDOVER_TIMEOUT=120
 
 # How long a successor that has to be stopped gets to exit on SIGTERM before
@@ -852,27 +854,78 @@ paths_match() {
 }
 
 # Poll `tbd daemon status` until it reports the executable we just installed.
+# It asks at least once, so a caller whose budget is already spent still gets
+# the answer the daemon gives now.
 wait_for_daemon_executable() {
     local expected="${1-}"
     local timeout="${2:-$HANDOVER_TIMEOUT}"
     local waited=0
     local reported
 
-    while [ "$waited" -lt "$timeout" ]; do
+    while :; do
         reported="$(json_field "$(daemon_status_json)" executablePath)"
         if [ -n "$reported" ] && paths_match "$reported" "$expected"; then
             return 0
         fi
+        [ "$waited" -lt "$timeout" ] || return 1
         sleep 1
         waited=$((waited + 1))
     done
-    return 1
+}
+
+# Wait until the daemon that answers is the successor: the predecessor has
+# exited, and `tbd daemon status` then reports the executable just installed.
+#
+#   wait_for_handover <old_pid> <expected_executable> [timeout]
+#
+# The status answer alone cannot say which daemon gave it. A local build runs
+# the old and the new daemon from the same file, the update clone's
+# .build/release/TBDDaemon, so the predecessor reports the expected path, and
+# it goes on answering on its socket for the whole of its shutdown, after it
+# has already let go of every session. An app launched on that answer attaches
+# to a daemon that refuses it, and the wake stage reads the fleet off a daemon
+# on its way out. The successor binds only once its predecessor is gone —
+# Daemon.start() retires it before opening the database, let alone the socket
+# — so from the predecessor's exit on, the daemon that answers is the
+# successor, and the path confirms it serves the build just installed. The
+# status reports no pid, which is why the exit is what tells the two apart.
+#
+# <old_pid> 0 is a cold start, with nothing to wait for, and so is a pid that
+# names no running daemon (daemon_process_is_running): a stale pid file. One
+# budget covers both phases.
+wait_for_handover() {
+    local old_pid="${1:-0}"
+    local expected="${2-}"
+    local timeout="${3:-$HANDOVER_TIMEOUT}"
+    local waited=0
+
+    if daemon_process_is_running "$old_pid"; then
+        while daemon_process_is_running "$old_pid"; do
+            if [ "$waited" -ge "$timeout" ]; then
+                log "the previous daemon (pid $old_pid) is still running after ${timeout}s"
+                return 1
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        log "the previous daemon (pid $old_pid) has exited"
+    elif [ "$old_pid" != 0 ]; then
+        log "pid $old_pid names no running daemon, so there is no predecessor to wait for"
+    fi
+    if ! wait_for_daemon_executable "$expected" "$((timeout - waited))"; then
+        log "the daemon never reported $expected as its executable"
+        return 1
+    fi
 }
 
 # Start the successor with TBD_HANDOVER_FROM_PID set. It claims the pid file
 # before it signals its predecessor, so the app's respawn watchdog — and any
 # stray restart.sh — finds a live daemon in that file from the first instant
 # and exits at the single-instance gate instead of racing us.
+#
+# It returns once the successor is the daemon that answers
+# (wait_for_handover), never while the predecessor is still shutting down:
+# the app relaunch and the wake stage that follow must reach the new daemon.
 #
 # A handover that times out has not necessarily started a dead daemon: a
 # successor that is merely slow is still running, already holds the pid file,
@@ -904,11 +957,11 @@ handover() {
     TBD_HANDOVER_FROM_PID="$old_pid" "$new_daemon" > "$DAEMON_LOG" 2>&1 &
     new_pid=$!
 
-    if wait_for_daemon_executable "$new_daemon" "$HANDOVER_TIMEOUT"; then
+    if wait_for_handover "$old_pid" "$new_daemon" "$HANDOVER_TIMEOUT"; then
         log "daemon is serving from $new_daemon"
         return 0
     fi
-    log_error "the new daemon did not report itself within ${HANDOVER_TIMEOUT}s — see $DAEMON_LOG"
+    log_error "the handover did not complete within ${HANDOVER_TIMEOUT}s — see $DAEMON_LOG"
     stop_handover_successor "$new_pid" || true
     return 1
 }

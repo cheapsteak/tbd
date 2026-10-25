@@ -217,8 +217,13 @@ arguments, and inherits the user's environment. The script is the procedure:
    sidecar is copied into `Contents/`, next to `SourceWorktreePath.txt`,
    which now points at the update clone.
 5. **Hand over** (§8): start the new daemon with
-   `TBD_HANDOVER_FROM_PID=<old pid>` and wait until `tbd daemon status`
-   reports the new executable path and build identity, bounded at 120 s.
+   `TBD_HANDOVER_FROM_PID=<old pid>` and wait until the old pid has exited
+   and `tbd daemon status` then reports the new executable path and build
+   identity, bounded at 120 s across both. The status alone cannot tell the
+   two daemons apart: a local build runs both from the update clone's
+   `.build/release/TBDDaemon`, and the old one answers until its `stop()`
+   ends. The successor binds only after the old pid has exited, so from then
+   on the answer is the successor's.
 6. **Restart the app** — kill the exact installed executable path, `open`
    the bundle with `--env PATH=$PATH` as `restart.sh` does. `--no-app` skips
    this. The app is a viewer; nothing in it holds a session.

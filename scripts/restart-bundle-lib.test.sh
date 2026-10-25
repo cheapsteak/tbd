@@ -4,8 +4,9 @@
 # Every case runs against a temp directory. The three functions that reach for
 # system tools (codesign/security, open, pkill/pgrep) get stubs on a temp PATH
 # that record their arguments, so nothing here signs, launches, or kills
-# anything real. macOS-only: the assembly reads `plutil` and the install uses
-# `/bin/cp -cR`.
+# anything real. The daemon process cases start copies of `sleep` of their own
+# and signal only those. macOS-only: the assembly reads `plutil` and the
+# install uses `/bin/cp -cR`.
 # shellcheck disable=SC2329 # test_* helpers are dispatched dynamically below
 set -uo pipefail
 
@@ -812,6 +813,154 @@ test_describe_app_stop_names_every_outcome() {
         "$(describe_app_stop bogus 5 "$app")"
 }
 
+# MARK: - Daemon process control
+#
+# These cases run real processes, all of them children of this harness and all
+# of them `sleep`: a stand-in daemon is sleep copied to a file named TBDDaemon,
+# which is the name daemon_process_is_running looks for. Every pid they hand to
+# stop_daemon_process is one they started, or one nothing runs as.
+
+# Copy sleep to <dir>/TBDDaemon and echo the copy's path.
+mkfakedaemon() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cp "$(command -v sleep)" "$dir/TBDDaemon"
+    printf '%s\n' "$dir/TBDDaemon"
+}
+
+# Start the stand-in daemon at <bin> in the background, sleeping 30 seconds,
+# and set STARTED_PID to its pid. With `ignore-term` it ignores SIGTERM, which
+# survives the exec, so only SIGKILL stops it. Returns once the pid names a
+# daemon: until the fork has become the exec, it is still a shell.
+#
+#   start_fake_daemon <bin> [ignore-term]
+start_fake_daemon() {
+    local bin="$1" mode="${2-}" ticks=0
+    if [ "$mode" = ignore-term ]; then
+        ( trap '' TERM; exec "$bin" 30 ) > /dev/null 2>&1 &
+    else
+        "$bin" 30 > /dev/null 2>&1 &
+    fi
+    STARTED_PID=$!
+    while ! daemon_process_is_running "$STARTED_PID" && [ "$ticks" -lt 50 ]; do
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+}
+
+# A pid nothing is running as: the harness's own pid plus a large offset,
+# confirmed absent before use.
+unused_pid() {
+    local pid=$(( ($$ + 100000) % 60000 + 2 ))
+    while kill -0 "$pid" 2>/dev/null; do pid=$((pid + 1)); done
+    printf '%s\n' "$pid"
+}
+
+# A daemon is a live process named TBDDaemon. Anything else a pid file might
+# name — a process the pid has since been handed to, a pid nothing runs as, a
+# zombie, or no pid at all — is not one, so nothing waits on it or signals it.
+test_daemon_process_is_running_wants_a_live_daemon() {
+    local bin daemon other zombie_file zombie ticks
+    bin="$(mkfakedaemon "$TEST_TMP/daemon-running")"
+    start_fake_daemon "$bin"
+    daemon="$STARTED_PID"
+    sleep 30 > /dev/null 2>&1 &
+    other=$!
+
+    assert_ok "a live process named TBDDaemon is a running daemon" \
+        daemon_process_is_running "$daemon"
+    assert_fail "a live process with another name is not" daemon_process_is_running "$other"
+    kill -KILL "$daemon" "$other" 2>/dev/null
+    wait "$daemon" "$other" 2>/dev/null
+    assert_fail "a daemon that has exited is not running" daemon_process_is_running "$daemon"
+    assert_fail "a pid nothing runs as is not a running daemon" \
+        daemon_process_is_running "$(unused_pid)"
+    assert_fail "an empty pid is not a running daemon" daemon_process_is_running ""
+    assert_fail "a pid that is not a number is not a running daemon" daemon_process_is_running "12x"
+    assert_fail "pid 0 is not a running daemon" daemon_process_is_running 0
+
+    # A zombie: the stand-in exits after its parent has become a sleep, which
+    # never reaps it. It exits a second in, so the parent has finished the exec
+    # by then; a shell would reap it.
+    zombie_file="$TEST_TMP/daemon-zombie.pid"
+    sh -c '"$1" 1 & echo "$!" > "$2"; exec sleep 6' _ "$bin" "$zombie_file" > /dev/null 2>&1 &
+    ticks=0
+    zombie=""
+    while [ "$ticks" -lt 40 ]; do
+        zombie="$(head -1 "$zombie_file" 2>/dev/null | tr -dc '0-9')"
+        if [ -n "$zombie" ] && ps -o stat= -p "$zombie" 2>/dev/null | grep -q Z; then
+            break
+        fi
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+    if [ -n "$zombie" ] && ps -o stat= -p "$zombie" 2>/dev/null | grep -q Z; then
+        pass "the zombie fixture is a zombie"
+        assert_fail "a zombie daemon is not a running daemon" daemon_process_is_running "$zombie"
+    else
+        fail "the zombie fixture is a zombie: pid [$zombie] never showed state Z"
+    fi
+}
+
+# Run stop_daemon_process on <pid> with a one-second grace and a one-second
+# wait after SIGKILL, and print "<outcome> rc=<status>".
+run_stop_daemon() {
+    local outcome status=0
+    outcome="$(stop_daemon_process "$1" 1 1)" || status=$?
+    printf '%s rc=%s' "$outcome" "$status"
+}
+
+# stop_daemon_process returns only once the daemon has exited, escalating to
+# SIGKILL, and says which way it went. It never signals a pid that names no
+# daemon.
+test_stop_daemon_waits_and_escalates() {
+    local bin other outcome
+    bin="$(mkfakedaemon "$TEST_TMP/daemon-stop")"
+
+    assert_eq "no daemon at the pid: nothing to stop" "none rc=0" \
+        "$(run_stop_daemon "$(unused_pid)")"
+
+    sleep 30 > /dev/null 2>&1 &
+    other=$!
+    assert_eq "a pid that names another process is nothing to stop" "none rc=0" \
+        "$(run_stop_daemon "$other")"
+    if kill -0 "$other" 2>/dev/null; then
+        pass "the other process is not signalled"
+    else
+        fail "the other process is not signalled"
+    fi
+    kill "$other" 2>/dev/null
+    wait "$other" 2>/dev/null
+
+    start_fake_daemon "$bin"
+    assert_eq "a daemon that exits on SIGTERM is stopped" "stopped rc=0" \
+        "$(run_stop_daemon "$STARTED_PID")"
+    assert_fail "and it is gone" daemon_process_is_running "$STARTED_PID"
+    wait "$STARTED_PID" 2>/dev/null
+
+    start_fake_daemon "$bin" ignore-term
+    assert_eq "a daemon that ignores SIGTERM is killed" "killed rc=0" \
+        "$(run_stop_daemon "$STARTED_PID")"
+    assert_fail "and it is gone" daemon_process_is_running "$STARTED_PID"
+    wait "$STARTED_PID" 2>/dev/null
+
+    # A process SIGKILL cannot stop is one in an uninterruptible kernel wait,
+    # which no harness can make on demand. A `kill` that drops SIGKILL stands
+    # in for it.
+    start_fake_daemon "$bin" ignore-term
+    outcome="$(
+        kill() {
+            [ "$1" = -KILL ] && return 0
+            builtin kill "$@"
+        }
+        run_stop_daemon "$STARTED_PID"
+    )"
+    assert_eq "a daemon still running after SIGKILL is reported, and fails" \
+        "survived rc=1" "$outcome"
+    kill -KILL "$STARTED_PID" 2>/dev/null
+    wait "$STARTED_PID" 2>/dev/null
+}
+
 test_runtime_products_are_executable_targets() {
     local product
     if [ "${#RUNTIME_PRODUCTS[@]}" -eq 0 ]; then
@@ -975,6 +1124,8 @@ test_stop_waits_for_the_app_and_escalates
 test_a_zero_second_wait_still_checks
 test_stop_does_not_read_a_failure_as_no_app
 test_describe_app_stop_names_every_outcome
+test_daemon_process_is_running_wants_a_live_daemon
+test_stop_daemon_waits_and_escalates
 test_runtime_products_are_executable_targets
 test_helper_refuses_direct_execution
 test_seed_writes_when_missing

@@ -380,11 +380,32 @@ fi
 
 # MARK: - Restart Daemon
 
+# How long the daemon being replaced gets to finish its shutdown on SIGTERM
+# before it is killed, and how long to wait after SIGKILL, in seconds: the
+# budgets a successor daemon gives its predecessor in a handover
+# (DaemonHandover.termBudget and killBudget).
+DAEMON_STOP_GRACE=30
+DAEMON_KILL_WAIT=5
+
 if [ "$app_only" = false ] && [ "$install_to_applications" = true ]; then
     echo "Stopping daemon..."
+    # The old daemon is gone before its files are cleared and the new one
+    # starts. Its stop() takes seconds, and a daemon started before it ends
+    # runs beside one that still answers on the socket and whose teardown
+    # unlinks sockets the new daemon has just bound. A daemon that outlives
+    # SIGKILL stops the restart before its pid file is removed: a second
+    # daemon started beside it would put two writers on state.db.
     if [ -f ~/tbd/tbdd.pid ]; then
         pid=$(cat ~/tbd/tbdd.pid)
-        kill "$pid" 2>/dev/null && sleep 0.5 || true
+        daemon_stop_outcome="$(stop_daemon_process "$pid" "$DAEMON_STOP_GRACE" "$DAEMON_KILL_WAIT")" || true
+        case "$daemon_stop_outcome" in
+            stopped) echo "  Daemon (PID $pid) exited" ;;
+            killed) echo "  Daemon (PID $pid) ignored SIGTERM for ${DAEMON_STOP_GRACE}s and exited on SIGKILL" ;;
+            survived)
+                echo "  ERROR: daemon (PID $pid) is still running after SIGKILL — not starting another beside it" >&2
+                exit 1
+                ;;
+        esac
     fi
     # Clean stale files
     rm -f ~/tbd/sock ~/tbd/tbdd.pid ~/tbd/port

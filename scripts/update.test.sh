@@ -5,7 +5,9 @@
 # HOME and TBD_HOME point at a temp directory for every case; `tbd`, `open`,
 # `codesign` and `security` are stubs on a temp PATH; and the update clone is a
 # real clone of a fixture repo whose `scripts/swift-safe` writes five empty
-# files instead of compiling. git is the real git, against fixture repos.
+# files instead of compiling. git is the real git, against fixture repos. The
+# handover cases stand a copy of sleep named TBDDaemon in for the daemon being
+# replaced, and signal only processes they started themselves.
 #
 # The end-to-end cases stop at --dry-run, which is the last step before the
 # installation changes.
@@ -2382,6 +2384,15 @@ test_local_build_takes_the_link_back_from_a_download() {
 # has completed, from the CLI refresh that runs just before the app stage.
 # FAKE_APP_STARTS_DURING_HANDOVER=1 brings an app up while the handover runs,
 # the way an operator opening it by hand would.
+# FAKE_REAL_HANDOVER=1 fakes nothing of the install or the handover: the
+# successor is the fixture build's TBDDaemon, which exits at once, the
+# predecessor is whatever <case>/home/tbd/tbdd.pid names (start_predecessor),
+# and the handover is done when the status in <case>/state says so. Its budget
+# is FAKE_HANDOVER_TIMEOUT seconds. The case must create <case>/Applications.
+#
+# Whatever the mode, the successor's log is <case>/tbdd.log rather than the
+# real /tmp/tbdd.log, and the wake stage records "wake" in the events file
+# instead of waking anything.
 run_update_around_handover() {
     local case_dir="$1"; shift
     : > "$case_dir/app"
@@ -2396,13 +2407,18 @@ run_update_around_handover() {
         FAKE_KILL_LOG="$case_dir/events.log" \
         FAKE_EVENTS_LOG="$case_dir/events.log" \
         FAKE_INSTALLED_BUNDLE="$case_dir/Applications/TBD.app" \
+        FAKE_DAEMON_LOG="$case_dir/tbdd.log" \
         PATH="$case_dir/bin:$PATH" \
         bash -c '
             script="$1"; shift
             # shellcheck source=/dev/null
             source "$script"
             INSTALLED_BUNDLE="$FAKE_INSTALLED_BUNDLE"
-            if [ "${FAKE_REAL_INSTALL:-0}" = 1 ]; then
+            DAEMON_LOG="$FAKE_DAEMON_LOG"
+            if [ "${FAKE_REAL_HANDOVER:-0}" = 1 ]; then
+                HANDOVER_TIMEOUT="${FAKE_HANDOVER_TIMEOUT:-$HANDOVER_TIMEOUT}"
+                HANDOVER_STOP_GRACE=1
+            elif [ "${FAKE_REAL_INSTALL:-0}" = 1 ]; then
                 handover() {
                     printf "handover %s\n" "$1" >> "$FAKE_EVENTS_LOG"
                     return 1
@@ -2424,10 +2440,101 @@ run_update_around_handover() {
                     exit 4
                 fi
             }
-            run_wake_stage() { WAKE_CANDIDATES=0; WAKE_WOKEN=0; WAKE_FAILED=0; }
+            run_wake_stage() {
+                printf "wake\n" >> "$FAKE_EVENTS_LOG"
+                WAKE_CANDIDATES=0; WAKE_WOKEN=0; WAKE_FAILED=0
+            }
             set -uo pipefail
             main "$@"
         ' _ "$SCRIPT" "$@" 2>&1
+}
+
+# Stand in for the daemon a handover replaces: a copy of sleep named
+# TBDDaemon, so daemon_process_is_running takes it for one, with its pid in the
+# case's pid file, where handover() reads its predecessor from. Its shutdown
+# begins when the handover starts the successor (the successor's log appears)
+# and takes <seconds>: the time a real predecessor goes on answering on its
+# socket after it has let go of every session. Then it exits, and "predecessor
+# exited" lands in the events file. With `never` it keeps running until the
+# case calls stop_predecessor. Counting from the handover rather than from the
+# start means a build that runs long on a slow runner cannot use the lifetime
+# up before the handover begins.
+#
+#   start_predecessor <case_dir> <seconds|never>
+start_predecessor() {
+    local case_dir="$1" lifetime="$2"
+    local bin="$case_dir/old/TBDDaemon"
+    local pid_file="$case_dir/home/tbd/tbdd.pid"
+    mkdir -p "$case_dir/old" "$case_dir/home/tbd"
+    cp "$(command -v sleep)" "$bin"
+    rm -f "$pid_file" "$case_dir/tbdd.log"
+    (
+        "$bin" 300 &
+        pid=$!
+        printf '%s\n' "$pid" > "$pid_file"
+        # The pid stays this subshell's until the wait below reaps it, so the
+        # kill can only ever reach the stand-in.
+        if [ "$lifetime" != never ]; then
+            ticks=0
+            while [ ! -e "$case_dir/tbdd.log" ] && [ "$ticks" -lt 600 ] &&
+                daemon_process_is_running "$pid"; do
+                sleep 0.1
+                ticks=$((ticks + 1))
+            done
+            sleep "$lifetime"
+            kill "$pid" 2>/dev/null
+        fi
+        wait "$pid"
+        printf 'predecessor exited\n' >> "$case_dir/events.log"
+    ) > /dev/null 2>&1 &
+    # Until the fork has become the exec, the pid is still a shell and names no
+    # daemon.
+    wait_until_daemon "$pid_file"
+}
+
+# Wait, up to five seconds, until the pid in <pid_file> is a running daemon
+# (daemon_process_is_running).
+wait_until_daemon() {
+    local ticks=0
+    while ! daemon_process_is_running "$(head -1 "$1" 2>/dev/null | tr -dc '0-9')" &&
+        [ "$ticks" -lt 50 ]; do
+        sleep 0.1
+        ticks=$((ticks + 1))
+    done
+}
+
+# The pid start_predecessor started for <case_dir>.
+predecessor_pid() {
+    head -1 "$1/home/tbd/tbdd.pid" 2>/dev/null | tr -dc '0-9'
+}
+
+# Kill the stand-in start_predecessor started for <case_dir>, if it is still
+# running. Only while the pid still names a daemon: once the stand-in has gone,
+# the pid is free for the system to hand to anything.
+stop_predecessor() {
+    local pid
+    pid="$(predecessor_pid "$1")"
+    if daemon_process_is_running "$pid"; then
+        kill -KILL "$pid" 2>/dev/null
+    fi
+}
+
+# Make the case's daemon status name the executable the update installs: the
+# update clone's release TBDDaemon. A local build runs the predecessor from
+# that same file, so this is what the predecessor answers as well as the
+# successor, from before the handover to after it.
+report_installed_executable() {
+    local case_dir="$1"
+    cat > "$case_dir/state/status.json" << EOF
+{
+  "executablePath": "$case_dir/home/tbd/updates/src/.build/release/TBDDaemon",
+  "buildIdentity": {
+    "commit": "1111111111111111111111111111111111111111",
+    "shortCommit": "1111111",
+    "sourceWorktree": "$case_dir/worktree"
+  }
+}
+EOF
 }
 
 # The number of the first line of <file> that starts with <prefix>, or nothing
@@ -2714,6 +2821,103 @@ test_no_app_never_stops_the_app() {
     done
 }
 
+# The number of the first line of <file> that contains <text>, or nothing.
+first_line_containing() {
+    grep -n -F -- "$2" "$1" 2>/dev/null | head -1 | cut -d: -f1
+}
+
+# THE REGRESSION: the handover counted as done as soon as `tbd daemon status`
+# named the new binary. A local build runs the old daemon and the new one from
+# the same file, so the old daemon's own answer passed on the first poll, while
+# it was still inside its shutdown with every session already let go. The app
+# relaunched then attached to the old daemon and was refused, and the wake
+# stage read the fleet off it. Here the status names the installed executable
+# from start to finish and the predecessor goes on running for three seconds
+# after the handover starts: neither the launch nor the wake may come before it
+# has exited.
+test_the_app_and_the_wake_wait_for_the_predecessor_to_exit() {
+    local case_dir out rc events log pid exited launch wake
+    case_dir="$(mkcase handover-waits-for-predecessor)"
+    events="$case_dir/events.log"
+    log="$case_dir/home/tbd/updates/update.log"
+    mkdir -p "$case_dir/Applications"
+    report_installed_executable "$case_dir"
+    start_predecessor "$case_dir" 3
+    pid="$(predecessor_pid "$case_dir")"
+    out="$(FAKE_REAL_HANDOVER=1 FAKE_HANDOVER_TIMEOUT=30 run_update_around_handover "$case_dir")"; rc=$?
+    stop_predecessor "$case_dir"
+
+    assert_eq "the update succeeds once the predecessor has gone" "0" "$rc"
+    assert_contains "the run hands over from the predecessor" "handing over from daemon pid $pid" "$out"
+    exited="$(first_line_starting "$events" "predecessor exited")"
+    launch="$(first_line_starting "$events" "open ")"
+    wake="$(first_line_starting "$events" "wake")"
+    assert_before "the app is launched only after the predecessor has exited" "$exited" "$launch"
+    assert_before "the wake stage runs only after the predecessor has exited" "$exited" "$wake"
+    assert_before "the run logs the predecessor's exit before it calls the handover done" \
+        "$(first_line_containing "$log" "the previous daemon (pid $pid) has exited")" \
+        "$(first_line_containing "$log" "daemon is serving from")"
+    if [ -f "$case_dir/app" ]; then
+        pass "the app is running when the update ends"
+    else
+        fail "the app is running when the update ends"
+    fi
+}
+
+# A predecessor that never exits never hands over, however the status reads.
+# The status names the installed executable throughout, and the handover still
+# fails once its budget is spent, down the same path as a successor that never
+# reports itself: the successor is stopped, the bundle this run kept goes back,
+# the app this run stopped is relaunched from it, and nothing is woken.
+test_a_predecessor_that_never_exits_fails_the_handover() {
+    local case_dir out rc events pid
+    case_dir="$(mkcase handover-predecessor-never-exits)"
+    events="$case_dir/events.log"
+    mkdir -p "$case_dir/Applications"
+    mkbundle "$case_dir/Applications/TBD.app" "before-the-update" >/dev/null
+    report_installed_executable "$case_dir"
+    start_predecessor "$case_dir" never
+    pid="$(predecessor_pid "$case_dir")"
+    out="$(FAKE_REAL_HANDOVER=1 FAKE_HANDOVER_TIMEOUT=2 run_update_around_handover "$case_dir")"; rc=$?
+    stop_predecessor "$case_dir"
+
+    assert_eq "a predecessor that never exits fails the run" "1" "$rc"
+    assert_contains "the log names the predecessor that did not exit" \
+        "the previous daemon (pid $pid) is still running after 2s" "$out"
+    assert_contains "the failed handover is an error" \
+        "ERROR: the handover did not complete within 2s" "$out"
+    assert_not_contains "the new daemon is never called the one serving" "daemon is serving from" "$out"
+    assert_contains "the failure path deals with the successor" "the new daemon (pid " "$out"
+    assert_contains "the bundle this run kept goes back" "restored previous app bundle" "$out"
+    assert_eq "the installed bundle is the one from before the update" "before-the-update" \
+        "$(cat "$case_dir/Applications/TBD.app/Contents/SourceWorktreePath.txt" 2>/dev/null)"
+    assert_contains "the app this run stopped is relaunched" \
+        "relaunching the app this run stopped before the handover" "$out"
+    assert_eq "the app is launched once" "1" "$(grep -c '^open ' "$events")"
+    assert_not_contains "nothing is woken after a failed handover" "^wake" "$(cat "$events")"
+}
+
+# With no daemon running there is no predecessor to wait for. The pid file is
+# absent, the successor starts cold, and the handover is done once the status
+# names the installed executable.
+test_a_cold_start_hands_over_without_a_predecessor() {
+    local case_dir out rc events launch wake
+    case_dir="$(mkcase handover-cold-start)"
+    events="$case_dir/events.log"
+    mkdir -p "$case_dir/Applications"
+    report_installed_executable "$case_dir"
+    rm -f "$case_dir/home/tbd/tbdd.pid"
+    out="$(FAKE_REAL_HANDOVER=1 FAKE_HANDOVER_TIMEOUT=5 run_update_around_handover "$case_dir")"; rc=$?
+
+    assert_eq "a cold start succeeds" "0" "$rc"
+    assert_contains "it says it starts the new daemon cold" "starting the new one cold" "$out"
+    assert_not_contains "it waits for no predecessor" "the previous daemon" "$out"
+    assert_contains "the new daemon is serving" "daemon is serving from" "$out"
+    launch="$(first_line_starting "$events" "open ")"
+    wake="$(first_line_starting "$events" "wake")"
+    assert_before "the app is launched, then the wake runs" "$launch" "$wake"
+}
+
 # MARK: - Installing and handing over
 
 # A directory that looks enough like an assembled bundle for install and
@@ -2883,6 +3087,84 @@ test_handover_wait_gives_up() {
     assert_contains "a daemon reporting the new binary ends the wait" "rc=0" "$out"
 }
 
+# A pid file can outlive its daemon: after a crash, or a reboot that handed the
+# pid to something else. The successor starts as on a cold start then, and
+# waiting for that unrelated process to exit would time a good handover out
+# and roll it back. Only a running daemon is waited for.
+test_a_stale_pid_file_is_not_waited_on() {
+    local root out other
+    root="$TEST_TMP/handover-stale-pid"
+    mkdir -p "$root/bin" "$root/state" "$root/updates"
+    mkstub_tbd "$root/bin"
+    printf '{"executablePath":"/new/.build/release/TBDDaemon"}\n' > "$root/state/status.json"
+    sleep 30 > /dev/null 2>&1 &
+    other=$!
+
+    out="$(
+        export FAKE_TBD_STATE="$root/state" PATH="$root/bin:$PATH"
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        wait_for_handover "$other" "/new/.build/release/TBDDaemon" 3
+        printf 'rc=%s\n' "$?"
+    )"
+    kill "$other" 2>/dev/null
+    wait "$other" 2>/dev/null
+
+    assert_contains "a live pid that is not a daemon is not waited on" "rc=0" "$out"
+    assert_contains "and the log says why" "pid $other names no running daemon" "$out"
+    assert_not_contains "nothing waits for it to exit" "is still running" "$out"
+}
+
+# One budget covers the wait for the predecessor and the wait for the status.
+# The predecessor here exits a second and a half into a three-second budget,
+# and the status never names the new binary, so the status gets what is left:
+# at least one poll, and never the four a fresh three seconds would give it.
+test_the_handover_has_one_budget_for_both_waits() {
+    local root out pid polls
+    root="$TEST_TMP/handover-one-budget"
+    mkdir -p "$root/bin" "$root/state" "$root/updates" "$root/old"
+    mkstub_tbd "$root/bin"
+    printf '{"executablePath":"/old/.build/release/TBDDaemon"}\n' > "$root/state/status.json"
+    cp "$(command -v sleep)" "$root/old/TBDDaemon"
+    "$root/old/TBDDaemon" 30 > /dev/null 2>&1 &
+    pid=$!
+    printf '%s\n' "$pid" > "$root/old.pid"
+    wait_until_daemon "$root/old.pid"
+    ( sleep 1.5; kill "$pid" 2>/dev/null ) > /dev/null 2>&1 &
+
+    out="$(
+        export FAKE_TBD_STATE="$root/state" PATH="$root/bin:$PATH"
+        OPT_AUTO=false
+        UPDATE_HOME="$root/updates"
+        UPDATE_LOG="$root/updates/update.log"
+        daemon_status_json() {
+            printf 'poll\n' >> "$root/polls"
+            tbd daemon status --json 2>/dev/null
+        }
+        wait_for_handover "$pid" "/new/.build/release/TBDDaemon" 3
+        printf 'rc=%s\n' "$?"
+    )"
+    if daemon_process_is_running "$pid"; then
+        kill -KILL "$pid" 2>/dev/null
+    fi
+    wait "$pid" 2>/dev/null
+
+    assert_contains "a status that never names the new binary fails the handover" "rc=1" "$out"
+    assert_contains "the wait saw the predecessor go" "the previous daemon (pid $pid) has exited" "$out"
+    polls="$(grep -c '^poll' "$root/polls" 2>/dev/null || true)"
+    if [ "${polls:-0}" -ge 1 ]; then
+        pass "the status is asked once the predecessor has gone"
+    else
+        fail "the status is asked once the predecessor has gone: ${polls:-0} polls"
+    fi
+    if [ "${polls:-0}" -lt 4 ]; then
+        pass "the status gets only what the predecessor left of the budget"
+    else
+        fail "the status gets only what the predecessor left of the budget: $polls polls"
+    fi
+}
+
 # The Medium finding this guards: the successor was backgrounded without its
 # pid being captured, so a handover that timed out because the successor was
 # merely slow — rather than dead — rolled the bundle back while that successor
@@ -3023,12 +3305,17 @@ test_a_failed_handover_never_restores_an_earlier_updates_bundle
 test_an_exit_mid_handover_leaves_the_app_stopped
 test_an_exit_after_the_handover_still_relaunches_the_app
 test_no_app_never_stops_the_app
+test_the_app_and_the_wake_wait_for_the_predecessor_to_exit
+test_a_predecessor_that_never_exits_fails_the_handover
+test_a_cold_start_hands_over_without_a_predecessor
 test_a_failed_handover_restores_the_previous_bundle
 test_a_completed_handover_keeps_the_previous_bundle
 test_a_first_install_has_no_previous_bundle
 test_a_failed_first_install_records_that_nothing_was_restored
 test_paths_match_resolves_symlinks
 test_handover_wait_gives_up
+test_a_stale_pid_file_is_not_waited_on
+test_the_handover_has_one_budget_for_both_waits
 test_a_timed_out_handover_stops_the_successor
 test_stopping_a_successor_that_is_already_gone_is_not_an_error
 test_update_source_resolution

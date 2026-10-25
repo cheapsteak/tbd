@@ -591,6 +591,104 @@ _wait_for_no_match() {
     return 2
 }
 
+# MARK: - Daemon process control
+
+# True while <pid> is a running TBD daemon: a live process, not a zombie,
+# whose command is an executable named TBDDaemon. The shell's counterpart of
+# ProcessLiveness.isLiveNamedProcess, which the daemon's own single-instance
+# gate and handover use.
+#
+#   daemon_process_is_running <pid>
+#
+# The name is what makes a pid read out of the pid file safe to wait on or to
+# signal: after a crash or a reboot the file can name a pid the system has
+# since handed to something unrelated, which no wait should hang on and no
+# SIGKILL should reach. A zombie, exited but not yet reaped by its parent,
+# holds no socket and serves nothing, so it counts as gone, as it does for
+# proc_pidpath; `kill -0` alone would call it alive until its parent got
+# round to it, and the daemon an app spawned is the app's child.
+daemon_process_is_running() {
+    local pid="${1-}"
+    local line state command
+    case "$pid" in
+        '' | *[!0-9]*) return 1 ;;
+    esac
+    [ "$pid" -gt 0 ] || return 1
+    line="$(ps -o stat= -o args= -p "$pid" 2>/dev/null)" || return 1
+    read -r state command <<< "$line"
+    case "$state" in
+        '' | Z*) return 1 ;;
+    esac
+    case "$command" in
+        TBDDaemon | TBDDaemon\ * | */TBDDaemon | */TBDDaemon\ *) return 0 ;;
+    esac
+    return 1
+}
+
+# Wait up to <seconds> for <pid> to stop being a running daemon.
+#
+#   wait_for_daemon_exit <pid> <seconds>
+#
+# <seconds> is a whole number. Polled in tenths of a second, the first poll
+# before any sleep, as _wait_for_no_match is: a wait of 0 still looks once.
+# Returns 0 once it is gone, 1 if it was still running at the last poll.
+wait_for_daemon_exit() {
+    local pid="${1-}"
+    local ticks=$((${2:-0} * 10))
+    while daemon_process_is_running "$pid"; do
+        [ "$ticks" -gt 0 ] || return 1
+        sleep 0.1
+        ticks=$((ticks - 1))
+    done
+    return 0
+}
+
+# Stop the daemon running as <pid>, and wait until it has exited.
+#
+#   stop_daemon_process <pid> [grace_seconds] [kill_wait_seconds]
+#
+# SIGTERM first, then up to <grace_seconds> (default 30) for the daemon to
+# finish its shutdown, then SIGKILL and up to <kill_wait_seconds> (default 5)
+# more. The defaults are the budgets a successor daemon gives its predecessor
+# in a handover (DaemonHandover.termBudget and killBudget), for the same
+# reason: stop() is a sequence of awaits that releases every holder reader and
+# stops both servers, and takes seconds. A daemon started before it ends runs
+# beside a predecessor that still answers on the socket after letting go of
+# its sessions, and whose teardown unlinks files the new daemon has just
+# created.
+#
+# Signals only a pid daemon_process_is_running vouches for, so a stale pid
+# file cannot get an unrelated process killed.
+#
+# Prints one word saying how it ended, for the caller to report:
+#   none      no daemon is running as <pid>, so nothing was signalled
+#   stopped   it exited within the grace period after SIGTERM
+#   killed    it outlived the grace period and exited after SIGKILL
+#   survived  it is still running after SIGKILL
+# Returns non-zero for `survived`.
+stop_daemon_process() {
+    local pid="${1-}"
+    local grace="${2:-30}"
+    local kill_wait="${3:-5}"
+
+    if ! daemon_process_is_running "$pid"; then
+        printf 'none\n'
+        return 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    if wait_for_daemon_exit "$pid" "$grace"; then
+        printf 'stopped\n'
+        return 0
+    fi
+    kill -KILL "$pid" 2>/dev/null || true
+    if wait_for_daemon_exit "$pid" "$kill_wait"; then
+        printf 'killed\n'
+        return 0
+    fi
+    printf 'survived\n'
+    return 1
+}
+
 # Launch a bundle through LaunchServices with an explicit PATH.
 #
 #   launch_app_bundle <bundle_dir> <launch_path> <log_path>

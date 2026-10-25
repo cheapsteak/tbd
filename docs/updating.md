@@ -88,7 +88,18 @@ these steps in order.
   `~/tbd/updates/previous/TBD.app` first, and stays there — it is what a failed
   handover puts back, and afterwards it is the quickest way to return to the
   build you were on.
-- **Hands the daemon over.** See below.
+- **Hands the daemon over**, as described below, and waits until the new
+  daemon is the one answering: the old daemon's process has exited, and
+  `tbd daemon status` then reports the new binary's path. The path alone
+  cannot say which daemon answered. A local build runs the old and the new
+  daemon from the same file, the update clone's `.build/release/TBDDaemon`,
+  and the old one goes on answering for the seconds its shutdown takes, after
+  it has let go of every session. The new daemon binds its socket only once
+  the old one is gone, so from that exit on the answer is the new daemon's,
+  and the app launch and the wake below reach it. If either has not happened
+  within two minutes, one budget covering both, the run stops the new daemon
+  and rolls back as described under "Going back to the previous build". With
+  no daemon running when the update starts, it waits only for the status.
 - **Seeds the saved tmux fallback** on a manual run, with or without
   `--no-app`; an `--auto` run skips this step. When
   `~/tbd/tmux-executable-path` is missing or names no usable executable, the
