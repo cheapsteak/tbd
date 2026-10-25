@@ -341,6 +341,38 @@ struct TableTranscriptView: NSViewRepresentable {
         /// What last ended a jump's pin or hold, kept for diagnostics; tests
         /// name it when a hold ends early. Cleared by each jump.
         var lastJumpRelease: JumpRelease?
+        #if DEBUG
+        /// The last clip origin move the bounds observer counted as the
+        /// reader's while a jump's pin, a jump's hold or a prepend anchor was
+        /// held, and so released: where the origin went and the stack that
+        /// posted the bounds change. DEBUG builds only, for diagnostics; the
+        /// jump and prepend tests print it when a hold ends early, so the
+        /// failure names what moved the clip. Cleared by each jump.
+        var lastHeldReaderMove: HeldReaderMove?
+
+        /// One origin move recorded in `lastHeldReaderMove`.
+        struct HeldReaderMove: CustomStringConvertible {
+            /// Frames of the posting stack kept: enough to reach past
+            /// AppKit's notification frames to whatever moved the clip.
+            static let stackDepth = 40
+
+            /// The origin at the previous bounds change, nil before the first.
+            let from: CGFloat?
+            /// The origin this bounds change reported.
+            let to: CGFloat?
+            /// What was held when the move landed.
+            let held: [String]
+            /// The first `stackDepth` frames of `Thread.callStackSymbols`.
+            let stack: [String]
+
+            var description: String {
+                let from = self.from.map { "\($0)" } ?? "nil"
+                let to = self.to.map { "\($0)" } ?? "nil"
+                return "reader move while holding \(held.joined(separator: ", ")): clip origin "
+                    + "\(from) → \(to); stack:\n" + stack.joined(separator: "\n")
+            }
+        }
+        #endif
 
         /// Counts the scrolls that supersede a queued tail-follow: every jump
         /// and every reader scroll (`supersedeQueuedTailFollow()`). `update`
@@ -2363,7 +2395,13 @@ struct TableTranscriptView: NSViewRepresentable {
         }
 
         @objc private func clipBoundsDidChange() {
+            #if DEBUG
+            let originBefore = lastClipOriginY
+            #endif
             if clipOriginMovedByReader() {
+                #if DEBUG
+                recordHeldReaderMove(from: originBefore)
+                #endif
                 // The reader moved the viewport: a held prepend or jump anchor
                 // no longer describes where they are looking, so stop re-pinning
                 // it, and a jump target stops overriding the active-prompt rule.
@@ -2405,6 +2443,24 @@ struct TableTranscriptView: NSViewRepresentable {
             guard let origin, let last = lastClipOriginY else { return true }
             return abs(origin - last) > Self.clipMoveTolerance
         }
+
+        #if DEBUG
+        /// Records a reader move in `lastHeldReaderMove` when it is about to
+        /// release something held; a move with nothing held records nothing.
+        /// Call before the release, so what was held can still be read.
+        private func recordHeldReaderMove(from origin: CGFloat?) {
+            var held: [String] = []
+            if pendingJumpAnchor != nil { held.append("jump pin") }
+            if heldJumpTargetID != nil { held.append("jump hold") }
+            if pendingPrependAnchor != nil { held.append("prepend anchor") }
+            guard !held.isEmpty else { return }
+            lastHeldReaderMove = HeldReaderMove(
+                from: origin,
+                to: scrollView?.contentView.bounds.minY,
+                held: held,
+                stack: Array(Thread.callStackSymbols.prefix(HeldReaderMove.stackDepth)))
+        }
+        #endif
 
         // MARK: Prepend anchor / near top
 

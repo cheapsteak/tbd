@@ -174,6 +174,9 @@ extension TableTranscriptView.Coordinator {
         // the bounds observer is already the target.
         heldJumpTargetID = id
         lastJumpRelease = nil
+        #if DEBUG
+        lastHeldReaderMove = nil
+        #endif
         do {
             isRestoringAnchor = true
             defer { isRestoringAnchor = false }

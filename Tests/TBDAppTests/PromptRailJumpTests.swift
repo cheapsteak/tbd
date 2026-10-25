@@ -66,11 +66,12 @@ struct PromptRailJumpTests {
         scene.settle()
     }
 
-    /// Names what last ended the jump's pin or hold, so a hold that ended early
-    /// says why in the failure.
+    /// Names what last ended the jump's pin or hold, and the move and stack
+    /// behind a reader-scroll release, so a hold that ended early says why in
+    /// the failure.
     private static func releaseNote(_ scene: TableTranscriptScene) -> Comment {
         let reason = scene.coordinator.lastJumpRelease.map { "\($0)" } ?? "none"
-        return Comment(rawValue: "last jump release: \(reason)")
+        return Comment(rawValue: "last jump release: \(reason); \(scene.heldReaderMoveNote)")
     }
 
     /// An AskUserQuestion card whose question wraps. Prose rows estimate to
@@ -169,7 +170,8 @@ struct PromptRailJumpTests {
         try #require(clip.bounds.height < TableTranscriptScene.viewportHeight - 50,
                      Comment(rawValue: "precondition: the viewport got shorter (\(clip.bounds.height) pt)"))
         try #require(abs(clip.bounds.minY - origin) <= 0.5,
-                     Comment(rawValue: "precondition: the origin stayed (\(origin) → \(clip.bounds.minY))"))
+                     Comment(rawValue: "precondition: the origin stayed (\(origin) → \(clip.bounds.minY)); "
+                         + Self.releaseNote(scene).rawValue))
         // Whether or not the resize itself posted one, the observer hears a
         // bounds change against the new size, as it would from AppKit.
         NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: clip)

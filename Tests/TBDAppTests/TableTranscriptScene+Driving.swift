@@ -104,6 +104,19 @@ extension TableTranscriptScene {
         let clip = scrollView.contentView
         return tableView.frame.height - (clip.bounds.origin.y + clip.bounds.height)
     }
+
+    /// The last clip move the bounds observer counted as the reader's while
+    /// a jump or prepend anchor was held, with the stack that posted it
+    /// (`Coordinator.lastHeldReaderMove`), for a failure's comment: a hold
+    /// that ends early then names what moved the clip. A test may make such a
+    /// move itself on purpose; this reports the latest one.
+    var heldReaderMoveNote: String {
+        #if DEBUG
+        return coordinator.lastHeldReaderMove.map { "\($0)" } ?? "no reader move while anything was held"
+        #else
+        return "reader moves are recorded in DEBUG builds only"
+        #endif
+    }
 }
 
 /// The table holds row heights its delegate never gave it: NSTableView's own
