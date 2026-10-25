@@ -1102,6 +1102,17 @@ extension HibernationCoordinator {
     /// must not silently un-park a row over a session nobody is running, and a
     /// spawn that turns out to be unnecessary is refused by the registry rather
     /// than duplicated.
+    ///
+    /// **The second leg adopts the holder before it un-parks the row.** The
+    /// startup adoption that failed is the one nothing would repeat, and an
+    /// awake row with no reader is a session nobody drains — whose job cannot
+    /// finish exiting — that no park can end, and that only an attach would
+    /// adopt. So the wake takes the hand-over itself, and the row comes back
+    /// awake with a reader on it and its pids checked against what the holder
+    /// reported. If the hand-over fails again the row is un-parked regardless:
+    /// a row parked over a live child is the state this transport treats as
+    /// worst, while an awake row names live pids every reconciler can judge,
+    /// and the next attach adopts on demand (`HolderRegistry.adoptForAttach`).
     private func adoptLiveHolderInsteadOfRespawning(
         _ terminal: Terminal, registry: HolderRegistry
     ) async -> WakeResult? {
@@ -1120,7 +1131,18 @@ extension HibernationCoordinator {
                     of: HolderChildIdentity.anchor(of: terminal),
                     executableIsAcceptable: AgentReaper.isHolderChildExecutable,
                     signaller: signaller) == .same {
-            evidence = "its recorded child \(childPID) is identity-verified alive"
+            // Adopted before the row stops being parked, for the reason the
+            // header gives: un-parked without a reader, nothing drains it.
+            do {
+                try await registry.adopt(terminal: terminal)
+                evidence = "its recorded child \(childPID) is identity-verified alive, and its "
+                    + "holder is now adopted"
+                await restoreHolderPIDsFromRegistry(terminal, registry: registry)
+            } catch {
+                evidence = "its recorded child \(childPID) is identity-verified alive, though its "
+                    + "holder could not be adopted, so the next attach will adopt it"
+                logger.warning("wake: \(terminal.id, privacy: .public) is parked over a live holder that would not hand its pty over; un-parking it without a reader: \(error.localizedDescription, privacy: .public)")
+            }
         } else {
             return nil
         }

@@ -1494,11 +1494,11 @@ actor HolderRegistry {
     ///
     /// **Rows the budget did not reach are returned, not dropped**, and the
     /// caller is obliged to finish them. Outside startup a session is adopted
-    /// only when something asks for it — an attach (`adoptForAttach`) — so a
-    /// row abandoned here that nobody opens would stay undrained for the
-    /// process's whole life, and an undrained pty master does not merely cost
-    /// a screen, it stops the job on it from finishing its exit. `Daemon`
-    /// resumes them
+    /// only when something asks for it — an attach (`adoptForAttach`), or a
+    /// wake that finds the session's holder already running — so a row
+    /// abandoned here that nobody opens would stay undrained for the process's
+    /// whole life, and an undrained pty master does not merely cost a screen,
+    /// it stops the job on it from finishing its exit. `Daemon` resumes them
     /// immediately after the socket is bound, where the wait costs no RPC
     /// caller — `adoptRemaining` documents what it does still cost. The result
     /// is deliberately **not** `@discardableResult`, so the obligation is one

@@ -937,6 +937,13 @@ struct HolderTmuxAssumptionGateTests {
     /// would answer `.respawnFailed` here, so `.ok` can only mean it stopped
     /// short of one. The pids surviving unchanged says the same thing from the
     /// row's side.
+    ///
+    /// No holder answers at this fixture's rendezvous, so the wake's hand-over
+    /// fails, and that is the arm this pins: the wake reaches for the holder
+    /// — one hand-over opened — and un-parks the row over its live child
+    /// regardless, leaving the adoption to the next attach. A wake that adopts
+    /// for real, with a holder on the other end, is
+    /// `HolderHibernationLiveTests.wakeAdoptsTheHolderOfARowParkedWithNoReader`.
     @Test("a wake of a row parked over a live holder adopts it instead of spawning again")
     func wakeAdoptsAHolderThatIsAlreadyRunning() async throws {
         let db = try TBDDatabase(inMemory: true)
@@ -967,6 +974,10 @@ struct HolderTmuxAssumptionGateTests {
             .wake(terminalID: terminal.id)
         #expect(result.isOk,
                 "a row parked over a live holder was not adopted")
+        #expect(await registry.attachRoundTripsStarted == 1, """
+            the wake un-parked a row over a holder nothing reads without trying to adopt it, so \
+            the session comes back awake and undrained
+            """)
 
         let after = try #require(try await db.terminals.get(id: terminal.id))
         #expect(!after.isParked, "the adopted row was left parked")

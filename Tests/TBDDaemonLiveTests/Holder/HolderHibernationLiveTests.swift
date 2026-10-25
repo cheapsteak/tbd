@@ -606,6 +606,48 @@ struct HolderHibernationLiveTests {
                 "the wake spawned a second holder instead of adopting the live one")
     }
 
+    /// The guard's other leg, with a holder on the other end: the row is
+    /// parked over a holder and a job that are both running, and this daemon
+    /// holds no reader for them — what a startup adoption that failed leaves.
+    ///
+    /// The wake must adopt the holder before it un-parks the row. Un-parked
+    /// without a reader, the session is awake and nobody drains it: its job
+    /// cannot finish exiting, no park can end it, and only an attach would
+    /// ever adopt it.
+    ///
+    /// The reader is released rather than never built, because a release is
+    /// the one way to take this daemon off a session while leaving its holder
+    /// and job untouched — exactly the state the leg exists for.
+    @Test func wakeAdoptsTheHolderOfARowParkedWithNoReader() async throws {
+        let fixture = try await HibernationFixture.make()
+        defer { fixture.tearDown() }
+        let terminal = try await fixture.spawnHolderRow()
+        let childPID = try #require(terminal.childPID)
+
+        await fixture.registry.release(terminalID: terminal.id)
+        try await fixture.db.terminals.setHibernated(
+            id: terminal.id, sessionID: HibernationFixture.sessionID)
+        #expect(await fixture.registry.reader(for: terminal.id) == nil,
+                "the fixture kept its reader, so this test would exercise the other leg")
+        #expect(holderProcessIsAlive(childPID))
+
+        let result = await fixture.coordinator.wake(terminalID: terminal.id)
+        #expect(result == .ok(sessionIncarnationID: nil),
+                "the wake did not stop at the live holder: \(result)")
+
+        let woken = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(!woken.isParked)
+        let reader = try #require(
+            await fixture.registry.reader(for: terminal.id),
+            "the wake un-parked the row without adopting its holder, so nothing drains the session")
+        #expect(await reader.isDraining)
+        #expect(await fixture.registry.adoptedProcess(for: terminal.id)?.childPID == childPID,
+                "the wake adopted something other than the session's own job")
+        #expect(woken.childPID == childPID)
+        #expect(!FileManager.default.fileExists(atPath: fixture.launchArgvPath),
+                "the wake spawned a second holder instead of adopting the live one")
+    }
+
     /// Teardown's second pass, against the branch where the first one has
     /// nothing to read.
     ///

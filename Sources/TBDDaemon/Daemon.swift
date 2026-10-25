@@ -1614,14 +1614,15 @@ public final class Daemon: Sendable {
         // 9c. Finish the holder sessions the startup budget did not reach.
         //
         // Past startup a session is adopted only when something asks for it —
-        // an attach adopts the session it names — so a row the budget walked
-        // away from that nobody opens would go undrained for the process's
-        // whole life, and a job cannot finish exiting while anything it wrote
-        // is still queued on its terminal. The budget therefore bounds when the
-        // *socket* is bound, not whether these sessions are rescued. Detached
-        // because nobody is waiting on it: the socket is up, so no RPC caller
-        // waits on a slow holder here — an attach that reaches a row first
-        // adopts it itself, and this pass then finds the reader published.
+        // an attach adopts the session it names, and a wake adopts a holder it
+        // finds already running — so a row the budget walked away from that
+        // nobody opens would go undrained for the process's whole life, and a
+        // job cannot finish exiting while anything it wrote is still queued on
+        // its terminal. The budget therefore bounds when the *socket* is bound,
+        // not whether these sessions are rescued. Detached because nobody is
+        // waiting on it: the socket is up, so no RPC caller waits on a slow
+        // holder here — an attach that reaches a row first adopts it itself,
+        // and this pass then finds the reader published.
         //
         // **The rescue is serial, so a slow row delays the rows behind it**,
         // and that is a deliberate trade rather than an oversight. Each row is
