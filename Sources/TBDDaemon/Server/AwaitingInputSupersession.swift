@@ -2,7 +2,7 @@ import Foundation
 import os
 import TBDShared
 
-private let logger = Logger(subsystem: "com.tbd.daemon", category: "supervision.supersession")
+private let logger = Logger(subsystem: "com.tbd.daemon", category: "awaiting-input")
 
 /// How a transcript is measured. Injected so tests drive fingerprints without
 /// a filesystem, and so the daemon's one real measurement lives in one place.

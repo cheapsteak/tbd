@@ -96,7 +96,7 @@ struct SessionStateFacts: Sendable, Equatable {
 ///    source `.database`), else the transcript tail's own classification
 ///    (source `.transcriptTail`). Above the activity facts because a
 ///    rate-limited session reads as `idle` on the hook rail — its turn *did*
-///    end — and reporting `idle` invites a supervisor to send work the session
+///    end — and reporting `idle` invites a caller to send work the session
 ///    cannot do until the limit resets.
 /// 3½. **Program status (OSC 7501)** — from the first accepted main-entry
 ///    report for the terminal's current incarnation, Claude Code's own report
@@ -205,11 +205,10 @@ struct SessionStateFacts: Sendable, Equatable {
 /// The evidence is **byte-level only**: the fact consulted is
 /// `SessionStateFacts.transcriptLastAppendedAt`, the transcript file's own
 /// append stamp, read from the same descriptor the tail was read through. No
-/// record is parsed, matched or interpreted anywhere on this path — a rule this
-/// file shares with `SessionCountersTracker`, whose turn count is likewise a
-/// count of appends and never a reading of them. And an *absent* growth fact (no
-/// transcript path, or a file TBD could not read) establishes nothing: the
-/// prompt stands, because "we could not look" is not evidence that it went away.
+/// record is parsed, matched or interpreted anywhere on this path. And an
+/// *absent* growth fact (no transcript path, or a file TBD could not read)
+/// establishes nothing: the prompt stands, because "we could not look" is not
+/// evidence that it went away.
 ///
 /// **One assumption rides on the comparison, and it is unmeasured.** It holds
 /// that Claude Code flushes the assistant record carrying the `tool_use` to the
@@ -238,7 +237,7 @@ struct SessionStateFacts: Sendable, Equatable {
 /// what `.idle` denotes here ("the rail last told us a turn ended, at this
 /// time"). It is deliberately not `.awaitingInput`: nothing is on screen for a
 /// human to answer, and reporting a prompt that does not exist would send a
-/// supervisor looking for one. **What it must never resolve to is `.working`**,
+/// caller looking for one. **What it must never resolve to is `.working`**,
 /// and that is why it is decided here rather than left to fall through. When
 /// `Stop`/`StopFailure` never reaches the daemon — a hook failure, or a stale
 /// `tbd` on the pane's `PATH` — `activityState` is stuck at `working` from
@@ -255,8 +254,8 @@ struct SessionStateFacts: Sendable, Equatable {
 /// subprocess; nothing durable records it (a terminal whose window dies is
 /// *parked* by the reconcile sweep with `.recovery`, and a deleted terminal has
 /// no row left to report on). Adding a probe here would put one subprocess per
-/// agent on a path built to run every cycle for the whole fleet, which is the
-/// cost this whole slice exists to avoid.
+/// agent on a path built to be asked about every agent at once, which is the
+/// cost this resolver exists to avoid.
 ///
 /// So `liveness` is an input, not something this type goes and gets. A caller
 /// that already established it — the send path consults the pane
@@ -283,9 +282,9 @@ struct SessionStateFacts: Sendable, Equatable {
 /// would mean matching launches against later completion notices by reading
 /// result prose: content interpretation at a layer that is not allowed to
 /// interpret content, and brittle against a wording change nobody would think
-/// to look for. The design already answers this — when compiled facts cannot
-/// separate two situations, the case goes to a desk, and the desk reads the
-/// transcript, which is the tier licensed to interpret text.
+/// to look for. When compiled facts cannot separate two situations, the case
+/// belongs to a reader of the transcript, which is the tier licensed to
+/// interpret text.
 ///
 /// What this type owes instead is **carrying the ambiguity honestly**. `idle`
 /// with a source and an observed-at is a fine answer; `idle` presented as "not

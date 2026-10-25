@@ -541,17 +541,7 @@ import Testing
         #expect(decoded != PRObservation.Outcome.none)
     }
 
-    // MARK: - Counters and report
-
-    @Test func sessionCountersRoundTrip() throws {
-        let counters = SessionCounters(
-            turnsInWindow: 12,
-            hookEventsInWindow: 40,
-            windowStart: epoch,
-            observedAt: epoch.addingTimeInterval(600),
-            commitsUnchangedSince: epoch.addingTimeInterval(-3600))
-        #expect(try roundTrip(counters) == counters)
-    }
+    // MARK: - Report
 
     @Test func reportRoundTripsWithItsOptionalsEmpty() throws {
         let report = SessionStateReport(
@@ -562,7 +552,6 @@ import Testing
         let decoded = try roundTrip(report)
         #expect(decoded == report)
         #expect(decoded.contextLoad == nil)
-        #expect(decoded.counters == nil)
     }
 
     @Test func reportRoundTripsWithItsOptionalsFilled() throws {
@@ -573,10 +562,25 @@ import Testing
             contextLoad: ContextLoad(
                 used: ObservedFact(value: 90_000, source: .transcriptTail, observedAt: epoch),
                 window: .observed(
-                    ObservedFact(value: 200_000, source: .sessionMod, observedAt: epoch))),
-            counters: SessionCounters(
-                turnsInWindow: 3, hookEventsInWindow: 9,
-                windowStart: epoch, observedAt: epoch))
+                    ObservedFact(value: 200_000, source: .sessionMod, observedAt: epoch))))
         #expect(try roundTrip(report) == report)
+    }
+
+    /// A daemon built before the runaway counters were dropped still sends a
+    /// `counters` object on every report. A newer reader ignores it rather than
+    /// failing the whole `session.states` result.
+    @Test func reportFromADaemonThatStillSendsCountersDecodes() throws {
+        let report = SessionStateReport(
+            terminalID: UUID(),
+            worktreeID: UUID(),
+            state: SessionState(value: .idle, source: .hookEvent("Stop"), observedAt: epoch))
+        var object = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any])
+        object["counters"] = [
+            "turnsInWindow": 3, "hookEventsInWindow": 9,
+            "windowStart": 0, "observedAt": 0,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object)
+        #expect(try JSONDecoder().decode(SessionStateReport.self, from: data) == report)
     }
 }

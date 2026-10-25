@@ -170,14 +170,6 @@ public final class RPCRouter: Sendable {
             title: title)
     }
 
-    /// Runaway-detection counters (design §13): turns appended per session and
-    /// hook events received per session, over one observation window. The
-    /// hook-driven handlers increment it; `session.states` samples it. An actor
-    /// reference held here so the whole daemon keeps one set of books.
-    ///
-    /// It reports numbers and nothing acts on them — see the actor's doc
-    /// comment for why no threshold lives in compiled TBD.
-    let sessionCounters = SessionCountersTracker()
     /// Single-flights concurrent `pr.list` RPCs so a poll storm collapses into
     /// one git enumeration + gh fetch instead of N overlapping ones.
     let prListCoordinator = PRListCoordinator()

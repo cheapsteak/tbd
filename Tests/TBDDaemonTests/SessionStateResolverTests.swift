@@ -492,7 +492,7 @@ struct SessionStateResolverTests {
     ///
     /// It resolves `.idle`, not `.awaitingInput`: nothing is on screen to
     /// answer, and reporting a prompt that does not exist would send a
-    /// supervisor looking for one.
+    /// caller looking for one.
     @Test func aDoneWaitingReasonNewerThanAStaleWorkingStampResolvesIdleNotWorking() {
         let reasonAt = t0.addingTimeInterval(400)
         let idlePrompt = AwaitingInputReason(

@@ -89,11 +89,6 @@ public struct WorktreeLifecycle: Sendable {
     /// Dirty gate for the periodic conflict sweep (see `refreshGitStatuses`).
     /// An actor reference, so every copy of this struct shares one cache.
     public let conflictSweepCache = ConflictSweepCache()
-    /// Since when each worktree's commits have stood still — §13's third
-    /// runaway input, filled from the branch tips `refreshGitStatuses` already
-    /// resolves for the gate above, at no extra subprocess cost. An actor
-    /// reference for the same reason `conflictSweepCache` is one.
-    public let branchTipTracker = BranchTipTracker()
     /// Notices when a worktree's remote-tracking tip (`origin/<branch>`) moves,
     /// from the same tips map, and makes its PR check due now. An actor
     /// reference, so the copy `Daemon` wires and the copy the sweep runs on
@@ -215,12 +210,11 @@ public struct WorktreeLifecycle: Sendable {
     }
 
     /// Date seam for stamps this type produces that are **persisted or
-    /// compared** — today, the observation instant the git sweep hands
-    /// `BranchTipTracker`, which is reported as `commitsUnchangedSince` and
-    /// compared against by whatever reads it. `Duration` is behavior and takes
-    /// a clock; `Date` is data and takes this. A bare `Date()` at the call site
-    /// would defeat the tracker's own seam and leave no way to pin the fact
-    /// end to end.
+    /// compared** — the holder child's start time on the terminal row, which
+    /// `ProcessIdentityCheck` later compares against a process start time, and
+    /// the stamp on an unsent-prompt file. `Duration` is behavior and takes a
+    /// clock; `Date` is data and takes this. A bare `Date()` at the call site
+    /// would leave no way to pin those facts end to end.
     let now: @Sendable () -> Date
     /// Behavior clock for the holder arm's phase budget. `Duration` is
     /// behavior and `Date` is data, so this is a separate seam from `now`.
