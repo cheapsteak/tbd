@@ -83,12 +83,12 @@ actor HolderRegistry {
         /// attach has taken the pty, and clearing the successor's claim would
         /// put the daemon on a descriptor another process is reading.
         case handbackSuperseded(terminalID: UUID, generation: UInt64)
-        /// The daemon is shutting down: `releaseAll` has begun, so every reader
-        /// is being stopped and none may be built or handed out. A reader
-        /// adopted behind that release would never be stopped, and a pty vended
-        /// now would go to an app this daemon is about to stop serving. The
-        /// session itself is untouched and keeps running; the next daemon
-        /// adopts it.
+        /// The daemon is shutting down: `releaseAll` has begun, so no session
+        /// may be adopted or attached. A reader adopted behind that release
+        /// would never be stopped, and a pty vended now would go to an app this
+        /// daemon is about to stop serving. The session itself is untouched
+        /// and keeps running; the next daemon adopts it. `spawn` is the one
+        /// path that still builds a reader — see `isShuttingDown`.
         case daemonShuttingDown(terminalID: UUID)
         /// This registry told the session's holder to let go after the
         /// startup adoption pass read its rows, so that pass leaves it alone
@@ -422,9 +422,17 @@ actor HolderRegistry {
     private var slots: [UUID: Slot] = [:]
 
     /// Set when `releaseAll` begins, and never cleared: the daemon is shutting
-    /// down. From then on every adoption and every attach refuses with
-    /// `daemonShuttingDown`, because `releaseAll` releases the slots it found
-    /// when it began and a reader built after that would be stopped by nothing.
+    /// down. From then on these refuse with `daemonShuttingDown`: `adopt` (on
+    /// every pass of its loop), `beginAdoption` (so the take-back's no-reader
+    /// arm too), `adoptForAttach` and `beginAttach`; and `adoptRemaining`
+    /// stops. `releaseAll` releases the slots it found when it began, so a
+    /// reader adopted after that would be stopped by nothing.
+    ///
+    /// **`spawn` is deliberately not refused.** A session created during
+    /// shutdown gets its holder like any other, and the holder outlives this
+    /// daemon by design — the successor adopts it at startup. The reader that
+    /// spawn publishes is the one reader built after `releaseAll` begins, and
+    /// it is left unstopped in a process that is about to exit.
     ///
     /// The window it covers is real and wide. `Daemon.stop()` releases every
     /// reader long before it stops the fd sidecar and the RPC socket, and an
@@ -895,6 +903,9 @@ actor HolderRegistry {
     /// row: a holder that was spawned and then failed to be recorded is the
     /// caller's to `abandon`, because only the caller knows whether the record
     /// landed.
+    ///
+    /// Not refused while the daemon shuts down, unlike adoption — see
+    /// `isShuttingDown`.
     func spawn(terminalID: UUID, launch: HolderLaunchRequest) async throws -> HolderHandle {
         guard let spawner else { throw Error.holderExecutableUnavailable }
         guard slots[terminalID] == nil else {
@@ -1398,8 +1409,9 @@ actor HolderRegistry {
     /// being adopted, and none still draining its way out of a release.
     ///
     /// Refused while the daemon shuts down, here as well as in its callers,
-    /// so that no path into a hand-over — the take-back's no-reader arm
-    /// included — can open one behind `releaseAll`.
+    /// so that no adoption — the take-back's no-reader arm included — can open
+    /// a hand-over behind `releaseAll`. (`spawn` takes its hand-over without
+    /// coming through here; `isShuttingDown` says why it is not refused.)
     private func beginAdoption(
         of terminalID: UUID, seedingScreenWith preamble: Data = Data()
     ) async throws -> HolderReader {
@@ -3443,7 +3455,9 @@ actor HolderRegistry {
     /// with no suspension in between. Every adoption or attach that arrives
     /// after that refuses rather than building a reader this loop has already
     /// decided not to visit; one already in flight holds its slot, so the loop
-    /// releases it and the adoption finds itself superseded.
+    /// releases it and the adoption finds itself superseded. A `spawn` after
+    /// this point still publishes a reader the loop never visits — by design,
+    /// see `isShuttingDown`.
     func releaseAll() async {
         isShuttingDown = true
         for terminalID in Set(slots.keys).union(viewerAttachments.keys) {
