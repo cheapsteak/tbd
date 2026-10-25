@@ -240,7 +240,7 @@ import Testing
     /// has only the failing drop left. It deletes the copy it wrote and no
     /// other: the earlier run's copy, which still holds the column that run
     /// dropped, stays, and so does every older copy, unpruned.
-    @Test func aRunWithAFailingDropDeletesOnlyItsOwnCopy() async throws {
+    @Test func aRunWhoseOnlyRemainingDropFailsDeletesOnlyItsOwnCopy() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
         let indexed = try await fixture.addIndexedColumn()
@@ -262,6 +262,30 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: reconciler.snapshotPath(at: Self.secondRun)) == false)
         #expect(fixture.snapshots()
             == (earlier + ["20261024T123456Z"]).map { "state.db.pre-column-drop.\($0)" })
+    }
+
+    /// A held column is not dropped, so a run that holds one column and fails
+    /// to drop the only due one dropped nothing: it deletes its copy, and the
+    /// held column stays in its table.
+    @Test func aRunThatHoldsOneColumnAndFailsTheOtherDeletesItsCopy() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let indexed = try await fixture.addIndexedColumn()
+        _ = try Self.makeKeptBundle(in: fixture.scratch, identity: Self.identity(schemaEpoch: 1))
+        let heldAtTwo = RetiredColumn(table: "config", column: "nightwatch_mode", epoch: 2)
+
+        let report = await fixture.db.reconcileRetiredColumns(
+            fixture.reconciler(columns: [heldAtTwo, indexed]), at: Self.firstRun)
+
+        #expect(report.outcomes[heldAtTwo] == .held(keptEpoch: 1))
+        guard case .failed(_)? = report.outcomes[indexed] else {
+            Issue.record("expected the indexed column's drop to fail, got \(String(describing: report.outcomes[indexed]))")
+            return
+        }
+        #expect(report.snapshotPath == nil)
+        #expect(fixture.snapshots().isEmpty)
+        #expect(try await fixture.columns(of: "config").contains("nightwatch_mode"))
+        #expect(try await fixture.columns(of: "retirement_probe").contains("indexed"))
     }
 
     /// A run with nothing to drop and nothing failed still prunes, so a

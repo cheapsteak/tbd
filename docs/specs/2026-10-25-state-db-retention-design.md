@@ -109,9 +109,11 @@ already writes compactly.
 
 ### Docs
 
-The places that say the copies are reclaimed by hand — `Sources/TBDDaemon/Database/CLAUDE.md`
-("Pre-migration snapshot"), `docs/updating.md` and the reconciler section of
-`docs/specs/2026-10-24-column-retirement-design.md` — state the retention instead.
+The places that describe the copies — the root `CLAUDE.md` (beside the named reconcilers),
+`Sources/TBDDaemon/Database/CLAUDE.md` ("Pre-migration snapshot" and "Retiring a column"),
+`docs/updating.md` and the reconciler section of
+`docs/specs/2026-10-24-column-retirement-design.md` — state this retention rather than leaving
+the copies for a person to delete.
 
 ## Testing
 
@@ -134,8 +136,9 @@ the sweep takes `now`.
 - **Reconciler:** a run in which nothing failed leaves 3 copies, its own among them even when
   every seeded copy is stamped later; a run that drops one column and fails on another keeps
   its copy and prunes nothing; a run whose only due drop fails leaves no copy and reports
-  none; a run with a failing drop deletes only its own copy, never an older one; a run with
-  nothing to drop still clears a backlog.
+  none; a run whose only remaining due drop fails deletes its own copy and no older one; a run
+  that holds one column and fails to drop another deletes its own copy; a run with nothing to
+  drop still clears a backlog.
 
 ## Rejected alternatives
 

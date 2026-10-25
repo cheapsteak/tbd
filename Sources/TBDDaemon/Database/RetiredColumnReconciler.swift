@@ -220,10 +220,16 @@ struct RetiredColumnReconciler: Sendable {
                 return report
             }
 
+            // Tracked here rather than read back from `report.outcomes`, which
+            // is keyed by entry: a duplicate entry whose second drop fails
+            // would overwrite `.dropped` and delete the only copy of data this
+            // run just dropped.
+            var droppedAny = false
             for entry in due {
                 let sql = "ALTER TABLE \(entry.table.quotedDatabaseIdentifier) DROP COLUMN \(entry.column.quotedDatabaseIdentifier)"
                 do {
                     try await writer.write { db in try db.execute(sql: sql) }
+                    droppedAny = true
                     Self.logger.notice(
                         "Dropped retired column \(entry.description, privacy: .public) (retired at schema epoch \(entry.epoch, privacy: .public))")
                     report.outcomes[entry] = .dropped
@@ -239,7 +245,7 @@ struct RetiredColumnReconciler: Sendable {
             // otherwise a drop that fails at every start would leave a full
             // copy at every start, and the failure keeps the prune below from
             // ever running.
-            if !report.outcomes.values.contains(.dropped) {
+            if !droppedAny {
                 do {
                     try FileManager.default.removeItem(atPath: snapshot)
                     Self.logger.notice(
