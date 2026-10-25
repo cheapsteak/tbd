@@ -4,8 +4,16 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
-/// Renders the Session Workbench transcript UI to PNG at various viewport
-/// sizes and appearance settings for visual review.
+/// Renders the Session Workbench transcript UI to PNG.
+///
+/// A normal run renders one configuration, as a smoke test: the workbench lays
+/// out over the table pane, captures as a picture of something rather than a
+/// flat field, and releases its hosted tree on teardown. The full matrix of
+/// viewport sizes and appearances is for a person reviewing the PNGs under the
+/// gitignored `artifacts/snapshots`, so it compiles only with the
+/// `TBD_HARNESSES` condition (see `Tests/CLAUDE.md`):
+///
+///     scripts/test.sh -Xswiftc -DTBD_HARNESSES --filter WorkbenchSnapshotTests
 ///
 /// Hosted offscreen through `OffscreenHost`, which captures in process rather
 /// than through a screen recording — a screenshot API would want a permission
@@ -30,16 +38,23 @@ struct WorkbenchSnapshotTests {
     private static let settlePumps = 5
     private static let settleSpin: TimeInterval = 0.02
 
-    /// Snapshot configurations: (name, width, height, appearance)
-    private let configurations: [(String, CGFloat, CGFloat, NSAppearance?)] = [
-        ("wb-wide-light", 1240, 760, NSAppearance(named: .aqua)),
-        ("wb-wide-dark", 1240, 760, NSAppearance(named: .darkAqua)),
-        ("wb-narrow-light", 820, 760, NSAppearance(named: .aqua)),
-        ("wb-narrow-dark", 820, 760, NSAppearance(named: .darkAqua)),
-        ("wb-wide-collapsed-light", 1240, 760, NSAppearance(named: .aqua)),
+    /// Snapshot configurations: (name, width, height, appearance, whether the
+    /// first activity group is forced collapsed).
+    #if TBD_HARNESSES
+    private let configurations: [(String, CGFloat, CGFloat, NSAppearance?, Bool)] = [
+        ("wb-wide-light", 1240, 760, NSAppearance(named: .aqua), false),
+        ("wb-wide-dark", 1240, 760, NSAppearance(named: .darkAqua), false),
+        ("wb-narrow-light", 820, 760, NSAppearance(named: .aqua), false),
+        ("wb-narrow-dark", 820, 760, NSAppearance(named: .darkAqua), false),
+        ("wb-wide-collapsed-light", 1240, 760, NSAppearance(named: .aqua), true),
     ]
+    #else
+    private let configurations: [(String, CGFloat, CGFloat, NSAppearance?, Bool)] = [
+        ("wb-wide-dark", 1240, 760, NSAppearance(named: .darkAqua), false),
+    ]
+    #endif
 
-    @Test("render workbench at multiple viewport sizes and appearances")
+    @Test("render the workbench and capture it (every size and appearance under TBD_HARNESSES)")
     func renderWorkbenchSnapshots() throws {
         let fm = FileManager.default
         try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
@@ -66,8 +81,8 @@ struct WorkbenchSnapshotTests {
         )
 
         // Render each configuration
-        for (index, (name, width, height, appearance)) in configurations.enumerated() {
-            let presentation = (index == 4) ? collapsedPresentation : basePresentation
+        for (name, width, height, appearance, collapsed) in configurations {
+            let presentation = collapsed ? collapsedPresentation : basePresentation
             let path = "\(Self.outputDir)/\(name).png"
             try renderWorkbench(
                 presentation: presentation,

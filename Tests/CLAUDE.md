@@ -261,6 +261,9 @@ variable and gives the full command:
 - **`TranscriptEagerMeasureBench`** – `TBD_PERF_BENCH=1`.
 - **`ComposerRenderHarness`** – `TBD_COMPOSER_SHOTS_DIR=<dir>`.
 - **`SidebarRenderHarness`** – `TBD_SIDEBAR_SHOTS_DIR=<dir>`.
+- **`WorkbenchSnapshotTests`** – no variable. A normal run renders one
+  configuration as a smoke test, and the condition adds the rest of the size
+  and appearance matrix.
 
 Nothing in CI builds with the condition, so a refactor can break a harness
 without anything going red. Whoever next enables one fixes it. A new
