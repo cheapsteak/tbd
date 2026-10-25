@@ -19,10 +19,13 @@
 # it exists to protect. `test_compared_paths_resolve_in_this_repository` pins
 # the list to the checkout the harness is running in for the same reason.
 #
-# ZERO BUILDS, AND THE ONLY REAL THING READ IS THIS CHECKOUT'S GIT TREE. Every
-# other case mints a throwaway repository under `mktemp -d`, shaped like this
-# one only in the paths the decision reads. No case reads the network, `~/tbd`,
-# or a real `.build/`, and nothing is ever written outside a temp directory.
+# ZERO BUILDS, AND THE ONLY REAL THINGS READ ARE THIS CHECKOUT'S GIT TREE AND
+# THE TEXT OF TWO OF ITS FILES. `test_compared_paths_resolve_in_this_repository`
+# reads the tree, and `test_the_wipe_step_removes_exactly_the_compared_libraries`
+# reads `Package.swift` and `.github/workflows/test.yml`. Every other case mints
+# a throwaway repository under `mktemp -d`, shaped like this one only in the
+# paths the decision reads. No case reads the network, `~/tbd`, or a real
+# `.build/`, and nothing is ever written outside a temp directory.
 #
 # THE FIXTURE REPOS ARE FENCED OFF FROM THE DEVELOPER'S GIT CONFIG. Each one
 # sets its own identity and turns signing off in LOCAL config: a global
@@ -33,6 +36,8 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/first-party-wipe-needed.sh"
+WORKFLOW="$HERE/../../.github/workflows/test.yml"
+PACKAGE="$HERE/../../Package.swift"
 
 FAIL=0
 assert_eq()       { if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1: expected [$2] got [$3]"; FAIL=1; fi; }
@@ -207,15 +212,16 @@ test_tbddaemonlib_change_wipes() {
   assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDDaemon"
 }
 
-# TBDDaemonLib imports TBDTerminalSerialization, so a commit touching only that
-# target still recompiles the library and still needs its archive re-emitted.
-test_first_party_dependency_change_wipes() {
+# TBDTerminalSerialization is a library the wipe removes in its own right, and
+# TBDDaemonLib imports it, so a commit touching only that target re-emits its
+# module and recompiles TBDDaemonLib: both archives can go stale.
+test_tbdterminalserialization_change_wipes() {
   local repo; repo="$(mkrepo)"
   record_marker "$repo"
   commit_change "$repo" "Sources/TBDTerminalSerialization/Frame.swift"
   run_decider "$repo"
-  assert_eq "a first-party dependency change wipes" "wipe" "$RUN_OUT"
-  assert_contains "the reason names the dependency" "$RUN_ERR" "Sources/TBDTerminalSerialization"
+  assert_eq "a TBDTerminalSerialization change wipes" "wipe" "$RUN_OUT"
+  assert_contains "the reason names the changed path" "$RUN_ERR" "Sources/TBDTerminalSerialization"
 }
 
 # A manifest change can move a library's module boundary without touching a
@@ -395,6 +401,139 @@ test_unknown_option_is_refused() {
   RUN_RC=$?
   assert_eq "an unknown option exits 64" "64" "$RUN_RC"
   assert_eq "an unknown option decides nothing" "" "$RUN_OUT"
+}
+
+# ---------------------------------------------------------------------------
+# 6. The wipe step removes every library this decision compares, and no other
+# ---------------------------------------------------------------------------
+#
+# The decision and the wipe live in two files — `WIPE_PATHS` in the script, the
+# module loop in the workflow's wipe step — and they only work as a pair. A
+# library whose sources are compared but whose artifacts the loop never removes
+# gets a `wipe` answer on exactly the run that changes it and keeps its stale
+# objects anyway, which is the #7715 condition left in place. A module the loop
+# removes whose sources are not compared has its wipe hinge on unrelated files,
+# and a name in the loop that is no library target at all removes nothing,
+# silently. So both lists are read out of the files CI runs and checked against
+# the targets `Package.swift` declares.
+
+WIPE_STEP_NAME='Force-rebuild first-party libraries (workaround SPM #7715)'
+
+# The modules the wipe step removes, one per line, read from its module loop in
+# WORKFLOW, or in the workflow file given as $1 (a mutated copy, in the case
+# below).
+wiped_modules() {
+  awk -v name="      - name: $WIPE_STEP_NAME" '
+    $0 == name { found = 1; next }
+    found && /^      - / { exit }
+    found && /^[ \t]*for module in / {
+      sub(/^[ \t]*for module in /, "")
+      sub(/;[ \t]*do[ \t]*$/, "")
+      n = split($0, m, " ")
+      for (i = 1; i <= n; i++) print m[i]
+      exit
+    }
+  ' "${1:-$WORKFLOW}"
+}
+
+# `WIPE_PATHS` from the script under test, one per line.
+wipe_paths() {
+  awk '
+    /^WIPE_PATHS=\(/ { grab = 1; next }
+    grab && /^\)/ { exit }
+    grab { gsub(/^[ \t]+|[ \t]+$/, ""); if ($0 != "") print }
+  ' "$SCRIPT"
+}
+
+# Every library target `Package.swift` declares — a `.target(`, not an
+# executable, test or system-library target — as `<name> <path>`, the path being
+# its `path:` argument or SwiftPM's default `Sources/<name>`. The manifest opens
+# each declaration on a line of its own, and only a target's own `name:` and
+# `path:` arguments start a line with those labels: a dependency's
+# `.product(name: ...)` starts with `.product`.
+library_targets() {
+  awk '
+    function flush(  p) {
+      if (kind == ".target(" && name != "") {
+        p = path
+        if (p == "") p = "Sources/" name
+        print name, p
+      }
+      kind = ""; name = ""; path = ""
+    }
+    /^[ \t]*\.[A-Za-z]+\([ \t]*$/ { flush(); kind = $1; next }
+    kind != "" && name == "" && /^[ \t]*name: "/ {
+      name = $0; sub(/^[ \t]*name: "/, "", name); sub(/".*/, "", name); next
+    }
+    kind != "" && /^[ \t]*path: "/ {
+      path = $0; sub(/^[ \t]*path: "/, "", path); sub(/".*/, "", path); next
+    }
+    END { flush() }
+  ' "$PACKAGE"
+}
+
+# Whether $1 is one of the newline-separated lines of $2.
+is_listed() {
+  case "
+$2
+" in
+    *"
+$1
+"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Where the wipe step's module loop (in WORKFLOW, or the workflow file given as
+# $1) and `WIPE_PATHS` disagree, one line per disagreement, or nothing:
+#   `unwiped <target>` – a library target whose sources `WIPE_PATHS` compares
+#     and whose artifacts the loop never removes;
+#   `uncompared <module>` – a module the loop removes that is not a library
+#     target whose sources `WIPE_PATHS` compares.
+wipe_loop_drift() {
+  local paths modules targets name path
+  paths="$(wipe_paths)"
+  modules="$(wiped_modules "${1:-$WORKFLOW}")"
+  targets="$(library_targets)"
+  while read -r name path; do
+    [ -n "$name" ] || continue
+    if is_listed "$path" "$paths" && ! is_listed "$name" "$modules"; then
+      echo "unwiped $name"
+    fi
+  done <<EOF
+$targets
+EOF
+  while read -r name; do
+    [ -n "$name" ] || continue
+    path="$(printf '%s\n' "$targets" | awk -v n="$name" '$1 == n { print $2; exit }')"
+    if ! is_listed "$path" "$paths"; then
+      echo "uncompared $name"
+    fi
+  done <<EOF
+$modules
+EOF
+}
+
+test_the_wipe_step_removes_exactly_the_compared_libraries() {
+  local d
+  # Each reader has to have found what it looks for, or the comparison below
+  # could pass on two empty lists agreeing with each other.
+  assert_contains "Package.swift reads as TBDDaemonLib at its real directory" \
+    "$(library_targets)" "TBDDaemonLib Sources/TBDDaemon"
+  assert_contains "the wipe step's module loop was read" "$(wiped_modules)" "TBDShared"
+  assert_eq "the wipe step removes every library WIPE_PATHS compares, and no other" \
+    "" "$(wipe_loop_drift)"
+  d="$(mktmpd)"
+  echo "$d" >> "$FIXTURE_LIST"
+  # MUTATION: TBDTerminalSerialization dropped from the loop, its sources still
+  # compared.
+  sed '/for module in /s/ TBDTerminalSerialization;/;/' "$WORKFLOW" > "$d/unwiped.yml"
+  assert_eq "mutation: a compared library the loop does not remove is caught" \
+    "unwiped TBDTerminalSerialization" "$(wipe_loop_drift "$d/unwiped.yml")"
+  # MUTATION: a library added to the loop whose sources are not compared.
+  sed '/for module in /s/TBDDaemonLib/TBDDaemonLib TBDAppIcon/' "$WORKFLOW" > "$d/uncompared.yml"
+  assert_eq "mutation: a loop entry whose sources are not compared is caught" \
+    "uncompared TBDAppIcon" "$(wipe_loop_drift "$d/uncompared.yml")"
 }
 
 # ---------------------------------------------------------------------------
