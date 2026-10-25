@@ -178,13 +178,13 @@ struct HolderAttachRetryTests {
 
     @Test("only a definitive answer is final; every transient refusal is retried")
     func retryPolicy() {
-        let final: [any Error] = [
+        let definitive: [any Error] = [
             DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus),
             DaemonClientError.attachUnavailable("unavailable"),
             HolderAttachError.missingGeneration,
             CancellationError(),
         ]
-        for error in final {
+        for error in definitive {
             #expect(!HolderAttachRetry.isRetryable(error), "\(error) is a definitive answer")
         }
         let transient: [any Error] = [
@@ -345,6 +345,28 @@ struct HolderAttachRetryTests {
 
         #expect(stub.attaches == 1, "a retry that outlived a reconnect asked again: \(stub.attaches)")
         #expect(fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage))
+    }
+
+    @Test("a cancelled backoff ends the retries at the placard")
+    func aCancelledBackoffStops() async throws {
+        let clock = EventDrivenTestClock()
+        let stub = ScriptedAttach(attach: { _ in
+            throw DaemonClientError.rpcError("attach failed: no live holder reader", code: nil)
+        })
+        let fixture = makeFixture(clock: clock, stub: stub)
+        defer { fixture.tearDown() }
+
+        let attaching = Task { @MainActor in
+            await fixture.coordinator.startHolderClient(terminalView: fixture.view)
+        }
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        attaching.cancel()
+        await attaching.value
+
+        #expect(stub.attaches == 1, "a cancelled wait must not be followed by another attempt")
+        #expect(fixture.didFeed(TerminalPreparationPresentation.holderAttachFailedMessage),
+                "the panel is still up and still unattached, so it must say so")
+        #expect(fixture.retryOffers.value == 1)
     }
 
     @Test("the connection epoch advances when the app regains the daemon, and only then")

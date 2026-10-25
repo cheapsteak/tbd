@@ -141,6 +141,28 @@ struct HolderHandbackResendTests {
                 "a detach was resent past a connection change, where it could hand back another claim")
     }
 
+    @Test("a cancelled wait between resends gives up with the failure it had")
+    func aCancelledWaitStopsTheResends() async throws {
+        let clock = EventDrivenTestClock()
+        let daemon = ScriptedDaemon(detach: { _ in throw DaemonClientError.daemonNotRunning })
+
+        let sending = Task { @MainActor in
+            do {
+                try await self.detach(daemon, clock: clock)
+                return nil as (any Error)?
+            } catch {
+                return error
+            }
+        }
+        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+        sending.cancel()
+        let thrown = await sending.value
+
+        #expect(daemon.detaches == 1, "a cancelled wait must not be followed by a resend")
+        #expect(thrown is DaemonClientError,
+                "the caller must learn the detach was not delivered, not that a sleep was cancelled")
+    }
+
     @Test("an answer from the daemon is not resent")
     func anAnswerIsNotResent() async {
         let daemon = ScriptedDaemon(detach: { _ in
