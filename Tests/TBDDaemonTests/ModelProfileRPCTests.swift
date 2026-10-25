@@ -128,11 +128,14 @@ final class ProfileRowPresenceProbe: ClaudeCredentialsKeychainDeleting, @uncheck
 struct ModelProfileRPCTests {
 
     /// Per-test scratch home. Swift Testing builds a fresh suite instance for
-    /// every test, so each test gets its own. Like `makeIsolatedConfigDirManager`
-    /// it has no teardown: it lives under `$TMPDIR`, which is the run's scratch
-    /// home under `scripts/test.sh`, and `cleanupKeychain` removes the secrets.
-    private let home = FileManager.default.temporaryDirectory
-        .appendingPathComponent("tbd-model-profile-rpc-\(UUID().uuidString)", isDirectory: true)
+    /// every test, so each test gets its own. It has no in-process teardown:
+    /// `fencedScratchRoot` mints it under the run root `scripts/test.sh` removes
+    /// on exit, the same reclaim the fenced `TBD_HOME` these writes used to land
+    /// in gets. Not `$TMPDIR`, which the wrapper leaves pointing at the real
+    /// per-user temp dir, where every secret file, profile dir and host mirror
+    /// written here would outlive the run.
+    private let home = URL(
+        fileURLWithPath: fencedScratchRoot(prefix: "tbdmp"), isDirectory: true)
 
     /// The environment every `TBD_HOME`-derived path in this suite resolves
     /// from — never the process-global one.
