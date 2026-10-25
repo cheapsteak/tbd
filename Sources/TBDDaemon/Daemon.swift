@@ -1681,76 +1681,76 @@ public final class Daemon: Sendable {
             daemonLogger.error("failed to start FD vending sidecar: \(error.localizedDescription, privacy: .public)")
         }
 
-        // 9. Start socket server
-        let sock = SocketServer(router: rpcRouter)
-        self.socketServer = sock
-        // Wire the live connected-client count into daemon.status (the router
-        // is built above, before the server exists, so it can't be an init dep).
-        rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
+        // Every throw from here through step 10 leaves the sidecar bound
+        // (step 8h), and a failed start ends in `main.swift`'s `exit(1)`
+        // without `stop()`. One cleanup covers them all, so no failed start
+        // leaves a vend.sock nobody serves: stopping the sidecar removes the
+        // file, but only while it is still the one this daemon bound.
         do {
+            // 9. Start socket server
+            let sock = SocketServer(router: rpcRouter)
+            self.socketServer = sock
+            // Wire the live connected-client count into daemon.status (the router
+            // is built above, before the server exists, so it can't be an init dep).
+            rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
             try await sock.start()
+
+            // Pending provider replacements recover only after the socket is live:
+            // Codex readiness arrives through the SessionStart hook RPC, so a
+            // pre-bind recovery would always time out despite a healthy process.
+            // The durable row remains Codex throughout the pass. It is NOT run
+            // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
+            // for that hook, serially, so awaiting it would hold every later boot
+            // step (the HTTP server among them) behind N × 15 s. The maintenance
+            // task in step 11a-gc runs the same pass immediately after boot, off the
+            // critical path, and then hourly.
+
+            // 9a. Finish the holder sessions the startup budget did not reach.
+            //
+            // Past startup a session is adopted only when something asks for it —
+            // an attach adopts the session it names, and a wake adopts a holder it
+            // finds already running — so a row the budget walked away from that
+            // nobody opens would go undrained for the process's whole life, and a
+            // job cannot finish exiting while anything it wrote is still queued on
+            // its terminal. The budget therefore bounds when the *socket* is bound,
+            // not whether these sessions are rescued. Detached because nobody is
+            // waiting on it: the socket is up, so no RPC caller waits on a slow
+            // holder here — an attach that reaches a row first adopts it itself,
+            // and this pass then finds the reader published.
+            //
+            // **The rescue is serial, so a slow row delays the rows behind it**,
+            // and that is a deliberate trade rather than an oversight. Each row is
+            // bounded — `busyRetryBudget` plus one `adoptionReceiveTimeout`, the
+            // connect that opens it being refused in microseconds rather than
+            // queued — so the tail is delayed, never stranded. A `Task` per row
+            // would trade that head-of-line cost for a worse one: the client's I/O
+            // is deliberately blocking, so N rows in flight park N cooperative-pool
+            // threads.
+            //
+            // What that starves is not the socket. `SocketServer` runs on its own
+            // `MultiThreadedEventLoopGroup`, so accept, read and write keep their
+            // dedicated threads whatever the cooperative pool is doing. It is every
+            // RPC *handler* that stops: `SocketRPCHandler.channelRead` hands each
+            // request into a `Task { … }` on the cooperative pool, so a starved
+            // pool leaves a daemon that accepts connections, reads their bytes and
+            // produces no response — which is the same "answers nobody" failure the
+            // startup budget exists to prevent, reached from the other side. Serial
+            // parks at most one thread. `adoptRemaining` logs its start and its
+            // completion, so a stalled tail is visible as a rescue that began and
+            // never finished.
+            if let holderRegistry, !deferredHolderAdoptions.isEmpty {
+                let remaining = deferredHolderAdoptions
+                Task { await holderRegistry.adoptRemaining(remaining) }
+            }
+
+            // 10. Start HTTP server
+            let http = HTTPServer(router: rpcRouter)
+            self.httpServer = http
+            try await http.start()
         } catch {
-            // The sidecar is already bound (step 8h), and a failed start ends
-            // in `main.swift`'s `exit(1)` without `stop()`. Left running, it
-            // would leave a vend.sock nobody serves for the next daemon to
-            // find; stopping it removes the file, but only while it is still
-            // the one this daemon bound.
             await fdVendingServer.stop()
             throw error
         }
-
-        // Pending provider replacements recover only after the socket is live:
-        // Codex readiness arrives through the SessionStart hook RPC, so a
-        // pre-bind recovery would always time out despite a healthy process.
-        // The durable row remains Codex throughout the pass. It is NOT run
-        // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
-        // for that hook, serially, so awaiting it would hold every later boot
-        // step (the HTTP server among them) behind N × 15 s. The maintenance
-        // task in step 11a-gc runs the same pass immediately after boot, off the
-        // critical path, and then hourly.
-
-        // 9a. Finish the holder sessions the startup budget did not reach.
-        //
-        // Past startup a session is adopted only when something asks for it —
-        // an attach adopts the session it names, and a wake adopts a holder it
-        // finds already running — so a row the budget walked away from that
-        // nobody opens would go undrained for the process's whole life, and a
-        // job cannot finish exiting while anything it wrote is still queued on
-        // its terminal. The budget therefore bounds when the *socket* is bound,
-        // not whether these sessions are rescued. Detached because nobody is
-        // waiting on it: the socket is up, so no RPC caller waits on a slow
-        // holder here — an attach that reaches a row first adopts it itself,
-        // and this pass then finds the reader published.
-        //
-        // **The rescue is serial, so a slow row delays the rows behind it**,
-        // and that is a deliberate trade rather than an oversight. Each row is
-        // bounded — `busyRetryBudget` plus one `adoptionReceiveTimeout`, the
-        // connect that opens it being refused in microseconds rather than
-        // queued — so the tail is delayed, never stranded. A `Task` per row
-        // would trade that head-of-line cost for a worse one: the client's I/O
-        // is deliberately blocking, so N rows in flight park N cooperative-pool
-        // threads.
-        //
-        // What that starves is not the socket. `SocketServer` runs on its own
-        // `MultiThreadedEventLoopGroup`, so accept, read and write keep their
-        // dedicated threads whatever the cooperative pool is doing. It is every
-        // RPC *handler* that stops: `SocketRPCHandler.channelRead` hands each
-        // request into a `Task { … }` on the cooperative pool, so a starved
-        // pool leaves a daemon that accepts connections, reads their bytes and
-        // produces no response — which is the same "answers nobody" failure the
-        // startup budget exists to prevent, reached from the other side. Serial
-        // parks at most one thread. `adoptRemaining` logs its start and its
-        // completion, so a stalled tail is visible as a rescue that began and
-        // never finished.
-        if let holderRegistry, !deferredHolderAdoptions.isEmpty {
-            let remaining = deferredHolderAdoptions
-            Task { await holderRegistry.adoptRemaining(remaining) }
-        }
-
-        // 10. Start HTTP server
-        let http = HTTPServer(router: rpcRouter)
-        self.httpServer = http
-        try await http.start()
 
         // 11b. Delivery acknowledgement (design §12): wire the verifier and
         // replay the observations the last daemon's timers died owing.
