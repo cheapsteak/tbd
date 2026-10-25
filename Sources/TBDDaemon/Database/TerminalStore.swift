@@ -76,6 +76,10 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var start_held_reason: String?
     var start_held_at: Date?
 
+    /// JSON-encoded `ClaudeSpawnExtras` — see `Terminal.claudeSpawnExtras`.
+    /// NULL when nothing was passed and on rows written before the column.
+    var claude_spawn_extras: String?
+
     init(from terminal: Terminal) {
         self.id = terminal.id.uuidString
         self.worktreeID = terminal.worktreeID.uuidString
@@ -111,6 +115,7 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.server_name = terminal.serverName
         self.start_held_reason = terminal.startHeldReason
         self.start_held_at = terminal.startHeldAt
+        self.claude_spawn_extras = ClaudeSpawnExtrasColumn.encode(terminal.claudeSpawnExtras)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) rather than
@@ -163,6 +168,8 @@ struct TerminalRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         model.serverName = server_name
         model.startHeldReason = start_held_reason
         model.startHeldAt = start_held_at
+        model.claudeSpawnExtras = ClaudeSpawnExtrasColumn.decode(
+            claude_spawn_extras, table: Self.databaseTableName, rowID: id)
         return model
     }
 }
@@ -192,6 +199,63 @@ enum FactColumnJSON {
         guard let json else { return expected == nil }
         guard let expected else { return false }
         return decode(T.self, from: json) == expected
+    }
+}
+
+/// JSON codec for the three columns that hold `ClaudeSpawnExtras`:
+/// `terminal.claude_spawn_extras`, `terminal_history.claudeSpawnExtras` (one
+/// object each) and `worktree.archivedClaudeSpawnExtras` (a map from Claude
+/// session id to an object).
+///
+/// NULL means nothing stored. A value that does not decode also reads as
+/// nothing stored — a bad value must never block a start or drop the row —
+/// but unlike `FactColumnJSON` it says so: a warning naming the table and row,
+/// since losing these silently would quietly start a session without the
+/// plugin folders its starter asked for.
+enum ClaudeSpawnExtrasColumn {
+    private static let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overlay")
+
+    static func encode(_ extras: ClaudeSpawnExtras?) -> String? {
+        guard let extras else { return nil }
+        return encodeJSON(extras)
+    }
+
+    /// An empty map stores NULL, so "no archived session carried any values"
+    /// has the one spelling a pre-column row already has.
+    static func encodeMap(_ map: [String: ClaudeSpawnExtras]?) -> String? {
+        guard let map, !map.isEmpty else { return nil }
+        return encodeJSON(map)
+    }
+
+    static func decode(_ json: String?, table: String, rowID: String) -> ClaudeSpawnExtras? {
+        decodeJSON(ClaudeSpawnExtras.self, from: json, table: table, rowID: rowID)
+    }
+
+    static func decodeMap(_ json: String?, table: String, rowID: String) -> [String: ClaudeSpawnExtras]? {
+        decodeJSON([String: ClaudeSpawnExtras].self, from: json, table: table, rowID: rowID)
+    }
+
+    private static func encodeJSON<T: Encodable>(_ value: T) -> String? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        do {
+            return String(data: try encoder.encode(value), encoding: .utf8)
+        } catch {
+            logger.warning("Could not encode Claude spawn extras: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    private static func decodeJSON<T: Decodable>(
+        _ type: T.Type, from json: String?, table: String, rowID: String
+    ) -> T? {
+        guard let json else { return nil }
+        do {
+            return try JSONDecoder().decode(type, from: Data(json.utf8))
+        } catch {
+            logger.warning("\(table, privacy: .public) row \(rowID, privacy: .public): stored Claude spawn extras do not decode, reading as none: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 }
 

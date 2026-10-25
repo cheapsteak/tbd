@@ -84,7 +84,11 @@ import Foundation
             prObservation: PRObservation(
                 outcome: .undetermined(cause: "network unreachable"),
                 observedAt: Date(timeIntervalSince1970: 1_700_000_400)),
-            remoteParentAssigned: true
+            remoteParentAssigned: true,
+            archivedClaudeSpawnExtras: [
+                "sess-a": ClaudeSpawnExtras(
+                    claudeSettingsOverlay: "{\"model\":\"x\"}", pluginDirs: ["/tmp/plug"]),
+            ]
         )
         let decoded = try JSONDecoder().decode(Worktree.self, from: JSONEncoder().encode(wt))
         #expect(decoded == wt)

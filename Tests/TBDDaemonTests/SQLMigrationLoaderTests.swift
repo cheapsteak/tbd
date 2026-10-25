@@ -528,6 +528,7 @@ import Testing
             "20261021120100_config_agent_background",
             "20261021120200_terminal_start_held",
             "20261024184718_drop_watch_desk_judge_lease",
+            "20261025003424_claude_spawn_extras",
         ]
         let found = try SQLMigrationLoader.bundled.get()
         #expect(found.files.map(\.identifier) == expected)
