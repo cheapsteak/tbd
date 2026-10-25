@@ -43,7 +43,11 @@ REST equivalents (all need `-H "X-GitHub-Api-Version: 2026-03-10"`):
 - `POST /repos/{owner}/{repo}/stacks/{number}/add` — append to the top
 - `POST /repos/{owner}/{repo}/stacks/{number}/unstack` — remove unmerged PRs; the stack dissolves when empty
 
+Without the extension, `gh api` makes the same calls and fills in `{owner}` and `{repo}` from the current checkout. Create a stack from PR numbers, bottom first, then read one back by number:
+
 ```
+gh api -X POST -H "X-GitHub-Api-Version: 2026-03-10" repos/{owner}/{repo}/stacks \
+  --input - <<< '{"pull_requests":[101,102,103]}'
 gh api -H "X-GitHub-Api-Version: 2026-03-10" repos/{owner}/{repo}/stacks/826
 ```
 
@@ -74,6 +78,8 @@ gh stack merge <stackNumber|prNumber> --squash --yes
 ```
 
 Atomic and all-or-nothing up to the PR you name: if any member cannot merge, none do. This repo is squash-only, so always `--squash`. If the base has a merge queue, the stack is queued instead of merged directly. `delete_branch_on_merge` is on, so merged branches disappear on their own.
+
+Never merge a stack PR by PR: each merge lands in that PR's base branch, so the upper PRs reach `main` inside the bottom PR's squash commit, under its title.
 
 ## Gotchas
 
