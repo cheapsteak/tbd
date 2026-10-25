@@ -108,9 +108,8 @@ public enum TerminalScreenProjection {
     /// The early return is **not** a second answer. With no lines the tail cut
     /// drops every enumerated row, so `droppedFromFront` equals the whole count
     /// and `viewportStart` reduces to `-rows` whatever the buffer holds.
-    /// `TerminalScreenProjectionParityTests` compares this against the full
-    /// walk at depth `0` over every fixture, and counts row accesses to prove
-    /// the walk did not run.
+    /// `TerminalScreenProjectionTests` checks this against a full walk of the
+    /// same terminal, and counts row accesses to prove the walk did not run.
     ///
     /// The line walk, when there is one, enumerates from `totalLinesTrimmed` —
     /// the absolute index of the oldest line still held — until
