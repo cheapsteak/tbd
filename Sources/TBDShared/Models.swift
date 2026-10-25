@@ -2699,6 +2699,10 @@ public enum SystemKind: String, Codable, Sendable, Equatable, Hashable {
     case skillBody
     case taskNotification
     case nestedMemory
+    /// The summary Claude Code writes into the user role when it compacts a
+    /// conversation (`/compact` or auto-compact), marked `isCompactSummary` on
+    /// its JSONL line. System-generated, so it is never the user's prompt.
+    case compactSummary
     case other
 
     /// Lenient decode: an unrecognized raw value degrades to `.other` rather

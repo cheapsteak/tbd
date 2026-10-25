@@ -67,6 +67,23 @@ struct ClaudeSessionScannerTests {
         #expect(summary.lastUserMessage == "real question")
     }
 
+    /// A compacted conversation's summary is written into the user role and
+    /// flagged `isCompactSummary`, but nobody typed it: it must never become the
+    /// subtitle. Covers both ends, since a session continued after a compaction
+    /// can open with the summary.
+    @Test("compaction summary is not treated as a user message")
+    func compactSummaryIsNotASubtitle() throws {
+        let compact = #"{"type":"user","uuid":"c1","message":{"role":"user","content":"This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. Primary Request and Intent: refactor the acme widget loader."},"isVisibleInTranscriptOnly":true,"isCompactSummary":true}"#
+        let lines = [
+            compact,
+            #"{"type":"user","uuid":"u1","message":{"role":"user","content":"real question"}}"#,
+            compact.replacingOccurrences(of: #""uuid":"c1""#, with: #""uuid":"c2""#),
+        ]
+        let summary = try scanOneSession(named: "compact-summary", lines: lines)
+        #expect(summary.firstUserMessage == "real question")
+        #expect(summary.lastUserMessage == "real question")
+    }
+
     /// Peer traffic is the other thing that only ever arrives queued, and it
     /// matches no system prefix, so it classifies as a real prompt and DOES
     /// become the subtitle. Pinned deliberately: it is a message this session

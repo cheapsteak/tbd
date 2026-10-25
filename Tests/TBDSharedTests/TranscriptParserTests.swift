@@ -1396,6 +1396,85 @@ struct TranscriptParserTests {
                 "a tail window containing peer rows must equal the bottom of the full parse")
     }
 
+    // MARK: - compaction summary
+
+    /// A summary long enough to cross both truncation caps, so a test can tell
+    /// an untruncated body from a capped one.
+    private var longCompactSummary: String {
+        let header = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:"
+        let sections = (1...30).map { "\($0). Section \($0) of the acme widget loader refactor: " + String(repeating: "detail ", count: 10) }
+        return ([header] + sections).joined(separator: "\n")
+    }
+
+    /// The `type:"user"` line Claude Code writes when it compacts a
+    /// conversation, flagged `isCompactSummary`.
+    private func compactSummaryLine(uuid: String, content: Any) throws -> String {
+        let message: [String: Any] = ["role": "user", "content": content]
+        let row: [String: Any] = [
+            "parentUuid": "p1",
+            "isSidechain": false,
+            "type": "user",
+            "message": message,
+            "isVisibleInTranscriptOnly": true,
+            "isCompactSummary": true,
+            "uuid": uuid,
+            "timestamp": "2026-10-25T10:00:00.000Z",
+        ]
+        let data = try JSONSerialization.data(withJSONObject: row)
+        return try #require(String(bytes: data, encoding: .utf8))
+    }
+
+    @Test func compact_summary_emits_one_untruncated_system_row_not_a_user_prompt() throws {
+        let summary = longCompactSummary
+        #expect(summary.count > TranscriptParser.bodyCharCap, "the fixture must cross the char cap")
+        let compact = try compactSummaryLine(uuid: "c1", content: summary)
+        let lines = [
+            #"{"type":"user","uuid":"u0","timestamp":"2026-10-25T09:59:00.000Z","message":{"role":"user","content":"Please refactor the loader."}}"#,
+            compact,
+            #"{"type":"assistant","uuid":"a1","timestamp":"2026-10-25T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Continuing."}]}}"#,
+        ].joined(separator: "\n")
+        let tmp = try writeTempJSONL(lines)
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(items.count == 3)
+        #expect(userPrompts(items).map { $0.text } == ["Please refactor the loader."],
+                "the summary must never render as something the user typed")
+
+        let rows = reminders(items)
+        #expect(rows.count == 1)
+        let row = try #require(rows.first)
+        #expect(row.id == "c1")
+        #expect(row.kind == .compactSummary)
+        #expect(row.text == summary, "the summary must reach the overlay whole")
+        #expect(row.truncatedTo == nil)
+        #expect(row.source == nil)
+    }
+
+    @Test func compact_summary_as_text_blocks_emits_the_same_row() throws {
+        let summary = longCompactSummary
+        let blocks: [[String: Any]] = [["type": "text", "text": summary]]
+        let tmp = try writeTempJSONL(try compactSummaryLine(uuid: "c1", content: blocks))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        let items = TranscriptParser.parse(filePath: tmp)
+        #expect(userPrompts(items).isEmpty)
+        let row = try #require(reminders(items).first)
+        #expect(row.kind == .compactSummary)
+        #expect(row.text == summary)
+        #expect(row.truncatedTo == nil)
+    }
+
+    /// The overlay may re-read a row's body from disk; it must get the same
+    /// whole summary the parse produced.
+    @Test func compact_summary_full_body_is_recoverable_by_line_uuid() throws {
+        let summary = longCompactSummary
+        let tmp = try writeTempJSONL(try compactSummaryLine(uuid: "c1", content: summary))
+        defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+        #expect(TranscriptParser.lookupFullBody(filePath: tmp, itemID: "c1") == summary)
+    }
+
     // MARK: - helpers
 
     private func writeTempJSONL(_ contents: String) throws -> String {
