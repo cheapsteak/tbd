@@ -28,10 +28,13 @@ struct HolderAttachOnDemandAdoptionLiveTests {
         // The spawner's handshake connection goes, and nothing takes its
         // place: no adoption ever runs for this session before the attach.
         await process.client.close()
+        // A base of its own, so the attach's generation shows minting
+        // continues from the base rather than from zero.
         let registry = HolderRegistry(
             owner: process.owner,
             environment: HolderProcessFixture.environment(home: process.home),
-            listTerminals: { [] })
+            listTerminals: { [] },
+            attachGenerationBase: 7_000)
         defer { Task.detached { await registry.releaseAll() } }
         let harness = try await SidecarRouter.make(
             terminalID: process.sessionID, registry: registry)
@@ -52,7 +55,7 @@ struct HolderAttachOnDemandAdoptionLiveTests {
             """)
         let result = try response.decodeResult(AttachRequestResult.self)
         #expect(result.status == "pending")
-        #expect(result.generation != nil)
+        #expect(result.generation == 7_001)
         let (vendedFD, header) = try SidecarTestSupport.receiveVend(from: harness.appSide)
         defer { Darwin.close(vendedFD) }
         #expect(header.attachID == attachID)

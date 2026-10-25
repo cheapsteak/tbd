@@ -251,6 +251,18 @@ actor HolderRegistry {
     /// indefinitely.
     static let defaultAttachAdoptionBudget: Duration = .seconds(5)
 
+    /// Every registry's first attach generation lies above a base below this:
+    /// 2^48, far enough under `UInt64.max` that the count never wraps, and
+    /// under 2^53, so a generation stays exact even through a `Double`.
+    static let attachGenerationBaseLimit: UInt64 = 1 << 48
+
+    /// A fresh base for one registry's attach generations, drawn at random
+    /// below `attachGenerationBaseLimit`. Why it is random rather than zero is
+    /// on `lastAttachGeneration`.
+    static func randomAttachGenerationBase() -> UInt64 {
+        UInt64.random(in: 0..<attachGenerationBaseLimit)
+    }
+
     /// This installation's token, compared against every holder's before it is
     /// adopted.
     let owner: HolderOwnerToken
@@ -417,7 +429,24 @@ actor HolderRegistry {
     /// Mints attach generations. Monotonic for the daemon's life, so an ack or
     /// a cancel naming an older attach can always be told from one naming the
     /// current attach.
-    private var lastAttachGeneration: UInt64 = 0
+    ///
+    /// **It starts at a random base, not at zero, so generations do not repeat
+    /// across daemon processes.** An `attach.ready` or a `pane.detach` is
+    /// addressed by generation alone, and one sent to a daemon can be
+    /// delivered to its successor — a detach in flight across a restart, or an
+    /// app resending a handback after it reconnects. Were every daemon to
+    /// count from zero, that message could name a claim the successor minted
+    /// with the same number and hand it back while a panel is still reading
+    /// it: two readers on one pty. A base drawn from 48 bits makes such a
+    /// collision vanishingly unlikely, and leaves the count far from both
+    /// `UInt64`'s ceiling and the 2^53 past which a `Double` stops holding it
+    /// exactly. See `randomAttachGenerationBase()`.
+    private var lastAttachGeneration: UInt64
+
+    /// The most recent attach generation minted, or the registry's base when
+    /// none has been. Test-facing: it is how a test sees the base without a
+    /// holder to attach to.
+    var lastMintedAttachGeneration: UInt64 { lastAttachGeneration }
 
     private var slots: [UUID: Slot] = [:]
 
@@ -644,6 +673,7 @@ actor HolderRegistry {
         adoptionReceiveTimeout: Duration = HolderRegistry.defaultAdoptionReceiveTimeout,
         exitConfirmationBudget: Duration = HolderRegistry.defaultExitConfirmationBudget,
         attachAdoptionBudget: Duration = HolderRegistry.defaultAttachAdoptionBudget,
+        attachGenerationBase: UInt64 = HolderRegistry.randomAttachGenerationBase(),
         programStatus: ProgramStatusStore? = nil,
         clock: any Clock<Duration> = ContinuousClock()
     ) {
@@ -659,6 +689,7 @@ actor HolderRegistry {
         self.adoptionReceiveTimeout = adoptionReceiveTimeout
         self.exitConfirmationBudget = exitConfirmationBudget
         self.attachAdoptionBudget = attachAdoptionBudget
+        self.lastAttachGeneration = attachGenerationBase
         self.clock = clock
     }
 
