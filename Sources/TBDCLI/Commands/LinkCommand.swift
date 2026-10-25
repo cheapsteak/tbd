@@ -70,7 +70,8 @@ struct LinkCommand: AsyncParsableCommand {
     /// bare form deliberately never reads `TBD_TERMINAL_ID`: only
     /// `--this-terminal` opts into a terminal anchor.
     ///
-    /// A worktree argument is resolved first, so its error wins. The first
+    /// A worktree argument is resolved before any terminal lookup (after the
+    /// flags' own format checks), so its error wins. The first
     /// terminal list (for `--terminal` and `--this-terminal` alike) is scoped
     /// to the worktree argument, or, with none, to a valid `TBD_WORKTREE_ID`,
     /// which is only a scope hint; with neither it is fleet-wide. A scoped miss
@@ -131,7 +132,7 @@ struct LinkCommand: AsyncParsableCommand {
             throw CLIError.invalidArgument("No terminal found with ID: \(terminalID.uuidString)")
         }
         if let expected, let typed = worktreeArg, expected != match.worktreeID {
-            let typedLabel = typed.caseInsensitiveCompare(expected.uuidString) == .orderedSame
+            let typedLabel = UUID(uuidString: typed) != nil
                 ? expected.uuidString
                 : "\(typed) (\(expected.uuidString))"
             throw CLIError.invalidArgument(

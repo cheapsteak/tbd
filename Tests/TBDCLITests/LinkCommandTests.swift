@@ -230,6 +230,29 @@ struct LinkCommandTests {
         #expect(scopes == [wtA, nil])
     }
 
+    @Test func malformedWorktreeEnvIsIgnoredAsScope() throws {
+        var scopes: [UUID?] = []
+        let t = try target(
+            terminal: termA.uuidString, env: ["TBD_WORKTREE_ID": "garbage"],
+            terminals: [term(termA, in: wtB)], scopes: &scopes
+        )
+        #expect(t.worktree == wtB)
+        #expect(t.terminal == termA)
+        #expect(scopes == [nil])
+    }
+
+    @Test func typedWorktreeWithTerminalNowhereRefusesAfterFleetWideList() {
+        var scopes: [UUID?] = []
+        let msg = refusal {
+            _ = try target(
+                worktree: "a", terminal: termA.uuidString,
+                terminals: [term(UUID(), in: wtB)], scopes: &scopes
+            )
+        }
+        #expect(msg == "No terminal found with ID: \(termA.uuidString)")
+        #expect(scopes == [wtA, nil])
+    }
+
     @Test func terminalFlagParses() throws {
         let cmd = try LinkCommand.parse(["--terminal", termA.uuidString, "--https"])
         #expect(cmd.terminal == termA.uuidString)
