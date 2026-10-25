@@ -31,7 +31,10 @@ fileprivate struct NotificationSweepFixture: Sendable {
             remoteTranscriptsEnvironment: environment,
             reposBase: TBDConstants.reposDir(environment: environment),
             sessionsBase: home.appendingPathComponent("se", isDirectory: true),
-            devServersBase: home.appendingPathComponent("d", isDirectory: true))
+            devServersBase: home.appendingPathComponent("d", isDirectory: true),
+            retainedTranscriptsBase: TBDConstants.retainedTranscriptsDir(environment: environment),
+            scratchSpacesBase: TBDConstants.scratchDir(environment: environment),
+            worktreesBase: TBDConstants.worktreesDir(environment: environment))
     }
 
     func makeWorktree(_ db: TBDDatabase, name: String) async throws -> Worktree {
@@ -394,31 +397,18 @@ struct NotificationRetentionTests {
     }
 }
 
-// Nested under TBDHomeSerialized: a sweep that gets past the `lsof` gate runs
-// every leg, and the deletion-queue and scratchpad legs drain the scratch
-// worktree pool at `TBDConstants.scratchDir`, which has no seam on `OrphanGC`
-// and resolves from the process-global TBD_HOME. With the shared home, this
-// sweep's fixed 2027 clock would read any other suite's queued scratch entry
-// as long past grace and reclaim it mid-run. A temporary TBD_HOME of its own
-// keeps that pool empty, so the sweep touches nothing it did not create and
-// its total is exactly the notification leg's. See TBDHomeSerializedSuites.swift.
-extension TBDHomeSerialized {
-
 /// The notification leg on a sweep that gets past the `lsof` gate: it prunes
-/// there too, and its count is the sweep's whole total.
+/// there too, and its count is the sweep's whole total. That sweep runs every
+/// leg, and the fixture hands each one a base under this test's own root —
+/// the scratch-space pool among them, whose queue is drained whatever the clock
+/// says — so it reads nothing under the process-global `TBD_HOME` and touches
+/// nothing it did not create.
 @Suite("OrphanGC prunes notifications on a full sweep")
 struct NotificationRetentionFullSweepTests {
     @Test func aHealthySweepPrunesAndCountsNotifications() async throws {
         let home = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdgcnf"), isDirectory: true)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
-        // Restores the displaced TBD_HOME rather than unsetting it:
-        // `scripts/test.sh` exports one for the whole run, and `unsetenv` would
-        // hand every concurrently running suite the developer's real `~/tbd`.
-        let prior = setTBDHome(home.path)
-        defer {
-            restoreTBDHome(prior)
-            try? FileManager.default.removeItem(at: home)
-        }
+        defer { try? FileManager.default.removeItem(at: home) }
         let fixture = NotificationSweepFixture(home: home)
         let db = try TBDDatabase(inMemory: true)
         let wt = try await fixture.makeWorktree(db, name: "wt-healthy")
@@ -431,6 +421,4 @@ struct NotificationRetentionFullSweepTests {
         #expect(result.planned.contains("REAP notifications 1"))
         #expect(result.reaped == 1, "planned: \(result.planned)")
     }
-}
-
 }
