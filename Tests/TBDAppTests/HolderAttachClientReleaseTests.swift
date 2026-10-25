@@ -161,11 +161,15 @@ struct HolderAttachClientReleaseTests {
 
         var thrown: (any Error)?
         do {
-            _ = try await client.attach(worktreeID: worktreeID, paneID: "", terminalID: terminalID)
+            _ = try await client.attach(
+                worktreeID: worktreeID, paneID: "", terminalID: terminalID, attachSeq: 7)
         } catch {
             thrown = error
         }
         #expect(thrown != nil, "the attach was expected to fail: no descriptor can arrive")
+        let requests = daemon.params(RPCMethod.attachRequest, as: AttachRequestParams.self)
+        #expect(requests.map(\.attachSeq) == [7 as UInt64?],
+                "the request must carry the seq the panel's hold minted")
 
         // Awaited inside `attach` before it rethrows, so it is all here now.
         #expect(daemon.methods == [
@@ -206,6 +210,9 @@ struct HolderAttachClientReleaseTests {
         } catch {
             thrown = error
         }
+        // No seq given: the default sends none, so no sweep can take it back.
+        let requests = daemon.params(RPCMethod.attachRequest, as: AttachRequestParams.self)
+        #expect(requests.map(\.attachSeq) == [nil as UInt64?], "\(requests.map(\.attachSeq))")
         let undelivered = try #require(
             thrown as? HolderAttachUndelivered,
             "the release's resend must ride the throw, got \(String(describing: thrown))")

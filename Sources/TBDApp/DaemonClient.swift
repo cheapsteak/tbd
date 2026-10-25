@@ -1681,13 +1681,13 @@ actor DaemonClient {
     /// default) is the control-mode caller, which names its pane.
     func attachRequest(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil
+        terminalID: UUID? = nil, attachSeq: UInt64? = nil
     ) async throws -> AttachRequestResult {
         try await callAsync(
             method: RPCMethod.attachRequest,
             params: AttachRequestParams(
                 worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID,
-                terminalID: terminalID),
+                terminalID: terminalID, attachSeq: attachSeq),
             resultType: AttachRequestResult.self
         )
     }

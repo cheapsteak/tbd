@@ -131,7 +131,7 @@ struct TerminalHolderTransportGateTests {
         }
 
         func attach(
-            worktreeID: UUID, paneID: String, terminalID: UUID
+            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
         ) async throws -> HolderAttachment {
             lock.withLock { attachCallCount += 1 }
             return try attachOutcome()

@@ -81,7 +81,7 @@ struct TerminalLatencyPanelTests {
         var readyGate: ReadyGate?
 
         func attach(
-            worktreeID: UUID, paneID: String, terminalID: UUID
+            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
         ) async throws -> HolderAttachment { attachment }
 
         func ready(

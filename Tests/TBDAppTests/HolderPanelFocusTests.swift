@@ -42,7 +42,7 @@ struct HolderPanelFocusTests {
         init(attachment: HolderAttachment) { self.attachment = attachment }
 
         func attach(
-            worktreeID: UUID, paneID: String, terminalID: UUID
+            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
         ) async throws -> HolderAttachment { attachment }
 
         func ready(

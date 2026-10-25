@@ -51,7 +51,14 @@ enum HolderAttachError: Error, LocalizedError {
 /// once, from its own values, and the resend paths below read them back off
 /// the client.
 protocol HolderAttaching: Sendable {
-    func attach(worktreeID: UUID, paneID: String, terminalID: UUID) async throws -> HolderAttachment
+    /// - Parameter attachSeq: This attach's number in the app's count, from
+    ///   `HolderHandbackLedger.beginHold`; sent on `attach.request` so the
+    ///   daemon's claim sweep can tell an attach the app numbered after a
+    ///   sweep from one it numbered before. 0 sends none, and a claim without
+    ///   one is never swept.
+    func attach(
+        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
+    ) async throws -> HolderAttachment
     func ready(
         worktreeID: UUID, paneID: String, terminalID: UUID, generation: UInt64
     ) async throws
@@ -291,7 +298,7 @@ struct HolderHandbackRequest: Sendable {
 /// of its release when a first attempt of that release never reached the
 /// daemon. The panel records `releaseResend` with its handback ledger, so it —
 /// out of retries — or a successor waits for the claim to clear before giving
-/// up.
+/// up, and so the attempt's hold lasts until the release has ended.
 struct HolderAttachUndelivered: Error, LocalizedError {
     let cause: any Error
     let releaseResend: Task<Void, Never>
@@ -326,8 +333,12 @@ struct HolderAttachClient: HolderAttaching {
     /// waiter is registered SYNCHRONOUSLY before the RPC is issued, so a vend
     /// that comes back faster than this function resumes still has somewhere to
     /// land. `expectFD` is not `async` precisely so that ordering is available.
+    ///
+    /// `attachSeq` defaults to 0, which sends none: the panel always passes
+    /// the seq its hold minted, and a caller with no hold has nothing a sweep
+    /// should be allowed to take back.
     func attach(
-        worktreeID: UUID, paneID: String, terminalID: UUID
+        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64 = 0
     ) async throws -> HolderAttachment {
         // Fresh nonce per attach: the daemon echoes it in the vend header, so a
         // superseded attach's stale fd can never be delivered to this one.
@@ -345,7 +356,8 @@ struct HolderAttachClient: HolderAttaching {
             // tmux coordinate on it — `terminalID` is what names the session.
             result = try await daemonClient.attachRequest(
                 worktreeID: worktreeID, paneID: paneID, windowID: "",
-                attachID: attachID, terminalID: terminalID)
+                attachID: attachID, terminalID: terminalID,
+                attachSeq: attachSeq == 0 ? nil : attachSeq)
         } catch {
             promise.cancel()
             throw error

@@ -15,6 +15,7 @@ import Testing
 final class ScriptedHolderDaemon: HolderAttaching, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [String] = []
+    private var attachSeqLog: [UInt64] = []
     private var attachCount = 0
     private var readyCount = 0
     private var detachCount = 0
@@ -42,14 +43,17 @@ final class ScriptedHolderDaemon: HolderAttaching, @unchecked Sendable {
 
     var events: [String] { lock.withLock { log } }
     var attaches: Int { lock.withLock { attachCount } }
+    /// The `attachSeq` each `attach` call carried, in call order.
+    var attachSeqs: [UInt64] { lock.withLock { attachSeqLog } }
     var readies: Int { lock.withLock { readyCount } }
     var detaches: Int { lock.withLock { detachCount } }
 
     func attach(
-        worktreeID: UUID, paneID: String, terminalID: UUID
+        worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
     ) async throws -> HolderAttachment {
         let call = lock.withLock {
             log.append("attach")
+            attachSeqLog.append(attachSeq)
             attachCount += 1
             return attachCount - 1
         }
@@ -95,6 +99,39 @@ actor HolderTestGate {
         opened = true
         for waiter in waiters { waiter.resume() }
         waiters.removeAll()
+    }
+}
+
+/// Values any thread can append and read — what a scripted daemon saw at each
+/// call, say.
+final class HolderTestRecorder<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Value] = []
+
+    var values: [Value] { lock.withLock { storage } }
+
+    func append(_ value: Value) { lock.withLock { storage.append(value) } }
+}
+
+/// What `HolderHandbackLedger.reconcileSnapshot()` returned at one moment, in
+/// a shape that can leave the main actor.
+struct HeldSnapshot: Sendable, Equatable {
+    let held: Set<UUID>
+    let throughSeq: UInt64
+
+    @MainActor
+    init(_ ledger: HolderHandbackLedger) {
+        let snapshot = ledger.reconcileSnapshot()
+        held = Set(snapshot.held)
+        throughSeq = snapshot.throughSeq
+    }
+}
+
+extension HolderHandbackLedger {
+    /// Whether `terminalID` is in the held set a claim sweep would be sent.
+    @MainActor
+    func isHeld(_ terminalID: UUID) -> Bool {
+        reconcileSnapshot().held.contains(terminalID)
     }
 }
 

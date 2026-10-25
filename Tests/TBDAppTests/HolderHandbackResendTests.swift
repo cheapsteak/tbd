@@ -491,4 +491,190 @@ struct HolderHandbackResendTests {
         #expect(successorDaemon.readies == 1, "the claim cleared, so the successor must attach")
         #expect(successorPlacards.value == 0, "a successor that attached must not show the placard")
     }
+
+    // MARK: - The held set
+
+    /// Raised on the main actor, where the waits it records run.
+    @MainActor
+    private final class Flag {
+        var isSet = false
+    }
+
+    /// A terminal leaves the held set only once its handback has ended, so a
+    /// claim sweep acts only on a handback that was truly lost and the orderly
+    /// path keeps its screen. Two shapes: a detach that stalls in transit, and
+    /// one that is lost and resent.
+    @Test("a panel's terminal stays held until its handback has ended, resends and all")
+    func thePanelHoldsUntilItsHandbackEnds() async throws {
+        let session = Session()
+        defer { session.tearDown() }
+        let ledger = session.ledger
+        let terminalID = session.terminalID
+
+        // A detach that stalls: held until it answers.
+        do {
+            let pty = HolderTestPTY()
+            defer { pty.closeFar() }
+            let gate = HolderTestGate()
+            let attachment = pty.attachment(generation: Self.generation)
+            let daemon = ScriptedHolderDaemon(
+                attach: { _ in attachment },
+                detach: { _ in await gate.wait() })
+            let panel = session.panel(clock: EventDrivenTestClock(), client: daemon)
+
+            await panel.coordinator.startHolderClient(terminalView: panel.view)
+            #expect(daemon.events == ["attach", "ready"], "the attach must be live first: \(daemon.events)")
+            #expect(ledger.isHeld(terminalID), "a live attach must be held")
+
+            panel.coordinator.cleanup()
+            try await waitFor("the handback's detach to be in flight", observed: { "\(daemon.events)" }) {
+                daemon.detaches == 1
+            }
+            #expect(ledger.isHeld(terminalID), "the hold ended while the handback's detach was unanswered")
+
+            await gate.open()
+            try await waitFor("the hold to end with the handback", observed: { "\(daemon.events)" }) {
+                await MainActor.run { !ledger.isHeld(terminalID) }
+            }
+        }
+
+        // A detach lost in transit: held until the last resend ends.
+        do {
+            let pty = HolderTestPTY()
+            defer { pty.closeFar() }
+            let clock = EventDrivenTestClock()
+            let attachment = pty.attachment(generation: Self.generation + 1)
+            let daemon = ScriptedHolderDaemon(
+                attach: { _ in attachment },
+                detach: { call in if call < 2 { throw Self.lost } },
+                clock: clock)
+            let panel = session.panel(clock: clock, client: daemon)
+
+            await panel.coordinator.startHolderClient(terminalView: panel.view)
+            #expect(daemon.events == ["attach", "ready"], "the attach must be live first: \(daemon.events)")
+
+            panel.coordinator.cleanup()
+            try await waitFor("the handback's first pass to settle", observed: { "\(daemon.events)" }) {
+                await MainActor.run { !ledger.isInFlight(terminalID: terminalID) }
+            }
+            #expect(daemon.detaches == 1, "\(daemon.events)")
+            #expect(ledger.isHeld(terminalID), "the hold ended with a first pass that left a resend owed")
+
+            try await clock.requireAdvanceWhenArmed(
+                by: HolderAttachRetry.handbackResendDelays[0], timeout: TestDeadlines.saturatedPass)
+            try await waitFor("the first resend", observed: { "\(daemon.events)" }) {
+                daemon.detaches == 2
+            }
+            #expect(ledger.isHeld(terminalID), "the hold ended while the resends were still going")
+
+            try await clock.requireAdvanceWhenArmed(
+                by: HolderAttachRetry.handbackResendDelays[1], timeout: TestDeadlines.saturatedPass)
+            try await waitFor("the hold to end with the last resend", observed: { "\(daemon.events)" }) {
+                await MainActor.run { !ledger.isHeld(terminalID) }
+            }
+            #expect(daemon.detaches == 3, "two lost copies, then the resend that landed: \(daemon.events)")
+        }
+    }
+
+    /// The teardown-during-ack race: `cleanup()` reaches the handback with the
+    /// attach not recorded yet — the ack is still pending — so the handback
+    /// returns early with the reader stopped but not yet closed. That early
+    /// return must keep the hold. Whichever way the ack then goes, the hold
+    /// ends with the hand-back that ack leads to: the abandoned attach's
+    /// release when it fails, the live handback when it succeeds.
+    @Test("a teardown during the ack keeps the hold until the ack's outcome is handed back",
+          arguments: [false, true])
+    func aTeardownDuringTheAckKeepsTheHold(ackSucceeds: Bool) async throws {
+        let session = Session()
+        defer { session.tearDown() }
+        let pty = HolderTestPTY()
+        defer { pty.closeFar() }
+        let ackGate = HolderTestGate()
+        let detachGate = HolderTestGate()
+        let attachment = pty.attachment(generation: Self.generation)
+        let daemon = ScriptedHolderDaemon(
+            attach: { _ in attachment },
+            ready: { call in
+                // Later acks are the abandoned attach's release, answered at once.
+                guard call == 0 else { return }
+                await ackGate.wait()
+                if !ackSucceeds { throw Self.lost }
+            },
+            detach: { _ in await detachGate.wait() })
+        let panel = session.panel(clock: EventDrivenTestClock(), client: daemon)
+        let ledger = session.ledger
+        let terminalID = session.terminalID
+
+        let attaching = Task { @MainActor in
+            await panel.coordinator.startHolderClient(terminalView: panel.view)
+        }
+        try await waitFor("the ack to be in flight", observed: { "\(daemon.events)" }) {
+            daemon.readies == 1
+        }
+        panel.coordinator.cleanup()
+        #expect(ledger.isHeld(terminalID),
+                "the teardown ended the hold of an attach whose ack was still pending")
+
+        await ackGate.open()
+        await attaching.value
+        try await waitFor("the attach to be handed back", observed: { "\(daemon.events)" }) {
+            daemon.detaches == 1
+        }
+        let expected = ackSucceeds
+            ? ["attach", "ready", "detach"]
+            : ["attach", "ready", "ready", "detach"]
+        #expect(daemon.events == expected, "\(daemon.events)")
+        #expect(ledger.isHeld(terminalID), "the hold ended before the hand-back had an answer")
+
+        await detachGate.open()
+        try await waitFor("the hold to end with the hand-back", observed: { "\(daemon.events)" }) {
+            await MainActor.run { !ledger.isHeld(terminalID) }
+        }
+    }
+
+    /// The ledger's own contract: a successor waits for a predecessor's first
+    /// pass, never its resends. The resend carries the hold instead, so the
+    /// terminal stays held after the successor's wait has ended.
+    @Test("a successor's wait ends after the handback's first pass, with the terminal held until the resend ends")
+    func successorsDoNotWaitForResends() async throws {
+        let session = Session()
+        defer { session.tearDown() }
+        let pty = HolderTestPTY()
+        defer { pty.closeFar() }
+        let clock = EventDrivenTestClock()
+        let attachment = pty.attachment(generation: Self.generation)
+        let daemon = ScriptedHolderDaemon(
+            attach: { _ in attachment },
+            detach: { call in if call == 0 { throw Self.lost } },
+            clock: clock)
+        let panel = session.panel(clock: clock, client: daemon)
+        let ledger = session.ledger
+        let terminalID = session.terminalID
+
+        await panel.coordinator.startHolderClient(terminalView: panel.view)
+        panel.coordinator.cleanup()
+        // What a successor does before it asks. Nothing advances the clock
+        // until this has ended, so a wait that took in the resend never would.
+        let waited = Flag()
+        let successorWait = Task { @MainActor in
+            await ledger.awaitSettled(terminalID: terminalID)
+            waited.isSet = true
+        }
+        try await waitFor("a successor's wait to end after the handback's first pass", observed: {
+            "\(daemon.events)"
+        }) {
+            await MainActor.run { waited.isSet }
+        }
+        #expect(daemon.detaches == 1, "\(daemon.events)")
+        #expect(ledger.isResending(terminalID: terminalID))
+        #expect(ledger.isHeld(terminalID), "the hold ended with a first pass that left a resend owed")
+
+        try await clock.requireAdvanceWhenArmed(
+            by: HolderAttachRetry.handbackResendDelays[0], timeout: TestDeadlines.saturatedPass)
+        try await waitFor("the hold to end with the resend", observed: { "\(daemon.events)" }) {
+            await MainActor.run { !ledger.isHeld(terminalID) }
+        }
+        #expect(daemon.detaches == 2, "\(daemon.events)")
+        await successorWait.value
+    }
 }

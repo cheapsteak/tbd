@@ -40,12 +40,35 @@ import Foundation
 /// can land after a successor's last retry; a successor about to give up waits
 /// for them (`awaitResends`) and asks once more.
 ///
+/// The ledger also owns the **held set**: the terminals this app holds a pty
+/// descriptor for, or has an attach in flight for. The daemon's claim sweep
+/// (`holder.reconcileClaims`) takes back this app's claim on any session not
+/// in it, so a terminal must be in it for as long as this process may read
+/// its pty. Each attach attempt is one `HolderHold`:
+///
+/// - It begins (`beginHold`) in the same main-actor step that numbers the
+///   attach, before `attach.request` is sent.
+/// - It ends (`endHold`) only after the attempt's descriptor is closed (or
+///   never arrived) and its handback or release has ended — answered, or
+///   given up after its resends. A hold handed to `registerResend` ends when
+///   that resend does.
+///
+/// A terminal stays held while any of its holds is open, which covers the
+/// overlap of a closing panel and its successor. Only the code that owns a
+/// descriptor begins or ends a hold, never view state: a hold that ends while
+/// a panel may still read puts the daemon on the pty beside it, while one that
+/// ends late only delays a sweep.
+///
 /// Free of `AppState` so it can be unit-tested on its own; `AppState` holds
 /// the one instance the coordinators share.
 @MainActor
 final class HolderHandbackLedger {
     private var inFlight: [UUID: Task<Void, Never>] = [:]
     private var resends: [UUID: [Task<Void, Never>]] = [:]
+    /// Every open hold. A terminal is held while any hold names it.
+    private var holds: Set<HolderHold> = []
+    /// The highest `attachSeq` minted so far; 0 before the first.
+    private var lastAttachSeq: UInt64 = 0
     /// How many callers are parked in `awaitResends` right now. For tests: it
     /// is how one observes a successor waiting on a resend rather than racing
     /// it.
@@ -53,13 +76,52 @@ final class HolderHandbackLedger {
 
     init() {}
 
+    /// Numbers the next attach for `terminalID` and holds the terminal under
+    /// it, in one step. The first seq is 1.
+    ///
+    /// Call it immediately before sending the `attach.request` the seq goes
+    /// out on. A sweep built before this call has a `throughSeq` below the new
+    /// seq, so it cannot take back this attach's claim, whichever of the two
+    /// RPCs the daemon receives first; one built after it sees the terminal
+    /// held.
+    func beginHold(terminalID: UUID) -> HolderHold {
+        lastAttachSeq += 1
+        let hold = HolderHold(terminalID: terminalID, attachSeq: lastAttachSeq)
+        holds.insert(hold)
+        return hold
+    }
+
+    /// Ends `hold`. Idempotent; the terminal stays held while another of its
+    /// holds is open.
+    ///
+    /// Call it only once the hold's descriptor is closed, or never arrived,
+    /// and its handback or release has ended.
+    func endHold(_ hold: HolderHold) {
+        holds.remove(hold)
+    }
+
+    /// What a claim sweep sends: the distinct terminals with an open hold, and
+    /// the highest seq minted so far (0 before any). One main-actor step, so
+    /// every attach numbered at or below `throughSeq` whose attempt has not
+    /// ended is in `held`.
+    func reconcileSnapshot() -> (held: [UUID], throughSeq: UInt64) {
+        (Array(Set(holds.map(\.terminalID))), lastAttachSeq)
+    }
+
     /// Records `task`, a background resend of a handback or release for
     /// `terminalID`, until it finishes. Bounded by the resend's own schedule.
-    func registerResend(terminalID: UUID, task: Task<Void, Never>) {
+    ///
+    /// - Parameter endingHold: The hold of the attach this resend hands back,
+    ///   ended when the resend finishes, whatever its outcome. Until then the
+    ///   attempt has not ended, so its terminal stays held.
+    func registerResend(
+        terminalID: UUID, task: Task<Void, Never>, endingHold: HolderHold? = nil
+    ) {
         resends[terminalID, default: []].append(task)
         Task { @MainActor [weak self] in
             await task.value
             self?.dropResend(terminalID: terminalID, task: task)
+            if let endingHold { self?.endHold(endingHold) }
         }
     }
 
@@ -168,6 +230,15 @@ final class HolderHandbackLedger {
         }
         return waited
     }
+}
+
+/// One attach attempt's place in the held set: the terminal it attaches, and
+/// the seq its `attach.request` carries. Minted by
+/// `HolderHandbackLedger.beginHold`, and ended by whichever code ends up
+/// owning the attempt's descriptor.
+struct HolderHold: Hashable, Sendable {
+    let terminalID: UUID
+    let attachSeq: UInt64
 }
 
 /// A continuation resumed exactly once, by whichever of several racers gets
