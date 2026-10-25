@@ -4496,17 +4496,17 @@ extension RPCRouter {
         // **An explicit `--verify` is the only thing that arms an observation**,
         // here as on tmux. Arming on the sender's behalf — giving the daemon's
         // own rails, the limit resume and the queued prompt, an observation
-        // they did not ask for — is a separate change, and one this transport
-        // cannot make on its own: the rails that would benefit do not pass
-        // through this handler at all.
-        // `LimitResumeActuator`'s holder path writes to `HolderInjectionCourier`
-        // itself, and `sendQueuedPromptVerbatim` — the one rail that does route
-        // through here — sends `.suppressed` so the operator's words arrive
-        // byte-identically, and an envelope-less send is one the observation
-        // structurally cannot find (`DeliveryVerifier.envelopeAppears` searches
-        // the transcript for this row's dispatch id and nothing else). Arming
-        // for a rail therefore begins with routing that rail through this
-        // handler with its envelope attached, not with a term here.
+        // they did not ask for — is a separate change, and one a term in this
+        // gate cannot make, because neither rail reaches it with an envelope.
+        // `LimitResumeActuator`'s holder path bypasses this handler entirely
+        // and writes to `HolderInjectionCourier` itself.
+        // `sendQueuedPromptVerbatim` does route through here, but it sends
+        // `.suppressed` so the operator's words arrive byte-identically, and an
+        // envelope-less send is one the observation structurally cannot find
+        // (`DeliveryVerifier.envelopeAppears` searches the transcript for this
+        // row's dispatch id and nothing else). Arming for a rail therefore
+        // begins with routing that rail through this handler with its envelope
+        // attached, not with a term here.
         //
         // The three checks below exist to keep a caller that asked for evidence
         // from being handed a silence that reads like confirmation, so they

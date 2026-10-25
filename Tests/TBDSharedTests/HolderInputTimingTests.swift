@@ -49,9 +49,11 @@ struct HolderInputTimingTests {
         #expect(
             HolderInputTiming.screenPullBound < HolderInputTiming.injectionAckDeadline,
             """
-            a `tbd terminal send` to an open tab pays the pull's \
-            \(HolderInputTiming.screenPullBound) and then, in the worst case, the ack's \
-            \(HolderInputTiming.injectionAckDeadline) as well.
+            a screen read gives up on the viewer after \
+            \(HolderInputTiming.screenPullBound) and answers from the daemon's emulator; \
+            that should stay well under the \(HolderInputTiming.injectionAckDeadline) a \
+            write may wait for its ack, because the write loses nothing by waiting and \
+            the read has a fallback to land on.
             """)
     }
 
