@@ -12,11 +12,11 @@ extension TableTranscriptView.Coordinator {
     /// How far below the viewport top a jump puts its target row's top.
     static let jumpTopInset: CGFloat = 16
 
-    /// Slack on Previous's "inside the exchange" test. A jump leaves its target
-    /// at `jumpTopInset` only to within the re-pin's tolerance, so without it a
-    /// Previous pressed right after a jump could read the reader as inside the
-    /// exchange and jump to the same prompt again instead of the one before.
-    private static let insideExchangeSlack: CGFloat = 1
+    /// How far the viewport's top must sit below the active prompt's top for
+    /// Previous to read the reader as inside that prompt's exchange. Right
+    /// after a jump the viewport's top is `jumpTopInset` above the target's,
+    /// a depth of −16, so Previous then goes to the prompt before.
+    private static let insideExchangeDepth: CGFloat = 16
 
     /// The Previous Prompt and Next Prompt commands.
     enum PromptStep { case previous, next }
@@ -192,8 +192,8 @@ extension TableTranscriptView.Coordinator {
     /// Previous Prompt and Next Prompt.
     ///
     /// - Previous jumps to the active prompt itself when the reader is inside
-    ///   its exchange, its top more than `jumpTopInset` above the viewport top,
-    ///   and otherwise to the prompt before it. From the top of the first
+    ///   its exchange, its top more than `insideExchangeDepth` above the
+    ///   viewport top, and otherwise to the prompt before it. From the top of the first
     ///   prompt it does nothing.
     /// - Next jumps to the prompt after the active one. From the last prompt it
     ///   scrolls to the end of the transcript and stops holding the target.
@@ -211,7 +211,7 @@ extension TableTranscriptView.Coordinator {
             guard let tableView, let scrollView else { return }
             let rowTop = tableView.rect(ofRow: entries[active].rowIndex).minY
             let depth = scrollView.contentView.bounds.minY - rowTop
-            let target = depth > Self.jumpTopInset + Self.insideExchangeSlack ? active : active - 1
+            let target = depth > Self.insideExchangeDepth ? active : active - 1
             guard target >= 0 else { return }
             jump(toNodeID: entries[target].id)
         case .next:
