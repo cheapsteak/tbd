@@ -618,7 +618,11 @@ struct HolderSpawnGateTests {
         defer { fixture.tearDown() }
         let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
         // The daemon's only path for typing into a holder session. A login tab
-        // is left to the person, so nothing may come through it.
+        // is left to the person, so nothing may come through it while the tab
+        // is being created. No window watches for a later write: nothing in
+        // the daemon types into a login tab at all — the person runs `/login`
+        // from Claude's own footer hint — so there is no delayed writer to
+        // wait out.
         let courierWrites = CourierWriteLog()
         fixture.router.holderInjectionCourier = HolderInjectionCourier(
             sendFrame: { courierWrites.record($0) },
@@ -655,13 +659,9 @@ struct HolderSpawnGateTests {
             !issued.contains(where: { $0.contains("new-session") }),
             "the login tab started a tmux server: \(issued)")
 
-        // Three seconds covers the settle-then-poll shape an auto-typing pump
-        // would take (a 2 s settle, then a 1 s cadence) before its first write.
-        let wrote = await pollUntilTrue(timeout: .seconds(3), pollInterval: .milliseconds(50)) {
-            !courierWrites.writes.isEmpty
-        }
-        #expect(wrote != .satisfied, "the daemon typed into a login tab: \(courierWrites.writes)")
-        #expect(courierWrites.writes.isEmpty)
+        #expect(
+            courierWrites.writes.isEmpty,
+            "the daemon typed into a login tab: \(courierWrites.writes)")
     }
 
     /// The other arm, unchanged: with the flag off a login tab is a tmux
