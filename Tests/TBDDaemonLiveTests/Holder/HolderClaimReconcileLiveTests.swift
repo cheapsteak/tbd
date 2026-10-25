@@ -58,7 +58,7 @@ struct HolderClaimReconcileLiveTests {
         viewer.close()
 
         let sweep = await fixture.registry.reconcileClaims(
-            heldBy: HandbackFixture.viewerApp, held: [], throughSeq: Self.attachSeq, act: true)
+            heldBy: HandbackFixture.viewerApp, held: [], throughSeq: Self.attachSeq)
 
         #expect(sweep == HolderClaimSweep(takenBack: [fixture.terminalID], wouldTakeBack: []))
         #expect(await fixture.registry.viewerAttachment(for: fixture.terminalID) == nil, """
@@ -103,7 +103,7 @@ struct HolderClaimReconcileLiveTests {
         Darwin.close(vend.ptyFD)
 
         let sweep = await fixture.registry.reconcileClaims(
-            heldBy: HandbackFixture.viewerApp, held: [], throughSeq: Self.attachSeq, act: true)
+            heldBy: HandbackFixture.viewerApp, held: [], throughSeq: Self.attachSeq)
 
         #expect(sweep == HolderClaimSweep(takenBack: [fixture.terminalID], wouldTakeBack: []), """
             an attach delivered to the app, which it says it no longer holds, was not taken back
@@ -166,7 +166,7 @@ struct HolderClaimReconcileLiveTests {
         })
 
         let sweep = await registry.reconcileClaims(
-            heldBy: HandbackFixture.viewerApp, held: [], throughSeq: Self.attachSeq, act: true)
+            heldBy: HandbackFixture.viewerApp, held: [], throughSeq: Self.attachSeq)
 
         #expect(sweep == HolderClaimSweep(takenBack: [], wouldTakeBack: []), """
             the sweep claimed a take-back the handback in flight owns

@@ -12,12 +12,15 @@ import Testing
 /// each condition in `HolderRegistry.reconcileClaims` refuses a take-back on
 /// its own, and each test here departs from one baseline in exactly one of
 /// them. The baseline is a claim owned by app A under `attachSeq` 5, on a
-/// session A did not list, swept through `throughSeq` 5; `actFalseOnlyReports`
+/// session A did not list, swept through `throughSeq` 5; `aReportChangesNothing`
 /// shows it selected, and `aCandidateIsNotKept` shows it acted on.
 ///
-/// The flag decides whether a sweep acts, never what it selects, so every
+/// The flag decides whether a sweep acts (`reconcileClaims`) or only reports
+/// (`reportClaims`), and the two select by the same conditions, so every
 /// refusal is checked both ways: a report first, which changes nothing, then a
-/// sweep that acts.
+/// sweep that acts. The one difference is whose claim each matches: a report
+/// matches the owner by pid alone, because it never resolves the app's
+/// identity, and `aReusedPidIsOnlyReported` pins what that costs.
 ///
 /// **No holder answers for any session here.** The fixture is
 /// `HolderClaimOwnershipTests`': a take-back attempted on it fails at the
@@ -49,10 +52,10 @@ import Testing
     private static func sweepBothWays(
         _ registry: HolderRegistry, held: Set<UUID>, throughSeq: UInt64 = 5
     ) async -> (report: HolderClaimSweep, acted: HolderClaimSweep) {
-        let report = await registry.reconcileClaims(
-            heldBy: appA, held: held, throughSeq: throughSeq, act: false)
+        let report = await registry.reportClaims(
+            ownedByPID: appA.pid, held: held, throughSeq: throughSeq)
         let acted = await registry.reconcileClaims(
-            heldBy: appA, held: held, throughSeq: throughSeq, act: true)
+            heldBy: appA, held: held, throughSeq: throughSeq)
         return (report, acted)
     }
 
@@ -77,17 +80,12 @@ import Testing
     }
 
     /// A sweep speaks for one app. A claim another app owns is on a pty that
-    /// app may be reading, whatever this one says — and so is the claim of an
-    /// earlier process that held the same pid.
+    /// app may be reading, whatever this one says.
     @Test func anotherAppsClaimIsKept() async {
         let registry = HolderClaimOwnershipTests.registry()
         let othersSession = UUID()
-        let reusedPIDSession = UUID()
         await registry.recordViewerClaimForTesting(
             terminalID: othersSession, generation: 11, owner: Self.appB, attachSeq: 5)
-        await registry.recordViewerClaimForTesting(
-            terminalID: reusedPIDSession, generation: 12, owner: Self.earlierHolderOfAppAsPID,
-            attachSeq: 5)
 
         let sweep = await Self.sweepBothWays(registry, held: [])
 
@@ -96,12 +94,35 @@ import Testing
         #expect(await registry.viewerAttachmentOwner(for: othersSession) == Self.appB, """
             one app's sweep took back a claim another app owns
             """)
+    }
+
+    /// The claim of an earlier process that held the same pid is on a pty
+    /// that process's descriptor may still be on, whatever this app says. A
+    /// sweep that acts compares identities, start time included, and keeps
+    /// it. A report matches by pid alone, because resolving the identity
+    /// spawns `ps` and a report would pay for it on every tick, so it names
+    /// that claim — and naming it is all it does.
+    @Test func aReusedPidIsOnlyReported() async {
+        let registry = HolderClaimOwnershipTests.registry()
+        let reusedPIDSession = UUID()
+        await registry.recordViewerClaimForTesting(
+            terminalID: reusedPIDSession, generation: 12, owner: Self.earlierHolderOfAppAsPID,
+            attachSeq: 5)
+
+        let sweep = await Self.sweepBothWays(registry, held: [])
+
+        #expect(sweep.report == HolderClaimSweep(takenBack: [], wouldTakeBack: [reusedPIDSession]), """
+            a report matched the owner by more than its pid, which only a resolved identity can \
+            supply, and resolving it spawns ps on every tick while the flag is off
+            """)
+        #expect(sweep.acted == Self.nothing)
         #expect(
             await registry.viewerAttachmentOwner(for: reusedPIDSession)
                 == Self.earlierHolderOfAppAsPID, """
             a sweep matched a claim by pid alone, so a reused pid took back a claim its app \
             never owned
             """)
+        #expect(await registry.viewerAttachment(for: reusedPIDSession) == 12)
     }
 
     /// An attach numbered after the app built its held set is one that set
@@ -188,7 +209,7 @@ import Testing
 
     /// With the flag off, the sweep names what it would take back — a claim
     /// and a pending attach alike — and changes nothing.
-    @Test func actFalseOnlyReports() async {
+    @Test func aReportChangesNothing() async {
         let registry = HolderClaimOwnershipTests.registry()
         let claimed = UUID()
         let vended = UUID()
@@ -199,8 +220,8 @@ import Testing
             reader: HolderClaimOwnershipTests.idleReader(for: vended), recipient: Self.appA,
             attachSeq: 4)
 
-        let report = await registry.reconcileClaims(
-            heldBy: Self.appA, held: [], throughSeq: 5, act: false)
+        let report = await registry.reportClaims(
+            ownedByPID: Self.appA.pid, held: [], throughSeq: 5)
 
         #expect(Set(report.wouldTakeBack) == [claimed, vended])
         #expect(report.wouldTakeBack.count == 2)
@@ -231,7 +252,7 @@ import Testing
             attachSeq: 5)
 
         let acted = await registry.reconcileClaims(
-            heldBy: Self.appA, held: [], throughSeq: 5, act: true)
+            heldBy: Self.appA, held: [], throughSeq: 5)
 
         #expect(acted == Self.nothing, """
             a sweep counted take-backs that threw
@@ -257,10 +278,10 @@ import Testing
         await registry.recordViewerClaimForTesting(
             terminalID: session, generation: 11, owner: Self.appA, attachSeq: 5)
 
-        let first = await registry.reconcileClaims(
-            heldBy: Self.appA, held: [], throughSeq: 5, act: false)
-        let second = await registry.reconcileClaims(
-            heldBy: Self.appA, held: [], throughSeq: 5, act: false)
+        let first = await registry.reportClaims(
+            ownedByPID: Self.appA.pid, held: [], throughSeq: 5)
+        let second = await registry.reportClaims(
+            ownedByPID: Self.appA.pid, held: [], throughSeq: 5)
 
         #expect(first.wouldTakeBack == [session])
         #expect(second.wouldTakeBack == [session], """
@@ -272,13 +293,13 @@ import Testing
 
         // The attach ends (here its take-back fails at the hand-over and drops
         // the claim), and the session's next attach gets stuck the same way.
-        _ = await registry.reconcileClaims(heldBy: Self.appA, held: [], throughSeq: 5, act: true)
+        _ = await registry.reconcileClaims(heldBy: Self.appA, held: [], throughSeq: 5)
         #expect(await registry.viewerAttachment(for: session) == nil)
         await registry.recordViewerClaimForTesting(
             terminalID: session, generation: 12, owner: Self.appA, attachSeq: 6)
 
-        let later = await registry.reconcileClaims(
-            heldBy: Self.appA, held: [], throughSeq: 6, act: false)
+        let later = await registry.reportClaims(
+            ownedByPID: Self.appA.pid, held: [], throughSeq: 6)
 
         #expect(later.wouldTakeBack == [session])
         #expect(await registry.wouldTakeBackNotices == 2, """
@@ -294,23 +315,23 @@ import Testing
         await registry.recordViewerClaimForTesting(
             terminalID: session, generation: 11, owner: Self.appA, attachSeq: 5)
 
-        _ = await registry.reconcileClaims(heldBy: Self.appA, held: [], throughSeq: 5, act: false)
+        _ = await registry.reportClaims(ownedByPID: Self.appA.pid, held: [], throughSeq: 5)
         #expect(await registry.wouldTakeBacksRemembered == 1)
 
         // A report for a session the app holds leaves the attach standing,
         // and so remembered.
-        _ = await registry.reconcileClaims(
-            heldBy: Self.appA, held: [session], throughSeq: 5, act: false)
+        _ = await registry.reportClaims(
+            ownedByPID: Self.appA.pid, held: [session], throughSeq: 5)
         #expect(await registry.wouldTakeBacksRemembered == 1, """
             a sweep forgot an attach that still stands, so it would be logged again
             """)
 
         // The take-back fails at the hand-over here and drops the claim.
-        _ = await registry.reconcileClaims(heldBy: Self.appA, held: [], throughSeq: 5, act: true)
+        _ = await registry.reconcileClaims(heldBy: Self.appA, held: [], throughSeq: 5)
         #expect(await registry.viewerAttachment(for: session) == nil)
 
-        let after = await registry.reconcileClaims(
-            heldBy: Self.appA, held: [], throughSeq: 5, act: false)
+        let after = await registry.reportClaims(
+            ownedByPID: Self.appA.pid, held: [], throughSeq: 5)
 
         #expect(after == Self.nothing)
         #expect(await registry.wouldTakeBacksRemembered == 0, """

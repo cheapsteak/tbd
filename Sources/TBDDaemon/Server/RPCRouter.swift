@@ -151,8 +151,9 @@ public final class RPCRouter: Sendable {
     /// Resolves the pid a `holder.reconcileClaims` names to the identity a
     /// claim's owner is compared with: the read the fd sidecar makes of its
     /// peer, so the same app reads back the same identity. Nil sweeps nothing.
-    /// It spawns `ps` twice and blocks, so the handler asks it only once the
-    /// registry says there is something to take back. Tests replace it.
+    /// It spawns `ps` twice and blocks, so the handler asks it only while
+    /// `holder_claim_reconcile_enabled` is on, and only once the registry
+    /// says there is something to take back. Tests replace it.
     nonisolated(unsafe) var appIdentityResolver: @Sendable (Int32) -> ProcessIdentity? = { pid in
         ProcessIdentity.of(pid: pid, signaller: ProductionProcessSignaller())
     }

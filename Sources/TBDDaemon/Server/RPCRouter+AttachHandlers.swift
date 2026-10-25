@@ -601,17 +601,27 @@ extension RPCRouter {
 
     /// Handle `holder.reconcileClaims`: the app's statement, sent on every poll
     /// tick, of which holder sessions it holds a descriptor for or has an
-    /// attach in flight for. The registry takes back that app's claims on
-    /// every other session, or, while `holder_claim_reconcile_enabled` is off,
-    /// only reports them (`HolderRegistry.reconcileClaims`). Design:
+    /// attach in flight for. While `holder_claim_reconcile_enabled` is on, the
+    /// registry takes back that app's claims on every other session
+    /// (`HolderRegistry.reconcileClaims`); while it is off, it only names them
+    /// (`HolderRegistry.reportClaims`). Design:
     /// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
     ///
-    /// **The registry's cheap gate runs before the pid is resolved.**
-    /// Resolving it spawns `ps` twice and blocks, and in the steady state every
+    /// **The registry's cheap gate runs first.** In the steady state every
     /// live panel's session is in `held`, so the gate answers false and the
-    /// sweep costs one actor hop. It matches on the pid alone, which can only
-    /// let a reused pid through to the resolve, where its start time tells it
-    /// apart from the claim's owner.
+    /// sweep costs one actor hop: no database read, no `ps`.
+    ///
+    /// **The flag is read next, before the pid is resolved, and while it is
+    /// off the pid is never resolved.** Resolving it spawns `ps` twice and
+    /// blocks. With the flag off a candidate is never taken back, so after
+    /// one truly lost handback it would pass the gate on every 2 s tick until
+    /// the app quits, and each tick would pay for the resolve. The report
+    /// matches by pid alone instead, as the gate does; that can name a claim
+    /// whose owner merely reused the app's pid, and naming it changes
+    /// nothing. With the flag on, the pid is resolved and its start time
+    /// tells the app apart from a reused pid, and every candidate the sweep
+    /// selects is taken back, or dropped by a failed take-back, so it stops
+    /// passing the gate.
     ///
     /// **Nothing here is an error.** A daemon with no holder transport, a pid
     /// that does not resolve, and a sweep with nothing to take back all answer
@@ -627,13 +637,6 @@ extension RPCRouter {
         else {
             return try RPCResponse(result: HolderReconcileClaimsResult())
         }
-        guard let app = appIdentityResolver(params.appPID) else {
-            logger.info("""
-                holder.reconcileClaims from pid \(params.appPID, privacy: .public) swept \
-                nothing: that pid could not be resolved to a process identity
-                """)
-            return try RPCResponse(result: HolderReconcileClaimsResult())
-        }
         let act: Bool
         do {
             act = try await db.config.get().holderClaimReconcileEnabled
@@ -644,8 +647,22 @@ extension RPCRouter {
                 """)
             act = Config.holderClaimReconcileEnabledDefault
         }
+        guard act else {
+            let report = await registry.reportClaims(
+                ownedByPID: params.appPID, held: held, throughSeq: params.throughSeq)
+            return try RPCResponse(
+                result: HolderReconcileClaimsResult(
+                    takenBack: report.takenBack, wouldTakeBack: report.wouldTakeBack))
+        }
+        guard let app = appIdentityResolver(params.appPID) else {
+            logger.info("""
+                holder.reconcileClaims from pid \(params.appPID, privacy: .public) swept \
+                nothing: that pid could not be resolved to a process identity
+                """)
+            return try RPCResponse(result: HolderReconcileClaimsResult())
+        }
         let sweep = await registry.reconcileClaims(
-            heldBy: app, held: held, throughSeq: params.throughSeq, act: act)
+            heldBy: app, held: held, throughSeq: params.throughSeq)
         return try RPCResponse(
             result: HolderReconcileClaimsResult(
                 takenBack: sweep.takenBack, wouldTakeBack: sweep.wouldTakeBack))

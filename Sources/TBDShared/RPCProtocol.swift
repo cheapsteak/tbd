@@ -3826,9 +3826,13 @@ public struct AttachRequestResult: Codable, Sendable {
 /// sessions it holds, sent on every poll tick. Design:
 /// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
 public struct HolderReconcileClaimsParams: Codable, Sendable, Equatable {
-    /// The app's process. The daemon resolves it to a process identity (pid,
-    /// start time and executable) before comparing it with any claim's owner,
-    /// so a pid it cannot resolve, or one that was reused, sweeps nothing.
+    /// The app's process. Before it takes any claim back, the daemon resolves
+    /// it to a process identity (pid, start time and executable) and compares
+    /// that with the claim's owner, so a pid it cannot resolve, or one that
+    /// was reused, takes nothing back. While `holder_claim_reconcile_enabled`
+    /// is off, the daemon does not resolve it: `wouldTakeBack` is matched by
+    /// pid alone, so it can also name a claim of an earlier process that held
+    /// the same pid.
     public let appPID: Int32
     /// The terminals the app holds a descriptor for, or has an attach in
     /// flight for. The daemon never takes back a claim on one of these.

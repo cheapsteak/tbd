@@ -447,7 +447,7 @@ actor HolderRegistry {
     private(set) var takeBacksCompleted = 0
     /// The attaches a claim sweep with the flag off has already logged as ones
     /// it would take back, so each is logged once for the daemon's life rather
-    /// than on every poll tick (`reconcileClaims`). With the flag off a
+    /// than on every poll tick (`reportClaims`). With the flag off a
     /// candidate is never taken back, so it stays a candidate on every tick,
     /// and logging it each time would be some 1,800 persisted lines an hour
     /// for one stuck session. The sweep's result still names it every time.
@@ -3293,9 +3293,12 @@ actor HolderRegistry {
 
     /// Takes back the claims `app` owns on sessions it says it no longer
     /// holds, and answers with them: the registry's half of
-    /// `holder.reconcileClaims`, and the reconciler for a viewer claim whose
-    /// handback, or whose attach reply, was lost while its app lives
-    /// (docs/specs/2026-10-25-holder-claim-reconcile-design.md).
+    /// `holder.reconcileClaims` while `holder_claim_reconcile_enabled` is on,
+    /// and the reconciler for a viewer claim whose handback, or whose attach
+    /// reply, was lost while its app lives
+    /// (docs/specs/2026-10-25-holder-claim-reconcile-design.md). While the
+    /// flag is off the handler asks `reportClaims` instead, which selects by
+    /// pid and changes nothing.
     ///
     /// **Its authority is the one a handback carries: the app's own statement
     /// that it holds no descriptor for a session, made only after it closed
@@ -3321,13 +3324,7 @@ actor HolderRegistry {
     /// before anything here suspends, so the set acted on is the set those
     /// conditions describe.
     ///
-    /// With `act` false — the flag off — each candidate is returned in
-    /// `wouldTakeBack`, and nothing is settled, cleared or resumed. It is
-    /// logged as one the sweep would take back the first time a sweep selects
-    /// that attach, and not again (`wouldTakeBacksLogged`), since a candidate
-    /// the flag leaves standing is selected on every tick.
-    ///
-    /// With `act` true:
+    /// Then:
     ///
     /// - **Only the candidate pending attaches are settled** into claims, the
     ///   way the ready-timeout would settle each, and before the first
@@ -3349,34 +3346,16 @@ actor HolderRegistry {
     /// `reclaimSessions(heldBy:)` counts them — including one that found a
     /// take-back of the same attach begun since the selection, which owns it.
     /// A take-back that throws is logged and skipped, and drops its claim on
-    /// the way out, as every failed take-back does. Whatever is not a
-    /// candidate is left exactly as it was.
+    /// the way out, as every failed take-back does. Either way the attach is
+    /// no longer a candidate, so the next sweep's cheap gate
+    /// (`hasCandidates`) does not pass it again. `wouldTakeBack` is always
+    /// empty. Whatever is not a candidate is left exactly as it was.
     func reconcileClaims(
-        heldBy app: ProcessIdentity, held: Set<UUID>, throughSeq: UInt64, act: Bool
+        heldBy app: ProcessIdentity, held: Set<UUID>, throughSeq: UInt64
     ) async -> HolderClaimSweep {
         let candidates = sweepCandidates(held: held, throughSeq: throughSeq, ownedBy: { $0 == app })
         let appPID = app.pid
         forgetEndedWouldTakeBacks()
-        guard act else {
-            for candidate in candidates {
-                let terminalID = candidate.terminalID
-                let generation = candidate.generation
-                // Once per attach: the result names it on every sweep, the
-                // log only on the first.
-                guard wouldTakeBacksLogged.insert(
-                    TakeBack(terminalID: terminalID, generation: generation)).inserted
-                else { continue }
-                wouldTakeBackNotices += 1
-                Self.logger.notice(
-                    """
-                    would take back attach \(generation, privacy: .public) of session \
-                    \(terminalID.uuidString, privacy: .public) from app pid \
-                    \(appPID, privacy: .public), which says it no longer holds it; the claim \
-                    sweep is off, so the claim stands
-                    """)
-            }
-            return HolderClaimSweep(takenBack: [], wouldTakeBack: candidates.map(\.terminalID))
-        }
         // Still the stretch the selection ran in, so every `pending` here is
         // the value just read from the map, as `settleAsUnacknowledged`
         // requires. Settled before the first take-back suspends, so the
@@ -3427,17 +3406,63 @@ actor HolderRegistry {
     /// Whether a sweep from the app with this pid could find anything to take
     /// back: some claim owned by a process with that pid, or some pending
     /// attach delivered to one, that also meets the other three conditions of
-    /// `reconcileClaims`.
+    /// `reconcileClaims` — whether `reportClaims` would name anything, without
+    /// logging it.
     ///
     /// The cheap gate in front of a sweep. It reads only this registry, so a
-    /// caller can ask it on every poll tick before it resolves the pid to an
-    /// identity, which spawns `ps`. In the steady state every live panel's
-    /// session is in `held` and this answers false. Matching by pid alone can
-    /// only over-answer — a reused pid passes here and matches no owner in the
-    /// sweep — and never under-answers, because a sweep's owner always has the
-    /// pid it resolved from.
+    /// caller can ask it on every poll tick before it reads the flag or
+    /// resolves the pid to an identity, which spawns `ps`. In the steady
+    /// state every live panel's session is in `held` and this answers false.
+    /// Matching by pid alone can only over-answer — a reused pid passes here
+    /// and matches no owner in a sweep that acts — and never under-answers,
+    /// because a sweep's owner always has the pid it resolved from.
     func hasCandidates(ownedByPID pid: Int32, held: Set<UUID>, throughSeq: UInt64) -> Bool {
         !sweepCandidates(held: held, throughSeq: throughSeq, ownedBy: { $0.pid == pid }).isEmpty
+    }
+
+    /// Names the claims a sweep from the app with this pid would take back,
+    /// and changes nothing: the registry's half of `holder.reconcileClaims`
+    /// while `holder_claim_reconcile_enabled` is off.
+    ///
+    /// **It matches the owner by pid alone**, as `hasCandidates` does, and
+    /// applies the other three conditions of `reconcileClaims` unchanged.
+    /// Matching by identity would need the pid resolved, which spawns `ps`
+    /// twice and blocks, and with the flag off a candidate is never taken
+    /// back: it stays a candidate on every 2 s tick until the app quits, so
+    /// it would be resolved again on every one. The price is that a claim
+    /// owned by an earlier process that held the same pid is named too. It is
+    /// only named: a sweep that acts resolves the identity first, and leaves
+    /// that claim alone.
+    ///
+    /// Each attach is logged at `.notice` as one the sweep would take back the
+    /// first time a report names it, and not again for the daemon's life
+    /// (`wouldTakeBacksLogged`), since a candidate the flag leaves standing is
+    /// named on every tick. Every report still lists it in `wouldTakeBack`;
+    /// `takenBack` is always empty.
+    func reportClaims(
+        ownedByPID pid: Int32, held: Set<UUID>, throughSeq: UInt64
+    ) -> HolderClaimSweep {
+        forgetEndedWouldTakeBacks()
+        let candidates = sweepCandidates(
+            held: held, throughSeq: throughSeq, ownedBy: { $0.pid == pid })
+        for candidate in candidates {
+            let terminalID = candidate.terminalID
+            let generation = candidate.generation
+            // Once per attach: the result names it on every report, the log
+            // only on the first.
+            guard wouldTakeBacksLogged.insert(
+                TakeBack(terminalID: terminalID, generation: generation)).inserted
+            else { continue }
+            wouldTakeBackNotices += 1
+            Self.logger.notice(
+                """
+                would take back attach \(generation, privacy: .public) of session \
+                \(terminalID.uuidString, privacy: .public) from app pid \
+                \(pid, privacy: .public), which says it no longer holds it; the claim sweep \
+                is off, so the claim stands
+                """)
+        }
+        return HolderClaimSweep(takenBack: [], wouldTakeBack: candidates.map(\.terminalID))
     }
 
     /// The attaches a sweep may take back, in session order: those `isOwner`

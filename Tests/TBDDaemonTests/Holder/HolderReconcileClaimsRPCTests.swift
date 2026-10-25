@@ -9,8 +9,11 @@ import Testing
 ///
 /// - **When the app's pid is resolved at all.** Resolving it spawns `ps` twice
 ///   and blocks, and the sweep arrives every 2 s, so the handler asks the
-///   registry's cheap gate first and resolves only when there is something
-///   to take back. The resolver here counts its calls.
+///   registry's cheap gate first, and resolves only when there is something
+///   to take back and the flag says to take it back. With the flag off a
+///   candidate is never taken back, so it would pass the gate on every tick
+///   until the app quits; the report matches by pid instead. The resolver
+///   here counts its calls.
 /// - **What an unresolvable pid does**: nothing, and without an error.
 /// - **Which way the flag sends the sweep**, read from the database on every
 ///   call.
@@ -129,7 +132,7 @@ import Testing
     /// Unset, the flag takes its shipped default, off: the sweep names what it
     /// would take back and changes nothing.
     @Test func flagOffReportsWithoutActing() async throws {
-        let (router, registry, resolved) = try Self.makeRouter()
+        let (router, registry, _) = try Self.makeRouter()
         let session = UUID()
         await registry.recordViewerClaimForTesting(
             terminalID: session, generation: 11, owner: Self.app, attachSeq: 5)
@@ -138,18 +141,52 @@ import Testing
 
         #expect(result.wouldTakeBack == [session])
         #expect(result.takenBack == [])
-        #expect(resolved.values == [Self.app.pid])
         #expect(await registry.viewerAttachment(for: session) == 11, """
             a sweep with the flag unset took back a claim
             """)
         #expect(await registry.viewerAttachmentOwner(for: session) == Self.app)
     }
 
-    /// On, the sweep acts. The take-back fails at the hand-over here, since no
-    /// holder answers, so nothing is listed as taken back, but the claim is
-    /// gone and nothing is reported as merely what it would have done.
+    /// With the flag off a candidate is never taken back, so after one lost
+    /// handback it passes the cheap gate on every tick until the app quits.
+    /// Resolving the pid on each of those ticks would spawn `ps` twice every
+    /// 2 s, so the report never resolves it: every sweep names the candidate,
+    /// and none asks the resolver anything. Both the unset flag and one
+    /// written off are checked, since each takes the report's branch.
+    @Test(arguments: [nil, false] as [Bool?])
+    func flagOffNeverResolvesThePid(written: Bool?) async throws {
+        let (router, registry, resolved) = try Self.makeRouter()
+        if let written {
+            try await Self.setFlag(router, written)
+        }
+        let session = UUID()
+        await registry.recordViewerClaimForTesting(
+            terminalID: session, generation: 11, owner: Self.app, attachSeq: 5)
+
+        for tick in 1...3 {
+            let result = try await Self.reconcile(router, held: [])
+            #expect(result == HolderReconcileClaimsResult(wouldTakeBack: [session]), """
+                sweep \(tick) with the flag off stopped naming a candidate that still stands
+                """)
+        }
+
+        #expect(resolved.values == [], """
+            a sweep with the flag off resolved the app's pid, which spawns ps twice on every 2 s \
+            tick for as long as one stuck candidate stands
+            """)
+        #expect(await registry.viewerAttachment(for: session) == 11, """
+            a sweep with the flag off took back a claim
+            """)
+        #expect(await registry.wouldTakeBackNotices == 1)
+    }
+
+    /// On, the sweep resolves the pid and acts. The take-back fails at the
+    /// hand-over here, since no holder answers, so nothing is listed as taken
+    /// back, but the claim is gone and nothing is reported as merely what it
+    /// would have done. Gone, it no longer passes the gate, so the next sweep
+    /// resolves nothing.
     @Test func flagOnActs() async throws {
-        let (router, registry, _) = try Self.makeRouter()
+        let (router, registry, resolved) = try Self.makeRouter()
         try await Self.setFlag(router, true)
         let session = UUID()
         await registry.recordViewerClaimForTesting(
@@ -158,8 +195,20 @@ import Testing
         let result = try await Self.reconcile(router, held: [])
 
         #expect(result.wouldTakeBack == [], "a sweep with the flag on only reported")
+        #expect(resolved.values == [Self.app.pid], """
+            a sweep with the flag on did not resolve the app's pid, so it cannot have compared \
+            the app's identity with the claim's owner
+            """)
         #expect(await registry.viewerAttachment(for: session) == nil, """
             a sweep with the flag on left standing a claim its app says it no longer holds
+            """)
+
+        let next = try await Self.reconcile(router, held: [])
+
+        #expect(next == HolderReconcileClaimsResult())
+        #expect(resolved.values == [Self.app.pid], """
+            a sweep after the take-back resolved the pid again, though nothing was left to take \
+            back
             """)
     }
 
