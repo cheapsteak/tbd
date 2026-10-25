@@ -204,10 +204,11 @@ struct PromptRailJumpTests {
         #expect(scene.coordinator.lastJumpRelease == .readerScroll)
     }
 
-    /// Away from the bottom nothing tail-follows, so this isolates what an
-    /// append itself does: a reply keeps both the pin and the held target, and
-    /// a new prompt keeps the pin but ends the hold.
-    @Test("an append keeps the jump anchor and the target where it landed")
+    /// Away from the bottom nothing tail-follows, so this isolates what each
+    /// kind of update below the target does: an appended reply, a re-rendered
+    /// tail and a `.noop` keep both the pin and the held target, and a new
+    /// prompt keeps the pin but ends the hold.
+    @Test("appends, a tail re-render and a noop keep the jump anchor and the target where it landed")
     func appendKeepsAnchor() async throws {
         let suiteName = "prompt-rail-jump-append-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -223,6 +224,12 @@ struct PromptRailJumpTests {
 
         scene.coordinator.jump(toNodeID: target.id)
         await Self.settleJump(scene)
+        try #require(scene.coordinator.pendingJumpAnchor?.id == target.id,
+                     Comment(rawValue: "precondition: the jump's pin survived its settle; "
+                         + Self.releaseNote(scene).rawValue))
+        try #require(scene.coordinator.heldJumpTargetID == target.id,
+                     Comment(rawValue: "precondition: the jump's hold survived its settle; "
+                         + Self.releaseNote(scene).rawValue))
         let offsetBefore = scene.screenOffset(ofRow: target.rowIndex)
 
         // A reply row arrives below.
@@ -242,12 +249,44 @@ struct PromptRailJumpTests {
         #expect(abs(afterReply - offsetBefore) <= 1,
                 Comment(rawValue: "the reply moved the target: before=\(offsetBefore) after=\(afterReply)"))
 
+        // The reply streams on: the tail re-renders below the target.
+        var streamed = withReply
+        streamed[streamed.count - 1] = .assistantText(
+            id: "a-59-more",
+            text: String(repeating: "A further reply sentence that wraps across the column. ", count: 6),
+            timestamp: nil,
+            usage: nil)
+        let streamedNodes = transcriptRenderNodes(from: streamed)
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: streamedNodes)
+                         == .updateLast,
+                     "precondition: the grown reply arrives as a tail re-render")
+        scene.coordinator.update(
+            nodes: streamedNodes, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == target.id, Self.releaseNote(scene))
+        #expect(scene.coordinator.activePromptIndex == 20)
+        let afterStream = scene.screenOffset(ofRow: target.rowIndex)
+        #expect(abs(afterStream - offsetBefore) <= 1,
+                Comment(rawValue: "the tail re-render moved the target: before=\(offsetBefore) after=\(afterStream)"))
+
+        // SwiftUI re-renders the pane with the same rows: a `.noop`.
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: streamedNodes)
+                         == .noop,
+                     "precondition: the same rows again are a noop")
+        scene.coordinator.update(
+            nodes: streamedNodes, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+
+        #expect(scene.coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+        #expect(scene.coordinator.heldJumpTargetID == target.id, Self.releaseNote(scene))
+        #expect(scene.coordinator.activePromptIndex == 20)
+
         // A new prompt arrives below: the pin stays, the hold ends, and the rule
         // still picks the target, whose top sits above the probe line.
         let withPrompt = transcriptRenderNodes(
-            from: withReply + [.userPrompt(id: "p-60", text: "Prompt 60", timestamp: nil)])
+            from: streamed + [.userPrompt(id: "p-60", text: "Prompt 60", timestamp: nil)])
         try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: withPrompt)
-                         == .append(fromIndex: withReply.count),
+                         == .append(fromIndex: streamed.count),
                      "precondition: the new prompt arrives as an append")
         scene.coordinator.update(
             nodes: withPrompt, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
