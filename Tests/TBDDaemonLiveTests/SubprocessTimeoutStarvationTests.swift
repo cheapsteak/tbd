@@ -94,12 +94,15 @@ struct SubprocessTimeoutStarvationTests {
     private static let floodCount = 128
 
     /// How long the started count must hold still before the warm-up calls
-    /// the pool saturated. Four times the kernel's longest spacing between
+    /// the pool saturated. Ten times the kernel's longest spacing between
     /// workqueue thread creations (`kern.wq_max_timer_interval_usecs`, 50 ms),
     /// so a slow ramp is not mistaken for the ceiling. Measured with a C probe
     /// on a 12-core box, all 64 workers started within 1 ms, never more than
-    /// 62 µs apart.
-    private static let saturationSettle: Duration = .milliseconds(200)
+    /// 62 µs apart — but a 2-core runner was not measured, and a warm-up that
+    /// ends early fails silently: an unsaturated pool lets the pre-fix
+    /// watchdog's timer run, and the test passes without proving anything.
+    /// So the margin is generous where it costs a fraction of the 5 s cap.
+    private static let saturationSettle: Duration = .milliseconds(500)
 
     /// Lock-guarded counter — `DispatchSemaphore.wait` is unavailable from an
     /// async context, so we track flood-item progress with a counter polled via
