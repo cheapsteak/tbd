@@ -3169,7 +3169,7 @@ test_a_daemon_that_reports_another_binary_fails_the_handover() {
         printf 'rc=%s\n' "$?"
     )"
     assert_contains "a daemon naming another binary fails the handover" "rc=1" "$out"
-    assert_contains "with an error naming both" \
+    assert_contains_literal "with an error naming both" \
         "ERROR: the new daemon reports [/old/.build/release/TBDDaemon] as its executable, not /new/.build/release/TBDDaemon" \
         "$out"
     if [ -e "$root/updates/handover-status.json" ]; then

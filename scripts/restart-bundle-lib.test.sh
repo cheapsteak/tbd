@@ -60,6 +60,28 @@ assert_no_dir() {
     if [ -d "$2" ]; then fail "$1: unexpected $2"; else pass "$1"; fi
 }
 
+# Pass when <output> contains <text>, matched literally: the expected lines
+# here are full of parentheses, brackets and dots that a regex would misread.
+# A here-string rather than a pipe, so that grep -q leaving early cannot turn
+# into a SIGPIPE that pipefail reports as no match.
+#
+#   assert_contains <description> <text> <output>
+assert_contains() {
+    if grep -qF -- "$2" <<< "$3"; then
+        pass "$1"
+    else
+        fail "$1: [$2] not found in output"
+    fi
+}
+
+assert_not_contains() {
+    if grep -qF -- "$2" <<< "$3"; then
+        fail "$1: [$2] unexpectedly present"
+    else
+        pass "$1"
+    fi
+}
+
 # Read one top-level field out of the sidecar without assuming jq is installed.
 sidecar_field() {
     python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"
