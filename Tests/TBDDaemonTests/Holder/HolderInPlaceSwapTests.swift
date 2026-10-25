@@ -537,7 +537,8 @@ struct HolderInPlaceSwapTests {
         ReplacementSpawnOverlay.plan(
             fallbackModels: nil,
             sessionKey: terminal.id.uuidString,
-            repoSettingsJSON: nil)
+            repoSettingsJSON: nil,
+            extraSettingsJSON: nil)
     }
 
     /// With the flag on, a holder wake — the in-place swap's wake included —

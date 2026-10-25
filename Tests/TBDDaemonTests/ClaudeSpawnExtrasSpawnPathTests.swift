@@ -11,10 +11,11 @@ import TestSupport
 extension TBDHomeSerialized {
 /// `terminal.create` and `worktree.create` with plugin folders and a settings
 /// overlay: what they refuse, what they store on the new rows, and what
-/// reaches the spawned command, fresh and resuming. Tier 2: an in-memory
-/// database, a dry-run tmux and a real scratch directory (a real git repo for
-/// `worktree.create`); nothing is spawned.
-@Suite("terminal.create and worktree.create keep a Claude terminal's plugin folders and settings overlay")
+/// reaches the spawned command, fresh and resuming — and the later starts that
+/// read them back from the row: a wake from hibernation and each account
+/// switch arm. Tier 2: an in-memory database, a dry-run tmux and a real scratch
+/// directory (a real git repo for `worktree.create`); nothing is spawned.
+@Suite("Starts of a Claude terminal keep its plugin folders and settings overlay")
 struct ClaudeSpawnExtrasSpawnPathTests {
     /// Every tmux argv the dry-run manager would have run.
     final class TmuxRecorder: @unchecked Sendable {
@@ -26,6 +27,14 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         /// the spawn command with only the inline exports in front of it.
         var newWindowCommands: [String] {
             calls.filter { $0.contains("new-window") }.compactMap(\.last)
+        }
+        /// The shell command of every `new-window` or `respawn-window` call
+        /// from the `start`th call on that launches Claude.
+        func claudeCommands(since start: Int) -> [String] {
+            calls.dropFirst(start)
+                .filter { $0.contains("new-window") || $0.contains("respawn-window") }
+                .compactMap(\.last)
+                .filter { $0.contains("claude --") }
         }
     }
 
@@ -52,6 +61,63 @@ struct ClaudeSpawnExtrasSpawnPathTests {
 
         func createWorktree(_ params: WorktreeCreateParams) async throws -> RPCResponse {
             await router.handle(try RPCRequest(method: RPCMethod.worktreeCreate, params: params))
+        }
+
+        func swapProfile(
+            _ terminalID: UUID, to profileID: UUID?, mode: TerminalSwapMode
+        ) async throws -> RPCResponse {
+            await router.handle(try RPCRequest(
+                method: RPCMethod.terminalSwapProfile,
+                params: TerminalSwapProfileParams(
+                    terminalID: terminalID, newProfileID: profileID, mode: mode)))
+        }
+
+        /// A Claude row carrying `extras`, parked the way hibernation leaves
+        /// one. Written straight to the database, so no settings file exists
+        /// for it until a start writes one.
+        func parkedClaudeTerminal(
+            sessionID: String, extras: ClaudeSpawnExtras?
+        ) async throws -> Terminal {
+            let terminal = try await db.terminals.create(
+                worktreeID: worktree.id, tmuxWindowID: "@90", tmuxPaneID: "%90",
+                label: "claude", claudeSessionID: sessionID, kind: .claude,
+                claudeSpawnExtras: extras)
+            try await db.terminals.setHibernated(id: terminal.id, sessionID: sessionID)
+            return try #require(try await db.terminals.get(id: terminal.id))
+        }
+
+        /// A live Claude terminal made by `terminal.create` with `extras`, whose
+        /// session has a turn in its transcript, so an account switch resumes
+        /// the conversation rather than starting a fresh one. The settings file
+        /// the create wrote is removed, so only a later start can bring it back.
+        func liveClaudeTerminalWithConversation(
+            extras: ClaudeSpawnExtras
+        ) async throws -> Terminal {
+            let resp = try await create(TerminalCreateParams(
+                worktreeID: worktree.id, type: .claude,
+                claudeSettingsOverlay: extras.claudeSettingsOverlay,
+                pluginDirs: extras.pluginDirs))
+            #expect(resp.success, "\(resp.error ?? "")")
+            let created = try resp.decodeResult(Terminal.self)
+            #expect(created.claudeSpawnExtras == extras)
+            let sessionID = try #require(created.claudeSessionID)
+
+            let dir = scratch.appendingPathComponent("transcripts", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let file = dir.appendingPathComponent("\(sessionID).jsonl")
+            try #"{"type":"user","message":{"role":"user","content":"hello there"}}"#
+                .write(to: file, atomically: true, encoding: .utf8)
+            try await db.terminals.updateSession(
+                id: created.id, sessionID: sessionID, transcriptPath: file.path)
+
+            try FileManager.default.removeItem(
+                atPath: ClaudeHookOverlay.perSessionOverlayPath(sessionKey: created.id.uuidString))
+            return try #require(try await db.terminals.get(id: created.id))
+        }
+
+        /// A second account to switch to. OAuth, so it needs no stored secret.
+        func otherProfile() async throws -> ModelProfile {
+            try await db.modelProfiles.create(name: "B", kind: .oauth)
         }
 
         /// Waits until the create's detached phases leave `.creating` — or
@@ -113,6 +179,10 @@ struct ClaudeSpawnExtrasSpawnPathTests {
     }
 
     static let overlay = #"{"acmeSetting":"on"}"#
+
+    /// A stored overlay that also hooks `PreToolUse`, an event TBD hooks too:
+    /// every start must keep TBD's own entry beside this one.
+    static let hookOverlay = #"{"acmeSetting":"on","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"acme-guard"}]}]}}"#
 
     /// TBD's own `--plugin-dir` flag, present only when its folder exists on
     /// this machine. Assertions about a terminal's extra folders strip it.
@@ -191,6 +261,28 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: terminalID.uuidString)
         let data = try Data(contentsOf: URL(fileURLWithPath: path))
         return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    /// `terminalID`'s settings file carries `hookOverlay` — its setting and its
+    /// `PreToolUse` entry, after TBD's own `PreToolUse` entry — and `command`
+    /// names that file.
+    private func expectHookOverlayApplied(_ terminalID: UUID, command: String) throws {
+        let settings = try perSessionSettings(terminalID)
+        #expect(settings["acmeSetting"] as? String == "on")
+        let pre = try #require(
+            (settings["hooks"] as? [String: Any])?["PreToolUse"] as? [[String: Any]])
+        let matchers = pre.compactMap { $0["matcher"] as? String }
+        #expect(matchers.contains("AskUserQuestion"), "TBD's own entry is gone: \(matchers)")
+        #expect(matchers.last == "Bash", "\(matchers)")
+        let guardCommand = (pre.last?["hooks"] as? [[String: Any]])?.first?["command"] as? String
+        #expect(guardCommand == "acme-guard")
+
+        let path = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: terminalID.uuidString)
+        #expect(command.contains(" --settings \(SystemPromptBuilder.shellEscape(path))"), "\(command)")
+    }
+
+    private static func pluginFlag(_ dir: String) -> String {
+        " --plugin-dir \(SystemPromptBuilder.shellEscape(dir))"
     }
 
     // MARK: - Starts that take the values
@@ -460,6 +552,175 @@ struct ClaudeSpawnExtrasSpawnPathTests {
             #expect(!terminals.contains { $0.kind == .claude })
             #expect(terminals.allSatisfy { $0.claudeSpawnExtras == nil })
             #expect(!f.recorder.newWindowCommands.contains { $0.contains(plug) })
+        }
+    }
+
+    // MARK: - Wake
+
+    /// A wake reads the parked row's values: the plugin folder is passed again
+    /// and the overlay is merged into the session's settings file, beside —
+    /// not instead of — TBD's own `PreToolUse` hook.
+    @Test func wakeReappliesStoredExtras() async throws {
+        try await withFixture { f in
+            let plug = try f.makePluginDir("plug")
+            let extras = ClaudeSpawnExtras(claudeSettingsOverlay: Self.hookOverlay, pluginDirs: [plug])
+            let sessionID = UUID().uuidString
+            let terminal = try await f.parkedClaudeTerminal(sessionID: sessionID, extras: extras)
+            let settingsPath = ClaudeHookOverlay.perSessionOverlayPath(
+                sessionKey: terminal.id.uuidString)
+            #expect(!FileManager.default.fileExists(atPath: settingsPath))
+            let start = f.recorder.calls.count
+
+            let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
+            #expect(result.isOk, "\(result)")
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
+            if let own = command.range(of: Self.ownPluginFlag),
+               let extra = command.range(of: Self.pluginFlag(plug)) {
+                #expect(own.lowerBound < extra.lowerBound, "\(command)")
+            }
+            try expectHookOverlayApplied(terminal.id, command: command)
+            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == extras)
+        }
+    }
+
+    /// A folder deleted since the terminal was made is skipped, and the wake
+    /// still starts — with the folders that remain. The row keeps naming the
+    /// deleted folder, so it loads again once it is back.
+    @Test func wakeSkipsDeletedPluginDir() async throws {
+        try await withFixture { f in
+            let kept = try f.makePluginDir("kept")
+            let gone = try f.makePluginDir("gone")
+            let extras = ClaudeSpawnExtras(pluginDirs: [kept, gone])
+            let sessionID = UUID().uuidString
+            let terminal = try await f.parkedClaudeTerminal(sessionID: sessionID, extras: extras)
+            try FileManager.default.removeItem(atPath: gone)
+            let start = f.recorder.calls.count
+
+            let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
+            #expect(result.isOk, "\(result)")
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(command.contains(Self.pluginFlag(kept)), "\(command)")
+            #expect(!command.contains(gone), "\(command)")
+            let awake = try #require(try await f.db.terminals.get(id: terminal.id))
+            #expect(!awake.isParked)
+            #expect(awake.claudeSpawnExtras == extras)
+        }
+    }
+
+    /// Control: a row with no values — every row an older daemon wrote — wakes
+    /// as it always has: TBD's plugin folder alone and the shared settings file.
+    @Test func wakeWithoutExtrasUnchanged() async throws {
+        try await withFixture { f in
+            let sessionID = UUID().uuidString
+            let terminal = try await f.parkedClaudeTerminal(sessionID: sessionID, extras: nil)
+            let start = f.recorder.calls.count
+
+            let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
+            #expect(result.isOk, "\(result)")
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            let withoutOwn = command.replacingOccurrences(of: Self.ownPluginFlag, with: "")
+            #expect(!withoutOwn.contains("--plugin-dir"), "\(command)")
+            #expect(!command.contains("claude-overlay-session-"), "\(command)")
+            #expect(!FileManager.default.fileExists(
+                atPath: ClaudeHookOverlay.perSessionOverlayPath(sessionKey: terminal.id.uuidString)))
+            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == nil)
+        }
+    }
+
+    // MARK: - Account switch
+
+    /// In place: the same row is respawned under the other account, and the
+    /// replacement reads that row's values.
+    @Test func inPlaceSwapReappliesExtras() async throws {
+        try await withFixture { f in
+            let plug = try f.makePluginDir("plug")
+            let extras = ClaudeSpawnExtras(claudeSettingsOverlay: Self.hookOverlay, pluginDirs: [plug])
+            let terminal = try await f.liveClaudeTerminalWithConversation(extras: extras)
+            let sessionID = try #require(terminal.claudeSessionID)
+            let profile = try await f.otherProfile()
+            let start = f.recorder.calls.count
+
+            let resp = try await f.swapProfile(terminal.id, to: profile.id, mode: .inPlace)
+            #expect(resp.success, "\(resp.error ?? "")")
+            let swapped = try resp.decodeResult(Terminal.self)
+            #expect(swapped.id == terminal.id)
+            #expect(swapped.profileID == profile.id)
+            #expect(try await f.db.terminals.list(worktreeID: f.worktree.id).count == 1)
+
+            // Respawned in its own window: no new tab.
+            #expect(!f.recorder.calls.dropFirst(start).contains { $0.contains("new-window") })
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(!command.contains("--fork-session"), "\(command)")
+            #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
+            try expectHookOverlayApplied(terminal.id, command: command)
+            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == extras)
+        }
+    }
+
+    /// Fork: a new row under a new terminal id. The source's values are copied
+    /// onto it, so its own later starts reapply them, and its first command
+    /// carries them; the source row is left as it was.
+    @Test func forkSwapCopiesExtrasToNewRow() async throws {
+        try await withFixture { f in
+            let plug = try f.makePluginDir("plug")
+            let extras = ClaudeSpawnExtras(claudeSettingsOverlay: Self.hookOverlay, pluginDirs: [plug])
+            let source = try await f.liveClaudeTerminalWithConversation(extras: extras)
+            let sessionID = try #require(source.claudeSessionID)
+            let profile = try await f.otherProfile()
+            let start = f.recorder.calls.count
+
+            let resp = try await f.swapProfile(source.id, to: profile.id, mode: .fork)
+            #expect(resp.success, "\(resp.error ?? "")")
+            let fork = try resp.decodeResult(Terminal.self)
+            #expect(fork.id != source.id)
+            #expect(fork.profileID == profile.id)
+            #expect(fork.claudeSpawnExtras == extras)
+            #expect(try await f.db.terminals.get(id: fork.id)?.claudeSpawnExtras == extras)
+            #expect(try await f.db.terminals.get(id: source.id)?.claudeSpawnExtras == extras)
+
+            let command = try #require(f.recorder.claudeCommands(since: start).last)
+            #expect(command.contains("claude --resume \(sessionID) --fork-session"), "\(command)")
+            #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
+            try expectHookOverlayApplied(fork.id, command: command)
+        }
+    }
+
+    /// Cold: a parked row is re-homed onto the other account without starting
+    /// anything, and keeps its values; the wake that follows reads them.
+    @Test func coldSwapThenWakeReappliesExtras() async throws {
+        try await withFixture { f in
+            let plug = try f.makePluginDir("plug")
+            let extras = ClaudeSpawnExtras(claudeSettingsOverlay: Self.hookOverlay, pluginDirs: [plug])
+            let sessionID = UUID().uuidString
+            let terminal = try await f.parkedClaudeTerminal(sessionID: sessionID, extras: extras)
+            let profile = try await f.otherProfile()
+            let beforeSwap = f.recorder.calls.count
+
+            let resp = try await f.swapProfile(terminal.id, to: profile.id, mode: .inPlace)
+            #expect(resp.success, "\(resp.error ?? "")")
+            let rehomed = try resp.decodeResult(Terminal.self)
+            #expect(rehomed.isParked, "a cold switch must not wake the session")
+            #expect(rehomed.profileID == profile.id)
+            #expect(rehomed.claudeSpawnExtras == extras)
+            #expect(try await f.db.terminals.get(id: terminal.id)?.claudeSpawnExtras == extras)
+            #expect(f.recorder.claudeCommands(since: beforeSwap).isEmpty)
+
+            let beforeWake = f.recorder.calls.count
+            let result = await f.router.hibernationCoordinator.wake(terminalID: terminal.id)
+            #expect(result.isOk, "\(result)")
+
+            let command = try #require(f.recorder.claudeCommands(since: beforeWake).last)
+            #expect(command.contains("claude --resume \(sessionID)"), "\(command)")
+            #expect(command.contains(Self.pluginFlag(plug)), "\(command)")
+            try expectHookOverlayApplied(terminal.id, command: command)
         }
     }
 }

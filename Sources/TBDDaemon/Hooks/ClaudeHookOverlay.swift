@@ -479,8 +479,10 @@ public enum ClaudeHookOverlay {
     /// The repo fragment is read fresh from the repo's overlay file (see
     /// `repoSettingsFragment`) at actual spawn time, so it applies on ALL
     /// spawn paths (fresh create, resume, wake, profile swap) and edits made
-    /// during a preSession hook wait are picked up. The per-spawn fragment
-    /// applies at FRESH spawn only — callers gate it.
+    /// during a preSession hook wait are picked up. The per-spawn fragment is
+    /// the terminal's own overlay, kept on its row
+    /// (`Terminal.claudeSpawnExtras`); a start reads it from the row it starts
+    /// from and passes it here.
     public static func resolveOverlayPath(
         fallbackModels: [String]?,
         sessionKey: String,
@@ -666,18 +668,23 @@ struct ReplacementSpawnOverlay: Sendable {
     private let fallbackModels: [String]?
     private let sessionKey: String
     private let repoSettingsJSON: String?
+    private let extraSettingsJSON: String?
 
     /// Plans the overlay `ClaudeHookOverlay.resolveOverlayPath` will write at
-    /// `settle`, without writing it. The parameters are `resolveOverlayPath`'s.
+    /// `settle`, without writing it. The parameters are `resolveOverlayPath`'s:
+    /// `extraSettingsJSON` is the terminal's own stored overlay
+    /// (`Terminal.claudeSpawnExtras`), read from the row the spawn replaces or
+    /// copies, and nil for a spawn that carries none.
     static func plan(
         fallbackModels: [String]?,
         sessionKey: String,
-        repoSettingsJSON: String?
+        repoSettingsJSON: String?,
+        extraSettingsJSON: String?
     ) -> ReplacementSpawnOverlay {
         let isPerSession = ClaudeHookOverlay.needsPerSessionOverlay(
             fallbackModels: fallbackModels,
             repoSettingsJSON: repoSettingsJSON,
-            extraSettingsJSON: nil)
+            extraSettingsJSON: extraSettingsJSON)
         return ReplacementSpawnOverlay(
             path: isPerSession
                 ? ClaudeHookOverlay.perSessionOverlayPath(sessionKey: sessionKey)
@@ -685,7 +692,8 @@ struct ReplacementSpawnOverlay: Sendable {
             isPerSession: isPerSession,
             fallbackModels: fallbackModels,
             sessionKey: sessionKey,
-            repoSettingsJSON: repoSettingsJSON)
+            repoSettingsJSON: repoSettingsJSON,
+            extraSettingsJSON: extraSettingsJSON)
     }
 
     /// `ClaudeSpawnCommandBuilder.build`'s `fileExists` for this spawn's
@@ -709,7 +717,8 @@ struct ReplacementSpawnOverlay: Sendable {
         let written = ClaudeHookOverlay.resolveOverlayPath(
             fallbackModels: fallbackModels,
             sessionKey: sessionKey,
-            repoSettingsJSON: repoSettingsJSON)
+            repoSettingsJSON: repoSettingsJSON,
+            extraSettingsJSON: extraSettingsJSON)
         guard written != path else { return command }
         logger.error("""
             overlay for session key \(sessionKey, privacy: .public): the per-session overlay \

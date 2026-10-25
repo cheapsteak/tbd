@@ -2751,10 +2751,17 @@ extension RPCRouter {
         // arm writes it immediately before its launch. A swap that fails before
         // it reaches its launch leaves the running process's overlay untouched.
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
+        // The terminal's own plugin folders and settings overlay, read from the
+        // row being switched: every arm reapplies them — the in-place arms to
+        // the same row, the fork to the new row it copies them onto. (The cold
+        // re-home above changes only the parked row's profile, so its next
+        // wake reads them from that row.)
+        let spawnExtras = oldTerminal.claudeSpawnExtras
         let overlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolved?.fallbackModels,
             sessionKey: plannedTerminalID.uuidString,
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
         )
 
         // The session name is the swapped tab's: the new tab on a fork, the
@@ -2788,6 +2795,7 @@ extension RPCRouter {
         let spawn = swapSpawn(
             plan: plan, mode: mode, resolved: resolved,
             overlay: overlay, profileConfigDir: profileConfigDir,
+            extraPluginDirs: spawnExtras?.pluginDirs ?? [],
             worktree: worktree, repo: repo, swapConfig: swapConfig,
             claudeEnvOverrides: claudeEnvOverrides,
             sessionName: swapSessionName,
@@ -2827,7 +2835,8 @@ extension RPCRouter {
                     cols: resolvedCols,
                     rows: resolvedRows,
                     transport: forkTransport,
-                    sessionIncarnationID: forkSessionMod?.incarnationID
+                    sessionIncarnationID: forkSessionMod?.incarnationID,
+                    claudeSpawnExtras: spawnExtras
                 )
 
             case .inPlace where oldTerminal.transport == .holder:
@@ -2980,6 +2989,9 @@ extension RPCRouter {
 
     /// The spawn a `terminal.swapProfile` will run, composed from its plan.
     ///
+    /// - Parameter extraPluginDirs: the switched terminal's own plugin folders,
+    ///   passed as `--plugin-dir` after TBD's on every arm; one that has gone
+    ///   is skipped by the builder.
     /// - Parameter sessionModEnvironment: the session mod's variables, for the
     ///   one arm that is a fresh spawn (a fork of a blank session); empty for
     ///   every other arm.
@@ -2989,6 +3001,7 @@ extension RPCRouter {
         resolved: ResolvedModelProfile?,
         overlay: ReplacementSpawnOverlay,
         profileConfigDir: String?,
+        extraPluginDirs: [String],
         worktree: LocalWorktree,
         repo: Repo?,
         swapConfig: Config?,
@@ -3016,6 +3029,7 @@ extension RPCRouter {
                 shellFallback: "",
                 settingsOverlayPath: overlay.path,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: extraPluginDirs,
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: sessionName,
                 sessionModEnvironment: sessionModEnvironment,
@@ -3042,6 +3056,7 @@ extension RPCRouter {
                 shellFallback: "",
                 settingsOverlayPath: overlay.path,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: extraPluginDirs,
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: sessionName,
                 sessionModEnvironment: sessionModEnvironment,
@@ -3349,7 +3364,10 @@ extension RPCRouter {
     /// leaving the source session's tab untouched. Preserves the original
     /// fork-into-new-tab behavior; now only reached via the explicit "Fork
     /// session" action. `sessionIncarnationID` is the session mod's, set only
-    /// when the fork is a fresh spawn of a blank session.
+    /// when the fork is a fresh spawn of a blank session. `claudeSpawnExtras`
+    /// are the source terminal's own plugin folders and settings overlay,
+    /// already applied to `spawnCommand`, copied onto the new row so the
+    /// fork's later starts reapply them too.
     private func forkSwapNewTab(
         worktree: Worktree,
         plannedTerminalID: UUID,
@@ -3362,7 +3380,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         transport: TerminalSpawnTransport,
-        sessionIncarnationID: UUID?
+        sessionIncarnationID: UUID?,
+        claudeSpawnExtras: ClaudeSpawnExtras?
     ) async throws -> RPCResponse {
         // The transport is decided like every other spawn's — once, by the
         // caller, from the same gate — and carried here rather than re-asked.
@@ -3386,7 +3405,8 @@ extension RPCRouter {
                 profileID: profileID,
                 kind: .claude,
                 transport: transport,
-                sessionIncarnationID: sessionIncarnationID)
+                sessionIncarnationID: sessionIncarnationID,
+                claudeSpawnExtras: claudeSpawnExtras)
             return (terminal, currentWorktree.tmuxServer)
         }
 

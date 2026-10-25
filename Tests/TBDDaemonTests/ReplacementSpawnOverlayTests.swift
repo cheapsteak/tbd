@@ -37,7 +37,8 @@ extension TBDHomeSerialized {
         ReplacementSpawnOverlay.plan(
             fallbackModels: fallbackModels,
             sessionKey: sessionKey,
-            repoSettingsJSON: nil)
+            repoSettingsJSON: nil,
+            extraSettingsJSON: nil)
     }
 
     /// Writes `bytes` where the session's per-session overlay lives, standing

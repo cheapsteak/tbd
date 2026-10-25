@@ -378,7 +378,9 @@ extension RPCRouter {
         let claudeOverlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: source.id.uuidString,
-            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id))
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            // A Codex tab has no Claude values to carry.
+            extraSettingsJSON: nil)
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
