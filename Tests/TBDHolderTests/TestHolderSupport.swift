@@ -283,12 +283,19 @@ final class HolderFixture {
 
         // `dup2(fd, fd)` succeeds WITHOUT clearing FD_CLOEXEC, so a lock that
         // already sits on the target number would be closed at exec and the
-        // holder would refuse to start. `dup` hands back the lowest free
-        // number, which cannot be the one still occupied by the original.
+        // holder would refuse to start. `F_DUPFD_CLOEXEC` hands back the lowest
+        // free number at or above 10, past the target, and keeps the duplicate
+        // close-on-exec, as `HolderSpawner` and `HolderLockTests` do. A plain
+        // `dup` clears FD_CLOEXEC, and its copy stays open here until this
+        // function returns: every test target links into one process, so a
+        // sibling suite's spawn in that window inherited the lock and held it
+        // after the holder died, and `theJobDoesNotInheritTheCreationLock`
+        // failed with `.alreadyHeld` about somebody else's child. Measured at
+        // about 6 runs in 1,000, and only when the lock happened to land on 9.
         var lockSource = lock.fileDescriptor
         var relocated: Int32 = -1
         if lockSource == 9 {
-            relocated = dup(lockSource)
+            relocated = fcntl(lockSource, F_DUPFD_CLOEXEC, 10)
             try #require(relocated >= 0, "could not move the lock off the target descriptor")
             lockSource = relocated
         }
@@ -320,7 +327,7 @@ final class HolderFixture {
             // Same `dup2(fd, fd)` hazard as the lock, same remedy.
             var straySource = strayFD
             if straySource == strayDescriptorNumber {
-                strayRelocated = dup(straySource)
+                strayRelocated = fcntl(straySource, F_DUPFD_CLOEXEC, strayDescriptorNumber + 1)
                 try #require(strayRelocated >= 0, "could not move the probe off the target descriptor")
                 straySource = strayRelocated
             }
