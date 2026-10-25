@@ -273,6 +273,27 @@ struct TableTranscriptView: NSViewRepresentable {
         /// so the bounds observer can tell that scroll from the reader's.
         private var isRestoringAnchor = false
 
+        // MARK: Prompt rail state (see TableTranscriptView+PromptRail.swift)
+
+        /// Receives the prompt outline and the active prompt. Attaching one
+        /// pushes both current values to it at once.
+        weak var promptRailPresenter: PromptRailPresenter? {
+            didSet {
+                guard let promptRailPresenter else { return }
+                promptRailPresenter.promptRail(entriesDidChange: promptEntries)
+                promptRailPresenter.promptRail(activeIndexDidChange: activePromptIndex)
+            }
+        }
+        /// The prompts and peer messages in `nodes`, kept by
+        /// `refreshPromptOutline()`. Written only there; the setter is internal
+        /// because `private(set)` does not reach an extension in another file.
+        var promptEntries: [PromptOutlineEntry] = []
+        /// Index into `promptEntries` of the active prompt, kept by
+        /// `refreshActivePrompt()` and written only there. Nil with no entries.
+        var activePromptIndex: Int?
+        /// Node id of a jump target that stays active until the reader scrolls.
+        var heldJumpTargetID: String?
+
         /// The worktree root the entries in `composedCache` were composed
         /// against. Optional so "never set" is distinguishable from the empty
         /// root a pane whose worktree row has not loaded legitimately composes
@@ -1999,6 +2020,7 @@ struct TableTranscriptView: NSViewRepresentable {
                 previousNodes = newNodes
                 precomputeBottomWindow()
                 tableView.reloadData()
+                refreshPromptOutline()
                 recomputeAtBottom(atBottom)
                 return
             }
@@ -2098,6 +2120,10 @@ struct TableTranscriptView: NSViewRepresentable {
                     self.restorePrependAnchor(held)
                 }
             }
+
+            // After the table ops and any anchor restore, so the active prompt
+            // is read off the rows and clip the reader will see.
+            refreshPromptOutline()
 
             // Follow the tail only for content the SESSION produced. A user-driven
             // disclosure toggle keeps the viewport exactly where it is, so the row
@@ -2206,13 +2232,15 @@ struct TableTranscriptView: NSViewRepresentable {
             // coordinator's own restore scroll is the one move that keeps it.
             if !isRestoringAnchor { pendingPrependAnchor = nil }
             reportNearTopIfChanged()
-            guard let binding = atBottomBinding else { return }
-            let value = isViewportAtBottomForButton()
-            // Only write on a transition so a scroll gesture flips the flag at
-            // most twice (entering/leaving the bottom), not once per frame.
-            if binding.wrappedValue != value {
-                binding.wrappedValue = value
+            if let binding = atBottomBinding {
+                let value = isViewportAtBottomForButton()
+                // Only write on a transition so a scroll gesture flips the flag at
+                // most twice (entering/leaving the bottom), not once per frame.
+                if binding.wrappedValue != value {
+                    binding.wrappedValue = value
+                }
             }
+            refreshActivePrompt()
         }
 
         // MARK: Prepend anchor / near top
