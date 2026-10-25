@@ -50,14 +50,32 @@ struct PaneFanoutFlowControlTests {
         }
     }
 
-    /// Reads a nonblocking fd until `expected` bytes arrived, it hits EOF, or
-    /// the shared budget runs out, and returns what arrived for the caller to
-    /// compare. Never a fixed sleep alone — the drain is async.
-    private func readAll(fd: Int32, expected: Int) async -> Data {
+    /// Ends a bounded wait the way this suite reports one: a timeout throws a
+    /// named diagnostic carrying what the wait saw, and a cancellation
+    /// rethrows, so neither becomes a fabricated assertion failure at the call
+    /// site (`Tests/CLAUDE.md`, "Assertion hygiene", rules 4 and 5).
+    private func settle(
+        _ outcome: PollOutcome, waitingFor what: String, observed: @autoclosure () -> String
+    ) throws {
+        switch outcome {
+        case .satisfied:
+            return
+        case .cancelled:
+            throw CancellationError()
+        case .timedOut:
+            throw BoundedWaitTimeout(what: what, observed: observed(), deadline: TestDeadlines.saturatedPass)
+        }
+    }
+
+    /// Reads a nonblocking fd until `expected` bytes arrived or it hits EOF,
+    /// and returns what arrived for the caller to compare. Throws if neither
+    /// happens within the shared budget. Never a fixed sleep alone — the drain
+    /// is async.
+    private func readAll(fd: Int32, expected: Int) async throws -> Data {
         var received = Data()
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         var atEOF = false
-        _ = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             while received.count < expected {
                 let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
                 if n > 0 {
@@ -69,29 +87,38 @@ struct PaneFanoutFlowControlTests {
             }
             return atEOF || received.count >= expected
         }
+        try settle(outcome, waitingFor: "\(expected) bytes on the pipe", observed: "\(received.count) bytes")
         return received
     }
 
     /// Reads a nonblocking fd to EOF: the write end closed and every byte
-    /// before it consumed. Returns whether EOF arrived within the budget.
-    private func readToEOF(fd: Int32) async -> Bool {
+    /// before it consumed. Throws if EOF does not arrive within the budget.
+    private func readToEOF(fd: Int32) async throws {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        var drained = 0
         let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
             while true {
                 let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
-                if n > 0 { continue }
+                if n > 0 {
+                    drained += n
+                    continue
+                }
                 return n == 0
             }
         }
-        return outcome == .satisfied
+        try settle(outcome, waitingFor: "EOF on the pipe", observed: "\(drained) bytes and no EOF")
     }
 
-    /// Waits for the pane's backpressure queue to report empty. The caller
-    /// asserts on a fresh read afterwards.
-    private func waitForEmptyQueue(_ fanout: PaneFanout, key: PaneKey) async {
-        _ = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            (fanout.flowStats(key: key)?.queuedBytes ?? 0) == 0
+    /// Waits for the pane's backpressure queue to report empty, or for its
+    /// sink to be gone, and throws if neither happens within the budget. The
+    /// caller asserts on a fresh read afterwards, which tells the two apart.
+    private func waitForEmptyQueue(_ fanout: PaneFanout, key: PaneKey) async throws {
+        var lastQueued = 0
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            lastQueued = fanout.flowStats(key: key)?.queuedBytes ?? 0
+            return lastQueued == 0
         }
+        try settle(outcome, waitingFor: "the backpressure queue to empty", observed: "\(lastQueued) bytes queued")
     }
 
     /// A negative-assertion window: the time a drain that must NOT write is
@@ -126,12 +153,12 @@ struct PaneFanoutFlowControlTests {
 
         // Now read everything: the drain task must deliver the queued
         // remainder, byte-for-byte in order.
-        let received = await readAll(fd: readFD, expected: total.count)
+        let received = try await readAll(fd: readFD, expected: total.count)
         #expect(received.count == total.count)
         #expect(received == total, "stream must arrive intact and in order across backpressure")
 
         // Queue must eventually report empty.
-        await waitForEmptyQueue(fanout, key: key)
+        try await waitForEmptyQueue(fanout, key: key)
         #expect(fanout.flowStats(key: key)?.queuedBytes == 0)
     }
 
@@ -154,7 +181,7 @@ struct PaneFanoutFlowControlTests {
         fanout.route(server: server, event: .output(paneID: "%2", bytes: chunkB))
 
         let expected = chunkA + chunkB
-        let received = await readAll(fd: readFD, expected: expected.count)
+        let received = try await readAll(fd: readFD, expected: expected.count)
         #expect(received == expected, "B must arrive strictly after every byte of A")
         #expect(fanout.flowStats(key: key)?.droppedBytes == 0)
     }
@@ -255,7 +282,7 @@ struct PaneFanoutFlowControlTests {
 
         // endRepair: clears fence + repairing, counts the repair, flushes.
         #expect(fanout.endRepair(key: key, generation: gen))
-        let received = await readAll(fd: readFD, expected: fenced.count)
+        let received = try await readAll(fd: readFD, expected: fenced.count)
         #expect(received == fenced, "endRepair must flush the fenced bytes intact")
         let stats = try #require(fanout.flowStats(key: key))
         #expect(stats.repairing == false)
@@ -275,7 +302,7 @@ struct PaneFanoutFlowControlTests {
         #expect(aborted.repairs == 1, "an aborted repair must not count as completed")
         drainPipe(readFD)
         fanout.route(server: server, event: .output(paneID: "%10", bytes: Data("POST-ABORT".utf8)))
-        let resumed = await readAll(fd: readFD, expected: "POST-ABORT".utf8.count)
+        let resumed = try await readAll(fd: readFD, expected: "POST-ABORT".utf8.count)
         #expect(String(decoding: resumed, as: UTF8.self) == "POST-ABORT")
     }
 
@@ -296,7 +323,7 @@ struct PaneFanoutFlowControlTests {
         #expect(fanout.isPipeWritable(key: key, generation: gen) == .full,
                 "a full pipe must probe full — healthy, keep waiting")
         // The reader catches up.
-        _ = await readAll(fd: readFD, expected: 160 * 1024)
+        _ = try await readAll(fd: readFD, expected: 160 * 1024)
         #expect(fanout.isPipeWritable(key: key, generation: gen) == .writable)
 
         // Stale generation / missing sink → nil (repair must abort silently).
@@ -348,7 +375,7 @@ struct PaneFanoutFlowControlTests {
 
         let newBytes = Data("ONLY-THE-NEW-GENERATION".utf8)
         fanout.route(server: server, event: .output(paneID: "%4", bytes: newBytes))
-        let received = await readAll(fd: read2, expected: newBytes.count)
+        let received = try await readAll(fd: read2, expected: newBytes.count)
         #expect(received == newBytes, "successor pipe must carry ONLY the new generation's bytes")
 
         // Give the old drain task time to observe the mismatch: whatever it
@@ -376,7 +403,7 @@ struct PaneFanoutFlowControlTests {
         #expect(fanout.flowStats(key: key) == nil)
         // Drain the pipe to EOF — the write end is closed; the drain task
         // must exit quietly without writing into a recycled fd.
-        #expect(await readToEOF(fd: readFD), "detach closes the write end, so the pipe must reach EOF")
+        try await readToEOF(fd: readFD)
         try await negativeWindow()
         #expect(fanout.flowStats(key: key) == nil)
     }
@@ -412,10 +439,10 @@ struct PaneFanoutFlowControlTests {
         // markReady clears the fence and arms the drain: the parked bytes
         // flush.
         #expect(fanout.markReady(key: key, generation: gen))
-        let received = await readAll(fd: readFD, expected: fenced.count)
+        let received = try await readAll(fd: readFD, expected: fenced.count)
         #expect(received == fenced, "markReady must flush the fence queue intact and in order")
 
-        await waitForEmptyQueue(fanout, key: key)
+        try await waitForEmptyQueue(fanout, key: key)
         #expect(fanout.flowStats(key: key)?.queuedBytes == 0)
     }
 
@@ -476,7 +503,7 @@ struct PaneFanoutFlowControlTests {
         // markReady flushes the intact prefix; the overflow residual is the
         // M3 repair cycle's to heal.
         #expect(fanout.markReady(key: key, generation: gen))
-        let received = await readAll(fd: readFD, expected: PaneFanout.queueCap)
+        let received = try await readAll(fd: readFD, expected: PaneFanout.queueCap)
         #expect(received == total.prefix(PaneFanout.queueCap),
                 "delivered bytes must be an intact prefix — no mid-stream holes")
     }

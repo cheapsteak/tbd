@@ -23,6 +23,8 @@ struct PaneFanoutReplayTests {
         private let readFD: Int32
         private let expected: Int
         private let lock = NSLock()
+        /// Bytes read so far, published as they arrive so a timeout can say
+        /// how far the reader got.
         private var received = Data()
         private var finished = false
 
@@ -34,28 +36,37 @@ struct PaneFanoutReplayTests {
         func start() {
             let thread = Thread { [self] in
                 var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-                var collected = Data()
-                while collected.count < expected {
+                var count = 0
+                while count < expected {
                     let n = buffer.withUnsafeMutableBytes { Darwin.read(readFD, $0.baseAddress, $0.count) }
                     if n <= 0 { break }
-                    collected.append(contentsOf: buffer[0..<n])
+                    count += n
+                    lock.withLock { received.append(contentsOf: buffer[0..<n]) }
                 }
-                lock.withLock {
-                    received = collected
-                    finished = true
-                }
+                lock.withLock { finished = true }
             }
             thread.start()
         }
 
-        /// The accumulated bytes once the thread finished, or nil if it did
-        /// not within the shared saturated-pass budget.
-        func join() async -> Data? {
+        /// The accumulated bytes once the thread finished. Throws a named
+        /// timeout, with how far the reader got, if it did not finish within
+        /// the shared saturated-pass budget, and rethrows a cancellation.
+        func join() async throws -> Data {
             let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
                 lock.withLock { finished }
             }
-            guard outcome == .satisfied else { return nil }
-            return lock.withLock { received }
+            switch outcome {
+            case .satisfied:
+                return lock.withLock { received }
+            case .cancelled:
+                throw CancellationError()
+            case .timedOut:
+                let readSoFar = lock.withLock { received.count }
+                throw BoundedWaitTimeout(
+                    what: "the reader thread to finish",
+                    observed: "\(readSoFar) of \(expected) bytes read",
+                    deadline: TestDeadlines.saturatedPass)
+            }
         }
     }
 
@@ -216,7 +227,7 @@ struct PaneFanoutReplayTests {
 
         let outcome = try await writer.finished()
         if let error = outcome.error { throw error }
-        let received = try #require(await drainer.join(), "reader thread did not finish")
+        let received = try await drainer.join()
         #expect(received == replay, "replay must arrive byte-for-byte intact")
     }
 
