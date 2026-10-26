@@ -371,8 +371,11 @@ columns and their data. The daemon keeps the newest three copies of each kind
 (`pre-column-drop` and `pre-migration`) beside the database and deletes older
 ones, so copy it elsewhere if you need it longer. It prunes a kind only after
 the step that writes it succeeds — migrations for `pre-migration`, a column-drop
-run with no failures for `pre-column-drop` — and never deletes the copy it has
-just written, so an upgrade that keeps failing keeps every copy. See
+run with no failures for `pre-column-drop` — and a prune never deletes the copy
+just written, so a migration that keeps failing keeps every copy. A column-drop
+run that dropped nothing, because every drop it tried failed, deletes the copy
+it wrote, which holds nothing the database lacks, so a drop that keeps failing
+does not add a copy at every start. See
 [the design](specs/2026-10-24-column-retirement-design.md).
 
 ## Knowing what you are running

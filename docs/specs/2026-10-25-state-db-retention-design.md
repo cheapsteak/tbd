@@ -73,9 +73,9 @@ pruned by the code that writes it, and only once that code's step has succeeded:
   Anything else beside the database — backups made by hand, files with suffixes (a trailing
   newline included), other tools' files — is never touched.
 - **Newest is read from the name's timestamp**, not the file date.
-- **The copy just written is never deleted.** It takes one of the 3 places and the newest of
-  the others fill the rest, so a clock running behind an older stamp cannot delete the newest
-  copy of the database.
+- **A prune never deletes the copy just written.** It takes one of the 3 places and the newest
+  of the others fill the rest, so a clock running behind an older stamp cannot delete the
+  newest copy of the database.
 - **Pre-migration copies are pruned at daemon start, once migrations have succeeded**, whether
   or not the start wrote a copy. A start whose migration fails prunes nothing: the app keeps
   relaunching a daemon that cannot come up, each start writes another copy of the
@@ -83,9 +83,15 @@ pruned by the code that writes it, and only once that code's step has succeeded:
   upgrade. Those copies accumulate, one per attempted start, until the migration is fixed.
 - **Pre-column-drop copies are pruned at the end of every `RetiredColumnReconciler` run in
   which nothing failed**, whether or not the run wrote a copy. A run with any failure prunes
-  nothing: a drop that fails at every start writes a fresh copy each time, and pruning then
-  would push out the copy that still holds a column an earlier run dropped. Those copies
-  accumulate, one per start, until the failure, logged at error level each time, is fixed.
+  nothing, so the older copies, among them any that still holds a column an earlier run
+  dropped, stay while the failure, logged at error level, waits to be fixed. A run that drops
+  some columns and fails on others keeps its own copy as well.
+- **A column-drop run that dropped nothing deletes the copy it wrote.** The reconciler writes
+  its copy before the first drop, so when every due drop fails, the copy holds nothing the
+  database lacks. The run deletes that one file, the exact path it wrote and nothing else,
+  and reports no copy. A drop that fails at every start, such as one SQLite refuses because
+  the column is in an index, therefore adds a copy only at a start where some other column
+  drops, and the copies stay bounded until it is fixed.
 - **Pruning at every start clears a backlog at once** rather than at the next copy. It only
   lists one directory and deletes files, so it adds little to startup.
 - **A failed delete is logged and skipped**; it never blocks startup or a migration.
@@ -103,8 +109,11 @@ already writes compactly.
 
 ### Docs
 
-The places that say the copies are reclaimed by hand — `Sources/TBDDaemon/Database/CLAUDE.md`
-("Pre-migration snapshot") and `docs/updating.md` — state the retention instead.
+The places that describe the copies — the root `CLAUDE.md` (beside the named reconcilers),
+`Sources/TBDDaemon/Database/CLAUDE.md` ("Pre-migration snapshot" and "Retiring a column"),
+`docs/updating.md` and the reconciler section of
+`docs/specs/2026-10-24-column-retirement-design.md` — state this retention rather than leaving
+the copies for a person to delete.
 
 ## Testing
 
@@ -125,8 +134,11 @@ the sweep takes `now`.
   and leaves pre-column-drop copies alone; a start whose migration fails leaves every copy; the
   copy a start just wrote survives when every other copy carries a later stamp.
 - **Reconciler:** a run in which nothing failed leaves 3 copies, its own among them even when
-  every seeded copy is stamped later; a run whose drop fails prunes nothing; a run with
-  nothing to drop still clears a backlog.
+  every seeded copy is stamped later; a run that drops one column and fails on another keeps
+  its copy and prunes nothing; a run whose only due drop fails leaves no copy and reports
+  none; a run whose only remaining due drop fails deletes its own copy and no older one; a run
+  that holds one column and fails to drop another deletes its own copy; a run with nothing to
+  drop still clears a backlog.
 
 ## Rejected alternatives
 

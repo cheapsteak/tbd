@@ -66,10 +66,19 @@ struct KeptBundle: Equatable, Sendable {
 /// back for data someone still needed. When that copy fails it drops nothing
 /// in the run. A drop that fails — SQLite refuses a column in a key, a
 /// constraint, an index, a view or a trigger — is logged and skipped, and the
-/// run carries on. A run in which nothing failed ends by pruning the
-/// pre-column-drop copies to the newest `DatabaseSnapshotPruner.keepPerKind`,
-/// never deleting the one it just wrote; a run with any failure prunes
-/// nothing. Nothing here throws: startup continues whatever happens.
+/// run carries on. Two rules keep the copies bounded:
+///
+/// - A run that wrote a copy and then dropped nothing, because every due drop
+///   failed, deletes that copy and no other file: the database still holds
+///   everything the copy does. A drop that fails at every start therefore
+///   leaves a copy only from a run in which some other column dropped.
+/// - A run in which nothing failed ends by pruning the pre-column-drop copies
+///   to the newest `DatabaseSnapshotPruner.keepPerKind`, never deleting the
+///   one it just wrote. A run with any failure prunes nothing, so a run that
+///   drops some columns and fails on others keeps its copy and every older
+///   one.
+///
+/// Nothing here throws: startup continues whatever happens.
 ///
 /// Drops happen only here; the `.sql` migration allowlist refuses
 /// `DROP COLUMN`. Design: `docs/specs/2026-10-24-column-retirement-design.md`.
@@ -105,7 +114,9 @@ struct RetiredColumnReconciler: Sendable {
 
     struct Report: Equatable, Sendable {
         var outcomes: [RetiredColumn: Outcome] = [:]
-        /// The snapshot this run wrote before its first drop, if it wrote one.
+        /// The snapshot this run wrote before its first drop, if it wrote one
+        /// and it is still there. Nil after a run that dropped nothing and
+        /// deleted its copy.
         var snapshotPath: String?
     }
 
@@ -209,10 +220,16 @@ struct RetiredColumnReconciler: Sendable {
                 return report
             }
 
+            // Tracked here rather than read back from `report.outcomes`, which
+            // is keyed by entry: a duplicate entry whose second drop fails
+            // would overwrite `.dropped` and delete the only copy of data this
+            // run just dropped.
+            var droppedAny = false
             for entry in due {
                 let sql = "ALTER TABLE \(entry.table.quotedDatabaseIdentifier) DROP COLUMN \(entry.column.quotedDatabaseIdentifier)"
                 do {
                     try await writer.write { db in try db.execute(sql: sql) }
+                    droppedAny = true
                     Self.logger.notice(
                         "Dropped retired column \(entry.description, privacy: .public) (retired at schema epoch \(entry.epoch, privacy: .public))")
                     report.outcomes[entry] = .dropped
@@ -222,13 +239,32 @@ struct RetiredColumnReconciler: Sendable {
                     report.outcomes[entry] = .failed(String(describing: error))
                 }
             }
+
+            // Every due drop failed, so the copy holds nothing the database
+            // lacks and is no way back to anything. Delete it, and only it:
+            // otherwise a drop that fails at every start would leave a full
+            // copy at every start, and the failure keeps the prune below from
+            // ever running.
+            if !droppedAny {
+                do {
+                    try FileManager.default.removeItem(atPath: snapshot)
+                    Self.logger.notice(
+                        "Deleted pre-column-drop snapshot \(snapshot, privacy: .public): no retired column was dropped this run, so it holds nothing the database lacks")
+                    report.snapshotPath = nil
+                } catch {
+                    Self.logger.error(
+                        "Could not delete pre-column-drop snapshot \(snapshot, privacy: .public) after a run that dropped nothing: \(String(describing: error), privacy: .public)")
+                }
+            }
         }
 
-        // Only after a run in which nothing failed. A drop that fails at
-        // every start writes a fresh copy each time, and pruning then would
-        // push out the copy that still holds a column an earlier run dropped.
-        // Every such run prunes, whether or not it wrote a copy, so a backlog
-        // clears at once. The copy this run wrote is never deleted.
+        // Only after a run in which nothing failed, whether or not it wrote a
+        // copy, so a backlog clears at once; the prune never deletes the copy
+        // this run wrote. A run with any failure prunes nothing: its error is
+        // logged for someone to look at, and the older copies, among them any
+        // that still holds a column an earlier run dropped, stay until a run
+        // goes clean. A failing run that dropped nothing has deleted its own
+        // copy above, so it adds none.
         if !report.outcomes.values.contains(where: \.isFailure) {
             DatabaseSnapshotPruner.prune(
                 databasePath: databasePath,
