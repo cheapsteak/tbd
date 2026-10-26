@@ -135,8 +135,6 @@ final class AppStateEmissionTracker {
         _ = state.expandedSidebarGroups
         _ = state.sidebarSelectionGeneration
         _ = state.pendingWorktreeIDs
-        _ = state.suspendingTerminalIDs
-        _ = state.suspendingSnapshots
         _ = state.switchingAccountTerminals
         _ = state.terminalAttachEpochs
         _ = state.terminalAttachRetries
@@ -263,8 +261,6 @@ final class AppStateEmissionTracker {
         "expandedSidebarGroups",
         "sidebarSelectionGeneration",
         "pendingWorktreeIDs",
-        "suspendingTerminalIDs",
-        "suspendingSnapshots",
         "switchingAccountTerminals",
         "terminalAttachEpochs",
         "terminalAttachRetries",

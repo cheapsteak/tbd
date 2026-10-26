@@ -285,13 +285,12 @@ extension HibernationCoordinator {
         // **A session whose holder and job are both verifiably gone is parked
         // without the live rails.** Every rail below asks something of a live
         // session — its reader, its transcript mid-write — and a session with
-        // neither process has none of those to give: no reader exists, and
-        // there is no composer left to hold unsent input. Refusing it would
-        // strand the row forever, awake over nothing, with every wake,
-        // hibernate and profile swap refused for a reader that can never come
-        // back. Parking it is the truthful record,
-        // and the invariant this feature is judged on holds trivially: the
-        // child is not running. `HolderChildDisposition.sessionHasEnded` is
+        // neither process has none of those to give: no reader exists.
+        // Refusing it would strand the row forever, awake over nothing, with
+        // every wake, hibernate and profile swap refused for a reader that can
+        // never come back. Parking it is the truthful record, and the
+        // invariant this feature is judged on holds trivially: the child is
+        // not running. `HolderChildDisposition.sessionHasEnded` is
         // fail-closed — an unrecorded pid, a pid that is alive under an
         // identity this daemon cannot confirm, or an unreadable one is not
         // "gone" — and it is the same answer the attach path gives the app.

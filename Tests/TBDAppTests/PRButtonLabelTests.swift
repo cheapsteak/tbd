@@ -274,18 +274,16 @@ struct PRButtonLabelTests {
         // url, reason, mergeQueuePosition), so a new field is otherwise
         // silently unkeyed: decide whether the split button renders it and
         // update prSplitButtonID (and this count) accordingly.
-        // 8 = number, state, url, reason and mergeQueuePosition, all of which
+        // 6 = number, state, url, reason and mergeQueuePosition, all of which
         // the split button DOES render and which are all keyed (reason via the
         // menu row titles, mergeQueuePosition via the bus glyph's baked
-        // position badge), plus the merge-gate metadata (files, commits,
-        // authorWorktreeID), which it does NOT render — deliberately excluded,
-        // else every metadata fetch would force a spurious item rebuild.
-        // 9 adds observedAt — when the forge was last asked. The RAW stamp is
-        // deliberately not keyed; the bucketed words it produces are, as
-        // `freshnessClauses`, so a re-confirmation that changes no displayed
-        // text rebuilds nothing while an age that visibly moved does.
+        // position badge), plus observedAt — when the forge was last asked.
+        // The RAW stamp is deliberately not keyed; the bucketed words it
+        // produces are, as `freshnessClauses`, so a re-confirmation that
+        // changes no displayed text rebuilds nothing while an age that visibly
+        // moved does.
         let status = Self.makeStatus()
-        #expect(Mirror(reflecting: status).children.count == 9)
+        #expect(Mirror(reflecting: status).children.count == 6)
     }
 
     @Test("id key differs by merge-queue position so a queue move rebuilds the item")

@@ -111,7 +111,7 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// stderr.
     ///
     /// **The raw values must stay identical to `ActuationModeSource`'s.** A
-    /// supervisor correlates the `screen.source` it read from `tbd terminal
+    /// caller correlates the `screen.source` it read from `tbd terminal
     /// output --json` against the `modeSource` on the actuation row its send
     /// produced, and it does that by string comparison — so two spellings of
     /// one fact make exactly the case that matters, `staleDaemon`, fail to

@@ -8,8 +8,8 @@ the code and this document disagree, the code wins; then fix the document.
 
 *Re-read against the tree on 2026-10-25 in the entries for the key-name
 `send-keys`, `capture-pane -p -e -J`, `windowExists`, `pane_current_command`
-and `pane_pid`: those cite that tree. Every other citation is from the
-2026-08-26 reading.*
+and `pane_pid`, and in the section on which capabilities serve supervision:
+those cite that tree. Every other citation is from the 2026-08-26 reading.*
 
 It is an inventory, not a proposal. It does not argue for or against any change
 to how terminals are driven.
@@ -468,7 +468,8 @@ usually told.
   daemon types. Without tmux, `tbd terminal send`, cross-session agent messaging
   and the rate-limit auto-continue lose their transport. There is no second
   path. A park types nothing, so it needs no `send-keys`; it needs tmux for
-  `panePID` and `respawn-window`.
+  `windowExists`, `paneCurrentCommand`, `capture-pane -p -e -J`, `panePID` and
+  `respawn-window`.
 - **Bracketed-paste correctness.** tmux is the sole wrapping authority
   (`PasteInterception.swift:8-19`); `-p` wrapping is what keeps a trailing Enter
   outside the paste, which is what stopped large `--submit` messages being

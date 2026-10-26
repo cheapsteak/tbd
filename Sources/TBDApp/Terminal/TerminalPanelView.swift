@@ -601,11 +601,6 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             }
         }
 
-        // Register snapshot provider so SidebarContextMenu can capture this view
-        let captureID = terminalID
-        appState.snapshotProviders[captureID] = { [weak tv] in
-            tv?.captureScreenshot()
-        }
         appState.registerTerminalView(tv, for: terminalID)
 
         return tv

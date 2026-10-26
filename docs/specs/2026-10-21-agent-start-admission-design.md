@@ -66,10 +66,10 @@ Each request carries its `ActuationActor`. The gate checks every actor except tw
   version.
 
 So `session` (a `tbd` command run inside a TBD terminal, usually an agent), `anonymous` (a
-`tbd` command run outside TBD, usually a script or another tool's timer), the reserved
-`supervisor` kind, and any kind a newer client declares are all checked. The actor is
-self-declared, not authenticated (`ActuationActor.swift`). This is a resource policy, not a
-security boundary: a caller that claims to be the app defeats only its own user's policy.
+`tbd` command run outside TBD, usually a script or another tool's timer), and any kind a
+newer client declares are all checked. The actor is self-declared, not authenticated
+(`ActuationActor.swift`). This is a resource policy, not a security boundary: a caller that
+claims to be the app defeats only its own user's policy.
 
 ### The command
 

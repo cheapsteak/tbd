@@ -3,7 +3,7 @@ import Foundation
 /// What the daemon knows about a session's unsent composer draft.
 public enum ComposerDraftStatus: Equatable, Sendable {
     case legacy
-    case confirmed(hasDraft: Bool)
+    case confirmed
     case unknown(SessionModLiveness.UnknownReason)
 
     /// A confirmed session's draft decides the rest. A draft is confirmed only
@@ -21,13 +21,13 @@ public enum ComposerDraftStatus: Equatable, Sendable {
         case .unknown(let reason): return .unknown(reason)
         case .confirmed:
             switch draft {
-            case .missing: return .confirmed(hasDraft: false)
+            case .missing: return .confirmed
             case .unreadable: return .unknown(.unreadableFile)
             case .record(let record):
                 if record.hasDraft, record.restorable != true {
                     return .unknown(.draftNotRestorable)
                 }
-                return .confirmed(hasDraft: record.hasDraft)
+                return .confirmed
             }
         }
     }

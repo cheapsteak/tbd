@@ -457,9 +457,11 @@ custom_rules:
     # Raw `kill(` is deliberately NOT in this list: no regex can separate a
     # signal sent to a session's process from ordinary subprocess reaping, and a
     # rule that fired on both would be one people disable. The park and the
-    # profile swap signal a session through `ProcessSignaller`
-    # (Sources/TBDDaemon/Process/ProcessSignaller.swift) rather than a raw
-    # `kill(`, and are covered by the manual audit.
+    # profile swap send their SIGTERM through `ProcessSignaller`
+    # (Sources/TBDDaemon/Process/ProcessSignaller.swift); a holder park's or
+    # swap's forced step goes through `HolderRegistry.abandon`, whose `killJob`
+    # sends a raw `kill(` SIGKILL to the job's process group and pid. Neither
+    # is matched here; both are covered by the manual audit.
     regex: '(?<!func )\b(?:killWindowAndReap|captureThenKillWindow|killWindow|killServer|respawnWindow|createWindow|pasteText|sendKeys|sendKey|setHibernated)\s*\('
     # Code only. Several doc comments name these primitives while explaining the
     # boundary (`ClaudeSpawnCommandBuilder` points at `createWindow(sensitiveEnv:)`),

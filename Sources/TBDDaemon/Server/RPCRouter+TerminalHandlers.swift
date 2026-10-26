@@ -5081,8 +5081,8 @@ extension RPCRouter {
     /// `id` is the actuation row's own id — there is no second identifier
     /// namespace, so dispatch, transcript receipt and outcome all join on one
     /// string. `from` comes from `ActuationActor.dispatchLabel`, which is
-    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail name can close
-    /// the tag or open a second attribute.
+    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail or kind name can
+    /// close the tag or open a second attribute.
     static func dispatchEnvelope(id: String, from label: String) -> String {
         "<tbd-dispatch id=\"\(id)\" from=\"\(label)\"/>"
     }

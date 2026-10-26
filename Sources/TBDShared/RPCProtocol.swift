@@ -2764,8 +2764,9 @@ public struct TerminalListParams: Codable, Sendable {
 }
 
 /// Which terminals `session.states` should report on. Absent `worktreeID` means
-/// the whole fleet — the ordinary call, since the point of the method is asking
-/// about every agent every cycle.
+/// every agent-bearing terminal in every worktree — the ordinary call, since
+/// the method is built to be asked about every agent at once. A plain shell is
+/// never reported on, whichever scope is asked.
 public struct SessionStatesParams: Codable, Sendable {
     public let worktreeID: UUID?
     public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
@@ -2773,9 +2774,9 @@ public struct SessionStatesParams: Codable, Sendable {
 
 /// One `session.states` answer: a `SessionStateReport` per terminal.
 ///
-/// A wrapper rather than a bare array so a later slice can add a fleet-level
-/// field (a pass timestamp, a count of terminals skipped) without changing the
-/// shape every existing reader decodes.
+/// A wrapper rather than a bare array so a field about the whole answer (a
+/// count of terminals skipped, say) can be added without changing the shape
+/// every existing reader decodes.
 public struct SessionStatesResult: Codable, Sendable {
     public let reports: [SessionStateReport]
     public init(reports: [SessionStateReport]) { self.reports = reports }

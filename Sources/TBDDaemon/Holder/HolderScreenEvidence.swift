@@ -10,13 +10,12 @@ import TBDShared
 ///
 /// It carries no wording, only the fact underneath.
 enum HolderScreenEvidence {
-    /// Why a screen is not evidence.
+    /// Why a screen is not the session's live frame.
     enum Refusal: Equatable, Sendable {
         /// Somebody else is at this session's pty. Either the daemon's
         /// emulator is frozen at the moment of that attach (`.staleDaemon`),
         /// or the viewer answered the pull itself (`.viewer`) — in both the
-        /// daemon's grid is not the live screen, and a caret standing in it
-        /// proves nothing about now.
+        /// daemon's grid is not the live screen.
         case viewerHoldsPty
         /// The daemon is rendering live, but its emulator was built over a
         /// child that was already running: the TUI above it paints

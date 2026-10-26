@@ -9,7 +9,7 @@ import Foundation
 // every state-shaped thing in this file either is one or is built out of them.
 //
 // The consequence that matters is what becomes unspellable. A value with no
-// provenance cannot be constructed, so it cannot drift into a briefing, a
+// provenance cannot be constructed, so it cannot drift into a report, a
 // threshold comparison, or a rendered surface pretending to be current. And
 // because provenance is structural rather than conventional, `unknown` gets to
 // be a first-class answer — "nothing could speak to this" is a fact with a
@@ -235,9 +235,8 @@ public enum FactTimestamp {
 ///
 /// The class is a *label on a recorded fact*, not a branch in a decision. What
 /// a class means — whether `promptOnScreen` warrants waking someone, whether
-/// `informational` is worth a line in a briefing — is for whoever reads the
-/// fact to decide, as is every threshold this file's other types decline to
-/// hold.
+/// `informational` is worth surfacing — is for whoever reads the fact to
+/// decide, as is every threshold this file's other types decline to hold.
 public enum AwaitingInputClass: String, Sendable, Equatable, Codable {
     /// A prompt is on screen now and a human has to answer it.
     case promptOnScreen = "prompt_on_screen"

@@ -206,6 +206,7 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
                 params: ConfigSetPromptAnswerParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
         case "composer-draft":
             let parsed = try Self.parseOnOff(value, key: key)
             try client.callVoid(

@@ -303,9 +303,9 @@ in the pane are separate and stay.
 - `PromptInputHash` and the note-pairing it serves.
 - The `prompt.note`, `prompt.register`, `prompt.await` and `prompt.ack` RPCs.
 
-`prompt.note` also fed the per-session activity counters and ledger on each
-tool call. Flag-on sessions lose that feed and match flag-off sessions, whose
-counters run on the other hooks.
+`prompt.note` also stamped the PR poll schedule's activity ledger
+(`WorktreeActivityLedger`) on each tool call. Flag-on sessions lose that feed
+and match flag-off sessions, whose stamps come from the other hooks.
 
 ### Unchanged
 

@@ -63,12 +63,12 @@ Parking a delegating session destroys its delegated work, and this design does
 not prevent that. The hazard is recorded here because the rail deliberately
 stops short of it, not because the risk is theoretical.
 
-`performHibernate` terminates rather than suspends: it sends an in-band `/exit`,
-falls back to a graceful interrupt, and respawns the window, which guarantees
-the process is gone. Background subagents die with their parent. Resuming does
-not recover them, because the parent's transcript holds a launch record whose
-completion notification can no longer arrive, so the resumed session waits on a
-result that will never come.
+`performHibernate` terminates rather than suspends: it sends the Claude process
+`SIGTERM`, then guarantees the end — `respawn-window -k` on tmux, and on the pty
+holder a process-group kill when `SIGTERM` has not ended it. Background
+subagents die with their parent. Resuming does not recover them, because the
+parent's transcript holds a launch record whose completion notification can no
+longer arrive, so the resumed session waits on a result that will never come.
 
 Reaching that state requires a park to select a delegating session. The idle
 sweep's master switch defaults off, which leaves merge-park and an explicit
@@ -93,28 +93,26 @@ on the daemon's clock rather than in response to `terminal.list`, so it cannot
 read a response-derived field and would take its own bounded sample at park time;
 that sampling is affordable precisely because parking is rare, and a fresh read
 cannot latch. The veto belongs behind a default-off configuration column and a
-soak, following the typed-but-unsent input veto, which is the same shape of rail
-and refuses a park for the same class of reason. And a stale claim must not
-render a worktree permanently unparkable, which argues for consulting process
-liveness before refusing.
+soak. And a stale claim must not render a worktree permanently unparkable,
+which argues for consulting process liveness before refusing.
 
-## Relationship to the supervision session state
+## Relationship to the session-state model
 
 This rail feeds the sidebar indicator and nothing else. It does not change
 `SessionStateResolver`, which composes the separate `SessionStateValue` that
-`session.states` and the fleet supervision readouts consume. A delegating
-session continues to resolve `.idle` there, carrying its source and observed-at
-so a consumer can see that `idle` means "the hook rail last reported a turn
-ending, at this time".
+`session.states` reports to a script or agent asking the daemon socket. A
+delegating session continues to resolve `.idle` there, carrying its source and
+observed-at so a consumer can see that `idle` means "the hook rail last
+reported a turn ending, at this time".
 
 The two answers differ because they are answers to different questions, and the
 separation is deliberate. The indicator asks whether the worktree is making
 progress, and a bounded, display-only, fail-toward-idle claim serves that well.
-Supervision asks whether a session needs a human, and it may act on the answer;
-it therefore holds a higher bar for what counts as evidence and prefers
-reporting ambiguity to guessing. Extending the delegation fact into the
-supervision model would be a separate design with a different risk profile,
-because that model's consumers are not confined to a spinner.
+The session-state model serves callers that may act on its answer, so it holds
+a higher bar for what counts as evidence and prefers reporting ambiguity to
+guessing. Extending the delegation fact into that model would be a separate
+design with a different risk profile, because its consumers are not confined
+to a spinner.
 
 ## Authoritative signal
 
