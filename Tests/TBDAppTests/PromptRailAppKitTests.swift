@@ -166,7 +166,7 @@ struct PromptRailAppKitTests {
             timeZone: TimeZone(identifier: "UTC"), year: 2020, month: 1, day: 2, hour: 12)))
         var entries = Self.entries(3)
         entries[0] = PromptOutlineEntry(
-            id: "p-0", rowIndex: 0, kind: .prompt, firstLine: "Prompt 0", tooltip: "Prompt 0", timestamp: dated)
+            id: "p-0", rowIndex: 0, kind: .prompt, firstLine: "Prompt 0", excerpt: "Prompt 0", timestamp: dated)
         rail.promptRail(entriesDidChange: entries)
         rail.promptRail(workCountsDidChange: [40, 1, 0])
 
@@ -313,28 +313,6 @@ struct PromptRailAppKitTests {
         }
         #expect(card.dashRect(forEntry: 2)?.height == 3)
         #expect(card.dashRect(forEntry: 5) == nil)
-    }
-
-    @Test("a row's tooltip gives its turn's tool calls, then the prompt when the row is truncated")
-    func cardToolTipsCarryTheCount() {
-        var entries = Self.entries(2)
-        entries[0] = PromptOutlineEntry(
-            id: "p-0", rowIndex: 0, kind: .prompt,
-            firstLine: String(repeating: "a first line far too long for the card ", count: 20),
-            tooltip: "the whole prompt", timestamp: nil)
-        let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
-        card.update(entries: entries, workCounts: [40, 1], activeIndex: nil, earlier: nil)
-        card.open(pointedIndex: nil, pointerY: 0, maxSize: CGSize(width: 680, height: 600))
-
-        #expect(card.toolTipText(forEntry: 0) == "40 tool calls\n\nthe whole prompt")
-        #expect(card.toolTipText(forEntry: 1) == "1 tool call")
-        #expect(card.toolTipText(forEntry: 2) == nil)
-        // Every row has a tooltip, the one that fits included.
-        #expect(card.toolTipRectCount == entries.count)
-
-        // New counts reach the tooltip, which is composed when shown.
-        card.update(entries: entries, workCounts: [41, 1], activeIndex: nil, earlier: nil)
-        #expect(card.toolTipText(forEntry: 0) == "41 tool calls\n\nthe whole prompt")
     }
 
     @Test("a new entry while the card is open keeps it open and keeps the list where it was")
@@ -572,7 +550,7 @@ struct PromptRailAppKitTests {
         (0..<count).map { index in
             PromptOutlineEntry(
                 id: "p-\(index)", rowIndex: index * 2, kind: .prompt,
-                firstLine: "Prompt \(index)", tooltip: "Prompt \(index)", timestamp: nil)
+                firstLine: "Prompt \(index)", excerpt: "Prompt \(index)", timestamp: nil)
         }
     }
 

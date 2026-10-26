@@ -42,12 +42,49 @@ struct PromptOutlineTests {
         #expect(PromptOutline.firstLine(of: "[Image #1]") == "[Image #1]")
     }
 
-    @Test("tooltip is capped at 500 characters")
-    func tooltipIsCappedAt500() {
+    @Test("the excerpt holds the lines with content, each collapsed, from the first line on")
+    func excerptCollapsesLinesWithContent() {
+        let text = "\n  \n  fix   the\tbuild  \n\n\n   then  ship it\r\nand tag\n  \n"
+        #expect(PromptOutline.excerpt(of: text) == "fix the build\nthen ship it\nand tag")
+        #expect(PromptOutline.excerpt(of: "only line") == "only line")
+        #expect(PromptOutline.excerpt(of: " \n \n") == "")
+        // Unwrapped as the first line is.
+        let pasted = "<pasted_content id=\"62f5\">\n  hello   world\nsecond\n</pasted_content id=\"62f5\">"
+        #expect(PromptOutline.excerpt(of: pasted) == "hello world\nsecond")
+    }
+
+    @Test("the excerpt stops at 500 characters and ends in an ellipsis when the prompt runs on")
+    func excerptIsCappedAt500() {
+        let capped = PromptOutline.excerpt(of: String(repeating: "x", count: 900))
+        #expect(capped.count == PromptOutline.excerptLimit + 1)
+        #expect(capped.hasSuffix("…"))
+        #expect(capped.dropLast().allSatisfy { $0 == "x" })
+
+        // Exactly the limit fits, with nothing after it, so no ellipsis.
+        let exact = String(repeating: "y", count: PromptOutline.excerptLimit)
+        #expect(PromptOutline.excerpt(of: exact) == exact)
+
+        // A line past the limit counts its separating newline.
+        let twoLines = String(repeating: "a", count: 498) + "\nbb"
+        #expect(PromptOutline.excerpt(of: twoLines) == String(repeating: "a", count: 498) + "\nb…")
+
+        // Text past the scan window counts only when it has content.
+        let blankTail = "z" + String(repeating: " ", count: PromptOutline.excerptScanLimit + 10)
+        #expect(PromptOutline.excerpt(of: blankTail) == "z")
+        let farTail = "z" + String(repeating: " ", count: PromptOutline.excerptScanLimit) + "more"
+        #expect(PromptOutline.excerpt(of: farTail) == "z…")
+    }
+
+    @Test("an entry runs past its first line when the prompt has more lines or more than the excerpt holds")
+    func entriesRunPastTheirFirstLine() {
         let entries = PromptOutline.entries(from: nodes([
-            .userPrompt(id: "p", text: String(repeating: "x", count: 900), timestamp: nil),
+            .userPrompt(id: "one", text: "  just   this  ", timestamp: nil),
+            .userPrompt(id: "more", text: "first\n\nsecond", timestamp: nil),
+            .userPrompt(id: "long", text: String(repeating: "x", count: 900), timestamp: nil),
         ]))
-        #expect(entries.first?.tooltip.count == 500)
+        #expect(entries.map(\.firstLine) == ["just this", "first", String(repeating: "x", count: 900)])
+        #expect(entries.map(\.excerpt).first == "just this")
+        #expect(entries.map(\.runsPastFirstLine) == [false, true, true])
     }
 
     @Test("time label: time today, month and day earlier, empty for nil")

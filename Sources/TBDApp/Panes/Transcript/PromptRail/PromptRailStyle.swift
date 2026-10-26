@@ -1,8 +1,8 @@
 import AppKit
 
 // Presentation the rail and the card share: notch colours, the edge fade's
-// extent, the card's metrics and tooltips, and the rail's accessibility
-// labels. Notch lengths are `PromptRailWorkScale`'s.
+// extent, the card's metrics and its rows' expansion, and the rail's
+// accessibility labels. Notch lengths are `PromptRailWorkScale`'s.
 
 /// Notch and dash colours, shared by the rail and the card so a card's dashes
 /// match the notches they sit over.
@@ -96,14 +96,52 @@ enum PromptRailCardMetrics {
     }
 }
 
+/// Where a card row's expansion goes: how many lines of its prompt it shows,
+/// and whether it grows up to the row rather than down from it.
+struct PromptRailExpansionPlacement: Equatable {
+    let lines: Int
+    let growsUpward: Bool
+}
+
 extension PromptRailCardMetrics {
-    /// A row's tooltip: its turn's work ("40 tool calls"), then, for a row
-    /// whose first line is truncated, a blank line and the prompt's first
-    /// `PromptOutline.tooltipLimit` characters (`truncatedBody`).
-    static func toolTip(workCount: Int, truncatedBody: String?) -> String {
-        let work = PromptOutline.workLabel(workCount)
-        guard let truncatedBody else { return work }
-        return "\(work)\n\n\(truncatedBody)"
+    /// How long the pointer rests on a row before the row expands.
+    static let expansionDelay = Duration.milliseconds(150)
+    /// Lines of its prompt an expansion shows at most.
+    static let expansionMaxLines = 6
+
+    /// The height of an expansion showing `lines` lines of its prompt, each
+    /// `lineHeight` tall, and its tool-call line: the row's own height, which
+    /// holds one line centred in it, plus a line for each of the rest. The
+    /// line on the row keeps the row's padding above and below it.
+    static func expansionHeight(lines: Int, lineHeight: CGFloat) -> CGFloat {
+        rowHeight + CGFloat(max(0, lines)) * lineHeight
+    }
+
+    /// Where an expansion of `row` goes within the list's `visible` rect,
+    /// both in list coordinates, for a prompt that would fill `wantedLines`
+    /// lines `lineHeight` tall.
+    ///
+    /// It grows down from the row when all `wantedLines` fit below the row's
+    /// top, and otherwise up to the row's bottom when they fit above it. When
+    /// they fit neither way it shows as many as fit, growing whichever way has
+    /// more room. Nil when not even one line fits beside the tool-call line,
+    /// or there is nothing to show.
+    static func expansionPlacement(
+        row: NSRect, visible: NSRect, wantedLines: Int, lineHeight: CGFloat
+    ) -> PromptRailExpansionPlacement? {
+        guard wantedLines > 0, lineHeight > 0 else { return nil }
+        // Laid-out heights are fractional; a hair over the room still fits.
+        let slack: CGFloat = 0.01
+        let below = visible.maxY - row.minY
+        let above = row.maxY - visible.minY
+        let wanted = expansionHeight(lines: wantedLines, lineHeight: lineHeight)
+        if wanted <= below + slack { return PromptRailExpansionPlacement(lines: wantedLines, growsUpward: false) }
+        if wanted <= above + slack { return PromptRailExpansionPlacement(lines: wantedLines, growsUpward: true) }
+        let growsUpward = above > below
+        let room = growsUpward ? above : below
+        let fitting = Int(((room - rowHeight) / lineHeight + slack).rounded(.down))
+        let lines = min(wantedLines, fitting)
+        return lines > 0 ? PromptRailExpansionPlacement(lines: lines, growsUpward: growsUpward) : nil
     }
 }
 
