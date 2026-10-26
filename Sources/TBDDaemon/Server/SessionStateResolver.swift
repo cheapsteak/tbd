@@ -71,7 +71,7 @@ struct SessionStateFacts: Sendable, Equatable {
 /// Composes one terminal's `SessionState` — the phase-1 triple — out of the
 /// machine facts the daemon already holds.
 ///
-/// Cheap enough to ask about every agent every cycle, and that bound is a
+/// Cheap enough to ask about every agent on a cadence, and that bound is a
 /// design constraint rather than an aspiration: **no model call, no rendered
 /// screen, no subprocess.** Every input is a database column or a byte-bounded
 /// file read a caller already made.

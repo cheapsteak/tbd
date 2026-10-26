@@ -468,11 +468,10 @@ struct HolderTmuxAssumptionGateTests {
         return (result, terminal, after)
     }
 
-    /// The field report: a tab whose holder was killed, its job with it. There
-    /// is no reader to judge a screen through and nothing left to hold unsent
-    /// input, so the park finalizes — with the pids cleared, as every park
-    /// leaves them — instead of refusing forever for a reader that cannot
-    /// come back.
+    /// The field report: a tab whose holder was killed, its job with it. No
+    /// process is left to end, so the park finalizes without the reader check
+    /// and the transcript rail — with the pids cleared, as every park leaves
+    /// them — instead of refusing forever for a reader that cannot come back.
     @Test("a session whose holder and job are both gone is parked without the live rails")
     func deadHolderAndDeadChildParks() async throws {
         let (result, _, after) = try await parkWithDeadHolder { signaller, _ in
@@ -570,8 +569,8 @@ struct HolderTmuxAssumptionGateTests {
         #expect(tmuxRow.isManuallyHibernatable())
         #expect(holderRow.isManuallyHibernatable())
 
-        // The tmux row parks outright; the holder row reaches its own screen
-        // rail rather than being refused for its transport.
+        // The tmux row parks outright; the holder row reaches its own reader
+        // check rather than being refused for its transport.
         #expect(
             await coordinator(db, tmux: TmuxManager(dryRun: true))
                 .manualHibernate(terminalID: tmuxRow.id) == .ok)
@@ -582,7 +581,7 @@ struct HolderTmuxAssumptionGateTests {
         #expect(
             holderResult == .notEligible(
                 reason: HibernationCoordinator.holderNoReaderRefusal),
-            "a manual holder park was refused for something other than its screen: \(holderResult)")
+            "a manual holder park was refused for something other than its missing reader: \(holderResult)")
     }
 
     @Test("an identical tmux row is still manually hibernatable and parks")
@@ -2178,8 +2177,8 @@ struct HolderTmuxAssumptionGateTests {
         let outcome = try #require(await Self.outcomeRow(of: rpc))
         #expect(outcome["result"] as? String == "dispatched")
         // The source alone would read as a live, trustworthy answer — the
-        // emulator IS live, and its lines are judgeable; only its modes are
-        // defaults. That is what the second field is for.
+        // emulator IS live, not frozen; only its modes are defaults. That is
+        // what the second field is for.
         #expect(outcome["modeSource"] as? String == "daemon")
         #expect(outcome["modesObserved"] as? Bool == false)
     }
@@ -2263,7 +2262,7 @@ struct HolderTmuxAssumptionGateTests {
         let outcome = try #require(await Self.outcomeRow(of: rpc))
         #expect(outcome["result"] as? String == "dispatched")
         // Spelled exactly as `TerminalScreen.Source.staleDaemon` encodes, so a
-        // supervisor can match the row against the screen it read.
+        // caller can match the row against the screen it read.
         #expect(outcome["modeSource"] as? String == "staleDaemon")
         #expect(outcome["modeAgeMilliseconds"] as? Int == 2_460_000)
     }

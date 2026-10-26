@@ -112,7 +112,8 @@ public enum TerminalKind: String, Codable, Sendable {
     /// sessions must not describe it: a report explaining that a shell's
     /// context window is unknown because nothing reported it is a true
     /// sentence about a session that was never going to have one, and the stat
-    /// and transcript-tail attempt behind it are paid every cycle for nothing.
+    /// and transcript-tail attempt behind it are paid on every call for
+    /// nothing.
     public var isAgentBearing: Bool { self != .shell }
 }
 
@@ -1067,14 +1068,13 @@ public extension Terminal {
     /// explicitly. Still refuses to hibernate an in-flight turn or a raised
     /// permission hand.
     ///
-    ///
     /// The rails are the same on every transport. Park and wake on the holder
     /// transport do not go through tmux at all — the park ends the child by
     /// SIGTERM (abandoning the holder if that does not end it), confirms the
-    /// child is gone, and clears the row's pids, and
-    /// the wake spawns a fresh holder running `claude --resume`. A holder row's
-    /// `tmuxWindowID`/`tmuxPaneID` are empty strings by construction and
-    /// neither path reads them.
+    /// child is gone, and clears the row's pids, and the wake spawns a fresh
+    /// holder running `claude --resume`. A holder row's `tmuxWindowID`/
+    /// `tmuxPaneID` are empty strings by construction and neither path reads
+    /// them.
     func isManuallyHibernatable() -> Bool {
         guard isClaudeResumable else { return false }
         guard hibernatedAt == nil, suspendedAt == nil else { return false }

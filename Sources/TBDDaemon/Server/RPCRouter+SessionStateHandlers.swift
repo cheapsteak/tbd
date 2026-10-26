@@ -16,8 +16,8 @@ private let sessionStateLog = Logger(subsystem: "com.tbd.daemon", category: "ses
 /// `ContextLoadReader`; for a Claude session with a session directory, its
 /// `spawn.json`, `alive.json` and — when the mod is confirmed running —
 /// `usage.json`) and **zero** subprocesses, tmux calls, pane reads and model
-/// calls. That is the property that lets the whole fleet be asked about every
-/// cycle.
+/// calls. That is the property that lets the pass be called on a cadence for
+/// every agent at once.
 /// Not `Sendable`, and it does not need to be: one gatherer is built inside a
 /// single `session.states` pass and never crosses an isolation boundary.
 struct SessionStateFactGatherer {
@@ -215,9 +215,9 @@ extension RPCRouter {
         let params = try decoder.decode(SessionStatesParams.self, from: paramsData)
         // Agent-bearing kinds only. A plain shell has no transcript, no context
         // window and no hook rail, so a `SessionStateReport` about one would
-        // spend a stat and a transcript-tail attempt every cycle to explain why
-        // a shell has no denominator. A nil kind is a pre-`kind` row, which in
-        // practice is an agent terminal — included, because dropping a real
+        // spend a stat and a transcript-tail attempt on every call to explain
+        // why a shell has no denominator. A nil kind is a pre-`kind` row, which
+        // in practice is an agent terminal — included, because dropping a real
         // agent from the report is the worse error of the two.
         let terminals = try await db.terminals.list(worktreeID: params.worktreeID)
             .filter { $0.kind?.isAgentBearing ?? true }

@@ -3564,9 +3564,9 @@ struct RPCRouterWakePromptDeliveryTests {
                 "the respawn must carry the prompt as a trailing argv; got: \(joined)")
     }
 
-    /// Already-awake terminal (the race wake.py guards against): the RPC
-    /// reports `woken: false`, touches no tmux pane, and the prompt is
-    /// delivered NOWHERE — not typed, not pasted, not queued.
+    /// Already-awake terminal (the race an autonomous caller must guard
+    /// against): the RPC reports `woken: false`, touches no tmux pane, and the
+    /// prompt is delivered NOWHERE — not typed, not pasted, not queued.
     @Test func wakeOnAwakeNoOpsAndWithholdsPrompt() async throws {
         let db = try TBDDatabase(inMemory: true)
         let recorded = RecordedTmuxCommands()

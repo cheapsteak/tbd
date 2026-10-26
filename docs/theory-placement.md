@@ -95,9 +95,9 @@ theories ship as authored defaults, not as compiled law.
    or count is a hypothesis wearing mechanism's clothes. Facts get
    timestamped; hypotheses get evaluated — and whoever evaluates owns the
    theory. *Example: the sixty-minute unanswered-briefing threshold read
-   as liveness mechanism until this test flagged it; it now ships as a
-   named constant in the reference sweep program beside idle-forty
-   (design §15, sweep program §7).*
+   as liveness mechanism until this test flagged it; the supervision
+   design made it a named constant in its reference sweep program beside
+   idle-forty (design §15, sweep program §7).*
 3. **The when/whether/what-instead probe.** Mechanism answers *how*. A
    compiled *when*, *whether*, or *what instead* is a decision looking
    for its owner. *Example: delivery-time desk replacement answered
@@ -152,7 +152,8 @@ TBD, which has no supervision, compiles neither:
 - **The brake** — the operator's atomic stop over TBD's own hand,
   rechecked at the act (design §3, §8).
 
-Two structural principles govern the theories TBD *does* hold:
+Two structural principles governed the theories the supervision design
+held:
 
 - **Content, not law.** A shipped default is a theory — the reference
   sweep program's thresholds, the default transition ceremony, the

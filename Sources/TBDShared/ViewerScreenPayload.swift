@@ -135,10 +135,9 @@ public struct ViewerScreenPayload: Codable, Sendable, Equatable {
     /// The cursor, in the shape `TerminalScreen` holds it.
     ///
     /// `TerminalScreen.Cursor` has no provenance field of its own, so
-    /// `cursorVisibleObserved` does not survive this conversion — which is
-    /// correct for the one screen a consumer can reach, because a `.viewer`
-    /// screen's cursor is refused by the only consumer that reads one. A
-    /// consumer that needs the flag reads it from the payload.
+    /// `cursorVisibleObserved` does not survive this conversion — which costs
+    /// nothing, because nothing in TBD decides anything from a screen's
+    /// cursor. A consumer that needs the flag reads it from the payload.
     public var cursor: TerminalScreen.Cursor {
         TerminalScreen.Cursor(row: cursorRow, column: cursorColumn, visible: cursorVisible)
     }

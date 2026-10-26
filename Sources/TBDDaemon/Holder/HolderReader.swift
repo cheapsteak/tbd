@@ -119,11 +119,11 @@ actor HolderReader {
     /// behind both `TerminalScreen.modesObserved` and
     /// `TerminalScreen.contentObserved`.
     ///
-    /// Exposed beside the emulator's own copy because the idle sweep needs it
-    /// next to `modeReading().source` and must not pay for a whole-buffer walk
-    /// to get it: `screen(maxLines:)` holds the emulator lock a live session's
-    /// drain thread needs, and the sweep asks this of every idle holder row on
-    /// every pass. `nonisolated` for the same reason it is a `let` — it is
+    /// Exposed beside the emulator's own copy because the `HolderDaemonStore`
+    /// wiring hands it to `HolderScreenResolver`, which stamps it on a viewer's
+    /// screen and modes, and must not pay for a whole-buffer walk to get it:
+    /// `screen(maxLines:)` holds the emulator lock a live session's drain
+    /// thread needs. `nonisolated` for the same reason it is a `let` — it is
     /// fixed at construction, so reading it can never race the actor.
     nonisolated let observedChildFromStart: Bool
     private let descriptor: PTYDescriptor

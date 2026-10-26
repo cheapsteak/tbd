@@ -154,7 +154,7 @@ struct SessionStatesRPCTests {
 
     /// A plain shell is not a session this model has anything to say about: no
     /// transcript, no context window, no hook rail. Reporting one spends a stat
-    /// and a transcript-tail attempt every cycle to produce a paragraph
+    /// and a transcript-tail attempt on every call to produce a paragraph
     /// explaining why a session that was never an agent has no denominator.
     @Test func aPlainShellIsNotReportedOnAtAll() async throws {
         let fixture = try await makeFixture()
@@ -288,7 +288,7 @@ struct SessionStatesRPCTests {
         #expect(try await states(fixture).count == 2)
     }
 
-    @Test func contextLoadReportsAnUnknownWindowForAFleetSession() async throws {
+    @Test func contextLoadReportsAnUnknownWindowForASessionSpawnedWithoutUsage() async throws {
         let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
         let terminal = try await fixture.db.terminals.create(
@@ -309,7 +309,7 @@ struct SessionStatesRPCTests {
         // Nothing reports the window of a session spawned without the
         // session mod's `usage` feature, so it is reported as unknown.
         guard case .unknown = load.window else {
-            Issue.record("expected an unknown window for a fleet session, got \(load.window)")
+            Issue.record("expected an unknown window for a session spawned without usage, got \(load.window)")
             return
         }
         #expect(load.isPairedReading == false)
