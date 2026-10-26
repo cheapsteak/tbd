@@ -185,6 +185,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// `AppState` owns it for the life of the process; this is a plain
     /// reference because the delegate is torn down with the app anyway.
     var tmuxBridge: TmuxBridge?
+    /// Signals every clone still running when the app terminates. A seam for
+    /// tests that drive `applicationWillTerminate`: the production
+    /// `RepoCloner.terminateAll` reaches every clone in the whole process, and
+    /// in a test process that includes the clones another suite is running.
+    var terminateClones: () -> Void = RepoCloner.terminateAll
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         lifecycleLogger.info("willFinishLaunching")
@@ -372,7 +377,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // SIGTERM to any clone still running, so git can clean up its
         // partial clone before the app is gone.
-        RepoCloner.terminateAll()
+        terminateClones()
         // Reclaim this app's tmux view sessions before the process goes. Each
         // one holds a worktree window linked into it, and tmux destroys a
         // window only when its last session reference drops — so a view
