@@ -23,22 +23,55 @@ struct PromptRailAppKitTests {
 
     // MARK: Rail
 
-    @Test("one notch per entry, the active one 18×3 and the rest 14×2, all at x 2")
-    func oneNotchPerEntryActiveSized() {
+    @Test("one notch per entry, each as long as its turn's work, the active one 3pt tall and the rest 2pt, all at x 2")
+    func notchLengthsFollowWork() {
         let rail = Self.makeRail(onJump: { _ in })
+        let counts = [0, 3, 40, 1, 12]
         rail.promptRail(entriesDidChange: Self.entries(5))
+        rail.promptRail(workCountsDidChange: counts)
         rail.promptRail(activeIndexDidChange: 2)
 
         let frames = rail.notchLayerFrames
         #expect(frames.count == 5)
         for (index, frame) in frames.enumerated() {
-            #expect(frame.minX == PromptRailLayout.notchLeading)
-            let size = index == 2 ? CGSize(width: 18, height: 3) : CGSize(width: 14, height: 2)
-            #expect(frame.size == size, "notch \(index) is \(frame.size)")
+            #expect(Self.isClose(frame.minX, PromptRailLayout.notchLeading), "notch \(index) starts at \(frame.minX)")
+            let length = PromptRailWorkScale.length(work: counts[index], busiest: 40)
+            #expect(Self.isClose(frame.width, length), "notch \(index) is \(frame.width) long, not \(length)")
+            #expect(frame.height == (index == 2 ? 3 : 2), "notch \(index) is \(frame.height) tall")
         }
+        // No work is the 4pt floor; the busiest turn, here the active one, 16pt.
+        #expect(Self.isClose(frames[0].width, 4))
+        #expect(Self.isClose(frames[2].width, 16))
         // Stacked from 12pt below the top at the 8pt maximum pitch.
         #expect(frames[0].midY == 16)
         #expect(frames[4].midY == 48)
+
+        // The active notch is marked by thickness alone: moving it changes no
+        // length.
+        rail.promptRail(activeIndexDidChange: 0)
+        let moved = rail.notchLayerFrames
+        #expect(zip(moved, frames).allSatisfy { Self.isClose($0.width, $1.width) },
+                Comment(rawValue: "lengths \(frames.map(\.width)) became \(moved.map(\.width))"))
+        #expect(moved[0].height == 3)
+        #expect(moved[2].height == 2)
+    }
+
+    @Test("new work counts restyle the notches in place, a busier turn rescaling the rest")
+    func workCountsRescaleNotches() {
+        let rail = Self.makeRail(onJump: { _ in })
+        rail.promptRail(entriesDidChange: Self.entries(3))
+        rail.promptRail(workCountsDidChange: [1, 10, 0])
+        let before = rail.notchLayerFrames
+        #expect(Self.isClose(before[1].width, 16))
+        #expect(Self.isClose(before[2].width, 4))
+
+        rail.promptRail(workCountsDidChange: [1, 10, 100])
+        let after = rail.notchLayerFrames
+        #expect(rail.workCounts == [1, 10, 100])
+        #expect(Self.isClose(after[2].width, 16))
+        #expect(after[1].width < before[1].width - 1,
+                Comment(rawValue: "the old busiest notch stayed \(after[1].width) long"))
+        #expect(after[0].width < before[0].width)
     }
 
     @Test("an appearance change re-resolves the notch colours")
@@ -97,7 +130,9 @@ struct PromptRailAppKitTests {
         rail.promptRail(entriesDidChange: Self.entries(3))
 
         #expect(rail.activeIndex == nil)
-        #expect(rail.notchLayerFrames.map(\.size) == Array(repeating: CGSize(width: 14, height: 2), count: 3))
+        // No counts delivered: every notch is the no-work floor.
+        #expect(rail.notchLayerFrames.map(\.size)
+                    == Array(repeating: CGSize(width: PromptRailWorkScale.minLength, height: 2), count: 3))
     }
 
     @Test("the wheel over the rail scrolls the transcript, not the rail")
@@ -123,6 +158,7 @@ struct PromptRailAppKitTests {
         entries[0] = PromptOutlineEntry(
             id: "p-0", rowIndex: 0, kind: .prompt, firstLine: "Prompt 0", tooltip: "Prompt 0", timestamp: dated)
         rail.promptRail(entriesDidChange: entries)
+        rail.promptRail(workCountsDidChange: [40, 1, 0])
 
         #expect(rail.accessibilityRole() == .group)
         #expect(rail.accessibilityLabel() == "Prompts")
@@ -130,9 +166,17 @@ struct PromptRailAppKitTests {
         #expect(buttons.count == 3)
         #expect(buttons.allSatisfy { $0.isAccessibilityElement() })
         #expect(buttons[1].accessibilityRole() == .button)
-        #expect(buttons[1].accessibilityLabel() == "Prompt 1")
+        #expect(buttons[1].accessibilityLabel() == "Prompt 1, 1 tool call")
+        #expect(buttons[2].accessibilityLabel() == "Prompt 2, 0 tool calls")
         let time = PromptOutline.timeLabel(dated, now: Date(), calendar: .current, locale: .current)
-        #expect(buttons[0].accessibilityLabel() == "Prompt 0, \(time)")
+        #expect(buttons[0].accessibilityLabel() == "Prompt 0, \(time), 40 tool calls")
+
+        // New counts relabel the same buttons in place.
+        rail.promptRail(workCountsDidChange: [40, 2, 0])
+        let relabelled = try #require(rail.accessibilityChildren() as? [PromptRailAccessibilityButton])
+        #expect(relabelled.count == 3)
+        #expect(relabelled[1] === buttons[1], "new counts rebuilt the buttons")
+        #expect(buttons[1].accessibilityLabel() == "Prompt 1, 2 tool calls")
 
         #expect(buttons[1].accessibilityPerformPress())
         #expect(jumps.ids == ["p-1"])
@@ -235,6 +279,52 @@ struct PromptRailAppKitTests {
         #expect(PromptRailCardMetrics.bottomClearance == 60)
     }
 
+    @Test("each card dash is as long as its notch and as thick")
+    func cardDashesMatchNotches() throws {
+        let rail = Self.makeRail(onJump: { _ in })
+        rail.promptRail(entriesDidChange: Self.entries(5))
+        rail.promptRail(workCountsDidChange: [0, 3, 40, 1, 12])
+        rail.promptRail(activeIndexDidChange: 2)
+        let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
+        card.update(entries: rail.entries, workCounts: rail.workCounts, activeIndex: rail.activeIndex, earlier: nil)
+        card.open(pointedIndex: nil, pointerY: 0, maxSize: CGSize(width: 680, height: 600))
+
+        let notches = rail.notchLayerFrames
+        try #require(notches.count == 5)
+        for index in 0..<5 {
+            guard let dash = card.dashRect(forEntry: index) else {
+                Issue.record("entry \(index) has no dash")
+                continue
+            }
+            #expect(Self.isClose(dash.width, notches[index].width),
+                    "dash \(index) is \(dash.width) long, its notch \(notches[index].width)")
+            #expect(dash.height == notches[index].height, "dash \(index) is \(dash.height) tall")
+            #expect(dash.minX == PromptRailCardMetrics.dashColumnLeading)
+        }
+        #expect(card.dashRect(forEntry: 2)?.height == 3)
+        #expect(card.dashRect(forEntry: 5) == nil)
+    }
+
+    @Test("a row's tooltip gives its turn's tool calls, then the prompt when the row is truncated")
+    func cardToolTipsCarryTheCount() {
+        var entries = Self.entries(2)
+        entries[0] = PromptOutlineEntry(
+            id: "p-0", rowIndex: 0, kind: .prompt,
+            firstLine: String(repeating: "a first line far too long for the card ", count: 20),
+            tooltip: "the whole prompt", timestamp: nil)
+        let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
+        card.update(entries: entries, workCounts: [40, 1], activeIndex: nil, earlier: nil)
+        card.open(pointedIndex: nil, pointerY: 0, maxSize: CGSize(width: 680, height: 600))
+
+        #expect(card.toolTipText(forEntry: 0) == "40 tool calls\n\nthe whole prompt")
+        #expect(card.toolTipText(forEntry: 1) == "1 tool call")
+        #expect(card.toolTipText(forEntry: 2) == nil)
+
+        // New counts reach the tooltip, which is composed when shown.
+        card.update(entries: entries, workCounts: [41, 1], activeIndex: nil, earlier: nil)
+        #expect(card.toolTipText(forEntry: 0) == "41 tool calls\n\nthe whole prompt")
+    }
+
     @Test("a new entry while the card is open keeps it open and keeps the list where it was")
     func entriesChangeWhileOpenKeepsCardAndScroll() throws {
         let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
@@ -323,6 +413,18 @@ struct PromptRailAppKitTests {
         #expect(!mounted.card.isOpen)
         #expect(mounted.card.isHidden)
         #expect(escape.live == 0, "the Escape monitor outlived the card")
+    }
+
+    @Test("the rail hands its work counts on to the card")
+    func workCountsReachTheCard() {
+        let mounted = Self.mount(hover: Self.makeHover(), escape: EscapeTable(), onJump: { _ in })
+        defer { mounted.host.tearDown() }
+        mounted.rail.promptRail(entriesDidChange: Self.entries(3))
+        mounted.rail.promptRail(workCountsDidChange: [4, 0, 9])
+
+        #expect(mounted.card.workCounts == [4, 0, 9])
+        #expect(Self.isClose(mounted.card.dashRect(forEntry: 2)?.width ?? 0, 16))
+        #expect(Self.isClose(mounted.card.dashRect(forEntry: 1)?.width ?? 0, 4))
     }
 
     @Test("removing the container from its window closes the card")
@@ -460,6 +562,12 @@ struct PromptRailAppKitTests {
                 id: "p-\(index)", rowIndex: index * 2, kind: .prompt,
                 firstLine: "Prompt \(index)", tooltip: "Prompt \(index)", timestamp: nil)
         }
+    }
+
+    /// Within a thousandth of a point: a layer's frame is read back from its
+    /// position and bounds, which can round a fractional length's edges.
+    private static func isClose(_ lhs: CGFloat, _ rhs: CGFloat) -> Bool {
+        abs(lhs - rhs) < 0.001
     }
 
     private static func makeHover(clock: EventDrivenTestClock = EventDrivenTestClock()) -> PromptRailHoverModel {

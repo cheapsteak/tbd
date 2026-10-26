@@ -157,11 +157,13 @@ final class TranscriptContainerView: NSView {
         startObservingKeyWindow()
     }
 
-    /// Hands the rail's outline and active prompt, and the earlier-history
-    /// state, to the card.
+    /// Hands the rail's outline, work counts and active prompt, and the
+    /// earlier-history state, to the card.
     private func pushOutlineToCard() {
         guard let rail = promptRailNSView, let card = promptRailCard else { return }
-        card.update(entries: rail.entries, activeIndex: rail.activeIndex, earlier: promptRailEarlier)
+        card.update(
+            entries: rail.entries, workCounts: rail.workCounts, activeIndex: rail.activeIndex,
+            earlier: promptRailEarlier)
     }
 
     /// The hover model opened or closed the card. Opening lays it out against

@@ -1,7 +1,8 @@
 import AppKit
 
 // Presentation the rail and the card share: notch colours, the edge fade's
-// extent, the card's metrics and the rail's accessibility labels.
+// extent, the card's metrics and tooltips, and the rail's accessibility
+// labels. Notch lengths are `PromptRailWorkScale`'s.
 
 /// Notch and dash colours, shared by the rail and the card so a card's dashes
 /// match the notches they sit over.
@@ -95,12 +96,25 @@ enum PromptRailCardMetrics {
     }
 }
 
+extension PromptRailCardMetrics {
+    /// A row's tooltip: its turn's work ("40 tool calls"), then, for a row
+    /// whose first line is truncated, a blank line and the prompt's first
+    /// `PromptOutline.tooltipLimit` characters (`truncatedBody`).
+    static func toolTip(workCount: Int, truncatedBody: String?) -> String {
+        let work = PromptOutline.workLabel(workCount)
+        guard let truncatedBody else { return work }
+        return "\(work)\n\n\(truncatedBody)"
+    }
+}
+
 /// The rail's accessibility.
 enum PromptRailAccessibility {
-    /// An entry's button label: "<first line>, <time>", or the first line
-    /// alone when the entry has no time.
-    static func label(for entry: PromptOutlineEntry, now: Date) -> String {
+    /// An entry's button label: "<first line>, <time>, <work>", as in
+    /// "fix the rail, 14:02, 40 tool calls"; with no time, "<first line>,
+    /// <work>".
+    static func label(for entry: PromptOutlineEntry, workCount: Int, now: Date) -> String {
         let time = PromptOutline.timeLabel(entry.timestamp, now: now, calendar: .current, locale: .current)
-        return time.isEmpty ? entry.firstLine : "\(entry.firstLine), \(time)"
+        let work = PromptOutline.workLabel(workCount)
+        return time.isEmpty ? "\(entry.firstLine), \(work)" : "\(entry.firstLine), \(time), \(work)"
     }
 }

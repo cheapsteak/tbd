@@ -19,10 +19,15 @@ struct PromptRailCoordinatorTests {
     @MainActor
     private final class RecordingPresenter: PromptRailPresenter {
         var entryLists: [[PromptOutlineEntry]] = []
+        var workCountLists: [[Int]] = []
         var activeIndices: [Int?] = []
 
         func promptRail(entriesDidChange entries: [PromptOutlineEntry]) {
             entryLists.append(entries)
+        }
+
+        func promptRail(workCountsDidChange counts: [Int]) {
+            workCountLists.append(counts)
         }
 
         func promptRail(activeIndexDidChange index: Int?) {
@@ -265,6 +270,7 @@ struct PromptRailCoordinatorTests {
         try #require(cellsBefore > 0, "precondition: priming realizes the visible rows, so the counter is live")
 
         coordinator.refreshPromptOutline()
+        coordinator.refreshPromptWorkCounts()
         coordinator.refreshActivePrompt()
 
         #expect(coordinator.viewForCalls == cellsBefore)
@@ -299,6 +305,7 @@ struct PromptRailCoordinatorTests {
         #expect(scene.coordinator.activePromptIndex == nil)
         // Only the values pushed on attach: nothing changed after that.
         #expect(presenter.entryLists == [[]])
+        #expect(presenter.workCountLists == [[]])
         #expect(presenter.activeIndices == [nil])
     }
 
@@ -416,6 +423,7 @@ struct PromptRailCoordinatorTests {
         scene.coordinator.promptRailPresenter = presenter
 
         #expect(presenter.entryLists == [scene.coordinator.promptEntries])
+        #expect(presenter.workCountLists == [scene.coordinator.promptWorkCounts])
         #expect(presenter.activeIndices == [scene.coordinator.activePromptIndex])
     }
 
@@ -497,5 +505,128 @@ struct PromptRailCoordinatorTests {
         scene.coordinator.refreshPromptOutline()
         #expect(scene.coordinator.promptEntries.first?.rowIndex == 2)
         #expect(presenter.entryLists.last == scene.coordinator.promptEntries)
+    }
+
+    // MARK: Work counts
+
+    /// Tool calls streaming into the last turn's collapsed group re-render only
+    /// the group's row: an `.updateLast` that cannot change the outline, so
+    /// the counts must be redone on that path too.
+    @Test("a turn's count grows as tool calls arrive, and the presenter hears only changes")
+    func workCountGrowsAsToolCallsArrive() throws {
+        let suiteName = "prompt-rail-work-tools-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let memo = TranscriptPresentationMemo()
+        var items = PromptRailFixtures.conversation(prompts: 2, replySentences: { _ in 3 })
+        items += [Self.tool("t-1"), Self.tool("t-2")]
+        let nodes = TranscriptPresentation.build(items: items, memo: memo).nodes
+        let scene = TableTranscriptScene(items: items, appState: appState, nodes: nodes)
+        let presenter = RecordingPresenter()
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        defer { withExtendedLifetime(presenter) {} }
+        scene.coordinator.startObservingScroll()
+        scene.coordinator.promptRailPresenter = presenter
+        scene.prime(nodes: nodes)
+
+        try #require(scene.coordinator.promptEntries.map(\.id) == ["p-0", "p-1"])
+        #expect(scene.coordinator.promptWorkCounts == [0, 2])
+        // The empty counts pushed on attach, then the counts once: priming's
+        // repeated width-change updates recount the same values and stay quiet.
+        #expect(presenter.workCountLists == [[], [0, 2]])
+
+        // A third tool call joins the trailing collapsed group.
+        items.append(Self.tool("t-3"))
+        let grown = TranscriptPresentation.build(items: items, memo: memo).nodes
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: grown)
+                         == .updateLast,
+                     "precondition: the grown group arrives as a tail re-render")
+        let entryListsBefore = presenter.entryLists.count
+        scene.coordinator.update(nodes: grown, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+        #expect(scene.coordinator.promptWorkCounts == [0, 3])
+        #expect(presenter.workCountLists.last == [0, 3])
+        #expect(presenter.entryLists.count == entryListsBefore,
+                Comment(rawValue: "new counts re-delivered the outline (lists: \(presenter.entryLists.map(\.count)))"))
+
+        // A reply after the group, then the reply streaming: no work, so the
+        // presenter hears nothing.
+        let countListsBeforeReply = presenter.workCountLists.count
+        items.append(.assistantText(id: "a-1-more", text: "Checking.", timestamp: nil, usage: nil))
+        scene.coordinator.update(
+            nodes: TranscriptPresentation.build(items: items, memo: memo).nodes,
+            atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+        items[items.count - 1] = .assistantText(
+            id: "a-1-more", text: "Checking the tests and then the lint.", timestamp: nil, usage: nil)
+        let streamed = TranscriptPresentation.build(items: items, memo: memo).nodes
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: streamed)
+                         == .updateLast,
+                     "precondition: the streamed reply arrives as a tail re-render")
+        scene.coordinator.update(nodes: streamed, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+        #expect(presenter.workCountLists.count == countListsBeforeReply,
+                Comment(rawValue: "unchanged counts were delivered again: \(presenter.workCountLists)"))
+
+        // A tool call after the reply stands alone and arrives as an append.
+        items.append(Self.tool("t-4"))
+        scene.coordinator.update(
+            nodes: TranscriptPresentation.build(items: items, memo: memo).nodes,
+            atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+        #expect(scene.coordinator.promptWorkCounts == [0, 4])
+        #expect(presenter.workCountLists.count == countListsBeforeReply + 1)
+    }
+
+    /// A subagent's steps reach the rail through its summary row, folded into
+    /// the trailing collapsed group, so a step advancing re-renders only the
+    /// group's row.
+    @Test("a turn's count grows as a subagent's step count advances")
+    func workCountGrowsAsSubagentStepsAdvance() throws {
+        let suiteName = "prompt-rail-work-subagent-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let nodes = Self.subagentTurn(steps: 2)
+        let scene = TableTranscriptScene(items: [], appState: appState, nodes: nodes)
+        let presenter = RecordingPresenter()
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        defer { withExtendedLifetime(presenter) {} }
+        scene.coordinator.startObservingScroll()
+        scene.coordinator.promptRailPresenter = presenter
+        scene.prime(nodes: nodes)
+        // The Agent call itself, then its subagent's two steps.
+        try #require(scene.coordinator.promptWorkCounts == [0, 3],
+                     Comment(rawValue: "counts: \(scene.coordinator.promptWorkCounts)"))
+
+        let advanced = Self.subagentTurn(steps: 5)
+        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: advanced)
+                         == .updateLast,
+                     "precondition: the advanced step count arrives as a tail re-render")
+        scene.coordinator.update(nodes: advanced, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+        #expect(scene.coordinator.promptWorkCounts == [0, 6])
+        #expect(presenter.workCountLists == [[], [0, 3], [0, 6]])
+
+        // The same rows again are a no-op, with nothing to tell.
+        scene.coordinator.update(nodes: advanced, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
+        #expect(presenter.workCountLists.count == 3)
+    }
+
+    /// Two prompts with replies, then an Agent call and its subagent's summary
+    /// row of `steps` steps, grouped as the presentation groups them.
+    private static func subagentTurn(steps: Int) -> [TranscriptRenderNode] {
+        let items = PromptRailFixtures.conversation(prompts: 2, replySentences: { _ in 3 }) + [tool("t-1")]
+        let base = transcriptRenderNodes(from: items) + [
+            TranscriptRenderNode(
+                id: "t-1#subagent",
+                kind: .subagentSummary(parentItemID: "t-1", count: steps, agentType: nil),
+                badgeUsage: nil),
+        ]
+        return TranscriptPresentation.groupedNodes(base, expansionOverrides: [:], windowStartIDs: [])
+    }
+
+    private static func tool(_ id: String) -> TranscriptItem {
+        .toolCall(
+            id: id, name: "Agent", inputJSON: "{}", inputTruncatedTo: nil,
+            result: nil, subagent: nil, timestamp: nil)
     }
 }

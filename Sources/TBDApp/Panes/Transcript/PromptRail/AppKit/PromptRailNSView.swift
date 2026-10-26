@@ -4,14 +4,17 @@ import os
 private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 
 /// The prompt rail: one notch per prompt in the transcript's 20pt
-/// gutter, the active prompt's notch accented. It is the coordinator's
-/// `PromptRailPresenter`, so an active-prompt change goes straight from the
-/// coordinator to a layer update, and it hands every outline change on
-/// through `onOutlineChange` so the card stays in step.
+/// gutter, each as long as its turn was busy, the active prompt's notch
+/// accented. It is the coordinator's `PromptRailPresenter`, so an
+/// active-prompt change goes straight from the coordinator to a layer update,
+/// and it hands every outline change on through `onOutlineChange` so the card
+/// stays in step.
 ///
 /// - **Notches** – one reusable `CALayer` per entry, placed by
-///   `PromptRailLayout`. Layer colours do not follow the appearance by
-///   themselves, so they are re-resolved in `viewDidChangeEffectiveAppearance()`.
+///   `PromptRailLayout` and as long as `PromptRailWorkScale` says. The active
+///   notch keeps its length and is thicker and accented instead. Layer colours
+///   do not follow the appearance by themselves, so they are re-resolved in
+///   `viewDidChangeEffectiveAppearance()`.
 /// - **Overflow** – past the minimum pitch the notches are offset to keep the
 ///   active one `PromptRailLayout.edgeMargin` from either end, and a gradient
 ///   mask fades whichever edge clips a notch.
@@ -24,7 +27,8 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 /// - **Wheel** – the rail never scrolls under the wheel; it hands wheel
 ///   events to the transcript's scroll view, so the gutter is not a dead zone.
 /// - **Accessibility** – a group labelled "Prompts" with one button per entry,
-///   labelled with its first line and time; pressing one jumps to it.
+///   labelled with its first line, time and tool-call count; pressing one
+///   jumps to it.
 ///
 /// Coordinates are flipped (y grows downward), matching `PromptRailLayout`.
 final class PromptRailNSView: NSView, PromptRailPresenter {
@@ -41,6 +45,11 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     var activeIndex: Int? {
         deliveredActiveIndex.flatMap { entries.indices.contains($0) ? $0 : nil }
     }
+    /// The work counts last delivered, as the scale that turns them into
+    /// notch lengths.
+    private(set) var workScale = PromptRailWorkScale(counts: [])
+    /// Each entry's work, parallel to `entries`, as last delivered.
+    var workCounts: [Int] { workScale.counts }
 
     /// The notch nearest the pointer while it is over the rail; nil otherwise.
     private(set) var pointedIndex: Int?
@@ -111,6 +120,24 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         self.entries = entries
         accessibilityButtons = nil
         relayoutNotches()
+        onOutlineChange?()
+    }
+
+    /// Restyles only the notches whose length moved: every one when the
+    /// busiest turn changed, which rescales them all, and otherwise those
+    /// whose own count changed.
+    func promptRail(workCountsDidChange counts: [Int]) {
+        let previous = workScale
+        workScale = PromptRailWorkScale(counts: counts)
+        let rescaled = previous.busiest != workScale.busiest
+        withoutAnimation {
+            let layout = currentLayout()
+            for index in notchLayers.indices
+            where rescaled || previous.count(at: index) != workScale.count(at: index) {
+                styleNotch(index, layout: layout)
+            }
+        }
+        updateAccessibilityLabels()
         onOutlineChange?()
     }
 
@@ -186,7 +213,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         guard notchLayers.indices.contains(index), entries.indices.contains(index) else { return }
         let active = index == activeIndex
         let notch = notchLayers[index]
-        let rect = layout.notchRect(index, active: active)
+        let rect = layout.notchRect(index, active: active, length: workScale.length(at: index))
         notch.frame = rect
         notch.cornerRadius = rect.height / 2
         let color = PromptRailNotchStyle.color(for: entries[index].kind, active: active)
@@ -278,7 +305,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         return buttons
     }
 
-    /// One button per entry, labelled "<first line>, <time>".
+    /// One button per entry, labelled "<first line>, <time>, <work>".
     private func makeAccessibilityButtons() -> [PromptRailAccessibilityButton] {
         let now = Date()
         let layout = currentLayout()
@@ -290,12 +317,24 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
             }
             button.setAccessibilityElement(true)
             button.setAccessibilityRole(.button)
-            button.setAccessibilityLabel(PromptRailAccessibility.label(for: entry, now: now))
+            button.setAccessibilityLabel(
+                PromptRailAccessibility.label(for: entry, workCount: workScale.count(at: index), now: now))
             button.setAccessibilityParent(self)
             button.setAccessibilityFrameInParentSpace(accessibilityFrame(index, layout: layout))
             return button
         }
         return buttons
+    }
+
+    /// Relabels the buttons in place for new work counts. They are built from
+    /// `entries` and dropped when it changes, so they match it one for one.
+    private func updateAccessibilityLabels() {
+        guard let accessibilityButtons else { return }
+        let now = Date()
+        for (index, button) in accessibilityButtons.enumerated() where entries.indices.contains(index) {
+            button.setAccessibilityLabel(
+                PromptRailAccessibility.label(for: entries[index], workCount: workScale.count(at: index), now: now))
+        }
     }
 
     private func updateAccessibilityFrames(_ layout: PromptRailLayout) {

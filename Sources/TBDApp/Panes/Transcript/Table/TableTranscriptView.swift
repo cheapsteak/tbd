@@ -397,12 +397,13 @@ struct TableTranscriptView: NSViewRepresentable {
 
         // MARK: Prompt rail state (see TableTranscriptView+PromptRail.swift)
 
-        /// Receives the prompt outline and the active prompt. Attaching one
-        /// pushes both current values to it at once.
+        /// Receives the prompt outline, the work counts and the active
+        /// prompt. Attaching one pushes all three current values to it at once.
         weak var promptRailPresenter: PromptRailPresenter? {
             didSet {
                 guard let promptRailPresenter else { return }
                 promptRailPresenter.promptRail(entriesDidChange: promptEntries)
+                promptRailPresenter.promptRail(workCountsDidChange: promptWorkCounts)
                 promptRailPresenter.promptRail(activeIndexDidChange: activePromptIndex)
             }
         }
@@ -410,6 +411,10 @@ struct TableTranscriptView: NSViewRepresentable {
         /// `refreshPromptOutline()`. Written only there; the setter is internal
         /// because `private(set)` does not reach an extension in another file.
         var promptEntries: [PromptOutlineEntry] = []
+        /// The work each entry's turn did, parallel to `promptEntries`, kept by
+        /// `refreshPromptWorkCounts()` and written only there; internal for the
+        /// same reason as `promptEntries`.
+        var promptWorkCounts: [Int] = []
         /// Each prompt's projection into the outline, by `(id, contentVersion)`,
         /// so a rebuild reads only the prompts that are new or changed. Used
         /// only by `refreshPromptOutline()`; internal for the same reason as
@@ -2284,11 +2289,15 @@ struct TableTranscriptView: NSViewRepresentable {
             // After the table ops and any anchor restore, so the active prompt
             // is read off the rows and clip the reader will see. A streaming
             // tick re-renders only the last row: unless that row is or was a
-            // prompt, the outline cannot have changed, so skip rebuilding it
-            // and re-read the active prompt against the grown document. With a
+            // prompt, the outline cannot have changed, so skip rebuilding it,
+            // recount the work — a tool call joining a collapsed group and a
+            // subagent's step count advancing both arrive this way — and
+            // re-read the active prompt against the grown document. With a
             // tail-follow queued, the follow re-reads the active prompt itself
-            // once the clip has followed; the entries are delivered now.
+            // once the clip has followed; the entries and counts are delivered
+            // now.
             if step == .updateLast, !updateLastCanChangeOutline() {
+                refreshPromptWorkCounts()
                 refreshActivePrompt()
             } else {
                 refreshPromptOutline()

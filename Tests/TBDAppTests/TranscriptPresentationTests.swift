@@ -27,6 +27,48 @@ struct TranscriptPresentationTests {
         #expect(!summary.isExpanded)
     }
 
+    /// The prompt rail reads a collapsed group's work from these; `itemCount`
+    /// also counts the reminder.
+    @Test("a group reports its tool calls and subagent steps apart from its other rows")
+    func groupReportsToolCallsApart() {
+        let presentation = TranscriptPresentation.build(
+            items: [
+                .assistantText(id: "a1", text: "Starting.", timestamp: nil),
+                tool("t1", "Read", #"{"file_path":"Sources/A.swift"}"#),
+                .systemReminder(id: "r1", kind: .toolReminder, text: "remember", timestamp: nil),
+                tool("t2", "Bash", #"{"command":"swift test"}"#)
+            ],
+            memo: TranscriptPresentationMemo())
+        guard case .activityGroupSummary(let summary) = presentation.nodes.last?.kind else {
+            Issue.record("expected activity group summary")
+            return
+        }
+        #expect(summary.itemCount == 3)
+        #expect(summary.toolCallCount == 2)
+        #expect(summary.subagentStepCount == 0)
+
+        // The parser never surfaces a subagent's timeline, so steps reach a
+        // group only from subagent-summary rows, grouped like any activity.
+        let base = transcriptRenderNodes(from: [tool("t3", "Agent", "{}")]) + [
+            TranscriptRenderNode(
+                id: "t3#subagent",
+                kind: .subagentSummary(parentItemID: "t3", count: 6, agentType: nil),
+                badgeUsage: nil),
+            TranscriptRenderNode(
+                id: "t4#subagent",
+                kind: .subagentSummary(parentItemID: "t4", count: 2, agentType: nil),
+                badgeUsage: nil)
+        ]
+        let grouped = TranscriptPresentation.groupedNodes(base, expansionOverrides: [:], windowStartIDs: [])
+        guard case .activityGroupSummary(let withSteps) = grouped.first?.kind else {
+            Issue.record("expected activity group summary")
+            return
+        }
+        #expect(withSteps.itemCount == 3)
+        #expect(withSteps.toolCallCount == 1)
+        #expect(withSteps.subagentStepCount == 8)
+    }
+
     @Test("expanded group flattens existing child rows after its summary")
     func expandsActivity() {
         let items = [

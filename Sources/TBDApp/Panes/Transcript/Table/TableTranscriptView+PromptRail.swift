@@ -1,8 +1,9 @@
 import AppKit
 
 /// Prompt rail tracking and navigation: the outline of prompts in `nodes`,
-/// which one is active for the current scroll position (reported to
-/// `promptRailPresenter`), and jumps to a prompt.
+/// the work each prompt's turn did, which one is active for the current scroll
+/// position (all three reported to `promptRailPresenter`), and jumps to a
+/// prompt.
 ///
 /// Everything here reads node data and `rect(ofRow:)` only. `rect(ofRow:)` sums
 /// row heights the table already holds (cached exact heights or per-kind
@@ -40,11 +41,12 @@ extension TableTranscriptView.Coordinator {
     }
 
     /// Rebuilds the outline from `nodes`, tells the presenter if it changed,
-    /// then calls `refreshActivePrompt()`. `update(...)` calls it once the table
-    /// holds the new rows. While a tail-follow is queued
-    /// (`isAwaitingTailFollow`) that call re-derives nothing: the entries are
-    /// delivered now, and the follow re-derives the active prompt once the clip
-    /// has reached the end.
+    /// recounts the work (`refreshPromptWorkCounts()`), then calls
+    /// `refreshActivePrompt()`. `update(...)` calls it once the table holds the
+    /// new rows. While a tail-follow is queued (`isAwaitingTailFollow`) that
+    /// last call re-derives nothing: the entries and counts are delivered now,
+    /// and the follow re-derives the active prompt once the clip has reached
+    /// the end.
     ///
     /// A prompt arriving after a held jump target ends the hold before the
     /// active prompt is next re-derived, so the rule can pick the new prompt.
@@ -62,7 +64,21 @@ extension TableTranscriptView.Coordinator {
             promptEntries = entries
             promptRailPresenter?.promptRail(entriesDidChange: entries)
         }
+        refreshPromptWorkCounts()
         refreshActivePrompt()
+    }
+
+    /// Recounts the work in each entry's turn (`PromptOutline.workCounts`)
+    /// and tells the presenter only if a count changed. An integer pass over
+    /// the node kinds: it reads no text and leaves `promptOutlineCache` alone,
+    /// so `update(...)` runs it on every update that changes the rows,
+    /// including the `.updateLast` ticks that skip rebuilding the outline.
+    /// Call once `promptEntries` describes `nodes`.
+    func refreshPromptWorkCounts() {
+        let counts = PromptOutline.workCounts(for: promptEntries, in: nodes)
+        guard counts != promptWorkCounts else { return }
+        promptWorkCounts = counts
+        promptRailPresenter?.promptRail(workCountsDidChange: counts)
     }
 
     /// Whether `entries` has more entries after the held jump target than

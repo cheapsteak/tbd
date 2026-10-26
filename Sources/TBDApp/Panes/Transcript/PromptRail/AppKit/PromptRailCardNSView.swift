@@ -19,9 +19,11 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 /// - **Updates** – a new outline while open updates the rows in place; the
 ///   card neither closes nor moves its list.
 /// - **Rows** – drawn, not built: a flipped list view draws only the rows a
-///   redraw covers, from node data alone. A row click jumps and closes the card
-///   at once; a truncated row carries its prompt's first 500 characters as a
-///   tooltip.
+///   redraw covers, from node data alone. Each row's dash is as long as its
+///   notch (`PromptRailWorkScale`), so the dash column repeats the rail's
+///   profile. A row click jumps and closes the card at once. A row's tooltip
+///   gives its turn's tool-call count and, when the row is truncated, its
+///   prompt's first 500 characters.
 /// - **Earlier history** – with older Remote history not loaded, the first
 ///   row reads "Earlier prompts not loaded" beside a Load button that calls the
 ///   pane's load-earlier action. Nothing else here loads history.
@@ -144,14 +146,23 @@ final class PromptRailCardNSView: NSView {
         Metrics.verticalPadding * 2 + CGFloat(rowCount) * Metrics.rowHeight
     }
 
-    /// Takes a new outline, active entry and earlier-history state. Rows
-    /// update in place; an open card keeps its scroll position.
-    func update(entries: [PromptOutlineEntry], activeIndex: Int?, earlier: PromptRailEarlierHistory?) {
+    /// Each entry's work, parallel to `entries`, as last delivered.
+    var workCounts: [Int] { listView.workScale.counts }
+
+    /// Takes a new outline, its work counts, the active entry and the
+    /// earlier-history state. Rows update in place; an open card keeps its
+    /// scroll position. New counts only redraw: a tooltip is composed when it
+    /// is shown, so its count is never stale.
+    func update(
+        entries: [PromptOutlineEntry], workCounts: [Int] = [], activeIndex: Int?,
+        earlier: PromptRailEarlierHistory?
+    ) {
         let rowsChanged = entries != self.entries || (earlier?.hasEarlier == true) != showsEarlierRow
         let previousActive = self.activeIndex
         self.entries = entries
         self.earlier = earlier
         deliveredActiveIndex = activeIndex
+        listView.workScale = PromptRailWorkScale(counts: workCounts)
         if rowsChanged {
             pushRows()
             if isOpen {
@@ -160,7 +171,6 @@ final class PromptRailCardNSView: NSView {
             }
         } else if previousActive != self.activeIndex {
             listView.activeIndex = self.activeIndex
-            if isOpen { listView.rebuildToolTips() }
         }
     }
 
@@ -384,6 +394,21 @@ final class PromptRailCardNSView: NSView {
         }
     }
 
+    // MARK: Test seams
+
+    /// Entry `index`'s dash, in list coordinates, as its row draws it.
+    func dashRect(forEntry index: Int) -> NSRect? {
+        guard entries.indices.contains(index) else { return nil }
+        return listView.dashRect(index, in: Metrics.rowRect(rowFor(entry: index), width: listView.bounds.width))
+    }
+
+    /// Entry `index`'s tooltip, as its row shows it at the list's width.
+    func toolTipText(forEntry index: Int) -> String? {
+        entries.indices.contains(index) ? listView.toolTipText(forEntry: index) : nil
+    }
+
+    private func rowFor(entry index: Int) -> Int { index + (showsEarlierRow ? 1 : 0) }
+
     // MARK: Geometry
 
     /// The row containing list y `y`, or nil above the first or below the last.
@@ -420,6 +445,12 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
         didSet {
             guard hoveredRow != oldValue else { return }
             for row in [oldValue, hoveredRow].compactMap({ $0 }) { invalidateRow(row) }
+        }
+    }
+    /// Each entry's work and the dash lengths it gives.
+    var workScale = PromptRailWorkScale(counts: []) {
+        didSet {
+            if workScale != oldValue { needsDisplay = true }
         }
     }
     var onClickRow: (@MainActor (Int) -> Void)?
@@ -507,12 +538,9 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
             ).fill()
         }
 
-        let dashSize = active ? PromptRailLayout.activeNotch : PromptRailLayout.inactiveNotch
-        let dash = NSRect(
-            x: Metrics.dashColumnLeading, y: rect.midY - dashSize.height / 2,
-            width: dashSize.width, height: dashSize.height)
+        let dash = dashRect(index, in: rect)
         PromptRailNotchStyle.color(for: entry.kind, active: active).setFill()
-        NSBezierPath(roundedRect: dash, xRadius: dashSize.height / 2, yRadius: dashSize.height / 2).fill()
+        NSBezierPath(roundedRect: dash, xRadius: dash.height / 2, yRadius: dash.height / 2).fill()
 
         let layout = textLayout(index, rowWidth: rect.width)
         if let time = layout.time {
@@ -529,6 +557,15 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
                 x: Metrics.textLeading, y: rect.midY - lineHeight / 2,
                 width: max(0, layout.titleWidth), height: lineHeight),
             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+    }
+
+    /// Entry `index`'s dash in the row at `rowRect`: as long as its notch on
+    /// the rail and as thick, so the dash column repeats the rail's profile.
+    func dashRect(_ index: Int, in rowRect: NSRect) -> NSRect {
+        let height = PromptRailLayout.notchHeight(active: index == activeIndex)
+        return NSRect(
+            x: Metrics.dashColumnLeading, y: rowRect.midY - height / 2,
+            width: workScale.length(at: index), height: height)
     }
 
     /// The row's title and time strings, and the width the title may take.
@@ -568,7 +605,9 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
 
     // MARK: Tooltips
 
-    /// One tooltip rectangle per truncated row.
+    /// One tooltip rectangle per entry row. Each row has a tooltip, since
+    /// every one gives its turn's work, so nothing is measured here; the text
+    /// is composed when AppKit asks for it (`toolTipText(forEntry:)`).
     func rebuildToolTips() {
         removeAllToolTips()
         toolTipsStale = false
@@ -578,10 +617,19 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
             return
         }
         for index in entries.indices {
-            let layout = textLayout(index, rowWidth: width)
-            guard layout.title.size().width > layout.titleWidth else { continue }
             _ = addToolTip(Metrics.rowRect(rowFor(index), width: width), owner: self, userData: nil)
         }
+    }
+
+    /// Entry `index`'s tooltip at the list's width: its turn's work, then
+    /// its prompt's first 500 characters when the row's first line does not
+    /// fit. Lays out that one row's text.
+    func toolTipText(forEntry index: Int) -> String {
+        let layout = textLayout(index, rowWidth: bounds.width)
+        let truncated = layout.title.size().width > layout.titleWidth
+        return Metrics.toolTip(
+            workCount: workScale.count(at: index),
+            truncatedBody: truncated ? entries[index].tooltip : nil)
     }
 
     func view(
@@ -591,7 +639,7 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
         guard let row = Card.row(atY: point.y, rowCount: rowCount),
               let index = entryIndex(forRow: row)
         else { return "" }
-        return entries[index].tooltip
+        return toolTipText(forEntry: index)
     }
 
     // MARK: Clicks

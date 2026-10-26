@@ -109,6 +109,51 @@ enum PromptOutline {
         return text[start..<end].split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
+    // MARK: Work
+
+    /// The work each entry's turn did, parallel to `entries`, which must have
+    /// been built from `nodes`. A turn runs from its entry's row up to the next
+    /// entry's row, or to the end of `nodes`; each row in it adds
+    /// `work(of:)`. An integer pass over node kinds: no text is read, and
+    /// nothing here builds or measures a cell.
+    static func workCounts(for entries: [PromptOutlineEntry], in nodes: [TranscriptRenderNode]) -> [Int] {
+        var counts: [Int] = []
+        counts.reserveCapacity(entries.count)
+        for (index, entry) in entries.enumerated() {
+            let start = min(entry.rowIndex + 1, nodes.count)
+            let next = index + 1 < entries.count ? entries[index + 1].rowIndex : nodes.count
+            let end = max(start, min(next, nodes.count))
+            var total = 0
+            for row in start..<end { total += work(of: nodes[row]) }
+            counts.append(total)
+        }
+        return counts
+    }
+
+    /// The work one row stands for: one for a tool call, the step count of a
+    /// subagent summary, and for a collapsed activity group its tool calls and
+    /// its subagents' steps. An expanded group stands for nothing itself: its
+    /// members follow it as rows of their own and count there. Every other row
+    /// is no work.
+    static func work(of node: TranscriptRenderNode) -> Int {
+        switch node.kind {
+        case .toolCall:
+            return 1
+        case .subagentSummary(_, let count, _):
+            return max(0, count)
+        case .activityGroupSummary(let summary):
+            return summary.isExpanded ? 0 : summary.toolCallCount + summary.subagentStepCount
+        case .chatBubble, .systemReminder, .skillBody, .thinking:
+            return 0
+        }
+    }
+
+    /// "1 tool call", "40 tool calls": a turn's work as the card's tooltip and
+    /// the rail's accessibility labels say it.
+    static func workLabel(_ count: Int) -> String {
+        count == 1 ? "1 tool call" : "\(count) tool calls"
+    }
+
     /// Today: short local time. Earlier: abbreviated month and day.
     static func timeLabel(_ date: Date?, now: Date, calendar: Calendar, locale: Locale) -> String {
         guard let date else { return "" }

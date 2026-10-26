@@ -11,8 +11,9 @@ struct PromptRailLayout: Equatable {
     static let maxPitch: CGFloat = 8
     static let minPitch: CGFloat = 4
     static let notchLeading: CGFloat = 2
-    static let inactiveNotch = CGSize(width: 14, height: 2)
-    static let activeNotch = CGSize(width: 18, height: 3)
+    static let inactiveNotchHeight: CGFloat = 2
+    /// The active notch keeps its length and is marked by thickness instead.
+    static let activeNotchHeight: CGFloat = 3
     static let edgeMargin: CGFloat = 40
     static let fadeHeight: CGFloat = 24
 
@@ -37,14 +38,22 @@ struct PromptRailLayout: Equatable {
         Self.topInset + (CGFloat(index) + 0.5) * pitch
     }
 
-    /// Notch frame in content coordinates, centred on `notchCenterY`.
-    func notchRect(_ index: Int, active: Bool) -> CGRect {
-        let size = active ? Self.activeNotch : Self.inactiveNotch
+    /// A notch's thickness: `activeNotchHeight` for the active one,
+    /// `inactiveNotchHeight` for the rest.
+    static func notchHeight(active: Bool) -> CGFloat {
+        active ? activeNotchHeight : inactiveNotchHeight
+    }
+
+    /// Notch frame in content coordinates, centred on `notchCenterY`, starting
+    /// at `notchLeading` and `length` long (`PromptRailWorkScale`) whether or
+    /// not it is active.
+    func notchRect(_ index: Int, active: Bool, length: CGFloat) -> CGRect {
+        let height = Self.notchHeight(active: active)
         return CGRect(
             x: Self.notchLeading,
-            y: notchCenterY(index) - size.height / 2,
-            width: size.width,
-            height: size.height
+            y: notchCenterY(index) - height / 2,
+            width: length,
+            height: height
         )
     }
 
