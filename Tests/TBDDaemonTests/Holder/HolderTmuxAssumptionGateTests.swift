@@ -652,7 +652,6 @@ struct HolderTmuxAssumptionGateTests {
         var isFrozen: Bool { self == .liveTyped || self == .liveClear }
 
         func answer() throws -> TerminalScreen? {
-            struct ProjectionRefused: Error {}
             switch self {
             case .liveTyped:
                 return try HolderTmuxAssumptionGateTests.screen(

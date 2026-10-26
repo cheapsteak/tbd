@@ -267,7 +267,7 @@ actor DaemonClient {
     /// Create a connected Unix domain socket to the daemon.
     /// Caller is responsible for closing the returned file descriptor.
     ///
-    /// Internal rather than private so `DaemonClientSocketTests` can call it
+    /// Internal rather than private so `AppSocketInheritanceTests` can call it
     /// against a listener of its own and read the flags back off the returned
     /// descriptor. The fd otherwise never escapes this file.
     nonisolated func makeConnectedSocket() throws -> Int32 {
@@ -335,7 +335,7 @@ actor DaemonClient {
         // particular must not set that disposition (SwiftTerm's `forkpty`
         // children would inherit it).
         //
-        // Covered by `DaemonClientSocketTests.connectedSocketSuppressesSIGPIPE`,
+        // Covered by `AppSocketInheritanceTests.connectedSocketSuppressesSIGPIPE`,
         // which stands up a listener on a socket path of its own and reads the
         // option back off the descriptor this returns. Deleting this line
         // reddens that row.
@@ -1566,45 +1566,6 @@ actor DaemonClient {
         )
     }
 
-    /// Ask a provider to retain one of its own sessions' transcripts
-    /// (`docs/remote-provider-contract.md` § `transcript retain <id>`), and record the
-    /// receipt daemon-side. Unlike `remoteRename`, the capability check is the
-    /// DAEMON's here — the handler refuses before invoking anything — so a
-    /// caller need not pre-check, and gets a refusal naming the capability
-    /// rather than a raw provider error.
-    func remoteRetain(provider: String, sessionID: String) async throws -> RetainReceipt {
-        try await callAsync(
-            method: RPCMethod.remoteRetain,
-            params: RemoteRetainParams(provider: provider, sessionID: sessionID),
-            resultType: RetainReceipt.self
-        )
-    }
-
-    /// Put a transcript from anywhere — including this machine — into a
-    /// provider's durable store (`docs/remote-provider-contract.md` §
-    /// `transcript import`). `jsonl` is Claude Code transcript JSONL.
-    func remoteImport(provider: String, jsonl: String) async throws -> RetainReceipt {
-        try await callAsync(
-            method: RPCMethod.remoteImport,
-            params: RemoteImportParams(provider: provider, jsonl: jsonl),
-            resultType: RetainReceipt.self
-        )
-    }
-
-    /// Read a retained transcript back (`docs/remote-provider-contract.md` §
-    /// `transcript recall <key>`). With `saveLocally`, the daemon also writes it under
-    /// `~/tbd/transcripts/` and returns that path; the records come back in
-    /// `jsonl` either way.
-    func remoteRecall(
-        provider: String, key: String, saveLocally: Bool = false
-    ) async throws -> RemoteRecallResult {
-        try await callAsync(
-            method: RPCMethod.remoteRecall,
-            params: RemoteRecallParams(provider: provider, key: key, saveLocally: saveLocally),
-            resultType: RemoteRecallResult.self
-        )
-    }
-
     /// The retain and import receipts TBD holds, newest first, optionally
     /// filtered to one provider.
     ///
@@ -1844,18 +1805,6 @@ actor DaemonClient {
         )
     }
 
-    /// Apply one panel-surface operation. Gated daemon-side
-    /// (`daemon_panel_surface_enabled` / `agent_panel_control_enabled`,
-    /// spec C §7.2) — a gated rejection surfaces as `DaemonClientError.rpcError`
-    /// naming the flag.
-    func panelApply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {
-        try await callAsync(
-            method: RPCMethod.panelApply,
-            params: PanelApplyParams(envelope: envelope),
-            resultType: PanelApplyResult.self
-        )
-    }
-
     /// One-time legacy-tab import into the daemon-owned panel surface.
     /// The daemon returns a "not implemented" error until Task 11 lands.
     func panelImportLegacy(_ params: PanelImportParams) async throws -> PanelImportResult {
@@ -1863,22 +1812,6 @@ actor DaemonClient {
             method: RPCMethod.panelImportLegacy,
             params: params,
             resultType: PanelImportResult.self
-        )
-    }
-
-    /// Manually suspend a single Claude terminal.
-    func terminalSuspend(terminalID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.terminalSuspend,
-            params: TerminalSuspendParams(terminalID: terminalID)
-        )
-    }
-
-    /// Manually resume a single suspended terminal.
-    func terminalResume(terminalID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.terminalResume,
-            params: TerminalResumeParams(terminalID: terminalID)
         )
     }
 
@@ -1949,22 +1882,6 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.terminalCancelScheduledResume,
             params: CancelScheduledResumeParams(terminalID: terminalID)
-        )
-    }
-
-    /// Suspend all Claude terminals in a worktree.
-    func worktreeSuspend(worktreeID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.worktreeSuspend,
-            params: WorktreeSuspendParams(worktreeID: worktreeID)
-        )
-    }
-
-    /// Resume all suspended terminals in a worktree.
-    func worktreeResume(worktreeID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.worktreeResume,
-            params: WorktreeResumeParams(worktreeID: worktreeID)
         )
     }
 

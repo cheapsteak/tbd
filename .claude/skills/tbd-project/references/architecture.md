@@ -16,7 +16,7 @@ Long-running headless process. Owns all state and logic.
 - **PR status manager** — polls GitHub for PR state (open/merged/closed, mergeable) per worktree, persists last-known status to the DB so icons survive restart
 - **Auto-archive-on-merge coordinator** — archives a worktree automatically once its PR merges, when armed per-worktree or via the global default
 - **SSH agent resolver** — finds live SSH agent socket, maintains `~/.ssh/tbd-agent.sock` symlink
-- **Suspend/resume coordinator** — auto-suspends idle Claude sessions on worktree deselection, supports manual suspend/resume
+- **Hibernation coordinator** — parks Claude sessions and wakes them with `claude --resume`, on tmux and on the pty holder. Parks come from "Hibernate now" (`terminal.hibernate`), from the idle sweep and park-on-merge (both off by default), and from the in-place profile swap and the transport migration; the session mod is a park's only guard for an unsent draft. A session parked by hand wakes only when asked; an automatic park also wakes when its worktree is focused
 - **Model profile resolver** — picks the credential profile (oauth/apiKey/proxy/bedrock) for a spawned Claude session
 - **Claude usage poller** — polls Claude OAuth usage every 30 min, broadcasts to clients
 - **Session instrumentation writers** — `PluginDirWriter`, `ClaudeHookOverlay`, `SkillFileWriter`, `CodexHomeManager` (see "Session Instrumentation")
@@ -164,11 +164,11 @@ Maintains a stable symlink at `~/.ssh/tbd-agent.sock` pointing to a live SSH age
 JSON-RPC style over Unix socket (newline-delimited) and HTTP POST `/rpc`. Method families (see `Sources/TBDDaemon/Server/RPCRouter+*Handlers.swift`):
 
 - **Repo**: `repo.add`, `repo.remove`, `repo.list`, `repo.rename`, `repo.relocate`, `repo.updateInstructions`, `repo.listBranches`, hidden/expanded toggles
-- **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.forget` (untrack without `git worktree remove`), `.rename`, `.reorder`, `.move` (reparent), `.selectionChanged`, `.suspend`, `.resume`, `.setAutoArchive`
+- **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.forget` (untrack without `git worktree remove`), `.rename`, `.reorder`, `.move` (reparent), `.suspend`, `.resume`, `.setAutoArchive`
 - **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.focus`, `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.transcriptItemFullBody`, `.suspend`, `.resume`, `.recreateWindow`, `.swapProfile`, `.activityEvent` (internal — fired by the terminal-activity hook)
 - **Tab**: `tab.setLabel`, `tab.setOrder`, `tab.list`, `worktree.setActiveTab`
 - **Session**: `session.list`, `session.messages` — list/parse Claude JSONL transcripts; plus `terminal.sessionEvent` (SessionStart hook bridge)
-- **AskUserQuestion**: `terminal.askUserQuestionPending` / `terminal.askUserQuestionCleared`, backed by `PendingQuestionStore`
+- **AskUserQuestion**: `terminal.askUserQuestionPending` / `terminal.askUserQuestionCleared`, backed by `PendingPromptStore`
 - **Model profile**: `modelProfile.list`/`.add`/`.delete`/`.rename`/`.updateEndpoint`/`.updateBedrock`/`.setGlobalDefault`/`.setPrimaryAgentPreference`/`.setRepoOverride`/`.fetchUsage`/`.healthCheck`
 - **Claude preferences**: `claude.setSpawnPreferences` — stores Claude spawn-env overrides (`ClaudeSpawnPreferences`) into the config row; handled by `RPCRouter+ClaudePreferencesHandlers.swift`
 - **Env overrides**: `config.setEnvOverrides`, `repo.setEnvOverrides`, `modelProfile.setEnvOverrides` — persist free-form `[String: String]` env vars per scope; `config.get` reads the config row; `config.setAutoArchiveOnMergeDefault` sets the global auto-archive default. Handled by `RPCRouter+EnvOverridesHandlers.swift`

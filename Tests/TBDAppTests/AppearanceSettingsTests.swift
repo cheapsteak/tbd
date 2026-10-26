@@ -7,7 +7,8 @@ import SwiftTerm
 @Suite("AppearanceSettings")
 struct AppearanceSettingsTests {
     /// Run a body with an isolated UserDefaults suite so we never touch
-    /// the live `TBDApp.plist` (see Tests/TBDAppTests/AutoSuspendPreferenceTests.swift).
+    /// the live `TBDApp.plist`: this unbundled executable's
+    /// `UserDefaults.standard` is the developer's real app domain.
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
         let suiteName = "TBDAppTests.Appearance.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

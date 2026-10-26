@@ -634,12 +634,6 @@ public enum ClaudeHookOverlay {
             return false
         }
     }
-
-    /// Verify the overlay exists. Used by `tbd hooks status` and as a
-    /// belt-and-braces check before we add `--settings` to the spawn command.
-    public static func overlayExists() -> Bool {
-        FileManager.default.fileExists(atPath: overlayPath)
-    }
 }
 
 /// The overlay of a spawn that replaces a process in an existing row — a wake,

@@ -4,12 +4,12 @@ import Foundation
 @testable import TBDShared
 import TestSupport
 
-/// `remote.archive` / `remote.unarchive` — Task 2 of
-/// `docs/plans/2026-08-16-remote-lane-archive.md`. Tier 2: in-memory GRDB + a
-/// fake provider invoker, no real subprocess. Mirrors the shape of
-/// `RPCRouterRemoteTests`'s `remote.stop`/`remote.rename` coverage; kept in
-/// its own file rather than appended there because a sibling task is also
-/// touching this worktree concurrently.
+/// `remote.archive` / `remote.unarchive` —
+/// `docs/specs/2026-08-16-remote-lane-archive-design.md`, "Wire surface".
+/// Tier 2: in-memory GRDB + a fake provider invoker, no real subprocess.
+/// Mirrors the shape of `RPCRouterRemoteTests`'s `remote.stop`/`remote.rename`
+/// coverage; kept in its own file rather than appended there because a sibling
+/// task is also touching this worktree concurrently.
 @Suite("RPCRouter remote.archive / remote.unarchive")
 struct RPCRouterRemoteArchiveTests: ~Copyable {
     let db: TBDDatabase

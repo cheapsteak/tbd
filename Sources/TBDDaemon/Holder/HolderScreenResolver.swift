@@ -1,6 +1,5 @@
 import Foundation
 import TBDShared
-import os
 
 /// What the resolver needs from the daemon's own store for one session.
 ///
@@ -88,9 +87,6 @@ struct HolderDaemonStore: Sendable {
 /// emulator's whole life, and attaching a viewer to it does not earn
 /// provenance the daemon never had.
 struct HolderScreenResolver: Sendable {
-    private static let logger = Logger(
-        subsystem: "com.tbd.daemon", category: "holderScreenResolver")
-
     /// Who the census says is reading a session's pty right now.
     let ptyReader: @Sendable (UUID) async -> PtyReaderRole?
     /// The daemon's own store for a session, or nil when it publishes none.

@@ -384,28 +384,6 @@ class TBDTerminalView: TerminalView {
         return (cellWidth, cellHeight)
     }
 
-    /// What a capture has to do about the renderer before it can read pixels.
-    enum CapturePreparation: Equatable {
-        /// CoreGraphics is already drawing into the backing store.
-        case captureDirectly
-        /// Metal owns the pixels; drop to CoreGraphics and put it back after.
-        case dropToCoreGraphicsThenRestore
-    }
-
-    /// The capture-time renderer decision, extracted so it can be asserted
-    /// without a GPU.
-    ///
-    /// It cannot be asserted *with* one under `scripts/test.sh`: SwiftTerm
-    /// resolves its shaders relative to `Bundle.main`, which in a test run is
-    /// the toolchain's xctest helper rather than the build directory, so
-    /// `setUseMetal(true)` throws `shaderSourceMissing` and the Metal branch is
-    /// unreachable in-process. Splitting the decision out is what keeps that
-    /// branch covered anyway — delete the drop-to-CoreGraphics and this goes
-    /// red, GPU or no GPU.
-    static func capturePreparation(isUsingMetalRenderer: Bool) -> CapturePreparation {
-        isUsingMetalRenderer ? .dropToCoreGraphicsThenRestore : .captureDirectly
-    }
-
     /// Requests SwiftTerm's Metal renderer for this view when `enabled`.
     ///
     /// Returns whether the GPU path is actually active afterwards, which is
@@ -447,10 +425,14 @@ class TBDTerminalView: TerminalView {
         case deferUntilWindowed
     }
 
-    /// Extracted so the deferral is assertable without a GPU — the same reason
-    /// `capturePreparation(isUsingMetalRenderer:)` is. Losing it costs one
-    /// wasted renderer build per terminal and nothing goes red, which is how
-    /// it got shipped the first time.
+    /// Extracted so the deferral is assertable without a GPU. It cannot be
+    /// asserted *with* one under `scripts/test.sh`: SwiftTerm resolves its
+    /// shaders relative to `Bundle.main`, which in a test run is the
+    /// toolchain's xctest helper rather than the build directory, so
+    /// `setUseMetal(true)` throws `shaderSourceMissing` and the Metal branch is
+    /// unreachable in-process. Losing the deferral costs one wasted renderer
+    /// build per terminal and nothing goes red, which is how it got shipped
+    /// the first time.
     static func metalActivation(hasWindow: Bool) -> MetalActivation {
         hasWindow ? .now : .deferUntilWindowed
     }
@@ -489,69 +471,6 @@ class TBDTerminalView: TerminalView {
             )
             return false
         }
-    }
-
-    /// Capture the current visible terminal content as an NSImage.
-    /// Returns nil if the view has no dimensions yet.
-    ///
-    /// Runs the capture with the CoreGraphics renderer temporarily reinstated —
-    /// see `withCoreGraphicsRendering(_:)` for why a Metal-backed view would
-    /// otherwise hand back a blank image.
-    func captureScreenshot() -> NSImage? {
-        guard bounds.width > 0 && bounds.height > 0 else { return nil }
-        return withCoreGraphicsRendering {
-            guard let bitmapRep = bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
-            cacheDisplay(in: bounds, to: bitmapRep)
-            guard let cgImage = bitmapRep.cgImage else { return nil }
-            return NSImage(cgImage: cgImage, size: bounds.size)
-        }
-    }
-
-    /// Runs `body` with this view on SwiftTerm's CoreGraphics draw path,
-    /// restoring the Metal renderer afterwards if it was active.
-    ///
-    /// `bitmapImageRepForCachingDisplay` + `cacheDisplay` read the view's
-    /// backing store by re-running `draw(_:)` down the subview tree. A
-    /// Metal-backed `TerminalView` renders into a `CAMetalLayer` owned by an
-    /// `MTKView` subview, which draws through its layer rather than through
-    /// `draw(_:)` — so that capture path sees no glyphs and returns a blank
-    /// image. A blank image is a *silent* regression: it still renders as an
-    /// image, so nothing downstream reports the failure.
-    ///
-    /// `setUseMetal(_:)` is togglable in both directions at runtime, so the fix
-    /// is to drop to CoreGraphics for the duration of the capture. The whole
-    /// round trip happens inside one main-thread turn, so the compositor never
-    /// commits the intermediate hierarchy and the swap is not visible; the
-    /// `drawMetalFrameNow()` on the way back is belt and braces, forcing the
-    /// freshly built `MTKView` to produce a frame synchronously rather than
-    /// leaving it blank until the next runloop turn.
-    ///
-    /// Re-enabling rebuilds the `MTKView`, its renderer and its glyph atlas,
-    /// which is not free — acceptable because captures are user-gestured and
-    /// occasional, not per-frame.
-    private func withCoreGraphicsRendering<T>(_ body: () -> T) -> T {
-        guard Self.capturePreparation(isUsingMetalRenderer: isUsingMetalRenderer)
-            == .dropToCoreGraphicsThenRestore
-        else { return body() }
-        do {
-            try setUseMetal(false)
-        } catch {
-            terminalViewLogger.error(
-                "Could not drop to CoreGraphics for capture; snapshot may be blank: \(String(describing: error), privacy: .public)"
-            )
-            return body()
-        }
-        defer {
-            do {
-                try setUseMetal(true)
-                drawMetalFrameNow()
-            } catch {
-                terminalViewLogger.error(
-                    "Could not restore the Metal renderer after capture; staying on CoreGraphics: \(String(describing: error), privacy: .public)"
-                )
-            }
-        }
-        return body()
     }
 
     /// Converts a window-coordinate point to terminal grid (col, row).

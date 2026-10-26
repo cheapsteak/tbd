@@ -17,8 +17,8 @@ Exactly one thing writes the reason: Claude Code's `Notification` hook, bridged
 through `tbd hooks notification` into `handleTerminalNotificationEvent`. Exactly
 one thing retracts it: **a later activity observation.** `setActivityState` nils
 the reason columns unconditionally — it is the superseding rail — and the
-same-value path calls `clearAwaitingInputReasonIfNotNewer` so a repeated state
-still supersedes a not-newer wait. Activity observations arrive from a small set
+same-value path clears a not-newer wait as well, so a repeated state still
+supersedes it. Activity observations arrive from a small set
 of hooks the TBD overlay registers: `UserPromptSubmit` reports working, `Stop`
 and `StopFailure` report idle, `SessionStart` re-establishes identity, and the
 `AskUserQuestion` pre/post pair brackets a question.
@@ -155,7 +155,7 @@ this is sound rather than an oversight:
   read-only reporter that also mutated the record it reports would give the same
   column two writers on two schedules.
 - A stale row it reads is transient. `terminal.list` heals it on its own polling
-  cadence, so `session.states` sees the corrected value on a later cycle without
+  cadence, so `session.states` sees the corrected value on a later call without
   doing anything itself.
 - Most importantly, the resolver does not report a stale prompt confidently. It
   independently compares the transcript's append stamp against the reason's
@@ -197,10 +197,9 @@ something is worse, because it hides the one row that needs attention.
   pending prompt raised.
 - **Concurrency** — the stat and the delta read happen outside the database, so
   the clear re-reads the stored fingerprint inside the write transaction and
-  clears only if it still matches what was compared. This mirrors
-  `clearAwaitingInputReasonIfNotNewer`, whose comment explains why: the row a
-  handler read before an unbounded stretch of async work may already be stale,
-  and `handleTerminalNotificationEvent` runs concurrently on its own connection.
+  clears only if it still matches what was compared, because the row a handler
+  read before an unbounded stretch of async work may already be stale, and
+  `handleTerminalNotificationEvent` runs concurrently on its own connection.
   The fingerprint refresh on a sidechain-only append takes the same conditional
   form, so a reason recorded while the delta was being read is not overwritten
   by a measurement of the file as it stood before it.

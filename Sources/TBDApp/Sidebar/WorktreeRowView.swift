@@ -649,9 +649,7 @@ struct WorktreeRowView: View {
                     Task {
                         await appState.renameWorktree(id: worktree.id, displayName: newName)
                     }
-                },
-                onStartEditing: { appState.isRenamingWorktree = true },
-                onStopEditing: { appState.isRenamingWorktree = false }
+                }
             ) {
                 VStack(alignment: .leading, spacing: -2) {
                     Text(worktree.displayName)

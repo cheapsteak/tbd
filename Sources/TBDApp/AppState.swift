@@ -999,7 +999,6 @@ final class AppState {
     }
 
     var editingWorktreeID: UUID? = nil
-    var isRenamingWorktree = false
     var prStatuses: [UUID: PRStatus] = [:]
     /// The outcome of the daemon's last attempt to learn each worktree's PR
     /// state. Kept beside `prStatuses`, never merged into it: a worktree absent
@@ -3011,12 +3010,6 @@ final class AppState {
         recordNavigation(.worktrees(filteredIDs))
     }
 
-    func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-        stopSubscription()
-    }
-
     /// Start listening for real-time state deltas from the daemon.
     func startSubscription() {
         subscriptionTask?.cancel()
@@ -4744,72 +4737,6 @@ final class AppState {
     /// Whether the WIP main-area resize broadcast is enabled. Default false.
     private var terminalAutoResizeEnabled: Bool {
         userDefaults.bool(forKey: Self.terminalAutoResizeKey)
-    }
-
-    /// UserDefaults key mirroring the `@AppStorage("autoSuspendClaude")`
-    /// toggle in the Settings → Experimental section. Read from non-View
-    /// contexts (the pre-sleep suspend hook) so the gate is honored outside
-    /// the View layer.
-    static let autoSuspendClaudeKey = "autoSuspendClaude"
-
-    /// Whether auto-suspend is enabled. Fails closed: defaults to false when
-    /// the user has never touched the toggle, matching the `@AppStorage`
-    /// defaults. Tests pass a private `UserDefaults(suiteName:)` so they
-    /// never mutate the developer's live app preferences.
-    static func autoSuspendClaudeEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? false
-    }
-
-    /// Pure target-selection for the pre-sleep suspend hook. Returns the
-    /// worktree IDs to best-effort suspend before the machine sleeps:
-    /// `[]` when auto-suspend is disabled, otherwise every worktree ID
-    /// (flattened across repos, plus repo-less scratch spaces — the daemon's
-    /// suspend handler is worktree-kind agnostic). No I/O — trivially
-    /// unit-testable for both gate branches without a live daemon.
-    static func worktreeIDsToSuspendForSleep(
-        worktrees: [UUID: [Worktree]],
-        scratchWorktrees: [Worktree],
-        autoSuspendEnabled: Bool
-    ) -> [UUID] {
-        guard autoSuspendEnabled else { return [] }
-        return worktrees.values.flatMap { $0 }.map(\.id) + scratchWorktrees.map(\.id)
-    }
-
-    /// Best-effort suspend of idle Claude terminals across all worktrees when
-    /// the machine is about to sleep, so if the tmux server dies during a long
-    /// sleep, wake has less to recover.
-    ///
-    /// This is an OPT-IN optimization gated on the existing `autoSuspendClaude`
-    /// toggle (default OFF) — NOT the safety net. Short sleeps (lid close)
-    /// usually leave the tmux server alive, so unconditionally exiting every
-    /// idle Claude session on every sleep would force needless manual resumes.
-    /// The unconditional safety is #284 (park-on-reboot), which already
-    /// guarantees no OOM by parking terminals as suspended on reboot/server
-    /// death. Gating keeps all proactive-suspend behavior under the one toggle
-    /// the user already controls.
-    ///
-    /// When the gate is off this makes ZERO daemon calls. Otherwise it fires a
-    /// fire-and-forget `worktreeSuspend` per worktree; the daemon filters to
-    /// `isClaudeResumable && suspendedAt == nil`, waits briefly per terminal
-    /// for idle, and skips busy ones — so firing for every worktree is safe and
-    /// no-ops worktrees with nothing to suspend.
-    func suspendIdleClaudeForSleep(defaults: UserDefaults = .standard) {
-        let enabled = Self.autoSuspendClaudeEnabled(defaults: defaults)
-        let ids = Self.worktreeIDsToSuspendForSleep(
-            worktrees: worktrees,
-            scratchWorktrees: scratchWorktrees,
-            autoSuspendEnabled: enabled
-        )
-        guard !ids.isEmpty else {
-            logger.debug("suspendIdleClaudeForSleep: nothing to do (enabled=\(enabled, privacy: .public))")
-            return
-        }
-        logger.info("suspendIdleClaudeForSleep: best-effort suspending \(ids.count, privacy: .public) worktree(s) before sleep")
-        for id in ids {
-            Task { [daemonClient] in
-                try? await daemonClient.worktreeSuspend(worktreeID: id)
-            }
-        }
     }
 
     /// UserDefaults key for the `@AppStorage` toggle in the Settings → Claude

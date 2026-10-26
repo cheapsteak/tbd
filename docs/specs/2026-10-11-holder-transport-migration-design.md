@@ -73,17 +73,27 @@ no new claim or lock is introduced.
 ### The park honours every live rail
 
 The migration parks under the ordinary manual-park policy, so the rails that
-read live state still apply: the typed-screen check, the typed-input check, and
-the transcript-tail rail. This is deliberate and is the opposite of the profile
-swap's policy, which stops honouring them because switching accounts should
-interrupt regardless.
+read the session's state still apply: a turn in flight, a permission prompt,
+and a transcript tail that is mid-write. This is deliberate and is the opposite
+of the profile swap's policy, which stops honouring them because switching
+accounts should interrupt regardless.
 
-The difference is in what the two actions destroy. Unsent typed input is exactly
-what a park-and-respawn would throw away, so a rail that refuses the park is
-protecting the session, and its refusal becomes a *skipped* line carrying that
-rail's own reason. A person then sends or clears the input and runs the
-migration again. No new eligibility policy is added, and in particular the tmux
-leg's typed-input rail is left exactly as it is.
+The difference is in when each action is wanted. A swap is wanted at the moment
+it is asked for. A migration is not: the session moves just as well once its
+turn ends, so interrupting the turn, eating a raised permission hand or cutting
+a transcript mid-write — which can leave a session the wake cannot resume —
+buys nothing. A rail that refuses the park is protecting the session, and its
+refusal becomes a *skipped* line carrying that rail's own reason. A person runs
+the migration again once the turn has ended or the prompt is answered. No new
+eligibility policy is added.
+
+No rail guards an unsent draft in the composer. The session mod is the park's
+only guard for one, and a manual park, this one included, goes ahead whatever
+the mod knows
+([`2026-10-24-mod-only-park-guard-design.md`](2026-10-24-mod-only-park-guard-design.md),
+"Which parks go ahead"). A session whose mod has confirmed the save gets its
+draft back when the wake resumes it on the holder; for any other session an
+unsent draft may be lost.
 
 ## What migrates, and what is skipped
 
@@ -109,12 +119,12 @@ leg's typed-input rail is left exactly as it is.
   clears the dead process's session and activity facts together. The
   replacement carries a freshly minted incarnation, so a hook from it is
   attributable to it rather than to what was killed. **A command line typed
-  into that shell and not yet run is discarded.** The rails that protect typed
-  input belong to the park, and a shell never reaches a park — nothing it could
-  preserve exists — while the process-table rail that stands in for them sees a
-  half-typed line as an idle shell, because it is one. A fleet run therefore
-  discards whatever is sitting unsent at every idle shell prompt. That is the
-  cost of moving a shell, and it is why nothing moves without a gesture.
+  into that shell and not yet run is discarded.** A shell never reaches a park
+  — nothing it could preserve exists — and the process-table rail that decides
+  whether its move goes ahead sees a half-typed line as an idle shell, because
+  it is one. A fleet run therefore discards whatever is sitting unsent at every
+  idle shell prompt. That is the cost of moving a shell, and it is why nothing
+  moves without a gesture.
 - **Agents migrate through `--resume`** on the session id the row records, the
   same argv a wake builds.
 - **Four rows that name no conversation are skipped rather than moved,
@@ -396,8 +406,8 @@ wake: a pane tmux cannot answer for is not evidence that a process is there.
   report of the rows already moved when a later call throws.
 - A session already on the holder is answered `.alreadyHolder` with nothing
   touched, for an agent tab and for a shell.
-- A session with unsent typed input is skipped with the rail's reason, proving
-  the migration park honours the rails rather than overriding them.
+- A session whose transcript is mid-write is skipped with the rail's reason,
+  proving the migration park honours the rails rather than overriding them.
 - An unspawnable holder refuses and leaves the row exactly as it was, in both
   the running and parked variants, and a daemon with no holder registry at all
   refuses the same way — the registry is where the launch's inherited
@@ -434,6 +444,8 @@ wake: a pane tmux cannot answer for is not evidence that a process is there.
   alternate screen on resume, so it would show through for a moment and then be
   replaced, and a shell's scrollback does not justify the mechanism.
 - **A dedicated park-eligibility policy.** The migration could stop honouring
-  the live rails, as the profile swap does. The actions differ in what they
-  destroy: a swap preserves the conversation and interrupts it, while a
-  migration would discard input the person typed and has not sent.
+  the live rails, as the profile swap does. A swap is wanted at the moment it is
+  asked for, and a migration is not: a session refused by a rail moves just as
+  well once its turn ends or its prompt is answered, while one parked mid-turn
+  has that turn cut off and one parked mid-write may not resume at all. The
+  manual-park policy already refuses those, so no policy is added.

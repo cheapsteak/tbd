@@ -19,7 +19,6 @@ public final class TBDDatabase: Sendable {
     public let modelProfileUsage: ModelProfileUsageStore
     public let oauthUsageSnapshots: OAuthUsageSnapshotStore
     public let config: ConfigStore
-    public let meta: TBDMetaStore
     public let tabs: TabStore
     public let forgottenWorktrees: ForgottenWorktreeStore
     public let scheduledResumes: ScheduledResumeStore
@@ -70,7 +69,6 @@ public final class TBDDatabase: Sendable {
         self.modelProfileUsage = ModelProfileUsageStore(writer: pool)
         self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: pool)
         self.config = ConfigStore(writer: pool)
-        self.meta = TBDMetaStore(writer: pool)
         self.tabs = TabStore(writer: pool)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: pool)
         self.scheduledResumes = ScheduledResumeStore(writer: pool)
@@ -132,7 +130,6 @@ public final class TBDDatabase: Sendable {
         self.modelProfileUsage = ModelProfileUsageStore(writer: queue)
         self.oauthUsageSnapshots = OAuthUsageSnapshotStore(writer: queue)
         self.config = ConfigStore(writer: queue)
-        self.meta = TBDMetaStore(writer: queue)
         self.tabs = TabStore(writer: queue)
         self.forgottenWorktrees = ForgottenWorktreeStore(writer: queue)
         self.scheduledResumes = ScheduledResumeStore(writer: queue)

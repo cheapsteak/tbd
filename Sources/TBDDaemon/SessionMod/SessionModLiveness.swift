@@ -24,9 +24,6 @@ public enum SessionModLiveness: Equatable, Sendable {
         case draftNotRestorable = "draft-not-restorable"
     }
 
-    /// Seconds after which a heartbeat no longer counts.
-    public static let staleAfter: TimeInterval = SessionModSessionFiles.heartbeatStaleAfter
-
     public static func evaluate(
         feature: SessionModFeature,
         spawn: SessionModFiles.ReadResult<SessionModFiles.SpawnRecord>,

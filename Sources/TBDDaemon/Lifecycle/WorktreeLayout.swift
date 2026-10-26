@@ -13,11 +13,6 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "WorktreeLayo
 /// See `docs/worktree-location-design.md` §4a / §5a.
 public struct WorktreeLayout: Sendable {
 
-    /// Current on-disk layout version. Bumped when a future release ships a
-    /// new filesystem migration. Persisted in the `tbd_meta` table under key
-    /// `layout_version` once the migration sweep completes end-to-end.
-    public static let currentVersion: Int = 1
-
     /// The root `basePath(for:)` composes a repo's slot under. `nil`, which is
     /// what `init()` gives every production caller, reads
     /// `TBDConstants.worktreesDir` on each call.
