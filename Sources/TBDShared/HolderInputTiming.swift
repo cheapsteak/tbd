@@ -125,7 +125,7 @@ public enum HolderInputTiming {
     /// How long the daemon waits for a viewer's answer when the question is
     /// being asked **to compose a send**, rather than to answer a read.
     ///
-    /// The tightest of the four, and the asymmetry is the point. Three things
+    /// The tightest of the five, and the asymmetry is the point. Three things
     /// differ between this and the read bound:
     ///
     /// - **A read's caller can absorb the wait; a send's cannot.**

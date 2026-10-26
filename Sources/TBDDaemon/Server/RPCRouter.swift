@@ -79,11 +79,12 @@ public final class RPCRouter: Sendable {
     public nonisolated(unsafe) var updateChecker: UpdateChecker?
     /// Delivery acknowledgement (design §12). `terminal.send` hands a
     /// dispatched, verify-armed text send here and this is the only caller —
-    /// see `DeliveryVerificationArming`. `nil` everywhere until the verifier
-    /// lands; a nil verifier means the observation is simply never armed, and
-    /// the act renders `unconfirmed` by `DeliveryRecord.statuses`, which is the
-    /// honest answer rather than a claim. Set post-construction like
-    /// `claudeUsagePoller`.
+    /// see `DeliveryVerificationArming`. Wired by
+    /// `Daemon.wireDeliveryVerification` only when
+    /// `delivery_verification_enabled` is on at startup, and `nil` otherwise,
+    /// in mock mode and in tests that wire none. While it is nil a `--verify`
+    /// send is refused rather than dispatched unobserved. Set
+    /// post-construction like `claudeUsagePoller`.
     nonisolated(unsafe) var deliveryVerifier: (any DeliveryVerificationArming)?
     /// Owner of the prompt parked at worktree creation (design 2026-08-10).
     /// `worktree.setPendingPrompt` routes to it and `terminal.sessionEvent`
