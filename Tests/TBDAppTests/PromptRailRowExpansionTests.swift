@@ -45,7 +45,10 @@ struct PromptRailRowExpansionTests {
     func placementGrowsDownThenUpThenClamps() {
         let visible = NSRect(x: 0, y: 0, width: 300, height: 600)
         let top = PromptRailCardMetrics.rowRect(0, width: 300)
-        // 22 + 6 × 16 = 118pt below the row's top, of 594.
+        // The row's 22pt holds the first line; each more adds 16pt.
+        #expect(PromptRailCardMetrics.expansionHeight(lines: 1, lineHeight: 16) == 22)
+        #expect(PromptRailCardMetrics.expansionHeight(lines: 6, lineHeight: 16) == 102)
+        // 102pt below the row's top, of 594.
         #expect(PromptRailCardMetrics.expansionPlacement(row: top, visible: visible, wantedLines: 6, lineHeight: 16)
                     == PromptRailExpansionPlacement(lines: 6, growsUpward: false))
 
@@ -55,20 +58,26 @@ struct PromptRailRowExpansionTests {
         #expect(PromptRailCardMetrics.expansionPlacement(row: low, visible: card, wantedLines: 6, lineHeight: 16)
                     == PromptRailExpansionPlacement(lines: 6, growsUpward: true))
 
-        // A 100pt card: 72pt below the row's top, 50 above its bottom. Three
+        // A 100pt card: 72pt below the row's top, 50 above its bottom. Four
         // lines fit below: 22 + 3 × 16 = 70.
         let short = NSRect(x: 0, y: 0, width: 300, height: 100)
         let second = NSRect(x: 0, y: 28, width: 300, height: 22)
         #expect(PromptRailCardMetrics.expansionPlacement(row: second, visible: short, wantedLines: 6, lineHeight: 16)
-                    == PromptRailExpansionPlacement(lines: 3, growsUpward: false))
+                    == PromptRailExpansionPlacement(lines: 4, growsUpward: false))
         // With more room above, it grows up instead.
         let third = NSRect(x: 0, y: 50, width: 300, height: 22)
         #expect(PromptRailCardMetrics.expansionPlacement(row: third, visible: short, wantedLines: 6, lineHeight: 16)
-                    == PromptRailExpansionPlacement(lines: 3, growsUpward: true))
+                    == PromptRailExpansionPlacement(lines: 4, growsUpward: true))
 
-        // A one-row card has no room for a line beside the tool-call line.
+        // A one-row card has room for the row's own line and no more.
         let oneRow = NSRect(x: 0, y: 0, width: 300, height: 34)
-        #expect(PromptRailCardMetrics.expansionPlacement(row: top, visible: oneRow, wantedLines: 6, lineHeight: 16) == nil)
+        #expect(PromptRailCardMetrics.expansionPlacement(row: top, visible: oneRow, wantedLines: 6, lineHeight: 16)
+                    == PromptRailExpansionPlacement(lines: 1, growsUpward: false))
+        // A list shorter than a row has room for no line at all.
+        let sliver = NSRect(x: 0, y: 0, width: 300, height: 20)
+        let straddling = NSRect(x: 0, y: -1, width: 300, height: 22)
+        #expect(PromptRailCardMetrics.expansionPlacement(
+            row: straddling, visible: sliver, wantedLines: 6, lineHeight: 16) == nil)
         #expect(PromptRailCardMetrics.expansionPlacement(row: top, visible: visible, wantedLines: 0, lineHeight: 16) == nil)
         // Fewer lines than six are all shown when they fit.
         #expect(PromptRailCardMetrics.expansionPlacement(row: top, visible: visible, wantedLines: 2, lineHeight: 16)
@@ -136,8 +145,8 @@ struct PromptRailRowExpansionTests {
 
     // MARK: What it shows and where
 
-    @Test("an expansion shows six lines ending in an ellipsis, then the tool-call line, growing down from its row")
-    func showsSixLinesAndTheCount() async throws {
+    @Test("an expansion shows six lines ending in an ellipsis and no tool-call line, growing down from its row")
+    func showsSixLines() async throws {
         // Ten rows, a 232pt card: room below the first two for six lines.
         let dated = try #require(Calendar(identifier: .gregorian).date(from: DateComponents(
             timeZone: TimeZone(identifier: "UTC"), year: 2020, month: 1, day: 2, hour: 12)))
@@ -154,26 +163,30 @@ struct PromptRailRowExpansionTests {
         #expect(expansion.lineCount == 6, "the prompt took \(expansion.lineCount) lines")
         #expect(expansion.text.hasSuffix("…"), "the sixth line does not end in an ellipsis: \(expansion.text)")
         #expect(expansion.text.hasPrefix("the rail and its card"))
-        #expect(expansion.countText == "40 tool calls")
+        #expect(!expansion.text.contains("tool call"))
+        // Exactly as tall as its six lines: no line for a tool-call count.
+        #expect(Self.fitsItsLines(expansion), "the expansion is \(expansion.frame.height)pt tall for its lines")
         let row = PromptRailCardMetrics.rowRect(0, width: scene.card.frame.width)
         #expect(!expansion.growsUpward)
         #expect(abs(expansion.frame.minY - row.minY) < 0.5, "the expansion starts at \(expansion.frame.minY), its row at \(row.minY)")
         #expect(expansion.frame.minX == row.minX && expansion.frame.width == row.width, "the expansion is not as wide as its row")
         #expect(expansion.frame.height > row.height * 4, "the expansion is \(expansion.frame.height)pt tall")
-        // The row's dash and time, where the row draws them.
+        // Its first line on the row's band, with the row's dash and time,
+        // where the row draws them.
+        #expect(abs((Self.lineMidY(expansion, last: false) ?? 0) - row.midY) < 0.5, "the first line left the row")
         #expect(Self.sameRect(Self.inList(expansion.content?.dash, of: expansion), scene.card.dashRect(forEntry: 0)),
                 "the expansion's dash left its row's")
         let time = PromptOutline.timeLabel(dated, now: Date(), calendar: .current, locale: .current)
         #expect(expansion.content?.time?.string == time)
 
         // A prompt that ends within six lines shows them all, with no
-        // ellipsis, and a single tool call reads in the singular.
+        // ellipsis, and is as tall as those lines alone.
         try scene.movePointer(toRow: 1)
         try await Self.fire(scene)
         try #require(scene.card.expandedRow == 1)
         #expect(expansion.lineCount == 2)
         #expect(expansion.text == "fix it\nthen ship")
-        #expect(expansion.countText == "1 tool call")
+        #expect(Self.fitsItsLines(expansion), "the expansion is \(expansion.frame.height)pt tall for two lines")
     }
 
     @Test("near the card's bottom an expansion grows up, ending on its row")
@@ -193,7 +206,10 @@ struct PromptRailRowExpansionTests {
         #expect(abs(expansion.frame.maxY - row.maxY) < 0.5, "the expansion ends at \(expansion.frame.maxY), its row at \(row.maxY)")
         #expect(expansion.lineCount == 6)
         #expect(expansion.frame.minY >= visible.minY - 0.5, "the expansion rises past the list's top")
-        // Growing up, the dash stays on the row, beside the tool-call line.
+        // Growing up, its last line sits on the row's band, and the dash
+        // stays there beside it.
+        #expect(abs((Self.lineMidY(expansion, last: true) ?? 0) - row.midY) < 0.5, "the last line left the row")
+        #expect(Self.fitsItsLines(expansion))
         #expect(Self.sameRect(Self.inList(expansion.content?.dash, of: expansion), scene.card.dashRect(forEntry: 9)),
                 "the expansion's dash left its row's")
     }
@@ -316,12 +332,12 @@ struct PromptRailRowExpansionTests {
         let scene = Self.scene((0..<40).map { Self.entry($0, Self.longPrompt) }, pane: NSSize(width: 680, height: 300))
         defer { scene.host.tearDown() }
         let expansion = scene.card.expansionView
-        // Row 5 starts 124pt above the clip's bottom: room for six lines
-        // there, but only 100pt above the fade.
-        try scene.movePointer(toRow: 5)
+        // Row 6 starts 102pt above the clip's bottom: room for six lines
+        // there, but only 78pt above the fade.
+        try scene.movePointer(toRow: 6)
         try await Self.fire(scene)
-        try #require(scene.card.expandedRow == 5)
-        let row = PromptRailCardMetrics.rowRect(5, width: scene.card.frame.width)
+        try #require(scene.card.expandedRow == 6)
+        let row = PromptRailCardMetrics.rowRect(6, width: scene.card.frame.width)
         #expect(expansion.growsUpward, "the expansion grew down into the fade")
         #expect(abs(expansion.frame.maxY - row.maxY) < 0.5)
         #expect(expansion.lineCount == 6)
@@ -486,20 +502,23 @@ struct PromptRailRowExpansionTests {
     @Test("new counts and a new active row redraw an expansion in place")
     func countsAndActiveRelayInPlace() async throws {
         let entries = (0..<10).map { Self.entry($0, Self.longPrompt) }
-        let counts = Array(repeating: 40, count: 10)
+        // Entry 0 is the busiest turn; entry 2 has done nothing yet.
+        let counts = [40] + Array(repeating: 0, count: 9)
         let scene = Self.scene(entries, workCounts: counts)
         defer { scene.host.tearDown() }
         let expansion = scene.card.expansionView
         try scene.movePointer(toRow: 2)
         try await Self.fire(scene)
-        try #require(expansion.countText == "40 tool calls")
+        try #require(scene.card.expandedRow == 2)
+        #expect(expansion.content?.dash.width == PromptRailWorkScale.minLength)
         #expect(expansion.content?.dash.height == 2)
 
+        // Entry 2 catches up with the busiest: its dash grows in place.
         var busier = counts
-        busier[2] = 41
+        busier[2] = 40
         scene.card.update(entries: entries, workCounts: busier, activeIndex: nil, earlier: nil)
         #expect(scene.card.expandedRow == 2, "new counts hid the expansion")
-        #expect(expansion.countText == "41 tool calls")
+        #expect(expansion.content?.dash.width == PromptRailWorkScale.maxLength, "the expansion kept the old dash")
 
         scene.card.update(entries: entries, workCounts: busier, activeIndex: 2, earlier: nil)
         #expect(scene.card.expandedRow == 2, "a new active row hid the expansion")
@@ -616,6 +635,25 @@ struct PromptRailRowExpansionTests {
             }
         }
         return nil
+    }
+
+    /// The middle of `expansion`'s first or last line of text, in list
+    /// coordinates.
+    private static func lineMidY(_ expansion: PromptRailRowExpansionView, last: Bool) -> CGFloat? {
+        guard let content = expansion.content else { return nil }
+        let top = expansion.frame.minY + content.textOrigin.y
+        let lineHeight = content.text.lineHeight
+        return last ? top + content.text.height - lineHeight / 2 : top + lineHeight / 2
+    }
+
+    /// Whether `expansion` is exactly as tall as its lines of text: a row's
+    /// height for the first and a line's for each of the rest, within half a
+    /// point, with nothing below them.
+    private static func fitsItsLines(_ expansion: PromptRailRowExpansionView) -> Bool {
+        guard let content = expansion.content else { return false }
+        let expected = PromptRailCardMetrics.expansionHeight(
+            lines: expansion.lineCount, lineHeight: content.text.lineHeight)
+        return abs(expansion.frame.height - expected) < 0.5
     }
 
     /// `rect`, in `expansion`'s coordinates, in the list's.

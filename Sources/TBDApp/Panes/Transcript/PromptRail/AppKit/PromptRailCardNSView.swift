@@ -795,9 +795,9 @@ private final class PromptRailCardListView: NSView {
     /// that shows its whole prompt, and where not one line fits.
     ///
     /// The prompt's opening is wrapped to the row's title width, in the row's
-    /// font. The line on the row's band — the first growing down, the
-    /// tool-call line growing up — is centred in it as the row's title is,
-    /// and the row's dash and time sit on that band.
+    /// font. The line on the row's band — the first growing down, the last
+    /// growing up — is centred in it as the row's title is, and the row's
+    /// dash and time sit on that band.
     func expansion(
         forRow row: Int, visible: NSRect
     ) -> (content: PromptRailRowExpansionView.Content, frame: NSRect)? {
@@ -817,14 +817,11 @@ private final class PromptRailCardListView: NSView {
         let text = full.limited(toLines: placement.lines)
         let lineHeight = full.lineHeight
         let padding = (Metrics.rowHeight - lineHeight) / 2
-        let height = padding * 2 + text.height + lineHeight
+        let height = padding * 2 + text.height
         let frame = NSRect(
             x: rowRect.minX, y: placement.growsUpward ? rowRect.maxY - height : rowRect.minY,
             width: rowRect.width, height: height)
         let band = rowRect.offsetBy(dx: -frame.minX, dy: -frame.minY)
-        let count = NSAttributedString(
-            string: PromptOutline.workLabel(workScale.count(at: index)),
-            attributes: [.font: regularFont, .foregroundColor: NSColor.secondaryLabelColor, .paragraphStyle: truncating])
         let content = PromptRailRowExpansionView.Content(
             row: row,
             growsUpward: placement.growsUpward,
@@ -833,11 +830,7 @@ private final class PromptRailCardListView: NSView {
             dashColor: PromptRailNotchStyle.color(for: entry.kind, active: active),
             time: layout.time,
             text: text,
-            textOrigin: NSPoint(x: Metrics.textLeading, y: padding),
-            count: count,
-            countRect: NSRect(
-                x: Metrics.textLeading, y: padding + text.height,
-                width: max(0, layout.titleWidth), height: lineHeight))
+            textOrigin: NSPoint(x: Metrics.textLeading, y: padding))
         return (content, frame)
     }
 

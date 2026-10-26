@@ -8,10 +8,10 @@ import AppKit
 /// scrolls.
 ///
 /// - **Content** – the row's dash and time, on the row's band where the row
-///   draws them; the prompt's opening wrapped to the row's text width, its
-///   last line ending in "…" when more remains; then a muted line with the
-///   turn's tool-call count. The card's list view composes it
-///   (`Content`), as it composes the rows.
+///   draws them, and the prompt's opening wrapped to the row's text width,
+///   its last line ending in "…" when more remains. No tool-call count: the
+///   notch's length shows it and VoiceOver reads it. The card's list view
+///   composes it (`Content`), as it composes the rows.
 /// - **Events** – it takes none. `hitTest(_:)` returns nil, so hover, clicks
 ///   and the wheel all reach the list beneath it, and a click on the row
 ///   jumps exactly as it does without the expansion.
@@ -37,8 +37,6 @@ final class PromptRailRowExpansionView: NSView {
         let time: NSAttributedString?
         let text: PromptRailExpansionText
         let textOrigin: NSPoint
-        let count: NSAttributedString
-        let countRect: NSRect
     }
 
     private(set) var content: Content?
@@ -50,8 +48,6 @@ final class PromptRailRowExpansionView: NSView {
     var text: String { content?.text.string ?? "" }
     /// Lines the prompt text takes as laid out.
     var lineCount: Int { content?.text.lineCount ?? 0 }
-    /// The tool-call line: "40 tool calls".
-    var countText: String { content?.count.string ?? "" }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -107,7 +103,6 @@ final class PromptRailRowExpansionView: NSView {
                 options: [.usesLineFragmentOrigin])
         }
         content.text.draw(at: content.textOrigin)
-        content.count.draw(with: content.countRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
 }
 

@@ -203,8 +203,8 @@ enum PromptOutline {
         }
     }
 
-    /// "1 tool call", "40 tool calls": a turn's work as the card's row
-    /// expansion and the rail's accessibility labels say it.
+    /// "1 tool call", "40 tool calls": a turn's work as the rail's
+    /// accessibility labels say it.
     static func workLabel(_ count: Int) -> String {
         count == 1 ? "1 tool call" : "\(count) tool calls"
     }

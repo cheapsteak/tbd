@@ -120,11 +120,11 @@ extension PromptRailCardMetrics {
     static let expansionMaxLines = 6
 
     /// The height of an expansion showing `lines` lines of its prompt, each
-    /// `lineHeight` tall, and its tool-call line: the row's own height, which
-    /// holds one line centred in it, plus a line for each of the rest. The
-    /// line on the row keeps the row's padding above and below it.
+    /// `lineHeight` tall: the row's own height, which holds one line centred
+    /// in it, plus a line for each of the rest. The line on the row keeps the
+    /// row's padding above and below it.
     static func expansionHeight(lines: Int, lineHeight: CGFloat) -> CGFloat {
-        rowHeight + CGFloat(max(0, lines)) * lineHeight
+        rowHeight + CGFloat(max(0, lines - 1)) * lineHeight
     }
 
     /// The part of the list's `clip` rect, in list coordinates, an expansion
@@ -144,8 +144,8 @@ extension PromptRailCardMetrics {
     /// It grows down from the row when all `wantedLines` fit below the row's
     /// top, and otherwise up to the row's bottom when they fit above it. When
     /// they fit neither way it shows as many as fit, growing whichever way has
-    /// more room. Nil when not even one line fits beside the tool-call line,
-    /// or there is nothing to show.
+    /// more room. Nil when not even one line fits, which takes a whole row's
+    /// height, or there is nothing to show.
     static func expansionPlacement(
         row: NSRect, visible: NSRect, wantedLines: Int, lineHeight: CGFloat
     ) -> PromptRailExpansionPlacement? {
@@ -159,7 +159,7 @@ extension PromptRailCardMetrics {
         if wanted <= above + slack { return PromptRailExpansionPlacement(lines: wantedLines, growsUpward: true) }
         let growsUpward = above > below
         let room = growsUpward ? above : below
-        let fitting = Int(((room - rowHeight) / lineHeight + slack).rounded(.down))
+        let fitting = Int(((room - rowHeight) / lineHeight + slack).rounded(.down)) + 1
         let lines = min(wantedLines, fitting)
         return lines > 0 ? PromptRailExpansionPlacement(lines: lines, growsUpward: growsUpward) : nil
     }
