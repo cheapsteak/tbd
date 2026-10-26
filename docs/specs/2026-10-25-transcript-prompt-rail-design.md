@@ -136,11 +136,12 @@ The transcript stays fast because it is lazy in three ways: the table builds cel
 
 Everything with logic in it is kept out of the views. It lives under `Sources/TBDApp/Panes/Transcript/PromptRail/`, except the coordinator additions, which extend the coordinator in `TableTranscriptView+PromptRail.swift`:
 
-- **`PromptOutline`** – nodes in, entries out.
+- **`PromptOutline`** – nodes in, entries and each turn's work count out.
 - **`PromptRailLayout`** – pitch, notch rectangles and the overflow offset for a given count, rail height and active index.
+- **`PromptRailWorkScale`** – work counts in, notch lengths out, scaled to the busiest turn.
 - **`PromptRailActiveRule`** – the active-entry rule, given entry row rectangles, the viewport and the held jump target.
 - **`PromptRailHoverModel`** – the open delay, close grace, Escape and click suppression, and the deactivation close. It takes `clock: any Clock<Duration> = ContinuousClock()` as its last initializer parameter.
-- **Coordinator additions** – rebuilding the outline when the nodes change, tracking the active entry, `jump(toNodeID:)` and the jump anchor. The coordinator reports to a `PromptRailPresenter` – entries changed, active entry changed. The rail view is the presenter; the protocol lets the coordinator be tested without the views.
+- **Coordinator additions** – rebuilding the outline when the nodes change, tracking the active entry, `jump(toNodeID:)` and the jump anchor. The coordinator reports to a `PromptRailPresenter` – entries changed, work counts changed, active entry changed. The rail view is the presenter; the protocol lets the coordinator be tested without the views.
 - **Keyboard commands** – the Go menu items and the pane registry.
 
 ### Views
