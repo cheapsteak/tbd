@@ -140,7 +140,7 @@ struct ClaudeSpawnExtrasSpawnPathTests {
         /// A worktree with a real git checkout, made by the lifecycle with no
         /// agent, and active — past its pre-session hook when one resolves.
         func activeCheckout() async throws -> Worktree {
-            let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+            let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
             let completion = try await lifecycle.completeCreateWorktree(
                 worktreeID: pending.id, skipClaude: true)
             if case .preSessionPending(let phase3) = completion {

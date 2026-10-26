@@ -1885,42 +1885,10 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Retract a standing wait reason that is not newer than `observedAt`,
-    /// WITHOUT asserting an activity state. Returns whether one was retracted.
-    ///
-    /// The activity rail is what supersedes a recorded reason, and it has to be
-    /// able to do so on an observation that repeats the state the row already
-    /// held. A permission prompt is raised in the middle of a turn: the hook
-    /// that fires once the human answers reports `working` again, which
-    /// `handleTerminalActivityEvent`'s unchanged-state guard drops. Without
-    /// this entry point the reason would stay pinned to the row until the turn
-    /// ended, long after the prompt it describes went away.
-    ///
-    /// A terminal that vanished between the caller's read and this write
-    /// reports `false` rather than throwing: the only callers are
-    /// fire-and-forget hooks, whose handlers soft-succeed on an unknown
-    /// terminal, and there is nothing to retract on a row that is gone.
-    public func clearAwaitingInputReasonIfNotNewer(
-        id: UUID,
-        observedAt: Date
-    ) async throws -> Bool {
-        try await writer.write { db in
-            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
-                return false
-            }
-            guard clearAwaitingInputIfNotNewer(record: &record, than: observedAt) else {
-                return false
-            }
-            try record.update(db)
-            return true
-        }
-    }
-
     /// Retract a standing prompt whose transcript no longer matches the
     /// fingerprint taken when it was recorded, WITHOUT asserting an activity
-    /// state — the same entitlement `clearAwaitingInputReasonIfNotNewer` has,
-    /// for the same reason: this caller knows the prompt is gone, not what the
-    /// session is doing instead.
+    /// state: this caller knows the prompt is gone, not what the session is
+    /// doing instead.
     ///
     /// `expected` is re-checked inside this transaction. The stat that decided
     /// to call happened outside the database and

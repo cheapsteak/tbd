@@ -181,7 +181,6 @@ import Testing
     let pending = try await lifecycle.beginCreateWorktree(
         repoID: repo.id,
         branch: "existing-feature",
-        skipClaude: true,
         useExistingBranch: true
     )
     #expect(pending.name == "existing-feature-2")

@@ -475,7 +475,7 @@ import TBDShared
         // The same session whose heartbeat is older than the staleness bound:
         // the mod is no longer confirmed, so even its own file is not read.
         let stale = SessionStateFactGatherer(
-            now: { pinned.addingTimeInterval(SessionModLiveness.staleAfter + 60) },
+            now: { pinned.addingTimeInterval(SessionModSessionFiles.heartbeatStaleAfter + 60) },
             sessionsDir: sessionsDir)
         let staleWindow = stale.contextLoad(for: claude).window
         if case .unknown(let why) = staleWindow {

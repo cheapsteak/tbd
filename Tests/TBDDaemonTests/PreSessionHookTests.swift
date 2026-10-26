@@ -222,7 +222,7 @@ struct PreSessionHookTests {
             repoID: repo.id, folder: "first", branch: "feat/clash", skipClaude: true
         )
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, folder: "second", branch: "feat/clash", skipClaude: true
+            repoID: repo.id, folder: "second", branch: "feat/clash"
         )
         await #expect(throws: WorktreeLifecycleError.self) {
             try await lifecycle.completeCreateWorktree(
@@ -841,7 +841,7 @@ struct PreSessionHookTests {
     private func makeArchivedWorktree(
         lifecycle: WorktreeLifecycle, db: TBDDatabase, repo: Repo
     ) async throws -> Worktree {
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         let completion = try await lifecycle.completeCreateWorktree(
             worktreeID: pending.id, skipClaude: true
         )
