@@ -508,9 +508,19 @@ public enum TBDConstants {
     public static func retainedTranscriptPath(
         provider: String, key: String, environment: [String: String]
     ) -> URL {
-        let directory = retainedTranscriptsDir(environment: environment).path
-        return URL(fileURLWithPath:
-            "\(directory)/\(filenameEscaped(provider))/\(filenameEscaped(key)).jsonl")
+        retainedTranscriptPath(
+            provider: provider, key: key,
+            directory: retainedTranscriptsDir(environment: environment))
+    }
+    /// The same path under an explicit transcripts directory, and the one place
+    /// the composition lives. For a caller that resolved the directory once and
+    /// walks it, so the files it lists and the paths it names come from the
+    /// same root: `OrphanGC` takes that root as a seam.
+    public static func retainedTranscriptPath(
+        provider: String, key: String, directory: URL
+    ) -> URL {
+        URL(fileURLWithPath:
+            "\(directory.path)/\(filenameEscaped(provider))/\(filenameEscaped(key)).jsonl")
     }
     public static func retainedTranscriptPath(provider: String, key: String) -> URL {
         retainedTranscriptPath(

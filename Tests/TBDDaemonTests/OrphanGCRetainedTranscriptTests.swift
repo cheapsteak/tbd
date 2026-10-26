@@ -4,17 +4,18 @@ import TestSupport
 @testable import TBDDaemonLib
 import TBDShared
 
-// Nested under TBDHomeSerialized: the retained-transcript leg walks
-// `TBDConstants.retainedTranscriptsDir`, which resolves from the process-global
-// TBD_HOME and has no injection seam of its own — the path helper that names a
-// receipt's file resolves the same variable, and the two must agree. See
-// TBDHomeSerializedSuites.swift.
+// Nested under TBDHomeSerialized: these tests write their fixtures where
+// `recall` writes a transcript, at `TBDConstants.retainedTranscriptPath`, which
+// resolves from the process-global TBD_HOME, and most of them leave the leg's
+// `retainedTranscriptsBase:` seam unset so the sweep falls back to that same
+// directory. The seam test sets both and checks the sweep keeps them apart.
+// See TBDHomeSerializedSuites.swift.
 extension TBDHomeSerialized {
 
 /// Tier 2: a real `~/tbd/transcripts` tree under a temp `TBD_HOME`, plus an
-/// in-memory database. The scratchpad base, the profile base, the holders base
-/// and the clock are all injected; no process is spawned and no production path
-/// outside the temp home is touched.
+/// in-memory database. The scratchpad base, the profile base, the holders base,
+/// the dev-server directory and the clock are all injected; no process is
+/// spawned and no production path outside the temp home is touched.
 @Suite("OrphanGC reclaims retained transcripts")
 struct OrphanGCRetainedTranscriptTests {
     private let fm = FileManager.default
@@ -39,7 +40,11 @@ struct OrphanGCRetainedTranscriptTests {
         })
     }
 
-    private func makeGC(db: TBDDatabase, home: URL) -> OrphanGC {
+    /// `retainedTranscriptsBase` nil leaves the leg on the directory the
+    /// temp `TBD_HOME` gives, the production fallback.
+    private func makeGC(
+        db: TBDDatabase, home: URL, retainedTranscriptsBase: URL? = nil
+    ) -> OrphanGC {
         let fixed = clock
         return OrphanGC(
             db: db, git: GitManager(),
@@ -48,16 +53,25 @@ struct OrphanGCRetainedTranscriptTests {
             scratchpadBase: home.appendingPathComponent("s", isDirectory: true),
             now: { fixed },
             profileDirBase: home.appendingPathComponent("p", isDirectory: true),
-            holdersBase: home.appendingPathComponent("h", isDirectory: true)
+            holdersBase: home.appendingPathComponent("h", isDirectory: true),
+            // Not under TBD_HOME in production (`~/.local/state/dev-servers`),
+            // so the temp home alone would not keep this sweep off it.
+            devServersBase: home.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: retainedTranscriptsBase
         )
     }
 
-    /// Writes a JSONL file at the canonical path for `(provider, key)` and
+    /// Writes a JSONL file at the canonical path for `(provider, key)` — under
+    /// `directory` when given, else under the directory `TBD_HOME` gives — and
     /// backdates it, so the grace window has elapsed against this suite's fixed
     /// clock unless the caller asks otherwise.
     @discardableResult
-    private func writeTranscript(key: String, age: TimeInterval = 86_400) -> String {
-        let url = TBDConstants.retainedTranscriptPath(provider: provider, key: key)
+    private func writeTranscript(
+        key: String, age: TimeInterval = 86_400, under directory: URL? = nil
+    ) -> String {
+        let url = directory.map {
+            TBDConstants.retainedTranscriptPath(provider: provider, key: key, directory: $0)
+        } ?? TBDConstants.retainedTranscriptPath(provider: provider, key: key)
         try? fm.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         fm.createFile(atPath: url.path, contents: Data(#"{"type":"user"}"#.utf8))
@@ -330,6 +344,37 @@ struct OrphanGCRetainedTranscriptTests {
 
         #expect(try await db.retainedTranscripts.find(provider: provider, key: "fresh-key") != nil)
         #expect(fm.fileExists(atPath: path))
+    }
+
+    // MARK: - The base seam
+
+    /// Exercises `OrphanGC`'s `retainedTranscriptsBase:` seam directly, with a
+    /// base other than the directory `TBD_HOME` gives. The leg walks the
+    /// injected base and names each receipt's file under it, so an unreferenced
+    /// file there goes and a referenced one stays; an unreferenced file at the
+    /// path `TBDConstants` gives is one the leg must never look at, and stays.
+    @Test func theInjectedBaseIsSweptAndTheTBDHomeDirectoryIsNot() async throws {
+        let (home, cleanUp) = isolateTBDHome()
+        defer { cleanUp() }
+        let base = home.appendingPathComponent("injected-transcripts", isDirectory: true)
+        let db = try TBDDatabase(inMemory: true)
+        try await db.config.setGCRetainedTranscriptsEnabled(true)
+        let orphan = writeTranscript(key: "orphaned-key", under: base)
+        let referenced = writeTranscript(key: "referenced-key", under: base)
+        try await db.retainedTranscripts.insert(
+            receipt(key: "referenced-key", expiresAt: clock.addingTimeInterval(86_400)))
+        let ambient = writeTranscript(key: "ambient-key")
+        let ambientCanonical = canonical(ambient)
+
+        let result = await makeGC(db: db, home: home, retainedTranscriptsBase: base).sweep()
+
+        #expect(fm.fileExists(atPath: orphan) == false, "\(orphan) survived the sweep")
+        #expect(result.planned.contains("REAP retained-transcript \(canonical(orphan))"))
+        #expect(fm.fileExists(atPath: referenced),
+                "a receipt's file under the injected base was unlinked")
+        #expect(fm.fileExists(atPath: ambient),
+                "the sweep reached the transcripts directory TBD_HOME gives")
+        #expect(result.planned.contains { $0.contains(ambientCanonical) } == false)
     }
 }
 }

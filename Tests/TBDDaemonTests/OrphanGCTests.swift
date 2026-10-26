@@ -47,13 +47,29 @@ struct OrphanGCTests {
         scratchpadBase: URL? = nil,
         now: @escaping @Sendable () -> Date = OrphanGCTests.farFuture
     ) -> OrphanGC {
-        OrphanGC(
+        // Every base the caller does not inject sits under a root nothing
+        // creates, so no leg reads the process-global `TBD_HOME` or the real
+        // Claude scratchpad store, where `farFuture` would read whatever another
+        // suite left as past its grace window.
+        let root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdgc"), isDirectory: true)
+        return OrphanGC(
             db: db,
             git: git,
             broadcast: { broadcaster.append($0) },
-            lsofProvider: { [] },
-            scratchpadBase: scratchpadBase,
-            now: now
+            liveCWDsProvider: { [] },
+            scratchpadBase: scratchpadBase ?? root.appendingPathComponent("s", isDirectory: true),
+            now: now,
+            profileDirBase: root.appendingPathComponent("p", isDirectory: true),
+            hangStackBase: root.appendingPathComponent("hs", isDirectory: true),
+            holdersBase: root.appendingPathComponent("h", isDirectory: true),
+            attachmentsBase: root.appendingPathComponent("a", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": root.path],
+            reposBase: root.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: root.appendingPathComponent("se", isDirectory: true),
+            devServersBase: root.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: root.appendingPathComponent("rt", isDirectory: true),
+            scratchSpacesBase: root.appendingPathComponent("sc", isDirectory: true),
+            worktreesBase: root.appendingPathComponent("wt", isDirectory: true)
         )
     }
 

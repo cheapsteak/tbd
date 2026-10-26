@@ -18,7 +18,21 @@ public struct WorktreeLayout: Sendable {
     /// `layout_version` once the migration sweep completes end-to-end.
     public static let currentVersion: Int = 1
 
-    public init() {}
+    /// The root `basePath(for:)` composes a repo's slot under. `nil`, which is
+    /// what `init()` gives every production caller, reads
+    /// `TBDConstants.worktreesDir` on each call.
+    private let worktreesBase: URL?
+
+    public init() {
+        self.worktreesBase = nil
+    }
+
+    /// Test seam: compose under `worktreesBase` rather than the process-global
+    /// `TBD_HOME`. `OrphanGC` takes it so a sweep in a test drains no
+    /// `.deleting/` queue outside the test's own tree.
+    init(worktreesBase: URL) {
+        self.worktreesBase = worktreesBase
+    }
 
     /// Sanitize a repo display name into a filesystem-safe slot.
     ///
@@ -60,20 +74,22 @@ public struct WorktreeLayout: Sendable {
     /// The canonical base directory for fresh worktrees of the given repo.
     ///
     /// - Returns `repo.worktreeRoot` verbatim if the override is set.
-    /// - Otherwise returns `<TBDConstants.worktreesDir>/<slot>` — i.e.
-    ///   `~/tbd/worktrees/<slot>` in production, and a redirected base when
-    ///   `TBD_HOME` is set. Going through `TBDConstants` rather than
-    ///   re-deriving `~/tbd` by hand is what lets a test run point the whole
-    ///   process at a scratch home; a hand-built home path silently ignored
-    ///   the override and wrote real worktrees into the developer's `~/tbd`.
+    /// - Otherwise returns `<base>/<slot>`, where `<base>` is the injected
+    ///   `worktreesBase` if there is one and `TBDConstants.worktreesDir`
+    ///   otherwise — i.e. `~/tbd/worktrees/<slot>` in production, and a
+    ///   redirected base when `TBD_HOME` is set. Going through `TBDConstants`
+    ///   rather than re-deriving `~/tbd` by hand is what lets a test run point
+    ///   the whole process at a scratch home; a hand-built home path silently
+    ///   ignored the override and wrote real worktrees into the developer's
+    ///   `~/tbd`.
     public func basePath(for repo: Repo) -> String {
         if let override = repo.worktreeRoot, !override.isEmpty {
             return override
         }
-        // Below the override guard on purpose: `worktreesDir` snapshots the
-        // whole process environment into a Dictionary on every access, and the
-        // override path has no use for the result.
-        let base = TBDConstants.worktreesDir.path
+        // Below the override guard on purpose: `TBDConstants.worktreesDir`
+        // snapshots the whole process environment into a Dictionary on every
+        // access, and the override path has no use for the result.
+        let base = (worktreesBase ?? TBDConstants.worktreesDir).path
         if let slot = repo.worktreeSlot, !slot.isEmpty {
             return "\(base)/\(slot)"
         }

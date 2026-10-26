@@ -162,6 +162,31 @@ struct ScratchReconcileCallPathTests {
             server: server)
     }
 
+    /// The `OrphanGC` the hourly maintenance runs, with every base its sweep
+    /// walks under a root nothing creates: the sweep is incidental here, and
+    /// left on the process-global `TBD_HOME` it would drain and delete what
+    /// other suites put there.
+    private func makeGC(db: TBDDatabase) -> OrphanGC {
+        let root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdgcsr"), isDirectory: true)
+        return OrphanGC(
+            db: db,
+            git: GitManager(),
+            broadcast: { _ in },
+            liveCWDsProvider: { [] },
+            scratchpadBase: root.appendingPathComponent("s", isDirectory: true),
+            profileDirBase: root.appendingPathComponent("p", isDirectory: true),
+            hangStackBase: root.appendingPathComponent("hs", isDirectory: true),
+            holdersBase: root.appendingPathComponent("h", isDirectory: true),
+            attachmentsBase: root.appendingPathComponent("a", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": root.path],
+            reposBase: root.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: root.appendingPathComponent("se", isDirectory: true),
+            devServersBase: root.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: root.appendingPathComponent("rt", isDirectory: true),
+            scratchSpacesBase: root.appendingPathComponent("sc", isDirectory: true),
+            worktreesBase: root.appendingPathComponent("wt", isDirectory: true))
+    }
+
     private func insertPlannedCurrentTerminal(_ fixture: AliasFixture) async throws {
         _ = try await fixture.db.terminals.create(
             id: fixture.currentTerminalID,
@@ -535,11 +560,7 @@ struct ScratchReconcileCallPathTests {
     func orphanMaintenanceSkipsScratchAliasesWhenGCDisabled() async throws {
         let fixture = try await makeAliasFixture()
         try await fixture.db.config.setGCEnabled(false)
-        let gc = OrphanGC(
-            db: fixture.db,
-            git: GitManager(),
-            broadcast: { _ in },
-            lsofProvider: { [] })
+        let gc = makeGC(db: fixture.db)
 
         await Daemon.performOrphanMaintenance(
             orphanGC: gc,
@@ -556,11 +577,7 @@ struct ScratchReconcileCallPathTests {
     func orphanMaintenanceReconcilesScratchAliasesWhenGCEnabled() async throws {
         let fixture = try await makeAliasFixture()
         try await fixture.db.config.setGCEnabled(true)
-        let gc = OrphanGC(
-            db: fixture.db,
-            git: GitManager(),
-            broadcast: { _ in },
-            lsofProvider: { [] })
+        let gc = makeGC(db: fixture.db)
 
         await Daemon.performOrphanMaintenance(
             orphanGC: gc,

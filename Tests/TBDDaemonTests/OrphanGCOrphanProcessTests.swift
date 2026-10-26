@@ -72,6 +72,7 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
             now: { now },
             beforeInterruptedArchiveReap: nil,
             profileDirBase: sandbox.appendingPathComponent("profiles", isDirectory: true),
+            hangStackBase: sandbox.appendingPathComponent("hang-stacks", isDirectory: true),
             credentialsKeychain: NoopKeychain(),
             beforeProfileDirReap: nil,
             processCWDsProvider: { cwdByPID },
@@ -79,7 +80,16 @@ struct OrphanGCOrphanProcessTests: ~Copyable {
                 ?? { processSnapshotAvailable ? processes : nil },
             signaller: signaller,
             orphanProcessGraceAttempts: 2,
-            orphanProcessPollInterval: .milliseconds(1)
+            orphanProcessPollInterval: .milliseconds(1),
+            holdersBase: sandbox.appendingPathComponent("holders", isDirectory: true),
+            attachmentsBase: sandbox.appendingPathComponent("attachments", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": sandbox.path],
+            reposBase: sandbox.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: sandbox.appendingPathComponent("sessions", isDirectory: true),
+            devServersBase: sandbox.appendingPathComponent("dev-servers", isDirectory: true),
+            retainedTranscriptsBase: sandbox.appendingPathComponent("transcripts", isDirectory: true),
+            scratchSpacesBase: sandbox.appendingPathComponent("scratch-spaces", isDirectory: true),
+            worktreesBase: sandbox.appendingPathComponent("worktrees", isDirectory: true)
         )
     }
 

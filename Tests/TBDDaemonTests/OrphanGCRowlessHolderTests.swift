@@ -4,8 +4,8 @@ import Testing
 import TBDShared
 
 /// Tier 2: a real rendezvous directory with real (abandoned) unix sockets plus
-/// an in-memory database. The holders base, the profiles base, the scratchpad
-/// base, the clock, the handshake and the killer are all injected; nothing here
+/// an in-memory database. The holders base, every other base the sweep walks,
+/// the clock, the handshake and the killer are all injected; nothing here
 /// resolves a production path and **no process is spawned or signalled**.
 ///
 /// The live half of this sweep — a real `TBDHolder`, really killed, and two
@@ -90,14 +90,23 @@ struct OrphanGCRowlessHolderTests: ~Copyable {
             scratchpadBase: sandbox.appendingPathComponent("s", isDirectory: true),
             now: { fixed },
             profileDirBase: sandbox.appendingPathComponent("p", isDirectory: true),
+            hangStackBase: sandbox.appendingPathComponent("hs", isDirectory: true),
             holdersBase: holdersBase,
+            attachmentsBase: sandbox.appendingPathComponent("a", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": sandbox.path],
+            reposBase: sandbox.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: sandbox.appendingPathComponent("se", isDirectory: true),
+            devServersBase: sandbox.appendingPathComponent("ds", isDirectory: true),
             // The rendezvous sweep shares this directory and runs on the same
             // pass. Every fixture socket here answers "a process is listening",
             // so that sweep keeps them all and cannot unlink the fixture out
             // from under these assertions.
             holderListenerProbe: { _ in true },
             rowlessHolderHandshake: handshake,
-            rowlessHolderReclaimer: reclaimer)
+            rowlessHolderReclaimer: reclaimer,
+            retainedTranscriptsBase: sandbox.appendingPathComponent("rt", isDirectory: true),
+            scratchSpacesBase: sandbox.appendingPathComponent("sc", isDirectory: true),
+            worktreesBase: sandbox.appendingPathComponent("wt", isDirectory: true))
     }
 
     /// An installation that has minted a token and has a holder socket that no

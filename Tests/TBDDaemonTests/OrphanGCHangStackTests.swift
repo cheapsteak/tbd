@@ -5,8 +5,9 @@ import TBDShared
 
 /// Tier 2: a real filesystem plus an in-memory database, and nothing that can
 /// reach the developer's real `~/Library/Logs/TBD/hang-stacks` — the base is
-/// injected at a temp directory on every `OrphanGC` this suite builds, and the
-/// collector is also exercised directly against the same sandbox.
+/// injected at a temp directory on every `OrphanGC` this suite builds, as is
+/// every other base the sweep walks, and the collector is also exercised
+/// directly against the same sandbox.
 @Suite("OrphanGC reclaims hang-stack diagnostics")
 struct OrphanGCHangStackTests: ~Copyable {
     let fm = FileManager.default
@@ -51,7 +52,16 @@ struct OrphanGCHangStackTests: ~Copyable {
             scratchpadBase: scratchpadBase,
             now: { fixed },
             profileDirBase: profileBase,
-            hangStackBase: hangStackBase
+            hangStackBase: hangStackBase,
+            holdersBase: sandbox.appendingPathComponent("holders", isDirectory: true),
+            attachmentsBase: sandbox.appendingPathComponent("attachments", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": sandbox.path],
+            reposBase: sandbox.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: sandbox.appendingPathComponent("sessions", isDirectory: true),
+            devServersBase: sandbox.appendingPathComponent("dev-servers", isDirectory: true),
+            retainedTranscriptsBase: sandbox.appendingPathComponent("transcripts", isDirectory: true),
+            scratchSpacesBase: sandbox.appendingPathComponent("scratch", isDirectory: true),
+            worktreesBase: sandbox.appendingPathComponent("worktrees", isDirectory: true)
         )
     }
 
