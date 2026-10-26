@@ -38,7 +38,6 @@ struct GeneralSettingsTab: View {
     @Environment(AppState.self) var appState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
-    @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
     @AppStorage(AppState.chevronBeforeProjectNameKey)
@@ -264,8 +263,6 @@ struct GeneralSettingsTab: View {
             }
 
             Section("Experimental") {
-                Toggle("Suspend idle Claude before sleep", isOn: $autoSuspend)
-                    .help("Experimental: best-effort exit idle Claude instances when the machine is about to sleep, so a tmux server that dies during a long sleep has less to recover. Off by default — may interrupt long-running work.")
                 controlModeToggle
                 ptyHolderToggle
                 holderClaimReconcileToggle

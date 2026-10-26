@@ -1952,14 +1952,6 @@ actor DaemonClient {
         )
     }
 
-    /// Suspend all Claude terminals in a worktree.
-    func worktreeSuspend(worktreeID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.worktreeSuspend,
-            params: WorktreeSuspendParams(worktreeID: worktreeID)
-        )
-    }
-
     /// Resume all suspended terminals in a worktree.
     func worktreeResume(worktreeID: UUID) async throws {
         try await callVoidAsync(
