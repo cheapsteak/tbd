@@ -306,6 +306,9 @@ let package = Package(
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
+                // `ReplayWriterRoundTripTests` feeds the replay bytes through
+                // a headless SwiftTerm `Terminal`.
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]
@@ -349,10 +352,6 @@ let package = Package(
             name: "TBDAppTests",
             dependencies: [
                 "TBDApp",
-                // For the replay-writer round-trip test (M4.2): the daemon
-                // assembles replay bytes, the app's SwiftTerm consumes them,
-                // and only this test target links the SwiftTerm product.
-                "TBDDaemonLib",
                 "TestSupport",
                 // Turns off NSTableView's row-height estimation for the whole
                 // test process before any table exists; see the target.
