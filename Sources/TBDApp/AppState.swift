@@ -999,7 +999,6 @@ final class AppState {
     }
 
     var editingWorktreeID: UUID? = nil
-    var isRenamingWorktree = false
     var prStatuses: [UUID: PRStatus] = [:]
     /// The outcome of the daemon's last attempt to learn each worktree's PR
     /// state. Kept beside `prStatuses`, never merged into it: a worktree absent
@@ -3009,12 +3008,6 @@ final class AppState {
         // Record exactly one entry with the correct saved order so cmd+[ can
         // return to the restored selection after the user navigates elsewhere.
         recordNavigation(.worktrees(filteredIDs))
-    }
-
-    func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-        stopSubscription()
     }
 
     /// Start listening for real-time state deltas from the daemon.

@@ -139,7 +139,6 @@ final class AppStateEmissionTracker {
         _ = state.terminalAttachEpochs
         _ = state.terminalAttachRetries
         _ = state.editingWorktreeID
-        _ = state.isRenamingWorktree
         _ = state.prStatuses
         _ = state.prObservations
         _ = state.prBindings
@@ -265,7 +264,6 @@ final class AppStateEmissionTracker {
         "terminalAttachEpochs",
         "terminalAttachRetries",
         "editingWorktreeID",
-        "isRenamingWorktree",
         "prStatuses",
         "prObservations",
         "prBindings",
