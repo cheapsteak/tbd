@@ -8,7 +8,7 @@ Document and chat viewers solve this with an outline rail. Claude desktop's mark
 
 ## Decision
 
-Every transcript pane gets a **prompt rail**: a 20pt column at its leading edge with one notch per prompt, the current prompt's notch accented. Hovering the rail opens a card listing the prompts by first line and time; clicking one jumps the transcript to it. ⌥⌘↑ and ⌥⌘↓ jump to the previous and next prompt.
+Every transcript pane gets a **prompt rail**: a 20pt column at its leading edge with one notch per prompt, each notch as long as its turn was busy, the current prompt's notch accented. Hovering the rail opens a card listing the prompts by first line and time; clicking one jumps the transcript to it. ⌥⌘↑ and ⌥⌘↓ jump to the previous and next prompt.
 
 - **It appears in all three transcript surfaces**: the live pane, Session History and the Remote pane. All three render through `TableTranscriptView`, so the rail is built once.
 - **It is always on, with no setting.** It acts on nothing by itself, so the default-off flag rule does not apply.
@@ -50,13 +50,30 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
 
 ## The rail
 
+### Length: work done
+
+A notch's length shows how much work its turn did, so the rail reads as a profile of the session: short notches for quick answers, long ones for turns where Claude read, edited and ran a lot.
+
+- **A turn** runs from an entry's row up to the next entry's row, or to the end of the transcript. A peer message starts a turn just as a prompt does.
+- **Work** is the number of tool calls in the turn's rows, plus every step its subagents took:
+  - each standalone tool-call row counts one;
+  - a collapsed activity group counts the tool calls among its members and their subagents' steps, which `ActivityGroupSummary` reports for the purpose — its existing `itemCount` counts every grouped row, not just tool calls;
+  - each subagent summary row adds its step count.
+
+  Tool calls the transcript already hides as bookkeeping (`TodoWrite`, `TaskUpdate`, `TaskCreate`, `Skill`) are not rows, so they do not count.
+- **Scale** – relative to the session's busiest turn, on a log scale: length = 4 + 12 × log(1 + n) / log(1 + busiest) points, so a turn with no tool calls is 4pt and the busiest turn so far is 16pt. When a busier turn arrives, every notch rescales.
+- **Live** – the last turn's notch grows while Claude works. Counting is an integer pass over the rows, with no text read, so the coordinator redoes it on every update, including the ticks that only advance a subagent's step count, and tells the rail only when a count changes. The cached first-line projection is untouched by it.
+
+The count reads node data only, like the rest of the outline.
+
 ### Geometry
 
 - **Gutter** – a fixed 20pt column on the leading edge of the transcript area, running from the top of the table to the top of the composer. It exists from the moment the table is created, with zero prompts as with two hundred, so the table's width never changes on its account.
 - **Notches** – stacked from 12pt below the top of the rail, leaving 12pt free at the bottom. The pitch is the free height divided by the prompt count, clamped between 4pt and 8pt.
-  - An inactive notch is a 14×2pt dash in the tertiary label color, 2pt from the rail's leading edge.
-  - The active notch is 18×3pt in the accent color.
-  - A peer notch is amber at reduced opacity, and full amber at 18×3pt when active.
+  - Every notch starts 2pt from the rail's leading edge and is as long as its turn's work (4–16pt).
+  - An inactive notch is 2pt tall in the tertiary label color.
+  - The active notch keeps its length and is marked by thickness and color instead: 3pt tall in the accent color.
+  - A peer notch is amber at reduced opacity, and full amber at 3pt tall when active.
 - **Overflow** – at the 4pt floor a 600pt rail holds 144 notches. Past that, the rail offsets its notches to keep the active one at least 40pt from either end, and fades the clipped edges over 24pt. The rail never scrolls under the wheel: a wheel over it scrolls the transcript, so the gutter is no dead zone, and the card is where the whole list is browsed.
 
 ### The active prompt
@@ -77,9 +94,10 @@ The coordinator recomputes the active entry on the clip view's bounds notificati
 - **Closing** – 100ms after the pointer leaves both rail and card, so a jittery pointer does not snap it shut. Escape, a click on a row and app deactivation close it at once; hover alone cannot be the only dismissal, because a backgrounded app receives no pointer-exit event. After Escape or a click, hovering does not reopen it until the pointer has left the rail.
 - **Placement** – anchored at the rail's top-left, its dash column lined up over the rail's notches. It is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height less 60pt, which keeps the pane's bottom-corner jump-to-bottom button clear of it. A longer list scrolls inside the card behind 24pt edge fades. On opening, the list is scrolled so the row for the notch under the pointer sits under the pointer, or as close as the card's height and the list's ends allow.
 - **Rows** – 22pt tall, 13pt system text: an 18pt dash column, an 8pt gap, the first line truncated at the tail, and the time right-aligned in the secondary label color with monospaced digits.
+  - Each row's dash is as long as its notch, so the card's dash column repeats the rail's profile.
   - The active row is medium weight, with its accent or amber dash.
   - The row under the pointer gets a quaternary-fill background with a 6pt corner radius.
-  - A truncated row shows the prompt's first 500 characters as a tooltip.
+  - A row's tooltip shows the turn's tool-call count ("40 tool calls"), followed by the prompt's first 500 characters when the row is truncated.
 - **Click** – jumps to the prompt and closes the card.
 - **Remote, older history not loaded** – the card's first row reads "Earlier prompts not loaded" in the secondary color, with a Load button that calls the pane's existing load-earlier action, the one the "Load earlier messages" header button calls. The rail never loads history by itself.
 
@@ -139,7 +157,7 @@ Everything with logic in it is kept out of the views. It lives under `Sources/TB
 
 ## Accessibility
 
-The rail is an accessibility group labelled "Prompts", with one button per entry labelled with its first line and time. Activating a button jumps to that prompt. The rail view exposes each button as an accessibility element over the band of the rail its notch owns.
+The rail is an accessibility group labelled "Prompts", with one button per entry labelled with its first line, time and tool-call count ("fix the rail, 14:02, 40 tool calls"). Activating a button jumps to that prompt. The rail view exposes each button as an accessibility element over the band of the rail its notch owns.
 
 ## Testing
 
@@ -149,13 +167,15 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - `PromptRailLayout`: the pitch at both clamps and between them, and the overflow offset near both ends.
   - `PromptRailActiveRule`: the probe line, the bottom rule, the no-entry-above rule and the held jump target.
   - Time formatting for today, earlier days and a missing timestamp.
+  - Work counts: standalone tool calls, a collapsed group's tool calls and subagent steps, subagent summary rows, a peer-started turn, the last turn running to the end, hidden bookkeeping tools absent; and the length mapping at zero, at the busiest turn, and when a busier turn rescales the rest.
 - **Hover model** – against `EventDrivenTestClock`: the 80ms open, the 100ms grace, re-arming after Escape and after a click, and closing on app deactivation.
 - **Coordinator, offscreen** – in `TableTranscriptHarness`:
   - the active entry follows a scroll;
   - a jump to a far row with an estimated height keeps the target within 1pt of its placement once nearby rows realize;
   - a reader scroll releases the jump anchor, and an append does not;
   - an unknown ID leaves the scroll position alone;
-  - building the outline realizes no cells, which checks the first lazy-rendering rule.
+  - building the outline realizes no cells, which checks the first lazy-rendering rule;
+  - a turn's count grows as tool calls append and as a subagent's step count advances, and the rail hears only actual changes.
 - **Keyboard** – previous and next from the middle, from inside an exchange, from the first prompt and from the last.
 - **Views, offscreen** – notch geometry and colours, the overflow offset and fade, the wheel handed to the transcript, the accessibility buttons, and the card's rows, size caps, in-place updates, Escape monitor and key-window close.
 - **Mounting, offscreen** – a pane-shaped mount keeps the gutter inside the table's view and makes the rail the presenter, with and without earlier history; a new pane identity rebuilds the rail; a table with no mount has no rail, card or gutter.
@@ -179,3 +199,5 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - SwiftUI has no public way to forward a wheel event to the table's scroll view, so the gutter becomes a dead zone for scrolling.
   - The transcript is already AppKit. Views inside its hierarchy share its layout, stacking and event routing with no bridge between frameworks.
 - **A show/hide preference** – the rail acts on nothing by itself, and each preference is another layout to test.
+- **Other meanings for notch length** – time taken, context-window fill and reply size each fit the length channel. Time counts waits on the reader's answers and permission prompts as work. Context fill is cumulative, so it says more about the session than the turn, and needs the model's window size. Reply size ignores the tool activity that makes up most of a coding turn. Tool calls, with subagent steps, track what the reader means by "a big turn" most directly.
+- **A fixed scale for notch length** – fixed thresholds or a fixed ceiling keep a notch's length comparable across sessions and stable after its turn ends, but a quiet session then uses only the short end and a busy one saturates at the ceiling. Scaling to the session's busiest turn always uses the whole range.
