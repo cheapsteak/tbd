@@ -234,10 +234,9 @@ report prints both so that check is always visible.
   `HolderReader` drains the pty into its own emulator, and that consumer has
   its own latency. It is out of scope: nobody types into a detached session,
   the transport spec's flatness bound "does not speak to it at all", and its
-  consumers (`terminal.output`, the hibernation pending-input rail) tolerate
-  seconds. Its drain loop has the same read→feed shape if a number is ever
-  wanted there, and it would need its own category and script support rather
-  than a third arm in this one.
+  consumers, such as `terminal.output`, tolerate seconds. Its drain loop has
+  the same read→feed shape if a number is ever wanted there, and it would need
+  its own category and script support rather than a third arm in this one.
 
 ## Gating
 

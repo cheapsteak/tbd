@@ -155,7 +155,7 @@ this is sound rather than an oversight:
   read-only reporter that also mutated the record it reports would give the same
   column two writers on two schedules.
 - A stale row it reads is transient. `terminal.list` heals it on its own polling
-  cadence, so `session.states` sees the corrected value on a later cycle without
+  cadence, so `session.states` sees the corrected value on a later call without
   doing anything itself.
 - Most importantly, the resolver does not report a stale prompt confidently. It
   independently compares the transcript's append stamp against the reason's

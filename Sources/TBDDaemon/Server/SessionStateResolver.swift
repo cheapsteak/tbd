@@ -313,7 +313,7 @@ struct SessionStateResolver: Sendable {
 
         // 2. Parked. Observed-at is the park instant, not the read: the fact
         //    became true then, and aging it by the read would make a
-        //    three-day-old park look like it happened on this cycle.
+        //    three-day-old park look like it happened at this read.
         if let hibernatedAt = terminal.hibernatedAt {
             return SessionState(
                 value: .parked(reason: terminal.hibernateReason?.rawValue ?? "unspecified"),
