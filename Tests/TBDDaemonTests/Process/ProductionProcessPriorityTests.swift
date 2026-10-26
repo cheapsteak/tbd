@@ -97,14 +97,21 @@ struct ProductionProcessPriorityTests {
     /// thread.
     private func tearDown(_ process: Process, root: pid_t) async {
         let seam = ProductionProcessPriority()
-        // Read before anything is signalled, so every pid it names is still
-        // alive and still in this tree.
+        // Read before anything is signalled, so while the shell is unreaped
+        // (`isRunning`, checked below) every pid it names is still alive and
+        // still in this tree. Once the shell is reaped, nothing here vouches
+        // for those pids, so nothing below signals them.
         let tree = seam.subtree(of: root)
         var signalled = "nothing: the shell had already exited"
         // `root > 1`, so neither signal below can become `kill(0, …)` (the
         // test runner's own group), `kill(-1, …)` (every process this user
         // owns) or a signal to launchd.
         if root > 1, process.isRunning {
+            // `Tests/CLAUDE.md` says never to kill by process group, because
+            // that rule protects the test runner's own group. It does not apply
+            // here: `getpgid(root) == root` proves this group is led by our own
+            // unreaped child (the same guard as `HolderSpawnGateTests`'
+            // `reclaim`).
             if getpgid(root) == root {
                 kill(-root, SIGKILL)
                 signalled = "process group \(root)"
