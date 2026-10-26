@@ -59,8 +59,9 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
     /// How far the notches are shifted up to keep the active one in view.
     private(set) var offset: CGFloat = 0
 
-    /// Called after every change of `entries` or `activeIndex`. The
-    /// container forwards both to the card.
+    /// Called after every change of `entries`, `workCounts` or
+    /// `activeIndex`. The container forwards all three to the card, whose
+    /// dashes follow the counts.
     var onOutlineChange: (@MainActor () -> Void)?
     /// The transcript's scroll view: wheel events over the rail go to it.
     weak var wheelTarget: NSView?
@@ -125,7 +126,8 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
 
     /// Restyles only the notches whose length moved: every one when the
     /// busiest turn changed, which rescales them all, and otherwise those
-    /// whose own count changed.
+    /// whose own count changed. Relabels only the buttons whose count changed,
+    /// since a label carries the count and not the length.
     func promptRail(workCountsDidChange counts: [Int]) {
         let previous = workScale
         workScale = PromptRailWorkScale(counts: counts)
@@ -137,7 +139,7 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
                 styleNotch(index, layout: layout)
             }
         }
-        updateAccessibilityLabels()
+        updateAccessibilityLabels { previous.count(at: $0) != workScale.count(at: $0) }
         onOutlineChange?()
     }
 
@@ -326,12 +328,14 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         return buttons
     }
 
-    /// Relabels the buttons in place for new work counts. They are built from
-    /// `entries` and dropped when it changes, so they match it one for one.
-    private func updateAccessibilityLabels() {
+    /// Relabels in place the buttons whose index `changed` accepts, for new
+    /// work counts. The buttons are built from `entries` and dropped when it
+    /// changes, so they match it one for one.
+    private func updateAccessibilityLabels(where changed: (Int) -> Bool) {
         guard let accessibilityButtons else { return }
         let now = Date()
-        for (index, button) in accessibilityButtons.enumerated() where entries.indices.contains(index) {
+        for (index, button) in accessibilityButtons.enumerated()
+        where entries.indices.contains(index) && changed(index) {
             button.setAccessibilityLabel(
                 PromptRailAccessibility.label(for: entries[index], workCount: workScale.count(at: index), now: now))
         }

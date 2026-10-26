@@ -154,7 +154,7 @@ final class PromptRailCardNSView: NSView {
     /// scroll position. New counts only redraw: a tooltip is composed when it
     /// is shown, so its count is never stale.
     func update(
-        entries: [PromptOutlineEntry], workCounts: [Int] = [], activeIndex: Int?,
+        entries: [PromptOutlineEntry], workCounts: [Int], activeIndex: Int?,
         earlier: PromptRailEarlierHistory?
     ) {
         let rowsChanged = entries != self.entries || (earlier?.hasEarlier == true) != showsEarlierRow
@@ -407,6 +407,10 @@ final class PromptRailCardNSView: NSView {
         entries.indices.contains(index) ? listView.toolTipText(forEntry: index) : nil
     }
 
+    /// How many tooltip rectangles the list holds: one per entry row once
+    /// they are built.
+    var toolTipRectCount: Int { listView.toolTipRectCount }
+
     private func rowFor(entry index: Int) -> Int { index + (showsEarlierRow ? 1 : 0) }
 
     // MARK: Geometry
@@ -605,11 +609,15 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
 
     // MARK: Tooltips
 
+    /// Tooltip rectangles added by the last `rebuildToolTips()`.
+    private(set) var toolTipRectCount = 0
+
     /// One tooltip rectangle per entry row. Each row has a tooltip, since
     /// every one gives its turn's work, so nothing is measured here; the text
     /// is composed when AppKit asks for it (`toolTipText(forEntry:)`).
     func rebuildToolTips() {
         removeAllToolTips()
+        toolTipRectCount = 0
         toolTipsStale = false
         let width = bounds.width
         guard width > 0 else {
@@ -619,6 +627,7 @@ private final class PromptRailCardListView: NSView, NSViewToolTipOwner {
         for index in entries.indices {
             _ = addToolTip(Metrics.rowRect(rowFor(index), width: width), owner: self, userData: nil)
         }
+        toolTipRectCount = entries.count
     }
 
     /// Entry `index`'s tooltip at the list's width: its turn's work, then

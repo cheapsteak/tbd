@@ -65,6 +65,16 @@ struct PromptRailAppKitTests {
         #expect(Self.isClose(before[1].width, 16))
         #expect(Self.isClose(before[2].width, 4))
 
+        // The common live case: one turn's count changes and the busiest turn
+        // stays the busiest. That notch grows; the others keep their frames.
+        rail.promptRail(workCountsDidChange: [1, 10, 5])
+        let grown = rail.notchLayerFrames
+        #expect(Self.isClose(grown[2].width, PromptRailWorkScale.length(work: 5, busiest: 10)))
+        #expect(grown[2].width > before[2].width + 1,
+                Comment(rawValue: "notch 2 stayed \(grown[2].width) long"))
+        #expect(grown[0] == before[0] && grown[1] == before[1],
+                Comment(rawValue: "untouched notches moved: \(before.prefix(2)) became \(grown.prefix(2))"))
+
         rail.promptRail(workCountsDidChange: [1, 10, 100])
         let after = rail.notchLayerFrames
         #expect(rail.workCounts == [1, 10, 100])
@@ -235,7 +245,7 @@ struct PromptRailAppKitTests {
         let loads = JumpRecorder()
         let card = PromptRailCardNSView(hover: hover, onJump: { jumps.ids.append($0) })
         card.update(
-            entries: Self.entries(5), activeIndex: nil,
+            entries: Self.entries(5), workCounts: [], activeIndex: nil,
             earlier: PromptRailEarlierHistory(hasEarlier: true, load: { loads.ids.append("load") }))
         #expect(card.rowCount == 6)
 
@@ -252,14 +262,14 @@ struct PromptRailAppKitTests {
         #expect(jumps.ids == ["p-1"], "the earlier row jumped")
         #expect(loads.ids.isEmpty, "a click on the earlier row loaded history")
 
-        card.update(entries: Self.entries(5), activeIndex: nil, earlier: nil)
+        card.update(entries: Self.entries(5), workCounts: [], activeIndex: nil, earlier: nil)
         #expect(card.rowCount == 5)
     }
 
     @Test("the card is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height less 60pt")
     func cardWidthCaps() {
         let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
-        card.update(entries: Self.entries(5), activeIndex: nil, earlier: nil)
+        card.update(entries: Self.entries(5), workCounts: [], activeIndex: nil, earlier: nil)
 
         card.open(pointedIndex: nil, pointerY: 0, maxSize: CGSize(width: 300, height: 600))
         #expect(card.frame.width == 276)
@@ -273,7 +283,7 @@ struct PromptRailAppKitTests {
 
         // Forty rows outgrow a 300pt rail, so the card stops 60pt above its
         // bottom, clear of the pane's jump-to-bottom button.
-        card.update(entries: Self.entries(40), activeIndex: nil, earlier: nil)
+        card.update(entries: Self.entries(40), workCounts: [], activeIndex: nil, earlier: nil)
         card.open(pointedIndex: nil, pointerY: 0, maxSize: CGSize(width: 700, height: 300))
         #expect(card.frame.height == 240)
         #expect(PromptRailCardMetrics.bottomClearance == 60)
@@ -319,6 +329,8 @@ struct PromptRailAppKitTests {
         #expect(card.toolTipText(forEntry: 0) == "40 tool calls\n\nthe whole prompt")
         #expect(card.toolTipText(forEntry: 1) == "1 tool call")
         #expect(card.toolTipText(forEntry: 2) == nil)
+        // Every row has a tooltip, the one that fits included.
+        #expect(card.toolTipRectCount == entries.count)
 
         // New counts reach the tooltip, which is composed when shown.
         card.update(entries: entries, workCounts: [41, 1], activeIndex: nil, earlier: nil)
@@ -328,14 +340,14 @@ struct PromptRailAppKitTests {
     @Test("a new entry while the card is open keeps it open and keeps the list where it was")
     func entriesChangeWhileOpenKeepsCardAndScroll() throws {
         let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
-        card.update(entries: Self.entries(40), activeIndex: 3, earlier: nil)
+        card.update(entries: Self.entries(40), workCounts: [], activeIndex: 3, earlier: nil)
         card.open(pointedIndex: nil, pointerY: 0, maxSize: CGSize(width: 680, height: 300))
         let clip = card.listScrollView.contentView
         clip.scroll(to: NSPoint(x: 0, y: 40))
         card.listScrollView.reflectScrolledClipView(clip)
         try #require(clip.bounds.minY == 40, "the list did not scroll (offset \(clip.bounds.minY))")
 
-        card.update(entries: Self.entries(41), activeIndex: 3, earlier: nil)
+        card.update(entries: Self.entries(41), workCounts: [], activeIndex: 3, earlier: nil)
         #expect(card.isOpen)
         #expect(!card.isHidden)
         #expect(card.rowCount == 41)
@@ -345,7 +357,7 @@ struct PromptRailAppKitTests {
     @Test("opening puts the pointed row under the pointer")
     func openScrollsPointedRowUnderPointer() {
         let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
-        card.update(entries: Self.entries(100), activeIndex: nil, earlier: nil)
+        card.update(entries: Self.entries(100), workCounts: [], activeIndex: nil, earlier: nil)
 
         // Row 50's centre is 6 + 50 × 22 + 11 = 1117pt down the list.
         card.open(pointedIndex: 50, pointerY: 200, maxSize: CGSize(width: 680, height: 600))
@@ -362,7 +374,7 @@ struct PromptRailAppKitTests {
     @Test("a pointer below the card's bottom keeps the pointed row inside the card")
     func openKeepsPointedRowInsideCard() throws {
         let card = PromptRailCardNSView(hover: Self.makeHover(), onJump: { _ in })
-        card.update(entries: Self.entries(100), activeIndex: nil, earlier: nil)
+        card.update(entries: Self.entries(100), workCounts: [], activeIndex: nil, earlier: nil)
         let rail = CGSize(width: 680, height: 600)
         let pointerY: CGFloat = 585
         let pointed = try #require(
