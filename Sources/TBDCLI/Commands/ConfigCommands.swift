@@ -96,7 +96,7 @@ struct ConfigSet: AsyncParsableCommand {
                 + "permission prompts answered from the transcript."
         case ("transcript-prompt-answer", .off):
             return "Set transcript-prompt-answer to off. Prompts can no longer be answered from "
-                + "the transcript. Sessions already running keep their hooks until they restart."
+                + "the transcript, in any session; answer them in the terminal. Takes effect now."
         case ("composer-draft", .on):
             return "Set composer-draft to on. Claude sessions started from now on save unsent "
                 + "drafts, and hibernation keeps them."
