@@ -894,10 +894,6 @@ final class AppState {
     /// resurrect the row. Value is the time the tombstone was created, used for
     /// TTL-based eviction when an archive fails or stalls.
     @ObservationIgnored var recentlyArchivedWorktreeIDs: [UUID: Date] = [:]
-    var suspendingTerminalIDs: Set<UUID> = []
-    /// Closures registered by live TerminalPanelView instances to capture a screenshot.
-    /// Keyed by terminal UUID. Populated in makeNSView, cleared on view disappear.
-    @ObservationIgnored var snapshotProviders: [UUID: () -> NSImage?] = [:]
     /// Weak terminal views keyed by terminal UUID, used to restore AppKit first
     /// responder after worktree navigation.
     @ObservationIgnored var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
@@ -966,9 +962,6 @@ final class AppState {
     /// latch before registering, so a already-arrived start is a same-frame
     /// `true` rather than a wait.
     @ObservationIgnored var lastStartedIncarnation: [UUID: UUID] = [:]
-    /// Visual screenshots taken at suspend-click time, shown while daemon works.
-    /// Keyed by terminal UUID. Cleared when suspend completes.
-    var suspendingSnapshots: [UUID: NSImage] = [:]
     /// Terminals whose account "Switch account" is changing in place, keyed by
     /// terminal id. Set by `swapTerminalProfile` before the RPC, for a row the
     /// cache holds awake and only by the first swap to claim it, and cleared
@@ -1005,13 +998,6 @@ final class AppState {
         terminalAttachRetries[terminalID, default: 0] += 1
     }
 
-    func setSuspendingSnapshot(_ image: NSImage, for id: UUID) {
-        suspendingSnapshots[id] = image
-    }
-
-    func removeSuspendingSnapshot(for id: UUID) {
-        suspendingSnapshots.removeValue(forKey: id)
-    }
     var editingWorktreeID: UUID? = nil
     var isRenamingWorktree = false
     var prStatuses: [UUID: PRStatus] = [:]
