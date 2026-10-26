@@ -283,12 +283,20 @@ final class HolderFixture {
 
         // `dup2(fd, fd)` succeeds WITHOUT clearing FD_CLOEXEC, so a lock that
         // already sits on the target number would be closed at exec and the
-        // holder would refuse to start. `dup` hands back the lowest free
-        // number, which cannot be the one still occupied by the original.
+        // holder would refuse to start. `F_DUPFD_CLOEXEC` hands back the lowest
+        // free number at or above 10, past the target, and keeps the duplicate
+        // close-on-exec, as `HolderSpawner` and `HolderLockTests` do. A plain
+        // `dup` would clear FD_CLOEXEC, and the copy stays open here until this
+        // function returns: every test target links into one process, so a
+        // sibling suite's spawn in that window would inherit the lock and hold
+        // it after the holder died, and `theJobDoesNotInheritTheCreationLock`
+        // would fail with `.alreadyHeld` about somebody else's child. With a
+        // plain `dup` here, that failure measured about 6 runs in 1,000; it can
+        // arise only when the lock lands on 9, the one case that relocates.
         var lockSource = lock.fileDescriptor
         var relocated: Int32 = -1
         if lockSource == 9 {
-            relocated = dup(lockSource)
+            relocated = fcntl(lockSource, F_DUPFD_CLOEXEC, 10)
             try #require(relocated >= 0, "could not move the lock off the target descriptor")
             lockSource = relocated
         }
@@ -297,10 +305,11 @@ final class HolderFixture {
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
         defer { posix_spawn_file_actions_destroy(&actions) }
-        // File actions run IN ORDER. The stdio dup2s come first and the lock's
-        // dup2 last, so that if the log or /dev/null descriptor happens to land
-        // on 9 it has already been copied to its final home by the time the
-        // lock overwrites it. There are deliberately NO trailing closes: a
+        // File actions run IN ORDER. The stdio dup2s come first, then the
+        // lock's, then the probe's below, so a source that sits on a LATER
+        // action's target — the log or /dev/null on 9 or 11, the lock on 11 —
+        // has already been copied to its final home by the time that target is
+        // overwritten. There are deliberately NO trailing closes: a
         // close scheduled after the lock's dup2 would destroy the descriptor it
         // just placed, and O_CLOEXEC already retires the originals at exec.
         posix_spawn_file_actions_adddup2(&actions, nullFD, 0)
@@ -317,10 +326,19 @@ final class HolderFixture {
         if strayDescriptorProbe {
             strayFD = open(home + "/stray.probe", O_WRONLY | O_CREAT | O_CLOEXEC, 0o600)
             try #require(strayFD >= 0, "could not open the stray-descriptor probe")
-            // Same `dup2(fd, fd)` hazard as the lock, same remedy.
+            // Moved above every target whenever it sits on one, not only on
+            // its own. On 11 it meets the lock's `dup2(fd, fd)` hazard. On 0,
+            // 1, 2 or 9 an earlier action would overwrite it before its own
+            // dup2 runs: on 9, which is free whenever the lock is not there,
+            // the lock's dup2 would land first and the probe's dup2 would then
+            // copy the LOCK onto 11, so `theJobDoesNotInheritStrayDescriptors`
+            // would pass however the holder treated 11. At 12 or above the
+            // source is no action's target, so nothing can overwrite it before
+            // it is copied, whatever order the actions run in.
+            let fileActionTargets: Set<Int32> = [0, 1, 2, 9, strayDescriptorNumber]
             var straySource = strayFD
-            if straySource == strayDescriptorNumber {
-                strayRelocated = dup(straySource)
+            if fileActionTargets.contains(straySource) {
+                strayRelocated = fcntl(straySource, F_DUPFD_CLOEXEC, strayDescriptorNumber + 1)
                 try #require(strayRelocated >= 0, "could not move the probe off the target descriptor")
                 straySource = strayRelocated
             }
@@ -340,7 +358,20 @@ final class HolderFixture {
             for entry in argv { free(entry) }
             for entry in envp { free(entry) }
         }
-        let spawned = posix_spawn(&shellPID, "/bin/sh", &actions, nil, &argv, &envp)
+
+        // CLOEXEC_DEFAULT, as `HolderSpawner` asks for: the shell, and the
+        // holder it backgrounds, get the descriptors named by a file action
+        // above (0, 1, 2, the lock on 9, and the probe on 11 when asked for)
+        // and nothing else. The launch request on 3 is opened by the shell's
+        // own redirect after exec. Without the flag, every test holder would
+        // inherit whatever any concurrent suite in this process had open
+        // without FD_CLOEXEC, and keep it for the holder's whole life.
+        var attributes: posix_spawnattr_t?
+        posix_spawnattr_init(&attributes)
+        defer { posix_spawnattr_destroy(&attributes) }
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
+
+        let spawned = posix_spawn(&shellPID, "/bin/sh", &actions, &attributes, &argv, &envp)
         guard spawned == 0 else { throw TestHolderError.spawnFailed(spawned) }
 
         // The holder now owns the lock through its own copy of the open file
