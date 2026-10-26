@@ -2547,12 +2547,6 @@ public struct PRStatus: Codable, Sendable, Equatable {
     public let url: String
     public let state: PRMergeableState
     public let reason: String?
-    /// List of files changed in the PR (lazy-fetched on demand by the merge gate).
-    public let files: [String]?
-    /// Number of commits in the PR (lazy-fetched on demand by the merge gate).
-    public let commits: Int?
-    /// UUID of the worktree that authored this PR, if known.
-    public let authorWorktreeID: UUID?
     /// 1-indexed position in GitHub's merge queue (front of queue == 1), or nil
     /// when the PR is not in a merge queue. Sourced from
     /// `PullRequest.mergeQueueEntry.position` — not expressible via
@@ -2577,15 +2571,11 @@ public struct PRStatus: Codable, Sendable, Equatable {
     public var observedAt: Date?
 
     public init(number: Int, url: String, state: PRMergeableState, reason: String? = nil,
-                files: [String]? = nil, commits: Int? = nil, authorWorktreeID: UUID? = nil,
                 mergeQueuePosition: Int? = nil, observedAt: Date? = nil) {
         self.number = number
         self.url = url
         self.state = state
         self.reason = reason
-        self.files = files
-        self.commits = commits
-        self.authorWorktreeID = authorWorktreeID
         self.mergeQueuePosition = mergeQueuePosition
         self.observedAt = observedAt
     }
@@ -2607,7 +2597,7 @@ public struct PRStatus: Codable, Sendable, Equatable {
     /// round trip has to be able to prove the stamp survived.
     ///
     /// **Structural, not a hand-written field list**, and that is the whole
-    /// point of the shape. A list has to be remembered: a ninth property added
+    /// point of the shape. A list has to be remembered: a new property added
     /// to this type and forgotten here would silently stop persisting on change,
     /// with nothing red to say so. Stamping both sides to the same `observedAt`
     /// and deferring to synthesized `Equatable` covers every field this type

@@ -76,10 +76,7 @@ func writeComposerDraftSession(
     /// with an empty box or a saved draft.
     @Test func aConfirmedSessionProceedsUnderEveryPolicy() {
         for policy in Self.everyPolicy {
-            for hasDraft in [false, true] {
-                #expect(ComposerDraftParkGate.decide(
-                    status: .confirmed(hasDraft: hasDraft), policy: policy) == .proceed)
-            }
+            #expect(ComposerDraftParkGate.decide(status: .confirmed, policy: policy) == .proceed)
         }
     }
 

@@ -576,6 +576,19 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     #expect(decoded.mergeQueuePosition == nil)
 }
 
+/// A blob written while `PRStatus` still carried `files`, `commits` and
+/// `authorWorktreeID` must still decode: the synthesized decoder ignores keys
+/// the type no longer has.
+@Test func prStatusDecodesJSONCarryingRemovedKeys() throws {
+    let older = """
+    {"number":123,"url":"https://github.com/acme/acme-prod/pull/123","state":"pending",\
+    "files":["a.swift"],"commits":3,"authorWorktreeID":"00000000-0000-0000-0000-0000000000AA"}
+    """
+    let decoded = try JSONDecoder().decode(PRStatus.self, from: Data(older.utf8))
+    #expect(decoded.number == 123)
+    #expect(decoded.state == .pending)
+}
+
 @Test func prStatusRoundTripsMergeQueuePosition() throws {
     let status = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
                           state: .pending, reason: "Checks pending", mergeQueuePosition: 2)
@@ -608,41 +621,20 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     let stamp = Date(timeIntervalSince1970: 1_700_000_000)
     let base = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
                         state: .mergeable, reason: "Ready to merge",
-                        files: ["a.swift"], commits: 3,
-                        authorWorktreeID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA"),
                         mergeQueuePosition: 1, observedAt: stamp)
     // Each field, one at a time — a `sameValue` that forgot one would let a
     // real change go unpersisted, which is the opposite and worse failure.
     let variants: [PRStatus] = [
         PRStatus(number: 8, url: base.url, state: base.state, reason: base.reason,
-                 files: base.files, commits: base.commits,
-                 authorWorktreeID: base.authorWorktreeID,
                  mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
         PRStatus(number: base.number, url: "https://github.com/acme/acme-prod/pull/8",
-                 state: base.state, reason: base.reason, files: base.files,
-                 commits: base.commits, authorWorktreeID: base.authorWorktreeID,
+                 state: base.state, reason: base.reason,
                  mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
         PRStatus(number: base.number, url: base.url, state: .closed, reason: base.reason,
-                 files: base.files, commits: base.commits,
-                 authorWorktreeID: base.authorWorktreeID,
                  mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
         PRStatus(number: base.number, url: base.url, state: base.state, reason: "Blocked",
-                 files: base.files, commits: base.commits,
-                 authorWorktreeID: base.authorWorktreeID,
                  mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
         PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
-                 files: ["b.swift"], commits: base.commits,
-                 authorWorktreeID: base.authorWorktreeID,
-                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
-        PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
-                 files: base.files, commits: 4, authorWorktreeID: base.authorWorktreeID,
-                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
-        PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
-                 files: base.files, commits: base.commits, authorWorktreeID: UUID(),
-                 mergeQueuePosition: base.mergeQueuePosition, observedAt: stamp),
-        PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
-                 files: base.files, commits: base.commits,
-                 authorWorktreeID: base.authorWorktreeID,
                  mergeQueuePosition: 2, observedAt: stamp)
     ]
     for variant in variants {
@@ -650,7 +642,7 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     }
 }
 
-// MARK: - The structural half: a ninth field cannot be forgotten
+// MARK: - The structural half: a new field cannot be forgotten
 
 /// `sameValue` must not be a hand-written field list, because a list has to be
 /// remembered. This pins the two halves that together make it structural.
@@ -664,23 +656,16 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     let later = Date(timeIntervalSince1970: 1_700_000_600)
     let base = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
                         state: .mergeable, reason: "Ready to merge",
-                        files: ["a.swift"], commits: 3,
-                        authorWorktreeID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA"),
                         mergeQueuePosition: 1, observedAt: stamp)
     let matrix: [PRStatus] = [
         base,
         base.withObservedAt(later),
         base.withObservedAt(nil),
         PRStatus(number: 8, url: base.url, state: base.state, reason: base.reason,
-                 files: base.files, commits: base.commits,
-                 authorWorktreeID: base.authorWorktreeID,
                  mergeQueuePosition: base.mergeQueuePosition, observedAt: later),
         PRStatus(number: base.number, url: base.url, state: .closed, reason: nil,
-                 files: nil, commits: nil, authorWorktreeID: nil,
                  mergeQueuePosition: nil, observedAt: stamp),
         PRStatus(number: base.number, url: base.url, state: base.state, reason: base.reason,
-                 files: base.files, commits: base.commits,
-                 authorWorktreeID: base.authorWorktreeID,
                  mergeQueuePosition: 2, observedAt: stamp)
     ]
     for a in matrix {
@@ -699,8 +684,6 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
 @Test func prStatusWithObservedAtChangesTheStampAndNothingElse() throws {
     let base = PRStatus(number: 7, url: "https://github.com/acme/acme-prod/pull/7",
                         state: .mergeable, reason: "Ready to merge",
-                        files: ["a.swift"], commits: 3,
-                        authorWorktreeID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA"),
                         mergeQueuePosition: 1,
                         observedAt: Date(timeIntervalSince1970: 1_700_000_000))
     let restamped = base.withObservedAt(Date(timeIntervalSince1970: 1_700_000_600))
