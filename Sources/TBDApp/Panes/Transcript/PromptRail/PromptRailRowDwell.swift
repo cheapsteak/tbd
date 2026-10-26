@@ -11,6 +11,9 @@ import Foundation
 /// - **Cancelling** – hides at once and forgets the row: the list scrolled,
 ///   its rows changed, or the card closed. Resting on the same row afterwards
 ///   arms a fresh delay.
+/// - **Collapsing** – hides and keeps the row, unarmed: the expansion turned
+///   out to have nothing to show, as in a card too short for one line, so
+///   moving within the row does not try again.
 ///
 /// The timer sleeps on the injected `clock` and is cancel-and-replace, so a
 /// test drives it in virtual time.
@@ -52,6 +55,16 @@ final class PromptRailRowDwell {
         task = nil
         generation += 1
         restingRow = nil
+        setExpanded(nil)
+    }
+
+    /// Hide, keeping the row the pointer rests on; nothing is armed. Safe to
+    /// call from `onExpandedRowChange` itself: the nested change is reported
+    /// and stands.
+    func collapse() {
+        task?.cancel()
+        task = nil
+        generation += 1
         setExpanded(nil)
     }
 

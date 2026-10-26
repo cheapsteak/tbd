@@ -198,7 +198,12 @@ final class PromptRailCardNSView: NSView {
             restRowDwell()
         } else {
             let activeChanged = previousActive != self.activeIndex
-            if activeChanged { listView.activeIndex = self.activeIndex }
+            if activeChanged {
+                listView.activeIndex = self.activeIndex
+                // The active row's medium weight is wider: a row can start or
+                // stop showing only part of its prompt.
+                restRowDwell()
+            }
             if activeChanged || countsChanged, let row = expansionView.row { showExpansion(row: row) }
         }
     }
@@ -279,6 +284,9 @@ final class PromptRailCardNSView: NSView {
         layer?.shadowPath = CGPath(
             roundedRect: bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
         updateFades()
+        // A clip resized by `tile()` need not post a bounds notification;
+        // one that did has already been handled and matches.
+        if listScrollView.contentView.bounds != observedListBounds { listClipChanged() }
     }
 
     private func layoutEarlierRow(width: CGFloat) {
@@ -321,33 +329,43 @@ final class PromptRailCardNSView: NSView {
         updateFades()
     }
 
+    @objc private func listBoundsDidChange() {
+        listClipChanged()
+    }
+
     /// The list scrolled, or its clip changed size: a row expansion hides at
     /// once, and whichever row is now under the pointer waits its own delay.
-    @objc private func listBoundsDidChange() {
+    /// A clip whose bounds did not move changes nothing: the rows under a
+    /// still pointer are the same rows.
+    private func listClipChanged() {
         updateFades()
         let bounds = listScrollView.contentView.bounds
-        let moved = bounds != observedListBounds
+        guard bounds != observedListBounds else { return }
         observedListBounds = bounds
-        if moved { rowDwell.cancel() }
+        rowDwell.cancel()
         if pointerInside, let window {
             updateHoveredRow(windowPoint: window.mouseLocationOutsideOfEventStream)
         }
-        if moved { restRowDwell() }
+        restRowDwell()
+    }
+
+    /// Which edges of the list's clip fade: each that clips a row, and
+    /// neither when the whole list fits.
+    private var listFades: (top: Bool, bottom: Bool) {
+        let clip = listScrollView.contentView.bounds
+        guard listView.frame.height > clip.height + 0.5 else { return (false, false) }
+        return (clip.minY > 0.5, clip.maxY < listView.frame.height - 0.5)
     }
 
     /// Fades whichever edge clips a row; no mask when the whole list fits.
     private func updateFades() {
-        let clip = listScrollView.contentView.bounds
-        let overflows = listView.frame.height > clip.height + 0.5
+        let fades = listFades
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if overflows {
+        if fades.top || fades.bottom {
             fadeMask.frame = listHost.bounds
             PromptRailFade.configure(
-                fadeMask,
-                height: listHost.bounds.height,
-                fadesTop: clip.minY > 0.5,
-                fadesBottom: clip.maxY < listView.frame.height - 0.5)
+                fadeMask, height: listHost.bounds.height, fadesTop: fades.top, fadesBottom: fades.bottom)
             if listHost.layer?.mask !== fadeMask { listHost.layer?.mask = fadeMask }
         } else if listHost.layer?.mask != nil {
             listHost.layer?.mask = nil
@@ -389,18 +407,29 @@ final class PromptRailCardNSView: NSView {
         hover.cardHoverChanged(false)
     }
 
+    /// The row under the pointer, from a real pointer position; the row
+    /// expansion's delay follows it, even when it is the row the card opened
+    /// with highlighted.
     private func updateHoveredRow(windowPoint: NSPoint) {
         let point = listView.convert(windowPoint, from: nil)
         listView.hoveredRow = listView.clickableRow(at: point)
+        restRowDwell()
     }
 
     // MARK: Row expansion
 
-    /// Rests the dwell on the hovered row when it shows only part of its
-    /// prompt, and on no row otherwise, which hides any expansion at once.
-    /// Measures only the hovered row's first line.
+    /// Rests the dwell on the hovered row when the pointer is over the card
+    /// and the row shows only part of its prompt, and on no row otherwise,
+    /// which hides any expansion at once. Measures only the hovered row's
+    /// first line.
+    ///
+    /// The pointer must have been seen inside the card. A card opens with the
+    /// row for the pointed notch highlighted, and notches are closer together
+    /// than rows, so when the list fits without scrolling that row need not be
+    /// the one under the pointer; expanding it would put one prompt's text
+    /// under the pointer while a click jumps to another.
     private func restRowDwell() {
-        guard isOpen, let row = listView.hoveredRow,
+        guard isOpen, pointerInside, let row = listView.hoveredRow,
               let index = entryIndex(forRow: row), listView.showsPartOfPrompt(index)
         else {
             rowDwell.rest(on: nil)
@@ -417,12 +446,17 @@ final class PromptRailCardNSView: NSView {
         showExpansion(row: row)
     }
 
-    /// Lays `row`'s expansion out against the list's visible rect and shows
-    /// it; hides it when the row now shows its whole prompt or not one line
-    /// fits.
+    /// Lays `row`'s expansion out in the list's visible rect, clear of its
+    /// edge fades, and shows it. When the row now shows its whole prompt or
+    /// not one line fits, it hides, and the dwell collapses with it so the two
+    /// agree that nothing is expanded.
     private func showExpansion(row: Int) {
-        guard let expansion = listView.expansion(forRow: row, visible: listScrollView.contentView.bounds) else {
+        let fades = listFades
+        let room = Metrics.expansionRoom(
+            clip: listScrollView.contentView.bounds, fadesTop: fades.top, fadesBottom: fades.bottom)
+        guard let expansion = listView.expansion(forRow: row, visible: room) else {
             expansionView.hide()
+            rowDwell.collapse()
             return
         }
         expansionView.show(expansion.content, frame: expansion.frame)

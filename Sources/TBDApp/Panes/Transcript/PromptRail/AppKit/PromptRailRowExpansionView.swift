@@ -15,8 +15,10 @@ import AppKit
 /// - **Events** – it takes none. `hitTest(_:)` returns nil, so hover, clicks
 ///   and the wheel all reach the list beneath it, and a click on the row
 ///   jumps exactly as it does without the expansion.
-/// - **Accessibility** – hidden. The rail's buttons already say each prompt's
-///   first line, time and tool-call count.
+/// - **Accessibility** – hidden. It draws everything itself, so as a plain
+///   view it is no element, and it reports no children, so nothing added
+///   inside it later reaches VoiceOver either. The rail's buttons already say
+///   each prompt's first line, time and tool-call count.
 ///
 /// It lives in the list's document view, above the rows and the earlier row's
 /// controls, so the list's corner clip and edge fade apply to it as to them.
@@ -64,8 +66,6 @@ final class PromptRailRowExpansionView: NSView {
     /// Never the target of an event: whatever is under the pointer in the
     /// list gets it, as if the expansion were not there.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override func isAccessibilityElement() -> Bool { false }
 
     override func accessibilityChildren() -> [Any]? { nil }
 

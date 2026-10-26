@@ -117,6 +117,16 @@ extension PromptRailCardMetrics {
         rowHeight + CGFloat(max(0, lines)) * lineHeight
     }
 
+    /// The part of the list's `clip` rect, in list coordinates, an expansion
+    /// may cover: the clip less each edge fade that is on, which covers
+    /// `PromptRailFade.edgeFraction(height:)` of the clip at that edge.
+    static func expansionRoom(clip: NSRect, fadesTop: Bool, fadesBottom: Bool) -> NSRect {
+        let fade = PromptRailFade.edgeFraction(height: clip.height) * clip.height
+        let top = clip.minY + (fadesTop ? fade : 0)
+        let bottom = clip.maxY - (fadesBottom ? fade : 0)
+        return NSRect(x: clip.minX, y: top, width: clip.width, height: max(0, bottom - top))
+    }
+
     /// Where an expansion of `row` goes within the list's `visible` rect,
     /// both in list coordinates, for a prompt that would fill `wantedLines`
     /// lines `lineHeight` tall.

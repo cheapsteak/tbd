@@ -10,8 +10,10 @@ import TestSupport
 
 /// A prompt rail card row's expansion: the 150ms rest before it shows, the
 /// rows that never expand, what it shows, where it goes, that it takes no
-/// events, and that it hides at once when the pointer changes rows or the list
-/// scrolls. Every card takes the shipped delay, so the suite pins it.
+/// events, that it follows the pointer rather than the row a card opened
+/// with, that it hides at once when the pointer changes rows or the list
+/// scrolls or resizes, and how new outlines reach one on screen. Every card
+/// takes the shipped delay, so the suite pins it.
 @MainActor
 @Suite("Prompt rail row expansion", .clockDriven)
 struct PromptRailRowExpansionTests {
@@ -60,6 +62,22 @@ struct PromptRailRowExpansionTests {
         // Fewer lines than six are all shown when they fit.
         #expect(PromptRailCardMetrics.expansionPlacement(row: top, visible: visible, wantedLines: 2, lineHeight: 16)
                     == PromptRailExpansionPlacement(lines: 2, growsUpward: false))
+    }
+
+    @Test("an expansion keeps clear of each edge fade that is on")
+    func roomLeavesOutTheFades() {
+        let clip = NSRect(x: 0, y: 100, width: 300, height: 240)
+        #expect(PromptRailCardMetrics.expansionRoom(clip: clip, fadesTop: false, fadesBottom: false) == clip)
+        // 24pt fades on a 240pt clip.
+        #expect(PromptRailCardMetrics.expansionRoom(clip: clip, fadesTop: true, fadesBottom: false)
+                    == NSRect(x: 0, y: 124, width: 300, height: 216))
+        #expect(PromptRailCardMetrics.expansionRoom(clip: clip, fadesTop: false, fadesBottom: true)
+                    == NSRect(x: 0, y: 100, width: 300, height: 216))
+        #expect(PromptRailCardMetrics.expansionRoom(clip: clip, fadesTop: true, fadesBottom: true)
+                    == NSRect(x: 0, y: 124, width: 300, height: 192))
+        // Under 48pt each fade covers half the clip, which leaves no room.
+        let thin = NSRect(x: 0, y: 0, width: 300, height: 40)
+        #expect(PromptRailCardMetrics.expansionRoom(clip: thin, fadesTop: true, fadesBottom: true).height == 0)
     }
 
     // MARK: Which rows expand
@@ -200,7 +218,6 @@ struct PromptRailRowExpansionTests {
         try #require(scene.card.expandedRow == 1)
 
         #expect(expansion.hitTest(NSPoint(x: expansion.frame.midX, y: expansion.frame.midY)) == nil)
-        #expect(!expansion.isAccessibilityElement())
 
         let list = try #require(scene.card.listScrollView.documentView)
         let superview = try #require(scene.card.superview)
@@ -221,6 +238,12 @@ struct PromptRailRowExpansionTests {
         hit?.mouseDown(with: down)
         hit?.mouseUp(with: up)
         #expect(scene.jumps.ids == ["p-1"], "the click over the expansion did not jump to its row")
+
+        // Nothing inside it reaches accessibility, even a control.
+        let probe = NSButton(title: "probe", target: nil, action: nil)
+        expansion.addSubview(probe)
+        #expect((expansion.accessibilityChildren() ?? []).isEmpty, "the expansion exposed what it holds")
+        probe.removeFromSuperview()
     }
 
     // MARK: Hiding
@@ -237,7 +260,8 @@ struct PromptRailRowExpansionTests {
         let first = PromptRailCardMetrics.rowRect(0, width: scene.card.frame.width)
         try scene.movePointer(toListPoint: NSPoint(x: first.minX + 40, y: first.maxY - 2))
         #expect(scene.card.expandedRow == 0, "a move within the row hid its expansion")
-        #expect(!scene.clock.hasSleeper, "a move within the row restarted the delay")
+        #expect(await watchForSleeper(on: scene.clock) == false, "a move within the row restarted the delay")
+        #expect(scene.card.expandedRow == 0)
 
         try scene.movePointer(toRow: 1)
         #expect(scene.card.expandedRow == nil, "the expansion outlived the pointer leaving its row")
@@ -275,6 +299,145 @@ struct PromptRailRowExpansionTests {
         #expect(scene.card.expandedRow == nil, "the expansion outlived its card")
     }
 
+    @Test("an expansion near a faded bottom edge grows up rather than into the fade")
+    func keepsClearOfTheBottomFade() async throws {
+        // Forty rows in a 300pt pane: a 240pt card, its bottom 24pt fading.
+        let scene = Self.scene((0..<40).map { Self.entry($0, Self.longPrompt) }, pane: NSSize(width: 680, height: 300))
+        defer { scene.host.tearDown() }
+        let expansion = scene.card.expansionView
+        // Row 5 starts 124pt above the clip's bottom: room for six lines
+        // there, but only 100pt above the fade.
+        try scene.movePointer(toRow: 5)
+        try await Self.fire(scene)
+        try #require(scene.card.expandedRow == 5)
+        let row = PromptRailCardMetrics.rowRect(5, width: scene.card.frame.width)
+        #expect(expansion.growsUpward, "the expansion grew down into the fade")
+        #expect(abs(expansion.frame.maxY - row.maxY) < 0.5)
+        #expect(expansion.lineCount == 6)
+    }
+
+    // MARK: The pointer, not the opening row
+
+    /// Notches sit at most 8pt apart and rows 22pt, so with a list that fits,
+    /// the row a card opens with highlighted lies below the pointer: notch 5
+    /// is at y 56 on the rail, over row 2 of the card, while row 5 spans
+    /// 116–138.
+    @Test("a card opened from the rail expands nothing until the pointer moves over it")
+    func openingRowWaitsForThePointer() async throws {
+        let scene = Self.scene((0..<8).map { Self.entry($0, Self.longPrompt) }, pointedIndex: 5, pointerY: 53)
+        defer { scene.host.tearDown() }
+        try #require(scene.card.listScrollView.contentView.bounds.minY == 0, "precondition: the list fits unscrolled")
+
+        #expect(await watchForSleeper(on: scene.clock) == false, "the card armed the row it opened with")
+        await scene.clock.advance(by: Self.delay)
+        await scene.card._drainRowDwellForTesting()
+        #expect(scene.card.expandedRow == nil)
+
+        // A real move onto that same row arms it, though the highlight was
+        // already there.
+        try scene.movePointer(toRow: 5)
+        try await Self.fire(scene)
+        #expect(scene.card.expandedRow == 5)
+    }
+
+    @Test("a scroll under a card opened from the rail arms nothing")
+    func scrollAfterOpeningArmsNothing() async throws {
+        let scene = Self.scene(
+            (0..<40).map { Self.entry($0, Self.longPrompt) }, pane: NSSize(width: 680, height: 300),
+            pointedIndex: 5, pointerY: 53)
+        defer { scene.host.tearDown() }
+        let clip = scene.card.listScrollView.contentView
+        let opened = clip.bounds.minY
+
+        clip.scroll(to: NSPoint(x: 0, y: opened + 22))
+        scene.card.listScrollView.reflectScrolledClipView(clip)
+        try #require(clip.bounds.minY == opened + 22, "the list did not scroll (offset \(clip.bounds.minY))")
+        #expect(await watchForSleeper(on: scene.clock) == false, "a scroll armed the row the card opened with")
+        #expect(scene.card.expandedRow == nil)
+    }
+
+    // MARK: New outlines
+
+    @Test("changed rows hide the expansion at once, and it waits its delay again")
+    func changedRowsHideAndRearm() async throws {
+        // A 240pt card that one more row does not grow.
+        let entries = (0..<40).map { Self.entry($0, Self.longPrompt) }
+        let scene = Self.scene(entries, pane: NSSize(width: 680, height: 300))
+        defer { scene.host.tearDown() }
+        try scene.movePointer(toRow: 2)
+        try await Self.fire(scene)
+        try #require(scene.card.expandedRow == 2)
+
+        scene.card.update(
+            entries: entries + [Self.entry(40, Self.longPrompt)], workCounts: [], activeIndex: nil, earlier: nil)
+        #expect(scene.card.expandedRow == nil, "the expansion outlived its rows changing")
+        try await Self.fire(scene)
+        #expect(scene.card.expandedRow == 2, "the row under the pointer did not expand again")
+    }
+
+    @Test("new counts and a new active row redraw an expansion in place")
+    func countsAndActiveRelayInPlace() async throws {
+        let entries = (0..<10).map { Self.entry($0, Self.longPrompt) }
+        let counts = Array(repeating: 40, count: 10)
+        let scene = Self.scene(entries, workCounts: counts)
+        defer { scene.host.tearDown() }
+        let expansion = scene.card.expansionView
+        try scene.movePointer(toRow: 2)
+        try await Self.fire(scene)
+        try #require(expansion.countText == "40 tool calls")
+        #expect(expansion.content?.dash.height == 2)
+
+        var busier = counts
+        busier[2] = 41
+        scene.card.update(entries: entries, workCounts: busier, activeIndex: nil, earlier: nil)
+        #expect(scene.card.expandedRow == 2, "new counts hid the expansion")
+        #expect(expansion.countText == "41 tool calls")
+
+        scene.card.update(entries: entries, workCounts: busier, activeIndex: 2, earlier: nil)
+        #expect(scene.card.expandedRow == 2, "a new active row hid the expansion")
+        #expect(expansion.content?.dash.height == 3, "the expansion kept the inactive dash")
+        #expect(await watchForSleeper(on: scene.clock) == false, "redrawing in place armed the delay")
+    }
+
+    @Test("a row that only the active row's weight cuts off expands once it is active, and stops when it is not")
+    func activeWeightDecidesPartial() async throws {
+        let titleWidth = PromptRailCardMetrics.maxWidth - PromptRailCardMetrics.trailingPadding
+            - PromptRailCardMetrics.textLeading
+        let prompt = try #require(
+            Self.promptFittingOnlyWhenInactive(titleWidth: titleWidth),
+            "no prompt fits at regular weight but not at medium")
+        let entries = [Self.entry(0, prompt)] + (1..<10).map { Self.entry($0, "fix it") }
+        let scene = Self.scene(entries)
+        defer { scene.host.tearDown() }
+        try #require(scene.card.frame.width == PromptRailCardMetrics.maxWidth)
+        try #require(scene.card.showsPartOfPrompt(entry: 0) == false, "precondition: the inactive row shows it whole")
+
+        try scene.movePointer(toRow: 0)
+        #expect(await watchForSleeper(on: scene.clock) == false, "a row showing its whole prompt armed the delay")
+
+        scene.card.update(entries: entries, workCounts: [], activeIndex: 0, earlier: nil)
+        try #require(scene.card.showsPartOfPrompt(entry: 0) == true, "precondition: the active row cuts it off")
+        try await Self.fire(scene)
+        #expect(scene.card.expandedRow == 0, "the row did not expand once active")
+
+        scene.card.update(entries: entries, workCounts: [], activeIndex: nil, earlier: nil)
+        #expect(scene.card.expandedRow == nil, "the row stayed expanded once it showed its whole prompt")
+    }
+
+    @Test("resizing the card hides the expansion at once")
+    func resizingHidesAtOnce() async throws {
+        let scene = Self.scene((0..<40).map { Self.entry($0, Self.longPrompt) }, pane: NSSize(width: 680, height: 300))
+        defer { scene.host.tearDown() }
+        try scene.movePointer(toRow: 2)
+        try await Self.fire(scene)
+        try #require(scene.card.expandedRow == 2)
+
+        scene.card.layoutCard(maxSize: NSSize(width: 680, height: 400))
+        try #require(scene.card.listScrollView.contentView.bounds.height == 340,
+                     "precondition: the card grew (\(scene.card.listScrollView.contentView.bounds.height))")
+        #expect(scene.card.expandedRow == nil, "the expansion outlived its card resizing")
+    }
+
     // MARK: Helpers
 
     private static func entry(_ index: Int, _ text: String, timestamp: Date? = nil) -> PromptOutlineEntry {
@@ -282,6 +445,24 @@ struct PromptRailRowExpansionTests {
             id: "p-\(index)", rowIndex: index * 2, kind: .prompt,
             firstLine: PromptOutline.firstLine(of: text), excerpt: PromptOutline.excerpt(of: text),
             timestamp: timestamp)
+    }
+
+    /// A one-line prompt as wide as fits `titleWidth` at the card's regular
+    /// weight but not at the active row's medium weight; nil if no run of
+    /// "a"s and "l"s lands between the two.
+    private static func promptFittingOnlyWhenInactive(titleWidth: CGFloat) -> String? {
+        let regular = NSFont.systemFont(ofSize: PromptRailCardMetrics.fontSize)
+        let medium = NSFont.systemFont(ofSize: PromptRailCardMetrics.fontSize, weight: .medium)
+        for wide in 0..<200 {
+            for narrow in 0..<40 {
+                let text = String(repeating: "a", count: wide) + String(repeating: "l", count: narrow)
+                let regularWidth = NSAttributedString(string: text, attributes: [.font: regular]).size().width
+                if regularWidth > titleWidth { break }
+                let mediumWidth = NSAttributedString(string: text, attributes: [.font: medium]).size().width
+                if mediumWidth > titleWidth { return text }
+            }
+        }
+        return nil
     }
 
     /// `rect`, in `expansion`'s coordinates, in the list's.
@@ -300,7 +481,8 @@ struct PromptRailRowExpansionTests {
     /// clock of its own.
     private static func scene(
         _ entries: [PromptOutlineEntry], workCounts: [Int] = [],
-        pane: NSSize = NSSize(width: 680, height: 600)
+        pane: NSSize = NSSize(width: 680, height: 600),
+        pointedIndex: Int? = nil, pointerY: CGFloat = 0
     ) -> ExpansionScene {
         let host = OffscreenHost(root: EmptyView(), size: pane)
         let clock = EventDrivenTestClock()
@@ -309,7 +491,7 @@ struct PromptRailRowExpansionTests {
         let card = PromptRailCardNSView(hover: hover, onJump: { jumps.ids.append($0) }, clock: clock)
         host.contentView.addSubview(card)
         card.update(entries: entries, workCounts: workCounts, activeIndex: nil, earlier: nil)
-        card.open(pointedIndex: nil, pointerY: 0, maxSize: pane)
+        card.open(pointedIndex: pointedIndex, pointerY: pointerY, maxSize: pane)
         return ExpansionScene(host: host, card: card, clock: clock, jumps: jumps)
     }
 

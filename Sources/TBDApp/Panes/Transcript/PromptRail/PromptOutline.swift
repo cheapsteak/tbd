@@ -16,7 +16,8 @@ struct PromptOutlineEntry: Equatable, Identifiable {
     let kind: Kind
     let firstLine: String
     /// The prompt's opening, as the card's row expansion shows it:
-    /// `PromptOutline.excerpt(of:)`. Its first line is `firstLine`.
+    /// `PromptOutline.excerpt(of:)`. It begins with `firstLine`, cut short
+    /// when that line alone passes `PromptOutline.excerptLimit` characters.
     let excerpt: String
     let timestamp: Date?
 
@@ -123,10 +124,11 @@ enum PromptOutline {
 
     /// The prompt's opening, for the card's row expansion: the unwrapped
     /// text's lines with content, from the first, each collapsed as
-    /// `firstLine(of:)` collapses it and joined by newlines, so its first line
-    /// is the first line. At most `excerptLimit` characters, then "…" when the
-    /// text runs on past them. Reads at most `excerptScanLimit` characters
-    /// from the first with content.
+    /// `firstLine(of:)` collapses it and joined by newlines, so it begins with
+    /// the first line. At most `excerptLimit` characters, then "…" when the
+    /// text runs on past them — which cuts a first line longer than the limit.
+    /// Reads at most `excerptScanLimit` characters from the first with
+    /// content.
     static func excerpt(of text: String) -> String {
         excerpt(ofUnwrapped: TranscriptPastedContent.unwrap(text))
     }
