@@ -69,7 +69,17 @@ final class PromptRailCardNSView: NSView {
     private let earlierLabel = NSTextField(labelWithString: PromptRailCardMetrics.earlierRowText)
     private let loadButton = NSButton(title: "Load", target: nil, action: nil)
     private var hoverTrackingArea: NSTrackingArea?
+    /// Whether the card has seen the pointer over it since it opened, from a
+    /// tracking event or a read on opening. The row expansion waits for it.
     private var pointerInside = false
+    /// Whether the hover model has been told the pointer is over the card.
+    /// Kept apart from `pointerInside`: a pointer read on opening is not
+    /// reported, and its first move reports it.
+    private var cardHoverReported = false
+    /// Where the pointer is in a window's coordinates, read outside the event
+    /// stream: on opening, and when the list moves under a still pointer.
+    /// A test seam, since an offscreen window cannot place the real cursor.
+    var pointerLocation: @MainActor (NSWindow) -> NSPoint = { $0.mouseLocationOutsideOfEventStream }
     /// The row expansion, above every row and the earlier row's controls.
     /// Internal so tests can read what it shows.
     let expansionView = PromptRailRowExpansionView(frame: .zero)
@@ -232,6 +242,17 @@ final class PromptRailCardNSView: NSView {
         } else {
             scrollList(toOffset: 0)
         }
+        // The card opens over the rail the pointer is on, and a tracking area
+        // added under a still pointer sends no enter. A pointer already over
+        // the list is seen now: its row, not the pointed notch's stand-in,
+        // takes the hover fill and waits to expand. Elsewhere, the stand-in
+        // stays and nothing waits.
+        if let window {
+            let point = pointerLocation(window)
+            if listScrollView.contentView.bounds.contains(listView.convert(point, from: nil)) {
+                pointerSeen(at: point)
+            }
+        }
         logger.debug("card open rows=\(self.rowCount, privacy: .public)")
         alphaValue = 0
         applyVisibility()
@@ -246,6 +267,7 @@ final class PromptRailCardNSView: NSView {
     func close() {
         isOpen = false
         pointerInside = false
+        cardHoverReported = false
         listView.hoveredRow = nil
         rowDwell.cancel()
         alphaValue = 0
@@ -343,10 +365,13 @@ final class PromptRailCardNSView: NSView {
         guard bounds != observedListBounds else { return }
         observedListBounds = bounds
         rowDwell.cancel()
+        let before = listView.hoveredRow
         if pointerInside, let window {
-            updateHoveredRow(windowPoint: window.mouseLocationOutsideOfEventStream)
+            updateHoveredRow(windowPoint: pointerLocation(window))
         }
-        restRowDwell()
+        // A changed row rested the delay through `hoveredRow`; the same row
+        // under a still pointer waits afresh here.
+        if listView.hoveredRow == before { restRowDwell() }
     }
 
     /// Which edges of the list's clip fade: each that clips a row, and
@@ -381,20 +406,20 @@ final class PromptRailCardNSView: NSView {
             return
         }
         guard isOpen else { return }
-        pointerInside = true
+        cardHoverReported = true
         hover.cardHoverChanged(true)
-        updateHoveredRow(windowPoint: event.locationInWindow)
+        pointerSeen(at: event.locationInWindow)
     }
 
     override func mouseMoved(with event: NSEvent) {
         guard isOpen else { return }
         // A card that opened under a resting pointer may hear a move before
         // any enter: a move only reaches the card from inside it.
-        if !pointerInside {
-            pointerInside = true
+        if !cardHoverReported {
+            cardHoverReported = true
             hover.cardHoverChanged(true)
         }
-        updateHoveredRow(windowPoint: event.locationInWindow)
+        pointerSeen(at: event.locationInWindow)
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -403,17 +428,28 @@ final class PromptRailCardNSView: NSView {
             return
         }
         pointerInside = false
+        cardHoverReported = false
         listView.hoveredRow = nil
         hover.cardHoverChanged(false)
     }
 
-    /// The row under the pointer, from a real pointer position; the row
-    /// expansion's delay follows it, even when it is the row the card opened
-    /// with highlighted.
+    /// The pointer is over the card at `windowPoint`: the row under it is
+    /// hovered, and the row expansion's delay follows it. A changed row rests
+    /// the delay through `hoveredRow`; a pointer just arrived over the row
+    /// already highlighted, the one the card opened with, rests it here. A
+    /// move within a row measures nothing.
+    private func pointerSeen(at windowPoint: NSPoint) {
+        let arrived = !pointerInside
+        pointerInside = true
+        let before = listView.hoveredRow
+        updateHoveredRow(windowPoint: windowPoint)
+        if arrived && listView.hoveredRow == before { restRowDwell() }
+    }
+
+    /// The row under a window point.
     private func updateHoveredRow(windowPoint: NSPoint) {
         let point = listView.convert(windowPoint, from: nil)
         listView.hoveredRow = listView.clickableRow(at: point)
-        restRowDwell()
     }
 
     // MARK: Row expansion
@@ -423,11 +459,12 @@ final class PromptRailCardNSView: NSView {
     /// which hides any expansion at once. Measures only the hovered row's
     /// first line.
     ///
-    /// The pointer must have been seen inside the card. A card opens with the
-    /// row for the pointed notch highlighted, and notches are closer together
-    /// than rows, so when the list fits without scrolling that row need not be
-    /// the one under the pointer; expanding it would put one prompt's text
-    /// under the pointer while a click jumps to another.
+    /// The pointer must have been seen over the card, by a tracking event or
+    /// the read on opening. A card opens with the row for the pointed notch
+    /// highlighted, and notches are closer together than rows, so when the
+    /// list fits without scrolling that row need not be the one under the
+    /// pointer; expanding it would put one prompt's text under the pointer
+    /// while a click jumps to another.
     private func restRowDwell() {
         guard isOpen, pointerInside, let row = listView.hoveredRow,
               let index = entryIndex(forRow: row), listView.showsPartOfPrompt(index)
@@ -512,6 +549,9 @@ final class PromptRailCardNSView: NSView {
 
     /// The list row whose expansion is on screen; nil for none.
     var expandedRow: Int? { expansionView.row }
+
+    /// The list row with the hover fill; nil for none.
+    var hoveredRow: Int? { listView.hoveredRow }
 
     /// Await the row expansion's armed delay, so a test asserts on the state
     /// it left rather than racing it.

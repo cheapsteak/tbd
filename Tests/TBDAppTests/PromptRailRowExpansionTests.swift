@@ -6,14 +6,16 @@ import TestSupport
 
 // Tier 1 apart from the offscreen window the card is mounted in, which gives
 // pointer events and hit-testing real window coordinates. The pointer is fed
-// to the card by hand; the expansion's delay runs on `EventDrivenTestClock`.
+// to the card by hand, as events and through its pointer-location seam; the
+// expansion's delay runs on `EventDrivenTestClock`.
 
 /// A prompt rail card row's expansion: the 150ms rest before it shows, the
 /// rows that never expand, what it shows, where it goes, that it takes no
 /// events, that it follows the pointer rather than the row a card opened
-/// with, that it hides at once when the pointer changes rows or the list
-/// scrolls or resizes, and how new outlines reach one on screen. Every card
-/// takes the shipped delay, so the suite pins it.
+/// with — including a pointer already resting over the card as it opens —
+/// that it hides at once when the pointer changes rows or the list scrolls or
+/// resizes, and how new outlines reach one on screen. Every card takes the
+/// shipped delay, so the suite pins it.
 @MainActor
 @Suite("Prompt rail row expansion", .clockDriven)
 struct PromptRailRowExpansionTests {
@@ -22,6 +24,8 @@ struct PromptRailRowExpansionTests {
     /// `EventDrivenTestClock.sleeperArmed`.
     private static let mainActorHop = TestDeadlines.saturatedPass
     private static let delay = Duration.milliseconds(150)
+    /// The pane `scene` lays the card out against unless told otherwise.
+    private static let defaultPane = NSSize(width: 680, height: 600)
 
     /// Far more than six lines at the card's 282pt text width, on one line.
     private static let longPrompt = String(repeating: "the rail and its card line up ", count: 20)
@@ -324,9 +328,11 @@ struct PromptRailRowExpansionTests {
     /// 116–138.
     @Test("a card opened from the rail expands nothing until the pointer moves over it")
     func openingRowWaitsForThePointer() async throws {
+        // The pointer is not over the card as it opens.
         let scene = Self.scene((0..<8).map { Self.entry($0, Self.longPrompt) }, pointedIndex: 5, pointerY: 53)
         defer { scene.host.tearDown() }
         try #require(scene.card.listScrollView.contentView.bounds.minY == 0, "precondition: the list fits unscrolled")
+        #expect(scene.card.hoveredRow == 5, "the pointed notch's row lost its highlight")
 
         #expect(await watchForSleeper(on: scene.clock) == false, "the card armed the row it opened with")
         await scene.clock.advance(by: Self.delay)
@@ -436,6 +442,51 @@ struct PromptRailRowExpansionTests {
         try #require(scene.card.listScrollView.contentView.bounds.height == 340,
                      "precondition: the card grew (\(scene.card.listScrollView.contentView.bounds.height))")
         #expect(scene.card.expandedRow == nil, "the expansion outlived its card resizing")
+        // The row still under the pointer waits its own delay again.
+        try await Self.fire(scene)
+        #expect(scene.card.expandedRow == 2)
+    }
+
+    @Test("a pointer resting over the card as it opens expands the row under it, with no move")
+    func restingPointerExpandsOnOpening() async throws {
+        // A scrolling list: opening puts the pointed notch's row, 5, under
+        // the pointer, which never moves.
+        let scene = Self.scene(
+            (0..<40).map { Self.entry($0, Self.longPrompt) }, pane: NSSize(width: 680, height: 300),
+            pointedIndex: 5, pointerY: 53, pointerInCard: NSPoint(x: 100, y: 53))
+        defer { scene.host.tearDown() }
+        #expect(scene.card.hoveredRow == 5)
+        try await Self.fire(scene)
+        #expect(scene.card.expandedRow == 5, "a pointer that never moved never expanded its row")
+    }
+
+    @Test("when the pointed notch's row is not under the pointer, the row under it takes the fill and expands")
+    func restingPointerOverAnotherRow() async throws {
+        // A list that fits: notch 5's row spans 116–138, while the pointer at
+        // y 53 is over row 2.
+        let scene = Self.scene(
+            (0..<8).map { Self.entry($0, Self.longPrompt) },
+            pointedIndex: 5, pointerY: 53, pointerInCard: NSPoint(x: 100, y: 53))
+        defer { scene.host.tearDown() }
+        #expect(scene.card.hoveredRow == 2, "the fill stayed on the pointed notch's row")
+        try await Self.fire(scene)
+        #expect(scene.card.expandedRow == 2)
+    }
+
+    @Test("closing the card forgets the pointer, so reopening with it elsewhere arms nothing")
+    func closingForgetsThePointer() async throws {
+        let scene = Self.scene((0..<8).map { Self.entry($0, Self.longPrompt) })
+        defer { scene.host.tearDown() }
+        try scene.movePointer(toRow: 2)
+        try await Self.fire(scene)
+        try #require(scene.card.expandedRow == 2)
+
+        scene.card.close()
+        scene.pointer.inCard = nil
+        scene.card.open(pointedIndex: 5, pointerY: 53, maxSize: Self.defaultPane)
+        #expect(scene.card.hoveredRow == 5)
+        #expect(await watchForSleeper(on: scene.clock) == false, "a pointer seen before closing armed the reopened card")
+        #expect(scene.card.expandedRow == nil)
     }
 
     // MARK: Helpers
@@ -479,20 +530,28 @@ struct PromptRailRowExpansionTests {
 
     /// An open card in an offscreen window, its row expansion on a virtual
     /// clock of its own.
+    /// `pointerInCard` is where the pointer rests as the card opens, in the
+    /// card's coordinates; nil for nowhere near it.
     private static func scene(
         _ entries: [PromptOutlineEntry], workCounts: [Int] = [],
         pane: NSSize = NSSize(width: 680, height: 600),
-        pointedIndex: Int? = nil, pointerY: CGFloat = 0
+        pointedIndex: Int? = nil, pointerY: CGFloat = 0, pointerInCard: NSPoint? = nil
     ) -> ExpansionScene {
         let host = OffscreenHost(root: EmptyView(), size: pane)
         let clock = EventDrivenTestClock()
         let jumps = ExpansionJumps()
+        let pointer = ScenePointer()
+        pointer.inCard = pointerInCard
         let hover = PromptRailHoverModel(notificationCenter: NotificationCenter(), clock: EventDrivenTestClock())
         let card = PromptRailCardNSView(hover: hover, onJump: { jumps.ids.append($0) }, clock: clock)
+        card.pointerLocation = { [weak card] _ in
+            guard let card, let point = pointer.inCard else { return ScenePointer.away }
+            return card.convert(point, to: nil)
+        }
         host.contentView.addSubview(card)
         card.update(entries: entries, workCounts: workCounts, activeIndex: nil, earlier: nil)
         card.open(pointedIndex: pointedIndex, pointerY: pointerY, maxSize: pane)
-        return ExpansionScene(host: host, card: card, clock: clock, jumps: jumps)
+        return ExpansionScene(host: host, card: card, clock: clock, jumps: jumps, pointer: pointer)
     }
 
     /// Waits for the delay to arm, advances past it, and joins the task it
@@ -512,11 +571,15 @@ private struct ExpansionScene {
     let card: PromptRailCardNSView
     let clock: EventDrivenTestClock
     let jumps: ExpansionJumps
+    /// Where the card reads the pointer outside the event stream.
+    let pointer: ScenePointer
 
     /// Moves the pointer to `point` in the list's coordinates, as the card's
-    /// tracking area reports a move.
+    /// tracking area reports a move. The pointer stays there, fixed to the
+    /// card, if the list moves under it.
     func movePointer(toListPoint point: NSPoint) throws {
         let list = try #require(card.listScrollView.documentView)
+        pointer.inCard = card.convert(point, from: list)
         let event = try #require(NSEvent.mouseEvent(
             with: .mouseMoved, location: list.convert(point, to: nil), modifierFlags: [], timestamp: 0,
             windowNumber: host.window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0))
@@ -533,4 +596,14 @@ private struct ExpansionScene {
 @MainActor
 private final class ExpansionJumps {
     var ids: [String] = []
+}
+
+/// The pointer as the card reads it outside the event stream.
+@MainActor
+private final class ScenePointer {
+    /// Far from the offscreen window and everything in it.
+    static let away = NSPoint(x: -100_000, y: -100_000)
+    /// Where the pointer is, in the card's coordinates; nil for nowhere near
+    /// the card.
+    var inCard: NSPoint?
 }
