@@ -1,12 +1,10 @@
 import AppKit
 
-// Presentation both prompt rail renderers share: notch colours, the edge
-// fade's extent, the card's metrics and the rail's accessibility labels. It
-// lives beside the shared core rather than in either renderer's folder, so the
-// follow-up that deletes one renderer deletes only that folder.
+// Presentation the rail and the card share: notch colours, the edge fade's
+// extent, the card's metrics and the rail's accessibility labels.
 
-/// Notch and dash colours, shared by both renderers' rails and cards so a
-/// card's dashes match the notches they sit over.
+/// Notch and dash colours, shared by the rail and the card so a card's dashes
+/// match the notches they sit over.
 enum PromptRailNotchStyle {
     /// Alpha of an inactive peer notch: amber at reduced opacity.
     static let inactivePeerAlpha: CGFloat = 0.5
@@ -22,8 +20,8 @@ enum PromptRailNotchStyle {
     }
 }
 
-/// The 24pt edge fade both renderers put over a clipped edge of the rail and
-/// of the card's list. Each renderer spells the mask in its own framework.
+/// The 24pt edge fade over a clipped edge of the rail and of the card's list.
+/// `configure(_:height:fadesTop:fadesBottom:)` spells it as a layer mask.
 enum PromptRailFade {
     /// The fraction of a view `height` tall that each edge's fade covers:
     /// `PromptRailLayout.fadeHeight`, at most half the view.
@@ -32,8 +30,7 @@ enum PromptRailFade {
     }
 }
 
-/// The card's geometry, typography and timing, shared by both renderers'
-/// cards so the two differ in framework alone.
+/// The card's geometry, typography and timing.
 enum PromptRailCardMetrics {
     static let maxWidth: CGFloat = 320
     /// The card leaves this much of the pane's width uncovered.
@@ -98,7 +95,7 @@ enum PromptRailCardMetrics {
     }
 }
 
-/// The rail's accessibility, shared by both renderers' rails.
+/// The rail's accessibility.
 enum PromptRailAccessibility {
     /// An entry's button label: "<first line>, <time>", or the first line
     /// alone when the entry has no time.

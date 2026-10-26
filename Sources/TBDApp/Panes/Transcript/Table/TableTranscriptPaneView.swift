@@ -283,28 +283,25 @@ struct TableTranscriptPaneView: View {
             onOpen: { itemID in openTranscriptOverlay?(itemID) }
         ) {
             VStack(spacing: 0) {
-                PromptRailContainer { mount in
-                    TableTranscriptView(
-                        context: cardContext,
-                        atBottom: $atBottom,
-                        scrollToBottomToken: scrollToBottomToken,
-                        scrollToItem: promptScroll,
-                        activityToggleToken: activityToggleToken,
-                        linkRoot: linkRoot,
-                        nodesProvider: { timedRenderNodes(presentation.nodes) },
-                        onTableReady: { [appState, terminalID, registeredTable] table in
-                            registeredTable.view = table
-                            appState.registerTranscriptView(table, for: terminalID)
-                        },
-                        promptRail: mount
-                    )
-                }
+                TableTranscriptView(
+                    context: cardContext,
+                    atBottom: $atBottom,
+                    scrollToBottomToken: scrollToBottomToken,
+                    scrollToItem: promptScroll,
+                    activityToggleToken: activityToggleToken,
+                    linkRoot: linkRoot,
+                    nodesProvider: { timedRenderNodes(presentation.nodes) },
+                    onTableReady: { [appState, terminalID, registeredTable] table in
+                        registeredTable.view = table
+                        appState.registerTranscriptView(table, for: terminalID)
+                    },
+                    promptRail: .rail(earlier: nil)
+                )
                 // Compose the terminal with its current Claude session so a session
                 // rollover within one terminal tears down and rebuilds the stateful
                 // Coordinator, re-resolving from a clean baseline rather than persisting
-                // the prior session's drilled-in subagent thread. (#129) On the rail
-                // container rather than the table, so the rollover rebuilds the
-                // prompt rail's state with it.
+                // the prior session's drilled-in subagent thread. (#129) The prompt
+                // rail lives inside the table's view, so the rebuild takes it too.
                 .id(PaneIdentity(terminalID: terminalID, sessionID: currentSessionID))
                 .overlay(alignment: .bottomLeading) {
                     jumpToBottomButton

@@ -1,19 +1,18 @@
 import AppKit
 
-/// The view `TableTranscriptView` hands SwiftUI, under both prompt rail
-/// renderers: the transcript's scroll view, inset from the leading edge by a
-/// fixed gutter, plus the AppKit renderer's rail in that gutter and its card
-/// stacked above both.
+/// The view `TableTranscriptView` hands SwiftUI: the transcript's scroll
+/// view, inset from the leading edge by a fixed gutter, plus the prompt rail
+/// in that gutter and its card stacked above both.
 ///
-/// - **Gutter** – `leadingGutter` is `PromptRailLayout.width` for the AppKit
-///   renderer and 0 otherwise, set once from the mount when the view is made.
+/// - **Gutter** – `leadingGutter` is `PromptRailLayout.width` with the rail
+///   mounted and 0 without it, set once from the mount when the view is made.
 ///   The scroll view always fills the rest, so the table's width is fixed from
 ///   creation whatever the prompt count.
 /// - **Stacking** – subview order settles it: the scroll view at the bottom,
 ///   the rail above it, the card above everything.
 /// - **Coordinator** – a weak handle back to the table's coordinator, for
 ///   code that reaches the transcript through its view hierarchy.
-/// - **AppKit prompt rail** – `installPromptRail` makes this view the hub
+/// - **Prompt rail** – `installPromptRail` makes this view the hub
 ///   between the rail, the card and their shared hover model: the rail's
 ///   outline changes reach the card through here, the hover model's open and
 ///   close show and hide the card, and the Escape monitor runs only while the
@@ -37,8 +36,8 @@ final class TranscriptContainerView: NSView {
 
     weak var coordinator: TableTranscriptView.Coordinator?
 
-    /// The rail, laid out to fill the gutter. Installed by the AppKit
-    /// renderer; kept below `cardView`.
+    /// The rail, laid out to fill the gutter. Installed with the prompt rail;
+    /// kept below `cardView`.
     var railView: NSView? {
         didSet {
             guard railView !== oldValue else { return }
@@ -54,8 +53,8 @@ final class TranscriptContainerView: NSView {
         }
     }
 
-    /// The card, stacked above the scroll view and the rail. Installed by the
-    /// AppKit renderer; an open `PromptRailCardNSView` is re-laid out against
+    /// The card, stacked above the scroll view and the rail. Installed with
+    /// the prompt rail; an open `PromptRailCardNSView` is re-laid out against
     /// this view's size whenever it changes.
     var cardView: NSView? {
         didSet {
@@ -65,10 +64,9 @@ final class TranscriptContainerView: NSView {
         }
     }
 
-    // MARK: AppKit prompt rail
+    // MARK: Prompt rail
 
-    /// The hover model the AppKit rail and card share. Nil under any other
-    /// mount.
+    /// The hover model the rail and card share. Nil with no rail mounted.
     private(set) var promptRailHover: PromptRailHoverModel?
     /// The Remote pane's earlier-history state for the card's Load row,
     /// refreshed by every `updateNSView`.
@@ -124,9 +122,9 @@ final class TranscriptContainerView: NSView {
         if let card = promptRailCard, card.isOpen { card.layoutCard(maxSize: bounds.size) }
     }
 
-    // MARK: AppKit prompt rail wiring
+    // MARK: Prompt rail wiring
 
-    /// Mounts the AppKit renderer: `rail` in the gutter, `card` above
+    /// Mounts the prompt rail: `rail` in the gutter, `card` above
     /// everything, both driven by `hover`. Wheel events over the rail go to
     /// the transcript, and the rail's outline changes reach the card.
     ///

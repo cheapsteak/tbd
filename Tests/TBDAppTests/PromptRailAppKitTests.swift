@@ -9,12 +9,12 @@ import TestSupport
 // Hover is fed to the model by hand; the open timer runs on
 // `EventDrivenTestClock`.
 
-/// The AppKit prompt rail renderer: notch geometry and colours, the overflow
+/// The prompt rail's AppKit views: notch geometry and colours, the overflow
 /// offset and fade, the card's rows, width cap and in-place updates, its
 /// wiring through `TranscriptContainerView` to the hover model and the Escape
 /// monitor, and the mount through `TableTranscriptView`.
 @MainActor
-@Suite("Prompt rail AppKit renderer", .clockDriven)
+@Suite("Prompt rail AppKit views", .clockDriven)
 struct PromptRailAppKitTests {
     /// The open timer is a main-actor task; see the `timeout` note on
     /// `EventDrivenTestClock.sleeperArmed`.
@@ -493,7 +493,7 @@ struct PromptRailAppKitTests {
         let card: PromptRailCardNSView
     }
 
-    /// A 680×600 container in an offscreen window with the AppKit renderer
+    /// A 680×600 container in an offscreen window with the prompt rail
     /// installed, wired as `makeNSView` wires it but with the test's seams.
     private static func mount(
         hover: PromptRailHoverModel,
@@ -515,7 +515,7 @@ struct PromptRailAppKitTests {
         return Mounted(host: host, container: container, rail: rail, card: card)
     }
 
-    /// A three-prompt table on the AppKit renderer.
+    /// A three-prompt table with the prompt rail mounted.
     fileprivate static func table(
         appState: AppState, earlier: PromptRailEarlierHistory?
     ) -> TableTranscriptView {
@@ -533,7 +533,7 @@ struct PromptRailAppKitTests {
             activityToggleToken: 0,
             linkRoot: "",
             nodesProvider: { nodes },
-            promptRail: .appKit(earlier: earlier))
+            promptRail: .rail(earlier: earlier))
     }
 }
 

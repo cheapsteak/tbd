@@ -3,7 +3,7 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 
-/// The AppKit renderer's rail: one notch per prompt in the transcript's 20pt
+/// The prompt rail: one notch per prompt in the transcript's 20pt
 /// gutter, the active prompt's notch accented. It is the coordinator's
 /// `PromptRailPresenter`, so an active-prompt change goes straight from the
 /// coordinator to a layer update, and it hands every outline change on
@@ -236,11 +236,10 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
 
     override func mouseMoved(with event: NSEvent) {
         trackPointer(event)
-        // Every move re-asserts rail hover, as the SwiftUI rail's handler
-        // does. `closeNow()` — the window resigning key, the app deactivating
-        // — forgets it, and a pointer resting on the rail sends no new enter,
-        // so without this the card would not reopen until the pointer left
-        // the rail and came back.
+        // Every move re-asserts rail hover. `closeNow()` — the window
+        // resigning key, the app deactivating — forgets it, and a pointer
+        // resting on the rail sends no new enter, so without this the card
+        // would not reopen until the pointer left the rail and came back.
         hover.railHoverChanged(true)
     }
 

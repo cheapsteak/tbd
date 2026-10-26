@@ -59,12 +59,10 @@ struct TableTranscriptView: NSViewRepresentable {
     /// transition of that answer, whether a scroll or an update caused it. Nil
     /// where nobody loads earlier history.
     var onNearTop: (@MainActor (Bool) -> Void)?
-    /// The prompt rail renderer to mount, from `PromptRailContainer`.
-    /// `makeNSView` fixes the container's gutter from it for the life of the
-    /// view and attaches the renderer's presenter; a renderer change reaches
-    /// the table as a rebuild, because `PromptRailContainer` makes the renderer
-    /// part of its identity. `.none` (the default) mounts no rail and no
-    /// gutter.
+    /// The prompt rail to mount. `makeNSView` fixes the container's gutter
+    /// from it for the life of the view and installs the rail and its card;
+    /// each `updateNSView` hands the card the mount's earlier-history state.
+    /// `.none` (the default) mounts no rail and no gutter.
     var promptRail: PromptRailMount = .none
 
     private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
@@ -204,34 +202,22 @@ struct TableTranscriptView: NSViewRepresentable {
         return container
     }
 
-    /// Connects the mounted renderer to the coordinator; either renderer's
-    /// jumps go to this table.
-    ///
-    /// - **AppKit** – one hover model shared by a rail view in the gutter and
-    ///   a card view above everything. The rail becomes the presenter and the
-    ///   container hands its outline on to the card.
-    /// - **SwiftUI** – the renderer's state becomes the presenter.
-    /// - **None** – nothing.
-    ///
-    /// Attaching a presenter pushes it the current outline and active prompt
-    /// at once.
+    /// Installs the mounted rail and connects it to the coordinator: a rail
+    /// view in the gutter and a card view above everything, sharing one hover
+    /// model, whose jumps go to this table. The rail becomes the presenter and
+    /// the container hands its outline on to the card. Attaching the presenter
+    /// pushes it the current outline and active prompt at once. With no rail
+    /// mounted, this does nothing.
     private func attachPromptRail(to coordinator: Coordinator, container: TranscriptContainerView) {
+        guard case .rail(let earlier) = promptRail else { return }
         let onJump: @MainActor (String) -> Void = { [weak coordinator] id in
             coordinator?.jump(toNodeID: id)
         }
-        switch promptRail {
-        case .none:
-            break
-        case .appKit(let earlier):
-            let hover = PromptRailHoverModel()
-            let rail = PromptRailNSView(hover: hover, onJump: onJump)
-            let card = PromptRailCardNSView(hover: hover, onJump: onJump)
-            container.installPromptRail(rail: rail, card: card, hover: hover, earlier: earlier)
-            coordinator.promptRailPresenter = rail
-        case .swiftUI(let state):
-            coordinator.promptRailPresenter = state
-            state.onJump = onJump
-        }
+        let hover = PromptRailHoverModel()
+        let rail = PromptRailNSView(hover: hover, onJump: onJump)
+        let card = PromptRailCardNSView(hover: hover, onJump: onJump)
+        container.installPromptRail(rail: rail, card: card, hover: hover, earlier: earlier)
+        coordinator.promptRailPresenter = rail
     }
 
     func updateNSView(_ container: TranscriptContainerView, context ctx: Context) {
@@ -254,8 +240,8 @@ struct TableTranscriptView: NSViewRepresentable {
             coordinator.scrollToRow(withNodeID: request.itemID)
         }
         // The Remote pane's earlier-history state changes as pages load; the
-        // AppKit card's Load row follows it.
-        if case .appKit(let earlier) = promptRail {
+        // card's Load row follows it.
+        if case .rail(let earlier) = promptRail {
             container.promptRailEarlier = earlier
         }
     }

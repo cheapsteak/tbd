@@ -3,7 +3,7 @@ import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 
-/// The AppKit renderer's hover card: every prompt by first line and time,
+/// The prompt rail's hover card: every prompt by first line and time,
 /// anchored at the rail's top-left with its dash column over the rail's
 /// notches. `TranscriptContainerView` opens and closes it as
 /// `PromptRailHoverModel` says.

@@ -325,8 +325,6 @@ custom_rules:
       # PromptInputPopoverView is the permission card's "Show all" popover — it
       # renders outside the row and is never part of the row's measurement.
       - "Sources/TBDApp/Panes/Transcript/PromptInputPopoverView\\.swift"
-      # The prompt rail card is an overlay outside the transcript's row list, never measured as a row.
-      - "Sources/TBDApp/Panes/Transcript/PromptRail/SwiftUI/PromptRailCardView\\.swift"
     regex: '\bScrollView\b'
     match_kinds:
       - identifier

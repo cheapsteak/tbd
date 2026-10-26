@@ -38,7 +38,6 @@ struct GeneralSettingsTab: View {
     @Environment(AppState.self) var appState
     @AppStorage("enableNotifications") private var enableNotifications: Bool = true
     @AppStorage("skipPermissions") private var skipPermissions: Bool = true
-    @AppStorage(AppState.promptRailRendererKey) private var storedPromptRailRenderer: String?
     @AppStorage(AppState.autoSuspendClaudeKey) private var autoSuspend: Bool = false
     @AppStorage(AppState.enableTranscriptKey) private var enableTranscript: Bool = AppState.enableTranscriptDefault
     @AppStorage(AppState.showScratchSectionKey) private var showScratchSection: Bool = true
@@ -278,7 +277,6 @@ struct GeneralSettingsTab: View {
                 supervisionEnabledToggle
                 programStatusToggle
                 updateModePicker
-                promptRailRendererPicker
             }
         }
         .formStyle(.grouped)
@@ -426,23 +424,6 @@ struct GeneralSettingsTab: View {
             set: { newValue in Task { await appState.setSupervisionEnabled(newValue) } }
         ))
         .help("The fleet-wide switch for supervision. On releases TBD's autonomous processes to act on sessions it supervises; off engages the fleet brake and pauses that authority, leaving every per-project mark untouched. Off by default. Turning it on has no visible effect by itself yet — the rest of supervision (turning projects on, choosing their conduct) is shipping in the same series of changes, and nothing acts on this column until that lands.")
-    }
-
-    /// Which framework draws the transcript's prompt rail: a temporary switch for comparing the two.
-    @ViewBuilder
-    private var promptRailRendererPicker: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Picker(
-                "Prompt rail renderer",
-                selection: AppState.promptRailRendererBinding($storedPromptRailRenderer)
-            ) {
-                Text("AppKit").tag(PromptRailRenderer.appKit)
-                Text("SwiftUI").tag(PromptRailRenderer.swiftUI)
-            }
-            Text("Temporary: compare the two prompt rail renderers. Open transcripts rebuild when this changes.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
     }
 
     /// How TBD updates itself. Reads the persisted mode from

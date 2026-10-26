@@ -259,41 +259,38 @@ struct RemoteTranscriptPaneView: View {
                 windowStartIDs: windowStartIDs,
                 memo: presentationMemo
             )
-            PromptRailContainer(
-                earlier: PromptRailEarlierHistory(hasEarlier: hasEarlier, load: onLoadEarlier)
-            ) { mount in
-                TableTranscriptView(
-                    context: TranscriptCardContext(
-                        terminalID: nil,
-                        openTranscriptOverlay: openTranscriptItem,
-                        toggleActivityGroup: setActivityGroup,
-                        appState: appState,
-                        // No resolver: path tokens are never minted as links.
-                        linkResolver: nil,
-                        onLinkClicked: { target in
-                            if let url = TranscriptLinkDestination.remote(target) {
-                                NSWorkspace.shared.open(url)
-                            }
+            TableTranscriptView(
+                context: TranscriptCardContext(
+                    terminalID: nil,
+                    openTranscriptOverlay: openTranscriptItem,
+                    toggleActivityGroup: setActivityGroup,
+                    appState: appState,
+                    // No resolver: path tokens are never minted as links.
+                    linkResolver: nil,
+                    onLinkClicked: { target in
+                        if let url = TranscriptLinkDestination.remote(target) {
+                            NSWorkspace.shared.open(url)
                         }
-                    ),
-                    atBottom: $atBottom,
-                    scrollToBottomToken: scrollToBottomToken,
-                    scrollToItem: promptScroll,
-                    activityToggleToken: activityToggleToken,
-                    linkRoot: "",
-                    nodesProvider: { presentation.nodes },
-                    onTableReady: { [appState, selection, registeredTable] table in
-                        registeredTable.view = table
-                        appState.registerTranscriptView(table, for: .remote(selection))
-                    },
-                    prependToken: prependToken,
-                    onNearTop: { near in
-                        isNearTop = near
-                        onNearTop(near)
-                    },
-                    promptRail: mount
-                )
-            }
+                    }
+                ),
+                atBottom: $atBottom,
+                scrollToBottomToken: scrollToBottomToken,
+                scrollToItem: promptScroll,
+                activityToggleToken: activityToggleToken,
+                linkRoot: "",
+                nodesProvider: { presentation.nodes },
+                onTableReady: { [appState, selection, registeredTable] table in
+                    registeredTable.view = table
+                    appState.registerTranscriptView(table, for: .remote(selection))
+                },
+                prependToken: prependToken,
+                onNearTop: { near in
+                    isNearTop = near
+                    onNearTop(near)
+                },
+                promptRail: .rail(
+                    earlier: PromptRailEarlierHistory(hasEarlier: hasEarlier, load: onLoadEarlier))
+            )
             .overlay(alignment: .top) {
                 let content = RemoteTranscriptEarlierHeader.Content.resolve(
                     state: earlier, hasEarlier: hasEarlier, nearTop: isNearTop)

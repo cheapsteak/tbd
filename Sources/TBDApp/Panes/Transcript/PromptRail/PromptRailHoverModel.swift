@@ -1,12 +1,11 @@
 import AppKit
-import Observation
 import os
 
 private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 
-/// Opens and closes the prompt rail's card. Both renderers feed it hover and
-/// read it back: the SwiftUI card reads `isOpen`, the AppKit card listens on
-/// `onOpenChange`.
+/// Opens and closes the prompt rail's card. The rail and the card feed it
+/// hover; `TranscriptContainerView` listens on `onOpenChange` to show and hide
+/// the card.
 ///
 /// - **Opening** – `openDelay` after the pointer enters the rail, so sweeping
 ///   the pointer across the pane's edge does not flash the card open.
@@ -17,14 +16,13 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 ///   pointer stays on the rail the card does not reopen: hovering the rail is
 ///   what opened it, so without the suppression it would reopen `openDelay`
 ///   after being dismissed. Leaving the rail lifts the suppression.
-/// - **App deactivation** – closes the card at once. `.onHover` and
-///   `NSTrackingArea` are active-app concepts: Cmd-Tab moves no pointer, so no
-///   exit event arrives and hover alone would leave the card up.
+/// - **App deactivation** – closes the card at once. `NSTrackingArea` is an
+///   active-app concept: Cmd-Tab moves no pointer, so no exit event arrives
+///   and hover alone would leave the card up.
 ///
 /// The timers sleep on the injected `clock` and are cancel-and-replace, so a
 /// test drives them in virtual time.
 @MainActor
-@Observable
 final class PromptRailHoverModel {
     enum Dismissal: String {
         case escape
@@ -33,24 +31,23 @@ final class PromptRailHoverModel {
 
     private(set) var isOpen = false
 
-    /// Called on every change of `isOpen`, and only on a change. The AppKit
-    /// renderer's hook; the SwiftUI renderer observes `isOpen` instead.
-    @ObservationIgnored var onOpenChange: (@MainActor (Bool) -> Void)?
+    /// Called on every change of `isOpen`, and only on a change.
+    var onOpenChange: (@MainActor (Bool) -> Void)?
 
-    @ObservationIgnored private var isRailHovered = false
-    @ObservationIgnored private var isCardHovered = false
+    private var isRailHovered = false
+    private var isCardHovered = false
     /// Set by `dismiss` while the pointer is on the rail; cleared when it
     /// leaves. While set, rail hover does not open the card.
-    @ObservationIgnored private var suppressed = false
+    private var suppressed = false
 
-    @ObservationIgnored private var openTask: Task<Void, Never>?
-    @ObservationIgnored private var closeTask: Task<Void, Never>?
+    private var openTask: Task<Void, Never>?
+    private var closeTask: Task<Void, Never>?
     // Monotonic counters let a task verify, after its sleep resumes, that it
     // is still the current open/close task before nil-ing the ivar. Without
     // them a cancelled task resuming after a newer task was assigned would nil
     // out the newer, still-live one.
-    @ObservationIgnored private var openTaskGeneration = 0
-    @ObservationIgnored private var closeTaskGeneration = 0
+    private var openTaskGeneration = 0
+    private var closeTaskGeneration = 0
 
     private let openDelay: Duration
     private let closeGrace: Duration
@@ -62,11 +59,11 @@ final class PromptRailHoverModel {
     // nonisolated(unsafe): written in `init` on the main actor and read in
     // `deinit`, which is nonisolated and runs wherever ARC drops the last
     // strong reference. What keeps that single-threaded is an ownership
-    // invariant, not a language guarantee: the renderers own the model from
-    // the main actor (a SwiftUI `@State`, an AppKit view), and release it
-    // there. Releasing it off the main actor would break that. Same precedent,
-    // and same caveat, as `HoverMenuModel`.
-    @ObservationIgnored nonisolated(unsafe) private var deactivationObserver: (any NSObjectProtocol)?
+    // invariant, not a language guarantee: the rail, the card and their
+    // container view own the model on the main actor, and release it there.
+    // Releasing it off the main actor would break that. Same precedent, and
+    // same caveat, as `HoverMenuModel`.
+    nonisolated(unsafe) private var deactivationObserver: (any NSObjectProtocol)?
 
     /// The notification center is injected so tests can post
     /// `NSApplication.didResignActiveNotification` without disturbing
@@ -208,7 +205,8 @@ final class PromptRailHoverModel {
 }
 
 /// Installs an `NSEvent` local keyDown monitor while started; Escape (keyCode 53)
-/// calls `onEscape` and is consumed. Used by both renderers while the card is open.
+/// calls `onEscape` and is consumed. `TranscriptContainerView` runs it while the
+/// card is on screen.
 ///
 /// A local monitor sees every key-down the app dispatches, whichever view has
 /// focus, so the card needs no first responder of its own; it is also why the

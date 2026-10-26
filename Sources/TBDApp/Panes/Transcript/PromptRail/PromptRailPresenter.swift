@@ -1,8 +1,8 @@
 import Foundation
 
 /// Receives the prompt outline and the active prompt from
-/// `TableTranscriptView.Coordinator`. Each renderer supplies one: the AppKit
-/// rail view, or the SwiftUI renderer's state object.
+/// `TableTranscriptView.Coordinator`. The rail view, `PromptRailNSView`, is
+/// the presenter a mounted rail attaches.
 ///
 /// - **When** – each method is called only when its value changed, and both
 ///   are called at once when the presenter is attached, so a presenter set
