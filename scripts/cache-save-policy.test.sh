@@ -298,8 +298,9 @@ case_daemonlib() {
   assert_eq "TBDDaemonLib -> true" "true" "$(decision "$1" pull_request main)"
 }
 
-# TBDDaemonLib imports TBDTerminalSerialization, so a change confined to that
-# target recompiles the library just the same and earns the entry too.
+# TBDTerminalSerialization is a library the #7715 wipe removes in its own right,
+# and TBDDaemonLib imports it, so a change confined to that target re-emits its
+# module, recompiles TBDDaemonLib, and earns the entry too.
 test_a_pr_touching_tbdterminalserialization_answers_true() { with_repo case_serialization; }
 case_serialization() {
   change_file "$1" Sources/TBDTerminalSerialization/Frame.swift
