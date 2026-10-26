@@ -44,7 +44,7 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
 
 **First line.** The prompt body goes through `TranscriptPastedContent.unwrap`, the same unwrapping its bubble uses, so the line reads as the bubble does. The first non-empty line follows, with runs of whitespace collapsed. Inline `[Image #N]` placeholders stay, so an image-only prompt reads `[Image #1]`.
 
-**Time.** Today's prompts show the short local time (`14:02`); earlier ones show the abbreviated date (`Oct 24`). Both use the user's locale. A node without a timestamp shows none.
+**Time.** Today's prompts each show their short local time (`14:02`). An earlier day's prompts are listed in order, so only the first of each day shows its abbreviated date (`Oct 24`) and the rest of that day's rows leave the column blank — the date would only repeat. Both use the user's locale. A node without a timestamp shows nothing and does not start a new day; the next prompt with a timestamp is compared with the last one that had one. VoiceOver labels keep each prompt's own date or time, since a listener hears one row at a time.
 
 **Peers.** A peer notch is drawn in `AttentionAmber`, the tint the peer bubble already uses. Its card row reads "*sender*: first line" with the sender in amber.
 
@@ -93,11 +93,19 @@ The coordinator recomputes the active entry on the clip view's bounds notificati
 - **Opening** – 80ms after the pointer enters the rail, the card fades in over 150ms, easing out.
 - **Closing** – 100ms after the pointer leaves both rail and card, so a jittery pointer does not snap it shut. Escape, a click on a row and app deactivation close it at once; hover alone cannot be the only dismissal, because a backgrounded app receives no pointer-exit event. After Escape or a click, hovering does not reopen it until the pointer has left the rail.
 - **Placement** – anchored at the rail's top-left, its dash column lined up over the rail's notches. It is 320pt wide, capped at the pane's width minus 24pt, and at most the rail's height less 60pt, which keeps the pane's bottom-corner jump-to-bottom button clear of it. A longer list scrolls inside the card behind 24pt edge fades. On opening, the list is scrolled so the row for the notch under the pointer sits under the pointer, or as close as the card's height and the list's ends allow.
-- **Rows** – 22pt tall, 13pt system text: an 18pt dash column, an 8pt gap, the first line truncated at the tail, and the time right-aligned in the secondary label color with monospaced digits.
+- **Rows** – 22pt tall, 13pt system text: an 18pt dash column, an 8pt gap, the first line truncated at the tail, and the time right-aligned in the secondary label color with monospaced digits — today's time, or an earlier day's date on its first row only (see **Time** above). A row whose time cell is blank gives that width to its first line.
   - Each row's dash is as long as its notch, so the card's dash column repeats the rail's profile.
   - The active row is medium weight, with its accent or amber dash.
   - The row under the pointer gets a quaternary-fill background with a 6pt corner radius.
-  - A row's tooltip shows the turn's tool-call count ("40 tool calls"), followed by the prompt's first 500 characters when the row is truncated.
+- **Expansion** – a row whose prompt is longer than the row shows (its first line is cut off, or the prompt runs past it) appears to expand in place when the pointer rests on it, so the reader can read more of a prompt without leaving the card.
+  - It responds to the row's text, not its dash: the pointer has to be within the row's text column, from the first line's leading edge to the end of the time, short of the row's trailing padding. The gap between the dash column and the first line belongs to the dash; the space between the first line and the time does not interrupt the text column, so moving from one to the other never hides and re-arms the overlay. A pointer arriving from the rail rests over the dash column, which the card lays over the rail's notches, so opening the card never expands a row by itself. Over the dash column the row still highlights and a click still jumps, but nothing expands.
+  - After the pointer has rested 150ms over such a row's text, an overlay as wide as the row is drawn over it with the hovered row's fill on the card's background. It repeats the row's dash and time and shows the prompt's first six lines wrapped to the row's text width, the last ending in "…" when more remains. The rows beneath stay where they are: the overlay covers them, so nothing moves under the pointer.
+  - It grows downward from the row, the dash and time beside its first prompt line on the row's band. When that would pass the bottom of the card's visible list, it grows upward instead: its bottom edge sits on the row's, and the dash and time stay on the row's band beside its last line. Either way nothing under the pointer moves. When the card is too short for six lines, it shows as many as fit, and none when not one fits.
+  - It takes no mouse and no scroll events. Hover, clicks and the wheel all reach the list beneath, so a click on the row jumps exactly as it does without the overlay.
+  - It disappears the moment the pointer leaves the row's 22pt band or moves onto its dash column, or the list scrolls, and the next row's overlay waits its own 150ms. The text under the pointer therefore always belongs to the row a click would jump to.
+  - A row that already shows its whole prompt never expands.
+  - A turn's tool-call count is shown by its notch's length and read by VoiceOver; the card's rows and expansions do not print it.
+  - Rows carry no tooltips; the expansion is how a row shows more.
 - **Click** – jumps to the prompt and closes the card.
 - **Remote, older history not loaded** – the card's first row reads "Earlier prompts not loaded" in the secondary color, with a Load button that calls the pane's existing load-earlier action, the one the "Load earlier messages" header button calls. The rail never loads history by itself.
 
@@ -167,7 +175,7 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - The new `UserMessageClassifier` function, against the three marker forms and against prompts that merely mention them.
   - `PromptRailLayout`: the pitch at both clamps and between them, and the overflow offset near both ends.
   - `PromptRailActiveRule`: the probe line, the bottom rule, the no-entry-above rule and the held jump target.
-  - Time formatting for today, earlier days and a missing timestamp.
+  - Time formatting for today, earlier days and a missing timestamp, and the time column's day boundaries: every row of today shows its time, only the first row of an earlier day shows its date, and a row without a timestamp neither shows one nor starts a day.
   - Work counts: standalone tool calls, a collapsed group's tool calls, an expanded group counted once, a peer-started turn, the last turn running to the end, hidden bookkeeping tools absent; and the length mapping at zero, at the busiest turn, and when a busier turn rescales the rest.
 - **Hover model** – against `EventDrivenTestClock`: the 80ms open, the 100ms grace, re-arming after Escape and after a click, and closing on app deactivation.
 - **Coordinator, offscreen** – in `TableTranscriptHarness`:
@@ -179,6 +187,7 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - a turn's count grows as tool calls arrive, whether appended or as a tail re-render, and the rail hears only actual changes.
 - **Keyboard** – previous and next from the middle, from inside an exchange, from the first prompt and from the last.
 - **Views, offscreen** – notch geometry and colours, the overflow offset and fade, the wheel handed to the transcript, the accessibility buttons, and the card's rows, size caps, in-place updates, Escape monitor and key-window close.
+- **Row expansion** – against an injected clock: no overlay before 150ms, the overlay after it; none for a row that shows its whole prompt; six lines with the trailing "…" and no tool-call line; growing upward near the card's bottom and clamping in a short card; hit-testing through the overlay to the list for clicks and the wheel; hiding at once when the pointer changes rows, moves onto the dash column, or the list scrolls; no expansion while the pointer is over the dash column, including a card that opens under a pointer resting there.
 - **Mounting, offscreen** – a pane-shaped mount keeps the gutter inside the table's view and makes the rail the presenter, with and without earlier history; a new pane identity rebuilds the rail; a table with no mount has no rail, card or gutter.
 
 ## Out of scope
@@ -201,5 +210,10 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - SwiftUI has no public way to forward a wheel event to the table's scroll view, so the gutter becomes a dead zone for scrolling.
   - The transcript is already AppKit. Views inside its hierarchy share its layout, stacking and event routing with no bridge between frameworks.
 - **A show/hide preference** – the rail acts on nothing by itself, and each preference is another layout to test.
+- **Other ways to show a whole prompt on hover** –
+  - *Growing the row for real* shifts every row below it, so the row under the pointer changes as it grows and the card's rows stop lining up with the rail's notches.
+  - *A peek panel beside the card* needs horizontal room a narrow pane lacks, and a scrollable one needs a submenu-style aim rule so that crossing rows on the way to it does not switch prompts.
+  - *System tooltips* wait one to two seconds before showing, vanish when the pointer moves, and turn a long paste into one unformatted box.
+  - *Previewing in the transcript*, scrolling it to the hovered prompt and back, shows the prompt in context but churns the transcript and lays out far rows as the pointer sweeps the card.
 - **Other meanings for notch length** – time taken, context-window fill and reply size each fit the length channel. Time counts waits on the reader's answers and permission prompts as work. Context fill is cumulative, so it says more about the session than the turn, and needs the model's window size. Reply size ignores the tool activity that makes up most of a coding turn. Tool calls track what the reader means by "a big turn" most directly.
 - **A fixed scale for notch length** – fixed thresholds or a fixed ceiling keep a notch's length comparable across sessions and stable after its turn ends, but a quiet session then uses only the short end and a busy one saturates at the ceiling. Scaling to the session's busiest turn always uses the whole range.
