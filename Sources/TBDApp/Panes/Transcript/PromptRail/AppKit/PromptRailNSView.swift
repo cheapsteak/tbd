@@ -121,6 +121,10 @@ final class PromptRailNSView: NSView, PromptRailPresenter {
         self.entries = entries
         accessibilityButtons = nil
         relayoutNotches()
+        // The accessibility children were just invalidated; tell assistive
+        // clients to re-query them rather than keep a stale list. A no-op when
+        // no assistive client is running.
+        NSAccessibility.post(element: self, notification: .layoutChanged)
         onOutlineChange?()
     }
 
