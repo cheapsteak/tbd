@@ -141,9 +141,10 @@ different routes. **Two of them reconcile**, through one shared helper:
 
 - **`terminal.list`** — the app's poll, every two seconds while the app is
   connected. This is the path that heals a row for the sidebar.
-- **`SupervisionReadoutBuilder`** — loads rows one at a time for a readout, and
-  can run with no app attached, which is exactly the case `terminal.list` cannot
-  cover.
+- **`terminal.send`'s opt-in awaiting-input gate** — asks the same question of
+  the one row it is about to paste into, so a prompt the session has already
+  moved past does not refuse the send
+  ([`2026-09-05-transcript-composer-design.md`](2026-09-05-transcript-composer-design.md)).
 
 **The third reader does not reconcile.** `handleSessionStates`, backing the
 `session.states` RPC, reads the same column through `SessionStateFactGatherer`
@@ -170,14 +171,13 @@ So the precision the supersession buys is available on the paths that write, and
 the path that only reads stays honest about what it does not know.
 
 There is no sweep and no timer. The check runs only for terminals holding a
-standing `.promptOnScreen` reason, and both reconciling call sites already
-perform far heavier transcript I/O on the same pass:
-`CodexTranscriptActivityTracker` reads Codex transcripts on every
-`terminal.list`, `ClaudeDelegationTracker` opens and reads a byte-limited tail of
-the JSONL for every terminal that just ended a turn, and the readout builder
-samples session counters from the transcript per agent. A background sweep would
-perform the same stats on a worse schedule and add a timer to own, name, and
-test.
+standing `.promptOnScreen` reason. `terminal.list` already performs far heavier
+transcript I/O on the same pass — `CodexTranscriptActivityTracker` reads Codex
+transcripts on every `terminal.list`, and `ClaudeDelegationTracker` opens and
+reads a byte-limited tail of the JSONL for every terminal that just ended a
+turn — and the send gate asks it of one row per gated send. A background sweep
+would perform the same stats on a worse schedule and add a timer to own, name,
+and test.
 
 ## Edges
 
