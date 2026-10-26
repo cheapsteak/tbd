@@ -263,7 +263,7 @@ struct TableTranscriptView: NSViewRepresentable {
     // MARK: - Coordinator
 
     @MainActor
-    class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate, TranscriptTableLayoutObserver {
         static let columnID = NSUserInterfaceItemIdentifier("transcript")
         private static let cellID = NSUserInterfaceItemIdentifier("transcriptCell")
         private static let bubbleCellID = NSUserInterfaceItemIdentifier("bubbleCell")
@@ -271,7 +271,11 @@ struct TableTranscriptView: NSViewRepresentable {
         private static let log = Logger(subsystem: "com.tbd.app", category: "table-transcript")
 
         let context: TranscriptCardContext
-        weak var tableView: NSTableView?
+        /// The table. A `TranscriptBubbleTableView` reports its layout passes
+        /// here (`tableLayoutWillBegin()` / `tableLayoutDidEnd()`).
+        weak var tableView: NSTableView? {
+            didSet { (tableView as? TranscriptBubbleTableView)?.layoutObserver = self }
+        }
         weak var scrollView: NSScrollView?
 
         var nodes: [TranscriptRenderNode] = []
@@ -316,14 +320,16 @@ struct TableTranscriptView: NSViewRepresentable {
         /// The anchor of the last prepend. While held, a realize-time height
         /// correction of a row ABOVE the anchor (an estimated row realizing in
         /// AppKit's overdraw region) re-pins the anchor, so heights settling
-        /// above the reader never drag the rows they are reading.
+        /// above the reader never drag the rows they are reading. The end of
+        /// each table layout pass re-pins it too (`tableLayoutDidEnd()`).
         ///
-        /// Released by a reader scroll — a move of the clip's origin the
-        /// coordinator did not make; a change to the clip's size alone keeps
-        /// it — by a width change, by an update that changes the rows again,
-        /// by the tail-follow (`followTail()`), and by a jump to a prompt,
-        /// which moves the reader. The setter is internal for that last one:
-        /// `jump(toNodeID:)` lives in TableTranscriptView+PromptRail.swift.
+        /// Released by a reader scroll — a move of the clip's origin that
+        /// neither the coordinator nor the table's layout made; a change to the
+        /// clip's size alone keeps it — by a width change, by an update that
+        /// changes the rows again, by the tail-follow (`followTail()`), and by
+        /// a jump to a prompt, which moves the reader. The setter is internal
+        /// for that last one: `jump(toNodeID:)` lives in
+        /// TableTranscriptView+PromptRail.swift.
         var pendingPrependAnchor: PrependAnchor?
         /// The anchor of the last jump to a prompt (`jump(toNodeID:)`): the target
         /// row and where it landed in the viewport. Re-pinned exactly as
@@ -395,6 +401,11 @@ struct TableTranscriptView: NSViewRepresentable {
         /// The clip's origin at the last clip-bounds change, so the observer
         /// can tell a move of the origin from a change to the clip's size.
         private var lastClipOriginY: CGFloat?
+        /// How many table layout passes are in progress: `layout()` or
+        /// `tile()` of a `TranscriptBubbleTableView`. A clip move made during
+        /// one is NSTableView keeping its visible rows in place as heights
+        /// change, not the reader.
+        private var tableLayoutDepth = 0
         /// How far the origin must move for a bounds change to count as a move.
         private static let clipMoveTolerance: CGFloat = 0.25
 
@@ -2423,25 +2434,45 @@ struct TableTranscriptView: NSViewRepresentable {
         }
 
         /// Whether this bounds change is a reader scroll: the clip's origin
-        /// moved, and the coordinator did not move it (`isRestoringAnchor`).
-        /// A change to the clip's size that leaves the origin where it was —
-        /// the pane resizing, the autohiding scroller claiming its width — is
-        /// not one, and neither is a bounds change AppKit posts when only the
-        /// document's frame changed. Records the origin for the next change
-        /// either way.
+        /// moved, and neither the coordinator (`isRestoringAnchor`) nor the
+        /// table's own layout pass (`tableLayoutDepth`) moved it. A change to
+        /// the clip's size that leaves the origin where it was — the pane
+        /// resizing, the autohiding scroller claiming its width — is not one,
+        /// and neither is a bounds change AppKit posts when only the document's
+        /// frame changed. Records the origin for the next change either way.
         ///
-        /// AppKit's own row-height estimation, which would move the origin as
-        /// it swapped its guesses for real heights, is off for the whole
-        /// process (`applicationWillFinishLaunching`). What else moves the
-        /// origin without the coordinator is the clip clamping to a document
-        /// that got shorter than the viewport's reach, and that counts as the
-        /// reader's: nothing tells it apart, and it is rare.
+        /// The table's layout moves the clip when row heights have changed, to
+        /// keep its own choice of visible row in place; `tableLayoutDidEnd()`
+        /// then puts any held anchor back. AppKit's own row-height estimation,
+        /// which would move the origin as it swapped its guesses for real
+        /// heights, is off for the whole process
+        /// (`applicationWillFinishLaunching`). What else moves the origin
+        /// without the coordinator is the clip clamping to a document that got
+        /// shorter than the viewport's reach, and that counts as the reader's:
+        /// nothing tells it apart, and it is rare.
         private func clipOriginMovedByReader() -> Bool {
             let origin = scrollView?.contentView.bounds.minY
             defer { lastClipOriginY = origin }
-            guard !isRestoringAnchor else { return false }
+            guard !isRestoringAnchor, tableLayoutDepth == 0 else { return false }
             guard let origin, let last = lastClipOriginY else { return true }
             return abs(origin - last) > Self.clipMoveTolerance
+        }
+
+        // MARK: Table layout passes (TranscriptTableLayoutObserver)
+
+        func tableLayoutWillBegin() {
+            tableLayoutDepth += 1
+        }
+
+        /// At the end of the outermost pass, puts a held prepend or jump anchor
+        /// back where it says its row belongs. The pass may have moved the clip
+        /// to keep a different row in place, and this lands the anchored row
+        /// before anything is drawn.
+        func tableLayoutDidEnd() {
+            tableLayoutDepth = max(0, tableLayoutDepth - 1)
+            guard tableLayoutDepth == 0 else { return }
+            if let anchor = pendingPrependAnchor { restorePrependAnchor(anchor) }
+            if let anchor = pendingJumpAnchor { restorePrependAnchor(anchor) }
         }
 
         #if DEBUG
@@ -2668,8 +2699,19 @@ struct TableTranscriptView: NSViewRepresentable {
 /// accept our `TranscriptBubbleTextView` lets the text view take the mouse on the
 /// first click, so click-drag selection and copy work. `selectionHighlightStyle =
 /// .none` does NOT bypass this gate, which is why selection failed before.
+///
+/// It also tells `layoutObserver` when it lays itself out. When row heights
+/// change (`noteHeightOfRows`), NSTableView's layout keeps its visible rows in
+/// place by moving the clip itself (`NSTableRowData` updating its visible row
+/// entries scrolls the `NSClipView`). That move is AppKit's, not the
+/// reader's, and the coordinator needs to know a pass is in progress to tell
+/// the two apart.
 @MainActor
 final class TranscriptBubbleTableView: NSTableView {
+    /// Told when a layout pass begins and ends. The coordinator sets itself
+    /// here when it is given the table.
+    weak var layoutObserver: TranscriptTableLayoutObserver?
+
     override func validateProposedFirstResponder(
         _ responder: NSResponder,
         for event: NSEvent?
@@ -2679,6 +2721,28 @@ final class TranscriptBubbleTableView: NSTableView {
         if responder is TranscriptBubbleTextView { return true }
         return super.validateProposedFirstResponder(responder, for: event)
     }
+
+    override func layout() {
+        layoutObserver?.tableLayoutWillBegin()
+        super.layout()
+        layoutObserver?.tableLayoutDidEnd()
+    }
+
+    /// `tile()` lays out the same row geometry and is also called directly,
+    /// outside a layout pass, so it is bracketed the same way.
+    override func tile() {
+        layoutObserver?.tableLayoutWillBegin()
+        super.tile()
+        layoutObserver?.tableLayoutDidEnd()
+    }
+}
+
+/// Learns when `TranscriptBubbleTableView` lays itself out. Passes can nest:
+/// `layout()` may call `tile()`.
+@MainActor
+protocol TranscriptTableLayoutObserver: AnyObject {
+    func tableLayoutWillBegin()
+    func tableLayoutDidEnd()
 }
 
 // MARK: - Hosting cell

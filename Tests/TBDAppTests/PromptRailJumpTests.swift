@@ -118,8 +118,10 @@ struct PromptRailJumpTests {
                 Comment(rawValue: "the first frame put the target at \(firstFrame) pt, not \(Self.inset)"))
 
         // Lay out the rows the jump brought on screen: the card realizes and
-        // corrects here. Read before the deferred re-pin gets a turn, so this
-        // pins the synchronous re-pin in `correctRowHeightIfNeeded` alone.
+        // corrects here, and NSTableView's layout moves the clip to keep its
+        // own choice of visible row in place. Read before the deferred re-pin
+        // gets a turn, so this pins the re-pins inside the pass alone: the
+        // correction's and the one at the end of the table's layout.
         scene.tableView.layoutSubtreeIfNeeded()
         let afterLayout = scene.screenOffset(ofRow: target.rowIndex)
         #expect(abs(afterLayout - Self.inset) <= 1,
@@ -204,6 +206,83 @@ struct PromptRailJumpTests {
         #expect(scene.coordinator.pendingJumpAnchor == nil, Self.releaseNote(scene))
         #expect(scene.coordinator.heldJumpTargetID == nil, Self.releaseNote(scene))
         #expect(scene.coordinator.lastJumpRelease == .readerScroll)
+    }
+
+    /// NSTableView's layout moves the clip itself when row heights have
+    /// changed, to keep its own choice of visible row in place. A move made
+    /// inside a layout pass is AppKit's: it keeps the pin and the hold, and the
+    /// end of the pass puts the target back. The same move outside a pass is
+    /// the reader's. The pass is bracketed by hand here, so the test does not
+    /// depend on which row AppKit happens to keep still.
+    @Test("a clip move inside the table's layout pass keeps the jump, and the pass's end re-pins it")
+    func layoutPassMoveKeepsHold() async throws {
+        let suiteName = "prompt-rail-jump-layout-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
+        let scene = try Self.primedAtEnd(items: items, appState: appState)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        let coordinator = scene.coordinator
+        let entries = coordinator.promptEntries
+        try #require(entries.count == Self.promptCount)
+        let target = entries[20]
+        let clip = scene.scrollView.contentView
+        try #require((scene.tableView as? TranscriptBubbleTableView)?.layoutObserver === coordinator,
+                     "precondition: the scene's table reports its layout passes to the coordinator")
+
+        coordinator.jump(toNodeID: target.id)
+        await Self.settleJump(scene)
+        try #require(coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+
+        coordinator.tableLayoutWillBegin()
+        scene.scroll(toY: clip.bounds.minY + 32)
+        #expect(coordinator.pendingJumpAnchor?.id == target.id, Self.releaseNote(scene))
+        #expect(coordinator.heldJumpTargetID == target.id, Self.releaseNote(scene))
+        coordinator.tableLayoutDidEnd()
+
+        let offset = scene.screenOffset(ofRow: target.rowIndex)
+        #expect(abs(offset - Self.inset) <= 1,
+                Comment(rawValue: "the end of the pass left the target at \(offset) pt"))
+        #expect(coordinator.lastJumpRelease == nil, Self.releaseNote(scene))
+
+        scene.scroll(toY: clip.bounds.minY + 32)
+        #expect(coordinator.pendingJumpAnchor == nil)
+        #expect(coordinator.heldJumpTargetID == nil)
+        #expect(coordinator.lastJumpRelease == .readerScroll)
+    }
+
+    @MainActor
+    private final class LayoutPassRecorder: TranscriptTableLayoutObserver {
+        var depth = 0
+        var maxDepth = 0
+        var passes = 0
+
+        func tableLayoutWillBegin() {
+            depth += 1
+            maxDepth = max(maxDepth, depth)
+        }
+
+        func tableLayoutDidEnd() {
+            depth -= 1
+            if depth == 0 { passes += 1 }
+        }
+    }
+
+    @Test("the transcript table brackets its layout and tile passes for its observer")
+    func bubbleTableReportsLayoutPasses() {
+        let table = TranscriptBubbleTableView()
+        let recorder = LayoutPassRecorder()
+        defer { withExtendedLifetime(recorder) {} }
+        table.layoutObserver = recorder
+
+        table.layout()
+        #expect(recorder.passes == 1)
+        table.tile()
+        #expect(recorder.passes == 2)
+        #expect(recorder.depth == 0, "every pass that began also ended")
+        #expect(recorder.maxDepth >= 1)
     }
 
     /// Away from the bottom nothing tail-follows, so this isolates what each

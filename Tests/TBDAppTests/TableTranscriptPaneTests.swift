@@ -1033,7 +1033,11 @@ struct TableTranscriptScene {
         // would come too late, because AppKit reads it once per process and
         // another suite may have built a table first. `prime(nodes:)` and
         // `requireDelegateRowHeights()` say so if it is ever on.
-        let tableView = NSTableView()
+        //
+        // The production table class, so the scene exercises its behaviour too:
+        // it reports its layout passes to the coordinator, which tells
+        // NSTableView's own clip moves during them from the reader's.
+        let tableView = TranscriptBubbleTableView()
         tableView.headerView = nil
         tableView.gridStyleMask = []
         tableView.backgroundColor = .clear
