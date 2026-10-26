@@ -532,7 +532,7 @@ it reads back to the daemon:
   is authoritative while detached.
 - When the daemon needs an attached session's screen (`tbd terminal output`,
   the modes a send composes against), it **pulls a snapshot from the app**
-  over the existing RPC; the app serializes its live terminal state on
+  over the app sidecar; the app serializes its live terminal state on
   request. A machine read therefore reaches whichever store is live, instead
   of a store that stopped being updated at attach. That is a routing
   guarantee, not a freshness guarantee: when the pull cannot be answered, the
@@ -638,12 +638,16 @@ Everything TBD does through tmux today, and its replacement:
     in the daemon verifies one; an identity that cannot be established signals
     nothing, lets the holder go without a kill, and leaves the row awake for a
     reconciler to judge.
-  - **A park ends only a session this daemon has adopted.** The daemon's
+  - **A live session parks only if this daemon has adopted it.** The daemon's
     reader for the session is the proof of adoption. With no reader, the
     session was never adopted or its reader is gone, and the park refuses by a
-    name of its own rather than end a process nothing in this daemon reads. The
-    idle sweep asks the same question before it arms a row, so a session the
-    park could never complete costs no request-and-refusal pair on every pass.
+    name of its own rather than end a process nothing in this daemon reads. A
+    session whose holder and child are both verifiably gone is the exception:
+    no reader can come back for it and there is nothing left to end, so it
+    parks without one rather than stay awake over nothing. That check fails
+    closed — a pid this daemon cannot confirm as gone counts as live. The idle
+    sweep asks the reader question before it arms a row, so a session the park
+    could never complete costs no request-and-refusal pair on every pass.
   - **Revive re-anchors the identity check.** The row records when its current
     child started, because a woken session's child is younger than its row and
     every reclaimer that verifies a recorded pid against a start time would

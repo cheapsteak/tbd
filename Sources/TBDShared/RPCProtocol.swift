@@ -2764,8 +2764,9 @@ public struct TerminalListParams: Codable, Sendable {
 }
 
 /// Which terminals `session.states` should report on. Absent `worktreeID` means
-/// every terminal — the ordinary call, since the method is built to be asked
-/// about every agent at once.
+/// every agent-bearing terminal in every worktree — the ordinary call, since
+/// the method is built to be asked about every agent at once. A plain shell is
+/// never reported on, whichever scope is asked.
 public struct SessionStatesParams: Codable, Sendable {
     public let worktreeID: UUID?
     public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
