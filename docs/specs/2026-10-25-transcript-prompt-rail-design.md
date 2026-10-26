@@ -55,14 +55,14 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
 A notch's length shows how much work its turn did, so the rail reads as a profile of the session: short notches for quick answers, long ones for turns where Claude read, edited and ran a lot.
 
 - **A turn** runs from an entry's row up to the next entry's row, or to the end of the transcript. A peer message starts a turn just as a prompt does.
-- **Work** is the number of tool calls in the turn's rows, plus every step its subagents took:
+- **Work** is the number of tool calls the session made in the turn's rows:
   - each standalone tool-call row counts one;
-  - a collapsed activity group counts the tool calls among its members and their subagents' steps, which `ActivityGroupSummary` reports for the purpose — its existing `itemCount` counts every grouped row, not just tool calls;
-  - each subagent summary row adds its step count.
+  - a collapsed activity group counts the tool calls among its members, which `ActivityGroupSummary` reports for the purpose — its existing `itemCount` counts every grouped row, not just tool calls;
+  - launching a subagent is one tool call. The steps the subagent takes are recorded in its own transcript file, which the transcript pane does not read, so they do not count.
 
   Tool calls the transcript already hides as bookkeeping (`TodoWrite`, `TaskUpdate`, `TaskCreate`, `Skill`) are not rows, so they do not count.
 - **Scale** – relative to the session's busiest turn, on a log scale: length = 4 + 12 × log(1 + n) / log(1 + busiest) points, so a turn with no tool calls is 4pt and the busiest turn so far is 16pt. When a busier turn arrives, every notch rescales.
-- **Live** – the last turn's notch grows while Claude works. Counting is an integer pass over the rows, with no text read, so the coordinator redoes it on every update, including the ticks that only advance a subagent's step count, and tells the rail only when a count changes. The cached first-line projection is untouched by it.
+- **Live** – the last turn's notch grows while Claude works. Counting is an integer pass over the rows, with no text read, so the coordinator redoes it on every update, including tail re-renders, and tells the rail only when a count changes. The cached first-line projection is untouched by it.
 
 The count reads node data only, like the rest of the outline.
 
@@ -167,7 +167,7 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - `PromptRailLayout`: the pitch at both clamps and between them, and the overflow offset near both ends.
   - `PromptRailActiveRule`: the probe line, the bottom rule, the no-entry-above rule and the held jump target.
   - Time formatting for today, earlier days and a missing timestamp.
-  - Work counts: standalone tool calls, a collapsed group's tool calls and subagent steps, subagent summary rows, a peer-started turn, the last turn running to the end, hidden bookkeeping tools absent; and the length mapping at zero, at the busiest turn, and when a busier turn rescales the rest.
+  - Work counts: standalone tool calls, a collapsed group's tool calls, an expanded group counted once, a peer-started turn, the last turn running to the end, hidden bookkeeping tools absent; and the length mapping at zero, at the busiest turn, and when a busier turn rescales the rest.
 - **Hover model** – against `EventDrivenTestClock`: the 80ms open, the 100ms grace, re-arming after Escape and after a click, and closing on app deactivation.
 - **Coordinator, offscreen** – in `TableTranscriptHarness`:
   - the active entry follows a scroll;
@@ -175,7 +175,7 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - a reader scroll releases the jump anchor, and an append does not;
   - an unknown ID leaves the scroll position alone;
   - building the outline realizes no cells, which checks the first lazy-rendering rule;
-  - a turn's count grows as tool calls append and as a subagent's step count advances, and the rail hears only actual changes.
+  - a turn's count grows as tool calls arrive, whether appended or as a tail re-render, and the rail hears only actual changes.
 - **Keyboard** – previous and next from the middle, from inside an exchange, from the first prompt and from the last.
 - **Views, offscreen** – notch geometry and colours, the overflow offset and fade, the wheel handed to the transcript, the accessibility buttons, and the card's rows, size caps, in-place updates, Escape monitor and key-window close.
 - **Mounting, offscreen** – a pane-shaped mount keeps the gutter inside the table's view and makes the rail the presenter, with and without earlier history; a new pane identity rebuilds the rail; a table with no mount has no rail, card or gutter.
@@ -186,6 +186,7 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
 - Wheel-scrolling the rail.
 - Renaming, hiding or grouping prompts.
 - A complete prompt index for the Remote pane before its history has loaded, which would need a new RPC.
+- Counting a subagent's own steps toward its turn's work, which would mean reading each subagent's transcript file alongside the session's.
 
 ## Rejected alternatives
 
@@ -199,5 +200,5 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - SwiftUI has no public way to forward a wheel event to the table's scroll view, so the gutter becomes a dead zone for scrolling.
   - The transcript is already AppKit. Views inside its hierarchy share its layout, stacking and event routing with no bridge between frameworks.
 - **A show/hide preference** – the rail acts on nothing by itself, and each preference is another layout to test.
-- **Other meanings for notch length** – time taken, context-window fill and reply size each fit the length channel. Time counts waits on the reader's answers and permission prompts as work. Context fill is cumulative, so it says more about the session than the turn, and needs the model's window size. Reply size ignores the tool activity that makes up most of a coding turn. Tool calls, with subagent steps, track what the reader means by "a big turn" most directly.
+- **Other meanings for notch length** – time taken, context-window fill and reply size each fit the length channel. Time counts waits on the reader's answers and permission prompts as work. Context fill is cumulative, so it says more about the session than the turn, and needs the model's window size. Reply size ignores the tool activity that makes up most of a coding turn. Tool calls track what the reader means by "a big turn" most directly.
 - **A fixed scale for notch length** – fixed thresholds or a fixed ceiling keep a notch's length comparable across sessions and stable after its turn ends, but a quiet session then uses only the short end and a busy one saturates at the ceiling. Scaling to the session's busiest turn always uses the whole range.
