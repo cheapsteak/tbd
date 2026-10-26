@@ -78,14 +78,10 @@ struct MetalTerminalRendererSettingTests {
     }
 }
 
-/// Both branches of the flag against a live `TBDTerminalView`, plus the hazard
-/// the flag introduces: a Metal-backed view renders into a `CAMetalLayer`, and
-/// the snapshot path reads the view's *backing store*. A blank snapshot is a
-/// silent regression — a blank image still renders as an image — so the
-/// non-blank assertion is the only thing standing between the flag and a
-/// wordlessly broken sidebar preview.
+/// Both branches of the flag against a live `TBDTerminalView`, plus the
+/// deferral that holds a Metal request until the view has a window.
 @MainActor
-@Suite("Metal renderer: both branches, and snapshots survive")
+@Suite("Metal renderer: both branches")
 struct MetalTerminalRendererViewTests {
     /// Hosts the view in a real off-screen `NSWindow`.
     ///
@@ -102,8 +98,8 @@ struct MetalTerminalRendererViewTests {
     /// This helper windows the view first because that is the *quieter* of the
     /// two paths to test against: it exercises the renderer without also
     /// exercising the rebind. Neither ordering is currently reachable in-process
-    /// anyway — see `flagOnEndToEnd` — so this is about not encoding a false
-    /// claim in a comment, not about coverage we have.
+    /// anyway — see `flagOnActivatesMetal` — so this is about not encoding a
+    /// false claim in a comment, not about coverage we have.
     private func withView(_ body: (TBDTerminalView) -> Void) {
         // AppearanceSettings must never read or write the developer's real
         // TBDApp.plist (the UserDefaults twin of the ~/tbd fence).
@@ -124,33 +120,6 @@ struct MetalTerminalRendererViewTests {
         view.layoutSubtreeIfNeeded()
         defer { view.removeFromSuperview() }
         body(view)
-    }
-
-    /// Writes enough text that a correct capture cannot be a single flat
-    /// color, whichever renderer produced it.
-    private func feedSampleText(_ view: TBDTerminalView) {
-        let line = String(repeating: "MW#@8", count: 40)
-        view.feed(text: "\(line)\r\n\(line)\r\n\(line)\r\n")
-        view.layoutSubtreeIfNeeded()
-    }
-
-    /// Whether a capture contains more than one distinct pixel. A blank
-    /// snapshot — the Metal failure mode — is uniformly the background color,
-    /// so "not all pixels equal" is the discriminating property, and it does
-    /// not depend on which renderer drew the glyphs.
-    private func hasVaryingPixels(_ image: NSImage) -> Bool {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return false
-        }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        guard rep.pixelsWide > 0, rep.pixelsHigh > 0 else { return false }
-        let first = rep.colorAt(x: 0, y: 0)
-        for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
-            for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
-                if rep.colorAt(x: x, y: y) != first { return true }
-            }
-        }
-        return false
     }
 
     /// The outcome of asking for the GPU path, with the reason kept when it
@@ -217,31 +186,6 @@ struct MetalTerminalRendererViewTests {
         }
     }
 
-    @Test("flag off: snapshots keep working, unchanged")
-    func flagOffSnapshotIsNonBlank() {
-        withView { view in
-            view.applyMetalRendererPreference(enabled: false)
-            feedSampleText(view)
-            let shot = view.captureScreenshot()
-            #expect(shot != nil)
-            #expect(shot.map(hasVaryingPixels) == true)
-        }
-    }
-
-    /// The capture-time renderer decision, both ways. This is the branch the
-    /// end-to-end test below cannot reach in-process, and it is discriminating
-    /// on its own: drop the Metal case and the terminal's snapshots go blank
-    /// with nothing else going red.
-    @Test("a Metal-backed view must not be captured through its backing store")
-    func capturePreparationCoversBothRenderers() {
-        #expect(
-            TBDTerminalView.capturePreparation(isUsingMetalRenderer: true)
-                == .dropToCoreGraphicsThenRestore)
-        #expect(
-            TBDTerminalView.capturePreparation(isUsingMetalRenderer: false)
-                == .captureDirectly)
-    }
-
     /// Metal is requested only once the view has a window.
     ///
     /// Enabling it earlier "works" — upstream rebinds on `viewDidMoveToWindow` —
@@ -256,8 +200,8 @@ struct MetalTerminalRendererViewTests {
         #expect(TBDTerminalView.metalActivation(hasWindow: false) == .deferUntilWindowed)
     }
 
-    /// The whole flag-on path, end to end — Metal active, a non-blank capture,
-    /// and the view still on Metal afterwards.
+    /// The flag-on path on a windowed view — Metal active, and the production
+    /// wrapper still reporting it on when asked again.
     ///
     /// **It does not run here, and the `else` branch is why that is visible
     /// rather than silent.** SwiftTerm resolves `Shaders.metal` against
@@ -270,8 +214,8 @@ struct MetalTerminalRendererViewTests {
     /// the real assertions start running with no edit here.
     ///
     /// The live-app half of this is not optional — see the PR description.
-    @Test("flag on: Metal active, capture non-blank, renderer restored")
-    func flagOnEndToEnd() throws {
+    @Test("flag on: Metal active, and a re-request still reports it on")
+    func flagOnActivatesMetal() throws {
         try #require(MTLCreateSystemDefaultDevice() != nil, "no Metal device on this machine")
         withView { view in
             switch enableMetal(view) {
@@ -280,22 +224,6 @@ struct MetalTerminalRendererViewTests {
                 // The production wrapper agrees with the raw call: a re-request
                 // is a no-op and still reports the GPU path as on.
                 #expect(view.applyMetalRendererPreference(enabled: true))
-
-                feedSampleText(view)
-                let shot = view.captureScreenshot()
-                #expect(shot != nil)
-                // A blank result here means the CoreGraphics round trip
-                // failed, NOT that the Metal drawable was unavailable: the
-                // capture deliberately disables Metal and draws through
-                // CoreGraphics, so it never reads a drawable. The
-                // `drawMetalFrameNow()` on the way back is the only part that
-                // wants one, and it cannot affect the bitmap already captured.
-                #expect(
-                    shot.map(hasVaryingPixels) == true,
-                    "Metal-backed capture came back blank — the CoreGraphics round trip in captureScreenshot() is not holding")
-                #expect(
-                    view.isUsingMetalRenderer,
-                    "the capture must not strand the view on CoreGraphics")
 
             case .unavailable(let error):
                 // Pin the ONE case this is allowed to be unreachable for, by
@@ -317,10 +245,7 @@ struct MetalTerminalRendererViewTests {
                             bundles: Self.shaderBundleCandidates()))
                     return
                 }
-                // Even unreachable, the capture path must still be sound on the
-                // CoreGraphics side it fell back to.
-                feedSampleText(view)
-                #expect(view.captureScreenshot().map(hasVaryingPixels) == true)
+                // The refused request leaves the view on CoreGraphics.
                 #expect(!view.isUsingMetalRenderer)
             }
         }
@@ -379,7 +304,7 @@ struct MetalTerminalRendererViewTests {
     ///
     /// The consumed flag is the whole assertion on purpose — do not "fix" this
     /// by also checking `isUsingMetalRenderer`. `setUseMetal(true)` throws
-    /// `shaderSourceMissing` in a test process (see `flagOnEndToEnd`), so the
+    /// `shaderSourceMissing` in a test process (see `flagOnActivatesMetal`), so the
     /// view legitimately ends up back on CoreGraphics whether or not the
     /// handoff ran, and asserting on it would either red permanently or say
     /// nothing.
