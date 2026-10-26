@@ -25,9 +25,10 @@ There is a build-cost effect too. When a commit changes only `TBDDaemonLib`'s to
 - **`TestSupport`** stays generic. It depends on `TBDShared` and `Clocks` only.
 - **`DaemonTestSupport`** is a new library target at `Tests/DaemonTestSupport`.
   - It holds the four files above, moved without changes to their code.
-  - It depends on `TestSupport`, `TBDDaemonLib` and `TBDShared`.
-  - It does not re-export `TestSupport`. A file that uses a daemon helper imports `DaemonTestSupport` itself, so each file's imports say what it uses.
-- **`TBDDaemonTests`** adds `DaemonTestSupport` and the `SwiftTerm` product.
+  - It depends on `TBDDaemonLib` and `TBDShared`, which is all the four files use.
+  - A file that uses a daemon helper imports `DaemonTestSupport` itself, so each file's imports say what it uses.
+  - It joins the SwiftLint scope in the same way as `TestSupport`, so the moved files are still linted.
+- **`TBDDaemonTests`** adds `DaemonTestSupport`, and the `SwiftTerm` product for the suite it receives below.
 - **`TBDDaemonLiveTests`** adds `DaemonTestSupport`.
 - **`TBDAppTests`** drops `TBDDaemonLib`.
 - **`ReplayWriterRoundTripTests.swift`** moves from `Tests/TBDAppTests` to `Tests/TBDDaemonTests`.
@@ -39,10 +40,13 @@ There is a build-cost effect too. When a commit changes only `TBDDaemonLib`'s to
 
 SwiftPM writes every module it builds into one shared search directory. A target can therefore import a module it doesn't declare, and the import compiles whenever that module happens to be built first. Without a guard, the boundary above can wear away unnoticed.
 
-- **The check.** The CI `test` job's build step passes `--explicit-target-dependency-import-check error`. SwiftPM then fails the build when a target imports a first-party module that its `Package.swift` entry doesn't declare.
+- **The check.** The CI `test` job's build step passes `--explicit-target-dependency-import-check error`. Before it compiles, SwiftPM pre-scans each target's imports. The build fails when a target imports a module of the package graph that its dependencies don't reach.
+- **It counts the whole dependency tree.** A target may import anything its dependencies reach, not only what its own `Package.swift` entry lists. For example, `TBDAppTests` may import `TBDShared` because `TBDApp` depends on it.
+- **What it holds here.** After the change, nothing that `TBDAppTests` or `TestSupport` depends on reaches `TBDDaemonLib`, so importing it fails the build. Adding the dependency back in `Package.swift` would pass the check, but that is a manifest change that a reviewer sees.
 - **The build step only.** The option goes on that step, not in `CI_SWIFTPM_FLAGS`. It changes no compiled output, so the cache key stays as it is, and the test passes run with `--skip-build`.
-- **It covers every target.** It catches drift in every other target too, not just this boundary. Where it finds an existing violation, the fix is to declare the real dependency or to drop the unused import.
-- **The fallback.** If the option has no effect on Swift 6.3, a shell check in the `lint` job takes its place. That check fails when any file under `Tests/TBDAppTests` or `Tests/TestSupport` imports `TBDDaemonLib`. "No effect" means that the deliberate stray import described under Verification still builds.
+- **It covers every target.** It checks every target's imports, not just this boundary, and third-party modules as well as first-party ones. A scan of every target's imports against its dependency tree finds no import that breaks it today.
+- **It is best-effort.** SwiftPM skips the check without a message when the compiler has no import pre-scan. It also stops checking when the pre-scan of one target fails, and it visits targets in an order that changes from run to run. A green build therefore doesn't prove that the check ran. The verification below is what proves it.
+- **The fallback.** If the option has no effect on Swift 6.3, a check in the `lint` job takes its place. That check fails when any file under `Tests/TBDAppTests` or `Tests/TestSupport` imports `TBDDaemonLib`. "No effect" means that a deliberate stray import described under Verification still builds in any verification run.
 
 ### Documentation
 
@@ -54,7 +58,9 @@ These say where a moved helper or test lives, or why a target depends on the dae
 
 ## Verification
 
-- **The guard bites.** A throwaway `preflight/` branch adds `import TBDDaemonLib` to one file in `Tests/TBDAppTests`. Its CI build must fail with the import check's error. The branch is never merged, and it is deleted afterwards.
+- **The guard bites.** A throwaway `preflight/` branch adds `import TBDDaemonLib` to one file in `Tests/TBDAppTests` and to one file in `Tests/TestSupport`.
+  - Its CI build must fail with the import check's error for both targets, on two separate runs. Two runs, because the order in which SwiftPM visits targets changes from run to run.
+  - The branch is never merged, and it is deleted afterwards.
 - **No test is lost.** Each CI pass runs the same suites before and after. `ReplayWriterRoundTripTests` runs in the pass that covers `TBDDaemonTests`, and no pass filter in `test.yml` names it under its old target.
 - **The required `test` job passes** with the import check enabled.
 
@@ -67,5 +73,5 @@ These say where a moved helper or test lives, or why a target depends on the dae
 
 - **Keep the name `TestSupport` for the daemon helpers, and move the generic files to a new target below it.** This touches fewer files (55 app and holder test files instead of 154 daemon and live ones). But the generic name would then label the daemon-specific target, and the misleading name would outlive the migration.
 - **Put the helpers straight into the test targets.** This needs no new target. But the two helpers that the live tests also use would then exist twice.
-- **Only a lint check for this one boundary.** It is simple and certain. But it guards one edge, while the SwiftPM check guards every target's declared dependencies. It stays as the fallback.
+- **Only a lint check for this one boundary.** It is simple and certain. But it guards one edge, while the SwiftPM check covers every target's imports. It stays as the fallback.
 - **No guard.** The boundary would then rest on an import that happens to fail, and it would wear away unnoticed.
