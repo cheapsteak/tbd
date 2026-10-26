@@ -313,11 +313,38 @@ like; a hit spends 25 to 56 seconds restoring. So 1250 s is the measured
 cold-cache figure for the compile plus a full 5,529-test daemon pass, and
 1800 s clears it by 45% — more than that for the compile alone. The warm-cache
 runs still spread 73–996 s, because those runs all force-rebuilt TBDShared and
-TBDDaemonLib and a PR's first run restores only the deps-only fallback key, so
-a bound sized to the warm median would end healthy builds. 1b and 2 measured
-128 s and 71 s of step time on the split's first CI run, so 600 s is several
-times a healthy run while still ending a wedge inside the step's own bound; 1a
-runs the daemon half predicted to be smaller and shares 1b's budget.
+TBDDaemonLib and a PR's first run restores only a fallback entry, so a bound
+sized to the warm median would end healthy builds. Those runs compiled with
+SwiftPM's default debug information. Paired cold builds put the job's lighter
+flags (below) at about 0.825 of the default's compile time; whether these warm
+and compile-plus-test figures shrink by the same factor is inferred, not
+measured, so the bound stays sized against them as measured. 1b and 2 measured 128 s and 71 s of step time on the split's first CI run, so
+600 s is several times a healthy run while still ending a wedge inside the
+step's own bound; 1a runs the daemon half predicted to be smaller and shares
+1b's budget.
+
+The build step and all four passes compile with
+`--disable-index-store -Xswiftc -gline-tables-only`, defined once as the test
+job's `CI_SWIFTPM_FLAGS` and spelled on each step's own command line. The first
+stops every compile writing an index store, which nothing on a runner reads;
+the second keeps function names and line tables and drops type and variable
+information. That costs a stall report nothing: a `sample` stack still names
+each frame's function and file:line, which is what the report is read for, and
+`sample` never shows local variables. No step symbolicates anything else — the
+stall files are the only stacks CI collects, and no step runs `atos` or lldb.
+Measured as paired cold builds, both arms of a pair on one `macos-26` runner
+(3 cores, Swift 6.3.3) and the pairs run in both orders, the flags take 0.825
+of the default's time either way round: 795.1 s against 656.1 s in run
+40222086540, and 1124.8 s against 927.5 s in run 40232573803. Only same-runner
+pairs count, because the same build took about 41% longer on the slower of the
+two runners (795.1 s against 1124.8 s with the defaults, 656.1 s against
+927.5 s with the flags). `.build`
+shrinks from about 4.9 GB to 4.4 GB; the index store was 174 MB of that, and
+the test bundle's dSYM drops from 655 MB to 443 MB. A pass carries the flags
+although it compiles nothing because it re-plans from its own command line, and
+with the build step's flags it plans exactly what that step compiled. The flags
+stay out of `scripts/swift-safe` and `scripts/test.sh`, which forward them
+untouched, so a developer's build keeps full debug information for lldb.
 
 The build step carries no watchdog. The failure the watchdog exists for — a
 test process wedged where no time limit reaches it — is not one a compile has

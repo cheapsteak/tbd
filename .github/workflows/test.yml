@@ -461,6 +461,51 @@ jobs:
       # by spelling `-j "$TBD_SWIFT_JOBS"`, and the four `scripts/test.sh` steps
       # through the wrapper. One cap, one place.
       TBD_SWIFT_JOBS: "3"
+      # The debug information this job compiles with, lighter than SwiftPM's
+      # debug default. `--disable-index-store` stops every compile writing an
+      # index store, which nothing on a runner reads. `-Xswiftc
+      # -gline-tables-only` keeps function names and line tables and drops
+      # type and variable information.
+      #
+      # What that keeps: crash reports and `sample` stacks still name each
+      # frame's function and file:line, and lldb breakpoints and backtraces
+      # keep file:line. What it loses: lldb shows shorter function names and
+      # no local variables. Nothing in this job needs either loss back. The
+      # stall watchdog's `sample` files are read for the function and line a
+      # thread is parked in (docs/specs/2026-09-04-quiet-pass-stall-watchdog-design.md),
+      # no step runs `atos`, lldb or any other symbolicator, and macOS finds
+      # the tests by loading the bundle, not by reading an index.
+      #
+      # Measured as paired cold builds, both arms on one `macos-26` runner
+      # (3 cores, Swift 6.3.3), in both orders: SwiftPM's defaults 795.1 s then
+      # these flags 656.1 s (run 40222086540), and these flags 927.5 s then the
+      # defaults 1124.8 s (run 40232573803). The ratio is 0.825 in both orders,
+      # so building second buys nothing, and only same-runner pairs count: the
+      # same build took about 41% longer on the slower of the two runners
+      # (795.1 s against 1124.8 s with the defaults, 656.1 s against 927.5 s
+      # with these flags). `.build` shrinks from
+      # about 4.9 GB to 4.4 GB — the 174 MB index store goes, and the test
+      # bundle's dSYM drops from 655 MB to 443 MB. On a typical incremental
+      # build (513 s median) the same ratio predicts 85-95 s saved; that figure
+      # is inferred, not measured.
+      #
+      # ONE DEFINITION, SPELLED BY EVERY STEP THAT REACHES SWIFTPM: the build
+      # and all four passes. Each reads it with `${CI_SWIFTPM_FLAGS:?…}`, so a
+      # step that runs without it fails on its first line instead of building
+      # with the defaults, and expands it on its own command line rather than
+      # leaving a wrapper to supply it. The passes carry the flags although
+      # they compile nothing; see "THE PASSES CARRY THE BUILD'S FLAGS" at the
+      # build step.
+      # `scripts/nightly-flake-stress.test.sh`, which `plans-guard` runs, fails
+      # when a command in this job runs `scripts/swift-safe`, `scripts/test.sh`
+      # or `scripts/ci/watched-test-pass.sh` without them, so a new pass or a
+      # retry cannot drop them silently.
+      #
+      # CI ONLY. `scripts/swift-safe` and `scripts/test.sh` forward the flags
+      # untouched and their defaults are unchanged, so a developer's build
+      # keeps full debug information for lldb. The cache key carries this
+      # value; see the restore step.
+      CI_SWIFTPM_FLAGS: "--disable-index-store -Xswiftc -gline-tables-only"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -617,9 +662,25 @@ jobs:
           # set (same Package.resolved hash) — without this scoping, restore
           # could pull a cache from before a dep was added, leaving stale
           # `.build/checkouts/` that breaks SPM resolution of binary targets.
-          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          #
+          # Both also carry the job's CI_SWIFTPM_FLAGS, so this job restores
+          # only artifacts compiled with the flags it compiles with. Every
+          # compile command names those flags, so an entry built with others
+          # gives back its dependency checkouts and nothing else: the whole
+          # package compiles again. An exact-key hit on such an entry would
+          # also skip the save below (`cache-hit`), so every later run with the
+          # same sources would restore it and pay that compile again. And an
+          # index store restored into `.build` would ride along, unread, in
+          # every entry built on top of it.
+          #
+          # The flags sit after the dependency hash, not before it, because the
+          # nightly and the flake fixer restore this job's entries through the
+          # `…-deps-<hash>-` prefix. They build with SwiftPM's defaults, so what
+          # they take from an entry is its dependency checkouts, and those do
+          # not depend on the flags.
+          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-flags-${{ env.CI_SWIFTPM_FLAGS }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
-            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
+            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-flags-${{ env.CI_SWIFTPM_FLAGS }}-
 
       # A restored `.build/` can come back with a dependency checkout present but
       # its manifest missing, which fails the job at manifest planning before a
@@ -767,11 +828,12 @@ jobs:
       # SwiftPM maps it to the `allIncludingTests` subset, which is the subset
       # `swift test` builds when it is given no `--test-product`
       # (`buildTestsIfNeeded` in SwiftPM's `SwiftTestCommand.swift`), and in a
-      # debug build testability is on either way. Nothing the passes forward
-      # changes what is compiled — `--parallel`, `--no-parallel`, `--filter`,
-      # `--skip` and the xUnit pair choose which tests run and where the results
-      # go — and the one flag that bears on the build, `-j`, comes from the same
-      # TBD_SWIFT_JOBS through the same wrapper.
+      # debug build testability is on either way. Of what the passes forward,
+      # `--parallel`, `--no-parallel`, `--filter`, `--skip` and the xUnit pair
+      # choose which tests run and where the results go, and change nothing that
+      # is compiled. The flags that do bear on the build are this step's own:
+      # `-j` comes from the same TBD_SWIFT_JOBS through the same wrapper, and
+      # every pass spells the same CI_SWIFTPM_FLAGS this step does.
       #
       # IT ALSO BUILDS EVERY EXECUTABLE TARGET, which is why the job has no
       # separate build of TBDCLI and TBDDaemon. A build without `--build-tests`
@@ -793,6 +855,17 @@ jobs:
       # the job red on this step, with the `::error::` line below naming the
       # cause, and every pass is skipped rather than run against the wrong code.
       #
+      # THE PASSES CARRY THE BUILD'S FLAGS, the job's CI_SWIFTPM_FLAGS, although
+      # they compile nothing. A pass re-plans the build graph (see "WHAT
+      # `--skip-build` SKIPS" above) from its own command line, and the test
+      # bundle it then looks for sits under `.build/<triple>/debug/` whatever
+      # the debug-information flags are, so a pass planned without them would
+      # most likely still find the bundle this step linked and run it. "Most
+      # likely" is not good enough for a verdict, and identical flags remove the
+      # question: every pass plans exactly what this step compiled, and a pass
+      # that ever lost `--skip-build` would find the build up to date rather
+      # than compile the whole package again with other flags.
+      #
       # 30 minutes, which is 1800 s: 45% above the slowest measured run of a
       # first test step that compiled for itself, and that figure covers the
       # compile AND a full daemon test pass, so the compile alone has more room
@@ -805,7 +878,12 @@ jobs:
       # cold-cache figure, over a full 5,529-test daemon pass on top of the
       # compile. Warm-cache runs still spread 73–996 s, because the runs
       # measured all force-rebuilt TBDShared and TBDDaemonLib and a PR's first
-      # run restores only the deps-only fallback key.
+      # run restores only a fallback entry. Those runs compiled with SwiftPM's
+      # default debug information. Paired cold builds put CI_SWIFTPM_FLAGS at
+      # about 0.825 of the default's compile time on the same runner; whether
+      # these warm and compile-plus-test figures shrink by the same factor is
+      # inferred, not measured, so the bound stays sized against them as
+      # measured.
       #
       # NO STALL WATCHDOG, unlike the passes. The watchdog exists for one
       # failure: a test process wedged where no time limit can reach it — the
@@ -827,8 +905,9 @@ jobs:
         id: build
         timeout-minutes: 30
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           status=0
-          scripts/swift-safe build --build-tests -j "$TBD_SWIFT_JOBS" || status=$?
+          scripts/swift-safe build --build-tests -j "$TBD_SWIFT_JOBS" "${swiftpm_flags[@]}" || status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::The build exited $status, so all four test passes are skipped: they run with --skip-build, and after a failed build that would test whatever stale bundle .build/ still holds instead of this commit."
           fi
@@ -1179,11 +1258,12 @@ jobs:
         # sampling and the kill sweep.
         timeout-minutes: 15
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-daemon-a --budget-seconds 600 \
             --floor 1200 \
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
-            -- --fingerprint --skip-build --parallel --filter '^TBDDaemonTests\.[A-O]' \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --filter '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-a.xml --experimental-xunit-message-failure
 
       - name: Test (fast parallel pass 1b — the rest of TBDDaemonTests)
@@ -1206,11 +1286,12 @@ jobs:
         # it.
         timeout-minutes: 15
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-daemon-b --budget-seconds 600 \
             --floor 1500 \
             --floor-message 'the --filter/--skip pair over-matched or the target was renamed.' \
-            -- --fingerprint --skip-build --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]' \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-b.xml --experimental-xunit-message-failure
 
       - name: Test (fast parallel pass 2 — everything except TBDDaemonTests and the live target)
@@ -1227,11 +1308,12 @@ jobs:
         # sweep.
         timeout-minutes: 15
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-app --budget-seconds 600 \
             --floor 1900 \
             --floor-message 'the --skip regex over-matched or a target was renamed.' \
-            -- --fingerprint --skip-build --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
                --xunit-output /tmp/xunit-app.xml --experimental-xunit-message-failure
 
       - name: Test (quiet pass — tier-3 live suites, serial, idle machine)
@@ -1256,11 +1338,12 @@ jobs:
         # the artifact upload. The whole expiry path was measured at 42 s.
         timeout-minutes: 15
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name quiet-pass --budget-seconds 720 \
             --floor 35 \
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
-            -- --fingerprint --skip-build --filter '^TBDDaemonLiveTests\.' --no-parallel \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --filter '^TBDDaemonLiveTests\.' --no-parallel \
                --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure
 
       # Every watched pass writes its stall files as `<name>-stall-*.txt`, so one

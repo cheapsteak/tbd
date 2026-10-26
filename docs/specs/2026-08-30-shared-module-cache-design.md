@@ -125,6 +125,34 @@ for. The default location is also the one the CI cache already carries: the test
 the home directory, outside every cached path. Both branches of this condition are
 tested.
 
+**CI's lighter debug information comes from the workflow, not from here.** The test
+job compiles with `--disable-index-store -Xswiftc -gline-tables-only`, which change
+every compile command just as the cache path does. The alternation this spec removes
+needs two entry points disagreeing over one tree. In the test job the build step and
+every pass spell the same flags from one job-level variable, and a developer machine,
+where entry points do meet, never sees them, so the wrapper's defaults stay SwiftPM's.
+The cost of the disagreement falls where the test job's cache is shared. The nightly
+and the flake fixer restore its entries but build with SwiftPM's defaults, so they
+compile the whole package and keep only the dependency checkouts. The test job's cache
+key carries the flags, so it never restores an entry compiled with others.
+
+The nightly's exact key, which carries no flags, can therefore never hit: its restore
+always takes a fallback entry, and its stress harness compiles the whole package at
+two jobs. That costs it a few minutes at most, and none of its limits needs to move:
+
+- **What it paid already** – over the nine nightlies from 2026-10-16 to 2026-10-25 the
+  harness build took 13.5 to 20.1 minutes after an exact-key hit every night, because
+  the nightly does not restore source mtimes and so recompiled most of the package
+  anyway.
+- **What it pays now** – a cold build at two jobs, measured at 1167 s (run 37686691741)
+  and 1198 s (run 40183850233), about 19.5 to 21 minutes. The harness's own build
+  deadline, `BUILD_DEADLINE_S`, is 1800 s.
+- **The stress step's 120 minutes** – healthy nights took 47 to 63 minutes end to end,
+  and nights with one wedged whole-fast-pass iteration (about 44 minutes each) took
+  96, so up to seven more minutes of build leaves both inside the bound. Two wedges
+  overrun it whatever the build costs: 2026-10-20 timed out after a 15.8-minute build.
+  The job's 180 minutes sit above the step's.
+
 ## What it costs and what it returns
 
 **Read every figure here as a snapshot of a moving fleet.** `scripts/reclaim-build.sh`

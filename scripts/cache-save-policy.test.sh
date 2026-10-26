@@ -13,7 +13,10 @@
 # Neither failure has a symptom this repo's suites can see, so the branches are
 # exercised here instead. The same holds for WHEN it saves — right after the
 # build and the marker recording, before any test pass, so that a run cancelled
-# during its tests has still saved — and the step order is pinned here too.
+# during its tests has still saved — and the step order is pinned here too. So
+# is WHAT the key names: the `test` job's build flags, without which an entry
+# compiled with other flags would be restored and, on an exact hit, never
+# replaced.
 #
 # NOTHING HERE TOUCHES A REAL REPO, REMOTE OR CACHE, with one deliberate
 # exception noted below. Each case builds a throwaway git repo in a temp dir,
@@ -427,6 +430,62 @@ test_the_save_follows_the_build_and_the_marker_and_precedes_the_tests() {
   move_step_to_end "$WORKFLOW" "Record the sources these build artifacts came from" > "$d/record-last.yml"
   assert_eq "mutation: a marker recorded after the save is caught" "misordered" \
     "$(save_position_verdict "$d/record-last.yml")"
+}
+
+RESTORE_STEP_NAME='Restore SwiftPM build artifacts and dependencies'
+# What the restore step's key and fallback prefix both carry: the `test` job's
+# build flags.
+FLAGS_SEGMENT='-flags-${{ env.CI_SWIFTPM_FLAGS }}-'
+
+# `key <value>` and `prefix <value>` for the restore step's primary key and its
+# restore-keys lines, read from WORKFLOW or from the workflow file given as $1.
+restore_keys() {
+  awk -v name="      - name: $RESTORE_STEP_NAME" '
+    $0 == name { found = 1; next }
+    found && /^      - / { exit }
+    found && /^          key: / { sub(/^          key: /, ""); print "key " $0; next }
+    found && $0 == "          restore-keys: |" { inkeys = 1; next }
+    found && inkeys && /^            [^ ]/ { sub(/^            /, ""); print "prefix " $0; next }
+    found { inkeys = 0 }
+  ' "${1:-$WORKFLOW}"
+}
+
+# `keyed` when the key and its one fallback prefix both carry the build flags,
+# the prefix ending with them and being the key's own prefix; otherwise what is
+# wrong.
+key_verdict() {
+  local keys key prefix
+  keys="$(restore_keys "${1:-$WORKFLOW}")"
+  key="$(sed -n 's/^key //p' <<<"$keys")"
+  prefix="$(sed -n 's/^prefix //p' <<<"$keys")"
+  if [[ -z "$key" || -z "$prefix" ]]; then echo "missing"; return; fi
+  if [[ "$prefix" == *$'\n'* ]]; then echo "more than one prefix"; return; fi
+  if [[ "$key" != *"$FLAGS_SEGMENT"* ]]; then echo "key lacks the flags"; return; fi
+  if [[ "$prefix" != *"$FLAGS_SEGMENT" ]]; then echo "prefix lacks the flags"; return; fi
+  if [[ "$key" != "$prefix"* ]]; then echo "prefix is not the key's"; return; fi
+  echo "keyed"
+}
+
+# WHAT the key names. Every compile command carries the `test` job's
+# CI_SWIFTPM_FLAGS, so an entry built with other flags is compiled again in
+# full, and an exact-key hit on one would also skip the save (`cache-hit`):
+# every later run with the same sources would restore it and compile everything
+# again. Nothing goes red for that either, so the key and its fallback prefix
+# must both carry the flags.
+test_the_cache_key_carries_the_build_flags() {
+  local d
+  assert_eq "the key and its fallback prefix both carry the build flags" "keyed" "$(key_verdict)"
+  d="$(mktemp -d "${TMPDIR:-/tmp}/cache-save-policy.XXXXXX")"
+  FIXTURE_ROOTS+=("$d")
+  # MUTATION: the fallback prefix without them, which restores an entry
+  # compiled with other flags.
+  sed 's/flags-\${{ env\.CI_SWIFTPM_FLAGS }}-$//' "$WORKFLOW" > "$d/prefix.yml"
+  assert_eq "mutation: a fallback prefix without the flags is caught" "prefix lacks the flags" \
+    "$(key_verdict "$d/prefix.yml")"
+  # MUTATION: the primary key without them, whose exact hit would skip the save.
+  sed 's/-flags-\${{ env\.CI_SWIFTPM_FLAGS }}-src-/-src-/' "$WORKFLOW" > "$d/key.yml"
+  assert_eq "mutation: a key without the flags is caught" "key lacks the flags" \
+    "$(key_verdict "$d/key.yml")"
 }
 
 # --- run ---------------------------------------------------------------------
