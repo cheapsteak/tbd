@@ -391,14 +391,14 @@ struct PromptRailRowExpansionTests {
     func textColumnBounds() {
         typealias Metrics = PromptRailCardMetrics
         let width: CGFloat = 320
-        #expect(M.dashColumnTrailing == PromptRailLayout.width)
-        #expect(!M.isOverRowText(x: Self.overDashX, rowWidth: width))
-        #expect(!M.isOverRowText(x: M.dashColumnTrailing + 5, rowWidth: width), "the gap after the dash belongs to the dash")
-        #expect(!M.isOverRowText(x: M.textLeading - 0.5, rowWidth: width))
-        #expect(M.isOverRowText(x: M.textLeading, rowWidth: width))
-        #expect(M.isOverRowText(x: width / 2, rowWidth: width), "between the title and the time interrupts the column")
-        #expect(M.isOverRowText(x: width - M.trailingPadding - 0.5, rowWidth: width))
-        #expect(!M.isOverRowText(x: width - M.trailingPadding, rowWidth: width))
+        #expect(Metrics.dashColumnTrailing == PromptRailLayout.width)
+        #expect(!Metrics.isOverRowText(x: Self.overDashX, rowWidth: width))
+        #expect(!Metrics.isOverRowText(x: Metrics.dashColumnTrailing + 5, rowWidth: width), "the gap after the dash belongs to the dash")
+        #expect(!Metrics.isOverRowText(x: Metrics.textLeading - 0.5, rowWidth: width))
+        #expect(Metrics.isOverRowText(x: Metrics.textLeading, rowWidth: width))
+        #expect(Metrics.isOverRowText(x: width / 2, rowWidth: width), "the space between the title and the time does not interrupt the column")
+        #expect(Metrics.isOverRowText(x: width - Metrics.trailingPadding - 0.5, rowWidth: width))
+        #expect(!Metrics.isOverRowText(x: width - Metrics.trailingPadding, rowWidth: width))
     }
 
     @Test("a pointer in the gap between the dash column and the first line arms nothing; moving to the title arms after 150ms")
