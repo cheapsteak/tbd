@@ -61,6 +61,16 @@ enum PromptRailCardMetrics {
 
     /// Where row text starts: after the dash column and its gap.
     static var textLeading: CGFloat { dashColumnLeading + dashColumnWidth + dashGap }
+    /// Where the dash column ends: the rail's own trailing edge, since the
+    /// card's dashes sit over its notches.
+    static var dashColumnTrailing: CGFloat { dashColumnLeading + dashColumnWidth }
+
+    /// Whether a point `x` along a row, in list coordinates, is over the
+    /// row's text — its first line and time — rather than its dash column.
+    /// A row expands only for a pointer over its text.
+    static func isOverRowText(x: CGFloat) -> Bool {
+        x >= dashColumnTrailing
+    }
 
     /// The card's height over a list `contentHeight` tall and a rail
     /// `railHeight` tall: the list's, up to the rail's less `bottomClearance`.

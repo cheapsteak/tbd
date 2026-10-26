@@ -22,15 +22,22 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "prompt-rail")
 ///   redraw covers, from node data alone. Each row's dash is as long as its
 ///   notch (`PromptRailWorkScale`), so the dash column repeats the rail's
 ///   profile. A row click jumps and closes the card at once.
+/// - **Time column** – today's rows each show their time; an earlier day's
+///   first row shows its date and the rest of that day nothing
+///   (`PromptOutline.timeColumn`), worked out when the rows change and on
+///   each open, never per draw.
 /// - **Expansion** – a row that shows only part of its prompt, its first line
 ///   cut off or the prompt running past it, expands in place once the pointer
-///   has rested on it for `PromptRailCardMetrics.expansionDelay`
-///   (`PromptRailRowDwell`, on the injected clock):
+///   has rested over its text, right of the dash column, for
+///   `PromptRailCardMetrics.expansionDelay` (`PromptRailRowDwell`, on the
+///   injected clock). Over the dash column, where a pointer arriving from the
+///   rail rests, the row highlights and a click jumps but nothing expands.
 ///   `PromptRailRowExpansionView` draws over it and the rows beside it,
 ///   growing down from the row, or up to it near the bottom of the visible
 ///   list. It takes no events, so clicks and the wheel reach the list. It
-///   hides the moment the pointer leaves the row's band or the list scrolls,
-///   and the next row waits its own delay. Rows carry no tooltips.
+///   hides the moment the pointer leaves the row's band or moves onto the
+///   dash column, or the list scrolls, and the next row waits its own delay.
+///   Rows carry no tooltips.
 /// - **Earlier history** – with older Remote history not loaded, the first
 ///   row reads "Earlier prompts not loaded" beside a Load button that calls the
 ///   pane's load-earlier action. Nothing else here loads history.
@@ -72,6 +79,9 @@ final class PromptRailCardNSView: NSView {
     /// Whether the card has seen the pointer over it since it opened, from a
     /// tracking event or a read on opening. The row expansion waits for it.
     private var pointerInside = false
+    /// Whether the pointer was last seen over a row's text rather than the
+    /// dash column (`PromptRailCardMetrics.isOverRowText`).
+    private var pointerOverRowText = false
     /// Whether the hover model has been told the pointer is over the card.
     /// Kept apart from `pointerInside`: a pointer read on opening is not
     /// reported, and its first move reports it.
@@ -245,8 +255,9 @@ final class PromptRailCardNSView: NSView {
         // The card opens over the rail the pointer is on, and a tracking area
         // added under a still pointer sends no enter. A pointer already over
         // the list is seen now: its row, not the pointed notch's stand-in,
-        // takes the hover fill and waits to expand. Elsewhere, the stand-in
-        // stays and nothing waits.
+        // takes the hover fill, and waits to expand if the pointer is over its
+        // text — not over the dash column, where one arriving from the rail
+        // rests. Elsewhere, the stand-in stays and nothing waits.
         if let window {
             let point = pointerLocation(window)
             if listScrollView.contentView.bounds.contains(listView.convert(point, from: nil)) {
@@ -267,6 +278,7 @@ final class PromptRailCardNSView: NSView {
     func close() {
         isOpen = false
         pointerInside = false
+        pointerOverRowText = false
         cardHoverReported = false
         listView.hoveredRow = nil
         rowDwell.cancel()
@@ -428,6 +440,7 @@ final class PromptRailCardNSView: NSView {
             return
         }
         pointerInside = false
+        pointerOverRowText = false
         cardHoverReported = false
         listView.hoveredRow = nil
         hover.cardHoverChanged(false)
@@ -435,29 +448,33 @@ final class PromptRailCardNSView: NSView {
 
     /// The pointer is over the card at `windowPoint`: the row under it is
     /// hovered, and the row expansion's delay follows it. A changed row rests
-    /// the delay through `hoveredRow`; a pointer just arrived over the row
-    /// already highlighted, the one the card opened with, rests it here. A
-    /// move within a row measures nothing.
+    /// the delay through `hoveredRow`. The same row rests it here when the
+    /// pointer has just arrived over it — the row the card opened with — or
+    /// crossed between its dash column and its text. Any other move within a
+    /// row measures nothing.
     private func pointerSeen(at windowPoint: NSPoint) {
         let arrived = !pointerInside
+        let wasOverText = pointerOverRowText
         pointerInside = true
         let before = listView.hoveredRow
         updateHoveredRow(windowPoint: windowPoint)
-        if arrived && listView.hoveredRow == before { restRowDwell() }
+        if listView.hoveredRow == before && (arrived || pointerOverRowText != wasOverText) { restRowDwell() }
     }
 
-    /// The row under a window point.
+    /// The row under a window point, and whether the point is over row text.
+    /// The text side is set first, so a row change rests the delay knowing it.
     private func updateHoveredRow(windowPoint: NSPoint) {
         let point = listView.convert(windowPoint, from: nil)
+        pointerOverRowText = Metrics.isOverRowText(x: point.x)
         listView.hoveredRow = listView.clickableRow(at: point)
     }
 
     // MARK: Row expansion
 
     /// Rests the dwell on the hovered row when the pointer is over the card
-    /// and the row shows only part of its prompt, and on no row otherwise,
-    /// which hides any expansion at once. Measures only the hovered row's
-    /// first line.
+    /// and over the row's text, and the row shows only part of its prompt;
+    /// on no row otherwise, which hides any expansion at once. Measures only
+    /// the hovered row's first line.
     ///
     /// The pointer must have been seen over the card, by a tracking event or
     /// the read on opening. A card opens with the row for the pointed notch
@@ -466,7 +483,7 @@ final class PromptRailCardNSView: NSView {
     /// pointer; expanding it would put one prompt's text under the pointer
     /// while a click jumps to another.
     private func restRowDwell() {
-        guard isOpen, pointerInside, let row = listView.hoveredRow,
+        guard isOpen, pointerInside, pointerOverRowText, let row = listView.hoveredRow,
               let index = entryIndex(forRow: row), listView.showsPartOfPrompt(index)
         else {
             rowDwell.rest(on: nil)
@@ -553,6 +570,12 @@ final class PromptRailCardNSView: NSView {
     /// The list row with the hover fill; nil for none.
     var hoveredRow: Int? { listView.hoveredRow }
 
+    /// What entry `index`'s row shows in its time column, "" for nothing;
+    /// nil past the entries.
+    func timeText(forEntry index: Int) -> String? {
+        entries.indices.contains(index) ? listView.timeText(at: index) : nil
+    }
+
     /// Await the row expansion's armed delay, so a test asserts on the state
     /// it left rather than racing it.
     func _drainRowDwellForTesting() async {
@@ -618,9 +641,10 @@ private final class PromptRailCardListView: NSView {
         style.lineBreakMode = .byTruncatingTail
         return style
     }()
-    /// Time labels by entry id, built as rows are drawn and cleared on each
-    /// open so "today" is read afresh.
-    private var timeLabels: [String: String] = [:]
+    /// The time column, parallel to `entries` (`PromptOutline.timeColumn`)
+    /// as of `labelsNow`. Worked out when the entries change and on each
+    /// open, which reads "today" afresh; never per draw.
+    private var timeColumn: [String] = []
     private var labelsNow = Date()
     private var mouseDownRow: Int?
 
@@ -637,6 +661,7 @@ private final class PromptRailCardListView: NSView {
 
     func configure(entries: [PromptOutlineEntry], activeIndex: Int?, showsEarlierRow: Bool) {
         self.entries = entries
+        rebuildTimeColumn()
         self.showsEarlierRow = showsEarlierRow
         self.activeIndex = activeIndex
         if let hoveredRow, hoveredRow >= rowCount { self.hoveredRow = nil }
@@ -644,9 +669,19 @@ private final class PromptRailCardListView: NSView {
     }
 
     func refreshTimeLabels() {
-        timeLabels.removeAll()
         labelsNow = Date()
+        rebuildTimeColumn()
         needsDisplay = true
+    }
+
+    private func rebuildTimeColumn() {
+        timeColumn = PromptOutline.timeColumn(
+            entries.map(\.timestamp), now: labelsNow, calendar: .current, locale: .current)
+    }
+
+    /// Entry `index`'s time column: its time, its day's date, or "".
+    func timeText(at index: Int) -> String {
+        timeColumn.indices.contains(index) ? timeColumn[index] : ""
     }
 
     private func invalidateRow(_ row: Int) {
@@ -735,20 +770,13 @@ private final class PromptRailCardListView: NSView {
             .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: truncating,
         ]))
 
-        let label = timeLabel(for: entry)
+        let label = timeText(at: index)
         let time = label.isEmpty ? nil : NSAttributedString(string: label, attributes: [
             .font: timeFont, .foregroundColor: NSColor.secondaryLabelColor,
         ])
         var trailing = rowWidth - Metrics.trailingPadding
         if let time { trailing -= time.size().width + Metrics.timeGap }
         return (title, time, trailing - Metrics.textLeading)
-    }
-
-    private func timeLabel(for entry: PromptOutlineEntry) -> String {
-        if let cached = timeLabels[entry.id] { return cached }
-        let label = PromptOutline.timeLabel(entry.timestamp, now: labelsNow, calendar: .current, locale: .current)
-        timeLabels[entry.id] = label
-        return label
     }
 
     // MARK: Expansion

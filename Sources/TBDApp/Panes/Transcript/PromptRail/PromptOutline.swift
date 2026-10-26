@@ -209,6 +209,29 @@ enum PromptOutline {
         count == 1 ? "1 tool call" : "\(count) tool calls"
     }
 
+    /// The card's time column for entries with `timestamps`, in order.
+    /// Today's entries each show their time (`timeLabel`). An earlier day's
+    /// entries are listed in order, so only its first shows the date and the
+    /// rest of that day show nothing. An entry without a timestamp shows
+    /// nothing and starts no day: the next one with a timestamp is compared
+    /// with the last that had one.
+    static func timeColumn(_ timestamps: [Date?], now: Date, calendar: Calendar, locale: Locale) -> [String] {
+        var labels: [String] = []
+        labels.reserveCapacity(timestamps.count)
+        var lastDated: Date?
+        for timestamp in timestamps {
+            guard let date = timestamp else {
+                labels.append("")
+                continue
+            }
+            let today = calendar.isDate(date, inSameDayAs: now)
+            let sameDay = lastDated.map { calendar.isDate(date, inSameDayAs: $0) } ?? false
+            labels.append((today || !sameDay) ? timeLabel(date, now: now, calendar: calendar, locale: locale) : "")
+            lastDated = date
+        }
+        return labels
+    }
+
     /// Today: short local time. Earlier: abbreviated month and day.
     static func timeLabel(_ date: Date?, now: Date, calendar: Calendar, locale: Locale) -> String {
         guard let date else { return "" }

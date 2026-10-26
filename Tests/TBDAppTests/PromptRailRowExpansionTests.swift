@@ -13,9 +13,11 @@ import TestSupport
 /// rows that never expand, what it shows, where it goes, that it takes no
 /// events, that it follows the pointer rather than the row a card opened
 /// with — including a pointer already resting over the card as it opens —
-/// that it hides at once when the pointer changes rows or the list scrolls or
-/// resizes, and how new outlines reach one on screen. Every card takes the
-/// shipped delay, so the suite pins it.
+/// that it answers the row's text and never its dash column, that it hides at
+/// once when the pointer changes rows, moves onto the dash column, or the list
+/// scrolls or resizes, how new outlines reach one on screen, and the time
+/// column it repeats. Every card takes the shipped delay, so the suite pins
+/// it.
 @MainActor
 @Suite("Prompt rail row expansion", .clockDriven)
 struct PromptRailRowExpansionTests {
@@ -26,6 +28,11 @@ struct PromptRailRowExpansionTests {
     private static let delay = Duration.milliseconds(150)
     /// The pane `scene` lays the card out against unless told otherwise.
     private static let defaultPane = NSSize(width: 680, height: 600)
+    /// The middle of the dash column, where a pointer arriving from the rail
+    /// rests.
+    private static var overDashX: CGFloat {
+        PromptRailCardMetrics.dashColumnLeading + PromptRailCardMetrics.dashColumnWidth / 2
+    }
 
     /// Far more than six lines at the card's 282pt text width, on one line.
     private static let longPrompt = String(repeating: "the rail and its card line up ", count: 20)
@@ -362,6 +369,101 @@ struct PromptRailRowExpansionTests {
         #expect(scene.card.expandedRow == nil)
     }
 
+    // MARK: Text, not dash
+
+    @Test("a row's text starts where the dash column ends, at the rail's edge")
+    func textStartsAtTheRailsEdge() {
+        #expect(PromptRailCardMetrics.dashColumnTrailing == PromptRailLayout.width)
+        #expect(!PromptRailCardMetrics.isOverRowText(x: Self.overDashX))
+        #expect(!PromptRailCardMetrics.isOverRowText(x: PromptRailCardMetrics.dashColumnTrailing - 0.5))
+        #expect(PromptRailCardMetrics.isOverRowText(x: PromptRailCardMetrics.dashColumnTrailing))
+        #expect(PromptRailCardMetrics.isOverRowText(x: PromptRailCardMetrics.textLeading))
+    }
+
+    @Test("over the dash column a row highlights and jumps but never expands; over its text it does, and back on the dash it hides at once")
+    func dashColumnNeverExpands() async throws {
+        let scene = Self.scene((0..<10).map { Self.entry($0, Self.longPrompt) })
+        defer { scene.host.tearDown() }
+        let row = PromptRailCardMetrics.rowRect(2, width: scene.card.frame.width)
+        let overDash = NSPoint(x: Self.overDashX, y: row.midY)
+        let overText = NSPoint(x: row.midX, y: row.midY)
+
+        try scene.movePointer(toListPoint: overDash)
+        #expect(scene.card.hoveredRow == 2, "the row under the dash column lost its highlight")
+        #expect(await watchForSleeper(on: scene.clock) == false, "the dash column armed the delay")
+
+        try scene.movePointer(toListPoint: overText)
+        try await scene.clock.requireAdvanceWhenArmed(by: .milliseconds(149), timeout: Self.mainActorHop)
+        #expect(scene.card.expandedRow == nil, "the row expanded before 150ms over its text")
+        await scene.clock.advance(by: .milliseconds(1))
+        try #require(!scene.clock.hasSleeper, "the delay outlasted 150ms")
+        await scene.card._drainRowDwellForTesting()
+        #expect(scene.card.expandedRow == 2)
+
+        try scene.movePointer(toListPoint: overDash)
+        #expect(scene.card.expandedRow == nil, "the expansion outlived the pointer moving onto the dash column")
+        #expect(scene.card.expansionView.isHidden)
+        #expect(scene.card.hoveredRow == 2)
+
+        try scene.click(atListPoint: overDash)
+        #expect(scene.jumps.ids == ["p-2"], "a click on the dash column did not jump")
+    }
+
+    @Test("a card opening under a pointer resting on its dash column highlights the row there and expands nothing")
+    func openingOverTheDashColumnExpandsNothing() async throws {
+        // The usual case: the card's dash column lies over the rail's
+        // notches, where the pointer that opened it rests.
+        let scene = Self.scene(
+            (0..<40).map { Self.entry($0, Self.longPrompt) }, pane: NSSize(width: 680, height: 300),
+            pointedIndex: 5, pointerY: 53, pointerInCard: NSPoint(x: Self.overDashX, y: 53))
+        defer { scene.host.tearDown() }
+        #expect(scene.card.hoveredRow == 5)
+        #expect(await watchForSleeper(on: scene.clock) == false, "opening the card expanded a row by itself")
+        await scene.clock.advance(by: Self.delay)
+        await scene.card._drainRowDwellForTesting()
+        #expect(scene.card.expandedRow == nil)
+
+        let row = PromptRailCardMetrics.rowRect(5, width: scene.card.frame.width)
+        try scene.movePointer(toListPoint: NSPoint(x: row.midX, y: row.midY))
+        try await Self.fire(scene)
+        #expect(scene.card.expandedRow == 5, "moving onto the row's text did not expand it")
+    }
+
+    // MARK: Time column
+
+    @Test("an earlier day's date shows on its first row only, and an expansion repeats what its row shows")
+    func timeColumnAndExpansion() async throws {
+        // 12:00 and 12:30 UTC fall on one local day in every time zone.
+        let noon = try #require(Calendar(identifier: .gregorian).date(from: DateComponents(
+            timeZone: TimeZone(identifier: "UTC"), year: 2020, month: 1, day: 2, hour: 12)))
+        let halfPast = noon.addingTimeInterval(30 * 60)
+        let laterDay = noon.addingTimeInterval(3 * 24 * 60 * 60)
+        var entries = (0..<10).map { Self.entry($0, Self.longPrompt) }
+        entries[0] = Self.entry(0, Self.longPrompt, timestamp: noon)
+        entries[1] = Self.entry(1, Self.longPrompt, timestamp: halfPast)
+        entries[2] = Self.entry(2, Self.longPrompt, timestamp: laterDay)
+        let scene = Self.scene(entries)
+        defer { scene.host.tearDown() }
+        let expansion = scene.card.expansionView
+
+        let firstDate = PromptOutline.timeLabel(noon, now: Date(), calendar: .current, locale: .current)
+        #expect(scene.card.timeText(forEntry: 0) == firstDate)
+        #expect(scene.card.timeText(forEntry: 1) == "", "the day's second row repeated its date")
+        #expect(scene.card.timeText(forEntry: 2)
+                    == PromptOutline.timeLabel(laterDay, now: Date(), calendar: .current, locale: .current))
+        #expect(scene.card.timeText(forEntry: 3) == "", "a row with no timestamp showed a time")
+
+        try scene.movePointer(toRow: 1)
+        try await Self.fire(scene)
+        try #require(scene.card.expandedRow == 1)
+        #expect(expansion.content?.time == nil, "the expansion showed a date its row leaves blank")
+
+        try scene.movePointer(toRow: 0)
+        try await Self.fire(scene)
+        try #require(scene.card.expandedRow == 0)
+        #expect(expansion.content?.time?.string == firstDate)
+    }
+
     // MARK: New outlines
 
     @Test("changed rows hide the expansion at once, and it waits its delay again")
@@ -447,7 +549,7 @@ struct PromptRailRowExpansionTests {
         #expect(scene.card.expandedRow == 2)
     }
 
-    @Test("a pointer resting over the card as it opens expands the row under it, with no move")
+    @Test("a pointer resting over a row's text as the card opens expands that row, with no move")
     func restingPointerExpandsOnOpening() async throws {
         // A scrolling list: opening puts the pointed notch's row, 5, under
         // the pointer, which never moves.
@@ -584,6 +686,21 @@ private struct ExpansionScene {
             with: .mouseMoved, location: list.convert(point, to: nil), modifierFlags: [], timestamp: 0,
             windowNumber: host.window.windowNumber, context: nil, eventNumber: 0, clickCount: 0, pressure: 0))
         card.mouseMoved(with: event)
+    }
+
+    /// Clicks at `point` in the list's coordinates: a press and release on
+    /// the list, as AppKit delivers them there.
+    func click(atListPoint point: NSPoint) throws {
+        let list = try #require(card.listScrollView.documentView)
+        let location = list.convert(point, to: nil)
+        let down = try #require(NSEvent.mouseEvent(
+            with: .leftMouseDown, location: location, modifierFlags: [], timestamp: 0,
+            windowNumber: host.window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        let up = try #require(NSEvent.mouseEvent(
+            with: .leftMouseUp, location: location, modifierFlags: [], timestamp: 0,
+            windowNumber: host.window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 0))
+        list.mouseDown(with: down)
+        list.mouseUp(with: up)
     }
 
     /// Moves the pointer to the centre of list row `row`.

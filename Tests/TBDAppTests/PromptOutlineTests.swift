@@ -104,6 +104,46 @@ struct PromptOutlineTests {
             nil, now: now, calendar: calendar, locale: Locale(identifier: "en_US")) == "")
     }
 
+    @Test("the time column shows each of today's times, and an earlier day's date on its first row only")
+    func timeColumnMarksDayBoundaries() throws {
+        let calendar = try Self.gmtCalendar()
+        let locale = Locale(identifier: "en_US")
+        let now = try Self.october(25, 15, 0, in: calendar)
+        let todayEarly = try Self.october(25, 9, 0, in: calendar)
+        let todayLate = try Self.october(25, 14, 2, in: calendar)
+        let today = PromptOutline.timeColumn(
+            [todayEarly, todayLate], now: now, calendar: calendar, locale: locale)
+        #expect(today == [
+            PromptOutline.timeLabel(todayEarly, now: now, calendar: calendar, locale: locale),
+            PromptOutline.timeLabel(todayLate, now: now, calendar: calendar, locale: locale),
+        ])
+        #expect(today.allSatisfy { !$0.isEmpty }, "a row of today showed no time")
+
+        // Two earlier days, then today, with rows that have no timestamp
+        // scattered through: they show nothing and start no day.
+        let column = try PromptOutline.timeColumn([
+            nil,
+            Self.october(23, 9, 0, in: calendar),
+            Self.october(23, 10, 0, in: calendar),
+            nil,
+            Self.october(23, 11, 0, in: calendar),
+            Self.october(24, 9, 0, in: calendar),
+            Self.october(24, 18, 0, in: calendar),
+            todayEarly,
+            nil,
+            todayLate,
+        ], now: now, calendar: calendar, locale: locale)
+        let early = PromptOutline.timeLabel(todayEarly, now: now, calendar: calendar, locale: locale)
+        let late = PromptOutline.timeLabel(todayLate, now: now, calendar: calendar, locale: locale)
+        #expect(column == ["", "Oct 23", "", "", "", "Oct 24", "", early, "", late])
+
+        // An earlier day after today's rows still marks its first row.
+        let dayBefore = try Self.october(24, 9, 0, in: calendar)
+        #expect(PromptOutline.timeColumn([todayEarly, dayBefore], now: now, calendar: calendar, locale: locale)
+                    == [early, "Oct 24"])
+        #expect(PromptOutline.timeColumn([nil, nil], now: now, calendar: calendar, locale: locale) == ["", ""])
+    }
+
     @Test("first line reads the line holding the first non-blank character, whatever follows it")
     func firstLineSkipsBlankLinesAndStopsAtTheLine() {
         #expect(PromptOutline.firstLine(of: "  \n\t\n   fix   the\tbuild  \nsecond line\n") == "fix the build")
@@ -166,5 +206,15 @@ struct PromptOutlineTests {
             .peerMessage(id: "m", sender: sender, text: "hi", deliveredPayload: nil, timestamp: nil),
         ]))
         #expect(entries.first?.kind == .peer(sender: "x (unverified)"))
+    }
+
+    private static func gmtCalendar() throws -> Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(identifier: "GMT"))
+        return calendar
+    }
+
+    private static func october(_ day: Int, _ hour: Int, _ minute: Int, in calendar: Calendar) throws -> Date {
+        try #require(calendar.date(from: DateComponents(year: 2026, month: 10, day: day, hour: hour, minute: minute)))
     }
 }
