@@ -387,13 +387,36 @@ struct PromptRailRowExpansionTests {
 
     // MARK: Text, not dash
 
-    @Test("a row's text starts where the dash column ends, at the rail's edge")
-    func textStartsAtTheRailsEdge() {
-        #expect(PromptRailCardMetrics.dashColumnTrailing == PromptRailLayout.width)
-        #expect(!PromptRailCardMetrics.isOverRowText(x: Self.overDashX))
-        #expect(!PromptRailCardMetrics.isOverRowText(x: PromptRailCardMetrics.dashColumnTrailing - 0.5))
-        #expect(PromptRailCardMetrics.isOverRowText(x: PromptRailCardMetrics.dashColumnTrailing))
-        #expect(PromptRailCardMetrics.isOverRowText(x: PromptRailCardMetrics.textLeading))
+    @Test("a row's text column runs from its first line's leading edge to the end of the time, short of the trailing padding")
+    func textColumnBounds() {
+        typealias Metrics = PromptRailCardMetrics
+        let width: CGFloat = 320
+        #expect(M.dashColumnTrailing == PromptRailLayout.width)
+        #expect(!M.isOverRowText(x: Self.overDashX, rowWidth: width))
+        #expect(!M.isOverRowText(x: M.dashColumnTrailing + 5, rowWidth: width), "the gap after the dash belongs to the dash")
+        #expect(!M.isOverRowText(x: M.textLeading - 0.5, rowWidth: width))
+        #expect(M.isOverRowText(x: M.textLeading, rowWidth: width))
+        #expect(M.isOverRowText(x: width / 2, rowWidth: width), "between the title and the time interrupts the column")
+        #expect(M.isOverRowText(x: width - M.trailingPadding - 0.5, rowWidth: width))
+        #expect(!M.isOverRowText(x: width - M.trailingPadding, rowWidth: width))
+    }
+
+    @Test("a pointer in the gap between the dash column and the first line arms nothing; moving to the title arms after 150ms")
+    func gapBeforeTitleNeverArms() async throws {
+        let scene = Self.scene((0..<10).map { Self.entry($0, Self.longPrompt) })
+        defer { scene.host.tearDown() }
+        let row = PromptRailCardMetrics.rowRect(2, width: scene.card.frame.width)
+        let inGap = NSPoint(x: PromptRailCardMetrics.dashColumnTrailing + 5, y: row.midY)
+        let overTitle = NSPoint(x: PromptRailCardMetrics.textLeading + 10, y: row.midY)
+
+        try scene.movePointer(toListPoint: inGap)
+        #expect(scene.card.hoveredRow == 2)
+        #expect(await watchForSleeper(on: scene.clock) == false, "the gap before the title armed the delay")
+        #expect(scene.card.expandedRow == nil)
+
+        try scene.movePointer(toListPoint: overTitle)
+        try await Self.fire(scene)
+        #expect(scene.card.expandedRow == 2, "the title did not expand the row")
     }
 
     @Test("over the dash column a row highlights and jumps but never expands; over its text it does, and back on the dash it hides at once")

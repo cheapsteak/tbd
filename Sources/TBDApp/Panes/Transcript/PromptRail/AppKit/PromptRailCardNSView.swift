@@ -79,8 +79,9 @@ final class PromptRailCardNSView: NSView {
     /// Whether the card has seen the pointer over it since it opened, from a
     /// tracking event or a read on opening. The row expansion waits for it.
     private var pointerInside = false
-    /// Whether the pointer was last seen over a row's text rather than the
-    /// dash column (`PromptRailCardMetrics.isOverRowText`).
+    /// Whether the pointer was last seen over a row's text column rather than
+    /// the dash column, its gap or the trailing padding
+    /// (`PromptRailCardMetrics.isOverRowText`).
     private var pointerOverRowText = false
     /// Whether the hover model has been told the pointer is over the card.
     /// Kept apart from `pointerInside`: a pointer read on opening is not
@@ -465,7 +466,7 @@ final class PromptRailCardNSView: NSView {
     /// The text side is set first, so a row change rests the delay knowing it.
     private func updateHoveredRow(windowPoint: NSPoint) {
         let point = listView.convert(windowPoint, from: nil)
-        pointerOverRowText = Metrics.isOverRowText(x: point.x)
+        pointerOverRowText = Metrics.isOverRowText(x: point.x, rowWidth: listView.bounds.width)
         listView.hoveredRow = listView.clickableRow(at: point)
     }
 
