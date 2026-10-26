@@ -130,20 +130,18 @@ enum PromptOutline {
         return counts
     }
 
-    /// The work one row stands for: one for a tool call, the step count of a
-    /// subagent summary, and for a collapsed activity group its tool calls and
-    /// its subagents' steps. An expanded group stands for nothing itself: its
-    /// members follow it as rows of their own and count there. Every other row
-    /// is no work.
+    /// The work one row stands for: one for a tool call, a subagent launch
+    /// included, and for a collapsed activity group its tool calls. An
+    /// expanded group stands for nothing itself: its members follow it as rows
+    /// of their own and count there. Every other row is no work; a subagent's
+    /// own steps live in its transcript file, which the pane does not read.
     static func work(of node: TranscriptRenderNode) -> Int {
         switch node.kind {
         case .toolCall:
             return 1
-        case .subagentSummary(_, let count, _):
-            return max(0, count)
         case .activityGroupSummary(let summary):
-            return summary.isExpanded ? 0 : summary.toolCallCount + summary.subagentStepCount
-        case .chatBubble, .systemReminder, .skillBody, .thinking:
+            return summary.isExpanded ? 0 : summary.toolCallCount
+        case .chatBubble, .systemReminder, .skillBody, .subagentSummary, .thinking:
             return 0
         }
     }

@@ -4,7 +4,7 @@ import Testing
 @testable import TBDApp
 import TBDShared
 
-// Tier 1: pure functions over hand-built and builder-made render nodes.
+// Tier 1: pure functions over render nodes made by the production builders.
 
 /// A prompt rail notch's length: the work in each entry's turn
 /// (`PromptOutline.workCounts`) and the log scale that turns it into points
@@ -13,7 +13,9 @@ import TBDShared
 struct PromptRailWorkTests {
     // MARK: Counts
 
-    @Test("standalone tool calls count one each, and the last turn runs to the end")
+    /// A subagent launch is one more tool call: its own steps live in its
+    /// transcript file, which the pane does not read.
+    @Test("standalone tool calls count one each, a subagent launch included, and the last turn runs to the end")
     func standaloneToolCallsAndLastTurn() {
         let nodes = transcriptRenderNodes(from: [
             Self.prompt("p-0"),
@@ -26,7 +28,7 @@ struct PromptRailWorkTests {
             Self.prompt("p-2"),
             Self.tool("t-2a", "Read"),
             Self.tool("t-2b", "Grep"),
-            Self.tool("t-2c", "Edit"),
+            Self.tool("t-2c", "Agent"),
         ])
         #expect(Self.counts(nodes) == [2, 0, 3])
     }
@@ -57,42 +59,29 @@ struct PromptRailWorkTests {
         #expect(Self.counts(nodes) == [2])
     }
 
-    @Test("a subagent summary row adds its step count")
-    func subagentSummaryRowsAddTheirSteps() {
-        let nodes = [
-            Self.promptNode("p-0"),
-            Self.toolNode("t-0"),
-            Self.subagentNode("t-0#subagent", count: 4),
-            Self.promptNode("p-1"),
-            Self.subagentNode("t-1#subagent", count: 9),
-        ]
-        #expect(Self.counts(nodes) == [5, 9])
-    }
-
     /// `itemCount` counts every grouped row, so a group reports its tool calls
-    /// and its subagents' steps apart for the rail to read.
-    @Test("a collapsed group counts its tool calls and subagent steps, not its other rows")
-    func collapsedGroupCountsToolCallsAndSteps() {
-        let nodes = TranscriptPresentation.groupedNodes(
-            Self.groupRun, expansionOverrides: [:], windowStartIDs: [])
+    /// apart for the rail to read.
+    @Test("a collapsed group counts its tool calls, not its other rows")
+    func collapsedGroupCountsToolCalls() {
+        let nodes = TranscriptPresentation.build(items: Self.groupRun, memo: TranscriptPresentationMemo()).nodes
         #expect(nodes.map(\.id) == ["p-0", "t-1#activity-group"])
         guard case .activityGroupSummary(let summary) = nodes[1].kind else {
             Issue.record("expected the run to fold into a group")
             return
         }
         #expect(!summary.isExpanded)
-        #expect(summary.itemCount == 5)
+        #expect(summary.itemCount == 4)
         #expect(summary.toolCallCount == 2)
-        #expect(summary.subagentStepCount == 5)
-        #expect(Self.counts(nodes) == [7])
+        #expect(Self.counts(nodes) == [2])
     }
 
-    @Test("an expanded group's members count as rows and the summary adds nothing")
-    func expandedGroupIsNotCountedTwice() {
-        let nodes = TranscriptPresentation.groupedNodes(
-            Self.groupRun, expansionOverrides: ["t-1#activity-group": true], windowStartIDs: [])
-        #expect(nodes.map(\.id) == ["p-0", "t-1#activity-group", "t-1", "r-1", "t-1#subagent", "t-2", "k-1"])
-        #expect(Self.counts(nodes) == [7])
+    @Test("an expanded group is counted once, through its member rows")
+    func expandedGroupIsCountedOnce() {
+        let nodes = TranscriptPresentation.build(
+            items: Self.groupRun, expansionOverrides: ["t-1#activity-group": true],
+            memo: TranscriptPresentationMemo()).nodes
+        #expect(nodes.map(\.id) == ["p-0", "t-1#activity-group", "t-1", "r-1", "t-2", "k-1"])
+        #expect(Self.counts(nodes) == [2])
     }
 
     @Test("bookkeeping tools the transcript hides are no rows and count nothing")
@@ -173,20 +162,15 @@ struct PromptRailWorkTests {
 
     // MARK: Helpers
 
-    /// A prompt, then a run of activity: two tool calls, a reminder, a
-    /// subagent summary of five steps and a skill body.
-    private static var groupRun: [TranscriptRenderNode] {
+    /// A prompt, then a run of activity: two tool calls, one of them a
+    /// subagent launch, between a reminder and a skill body.
+    private static var groupRun: [TranscriptItem] {
         [
-            promptNode("p-0"),
-            toolNode("t-1"),
-            TranscriptRenderNode(
-                id: "r-1",
-                kind: .systemReminder(id: "r-1", kind: .toolReminder, text: "remember", timestamp: nil),
-                badgeUsage: nil),
-            subagentNode("t-1#subagent", count: 5),
-            toolNode("t-2"),
-            TranscriptRenderNode(
-                id: "k-1", kind: .skillBody(id: "k-1", text: "skill", timestamp: nil), badgeUsage: nil),
+            prompt("p-0"),
+            tool("t-1", "Read"),
+            .systemReminder(id: "r-1", kind: .toolReminder, text: "remember", timestamp: nil),
+            tool("t-2", "Agent"),
+            .systemReminder(id: "k-1", kind: .skillBody, text: "skill", timestamp: nil),
         ]
     }
 
@@ -206,21 +190,5 @@ struct PromptRailWorkTests {
         .toolCall(
             id: id, name: name, inputJSON: "{}", inputTruncatedTo: nil,
             result: nil, subagent: nil, timestamp: nil)
-    }
-
-    private static func promptNode(_ id: String) -> TranscriptRenderNode {
-        TranscriptRenderNode(id: id, kind: .chatBubble(prompt(id)), badgeUsage: nil)
-    }
-
-    private static func toolNode(_ id: String) -> TranscriptRenderNode {
-        TranscriptRenderNode(
-            id: id,
-            kind: .toolCall(id: id, name: "Agent", inputJSON: "{}", inputTruncatedTo: nil, result: nil, timestamp: nil),
-            badgeUsage: nil)
-    }
-
-    private static func subagentNode(_ id: String, count: Int) -> TranscriptRenderNode {
-        TranscriptRenderNode(
-            id: id, kind: .subagentSummary(parentItemID: id, count: count, agentType: nil), badgeUsage: nil)
     }
 }

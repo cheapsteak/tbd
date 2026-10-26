@@ -95,13 +95,10 @@ struct ActivityGroupSummary: Hashable {
     let pendingCount: Int
     let requiresResponse: Bool
     let isExpanded: Bool
-    /// Grouped rows that are tool calls. With `subagentStepCount`, the work a
-    /// collapsed group adds to its prompt rail turn (`PromptOutline.work(of:)`):
-    /// `itemCount` cannot serve, since it also counts reminders and skill bodies.
+    /// Grouped rows that are tool calls: the work a collapsed group adds to
+    /// its prompt rail turn (`PromptOutline.work(of:)`). `itemCount` cannot
+    /// serve, since it also counts reminders and skill bodies.
     let toolCallCount: Int
-    /// Steps the group's subagents took: the counts of its subagent-summary
-    /// members, summed.
-    let subagentStepCount: Int
 
     init(
         id: String,
@@ -112,8 +109,7 @@ struct ActivityGroupSummary: Hashable {
         pendingCount: Int = 0,
         requiresResponse: Bool = false,
         isExpanded: Bool = false,
-        toolCallCount: Int = 0,
-        subagentStepCount: Int = 0
+        toolCallCount: Int = 0
     ) {
         self.id = id
         self.itemCount = itemCount
@@ -124,7 +120,6 @@ struct ActivityGroupSummary: Hashable {
         self.requiresResponse = requiresResponse
         self.isExpanded = isExpanded
         self.toolCallCount = toolCallCount
-        self.subagentStepCount = subagentStepCount
     }
 
     /// The row's whole title, in Claude Code's phrasing: "Ran 2 shell
@@ -323,24 +318,7 @@ struct TranscriptPresentation {
         pendingPrompts: [String: PendingPromptPresentation],
         windowStartIDs: Set<String>
     ) -> TranscriptPresentation {
-        TranscriptPresentation(
-            nodes: groupedNodes(
-                transcriptRenderNodes(from: items, pendingPrompts: pendingPrompts),
-                expansionOverrides: expansionOverrides,
-                windowStartIDs: windowStartIDs),
-            indexSections: makeIndexSections(from: items)
-        )
-    }
-
-    /// The grouping pass over the per-item render nodes: each run of activity
-    /// between narrative rows folds into an `.activityGroupSummary`, followed
-    /// by its members when the group is expanded. Internal so tests can group
-    /// node kinds `transcriptRenderNodes(from:)` does not produce.
-    nonisolated static func groupedNodes(
-        _ baseNodes: [TranscriptRenderNode],
-        expansionOverrides: [String: Bool],
-        windowStartIDs: Set<String>
-    ) -> [TranscriptRenderNode] {
+        let baseNodes = transcriptRenderNodes(from: items, pendingPrompts: pendingPrompts)
         var projected: [TranscriptRenderNode] = []
         projected.reserveCapacity(baseNodes.count)
         var pendingActivity: [TranscriptRenderNode] = []
@@ -373,15 +351,8 @@ struct TranscriptPresentation {
             let defaultsExpanded = requiresResponse || errorCount > 0
             let isExpanded = expansionOverrides[groupID] ?? defaultsExpanded
             let tally = activityTally(of: members)
-            let work = members.reduce(into: (toolCalls: 0, subagentSteps: 0)) { total, node in
-                switch node.kind {
-                case .toolCall:
-                    total.toolCalls += 1
-                case .subagentSummary(_, let count, _):
-                    total.subagentSteps += count
-                default:
-                    break
-                }
+            let toolCallCount = members.reduce(into: 0) { total, node in
+                if case .toolCall = node.kind { total += 1 }
             }
             let summary = ActivityGroupSummary(
                 id: groupID,
@@ -392,8 +363,7 @@ struct TranscriptPresentation {
                 pendingCount: pendingCount,
                 requiresResponse: requiresResponse,
                 isExpanded: isExpanded,
-                toolCallCount: work.toolCalls,
-                subagentStepCount: work.subagentSteps
+                toolCallCount: toolCallCount
             )
             projected.append(TranscriptRenderNode(
                 id: groupID,
@@ -444,7 +414,11 @@ struct TranscriptPresentation {
             }
         }
         flushActivity()
-        return projected
+
+        return TranscriptPresentation(
+            nodes: projected,
+            indexSections: makeIndexSections(from: items)
+        )
     }
 
     private nonisolated static func isResponseRequired(_ node: TranscriptRenderNode) -> Bool {

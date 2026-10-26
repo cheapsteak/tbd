@@ -576,54 +576,6 @@ struct PromptRailCoordinatorTests {
         #expect(presenter.workCountLists.count == countListsBeforeReply + 1)
     }
 
-    /// A subagent's steps reach the rail through its summary row, folded into
-    /// the trailing collapsed group, so a step advancing re-renders only the
-    /// group's row.
-    @Test("a turn's count grows as a subagent's step count advances")
-    func workCountGrowsAsSubagentStepsAdvance() throws {
-        let suiteName = "prompt-rail-work-subagent-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let appState = AppState(userDefaults: defaults)
-
-        let nodes = Self.subagentTurn(steps: 2)
-        let scene = TableTranscriptScene(items: [], appState: appState, nodes: nodes)
-        let presenter = RecordingPresenter()
-        defer { withExtendedLifetime(scene.coordinator) {} }
-        defer { withExtendedLifetime(presenter) {} }
-        scene.coordinator.startObservingScroll()
-        scene.coordinator.promptRailPresenter = presenter
-        scene.prime(nodes: nodes)
-        // The Agent call itself, then its subagent's two steps.
-        try #require(scene.coordinator.promptWorkCounts == [0, 3],
-                     Comment(rawValue: "counts: \(scene.coordinator.promptWorkCounts)"))
-
-        let advanced = Self.subagentTurn(steps: 5)
-        try #require(TranscriptStreamPlan.step(previous: scene.coordinator.previousNodes, next: advanced)
-                         == .updateLast,
-                     "precondition: the advanced step count arrives as a tail re-render")
-        scene.coordinator.update(nodes: advanced, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
-        #expect(scene.coordinator.promptWorkCounts == [0, 6])
-        #expect(presenter.workCountLists == [[], [0, 3], [0, 6]])
-
-        // The same rows again are a no-op, with nothing to tell.
-        scene.coordinator.update(nodes: advanced, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "")
-        #expect(presenter.workCountLists.count == 3)
-    }
-
-    /// Two prompts with replies, then an Agent call and its subagent's summary
-    /// row of `steps` steps, grouped as the presentation groups them.
-    private static func subagentTurn(steps: Int) -> [TranscriptRenderNode] {
-        let items = PromptRailFixtures.conversation(prompts: 2, replySentences: { _ in 3 }) + [tool("t-1")]
-        let base = transcriptRenderNodes(from: items) + [
-            TranscriptRenderNode(
-                id: "t-1#subagent",
-                kind: .subagentSummary(parentItemID: "t-1", count: steps, agentType: nil),
-                badgeUsage: nil),
-        ]
-        return TranscriptPresentation.groupedNodes(base, expansionOverrides: [:], windowStartIDs: [])
-    }
-
     private static func tool(_ id: String) -> TranscriptItem {
         .toolCall(
             id: id, name: "Agent", inputJSON: "{}", inputTruncatedTo: nil,

@@ -16,8 +16,7 @@ import Foundation
 ///   entry.
 /// - **Work counts** – parallel to the entries, recomputed on every update
 ///   that changes the rows, the ones that only re-render the last row
-///   included: a tool call joining a collapsed group or a subagent's step
-///   count advancing arrives that way.
+///   included: a tool call joining a collapsed group arrives that way.
 @MainActor
 protocol PromptRailPresenter: AnyObject {
     func promptRail(entriesDidChange entries: [PromptOutlineEntry])

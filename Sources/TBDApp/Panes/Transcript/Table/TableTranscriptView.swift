@@ -2290,9 +2290,9 @@ struct TableTranscriptView: NSViewRepresentable {
             // is read off the rows and clip the reader will see. A streaming
             // tick re-renders only the last row: unless that row is or was a
             // prompt, the outline cannot have changed, so skip rebuilding it,
-            // recount the work — a tool call joining a collapsed group and a
-            // subagent's step count advancing both arrive this way — and
-            // re-read the active prompt against the grown document. With a
+            // recount the work — a tool call joining a collapsed group arrives
+            // this way — and re-read the active prompt against the grown
+            // document. With a
             // tail-follow queued, the follow re-reads the active prompt itself
             // once the clip has followed; the entries and counts are delivered
             // now.
