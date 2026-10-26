@@ -12,7 +12,7 @@ Every transcript pane gets a **prompt rail**: a 20pt column at its leading edge 
 
 - **It appears in all three transcript surfaces**: the live pane, Session History and the Remote pane. All three render through `TableTranscriptView`, so the rail is built once.
 - **It is always on, with no setting.** It acts on nothing by itself, so the default-off flag rule does not apply.
-- **It ships in two renderers behind a temporary switch** so the two can be compared in a running build: an AppKit rail inside the table's view hierarchy, and a SwiftUI rail beside it. Everything except the view layer is shared. Once one is chosen, a follow-up deletes the other and the switch.
+- **It is built in AppKit, inside the table's own view.** The transcript is an AppKit table, and the rail and its card sit beside its scroll view in the view `TableTranscriptView` hands SwiftUI.
 - **It lives entirely in TBDApp.** There is no daemon, RPC, schema or durable-resource change.
 
 ## Prior art: Claude desktop's rail
@@ -57,7 +57,7 @@ The rail describes whatever rows the table holds. In a drilled-in subagent threa
   - An inactive notch is a 14×2pt dash in the tertiary label color, 2pt from the rail's leading edge.
   - The active notch is 18×3pt in the accent color.
   - A peer notch is amber at reduced opacity, and full amber at 18×3pt when active.
-- **Overflow** – at the 4pt floor a 600pt rail holds 144 notches. Past that, the rail offsets its notches to keep the active one at least 40pt from either end, and fades the clipped edges over 24pt. The rail never scrolls under the wheel; the card is where the whole list is browsed.
+- **Overflow** – at the 4pt floor a 600pt rail holds 144 notches. Past that, the rail offsets its notches to keep the active one at least 40pt from either end, and fades the clipped edges over 24pt. The rail never scrolls under the wheel: a wheel over it scrolls the transcript, so the gutter is no dead zone, and the card is where the whole list is browsed.
 
 ### The active prompt
 
@@ -85,7 +85,7 @@ The coordinator recomputes the active entry on the clip view's bounds notificati
 
 ## Jumping
 
-`TableTranscriptView.Coordinator.jump(toNodeID:)` serves the card, the keyboard commands and VoiceOver in both renderers.
+`TableTranscriptView.Coordinator.jump(toNodeID:)` serves the card, the keyboard commands and VoiceOver.
 
 - **Placement** – it scrolls the clip at once, unanimated, so the target row's top sits 16pt below the top of the viewport, clamped to the scrollable range.
 - **Pinning** – a row far from the bottom has only an estimated height until it is laid out. When rows near the target realize and correct their heights, the target would drift: a correction moves every row below it, and the table's layout keeps its own choice of visible row in place, not the target. The jump therefore holds the target as an anchor and re-pins it whenever a row above it changes height and at the end of each table layout pass. This is the mechanism the prepend path already uses for its anchor, generalised to hold a jump target as well.
@@ -112,51 +112,34 @@ The transcript stays fast because it is lazy in three ways: the table builds cel
 3. **Jumps pin; nothing pre-measures.** No pass measures the rows above a jump target. On a long transcript, measuring every row exactly took about 4 seconds where measuring the bottom window takes about 40ms.
 4. **The rail never loads pages.** Only the card's Load row does.
 
-## Two renderers, one switch
+## Structure
 
-### Shared core
+### Logic
 
-Everything with logic in it is written once, under `Sources/TBDApp/Panes/Transcript/PromptRail/`:
+Everything with logic in it is kept out of the views. It lives under `Sources/TBDApp/Panes/Transcript/PromptRail/`, except the coordinator additions, which extend the coordinator in `TableTranscriptView+PromptRail.swift`:
 
 - **`PromptOutline`** – nodes in, entries out.
 - **`PromptRailLayout`** – pitch, notch rectangles and the overflow offset for a given count, rail height and active index.
 - **`PromptRailActiveRule`** – the active-entry rule, given entry row rectangles, the viewport and the held jump target.
 - **`PromptRailHoverModel`** – the open delay, close grace, Escape and click suppression, and the deactivation close. It takes `clock: any Clock<Duration> = ContinuousClock()` as its last initializer parameter.
-- **Coordinator additions** – rebuilding the outline when the nodes change, tracking the active entry, `jump(toNodeID:)` and the jump anchor. The coordinator reports to a `PromptRailPresenter` – entries changed, active entry changed – and each renderer supplies its own presenter.
+- **Coordinator additions** – rebuilding the outline when the nodes change, tracking the active entry, `jump(toNodeID:)` and the jump anchor. The coordinator reports to a `PromptRailPresenter` – entries changed, active entry changed. The rail view is the presenter; the protocol lets the coordinator be tested without the views.
 - **Keyboard commands** – the Go menu items and the pane registry.
 
-`TableTranscriptView`'s view becomes a container `NSView` holding the scroll view, under both renderers. The three call sites each change once, to pass the renderer choice and, for Remote, the earlier-history state and load action.
+### Views
 
-### AppKit renderer
+`TableTranscriptView`'s view is a container `NSView`, `TranscriptContainerView`, holding the scroll view right of the 20pt gutter, the rail in the gutter and the card stacked above both. The rail and card views live under `PromptRail/AppKit/`.
 
-The container also holds the rail, an `NSView` in the 20pt gutter that draws its notches as layers, and the card, an `NSView` subview stacked above both. The presenter is the rail view itself, so an active-entry change goes straight from the coordinator to a layer update. Hover is an `NSTrackingArea` feeding the hover model. Stacking order is settled by AppKit subview order.
+- **Rail** – `PromptRailNSView` draws its notches as layers. It is the presenter, so an active-entry change goes straight from the coordinator to a layer update. It hands wheel events to the scroll view.
+- **Card** – `PromptRailCardNSView` scrolls a list view that draws its rows from node data, building no view per row.
+- **Hover** – an `NSTrackingArea` on the rail and another on the card feed the hover model, in the key window only. A tracking area follows geometry, not hit-testing, so the rail stays hovered while the open card covers it, which keeps Escape and click suppression in force while the pointer is still on the rail.
+- **Wiring** – the container hands the rail's outline on to the card, shows and hides the card as the hover model says, runs the Escape monitor only while the card is on screen, and closes the card when the container leaves its window or the window resigns key. The monitor is app-wide, so a card left open in a background window would take Escape from every view in the key one.
+- **Stacking** – settled by AppKit subview order: the scroll view, then the rail, then the card.
 
-### SwiftUI renderer
-
-The rail is a SwiftUI view in an `HStack` beside `TableTranscriptView`, and the card is a SwiftUI overlay. The presenter writes into an `@Observable` `PromptRailState` that only the rail and card read. The pane body must not read it: a pane that re-renders on every active-prompt change would rerun `updateNSView`, and with it a whole-transcript comparison, in the middle of a scroll. Hover is `.onHover` feeding the same hover model.
-
-The card scrolls its list in a `ScrollView`. It lives outside the transcript's row list and is never measured as a row, so its file is added to the `excluded:` list of the `no_scrollview_in_transcript_cards` SwiftLint rule with a one-line comment saying so.
-
-### The switch
-
-- **Key** – the UserDefaults key `promptRailRenderer`, values `appkit` and `swiftui`, default `appkit`. It is declared as an `AppState` static with a default constant, as the other app-only keys are.
-- **UI** – a "Prompt rail renderer" picker in Settings → Experimental.
-- **Effect** – the renderer is part of the transcript view's identity, so a change rebuilds open transcript panes. A rebuilt pane opens at the bottom, as any freshly opened transcript does.
-
-### Choosing
-
-Compare the two in a running build on long sessions, a hundred prompts or more:
-
-- **Scroll smoothness** while the active notch changes during a fast scroll or a trackpad fling.
-- **Hover feel** – does the card open and close promptly, and does it ever flicker?
-- **Stacking** – does the card ever paint beneath the table, or the table over the rail?
-- **Code** – which renderer is smaller and simpler to change.
-
-The follow-up that records the choice deletes the losing renderer, the key, the picker and the renderer parameter.
+**Mounting.** The table's `promptRail` parameter says whether to build the views. The three call sites mount the rail on the table directly, the Remote pane passing its earlier-history state and load action and the other two passing none. A harness that drives the table alone mounts nothing and gets no gutter. Because the views live inside the table's view, a pane's `.id` that rebuilds the table, as on session rollover, rebuilds the rail with it. A pane's overlays span the gutter too, so the live pane insets its bottom-leading jump-to-bottom button by the gutter's width to keep it clear of the rail.
 
 ## Accessibility
 
-The rail is an accessibility group labelled "Prompts", with one button per entry labelled with its first line and time. Activating a button jumps to that prompt. Each renderer provides this through its own framework.
+The rail is an accessibility group labelled "Prompts", with one button per entry labelled with its first line and time. Activating a button jumps to that prompt. The rail view exposes each button as an accessibility element over the band of the rail its notch owns.
 
 ## Testing
 
@@ -174,7 +157,8 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
   - an unknown ID leaves the scroll position alone;
   - building the outline realizes no cells, which checks the first lazy-rendering rule.
 - **Keyboard** – previous and next from the middle, from inside an exchange, from the first prompt and from the last.
-- **The switch** – each value mounts its own renderer, and each renderer passes an offscreen render smoke test.
+- **Views, offscreen** – notch geometry and colours, the overflow offset and fade, the wheel handed to the transcript, the accessibility buttons, and the card's rows, size caps, in-place updates, Escape monitor and key-window close.
+- **Mounting, offscreen** – a pane-shaped mount keeps the gutter inside the table's view and makes the rail the presenter, with and without earlier history; a new pane identity rebuilds the rail; a table with no mount has no rail, card or gutter.
 
 ## Out of scope
 
@@ -189,5 +173,9 @@ The rail is an accessibility group labelled "Prompts", with one button per entry
 - **Notches placed by scroll position** – scrollbar-marker placement shows where long turns are, but neighbouring prompts merge into one mark and the notches stop lining up with the card's rows.
 - **A windowed rail** – showing only the prompts around the current one keeps a comfortable pitch, but the rail then stops showing how far into the session the reader is.
 - **Measuring rows above a jump target** – it would make jumps exact on the first try, at the cost of the estimated heights that make long transcripts open instantly.
-- **Publishing the active prompt through pane state** – the simplest SwiftUI wiring re-renders the pane on each active change and reruns the table's update in the middle of a scroll. The SwiftUI renderer scopes the state to the rail instead.
+- **A SwiftUI rail beside the table** – a SwiftUI rail in an `HStack` beside `TableTranscriptView`, with the card as a SwiftUI overlay, works against the framework at each point the rail depends on.
+  - SwiftUI hover follows hit-testing, so once the open card covers the rail, the rail hears the pointer leave and Escape and click suppression lapse with the pointer still on it. Hover has to be recomputed from the rail column's geometry by a handler on the whole pane.
+  - The pane must not observe the rail's state: a pane that re-renders on every active-prompt change reruns `updateNSView`, and with it a whole-transcript comparison, in the middle of a scroll. Keeping it out takes a state object only the rail and card read, with writes deferred to the next main-queue turn because the coordinator reports from inside `updateNSView`, and a separate pointer object so that a pointer moving over the rail re-renders nothing.
+  - SwiftUI has no public way to forward a wheel event to the table's scroll view, so the gutter becomes a dead zone for scrolling.
+  - The transcript is already AppKit. Views inside its hierarchy share its layout, stacking and event routing with no bridge between frameworks.
 - **A show/hide preference** – the rail acts on nothing by itself, and each preference is another layout to test.
