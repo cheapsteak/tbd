@@ -19,8 +19,8 @@ import Foundation
 /// (`dropFirst`/`removeDuplicates` involve no time and are worth nobody's
 /// hand-rolled reimplementation), and only the time-dependent stage becomes
 /// cancel-and-replace on `clock.sleep(for:)` — the same shape as
-/// `AppState.scheduleMainAreaSizeBroadcast` and `NotePaneView.debounceSave`,
-/// but with the delay injectable so a `TestClock` can drive it in virtual time.
+/// `AppState.scheduleMainAreaSizeBroadcast` and `NotepadPopoverView.debounceSave`,
+/// but with the delay injectable so a test clock can drive it in virtual time.
 @MainActor
 final class AppearanceBroadcastDebouncer {
     private let interval: Duration

@@ -23,6 +23,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `EnvOverridesCoding.swift` — JSON encode/decode for the free-form env-override `[String: String]` maps (config/repo/profile scopes)
 - `NewlineFrameScanner.swift` — incremental newline-delimited frame scanner for socket recv buffers
 - `TerminalLabel.swift` — canonical terminal display-label derivation shared by daemon + app
+- `HookResolver.swift` — worktree lifecycle hook resolution (`.worktree-hooks/` etc.) + async execution
 
 ## Sources/TBDAppIcon/ & Sources/IconBaker/
 - `TBDAppIcon/AppIcon.swift` — programmatic AppKit/CoreGraphics/CoreText icon drawing; per-worktree ribbon variant at runtime, shared by TBDApp and IconBaker
@@ -48,7 +49,6 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 
 ### Hooks/
 - `ClaudeHookOverlay.swift` — generates `~/tbd/runtime/claude-overlay.json` (SessionStart/Stop/AskUserQuestion hooks)
-- `HookResolver.swift` — worktree lifecycle hook resolution (`.worktree-hooks/` etc.) + async execution
 - `LegacyHookScanner.swift` — detects legacy globally-installed `tbd` hook entries in user/repo settings.json
 
 ### Lifecycle/
@@ -56,7 +56,8 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
 - `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
-- `SuspendResumeCoordinator.swift` — auto/manual suspend-resume of idle Claude sessions
+- `HibernationCoordinator.swift` (+`Holder`) — parks and wakes Claude sessions on both transports: manual hibernate, the idle sweep, park-on-merge, and the parks the profile swap and the transport migration compose
+- `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours
 - `PluginDirWriter.swift` — writes the TBD Claude Code plugin to Application Support: skills always, the session mod's `hooks/` and `types/` only while a session-mod flag is on; called after the database opens and on each flag change
 - `ComposerDraftParkGate.swift` — the park decision the session mod answers (proceed or skip, per policy), and the tmux signal ending every tmux park uses
 - `SkillFileWriter.swift` — writes the failsafe copy of the skill body
@@ -91,7 +92,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
-- `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Selection, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
+- `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
 - `SocketServer.swift` / `HTTPServer.swift` — NIO Unix-socket + HTTP RPC servers
 - `StateSubscription.swift` — `StateDelta` broadcasting to subscribed clients
 - `RepoSerializer.swift` — repo serialization for RPC results
@@ -101,7 +102,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `Tmux/TmuxManager.swift` — tmux server/window lifecycle, sendKeys/capture; `Tmux/ClaudeStateDetector.swift` — idle detection + session-id capture
 - `SSH/SSHAgentResolver.swift` — `~/.ssh/tbd-agent.sock` symlink maintenance
 - `Keychain/ModelProfileKeychain.swift` — stores apiKey profile secrets (0600 token files)
-- `AskUserQuestion/PendingQuestionStore.swift` — in-memory store bridging AskUserQuestion hook payloads
+- `AskUserQuestion/PendingPromptStore.swift` — in-memory store of open Claude Code dialogs: AskUserQuestion captures from the pre-tool hook, and the prompts the session mod reports open for answering from the transcript
 - `PR/PRStatusManager.swift` — GitHub PR status polling; `PR/AutoArchiveOnMergeCoordinator.swift` — auto-archives a worktree when its PR merges (if armed)
 
 ## Sources/TBDCLI/

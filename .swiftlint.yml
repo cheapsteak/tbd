@@ -386,7 +386,7 @@ custom_rules:
       # (display / transport / snapshot). Adding a file here draws High-severity review
       # scrutiny — see CLAUDE.md "No TUI screen-scraping".
       - "Sources/TBDDaemon/Tmux/TmuxManager\\.swift"                     # defines the capture API
-      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"  # terminal.read returns text verbatim
+      - "Sources/TBDDaemon/Server/RPCRouter\\+TerminalHandlers\\.swift"  # terminal.output returns text verbatim; terminal.delete snapshots scrollback into terminal-history
       - "Sources/TBDDaemon/Lifecycle/HibernationCoordinator\\.swift"     # ANSI display snapshot of a parked pane
       # Capture-for-replay: rebuilds a pane's display state verbatim for control-mode
       # attach/repair (replay bytes); never parses captured content for agent state.

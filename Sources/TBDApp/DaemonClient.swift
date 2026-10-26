@@ -267,7 +267,7 @@ actor DaemonClient {
     /// Create a connected Unix domain socket to the daemon.
     /// Caller is responsible for closing the returned file descriptor.
     ///
-    /// Internal rather than private so `DaemonClientSocketTests` can call it
+    /// Internal rather than private so `AppSocketInheritanceTests` can call it
     /// against a listener of its own and read the flags back off the returned
     /// descriptor. The fd otherwise never escapes this file.
     nonisolated func makeConnectedSocket() throws -> Int32 {
@@ -335,7 +335,7 @@ actor DaemonClient {
         // particular must not set that disposition (SwiftTerm's `forkpty`
         // children would inherit it).
         //
-        // Covered by `DaemonClientSocketTests.connectedSocketSuppressesSIGPIPE`,
+        // Covered by `AppSocketInheritanceTests.connectedSocketSuppressesSIGPIPE`,
         // which stands up a listener on a socket path of its own and reads the
         // option back off the descriptor this returns. Deleting this line
         // reddens that row.
