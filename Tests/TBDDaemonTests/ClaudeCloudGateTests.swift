@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 // Tier 2: in-memory GRDB plus fakes; no subprocess, no real `claude`.

@@ -259,11 +259,23 @@ let package = Package(
         .target(
             name: "TestSupport",
             dependencies: [
-                "TBDDaemonLib",
                 "TBDShared",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
             path: "Tests/TestSupport"
+        ),
+        // The test helpers that need the daemon library. They live apart from
+        // `TestSupport` so that the app and holder tests, which use only the
+        // generic helpers, neither link `TBDDaemonLib` nor recompile when it
+        // changes. The CI build's import check holds that line; see
+        // docs/specs/2026-10-26-daemon-test-support-design.md.
+        .target(
+            name: "DaemonTestSupport",
+            dependencies: [
+                "TBDDaemonLib",
+                "TBDShared",
+            ],
+            path: "Tests/DaemonTestSupport"
         ),
         // User defaults the test process must register before any test runs,
         // as the app registers them in `applicationWillFinishLaunching`: a
@@ -292,6 +304,7 @@ let package = Package(
                 "TBDDaemonLib",
                 "TBDShared",
                 "TestSupport",
+                "DaemonTestSupport",
                 "TBDTerminalSerialization",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
@@ -309,6 +322,7 @@ let package = Package(
                 "TBDDaemonLib",
                 "TBDShared",
                 "TestSupport",
+                "DaemonTestSupport",
                 // TmuxBridge (app side) drives a real tmux server in
                 // TmuxBridgeViewSessionLiveTests, which makes it tier 3.
                 "TBDApp",
@@ -390,10 +404,10 @@ let package = Package(
                 "TBDShared",
                 // `collectOutput(of:)`, which runs a spawned binary to
                 // completion without parking a cooperative-pool thread on
-                // `waitUntilExit()`. It brings `TBDDaemonLib` in behind it,
-                // which nothing here needs; the alternative is a second
-                // hand-rolled blocking wait in a target that spawns children,
-                // which is the thing that helper exists to end.
+                // `waitUntilExit()`. The alternative is a second hand-rolled
+                // blocking wait in a target that spawns children, which is the
+                // thing that helper exists to end. `TestSupport` holds only the
+                // generic helpers, so this brings no daemon code with it.
                 "TestSupport",
             ]
         ),

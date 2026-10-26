@@ -3,6 +3,7 @@ import os
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 struct FakeTmuxSendError: Error {}

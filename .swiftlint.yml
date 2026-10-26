@@ -17,6 +17,7 @@ included:
   - Tests/TBDHolderTests
   - Tests/TBDPeerHelperTests
   - Tests/TestSupport
+  - Tests/DaemonTestSupport
 
 excluded:
   - .build
