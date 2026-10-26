@@ -767,9 +767,9 @@ helper has.
 hands the main actor back, the queued block runs, and only then does the
 continuation resume — so the test observes the effect it came to assert.
 
-Two shapes, and they are not interchangeable.
-`TableTranscriptPaneTests.drainMainQueue()` is the minimal one — a few bare
-`Task.yield()`s, no condition and no sleep. That is enough when the work is
+Two shapes, and they are not interchangeable. `drainMainQueue()`
+(`Tests/TBDAppTests/TableTranscriptScene+Driving.swift`) is the minimal one — a
+few bare `Task.yield()`s, no condition and no sleep. That is enough when the work is
 already on the queue and handing it back is all that was missing, but it checks
 nothing and so **carries no failure signal**: if the work needs longer than the
 yields it gets, the test proceeds as though it arrived. Use it only where the

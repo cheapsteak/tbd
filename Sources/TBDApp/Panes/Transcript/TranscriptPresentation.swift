@@ -95,6 +95,10 @@ struct ActivityGroupSummary: Hashable {
     let pendingCount: Int
     let requiresResponse: Bool
     let isExpanded: Bool
+    /// Grouped rows that are tool calls: the work a collapsed group adds to
+    /// its prompt rail turn (`PromptOutline.work(of:)`). `itemCount` cannot
+    /// serve, since it also counts reminders and skill bodies.
+    let toolCallCount: Int
 
     init(
         id: String,
@@ -104,7 +108,8 @@ struct ActivityGroupSummary: Hashable {
         errorCount: Int = 0,
         pendingCount: Int = 0,
         requiresResponse: Bool = false,
-        isExpanded: Bool = false
+        isExpanded: Bool = false,
+        toolCallCount: Int = 0
     ) {
         self.id = id
         self.itemCount = itemCount
@@ -114,6 +119,7 @@ struct ActivityGroupSummary: Hashable {
         self.pendingCount = pendingCount
         self.requiresResponse = requiresResponse
         self.isExpanded = isExpanded
+        self.toolCallCount = toolCallCount
     }
 
     /// The row's whole title, in Claude Code's phrasing: "Ran 2 shell
@@ -345,6 +351,9 @@ struct TranscriptPresentation {
             let defaultsExpanded = requiresResponse || errorCount > 0
             let isExpanded = expansionOverrides[groupID] ?? defaultsExpanded
             let tally = activityTally(of: members)
+            let toolCallCount = members.reduce(into: 0) { total, node in
+                if case .toolCall = node.kind { total += 1 }
+            }
             let summary = ActivityGroupSummary(
                 id: groupID,
                 itemCount: members.count,
@@ -353,7 +362,8 @@ struct TranscriptPresentation {
                 errorCount: errorCount,
                 pendingCount: pendingCount,
                 requiresResponse: requiresResponse,
-                isExpanded: isExpanded
+                isExpanded: isExpanded,
+                toolCallCount: toolCallCount
             )
             projected.append(TranscriptRenderNode(
                 id: groupID,

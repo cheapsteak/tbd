@@ -254,53 +254,6 @@ struct TableTranscriptPaneTests {
         ).nodes
     }
 
-    /// Lets work the coordinator deferred with `DispatchQueue.main.async` — the
-    /// tail-follow `scrollToEnd` — actually run.
-    ///
-    /// `TableTranscriptScene.settle()` cannot do it: a Swift Testing `@MainActor`
-    /// test body is ITSELF a block executing on the serial main queue, so the
-    /// nested run loop that settle turns can never re-enter that queue, and the
-    /// deferred block sits there until the test ends. Suspending is what returns
-    /// the queue, so the queued block runs and only then does this continuation
-    /// resume. Without this a test would "pass" against a tail-follow that never
-    /// fired.
-    private func drainMainQueue() async {
-        for _ in 0..<4 { await Task.yield() }
-    }
-
-    /// Primes `scene` on `nodes` exactly as production's first `updateNSView` does,
-    /// then keeps updating until the table's COLUMN WIDTH stops moving.
-    ///
-    /// The first `update` after `makeNSView` always takes the width-change branch
-    /// (`cachedColumnWidth` starts at 0): it measures the bottom window and reloads.
-    /// That reload is also what first makes the document taller than the viewport,
-    /// so an autohiding legacy scroller claims its 17pt on the NEXT layout pass —
-    /// AFTER those heights were cached. Every cache here is keyed by `(id,
-    /// contentVersion, width)`, so the whole cache is then unreachable, and the next
-    /// `update` legitimately takes the width-change branch again (wipe + re-measure)
-    /// instead of the `.rebuild` branch a disclosure test means to exercise. Rows
-    /// above the click fall back to the arithmetic estimate, and even though that
-    /// estimate is now accurate to a point or two on these fixtures
-    /// (`TranscriptEstimatorAccuracyTests` pins it), a re-measure at a DIFFERENT
-    /// width re-flows every one of them, so the anchor still jumps.
-    ///
-    /// So: settle the width FIRST, and only then take a "before" snapshot. Returns
-    /// the settled column width; fails the test if it never settles.
-    @discardableResult
-    private func primeScene(
-        _ scene: TableTranscriptScene, nodes: [TranscriptRenderNode], linkRoot: String = ""
-    ) -> CGFloat {
-        for _ in 0..<4 {
-            let widthAtUpdate = scene.tableView.bounds.width
-            scene.coordinator.update(
-                nodes: nodes, atBottom: .constant(true), activityToggleToken: 0, linkRoot: linkRoot)
-            scene.settle()
-            if scene.tableView.bounds.width == widthAtUpdate { return widthAtUpdate }
-        }
-        Issue.record("the table's column width never settled: \(scene.tableView.bounds.width)")
-        return scene.tableView.bounds.width
-    }
-
     /// Realizes every row once — as a user who scrolled the whole transcript would —
     /// so each carries an EXACT measured height rather than the cheap arithmetic
     /// estimate `heightOfRow` serves for unrealized rows.
@@ -309,17 +262,6 @@ struct TableTranscriptPaneTests {
             _ = scene.coordinator.tableView(scene.tableView, viewFor: nil, row: row)
         }
         scene.settle()
-    }
-
-    /// Vertical gap between the viewport's bottom edge and the document bottom.
-    private func gapToBottom(_ scene: TableTranscriptScene) -> CGFloat {
-        let clip = scene.scrollView.contentView
-        return scene.tableView.frame.height - (clip.bounds.origin.y + clip.bounds.height)
-    }
-
-    /// Screen-space offset of `row`'s top edge from the top of the viewport.
-    private func screenOffset(of row: Int, in scene: TableTranscriptScene) -> CGFloat {
-        scene.tableView.rect(ofRow: row).origin.y - scene.scrollView.contentView.bounds.origin.y
     }
 
     /// REGRESSION GUARD: expanding a collapsed work group must leave the clicked
@@ -354,10 +296,10 @@ struct TableTranscriptPaneTests {
         defer { withExtendedLifetime(scene.coordinator) {} }
 
         // Prime exactly as production does, then let the column width settle (see
-        // `primeScene`) — a width that moves mid-test sends the toggle down the
+        // `prime(nodes:)`) — a width that moves mid-test sends the toggle down the
         // width-change branch, which wipes the caches for a reason that has nothing
         // to do with what this test guards.
-        let primedWidth = primeScene(scene, nodes: collapsed)
+        let primedWidth = scene.prime(nodes: collapsed)
 
         let summaryRow = try #require(collapsed.firstIndex { $0.id == Self.fixtureGroupID })
         let clip = scene.scrollView.contentView
@@ -408,9 +350,9 @@ struct TableTranscriptPaneTests {
         if atBottom {
             scene.coordinator.scrollToEnd(animated: false)
             scene.settle()
-            #expect(gapToBottom(scene) <= 120,
+            #expect(scene.gapToBottom <= 120,
                     Comment(rawValue: "arm precondition: viewport must be within the tail-follow "
-                        + "threshold (gap=\(gapToBottom(scene)))"))
+                        + "threshold (gap=\(scene.gapToBottom))"))
         } else {
             // Park the summary row ~200pt below the viewport top, so real rows sit
             // above it (any of which drifting would move the anchor).
@@ -418,15 +360,15 @@ struct TableTranscriptPaneTests {
             clip.scroll(to: NSPoint(x: 0, y: target))
             scene.scrollView.reflectScrolledClipView(clip)
             scene.settle()
-            #expect(gapToBottom(scene) > 120,
+            #expect(scene.gapToBottom > 120,
                     Comment(rawValue: "arm precondition: viewport must be clear of the tail-follow "
-                        + "threshold (gap=\(gapToBottom(scene)))"))
+                        + "threshold (gap=\(scene.gapToBottom))"))
         }
         let visible = clip.documentVisibleRect
         let summaryRect = scene.tableView.rect(ofRow: summaryRow)
         #expect(visible.intersects(summaryRect), "the summary row must be on screen before the click")
 
-        let offsetBefore = screenOffset(of: summaryRow, in: scene)
+        let offsetBefore = scene.screenOffset(ofRow: summaryRow)
         let rectsAboveBefore = (0..<summaryRow).map { scene.tableView.rect(ofRow: $0) }
 
         // The click: a new node array carrying the expanded group, with the toggle
@@ -447,7 +389,7 @@ struct TableTranscriptPaneTests {
         // rebuild dropped their cached exact heights they come back estimated, and
         // the anchor jumps now even though later realize-time corrections settle it
         // back.
-        let offsetFirstFrame = screenOffset(of: summaryRow, in: scene)
+        let offsetFirstFrame = scene.screenOffset(ofRow: summaryRow)
         #expect(abs(offsetFirstFrame - offsetBefore) <= 1.0,
                 Comment(rawValue: "the clicked summary row moved in the first frame after the click: "
                     + "before=\(offsetBefore) firstFrame=\(offsetFirstFrame)"))
@@ -457,7 +399,7 @@ struct TableTranscriptPaneTests {
         await drainMainQueue()
         scene.settle()
 
-        let offsetAfter = screenOffset(of: summaryRow, in: scene)
+        let offsetAfter = scene.screenOffset(ofRow: summaryRow)
         #expect(abs(offsetAfter - offsetBefore) <= 1.0,
                 Comment(rawValue: "the clicked summary row moved on screen: "
                     + "before=\(offsetBefore) after=\(offsetAfter)"))
@@ -540,7 +482,7 @@ struct TableTranscriptPaneTests {
         defer { withExtendedLifetime(scene.coordinator) {} }
 
         let nodes = scene.coordinator.nodes
-        primeScene(scene, nodes: nodes, linkRoot: box.value)
+        scene.prime(nodes: nodes, linkRoot: box.value)
         realizeAllRows(scene, count: nodes.count)
 
         let node = try #require(nodes.first { if case .chatBubble = $0.kind { return true } else { return false } })
@@ -583,7 +525,7 @@ struct TableTranscriptPaneTests {
 
         let scene = TableTranscriptScene(items: items, appState: appState, nodes: collapsed)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        primeScene(scene, nodes: collapsed)
+        scene.prime(nodes: collapsed)
 
         // Realize every row once — as a user scrolling the whole transcript would —
         // which measures each exactly and caches it.
@@ -631,7 +573,7 @@ struct TableTranscriptPaneTests {
 
         let scene = TableTranscriptScene(items: items, appState: appState, nodes: collapsed)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        primeScene(scene, nodes: collapsed)
+        scene.prime(nodes: collapsed)
 
         // Four caches, at most one entry per live row each.
         let ceiling = 4 * expanded.count
@@ -667,10 +609,10 @@ struct TableTranscriptPaneTests {
 
         let scene = TableTranscriptScene(items: items, appState: appState, nodes: collapsed)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        primeScene(scene, nodes: collapsed)
+        scene.prime(nodes: collapsed)
         scene.coordinator.scrollToEnd(animated: false)
         scene.settle()
-        #expect(gapToBottom(scene) <= 120, "precondition: the viewport starts at the bottom")
+        #expect(scene.gapToBottom <= 120, "precondition: the viewport starts at the bottom")
 
         // A new assistant message lands, as it does mid-stream. The toggle token
         // does NOT move — this is content the session produced.
@@ -693,9 +635,9 @@ struct TableTranscriptPaneTests {
         await drainMainQueue()
         scene.settle()
 
-        #expect(gapToBottom(scene) <= 2.0,
+        #expect(scene.gapToBottom <= 2.0,
                 Comment(rawValue: "a streaming append at the bottom must scroll to the new tail "
-                    + "(gap=\(gapToBottom(scene)))"))
+                    + "(gap=\(scene.gapToBottom))"))
     }
 
     // MARK: - Prepend anchor and near-top signal
@@ -722,22 +664,6 @@ struct TableTranscriptPaneTests {
         return (transcriptRenderNodes(from: base), transcriptRenderNodes(from: earlier + base))
     }
 
-    /// Scrolls so `row`'s top sits `below` points under the viewport top.
-    private func park(row: Int, below: CGFloat, in scene: TableTranscriptScene) {
-        let clip = scene.scrollView.contentView
-        let target = max(0, scene.tableView.rect(ofRow: row).minY - below)
-        clip.scroll(to: NSPoint(x: 0, y: target))
-        scene.scrollView.reflectScrolledClipView(clip)
-        scene.settle()
-    }
-
-    private func scroll(_ scene: TableTranscriptScene, toY y: CGFloat) {
-        let clip = scene.scrollView.contentView
-        let maxY = max(0, scene.tableView.frame.height - clip.bounds.height)
-        clip.scroll(to: NSPoint(x: 0, y: min(max(0, y), maxY)))
-        scene.scrollView.reflectScrolledClipView(clip)
-    }
-
     @Test("a prepend keeps the top visible row where it was")
     func prependKeepsTopRowAnchored() async throws {
         let suiteName = "table-harness-prepend-\(UUID().uuidString)"
@@ -748,14 +674,14 @@ struct TableTranscriptPaneTests {
         let (before, after) = Self.prependArrays()
         let scene = TableTranscriptScene(items: [], appState: appState, nodes: before)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        let primedWidth = primeScene(scene, nodes: before)
+        let primedWidth = scene.prime(nodes: before)
 
-        park(row: 20, below: 150, in: scene)
-        #expect(gapToBottom(scene) > 120,
+        scene.park(row: 20, below: 150)
+        #expect(scene.gapToBottom > 120,
                 Comment(rawValue: "precondition: the viewport must be clear of the tail-follow "
-                    + "threshold (gap=\(gapToBottom(scene)))"))
+                    + "threshold (gap=\(scene.gapToBottom))"))
         let anchorID = before[20].id
-        let offsetBefore = screenOffset(of: 20, in: scene)
+        let offsetBefore = scene.screenOffset(ofRow: 20)
 
         scene.coordinator.update(
             nodes: after, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
@@ -766,7 +692,7 @@ struct TableTranscriptPaneTests {
         #expect(index == 32)
 
         // The first frame after the prepend is what the reader sees.
-        let offsetFirstFrame = screenOffset(of: index, in: scene)
+        let offsetFirstFrame = scene.screenOffset(ofRow: index)
         #expect(abs(offsetFirstFrame - offsetBefore) <= 1.0,
                 Comment(rawValue: "the anchor row moved in the first frame: "
                     + "before=\(offsetBefore) firstFrame=\(offsetFirstFrame)"))
@@ -777,7 +703,7 @@ struct TableTranscriptPaneTests {
         await drainMainQueue()
         scene.settle()
 
-        let offsetAfter = screenOffset(of: index, in: scene)
+        let offsetAfter = scene.screenOffset(ofRow: index)
         #expect(abs(offsetAfter - offsetBefore) <= 1.0,
                 Comment(rawValue: "the anchor row moved on screen across the prepend: "
                     + "before=\(offsetBefore) after=\(offsetAfter)"))
@@ -793,10 +719,10 @@ struct TableTranscriptPaneTests {
         let (before, after) = Self.prependArrays()
         let scene = TableTranscriptScene(items: [], appState: appState, nodes: before)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        primeScene(scene, nodes: before)
+        scene.prime(nodes: before)
         scene.coordinator.scrollToEnd(animated: false)
         scene.settle()
-        #expect(gapToBottom(scene) <= 120, "precondition: the viewport starts at the bottom")
+        #expect(scene.gapToBottom <= 120, "precondition: the viewport starts at the bottom")
 
         scene.coordinator.update(
             nodes: after, atBottom: .constant(true), activityToggleToken: 0, linkRoot: "",
@@ -805,9 +731,9 @@ struct TableTranscriptPaneTests {
         await drainMainQueue()
         scene.settle()
 
-        #expect(gapToBottom(scene) <= 120,
+        #expect(scene.gapToBottom <= 120,
                 Comment(rawValue: "a prepend at the bottom must leave the viewport at the bottom "
-                    + "(gap=\(gapToBottom(scene)))"))
+                    + "(gap=\(scene.gapToBottom))"))
     }
 
     @Test("with no stable id on screen, a prepend keeps the distance from the bottom")
@@ -831,11 +757,11 @@ struct TableTranscriptPaneTests {
 
         let scene = TableTranscriptScene(items: [], appState: appState, nodes: before)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        primeScene(scene, nodes: before)
-        park(row: 20, below: 150, in: scene)
-        let gapBefore = gapToBottom(scene)
+        scene.prime(nodes: before)
+        scene.park(row: 20, below: 150)
+        let gapBefore = scene.gapToBottom
         #expect(gapBefore > 120, "precondition: the viewport must be clear of the tail-follow threshold")
-        let offsetBefore = screenOffset(of: 20, in: scene)
+        let offsetBefore = scene.screenOffset(ofRow: 20)
 
         scene.coordinator.update(
             nodes: after, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
@@ -844,11 +770,11 @@ struct TableTranscriptPaneTests {
         await drainMainQueue()
         scene.settle()
 
-        let gapAfter = gapToBottom(scene)
+        let gapAfter = scene.gapToBottom
         #expect(abs(gapAfter - gapBefore) <= 1.0,
                 Comment(rawValue: "the distance from the bottom moved: before=\(gapBefore) after=\(gapAfter)"))
         // The record the reader was looking at (now row 32) stays put too.
-        let offsetAfter = screenOffset(of: 32, in: scene)
+        let offsetAfter = scene.screenOffset(ofRow: 32)
         #expect(abs(offsetAfter - offsetBefore) <= 1.0,
                 Comment(rawValue: "the record on screen moved: before=\(offsetBefore) after=\(offsetAfter)"))
     }
@@ -867,9 +793,9 @@ struct TableTranscriptPaneTests {
         let (before, after) = Self.prependArrays()
         let scene = TableTranscriptScene(items: [], appState: appState, nodes: before)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        primeScene(scene, nodes: before)
-        park(row: 20, below: 150, in: scene)
-        let offsetBefore = screenOffset(of: 20, in: scene)
+        scene.prime(nodes: before)
+        scene.park(row: 20, below: 150)
+        let offsetBefore = scene.screenOffset(ofRow: 20)
         let originBefore = scene.scrollView.contentView.bounds.origin.y
 
         scene.coordinator.update(
@@ -884,10 +810,71 @@ struct TableTranscriptPaneTests {
 
         let inserted = scene.tableView.rect(ofRow: 12).minY
         #expect(inserted > 300, Comment(rawValue: "precondition: 12 rows inserted (\(inserted) pt)"))
-        let moved = screenOffset(of: 32, in: scene) - offsetBefore
+        let moved = scene.screenOffset(ofRow: 32) - offsetBefore
         #expect(moved >= inserted * 0.5,
                 Comment(rawValue: "without the token the row must move down by about the inserted "
                     + "height (moved=\(moved) inserted=\(inserted))"))
+    }
+
+    /// A held prepend anchor keeps the reader's place until the reader moves
+    /// it. A reader scroll is a move of the clip's origin the coordinator did
+    /// not make; a change to the viewport's size leaves the origin, and the
+    /// reader's place, where they were.
+    @Test("a reader scroll releases a held prepend anchor, and a viewport resize does not")
+    func readerScrollReleasesPrependAnchor() async throws {
+        let suiteName = "table-harness-prepend-release-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(userDefaults: defaults)
+
+        let (before, after) = Self.prependArrays()
+        let scene = TableTranscriptScene(items: [], appState: appState, nodes: before)
+        defer { withExtendedLifetime(scene.coordinator) {} }
+        scene.prime(nodes: before)
+        scene.coordinator.startObservingScroll()
+        scene.park(row: 20, below: 150)
+        try #require(scene.gapToBottom > 120,
+                     Comment(rawValue: "precondition: the viewport must be clear of the tail-follow "
+                         + "threshold (gap=\(scene.gapToBottom))"))
+        // The prepend anchors the first visible row with a stable id. Every
+        // id here is stable, and row 20 is parked 150pt down, so that is a
+        // row above it, read the way `capturePrependAnchor` reads it.
+        let clip = scene.scrollView.contentView
+        let firstVisible = scene.tableView.rows(in: clip.documentVisibleRect).location
+        try #require(firstVisible != NSNotFound && firstVisible < 20,
+                     Comment(rawValue: "precondition: rows above row 20 are on screen (first \(firstVisible))"))
+        let anchorID = before[firstVisible].id
+
+        scene.coordinator.update(
+            nodes: after, atBottom: .constant(false), activityToggleToken: 0, linkRoot: "",
+            prependToken: 1)
+        scene.tableView.layoutSubtreeIfNeeded()
+        await drainMainQueue()
+        scene.settle()
+        let anchor = try #require(scene.coordinator.pendingPrependAnchor,
+                                  Comment(rawValue: "precondition: the prepend still holds its anchor once its rows "
+                                      + "settled; \(scene.heldReaderMoveNote)"))
+        try #require(anchor.id == anchorID,
+                     Comment(rawValue: "precondition: the prepend anchored the first visible row, \(anchorID); "
+                         + scene.heldReaderMoveNote))
+
+        let origin = clip.bounds.minY
+        scene.scrollView.frame = NSRect(
+            x: 0, y: 0, width: TableTranscriptScene.width, height: TableTranscriptScene.viewportHeight - 100)
+        scene.settle()
+        try #require(clip.bounds.height < TableTranscriptScene.viewportHeight - 50,
+                     Comment(rawValue: "precondition: the viewport got shorter (\(clip.bounds.height) pt)"))
+        try #require(abs(clip.bounds.minY - origin) <= 0.5,
+                     Comment(rawValue: "precondition: the origin stayed (\(origin) → \(clip.bounds.minY)); "
+                         + scene.heldReaderMoveNote))
+        // Whether or not the resize itself posted one, the observer hears a
+        // bounds change against the new size, as it would from AppKit.
+        NotificationCenter.default.post(name: NSView.boundsDidChangeNotification, object: clip)
+        #expect(scene.coordinator.pendingPrependAnchor == anchor,
+                Comment(rawValue: "a viewport resize released the prepend anchor; \(scene.heldReaderMoveNote)"))
+
+        scene.scroll(toY: clip.bounds.minY + 120)
+        #expect(scene.coordinator.pendingPrependAnchor == nil, "a reader scroll left the prepend anchor held")
     }
 
     @Test("near-top reports transitions only")
@@ -900,7 +887,7 @@ struct TableTranscriptPaneTests {
         let (before, _) = Self.prependArrays()
         let scene = TableTranscriptScene(items: [], appState: appState, nodes: before)
         defer { withExtendedLifetime(scene.coordinator) {} }
-        primeScene(scene, nodes: before)
+        scene.prime(nodes: before)
         scene.coordinator.startObservingScroll()
         scene.coordinator.scrollToEnd(animated: false)
         scene.settle()
@@ -909,13 +896,13 @@ struct TableTranscriptPaneTests {
         let recorder = Recorder()
         scene.coordinator.onNearTop = { recorder.values.append($0) }
 
-        scroll(scene, toY: 0)
+        scene.scroll(toY: 0)
         #expect(recorder.values == [true])
-        scroll(scene, toY: scene.tableView.rect(ofRow: 3).minY + 1)
+        scene.scroll(toY: scene.tableView.rect(ofRow: 3).minY + 1)
         #expect(recorder.values == [true], "row 3 at the top is still near the top")
-        scroll(scene, toY: .greatestFiniteMagnitude)
+        scene.scroll(toY: .greatestFiniteMagnitude)
         #expect(recorder.values == [true, false])
-        scroll(scene, toY: 0)
+        scene.scroll(toY: 0)
         #expect(recorder.values == [true, false, true])
         #expect(TableTranscriptView.Coordinator.nearTopRowThreshold == 5)
     }
@@ -1040,7 +1027,17 @@ struct TableTranscriptScene {
             coordinator = TableTranscriptView.Coordinator(context: context)
         }
 
-        let tableView = NSTableView()
+        // AppKit's own row-height estimation is off for this whole process, as
+        // the app turns it off at launch: the `TestProcessDefaults` target
+        // registers the opt-out when the test bundle loads. Registering it here
+        // would come too late, because AppKit reads it once per process and
+        // another suite may have built a table first. `prime(nodes:)` and
+        // `requireDelegateRowHeights()` say so if it is ever on.
+        //
+        // The production table class, so the scene exercises its behaviour too:
+        // it reports its layout passes to the coordinator, which tells
+        // NSTableView's own clip moves during them from the reader's.
+        let tableView = TranscriptBubbleTableView()
         tableView.headerView = nil
         tableView.gridStyleMask = []
         tableView.backgroundColor = .clear
@@ -1063,7 +1060,7 @@ struct TableTranscriptScene {
         // autohiding shape (the moving one: the scroller claims its 17pt only once
         // the document outgrows the viewport, i.e. after the first `reloadData`) so
         // every environment exercises the same geometry AND the same mid-setup width
-        // change. `primeScene` is what absorbs that change.
+        // change. `prime(nodes:)` is what absorbs that change.
         scrollView.scrollerStyle = .legacy
         scrollView.autohidesScrollers = true
         scrollView.documentView = tableView
@@ -1107,7 +1104,7 @@ struct TableTranscriptScene {
     /// turn of the run loop, for whatever AppKit schedules there, a layout pass,
     /// and a comparison, until the table's width, document height and every row
     /// height have held across `settledTurns` consecutive turns. The width is in
-    /// the comparison because `primeScene` waits on it: the autohiding scroller
+    /// the comparison because `prime(nodes:)` waits on it: the autohiding scroller
     /// claims its 17pt only after the first reload outgrows the viewport.
     ///
     /// Bounded by turns, never by elapsed time: a table that never settles
@@ -1117,9 +1114,9 @@ struct TableTranscriptScene {
     /// Synchronous on purpose. It never suspends, so a block the coordinator
     /// deferred with `DispatchQueue.main.async` — the tail-follow
     /// `scrollToEnd`, the prepend re-pin — stays queued until a test hands the
-    /// main actor back (`TableTranscriptPaneTests.drainMainQueue()`); a nested
-    /// run loop cannot run it (see `Tests/CLAUDE.md`, "`@MainActor` tests:
-    /// suspend to drain, never pump").
+    /// main actor back (`drainMainQueue()`); a nested run loop cannot run it
+    /// (see `Tests/CLAUDE.md`, "`@MainActor` tests: suspend to drain, never
+    /// pump").
     func settle() {
         var previous = geometry
         var unchangedTurns = 0
