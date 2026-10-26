@@ -77,7 +77,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `MigrationHelpers.swift` — idempotent schema-change helpers (`addColumnIfMissing`/`createTableIfNotExists`/`addIndexIfMissing`) — required for all new migrations
 - `RetiredColumns.swift` / `RetiredColumnReconciler.swift` — the permanent list of retired columns, and the startup pass that drops each once the kept rollback bundle (`~/tbd/updates/previous/TBD.app`) records a schema epoch at or past it, after a `state.db.pre-column-drop.<UTC>` snapshot
 - `RepoStore` / `WorktreeStore` / `TerminalStore` / `NotificationStore` / `NoteStore` / `TabStore` — GRDB CRUD stores
-- `ConfigStore.swift` / `TBDMetaStore.swift` — global config + key/value meta
+- `ConfigStore.swift` — global config
 - `ModelProfileRecord.swift` / `ModelProfileUsageRecord.swift` — model profile GRDB records
 
 ### ModelProfile/
