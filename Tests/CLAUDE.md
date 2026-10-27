@@ -1077,7 +1077,9 @@ joining the task — rather than a weaker negative.
 **Count each `FireRecorder.next()` in the
 `.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like an
 arming wait, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
-180 s worst case against the 240 s limit. And `next()` is **non-throwing** — it
+180 s worst case against the 240 s limit, a figure that assumes every wait takes
+its default and scales with any explicit `next(timeout:)` or
+`requireAdvanceWhenArmed(by:timeout:)` budget. And `next()` is **non-throwing** — it
 records and returns `nil` — so it does not stop a chain the way a strict arming
 wait does: a `next()` that times out mid-chain leaves every guard after it
 payable in the same run. Put it last, which is what makes the poller chains
