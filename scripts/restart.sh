@@ -180,7 +180,7 @@ if [ "$skip_build" = false ]; then
     # Build the runtime PRODUCTS rather than the whole package.
     #
     # A whole-package build compiles the test targets too, and
-    # Tests/TestSupport does `@testable import TBDDaemonLib`, which needs
+    # Tests/DaemonTestSupport does `@testable import TBDDaemonLib`, which needs
     # testability enabled. Debug builds enable it by default; release builds
     # do NOT, so `swift build -c release` always fails with
     # ModuleNotTestable — after having already linked both products. That

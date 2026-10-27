@@ -6,9 +6,9 @@
 // using the same headless-harness pattern as SwiftTermModeEscapeSmokeTests (M4.0).
 //
 // It lives in TBDDaemonTests because it tests daemon code and runs entirely in
-// memory, so it has no place among the live tests; this target declares the
-// SwiftTerm product for it. Pairing the daemon's bytes with SwiftTerm mirrors
-// production, where the app's SwiftTerm consumes the daemon's replay bytes.
+// memory, so it has no place among the live tests. Pairing the daemon's bytes
+// with SwiftTerm mirrors production, where the app's SwiftTerm consumes the
+// daemon's replay bytes.
 //
 // Notable finding verified here (M4.0 did not cover it): SwiftTerm HONORS ED3
 // (`\e[3J`, xterm scrollback clear) via `feed` — `cmdEraseInDisplay` case 3

@@ -266,8 +266,8 @@ let package = Package(
         ),
         // The test helpers that need the daemon library. They live apart from
         // `TestSupport` so that the app and holder tests, which use only the
-        // generic helpers, neither link `TBDDaemonLib` nor recompile when it
-        // changes. The CI build's import check holds that line; see
+        // generic helpers, neither compile against `TBDDaemonLib` nor recompile
+        // when it changes. The CI build's import check holds that line; see
         // docs/specs/2026-10-26-daemon-test-support-design.md.
         .target(
             name: "DaemonTestSupport",
@@ -306,8 +306,9 @@ let package = Package(
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
-                // `ReplayWriterRoundTripTests` feeds the replay bytes through
-                // a headless SwiftTerm `Terminal`.
+                // Declared because these tests use SwiftTerm directly, not
+                // only through the daemon library: the replay round-trip suite
+                // and the screen tests feed bytes through a headless `Terminal`.
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
@@ -406,7 +407,8 @@ let package = Package(
                 // `waitUntilExit()`. The alternative is a second hand-rolled
                 // blocking wait in a target that spawns children, which is the
                 // thing that helper exists to end. `TestSupport` holds only the
-                // generic helpers, so this brings no daemon code with it.
+                // generic helpers, so this target doesn't depend on the daemon
+                // library.
                 "TestSupport",
             ]
         ),
