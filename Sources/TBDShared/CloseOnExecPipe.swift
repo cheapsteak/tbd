@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 /// Setting `FD_CLOEXEC` on one end of a fresh pipe failed.
-public struct CloseOnExecPipeError: Error, CustomStringConvertible, Equatable, Sendable {
+public struct CloseOnExecPipeError: LocalizedError, CustomStringConvertible, Equatable, Sendable {
     /// The descriptor `fcntl` refused.
     public let fileDescriptor: Int32
     public let errno: Int32
@@ -10,6 +10,8 @@ public struct CloseOnExecPipeError: Error, CustomStringConvertible, Equatable, S
     public var description: String {
         "could not mark pipe descriptor \(fileDescriptor) close-on-exec: \(String(cString: strerror(errno)))"
     }
+
+    public var errorDescription: String? { description }
 }
 
 extension Pipe {
