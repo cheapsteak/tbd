@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared

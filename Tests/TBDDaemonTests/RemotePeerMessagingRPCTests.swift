@@ -3,6 +3,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// `peer.status`'s report of each repository's peer-messaging switch — the read

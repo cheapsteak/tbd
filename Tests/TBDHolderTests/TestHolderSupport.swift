@@ -200,17 +200,8 @@ final class HolderFixture {
     ///
     /// Exposed so a test can name paths inside it — a marker file the job
     /// writes — while building the launch request, before the fixture exists.
-    ///
-    /// This duplicates `fencedScratchRoot(prefix:)` in `TestSupport` rather
-    /// than calling it: `TestSupport` pulls in `TBDDaemonLib`, and this target
-    /// deliberately links only the holder and `TBDShared`. Keep the two reading
-    /// the same variable, empty-value fallback included — an empty
-    /// `TBD_TEST_SCRATCH_ROOT` is no more a fence than a missing one, and taken
-    /// literally it would mint the root in the root of the volume.
     static func scratchHome() -> String {
-        let fenced = ProcessInfo.processInfo.environment["TBD_TEST_SCRATCH_ROOT"] ?? ""
-        let root = fenced.isEmpty ? "/tmp" : fenced
-        return "\(root)/tbdh-\(UUID().uuidString.prefix(8).lowercased())"
+        fencedScratchRoot(prefix: "tbdh")
     }
 
     /// The descriptor number `strayDescriptorProbe` plants a leaked fd on.

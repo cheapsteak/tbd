@@ -259,11 +259,23 @@ let package = Package(
         .target(
             name: "TestSupport",
             dependencies: [
-                "TBDDaemonLib",
                 "TBDShared",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
             path: "Tests/TestSupport"
+        ),
+        // The test helpers that need the daemon library. They live apart from
+        // `TestSupport` so that the app and holder tests, which use only the
+        // generic helpers, neither compile against `TBDDaemonLib` nor recompile
+        // when it changes. The CI build's import check holds that line; see
+        // docs/specs/2026-10-26-daemon-test-support-design.md.
+        .target(
+            name: "DaemonTestSupport",
+            dependencies: [
+                "TBDDaemonLib",
+                "TBDShared",
+            ],
+            path: "Tests/DaemonTestSupport"
         ),
         // User defaults the test process must register before any test runs,
         // as the app registers them in `applicationWillFinishLaunching`: a
@@ -292,7 +304,12 @@ let package = Package(
                 "TBDDaemonLib",
                 "TBDShared",
                 "TestSupport",
+                "DaemonTestSupport",
                 "TBDTerminalSerialization",
+                // Declared because these tests use SwiftTerm directly, not
+                // only through the daemon library: the replay round-trip suite
+                // and the screen tests feed bytes through a headless `Terminal`.
+                .product(name: "SwiftTerm", package: "SwiftTerm"),
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Clocks", package: "swift-clocks"),
             ]
@@ -309,6 +326,7 @@ let package = Package(
                 "TBDDaemonLib",
                 "TBDShared",
                 "TestSupport",
+                "DaemonTestSupport",
                 // TmuxBridge (app side) drives a real tmux server in
                 // TmuxBridgeViewSessionLiveTests, which makes it tier 3.
                 "TBDApp",
@@ -335,10 +353,6 @@ let package = Package(
             name: "TBDAppTests",
             dependencies: [
                 "TBDApp",
-                // For the replay-writer round-trip test (M4.2): the daemon
-                // assembles replay bytes, the app's SwiftTerm consumes them,
-                // and only this test target links the SwiftTerm product.
-                "TBDDaemonLib",
                 "TestSupport",
                 // Turns off NSTableView's row-height estimation for the whole
                 // test process before any table exists; see the target.
@@ -390,10 +404,11 @@ let package = Package(
                 "TBDShared",
                 // `collectOutput(of:)`, which runs a spawned binary to
                 // completion without parking a cooperative-pool thread on
-                // `waitUntilExit()`. It brings `TBDDaemonLib` in behind it,
-                // which nothing here needs; the alternative is a second
-                // hand-rolled blocking wait in a target that spawns children,
-                // which is the thing that helper exists to end.
+                // `waitUntilExit()`. The alternative is a second hand-rolled
+                // blocking wait in a target that spawns children, which is the
+                // thing that helper exists to end. `TestSupport` holds only the
+                // generic helpers, so this target doesn't depend on the daemon
+                // library.
                 "TestSupport",
             ]
         ),

@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// A `ClaudeProfileConfigDirManager` pointed at fresh temp dirs so nothing

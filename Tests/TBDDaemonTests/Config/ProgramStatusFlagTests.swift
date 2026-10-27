@@ -4,6 +4,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// Schema and resolution guards for `config.program_status_enabled`, the

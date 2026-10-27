@@ -5,10 +5,10 @@
 // bytes actually produce the intended terminal STATE when fed through SwiftTerm,
 // using the same headless-harness pattern as SwiftTermModeEscapeSmokeTests (M4.0).
 //
-// It lives in TBDAppTests because this is the only test target that links the
-// SwiftTerm product; TBDDaemonLib was added to this target's dependencies for
-// exactly this cross-boundary test (the app consumes the daemon's replay bytes
-// at runtime, so the pairing mirrors production).
+// It lives in TBDDaemonTests because it tests daemon code and runs entirely in
+// memory, so it has no place among the live tests. Pairing the daemon's bytes
+// with SwiftTerm mirrors production, where the app's SwiftTerm consumes the
+// daemon's replay bytes.
 //
 // Notable finding verified here (M4.0 did not cover it): SwiftTerm HONORS ED3
 // (`\e[3J`, xterm scrollback clear) via `feed` — `cmdEraseInDisplay` case 3

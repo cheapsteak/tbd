@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import os
 import TBDShared
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 

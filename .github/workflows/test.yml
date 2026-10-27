@@ -866,6 +866,29 @@ jobs:
       # that ever lost `--skip-build` would find the build up to date rather
       # than compile the whole package again with other flags.
       #
+      # THE IMPORT CHECK IS THIS STEP'S ALONE. With
+      # `--explicit-target-dependency-import-check error`, SwiftPM pre-scans
+      # each target's imports before it compiles and fails the build when a
+      # target imports a module of the package graph that its dependency tree
+      # does not reach. Every module SwiftPM builds lands in one shared search
+      # directory, so without the check such an import compiles whenever that
+      # module happens to be built first. SwiftPM skips the check for any
+      # target whose dependency tree holds a build plugin, and SwiftTerm's
+      # library uses one, so the check covers TestSupport but not TBDAppTests or
+      # any other target that reaches SwiftTerm. What keeps both TBDAppTests and
+      # TestSupport off TBDDaemonLib is the SwiftLint rule
+      # no_daemon_import_in_app_tests, in the lint job and the pre-push hook;
+      # for TestSupport this check is a second guard. The option changes
+      # nothing that is compiled, so it stays out of CI_SWIFTPM_FLAGS, and so
+      # out of the cache key that carries that value, and the passes, which run
+      # with `--skip-build`, do not spell it. It is best-effort: SwiftPM skips
+      # the check without a message when the compiler offers no import
+      # pre-scan, stops checking when one target's pre-scan fails, and visits
+      # targets in an order that changes from run to run, so a green build does
+      # not prove that it ran. See
+      # docs/specs/2026-10-26-daemon-test-support-design.md, which also says how
+      # to prove that the check bites.
+      #
       # 30 minutes, which is 1800 s: 45% above the slowest measured run of a
       # first test step that compiled for itself, and that figure covers the
       # compile AND a full daemon test pass, so the compile alone has more room
@@ -907,7 +930,7 @@ jobs:
         run: |
           read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           status=0
-          scripts/swift-safe build --build-tests -j "$TBD_SWIFT_JOBS" "${swiftpm_flags[@]}" || status=$?
+          scripts/swift-safe build --build-tests --explicit-target-dependency-import-check error -j "$TBD_SWIFT_JOBS" "${swiftpm_flags[@]}" || status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::The build exited $status, so all four test passes are skipped: they run with --skip-build, and after a failed build that would test whatever stale bundle .build/ still holds instead of this commit."
           fi

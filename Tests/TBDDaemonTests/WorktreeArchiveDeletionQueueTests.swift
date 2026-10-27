@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 @Suite("Worktree archive uses the deletion queue")
