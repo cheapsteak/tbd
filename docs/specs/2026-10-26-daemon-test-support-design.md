@@ -10,13 +10,15 @@
   - `DatabaseRepoHelpers.swift` (`makeTestRepo`);
   - `WakeResultTestSupport.swift` (`WakeResult.isOk`).
 
-  No app test uses any of them, while 154 daemon and live test files do. Every target that uses `TestSupport` still gets the daemon library.
-- **`TBDAppTests` declares `TBDDaemonLib` for one suite.** `ReplayWriterRoundTripTests` feeds the daemon's replay bytes through a headless SwiftTerm `Terminal`. It imports `SwiftTerm` and `TBDDaemonLib`, but not `TBDApp`. It sits in the app tests only because that target once was the only one linking the SwiftTerm product.
-- **`TBDHolderTests` links the daemon library for nothing.** It needs `collectOutput(of:)` from `TestSupport`, and the comment on that dependency in `Package.swift` says the daemon library comes along unused.
+  No app test uses any of them, while 154 daemon and live test files do. Every target that uses `TestSupport` still depends on the daemon library.
+- **`TBDAppTests` declares `TBDDaemonLib` for one suite.** `ReplayWriterRoundTripTests` feeds the daemon's replay bytes through a headless SwiftTerm `Terminal`. It imports `SwiftTerm` and `TBDDaemonLib`, but not `TBDApp`, so nothing in it needs the app.
+- **`TBDHolderTests` depends on the daemon library for nothing.** It needs `collectOutput(of:)` from `TestSupport`, and the comment on that dependency in `Package.swift` says the daemon library comes along unused.
 
 A test target that can reach a module its product cannot gives the wrong picture of the system, and it lets tests depend on daemon internals the app never sees.
 
 There is a build-cost effect too. When a commit changes only `TBDDaemonLib`'s top-level declarations, Swift 6.3 recompiles every file that uses the module. In 10 such CI runs, the app tests recompiled a median of 222 files, and `TBDApp` recompiled none.
+
+The change is to what each target compiles against. On macOS, SwiftPM links all test targets into one test bundle, so the test process still contains the daemon library.
 
 ## Design
 
@@ -28,13 +30,15 @@ There is a build-cost effect too. When a commit changes only `TBDDaemonLib`'s to
   - It depends on `TBDDaemonLib` and `TBDShared`, which is all the four files use.
   - A file that uses a daemon helper imports `DaemonTestSupport` itself, so each file's imports say what it uses.
   - It joins the SwiftLint scope in the same way as `TestSupport`, so the moved files are still linted.
-- **`TBDDaemonTests`** adds `DaemonTestSupport`, and the `SwiftTerm` product for the suite it receives below.
+- **`TBDDaemonTests`** adds `DaemonTestSupport`. It also declares the `SwiftTerm` product. It already reaches SwiftTerm through `TBDDaemonLib`, but its tests use SwiftTerm directly, as the live tests do, and the manifest says so.
 - **`TBDDaemonLiveTests`** adds `DaemonTestSupport`.
 - **`TBDAppTests`** drops `TBDDaemonLib`.
 - **`ReplayWriterRoundTripTests.swift`** moves from `Tests/TBDAppTests` to `Tests/TBDDaemonTests`.
   - Only its header comment changes.
   - It runs entirely in memory, so it belongs with the daemon tests, not the live tests.
-- **`TBDHolderTests`** keeps its dependency list. It stops linking the daemon library because `TestSupport` no longer depends on it, and its comment in `Package.swift` says so.
+- **`TBDHolderTests`** keeps its dependency list. It doesn't depend on the daemon library, because `TestSupport` doesn't.
+  - Its comment in `Package.swift` says so.
+  - Its own copy of the scratch-root helper existed only to keep `TestSupport` out. It calls `fencedScratchRoot(prefix:)` from `TestSupport` instead.
 
 ### Guard
 
@@ -52,7 +56,8 @@ SwiftPM writes every module it builds into one shared search directory. A target
 
 These say where a moved helper or test lives, or why a target depends on the daemon library, and are updated:
 - `CLAUDE.md`, which points to `makeIsolatedConfigDirManager(tag:)` "in `TestSupport`";
-- the comments on `TBDAppTests` and `TBDHolderTests` in `Package.swift`.
+- the comments on `TBDAppTests` and `TBDHolderTests` in `Package.swift`;
+- the comment in `scripts/restart.sh` that names the target holding `@testable import TBDDaemonLib`.
 
 `docs/research/2026-08-19-cold-build-split/findings.md` describes the target graph as it was measured then, and stays as it is.
 
@@ -71,7 +76,7 @@ These say where a moved helper or test lives, or why a target depends on the dae
 
 ## Rejected alternatives
 
-- **Keep the name `TestSupport` for the daemon helpers, and move the generic files to a new target below it.** This touches fewer files (55 app and holder test files instead of 154 daemon and live ones). But the generic name would then label the daemon-specific target, and the misleading name would outlive the migration.
+- **Keep the name `TestSupport` for the daemon helpers, and move the generic files to a new target below it.** This touches fewer files (57 app and holder test files instead of 154 daemon and live ones). But the generic name would then label the daemon-specific target, and the misleading name would outlive the migration.
 - **Put the helpers straight into the test targets.** This needs no new target. But the two helpers that the live tests also use would then exist twice.
 - **Only a lint check for this one boundary.** It is simple and certain. But it guards one edge, while the SwiftPM check covers every target's imports. It stays as the fallback.
 - **No guard.** The boundary would then rest on an import that happens to fail, and it would wear away unnoticed.
