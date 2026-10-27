@@ -1,6 +1,8 @@
-# This target is in the root lint scope only so the no_polling_test_clock
-# custom rule can reach it. `only_rules` keeps every default rule off this
-# test code. A custom rule must be named here individually — listing
-# `custom_rules` alone runs none of them in a nested config.
+# This target is in the root lint scope only so two custom rules can reach it:
+# no_polling_test_clock and no_daemon_import_in_app_tests. `only_rules` keeps
+# every default rule off this test code. A custom rule must be named here
+# individually — listing `custom_rules` alone runs none of them in a nested
+# config.
 only_rules:
   - no_polling_test_clock
+  - no_daemon_import_in_app_tests

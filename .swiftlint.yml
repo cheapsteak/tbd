@@ -2,15 +2,17 @@
 included:
   - Sources
   # The two test targets guarded by the no_setenv_tbdhome_wrong_target custom rule.
+  # TBDAppTests is also guarded by no_daemon_import_in_app_tests.
   # A custom rule only runs on files already inside the global lint scope, so these
-  # dirs must be listed here for that rule to fire in CI (`swiftlint --strict`).
-  # TBDDaemonTests is outside that rule's own `included:` regex — setenv("TBD_HOME")
-  # is legitimate there.
+  # dirs must be listed here for those rules to fire in CI (`swiftlint --strict`).
+  # TBDDaemonTests is outside both rules' own `included:` regexes — setenv("TBD_HOME")
+  # and the daemon library are legitimate there.
   - Tests/TBDSharedTests
   - Tests/TBDAppTests
-  # In scope for the no_polling_test_clock custom rule only. Each of these dirs
-  # carries a nested .swiftlint.yml with `only_rules: [no_polling_test_clock]`,
-  # so no default rule reaches test code there.
+  # In scope for custom rules only. Each of these dirs carries a nested
+  # .swiftlint.yml whose `only_rules:` names no_polling_test_clock (and, in
+  # TestSupport, no_daemon_import_in_app_tests), so no default rule reaches
+  # test code there.
   - Tests/TBDDaemonTests
   - Tests/TBDDaemonLiveTests
   - Tests/TBDCLITests
@@ -363,6 +365,28 @@ custom_rules:
       - identifier
       - string
     message: "setenv(\"TBD_HOME\") is only allowed in TBDDaemonTests under TBDHomeSerialized — it races concurrent suites in other targets (see CLAUDE.md, ConstantsTests flake)."
+    severity: error
+
+  no_daemon_import_in_app_tests:
+    name: "No TBDDaemonLib import in TBDAppTests or TestSupport"
+    # SwiftPM's import check in CI's build step holds this boundary for
+    # TestSupport but cannot see TBDAppTests: it skips every target whose
+    # dependency tree holds a build plugin, and TBDAppTests reaches SwiftTerm's
+    # through TBDApp. This rule holds it for both targets.
+    # included/excluded HERE take REGEX (not glob), matched against file path.
+    included:
+      - "Tests/(TBDAppTests|TestSupport)/.*\\.swift"
+    # Anchored on the `import` keyword, so attributes such as `@testable` and an
+    # access level may precede it, with an optional kind word for a scoped
+    # import (`import struct TBDDaemonLib.X`). The closing `\b` keeps
+    # `TBDDaemonLibX` out. SwiftLint marks `import` and the kind word `keyword`
+    # and the module name `identifier`; text inside a comment or string literal
+    # carries neither kind, so a mention of the import there does not match.
+    regex: '\bimport\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?TBDDaemonLib\b'
+    match_kinds:
+      - keyword
+      - identifier
+    message: "TBDAppTests and TestSupport must not depend on the daemon library (TBDDaemonLib). Daemon test helpers belong in DaemonTestSupport, and a suite that needs the daemon library belongs in TBDDaemonTests. See docs/specs/2026-10-26-daemon-test-support-design.md."
     severity: error
 
   no_tui_scraping_literals:

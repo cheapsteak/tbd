@@ -872,9 +872,13 @@ jobs:
       # target imports a module of the package graph that its dependency tree
       # does not reach. Every module SwiftPM builds lands in one shared search
       # directory, so without the check such an import compiles whenever that
-      # module happens to be built first. This is what keeps TBDAppTests and
-      # TestSupport off TBDDaemonLib: nothing either of them depends on reaches
-      # the daemon library, so importing it there fails here. The option changes
+      # module happens to be built first. SwiftPM skips the check for any
+      # target whose dependency tree holds a build plugin, and SwiftTerm's
+      # library uses one, so the check covers TestSupport but not TBDAppTests or
+      # any other target that reaches SwiftTerm. What keeps both TBDAppTests and
+      # TestSupport off TBDDaemonLib is the SwiftLint rule
+      # no_daemon_import_in_app_tests, in the lint job and the pre-push hook;
+      # for TestSupport this check is a second guard. The option changes
       # nothing that is compiled, so it stays out of CI_SWIFTPM_FLAGS, and so
       # out of the cache key that carries that value, and the passes, which run
       # with `--skip-build`, do not spell it. It is best-effort: SwiftPM skips
