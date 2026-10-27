@@ -227,8 +227,18 @@ public struct ShadowPeerHelperProcessSpawner: ShadowPeerHelperSpawning {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = invocation.arguments
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
+        // Close-on-exec, so no other child this daemon starts can inherit the
+        // stdin write end: a copy anywhere would withhold the EOF that is the
+        // helper's only cleanup signal after the daemon is SIGKILLed.
+        let stdinPipe: Pipe
+        let stdoutPipe: Pipe
+        do {
+            stdinPipe = try Pipe.closeOnExec()
+            stdoutPipe = try Pipe.closeOnExec()
+        } catch {
+            throw ShadowPeerHelperError.spawnFailed(
+                handle: invocation.handle, detail: String(describing: error))
+        }
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = FileHandle.nullDevice

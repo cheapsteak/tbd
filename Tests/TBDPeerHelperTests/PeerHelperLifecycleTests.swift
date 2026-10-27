@@ -62,6 +62,72 @@ struct PeerHelperLifecycleTests {
             "socket present: \(helper.socketExists), record present: \(helper.recordExists)")
     }
 
+    /// **The regression test for an inherited stdin write end.**
+    ///
+    /// EOF reaches the helper only once every copy of its stdin pipe's write
+    /// end is closed. `Pipe()` creates both ends inheritable, so any child
+    /// started while the helper runs through a path that closes nothing — a
+    /// sibling suite's `forkpty` or raw `posix_spawn` here — held a copy, and
+    /// `closeStdin()` delivered nothing until that child exited. In the daemon
+    /// the same copy would keep a helper alive past a SIGKILLed parent, socket
+    /// bound and record published.
+    ///
+    /// The unrelated child is started on purpose here, so the race the full
+    /// suite only sometimes ran becomes the case every run takes.
+    @Test func anUnrelatedChildDoesNotHoldTheHelpersStdinOpen() async throws {
+        let helper = try SpawnedPeerHelper(name: "acme:inherited-shadow")
+        defer { helper.tearDown() }
+
+        #expect(await helper.waitForPublication(), "the helper never published")
+
+        // A bare `posix_spawn` with no file actions and no
+        // `POSIX_SPAWN_CLOEXEC_DEFAULT` closes nothing, exactly like SwiftTerm's
+        // `forkpty` and the raw spawns sibling suites make — the children that
+        // actually held the copy. A `Foundation.Process` child would not
+        // reproduce it: measured, one ran beside a plain-`Pipe()` helper and
+        // the EOF still arrived.
+        let bystanderPID = try Self.spawnBystander()
+        defer {
+            // By captured pid only, and reaped with a bounded poll: nothing
+            // else in this process waits on a raw-spawned child.
+            kill(bystanderPID, SIGKILL)
+            let deadline = Date().addingTimeInterval(SpawnedPeerHelper.waitLimit)
+            var status: Int32 = 0
+            while waitpid(bystanderPID, &status, WNOHANG) == 0, Date() < deadline {
+                usleep(20_000)
+            }
+        }
+
+        helper.closeStdin()
+
+        #expect(
+            await helper.waitForExit(),
+            "the helper outlived its stdin close while an unrelated child (pid \(bystanderPID)) was running — that child inherited the stdin write end")
+        #expect(helper.exitStatus == 0)
+        #expect(
+            await helper.waitForReclamation(),
+            "socket present: \(helper.socketExists), record present: \(helper.recordExists)")
+    }
+
+    private struct BystanderSpawnFailed: Error, CustomStringConvertible {
+        let code: Int32
+        var description: String {
+            "could not posix_spawn /bin/sleep: \(String(cString: strerror(code)))"
+        }
+    }
+
+    /// `/bin/sleep 600`, inheriting every descriptor this process has open.
+    private static func spawnBystander() throws -> pid_t {
+        var pid: pid_t = 0
+        let words: [String] = ["/bin/sleep", "600"]
+        var argv: [UnsafeMutablePointer<CChar>?] = words.map { strdup($0) }
+        argv.append(nil)
+        defer { for arg in argv { free(arg) } }
+        let code = posix_spawn(&pid, "/bin/sleep", nil, nil, &argv, nil)
+        guard code == 0 else { throw BystanderSpawnFailed(code: code) }
+        return pid
+    }
+
     /// **The regression test for the self-pipe deadlock.**
     ///
     /// The helper's shutdown ran `drain(fd:)` as `while read(fd, …) > 0`, over a
