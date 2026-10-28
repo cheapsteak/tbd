@@ -70,6 +70,14 @@ and the next spawn on that profile retries the migration. The only removals are
 byte-identical profile duplicates and alias links. No file that differs from
 its counterpart is ever deleted.
 
+A `.backup` file is kept on purpose, and no sweep reclaims it. It holds the
+only copy of bytes that differ from the transcript beside it, so removing it is
+the user's call. Backups cannot pile up: the migration runs only while a
+profile's `projects` slot is a real directory, and once the slot links, the
+next spawn finds the link and returns before planning anything. A profile
+therefore gains at most one backup for each transcript pair that differed at
+the moment it linked.
+
 `keybindings.json` joins the mirror slots and follows the file-slot rules that
 `settings.json` and `CLAUDE.md` already use. When the host has no such file,
 the slot is skipped. When the profile holds a real file, it moves to a
