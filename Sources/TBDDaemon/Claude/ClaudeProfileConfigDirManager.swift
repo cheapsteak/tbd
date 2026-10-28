@@ -165,9 +165,9 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// Slots whose host entry must be a directory before it can be mirrored.
     ///
     /// Scoped to `sessions` deliberately. The other nine keep their
-    /// pre-existing unchecked behaviour — two of them (`CLAUDE.md`,
-    /// `settings.json`, `keybindings.json`) are files by design, and the rest have never been
-    /// reported wedged. What makes `sessions` different is that TBD *writes*
+    /// pre-existing unchecked behaviour — three of them (`CLAUDE.md`,
+    /// `settings.json`, `keybindings.json`) are files by design, and the rest
+    /// have never been reported wedged. What makes `sessions` different is that TBD *writes*
     /// through the mirror: a host `sessions` that is a regular file would give
     /// every profile a symlink to a file and fail every registry write.
     private static let slotsRequiringHostDirectory: Set<String> = ["sessions"]
@@ -183,8 +183,10 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// One pass-1 decision about a profile `projects/` entry that pass 2 applies.
     private enum ProjectsCollisionResolution {
         /// The profile file is byte-identical to the host file: remove the profile copy.
-        /// The sizes pass 1 saw are re-checked at apply time, so a live writer
-        /// appending in between cannot turn the removal into data loss.
+        /// The sizes pass 1 saw are re-checked at apply time, which makes it much
+        /// less likely that a live writer appending in between loses bytes. It
+        /// does not rule it out: an append between the re-check and the unlink,
+        /// or a same-size rewrite, still gets past it.
         case dropDuplicate(profile: URL, host: URL, profileSize: UInt64, hostSize: UInt64)
         /// The profile entry is a symlink to its own host counterpart: remove only the link.
         case dropAliasLink(profile: URL)
