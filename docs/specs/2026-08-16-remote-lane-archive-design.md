@@ -452,7 +452,7 @@ on disk by default, so it can be found in Console without a debug subscription.
 
 The merge rail writes the same shape under its daemon actor when the archive
 decision refuses a lane. Its earlier skips — a lane it is not armed for, and
-remote backends off — make no archive decision and write no row.
+a daemon started without remote backends — make no archive decision and write no row.
 
 The `gone` path does write a row and confirm it dispatched. No provider call was
 made, but the row genuinely changed status, and that is the act the record names.
@@ -497,8 +497,8 @@ Archive:
 - An already-archived and an already-exited lane each flip without error.
 - The merge rail archives an armed remote lane whose provider declares `archive`,
   and declines one whose provider does not, recording the decline as a request
-  row under its daemon actor confirmed as `refused`. An unarmed lane and a lane
-  seen with remote backends off write no row.
+  row under its daemon actor confirmed as `refused`. An unarmed lane, and a lane
+  seen by a daemon started without remote backends, write no row.
 
 Revive:
 

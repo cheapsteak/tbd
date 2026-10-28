@@ -47,7 +47,10 @@ struct ArchiveAnywayDecisionTests {
         let refusal = "Cannot archive acme-remote: its agent is still working."
         let (message, informative, confirm) = AppState.archiveAnywayPrompt(refusal: refusal)
         #expect(message == refusal)
-        #expect(informative == "Archive anyway retires the lane on its provider without this check.")
+        #expect(informative.contains("all three safety checks"))
+        #expect(informative.contains("working agent"))
+        #expect(informative.contains("uncommitted work"))
+        #expect(informative.contains("stale inventory"))
         #expect(confirm == "Archive anyway")
     }
 }

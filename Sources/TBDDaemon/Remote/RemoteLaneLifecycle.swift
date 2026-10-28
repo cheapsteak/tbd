@@ -228,6 +228,14 @@ struct RemoteLaneLifecycle: Sendable {
         "before changing remote sessions."
     }
 
+    /// The refusal for archiving a lane while its provider's inventory is
+    /// stale. States the fact alone: the working and dirty guards read the
+    /// stale mirror, so TBD cannot tell either. The surface adds the remedy.
+    static func staleSnapshotArchiveRefusal(_ name: String, provider: String) -> String {
+        "Cannot archive \(name): provider '\(provider)' inventory is stale, so TBD cannot tell " +
+        "whether its agent is working or its checkout has uncommitted work."
+    }
+
     /// The refusal for a lane whose provider reports an unclean checkout.
     static func dirtyWorkspaceGuardRefusal(_ name: String) -> String {
         "Cannot archive \(name): its provider reports the session's checkout has uncommitted work " +

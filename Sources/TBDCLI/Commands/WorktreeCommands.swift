@@ -423,7 +423,7 @@ struct WorktreeArchive: AsyncParsableCommand {
     @Argument(help: "Worktree name or ID")
     var nameOrID: String
 
-    @Flag(name: .long, help: "Force archive even with uncommitted changes")
+    @Flag(name: .long, help: "Force archive even with uncommitted changes, or past a remote lane's safety checks")
     var force = false
 
     @Flag(name: .long, help: "Output JSON")

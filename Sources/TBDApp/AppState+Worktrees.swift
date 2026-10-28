@@ -748,7 +748,8 @@ extension AppState {
         refusal: String
     ) -> (message: String, informative: String, confirm: String) {
         (message: refusal,
-         informative: "Archive anyway retires the lane on its provider without this check.",
+         informative: "Archive anyway skips all three safety checks — a working agent, uncommitted work on the provider, "
+             + "and a stale inventory — and retires the lane on its provider.",
          confirm: "Archive anyway")
     }
 

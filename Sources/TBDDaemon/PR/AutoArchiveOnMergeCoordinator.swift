@@ -143,12 +143,13 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
     /// `.notice`, not surfaced: this is a background rail, and declining is
     /// its ordinary behavior.
     ///
-    /// With remote backends off there is no manager to ask, so the rail makes
+    /// With no provider manager (remote backends were off when the daemon
+    /// started) there is nothing to ask, so the rail makes
     /// no decision and writes no row, exactly as for a lane it is not armed
     /// for.
     private func archiveRemoteLane(_ wt: Worktree, prNumber: Int) async -> Bool {
         guard let remoteManager else {
-            logger.debug("auto-archive skipped (remote backends off): \(wt.id, privacy: .public)")
+            logger.debug("auto-archive skipped (no provider manager): \(wt.id, privacy: .public)")
             return false
         }
         let lanes = RemoteLaneLifecycle(

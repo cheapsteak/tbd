@@ -15,10 +15,11 @@ import Testing
 /// declares no `archive`, when a guard refuses, and when the inventory is
 /// stale, and it records each decline as a request row under its own daemon
 /// actor confirmed `refused` with the reason `not-eligible`. The merged edge
-/// is not seen again, so that row is how a lane left active after its PR
+/// is not seen again for the rest of this daemon run, so that row is how a lane left active after its PR
 /// merged is traced to the refusal that kept it. The skips that come before
-/// any archive decision — a lane the rail is not armed for, and remote
-/// backends off — write no row.
+/// any archive decision — a lane the rail is not armed for, and no
+/// provider manager (remote backends were off when the daemon started) —
+/// write no row.
 @Suite("Auto-archive on merge: remote lanes")
 struct AutoArchiveRemoteLaneTests {
 

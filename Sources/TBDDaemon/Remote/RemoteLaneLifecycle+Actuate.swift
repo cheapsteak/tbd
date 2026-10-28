@@ -80,7 +80,7 @@ extension RemoteLaneLifecycle {
     /// the wrong dependency for the smaller gain.
     static let reseedCreateTimeout: TimeInterval = 60
 
-    /// Routes an archive of `worktree`, applying the verb path's two guards.
+    /// Routes an archive of `worktree`, applying the verb path's three guards.
     ///
     /// The capability routing is `archivePlan`'s, unchanged — this only adds
     /// the guards, and only on the verb path. The `gone` path touches nothing
@@ -110,7 +110,7 @@ extension RemoteLaneLifecycle {
         case .invokeVerb:
             if !force {
                 if await manager.hasStaleSnapshot(provider: provider) {
-                    return .guarded(Self.staleSnapshotRefusal(worktree.name, provider: provider))
+                    return .guarded(Self.staleSnapshotArchiveRefusal(worktree.name, provider: provider))
                 }
                 if payload?.agentState == .working {
                     return .guarded(Self.workingGuardRefusal(worktree.name))

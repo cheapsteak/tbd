@@ -368,7 +368,7 @@ extension RPCRouter {
         do {
             guard let manager = try await remoteGate() else {
                 return await declineRemoteLane(
-                    actuationID, method: RPCMethod.worktreeArchive,
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive,
                     Self.remoteBackendsDisabledResponse)
             }
             // Same inner gate `remote.archive` goes through — this route
@@ -378,17 +378,17 @@ extension RPCRouter {
             if case .remote(let provider, _) = worktree.location,
                let refusal = try await cloudGate(provider: provider) {
                 return await declineRemoteLane(
-                    actuationID, method: RPCMethod.worktreeArchive, refusal)
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive, refusal)
             }
             let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
             let step: RemoteLaneLifecycle.ArchiveStep
             switch try await lanes.archiveDecision(for: worktree, force: force) {
             case .refused(let message):
                 return await declineRemoteLane(
-                    actuationID, method: RPCMethod.worktreeArchive, RPCResponse(error: message))
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive, RPCResponse(error: message))
             case .guarded(let message):
                 return await declineRemoteLane(
-                    actuationID, method: RPCMethod.worktreeArchive,
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive,
                     RPCResponse(error: message, code: RPCErrorCode.remoteLaneArchiveGuarded.rawValue))
             case .proceed(let decided):
                 step = decided
@@ -424,7 +424,7 @@ extension RPCRouter {
         do {
             guard let manager = try await remoteGate() else {
                 return await declineRemoteLane(
-                    actuationID, method: RPCMethod.worktreeRevive,
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive,
                     Self.remoteBackendsDisabledResponse)
             }
             // See `archiveRemoteLane`'s matching comment: same inner gate as
@@ -433,14 +433,14 @@ extension RPCRouter {
             if case .remote(let provider, _) = worktree.location,
                let refusal = try await cloudGate(provider: provider) {
                 return await declineRemoteLane(
-                    actuationID, method: RPCMethod.worktreeRevive, refusal)
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive, refusal)
             }
             let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
             let step: RemoteLaneLifecycle.ReviveStep
             switch try await lanes.reviveDecision(for: worktree) {
             case .refused(let message):
                 return await declineRemoteLane(
-                    actuationID, method: RPCMethod.worktreeRevive, RPCResponse(error: message))
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive, RPCResponse(error: message))
             case .proceed(let decided):
                 step = decided
             }
@@ -463,10 +463,10 @@ extension RPCRouter {
     /// the unified log keeps on disk by default, so a refusal can be found in
     /// Console after its alert is dismissed without a debug subscription.
     private func declineRemoteLane(
-        _ actuationID: String, method: String, _ refusal: RPCResponse
+        _ actuationID: String, worktreeID: UUID, method: String, _ refusal: RPCResponse
     ) async -> RPCResponse {
         logger.notice(
-            "\(method, privacy: .public) refused: \(refusal.error ?? "no reason given", privacy: .public)")
+            "\(method, privacy: .public) refused for \(worktreeID, privacy: .public): \(refusal.error ?? "no reason given", privacy: .public)")
         await finishActuation(actuationID, response: refusal, refusedAs: .notEligible)
         return refusal
     }
