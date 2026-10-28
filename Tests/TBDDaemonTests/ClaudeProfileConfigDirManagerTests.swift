@@ -901,6 +901,40 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect((try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil, "link left in place")
     }
 
+    @Test("projects: a top-level regular file moves to a free host path and the profile links")
+    func projectsTopLevelFileMoves() async throws {
+        let fx = try ProjectsFixture(host: ["-cwd/a.jsonl": "A"], profile: ["notes.md": "TOP LEVEL"])
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("notes.md") == "TOP LEVEL")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
+    @Test("projects: a differing top-level regular file is a conflict and nothing changes anywhere")
+    func projectsTopLevelFileConflicts() async throws {
+        let fx = try ProjectsFixture(
+            host: ["notes.md": "host notes"],
+            profile: ["notes.md": "profile notes, longer", "-other/x.jsonl": "X"]
+        )
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("notes.md") == "host notes")
+        #expect(fx.profile("notes.md") == "profile notes, longer")
+        #expect(fx.profile("-other/x.jsonl") == "X")
+        #expect(fx.host("-other/x.jsonl") == nil)
+        #expect(fx.profileProjectsIsRealDir)
+    }
+
+    @Test("projects: a top-level .DS_Store is dropped even when the host's differs, and the profile links")
+    func projectsTopLevelDSStoreDropped() async throws {
+        let fx = try ProjectsFixture(host: [".DS_Store": "host finder"], profile: [".DS_Store": "profile finder", "-cwd/a.jsonl": "A"])
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host(".DS_Store") == "host finder")
+        #expect(fx.host("-cwd/a.jsonl") == "A")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
     @Test("keybindings.json: mirrored when the host has it, skipped when it does not, sidecar when the profile has its own")
     func keybindingsSlot() async throws {
         let fm = FileManager.default

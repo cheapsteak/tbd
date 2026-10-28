@@ -214,6 +214,12 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         return type == .typeSymbolicLink
     }
 
+    /// True when `url` is a real directory (a symlink to one counts as a directory here only if it is followed; callers check `isSymlink` first).
+    private static func isDirectory(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+    }
+
     private static func fileSize(of url: URL) -> UInt64? {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         return (attributes?[.size] as? NSNumber)?.uint64Value
@@ -476,7 +482,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// mismatch, a differing non-transcript file, a symlink pointing elsewhere onto
     /// an occupied host path) aborts the whole migration with nothing changed.
     /// Otherwise pass 2 applies the resolutions and merges everything else into the
-    /// host store. Only byte-identical copies and alias links are ever deleted.
+    /// host store. Only byte-identical copies, alias links and a top-level Finder `.DS_Store` are ever deleted.
     /// Atomic with respect to conflicts: pass 1 confirms none exist before pass 2
     /// changes anything. Not atomic with respect to
     /// I/O failures during pass 2 — those leave partial state that the next call
@@ -556,12 +562,14 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                     try fm.createDirectory(at: hostEntry, withIntermediateDirectories: true)
                     let entries = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
 
-                    // Top level: a cwd-hash directory or a symlink (stray files such
-                    // as .DS_Store are swept explicitly below).
+                    // Every top-level entry is planned, so a stray regular file is
+                    // moved or reported as a conflict, never swept. The one exception
+                    // is Finder's .DS_Store: view metadata Finder regenerates, which
+                    // would otherwise turn a differing copy into a conflict that
+                    // blocks the link forever.
                     func isPlannable(_ url: URL) -> Bool {
-                        if Self.isSymlink(url) { return true }
-                        var isCwdHashDir: ObjCBool = false
-                        return fm.fileExists(atPath: url.path, isDirectory: &isCwdHashDir) && isCwdHashDir.boolValue
+                        guard url.lastPathComponent == ".DS_Store" else { return true }
+                        return Self.isSymlink(url) || Self.isDirectory(url)
                     }
 
                     // Pass 1 (read-only): plan resolutions and collect every conflict.
@@ -597,16 +605,19 @@ public struct ClaudeProfileConfigDirManager: Sendable {
                         try mergeRecursive(src: entry, dst: hostEntry.appendingPathComponent(entry.lastPathComponent))
                     }
 
-                    // Sweep any stray non-directory entries left behind by the
-                    // pass 1/2 guards (e.g. a .DS_Store). removeItem(at:) on the
-                    // parent would delete them recursively without a log trail
-                    // — do it explicitly here so the destruction is observable.
-                    let leftover = (try? fm.contentsOfDirectory(at: profileEntry, includingPropertiesForKeys: nil)) ?? []
-                    for stray in leftover {
-                        logger.debug("removing stray entry \(stray.lastPathComponent, privacy: .public) from profile projects/ during migration")
-                        try? fm.removeItem(at: stray)
+                    // Drop the unplanned Finder .DS_Store files explicitly so the
+                    // removal is observable, then remove the directory itself
+                    // non-recursively: rmdir refuses a non-empty directory, so
+                    // anything a live writer created after planning is never deleted.
+                    for entry in entries where !isPlannable(entry) {
+                        logger.debug("removing Finder metadata \(entry.lastPathComponent, privacy: .public) from profile projects/ during migration")
+                        try? fm.removeItem(at: entry)
                     }
-                    try fm.removeItem(at: profileEntry)
+                    if rmdir(profileEntry.path) != 0 {
+                        let left = ((try? fm.contentsOfDirectory(atPath: profileEntry.path)) ?? []).sorted()
+                        logger.warning("profile \(name, privacy: .public)/ not empty after migration (left: \(left.joined(separator: ", "), privacy: .public)); symlink will not be created, will re-plan on the next spawn")
+                        return
+                    }
                 } catch {
                     logger.warning("failed migrating \(name, privacy: .public) for profile: \(error.localizedDescription, privacy: .public)")
                     return
