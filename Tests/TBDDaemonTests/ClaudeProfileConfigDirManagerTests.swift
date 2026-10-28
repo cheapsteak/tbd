@@ -4,6 +4,7 @@ import TestSupport
 @testable import TBDDaemonLib
 import TBDShared
 
+/// Tier 2 — real (temp-directory) filesystem, no clocks, no subprocesses.
 @Suite("ClaudeProfileConfigDirManager")
 struct ClaudeProfileConfigDirManagerTests {
 
