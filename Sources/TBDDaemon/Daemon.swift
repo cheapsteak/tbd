@@ -1961,9 +1961,14 @@ public final class Daemon: Sendable {
                     // Skip .missing repos so we don't spam errors against stale paths
                     // until the user relocates them.
                     for repo in allRepos where repo.status != .missing {
-                        do {
-                            try await git.fetch(repoPath: repo.path, branch: repo.defaultBranch)
-                        } catch {
+                        switch await Daemon.backgroundFetch(
+                            repoPath: repo.path, branch: repo.defaultBranch, git: git
+                        ) {
+                        case .fetched:
+                            break
+                        case .skippedNoOrigin:
+                            reconcileLogger.debug("Background fetch skipped for \(repo.displayName, privacy: .public): no origin remote, nothing to fetch")
+                        case .failed(let error):
                             reconcileLogger.warning("Background fetch failed for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                         }
                     }
