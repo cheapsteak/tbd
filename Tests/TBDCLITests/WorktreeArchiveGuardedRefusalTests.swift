@@ -23,7 +23,7 @@ struct WorktreeArchiveGuardedRefusalTests {
 
     /// A missing capability, remote backends off, the cloud gate: no retry
     /// gets past them, so the hint would point at a flag that only fails
-    /// again. The error keeps the shape it always had.
+    /// again. The error stays plain.
     @Test func aRefusalWithNoCodeGetsNoHint() {
         let response = RPCResponse(
             error: "Cannot archive acme-remote: provider 'fake' does not declare 'archive'.")

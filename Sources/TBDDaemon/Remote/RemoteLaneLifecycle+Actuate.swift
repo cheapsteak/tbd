@@ -108,6 +108,8 @@ extension RemoteLaneLifecycle {
         case .rowOnlyGone:
             return .proceed(.rowOnly)
         case .invokeVerb:
+            // The app's Archive anyway copy (`AppState.archiveAnywayPrompt`) names
+            // these three checks and must change with them.
             if !force {
                 if await manager.hasStaleSnapshot(provider: provider) {
                     return .guarded(Self.staleSnapshotArchiveRefusal(worktree.name, provider: provider))

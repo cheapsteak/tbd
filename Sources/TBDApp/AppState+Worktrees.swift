@@ -744,6 +744,8 @@ extension AppState {
     /// Copy for the Archive anyway confirm: the daemon's refusal sentence is
     /// the message, since it already says which guard fired. Pure so the
     /// wording is unit-tested; the modal is `confirmArchiveAnyway`.
+    /// The checks it names are `RemoteLaneLifecycle.archiveDecision`'s and must
+    /// change with them.
     static func archiveAnywayPrompt(
         refusal: String
     ) -> (message: String, informative: String, confirm: String) {

@@ -468,8 +468,8 @@ struct WorktreeArchive: AsyncParsableCommand {
     /// lifts refused — a working agent, a provider-reported dirty checkout, a
     /// stale inventory. The daemon's sentence states the fact alone, so this
     /// appends the flag that gets past it. `nil` for every other response,
-    /// which keeps the error it always had. Branches on the code, never the
-    /// prose.
+    /// every other response keeps its plain error. Branches on the code, never
+    /// the prose.
     static func guardedRefusalMessage(for response: RPCResponse) -> String? {
         guard !response.success,
               response.errorCode == RPCErrorCode.remoteLaneArchiveGuarded.rawValue

@@ -441,11 +441,11 @@ A remote archive or revive writes its request row before anything is decided,
 and a refusal confirms that row as `refused` with the reason `not-eligible` and
 the refusal sentence as its detail. This covers every refusal on the path:
 remote backends off, the Claude cloud gate (`claude_cloud_enabled`), a missing
-capability, the stale inventory,
-and both guards. A refused outcome claims no act — it says the daemon declined —
-so the record still names only what was attempted, and it can answer which
-archives the guards stopped. This is the shape the rest of the record already
-uses when a safety rail declines a park, a wake, or a hook re-run.
+capability, the stale inventory, and both guards. A refused outcome claims no
+act — it says the daemon declined — so the record still names only what was
+attempted, and it can answer which archives the guards stopped. This is the
+shape the rest of the record already uses when a safety rail declines a park,
+a wake, or a hook re-run.
 
 Each refusal is also logged at `.notice`, the lowest level the unified log keeps
 on disk by default, so it can be found in Console without a debug subscription.
