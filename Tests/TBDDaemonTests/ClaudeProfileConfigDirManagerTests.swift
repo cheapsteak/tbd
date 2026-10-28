@@ -809,6 +809,25 @@ struct ClaudeProfileConfigDirManagerTests {
         #expect(fx.profileProjectsIsSymlinkToHost)
     }
 
+    @Test("projects: a backup name the profile folder also holds is skipped, so the profile's own file moves in and the profile links")
+    func projectsBackupNameHeldByProfile() async throws {
+        let fx = try ProjectsFixture(
+            host: ["-cwd/s.jsonl": "short plus more"],
+            profile: [
+                "-cwd/s.jsonl": "short",
+                "-cwd/s.jsonl.backup": "PROFILE BACKUP",
+                "-cwd/s.jsonl.backup-2": "PROFILE BACKUP 2",
+            ]
+        )
+        defer { fx.cleanup() }
+        try await fx.run()
+        #expect(fx.host("-cwd/s.jsonl") == "short plus more")
+        #expect(fx.host("-cwd/s.jsonl.backup") == "PROFILE BACKUP")
+        #expect(fx.host("-cwd/s.jsonl.backup-2") == "PROFILE BACKUP 2")
+        #expect(fx.host("-cwd/s.jsonl.backup-3") == "short")
+        #expect(fx.profileProjectsIsSymlinkToHost)
+    }
+
     @Test("projects: equal-size differing transcript is a conflict and nothing changes anywhere")
     func projectsEqualSizeTranscriptConflicts() async throws {
         let fx = try ProjectsFixture(

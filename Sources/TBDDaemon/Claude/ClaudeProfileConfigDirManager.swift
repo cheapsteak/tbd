@@ -324,12 +324,17 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         }
     }
 
-    /// First unoccupied `<file>.backup`, `<file>.backup-2`, … beside `file`.
+    /// First `<file>.backup`, `<file>.backup-2`, … beside `file` whose name is
+    /// free both there and in `otherDirectory`, the profile directory being
+    /// merged into `file`'s directory. A profile entry of that name moves into
+    /// the host directory later in the same pass, so a backup under its name
+    /// would collide with it and fail the merge.
     /// `.backup` does not end in `.jsonl`, so transcript scanners ignore it.
-    private static func backupURL(for file: URL) -> URL {
+    private static func backupURL(for file: URL, avoidingNamesIn otherDirectory: URL) -> URL {
         var candidate = file.appendingPathExtension("backup")
         var n = 2
-        while pathOccupied(candidate) {
+        while pathOccupied(candidate)
+            || pathOccupied(otherDirectory.appendingPathComponent(candidate.lastPathComponent)) {
             candidate = file.deletingLastPathComponent()
                 .appendingPathComponent("\(file.lastPathComponent).backup-\(n)")
             n += 1
@@ -350,7 +355,7 @@ public struct ClaudeProfileConfigDirManager: Sendable {
             try fm.removeItem(at: profile)
         case .keepLonger(let profile, let host, let profileSize, let hostSize):
             try Self.requireUnchanged(profile: profile, profileSize: profileSize, host: host, hostSize: hostSize)
-            let backup = Self.backupURL(for: host)
+            let backup = Self.backupURL(for: host, avoidingNamesIn: profile.deletingLastPathComponent())
             let profileIsLonger = profileSize > hostSize
             if profileIsLonger {
                 try fm.moveItem(at: host, to: backup)

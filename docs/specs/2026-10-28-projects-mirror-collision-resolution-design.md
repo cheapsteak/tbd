@@ -57,9 +57,11 @@ Each path that exists in the profile tree is classified in this order:
   holds the same bytes.
 - **Transcripts (`.jsonl`) of different lengths** – the longer copy ends up at
   the host path. The other is kept beside it as `<name>.backup`, or
-  `<name>.backup-2` and so on when that name is taken. Claude Code only appends
-  to a transcript, so the longer copy is the more complete one, and no bytes are
-  lost either way. The suffix does not end in `.jsonl`, so Claude Code's resume
+  `<name>.backup-2` and so on. A name is skipped when the host folder already
+  holds it, and also when the profile folder being merged holds an entry of that
+  name, because that entry moves into the host folder later in the same pass.
+  Claude Code only appends to a transcript, so the longer copy is the more
+  complete one, and no bytes are lost either way. The suffix does not end in `.jsonl`, so Claude Code's resume
   list and TBD's own transcript scanners skip it.
 - **Any other pair of differing files** – conflict. This covers memory notes,
   settings, and two transcripts of equal length that differ.
@@ -130,8 +132,12 @@ is logged. The migration does not choose between two files the user wrote.
   holds the profile bytes, and the old host bytes are at `<name>.backup`.
 - **AC3** – Differing transcripts with the host copy longer: the host path is
   unchanged, and the profile bytes are at `<name>.backup`.
-- **AC4** – When `<name>.backup` is taken, `<name>.backup-2` is used and the
-  existing backup is untouched.
+- **AC4** – When the host folder already holds `<name>.backup`,
+  `<name>.backup-2` is used and the existing backup is untouched. When the
+  profile folder being merged holds `<name>.backup` or `<name>.backup-2`, those
+  names are skipped too: each such profile file moves to the host under its own
+  name, the backup takes the first name free in both folders, and the link is
+  made.
 - **AC5** – A differing non-transcript file, or two differing transcripts of
   equal length, aborts the migration. Nothing moves, including resolvable
   collisions elsewhere in the same profile, and no link is made.
