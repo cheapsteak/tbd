@@ -3,9 +3,13 @@
 An evidence record for the question "should TBD keep SwiftTerm?", gathered
 2026-08-25 from public sources: the engines' own repositories and headers, the
 committed design documents of projects that have embedded them, and those
-projects' issue trackers. Measured performance evidence lives separately in
-`2026-08-25-terminal-render-cost-investigation.md`; this document is about
-engine and architecture choices, and it deliberately does not decide anything.
+projects' issue trackers. This document is about engine and architecture
+choices rather than measured rendering cost, and it deliberately does not
+decide anything. Its statements describe TBD and the engines as of that date.
+The companion record
+[`docs/research/2026-10-28-terminal-engine-libghostty.md`](../research/2026-10-28-terminal-engine-libghostty.md)
+examines the same question against both as of 2026-10-28 and makes a
+recommendation.
 
 Claims below are marked where confidence is less than direct observation.
 

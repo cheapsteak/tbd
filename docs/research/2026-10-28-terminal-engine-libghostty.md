@@ -4,7 +4,11 @@
 against TBD at `8655b7c11`. Sources are Ghostty's release notes, its
 maintainer's public statements, the repositories and write-ups of projects that
 embed libghostty, and TBD's own tree. Statements carrying a date are evidence
-about that date. The record makes a recommendation; it changes no behavior.*
+about that date. The record makes a recommendation; it changes no behavior.
+Companion record:
+[`docs/perf/2026-08-25-terminal-engine-options.md`](../perf/2026-08-25-terminal-engine-options.md),
+which surveys the same options as of 2026-08-25 in more depth, including prior
+art and migration paths this record only summarizes.*
 
 ## Answer
 
@@ -113,8 +117,8 @@ the cost of the viewer's side alone.
   upstream SwiftTerm's `main`, whose display-link `FrameDriver` replaces the
   fixed 16.67 ms repaint timer and moves Metal rendering off the main thread.
 - **Embedders of `ghostty.h` have reported serious defects.** These were
-  gathered on 2026-08-25 from those projects' own trackers, except where
-  another date is given:
+  gathered on 2026-08-25 from those projects' own trackers and are recorded
+  in the companion record, except where another date is given:
   - **Occlusion** – marking a surface occluded left it permanently
     unfocusable. TBD keeps up to eight terminals alive in a hidden pager.
   - **Scale** – thirty tabs with twenty-nine surfaces reached 564–806% CPU and
