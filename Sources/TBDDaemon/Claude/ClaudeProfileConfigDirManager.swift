@@ -214,7 +214,8 @@ public struct ClaudeProfileConfigDirManager: Sendable {
         return type == .typeSymbolicLink
     }
 
-    /// True when `url` is a real directory (a symlink to one counts as a directory here only if it is followed; callers check `isSymlink` first).
+    /// True when `url` resolves to a directory. Follows symlinks, so callers
+    /// that must tell a link apart check `isSymlink` first.
     private static func isDirectory(_ url: URL) -> Bool {
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
@@ -482,7 +483,8 @@ public struct ClaudeProfileConfigDirManager: Sendable {
     /// mismatch, a differing non-transcript file, a symlink pointing elsewhere onto
     /// an occupied host path) aborts the whole migration with nothing changed.
     /// Otherwise pass 2 applies the resolutions and merges everything else into the
-    /// host store. Only byte-identical copies, alias links and a top-level Finder `.DS_Store` are ever deleted.
+    /// host store. Only byte-identical copies, alias links and a top-level Finder
+    /// `.DS_Store` are ever deleted.
     /// Atomic with respect to conflicts: pass 1 confirms none exist before pass 2
     /// changes anything. Not atomic with respect to
     /// I/O failures during pass 2 — those leave partial state that the next call

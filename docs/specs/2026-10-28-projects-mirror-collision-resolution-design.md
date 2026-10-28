@@ -64,24 +64,36 @@ Each path that exists in the profile tree is classified in this order:
 - **Any other pair of differing files** – conflict. This covers memory notes,
   settings, and two transcripts of equal length that differ.
 
+Loose files at the top of the profile's `projects/` follow the same rules as
+everything below it. The one exception is Finder's `.DS_Store` view metadata at
+that level, which is removed instead of planned. Finder rebuilds it, and
+planning it would turn two differing copies into a conflict that blocks the
+link for good. After pass 2 has moved everything, the profile's `projects/` is
+removed only if it is empty. If anything has appeared in it since pass 1, no
+link is made, and the next spawn plans again.
+
 If there are any conflicts, the migration logs a warning that names every
 conflicting path and makes no changes. Whoever owns those files resolves them,
 and the next spawn on that profile retries the migration. The only removals are
-byte-identical profile duplicates and alias links. No file that differs from
-its counterpart is ever deleted.
+byte-identical profile duplicates, alias links, and a top-level `.DS_Store`. No
+file that differs from its counterpart is ever deleted.
 
 A `.backup` file is kept on purpose, and no sweep reclaims it. It holds the
 only copy of bytes that differ from the transcript beside it, so removing it is
-the user's call. Backups cannot pile up: the migration runs only while a
-profile's `projects` slot is a real directory, and once the slot links, the
-next spawn finds the link and returns before planning anything. A profile
-therefore gains at most one backup for each transcript pair that differed at
-the moment it linked.
+the user's call. The number of backups is bounded by the number of profiles.
+The migration runs only while a profile's `projects` slot is a real directory,
+and once the slot links, the next spawn finds the link and returns before
+planning anything. So each profile adds at most one backup for each transcript
+that differed when it linked. Several profiles can each hold a diverged copy of
+the same session, though, so one host transcript can collect one backup per
+such profile: `.backup`, then `.backup-2`, and so on.
 
 `keybindings.json` joins the mirror slots and follows the file-slot rules that
 `settings.json` and `CLAUDE.md` already use. When the host has no such file,
 the slot is skipped. When the profile holds a real file, it moves to a
-`.profile-local` sidecar before the link is made.
+`.profile-local` sidecar before the link is made. When a sidecar is already
+there, the profile file stays where it is, no link is made, and the failed link
+is logged. The migration does not choose between two files the user wrote.
 
 ## Rejected alternatives
 
@@ -96,8 +108,8 @@ the slot is skipped. When the profile holds a real file, it moves to a
   that each hold part of a project.
 - **A default-off flag** – this finishes a migration that already runs on
   every spawn, and it adds no new autonomous behavior. Its only removals are
-  byte-identical duplicates and alias links, and every differing byte survives
-  under a name of its own.
+  byte-identical duplicates, alias links and Finder metadata, and every
+  differing byte survives under a name of its own.
 
 ## Assumptions
 
@@ -130,3 +142,7 @@ the slot is skipped. When the profile holds a real file, it moves to a
   occupied, aborts the migration.
 - **AC8** – `keybindings.json` is linked when the host has it and skipped when
   it does not.
+- **AC9** – A loose file at the top of the profile's `projects/` moves to the
+  host when the host path is free, and aborts the migration when the host holds
+  a differing file of that name. A top-level `.DS_Store` is removed, the host's
+  copy is untouched, and the link is made.
