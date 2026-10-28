@@ -197,8 +197,14 @@ struct RemoteLaneLifecycle: Sendable {
     /// The refusal for a lane whose agent is mid-task. Parallels how local
     /// archive refuses on uncommitted changes: do not retire a session
     /// mid-task by accident.
+    ///
+    /// The sentence states the fact alone, as the dirty-checkout one does. The
+    /// remedy is each surface's to name, keyed off
+    /// `RPCErrorCode.remoteLaneArchiveGuarded` rather than read out of the
+    /// prose: the CLI appends its `--force` hint, and the app offers Archive
+    /// anyway.
     static func workingGuardRefusal(_ name: String) -> String {
-        "Cannot archive \(name): its agent is still working. Re-run with --force to retire it anyway."
+        "Cannot archive \(name): its agent is still working."
     }
 
     /// The refusal for a lane whose provider's cached inventory has gone
@@ -216,7 +222,7 @@ struct RemoteLaneLifecycle: Sendable {
     /// paths make no provider call and read nothing out of the mirror they
     /// could be wrong about; gating them would strand the `gone` exemption —
     /// the only route out for a lane whose provider cannot archive — behind a
-    /// `--force` that revive does not have and the row menu never sends.
+    /// `--force` that revive does not have and the merge rail never sends.
     static func staleSnapshotRefusal(_ name: String, provider: String) -> String {
         "Cannot act on \(name): provider '\(provider)' inventory is stale; refresh must recover " +
         "before changing remote sessions."
@@ -225,6 +231,6 @@ struct RemoteLaneLifecycle: Sendable {
     /// The refusal for a lane whose provider reports an unclean checkout.
     static func dirtyWorkspaceGuardRefusal(_ name: String) -> String {
         "Cannot archive \(name): its provider reports the session's checkout has uncommitted work " +
-        "(meta.\(dirtyWorkspaceMetaKey)). Re-run with --force to retire it anyway."
+        "(meta.\(dirtyWorkspaceMetaKey))."
     }
 }

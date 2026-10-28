@@ -337,13 +337,22 @@ extension RPCRouter {
     /// Retires a remote lane
     /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Archive").
     ///
-    /// Two things about the shape are load bearing. **Every refusal returns
-    /// above `beginActuation`** — the capability refusal, the two guards, and
-    /// the subsystem gate alike — because nothing was attempted and the record
-    /// may claim solely acts that were attempted; this is the same pre-row
-    /// shape the local handler's not-found guard uses. And the `gone` path
-    /// *does* write a row: no provider call was made, but the row genuinely
-    /// changed status, and that is the act the record names.
+    /// Two things about the shape are load bearing. **The request row is
+    /// written before anything is decided**, and every refusal — remote
+    /// backends off, the cloud gate, the capability refusal, the stale
+    /// inventory and the two guards alike — confirms it `refused` with the
+    /// reason `not-eligible` and the refusal sentence as its detail. A refused
+    /// outcome claims no act, only that the daemon declined, so the record
+    /// still names solely what was attempted and can answer which archives the
+    /// guards stopped (§"The record"). And the `gone` path is confirmed
+    /// `dispatched`: no provider call was made, but the row genuinely changed
+    /// status, and that is the act the record names.
+    ///
+    /// The three guard refusals — the ones `force` lifts — carry
+    /// `RPCErrorCode.remoteLaneArchiveGuarded`, so the CLI can append its
+    /// `--force` hint and the app can offer Archive anyway without reading the
+    /// sentence. Every other refusal carries no code, because no retry would
+    /// get past it.
     ///
     /// `stop` is never reached from here. A provider declaring only `stop` is
     /// refused, because ending compute and retiring a record are different
@@ -352,32 +361,38 @@ extension RPCRouter {
     private func archiveRemoteLane(
         _ worktree: Worktree, force: Bool, actor: ActuationActor?
     ) async throws -> RPCResponse {
-        guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
-        }
-        // Same inner gate `remote.archive` goes through — this route reaches
-        // the identical provider verb, addressed by worktree row instead of
-        // by params, and must refuse the same way when cloud is off. Above
-        // `beginActuation` for the same reason every other refusal here is:
-        // nothing was attempted.
-        if case .remote(let provider, _) = worktree.location,
-           let refusal = try await cloudGate(provider: provider) {
-            return refusal
-        }
-        let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
-        let step: RemoteLaneLifecycle.ArchiveStep
-        switch try await lanes.archiveDecision(for: worktree, force: force) {
-        case .refused(let message):
-            logger.debug("worktree.archive refused: \(message, privacy: .public)")
-            return RPCResponse(error: message)
-        case .proceed(let decided):
-            step = decided
-        }
         let actuationID = try await beginActuation(
             .worktreeArchive, actor: actor,
             target: ActuationTarget(worktree: worktree.id.uuidString))
         let failure: String?
         do {
+            guard let manager = try await remoteGate() else {
+                return await declineRemoteLane(
+                    actuationID, method: RPCMethod.worktreeArchive,
+                    Self.remoteBackendsDisabledResponse)
+            }
+            // Same inner gate `remote.archive` goes through — this route
+            // reaches the identical provider verb, addressed by worktree row
+            // instead of by params, and must refuse the same way when cloud is
+            // off.
+            if case .remote(let provider, _) = worktree.location,
+               let refusal = try await cloudGate(provider: provider) {
+                return await declineRemoteLane(
+                    actuationID, method: RPCMethod.worktreeArchive, refusal)
+            }
+            let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
+            let step: RemoteLaneLifecycle.ArchiveStep
+            switch try await lanes.archiveDecision(for: worktree, force: force) {
+            case .refused(let message):
+                return await declineRemoteLane(
+                    actuationID, method: RPCMethod.worktreeArchive, RPCResponse(error: message))
+            case .guarded(let message):
+                return await declineRemoteLane(
+                    actuationID, method: RPCMethod.worktreeArchive,
+                    RPCResponse(error: message, code: RPCErrorCode.remoteLaneArchiveGuarded.rawValue))
+            case .proceed(let decided):
+                step = decided
+            }
             failure = try await lanes.performArchive(step, worktree: worktree)
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
@@ -393,37 +408,42 @@ extension RPCRouter {
 
     /// Returns a remote lane to the working set
     /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Revive").
-    /// Same record shape as `archiveRemoteLane`: refusals above the row, acts
-    /// below it. Returns the refreshed worktree, exactly as the local path
-    /// does, so the caller sees the row it asked for rather than the archived
-    /// snapshot it passed in.
+    /// Same record shape as `archiveRemoteLane`: the request row first, every
+    /// refusal confirmed `refused`/`not-eligible` with its sentence, and an act
+    /// confirmed by its outcome. No refusal here carries an error code, because
+    /// revive has no `force` to lift one. Returns the refreshed worktree,
+    /// exactly as the local path does, so the caller sees the row it asked for
+    /// rather than the archived snapshot it passed in.
     private func reviveRemoteLane(
         _ worktree: Worktree, actor: ActuationActor?
     ) async throws -> RPCResponse {
-        guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
-        }
-        // See `archiveRemoteLane`'s matching comment: same inner gate as
-        // `remote.unarchive`, same worktree-addressed route to the same
-        // provider verb, same pre-`beginActuation` placement.
-        if case .remote(let provider, _) = worktree.location,
-           let refusal = try await cloudGate(provider: provider) {
-            return refusal
-        }
-        let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
-        let step: RemoteLaneLifecycle.ReviveStep
-        switch try await lanes.reviveDecision(for: worktree) {
-        case .refused(let message):
-            logger.debug("worktree.revive refused: \(message, privacy: .public)")
-            return RPCResponse(error: message)
-        case .proceed(let decided):
-            step = decided
-        }
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: worktree.id.uuidString))
         let failure: String?
         do {
+            guard let manager = try await remoteGate() else {
+                return await declineRemoteLane(
+                    actuationID, method: RPCMethod.worktreeRevive,
+                    Self.remoteBackendsDisabledResponse)
+            }
+            // See `archiveRemoteLane`'s matching comment: same inner gate as
+            // `remote.unarchive`, same worktree-addressed route to the same
+            // provider verb.
+            if case .remote(let provider, _) = worktree.location,
+               let refusal = try await cloudGate(provider: provider) {
+                return await declineRemoteLane(
+                    actuationID, method: RPCMethod.worktreeRevive, refusal)
+            }
+            let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
+            let step: RemoteLaneLifecycle.ReviveStep
+            switch try await lanes.reviveDecision(for: worktree) {
+            case .refused(let message):
+                return await declineRemoteLane(
+                    actuationID, method: RPCMethod.worktreeRevive, RPCResponse(error: message))
+            case .proceed(let decided):
+                step = decided
+            }
             failure = try await lanes.performRevive(step, worktree: worktree)
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
@@ -436,6 +456,19 @@ extension RPCRouter {
         await finishActuation(actuationID, .dispatched)
         let revived = try await db.worktrees.get(id: worktree.id) ?? worktree
         return try RPCResponse(result: revived)
+    }
+
+    /// Confirms a remote lane's request row as declined and hands the refusal
+    /// back for the handler to return. Logged at `.notice`, the lowest level
+    /// the unified log keeps on disk by default, so a refusal can be found in
+    /// Console after its alert is dismissed without a debug subscription.
+    private func declineRemoteLane(
+        _ actuationID: String, method: String, _ refusal: RPCResponse
+    ) async -> RPCResponse {
+        logger.notice(
+            "\(method, privacy: .public) refused: \(refusal.error ?? "no reason given", privacy: .public)")
+        await finishActuation(actuationID, response: refusal, refusedAs: .notEligible)
+        return refusal
     }
 
     /// Re-run the worktree's `preSession` hook. Returns as soon as the hook's

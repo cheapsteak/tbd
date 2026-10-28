@@ -10,11 +10,14 @@ private let remoteLaneLogger = Logger(subsystem: "com.tbd.daemon", category: "re
 /// §"Revive", §"The record").
 ///
 /// The split between deciding and acting is the record's shape, not a style
-/// preference. **A refusal happens above the actuation row** — nothing was
-/// attempted, and the record may claim solely acts that were attempted — so
-/// callers ask for a decision first, return the refusal if that is what comes
-/// back, and only then write their row and call the `perform` half. The `gone`
-/// path does write a row: no provider call was made, but the row genuinely
+/// preference. A decision touches nothing, so a caller can record a refusal as
+/// a refusal: the RPC handlers write their request row before deciding, and
+/// confirm it `refused` with the reason `not-eligible` and the refusal
+/// sentence when that is what comes back; the merge rail writes the same pair
+/// under its daemon actor. A refused outcome claims no act — it says the
+/// daemon declined — so the record still names only what was attempted. Only
+/// a decision to proceed reaches the `perform` half. The `gone` path is
+/// confirmed `dispatched`: no provider call was made, but the row genuinely
 /// changed status, and that is the act the record names.
 ///
 /// Nothing here reaches `beginArchiveWorktree`, `completeArchiveWorktree`,
@@ -24,10 +27,21 @@ extension RemoteLaneLifecycle {
 
     // MARK: - Decisions, with the guards applied
 
-    /// A remote archive, decided: either refused above the record, or a step
-    /// to carry out below it.
+    /// A remote archive, decided: refused, refused by a guard `force` lifts,
+    /// or a step to carry out.
+    ///
+    /// The two refusals are separate cases so a caller can tell them apart
+    /// without reading the sentence. Only `guarded` is one a forced retry gets
+    /// past, which is why `worktree.archive` marks it
+    /// `RPCErrorCode.remoteLaneArchiveGuarded` and marks `refused` with nothing.
     enum ArchiveDecision: Equatable {
+        /// No retry gets past it: the provider declares no `archive` for a lane
+        /// that is not `gone`, or the row is not a remote lane at all.
         case refused(String)
+        /// One of the three guards on the verb path — the stale inventory, a
+        /// working agent, a provider-reported dirty checkout. `force` lifts all
+        /// three.
+        case guarded(String)
         case proceed(ArchiveStep)
     }
 
@@ -41,7 +55,8 @@ extension RemoteLaneLifecycle {
     }
 
     /// A remote revive, decided. Same shape and the same reason as
-    /// `ArchiveDecision`.
+    /// `ArchiveDecision`, without a `guarded` case: revive has no `force`, so
+    /// every refusal stands until the condition behind it changes.
     enum ReviveDecision: Equatable {
         case refused(String)
         case proceed(ReviveStep)
@@ -71,7 +86,8 @@ extension RemoteLaneLifecycle {
     /// the guards, and only on the verb path. The `gone` path touches nothing
     /// on the provider and so has nothing to defend, which is why all three
     /// guards sit inside the `.invokeVerb` arm rather than ahead of the switch.
-    /// `force` overrides all three.
+    /// `force` overrides all three, and each refuses as `.guarded` so the
+    /// caller can say a forced retry would pass.
     ///
     /// The stale-snapshot guard belongs with the other two for the same
     /// reason: it exists because `agentState` and `meta.workspace_dirty` are
@@ -94,13 +110,13 @@ extension RemoteLaneLifecycle {
         case .invokeVerb:
             if !force {
                 if await manager.hasStaleSnapshot(provider: provider) {
-                    return .refused(Self.staleSnapshotRefusal(worktree.name, provider: provider))
+                    return .guarded(Self.staleSnapshotRefusal(worktree.name, provider: provider))
                 }
                 if payload?.agentState == .working {
-                    return .refused(Self.workingGuardRefusal(worktree.name))
+                    return .guarded(Self.workingGuardRefusal(worktree.name))
                 }
                 if Self.metaReportsDirtyWorkspace(payload?.meta) {
-                    return .refused(Self.dirtyWorkspaceGuardRefusal(worktree.name))
+                    return .guarded(Self.dirtyWorkspaceGuardRefusal(worktree.name))
                 }
             }
             return .proceed(.invokeVerb(provider: provider, sessionID: sessionID))

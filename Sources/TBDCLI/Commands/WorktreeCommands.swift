@@ -445,16 +445,36 @@ struct WorktreeArchive: AsyncParsableCommand {
             }
         }
 
-        try client.callVoid(
+        let response = try client.send(try RPCRequest(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: worktreeID, force: force)
-        )
+        ))
+        if let refusal = Self.guardedRefusalMessage(for: response) {
+            throw CLIError.rpcError(refusal)
+        }
+        try SocketClient.requireSuccess(response)
 
         if json {
             printJSON(["status": "archived", "id": worktreeID.uuidString])
         } else {
             print("Worktree archived.")
         }
+    }
+
+    /// The remedy this surface names for a remote lane's guard refusal.
+    static let forceHint = "Re-run with --force to retire it anyway."
+
+    /// The message for a remote lane's archive that one of the guards `force`
+    /// lifts refused — a working agent, a provider-reported dirty checkout, a
+    /// stale inventory. The daemon's sentence states the fact alone, so this
+    /// appends the flag that gets past it. `nil` for every other response,
+    /// which keeps the error it always had. Branches on the code, never the
+    /// prose.
+    static func guardedRefusalMessage(for response: RPCResponse) -> String? {
+        guard !response.success,
+              response.errorCode == RPCErrorCode.remoteLaneArchiveGuarded.rawValue
+        else { return nil }
+        return "\(response.error ?? "The archive was refused.") \(forceHint)"
     }
 }
 

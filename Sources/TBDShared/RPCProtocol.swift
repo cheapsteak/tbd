@@ -130,6 +130,12 @@ public enum RPCErrorCode: String, Sendable {
     /// Nothing was started and nothing is queued: the caller asks again when
     /// it chooses to. `tbd` prints `held: <reason>` and exits 75.
     case startHeld
+    /// A remote lane's `worktree.archive` was refused by one of the three
+    /// guards `force` lifts: the agent is working, the provider reports a
+    /// dirty checkout, or the provider's inventory is stale. The message states
+    /// the fact alone; the CLI appends the `--force` hint and the app offers
+    /// "Archive anyway". A refusal no retry gets past carries no code.
+    case remoteLaneArchiveGuarded
 }
 
 // MARK: - RPC Method Names
