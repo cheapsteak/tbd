@@ -1219,8 +1219,10 @@ jobs:
       # second one whose `tbd`, `.claude` and `.codex` entries are mode 000 (so
       # code that assembles a path out of the home directory rather than asking
       # fails with EACCES at its own call site) and, as a backstop, fingerprints
-      # the real `~/tbd`, `~/.claude`, `~/.codex` and tmux socket directory on
-      # either side and fails the step if anything appeared or vanished.
+      # the real `~/tbd`, `~/.claude`, `~/.codex`,
+      # `~/Library/Logs/TBD/hang-stacks`, tmux socket directory and test-suite
+      # plists in `~/Library/Preferences` on either side and fails the step if
+      # anything appeared or vanished.
       # `CLAUDE.md` has said "Tests must not touch ~/tbd" all along, and the
       # suite quietly violated it anyway: 18k orphan profile dirs, ~2.9k fake
       # worktrees and ~7,100 dead tmux sockets accumulated on a developer box

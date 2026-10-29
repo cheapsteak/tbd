@@ -152,11 +152,23 @@ that turned the decoy loop into `chmod 000` on the developer's real `~/tbd` and
 owns them and can chmod them back.
 
 Two things the fence does *not* cover, so the existing disciplines stay
-load-bearing: `UserDefaults` (resolved by `cfprefsd` over XPC, hence the
-`AppState(userDefaults:)` rule in the root `CLAUDE.md`) and the Keychain, which
-breaks rather than redirects under `CFFIXED_USER_HOME` — Keychain-touching code
-must be reached through an injection seam such as
-`ClaudeCredentialsKeychainDeleting`. Account-database home lookups
+load-bearing: `UserDefaults` and the Keychain, which breaks rather than
+redirects under `CFFIXED_USER_HOME` — Keychain-touching code must be reached
+through an injection seam such as `ClaudeCredentialsKeychainDeleting`.
+
+`cfprefsd` resolves preferences over XPC, so a suite's backing plist is written
+to the **real** `~/Library/Preferences` whatever the wrapper exports, and
+`removePersistentDomain(forName:)` leaves it there as a 42-byte husk. No
+in-process teardown fixes that: six unlink orderings were measured, ten trials
+each, and all 60 files came back, because `cfprefsd` re-flushes the domain when
+the process disconnects. So mint every suite through `TestDefaultsSuite` /
+`withTestDefaults` (`Tests/TestSupport/UserDefaultsTestSupport.swift`), which
+names it `TBDTests.suites/<label>.<uuid>`; the `/` puts every file in one
+container that `scripts/test.sh` removes once the process is gone. To check
+for leftovers, stat that one path or list the container — never enumerate
+`~/Library/Preferences`, which can hold hundreds of thousands of entries.
+
+Account-database home lookups
 (`getpwuid`/`getpwnam`/`getpwent`, `NSHomeDirectoryForUser(_:)`,
 `FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
 escape both variables outright and are rejected mechanically by the
@@ -184,8 +196,8 @@ before trusting it: the home value has to be visible near the append, so a path
 built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
-The wrapper's last layer, a before/after fingerprint of the five real
-directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
+The wrapper's detection layer, a before/after fingerprint of six real roots,
+is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
 rather than contradicting it: a live daemon and sibling worktrees write to
 `~/tbd` legitimately for the whole duration of a local run, and any concurrent
@@ -194,12 +206,17 @@ agent session starting in a new directory mints a fresh
 not the primary guard: it compares directory *listings*, so a leak that writes
 to a fixed path — or one that cleans up after itself in a `defer` — is invisible
 to it, while the tripwire fails on the permission check every run regardless.
-Full rationale is in the wrapper's header.
+The sixth root, `~/Library/Preferences`, is the exception: it has no fence
+half, so its two counts — plists inside `TBDTests.suites`, and flat-named
+`TBDTests.*` strays beside it — are the only mechanical guard there, and the
+container is reclaimed before and after every run whether or not detection is
+on. Full rationale is in the wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
-fake home, the post-run mode-000 recheck, the fingerprint's seven arms (five
-roots, two of which are read twice), the tmux socket fence (its `sun_path`
+fake home, the post-run mode-000 recheck, the fingerprint's nine arms (six
+roots, three of which are read twice), the preferences reclaim and its three
+refusals, the tmux socket fence (its `sun_path`
 budget and its kill-server sweep), the holder sweep and the abandoned-run-root
 reconciler, and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes
