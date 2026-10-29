@@ -55,10 +55,10 @@
 #      having done its job.
 #   4. RECLAMATION — always on, including under `--no-fingerprint`. The
 #      preferences container `~/Library/Preferences/TBDTests.suites` is removed
-#      before the first snapshot and again once the suite has exited. It is a
-#      sweep rather than a fence because a fence is impossible: `cfprefsd`
-#      writes the files after the test process is gone. See "THE PREFERENCES
-#      CONTAINER" below.
+#      before the first snapshot and again once the suite has exited, then
+#      watched briefly for a trailing write. It is a sweep rather than a fence
+#      because a fence is impossible: the files reappear after the test process
+#      has exited. See "THE PREFERENCES CONTAINER" below.
 #
 # WHAT THE FENCE CANNOT DO ON ITS OWN: KILL A PROCESS. Containment is about
 # paths, and two of the things a run leaves behind are not files. A tmux server
@@ -124,8 +124,8 @@
 #     which names it `TBDTests.suites/<label>.<uuid>` so the file lands in one
 #     container directory, and layer 4 removes that container once the process
 #     is gone. Nothing short of that works: `removePersistentDomain(forName:)`
-#     leaves a 42-byte plist behind, and an unlink after it is undone when
-#     `cfprefsd` re-flushes the domain on client disconnect.
+#     leaves a 42-byte plist behind, and an unlink after it does not stick —
+#     the file reappears after the process exits.
 #   - **The Keychain.** It breaks rather than redirects under
 #     `CFFIXED_USER_HOME`: `SecItemAdd` returns `-60006` and
 #     `SecItemCopyMatching` returns `-25300`, and pre-seeding
@@ -605,9 +605,12 @@ reclaim_abandoned_run_roots() {
 # process can be the last writer. Six teardown orderings were measured, ten
 # trials each — remove/sync/unlink, unlink first, poll until flushed,
 # `removeSuite(named:)`, per-key removal, and an `atexit`-registered second
-# unlink — and all 60 files were back after the process exited, because
-# `cfprefsd` flushes a cached domain when its client DISCONNECTS. Only something
-# that runs after the suite has exited can win, and that is this script. It is
+# unlink — and all 60 files were back after the process exited. Which writer
+# puts them back (CF's own exit-time sync, or `cfprefsd` flushing on client
+# disconnect) was not established, and nothing here depends on it. What it
+# means is that the removal must run after the suite has exited AND allow for a
+# short trailing write: a sweeper started the instant the process exited still
+# lost 1 in 10. Hence `settle_preferences_container` below. Together they are
 # the named reconciler for this resource in the sense of
 # `docs/specs/2026-08-15-named-reconciler-doctrine-design.md`; ~520,000
 # orphaned plists accumulated in one real `~/Library/Preferences` before it
@@ -625,6 +628,22 @@ reclaim_abandoned_run_roots() {
 # `test_the_container_name_matches_the_swift_helper` pins the three together.
 PREFERENCES_CONTAINER_NAME="TBDTests.suites"
 
+# 1 when the most recent `reclaim_preferences_container` call removed the
+# container, 0 otherwise. The settle reads it to decide whether there is
+# anything to watch for.
+PREFERENCES_CONTAINER_REMOVED=0
+
+# THE SETTLE'S TIMING — CHOSEN, NOT MEASURED. What was measured is only that a
+# trailing write happens (1 lost in 10 by an instant sweeper), not how late it
+# can land. A poll every 0.2 s, done once the path has stayed absent for 10
+# consecutive polls (~2 s), and never more than 75 polls (~15 s at that
+# interval), after which the fingerprint reports whatever is left. Counted in
+# polls rather than seconds because bash 3.2 has no fractional arithmetic; a
+# loaded machine stretches the wall time, never shortens the quiet window.
+PREFERENCES_SETTLE_POLL_SECONDS=0.2
+PREFERENCES_SETTLE_QUIET_POLLS=10
+PREFERENCES_SETTLE_MAX_POLLS=75
+
 refuse_preferences_reclaim() {
   echo "test.sh: refusing to reclaim '$1' $2 — $3; this function removes nothing else." >&2
 }
@@ -638,6 +657,7 @@ refuse_preferences_reclaim() {
 # `-d` both follow a link.
 reclaim_preferences_container() {
   local container="$1" phase="$2"
+  PREFERENCES_CONTAINER_REMOVED=0
   case "$container" in
     */"$PREFERENCES_CONTAINER_NAME") ;;
     *) refuse_preferences_reclaim "$container" "$phase" "it does not end in $PREFERENCES_CONTAINER_NAME"; return 0 ;;
@@ -645,11 +665,39 @@ reclaim_preferences_container() {
   [ -L "$container" ] && { refuse_preferences_reclaim "$container" "$phase" "it is a SYMLINK"; return 0; }
   [ -e "$container" ] || return 0
   [ -d "$container" ] || { refuse_preferences_reclaim "$container" "$phase" "it is not a directory"; return 0; }
-  # `if !` rather than a bare call, so a failed removal under `set -e` reports
-  # itself instead of taking the run down with it.
-  if ! rm -rf "$container"; then
+  # Inside an `if` rather than a bare call, so a failed removal under `set -e`
+  # reports itself instead of taking the run down with it.
+  if rm -rf "$container"; then
+    PREFERENCES_CONTAINER_REMOVED=1
+  else
     echo "test.sh: could not remove '$container' $phase; the fingerprint counts what is left." >&2
   fi
+  return 0
+}
+
+# THE SETTLE: after a post-run reclaim that removed something, keep watching
+# that one path. Each time it reappears it is reclaimed again and the quiet
+# window restarts; the watch ends once the path has stayed absent for the whole
+# window, or at the cap. Skipped outright when the reclaim before it removed
+# nothing — a run that minted no suite has nothing to trail, and pays nothing.
+#
+# A reclaimer like the function above, never a gate: it always returns 0. A
+# refusal or a failed removal ends the watch at once, since polling cannot
+# change either and the line above has already said why.
+settle_preferences_container() {
+  local container="$1" polls=0 quiet=0
+  [ "$PREFERENCES_CONTAINER_REMOVED" -eq 1 ] || return 0
+  while [ "$polls" -lt "$PREFERENCES_SETTLE_MAX_POLLS" ] && [ "$quiet" -lt "$PREFERENCES_SETTLE_QUIET_POLLS" ]; do
+    sleep "$PREFERENCES_SETTLE_POLL_SECONDS" || true
+    polls=$((polls + 1))
+    if [ -e "$container" ] || [ -L "$container" ]; then
+      reclaim_preferences_container "$container" "after a late write"
+      [ "$PREFERENCES_CONTAINER_REMOVED" -eq 1 ] || return 0
+      quiet=0
+    else
+      quiet=$((quiet + 1))
+    fi
+  done
   return 0
 }
 
@@ -949,18 +997,22 @@ swift_lock_path="$(resolve_swift_lock_path)"
 mkdir -p "$(dirname "$swift_lock_path")"
 : >> "$swift_lock_path"
 
-# From the CALLER's `$HOME`, for the reason the fingerprint script reads it: the
-# fence below is an `env` prefix rather than an export, so this script's own
-# `$HOME` is still the developer's — which is where `cfprefsd` writes, whatever
-# the run is told.
+# From the CALLER's `$HOME`: the fence below is an `env` prefix rather than an
+# export, so this script's own `$HOME` is still the developer's, and a fixture
+# `$HOME` is what the harness drives. The Swift helper resolves the account
+# home through `getpwuid` instead; the two agree on CI and ordinary accounts,
+# and where they do not, the helper's once-per-process reclaim covers its own.
 preferences_container="$HOME/Library/Preferences/$PREFERENCES_CONTAINER_NAME"
 
 # RECLAIMED BEFORE THE FIRST SNAPSHOT, and this call is not redundant with the
-# one after the run. `cfprefsd` may flush the PREVIOUS run's domains after that
-# run has exited, so without this the before-snapshot counts files this run
-# never created, the after-snapshot counts zero, and the diff reddens on them.
-# Wiping the container under a concurrent run is safe, measured: `cfprefsd`
-# serves a live domain from memory.
+# one after the run. A previous run's files can reappear after that run has
+# exited, so without this the before-snapshot counts files this run never
+# created, the after-snapshot counts zero, and the diff reddens on them.
+#
+# Wiping the container under a concurrent run does not break that run's reads
+# and writes — `cfprefsd` serves a live domain from memory — but a test there
+# that asserts its backing file exists can see it vanish. The helper's own
+# self-tests tolerate that.
 reclaim_preferences_container "$preferences_container" "before the run"
 
 fingerprint_before=""
@@ -1332,21 +1384,18 @@ for decoy in "${decoys[@]}"; do
   [ "$mode" = "0" ] || fence_bail "the $decoy decoy came back mode 0$mode, not 000 — the run disarmed the tripwire: $path"
 done
 
-# AFTER THE SUITE HAS EXITED, which is the only moment this can work: `cfprefsd`
-# flushes a cached domain on client disconnect, so an earlier reclaim would be
-# overwritten. By here every fenced invocation — the valve's local re-run
-# included — is gone. A run that never reaches this line (a `fence_bail` above,
-# a SIGKILL) leaves at most one run's files, which the next run's pre-run
-# reclaim takes.
-#
-# NOT MEASURED, AND IT WOULD SHOW UP AS A FLAKE: whether that flush has always
-# COMPLETED by now. If it lands after this `rm -rf`, the container comes back
-# and the fingerprint counts one or two files. The fix for that is a bounded
-# settle-and-retry here, never a relaxed arm.
+# AFTER THE SUITE HAS EXITED, because the files reappear after exit and an
+# earlier reclaim would be undone. By here every fenced invocation — the valve's
+# local re-run included — is gone. Exit is not quite enough on its own: a
+# sweeper started the instant the process exited still lost 1 in 10 to a
+# trailing write, so the settle watches the path for a little longer. A run
+# that never reaches these lines (a `fence_bail` above, a SIGKILL) leaves at
+# most one run's files, which the next run's pre-run reclaim takes.
 #
 # UNCONDITIONAL, ABOVE THE DETECTION GATE. A developer box is where the files
 # piled up, so `--no-fingerprint` turns off the report, never the sweep.
 reclaim_preferences_container "$preferences_container" "after the run"
+settle_preferences_container "$preferences_container"
 
 if [ "$fingerprint" -eq 0 ]; then
   exit "$test_status"
@@ -1385,21 +1434,13 @@ if [ "$fingerprint_before" != "$fingerprint_after" ]; then
   echo "Something spawned tmux with an environment that dropped TMUX_TMPDIR:" >&2
   echo "look for a Process whose \`environment\` is built from scratch." >&2
   echo >&2
-  echo "If the entry is a <preferences> count, read which one:" >&2
-  echo >&2
-  echo "  <preferences>/$PREFERENCES_CONTAINER_NAME — suites were minted through the" >&2
-  echo "  helper and this wrapper failed to reclaim them; any refusal it printed" >&2
-  echo "  is above. The files are still there, each named for its suite." >&2
-  echo >&2
-  echo "  <preferences> stray TBDTests.* — a suite was minted with a flat name" >&2
-  echo "  instead of through the helper, so its file landed outside the" >&2
-  echo "  container and nothing will ever reclaim it." >&2
-  echo >&2
-  echo "Either way the fix is to mint the suite through the Tests/TestSupport" >&2
-  echo "helper (TestDefaultsSuite / withTestDefaults). Unlinking the file in a" >&2
-  echo "teardown is NOT sufficient: cfprefsd re-flushes the domain when the" >&2
-  echo "process disconnects, after every atexit handler, and it resolves the" >&2
-  echo "path over XPC, ignoring HOME and CFFIXED_USER_HOME. ~520,000 such" >&2
+  echo "If the entry is <preferences>/$PREFERENCES_CONTAINER_NAME, test suites were" >&2
+  echo "minted through the helper and this wrapper failed to reclaim them," >&2
+  echo "or they were still being written when its settle gave up after" >&2
+  echo "$PREFERENCES_SETTLE_MAX_POLLS polls. Any refusal it printed is above; the files are still" >&2
+  echo "there, each named for its suite. Unlinking them in a teardown is NOT" >&2
+  echo "a fix: the file reappears after the process exits, and the path is" >&2
+  echo "resolved over XPC, ignoring HOME and CFFIXED_USER_HOME. ~520,000 such" >&2
   echo "files once accumulated in one real ~/Library/Preferences." >&2
   echo >&2
   echo "Reaching here at all is now unusual — except for <preferences>, which" >&2
