@@ -257,10 +257,15 @@ public enum TestDefaults {
 
     /// Clear `suiteName`'s domain and unlink its backing file.
     ///
-    /// The primitive behind ``TestDefaultsSuite/tearDown(sourceLocation:)``, exposed for the
+    /// The primitive behind ``TestDefaultsSuite/tearDown()``, exposed for the
     /// rare site that cannot use the suite object — a `UserDefaults` *subclass*
     /// it has to construct itself, for instance. Pair it with
     /// ``makeSuiteName(label:)``.
+    ///
+    /// `sourceLocation` defaults to the caller's through `#_sourceLocation`,
+    /// which expands at the call site, so the calling file must
+    /// `import Testing`. A file that does not — an XCTest suite, a shared
+    /// fixture — uses ``TestDefaultsSuite`` instead.
     ///
     /// A name ``validatedBackingPlistPath(forSuiteNamed:inHome:)`` refuses is
     /// recorded as a test failure at `sourceLocation`, and nothing else
@@ -314,7 +319,7 @@ public enum TestDefaults {
 /// `TestDefaultsSuite("x").defaults` drops the suite at the end of the
 /// statement, and `deinit` tears the domain down there and then.
 ///
-/// ``tearDown(sourceLocation:)`` is idempotent, and `deinit` calls it as a safety net so a
+/// ``tearDown()`` is idempotent, and `deinit` calls it as a safety net so a
 /// suite that is dropped without an explicit teardown still unlinks its file.
 ///
 /// `@unchecked Sendable` because tests capture a suite in `@Sendable` closures
@@ -341,7 +346,7 @@ public final class TestDefaultsSuite: @unchecked Sendable {
 
     /// A second, independent `UserDefaults` on this same domain — what a
     /// relaunched app would construct. Values written through either instance
-    /// are visible through the other. ``tearDown(sourceLocation:)`` covers both, because it
+    /// are visible through the other. ``tearDown()`` covers both, because it
     /// clears and unlinks the domain rather than an instance.
     public func reopen() -> UserDefaults {
         TestDefaultsSuite.open(name)
@@ -361,16 +366,21 @@ public final class TestDefaultsSuite: @unchecked Sendable {
     ///
     /// See ``TestDefaults/tearDown(suiteName:defaults:sourceLocation:)`` for
     /// the ordering and for why the unlink cannot be the last word.
-    /// `sourceLocation` defaults to the caller's, so anything teardown has to
-    /// report lands on the test that tore down rather than on this file;
-    /// `deinit`, which has no caller to name, takes the default.
-    public func tearDown(sourceLocation: SourceLocation = #_sourceLocation) {
+    ///
+    /// Deliberately parameterless. A `sourceLocation: SourceLocation =
+    /// #_sourceLocation` default expands that macro at the CALL SITE, so every
+    /// caller would have to `import Testing` — and the XCTest suites and the
+    /// shared fixtures that call this do not, which fails the build. Anything
+    /// teardown reports is therefore attributed to this method. The name it
+    /// tears down came from ``TestDefaults/makeSuiteName(label:)``, which the
+    /// validator accepts by construction, so in practice it reports nothing.
+    public func tearDown() {
         let isFirst = lock.withLock { () -> Bool in
             defer { isTornDown = true }
             return !isTornDown
         }
         guard isFirst else { return }
-        TestDefaults.tearDown(suiteName: name, defaults: defaults, sourceLocation: sourceLocation)
+        TestDefaults.tearDown(suiteName: name, defaults: defaults)
     }
 
     deinit {
