@@ -381,16 +381,10 @@ struct MarkdownStylesheetTests {
             }
         }
 
-        // The timer is virtual, so crossing the window costs no wall time. The
-        // poll after it is the real leg: `AsyncStream` delivery into the
-        // consuming `Task`.
-        try await clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
-        try await Self.waitFor(TestDeadlines.saturatedPass, { notified.count > 0 }) { elapsed in
-            """
-            the debounce window elapsed but no notification reached the consumer — \
-            observed \(notified.count) after \(elapsed) (budget \(TestDeadlines.saturatedPass))
-            """
-        }
+        // The timer is virtual, so crossing the window costs no wall time; the
+        // real leg is `AsyncStream` delivery into the consuming `Task`.
+        // `advanceUntil`, not one advance: see `crossDebounce`.
+        try await Self.crossDebounce(on: clock, until: "the first notification") { notified.count > 0 }
 
         // Phase 2 — the event the viewer actually cares about: the selected
         // stylesheet appearing. After it, resolution must stop returning the
@@ -411,13 +405,8 @@ struct MarkdownStylesheetTests {
             (budget \(TestDeadlines.saturatedPass))
             """
         }
-        try await clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
-        try await Self.waitFor(TestDeadlines.saturatedPass, { notified.count > before }) { elapsed in
-            """
-            creating the selected stylesheet produced no directory notification — \
-            observed \(notified.count) (baseline \(before)) after \(elapsed) \
-            (budget \(TestDeadlines.saturatedPass))
-            """
+        try await Self.crossDebounce(on: clock, until: "a notification for later.css") {
+            notified.count > before
         }
 
         try withDefaults { defaults in
@@ -432,6 +421,40 @@ struct MarkdownStylesheetTests {
     }
 
     private static let pollInterval: Duration = .milliseconds(25)
+
+    /// Crosses the debounce window, one armed sleeper at a time, until
+    /// `condition` (a notification reaching the consumer) holds.
+    ///
+    /// A single `requireAdvanceWhenArmed` is the wrong instrument here
+    /// (Tests/CLAUDE.md: "A single advance is the wrong instrument for a
+    /// poll-and-re-arm loop"). An atomic write is a temp-file create plus a
+    /// rename, and GCD may hand the directory's events to one handler call or
+    /// to two. With two, a lone advance can fire the first debounce task just
+    /// as the second event replaces it. The fired task then resumes cancelled,
+    /// and its `Task.isCancelled` guard drops the notification. That is
+    /// production's trailing-edge debounce working as designed. The
+    /// replacement then sleeps on a virtual timer that nothing advances again,
+    /// so the notification wait ran out its whole budget even with the test
+    /// running alone. `advanceUntil` steps each timer that arms until the
+    /// notification lands, and it watches the condition between steps, so the
+    /// healthy path costs one advance.
+    ///
+    /// Each arming wait is one `TestDeadlines.saturatedPass` hang guard, since
+    /// the arm sits behind an unstructured `Task` hop. If nothing arms and no
+    /// notification arrives, the call throws `NoSleeperArmed`. `maxSteps`
+    /// bounds a watcher that keeps re-arming without ever notifying.
+    private static func crossDebounce(on clock: EventDrivenTestClock,
+                                      until what: String,
+                                      sourceLocation: SourceLocation = #_sourceLocation,
+                                      _ condition: @escaping @Sendable () -> Bool) async throws {
+        let held = try await clock.advanceUntil(what,
+                                                by: FileWatcher.debounceInterval,
+                                                timeout: TestDeadlines.saturatedPass,
+                                                maxSteps: 16,
+                                                sourceLocation: sourceLocation) { condition() }
+        // `false` only under cancellation, which belongs to whatever cancelled.
+        if !held { throw CancellationError() }
+    }
 
     /// Bounded wait on a fact produced by **real** scheduling — a dispatch
     /// source delivering an event, or `AsyncStream` handing an element to its
