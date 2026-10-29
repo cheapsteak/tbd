@@ -431,7 +431,9 @@ custom_rules:
     #     `TestDefaults.tearDown(suiteName:defaults:)` under a reasoned
     #     suppression. That primitive is the one sanctioned `suiteName:` call
     #     outside the helper, so the lookbehind exempts it, and only when
-    #     qualified by `TestDefaults.`: an unqualified `tearDown(suiteName:` is
+    #     qualified by `TestDefaults.` as a whole word — the inner `\b` keeps a
+    #     type merely ending in it (`SpyTestDefaults.init(suiteName:`) from
+    #     riding the exemption — while an unqualified `tearDown(suiteName:` is
     #     somebody's own helper and still matches.
     #   - `removePersistentDomain(` and `setPersistentDomain(`, which act on a
     #     domain by name from any instance, `.standard` included — the first is
@@ -441,7 +443,7 @@ custom_rules:
     #
     # `\s*` spans newlines, so a call split across lines still matches.
     # `match_kinds` drops comments and string literals that only name one.
-    regex: '\b(?<!TestDefaults\.)\w+\s*\(\s*suiteName\s*:|\b(?:remove|set)PersistentDomain\s*\(|\bCFPreferences\w*\s*\('
+    regex: '\b(?<!\bTestDefaults\.)\w+\s*\(\s*suiteName\s*:|\b(?:remove|set)PersistentDomain\s*\(|\bCFPreferences\w*\s*\('
     match_kinds:
       - identifier
       - typeidentifier
