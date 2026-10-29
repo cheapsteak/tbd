@@ -78,10 +78,10 @@ struct UserDefaultsTestSupportTests {
     /// removes the container outside the build lock — when a run joins the
     /// queue and after its test process exits — and ~40 worktrees share that
     /// one directory, so another run can delete it between this case's write
-    /// and its check. `cfprefsd` serves the domain from memory and does not
-    /// rewrite a value that has not changed, so a single write would then never
-    /// land again and the case would time out on a healthy helper. A changing
-    /// value puts the file back on the next probe, so a concurrent deletion
+    /// and its check. A case that wrote once would then depend on whether
+    /// `cfprefsd` writes an unchanged value out again, which nothing here has
+    /// measured. Writing a new value on every probe removes that dependency:
+    /// each probe is a real change to the domain, so a concurrent deletion
     /// only delays the check.
     ///
     /// The path is returned from the probe that succeeded rather than looked

@@ -14,8 +14,8 @@ import Testing
 ///
 /// # What was measured
 ///
-/// All of the following was established empirically against `cfprefsd` on
-/// macOS 15, by checking one exact path at a time (never by enumerating
+/// All of the following was established empirically against `cfprefsd`, by
+/// checking one exact path at a time (never by enumerating
 /// `~/Library/Preferences`, which is far too large to walk):
 ///
 /// 1. A suite's backing store is `<home>/Library/Preferences/<suite>.plist`.
@@ -26,8 +26,8 @@ import Testing
 ///    test fence cannot contain this leak.
 /// 3. `removePersistentDomain(forName:)` clears the domain's *values* and
 ///    leaves the file behind: a 42-byte `bplist00` + empty dict, forever.
-/// 4. **No in-process teardown order can win.** Six orderings were tried, ten
-///    trials each — remove-then-sync-then-unlink; unlink-then-remove-then-
+/// 4. **None of the six in-process teardown orderings tried won.** Ten trials
+///    each — remove-then-sync-then-unlink; unlink-then-remove-then-
 ///    unlink; polling until the empty write lands before unlinking;
 ///    `removeSuite(named:)` first; per-key `removeObject` first; and an
 ///    `atexit`-registered second unlink. **All 60 files were present again
