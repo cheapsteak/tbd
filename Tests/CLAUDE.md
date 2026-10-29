@@ -165,9 +165,10 @@ exit-time sync or `cfprefsd` writes them back was not established). So mint
 every suite through `TestDefaultsSuite` / `withTestDefaults`
 (`Tests/TestSupport/UserDefaultsTestSupport.swift`), which names it
 `TBDTests.suites/<label>.<uuid>`; the `/` puts every file in one container that
-`scripts/test.sh` removes once the process is gone, then watches briefly,
-because a sweeper started the instant the process exited still lost 1 in 10 to
-a trailing write. To check for leftovers, stat that one path or list the
+`scripts/test.sh` removes once the process is gone. With detection on it then
+watches the path briefly, because a sweeper started the instant the process
+exited still lost 1 in 10 to a trailing write; without detection a late write
+is left for the next run's pre-run reclaim. To check for leftovers, stat that one path or list the
 container — never enumerate `~/Library/Preferences`, which can hold hundreds of
 thousands of entries.
 
