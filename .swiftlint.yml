@@ -412,20 +412,30 @@ custom_rules:
     # `scripts/test.sh` removes wholesale; a suite minted any other way is
     # outside both.
     #
-    # Two shapes. Construction, including a subclass (`\w*UserDefaults`) and
-    # `.init`: a subclass has to construct itself, so it pairs
-    # `TestDefaults.makeSuiteName(label:)` with
-    # `TestDefaults.tearDown(suiteName:defaults:)` under a reasoned
-    # suppression. And any `removePersistentDomain` call, the teardown that
-    # leaks. `\s*` spans newlines, so a constructor split across lines still
-    # matches. `match_kinds` drops comments and string literals that only name
-    # either one.
-    regex: '\b\w*UserDefaults\s*(?:\.init\s*)?\(\s*suiteName\s*:|\.removePersistentDomain\s*\('
+    # Four shapes, each a way to put a domain on disk by name:
+    #
+    #   - construction by type name, including a subclass (`\w*UserDefaults`,
+    #     which also covers `NSUserDefaults`): a subclass has to construct
+    #     itself, so it pairs `TestDefaults.makeSuiteName(label:)` with
+    #     `TestDefaults.tearDown(suiteName:defaults:)` under a reasoned
+    #     suppression;
+    #   - `.init(suiteName:` on any receiver, which is how an inferred
+    #     `let d: UserDefaults = .init(suiteName: x)!` spells it without the
+    #     type name;
+    #   - `removePersistentDomain(` and `setPersistentDomain(`, which act on a
+    #     domain by name from any instance, `.standard` included — the first is
+    #     also the teardown that leaks;
+    #   - any `CFPreferences…(` call, the CoreFoundation layer underneath all
+    #     of the above, which takes a domain name as a plain string.
+    #
+    # `\s*` spans newlines, so a call split across lines still matches.
+    # `match_kinds` drops comments and string literals that only name one.
+    regex: '\b\w*UserDefaults\s*\(\s*suiteName\s*:|\.init\s*\(\s*suiteName\s*:|\b(?:remove|set)PersistentDomain\s*\(|\bCFPreferences\w*\s*\('
     match_kinds:
       - identifier
       - typeidentifier
       - keyword
-    message: "Mint test UserDefaults suites through TestDefaultsSuite or withTestDefaults (Tests/TestSupport/UserDefaultsTestSupport.swift), never UserDefaults(suiteName:) or removePersistentDomain(forName:). cfprefsd writes every suite's plist into the developer's real ~/Library/Preferences whatever HOME says, and removePersistentDomain leaves that file behind forever; only the helper's TBDTests.suites container is unlinked at teardown and reclaimed by scripts/test.sh. A UserDefaults subclass pairs TestDefaults.makeSuiteName(label:) with TestDefaults.tearDown(suiteName:defaults:) under `// swiftlint:disable:next no_raw_userdefaults_suite - <reason>`."
+    message: "Mint test UserDefaults suites through TestDefaultsSuite or withTestDefaults (Tests/TestSupport/UserDefaultsTestSupport.swift). Never construct one by name (UserDefaults(suiteName:), .init(suiteName:)), never call removePersistentDomain/setPersistentDomain, and never reach CFPreferences directly. cfprefsd writes every named domain's plist into the developer's real ~/Library/Preferences whatever HOME says, and removePersistentDomain leaves that file behind forever; only the helper's TBDTests.suites container is unlinked at teardown and reclaimed by scripts/test.sh. A UserDefaults subclass pairs TestDefaults.makeSuiteName(label:) with TestDefaults.tearDown(suiteName:defaults:) under `// swiftlint:disable:next no_raw_userdefaults_suite - <reason>`."
     severity: error
 
   no_tui_scraping_literals:
