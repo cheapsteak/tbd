@@ -334,16 +334,24 @@ tbd remote dismiss <session>
   `meta.workspace_dirty` is the same fact in the other direction.
 - **`delete` refuses without `--force`** when the session is running or claims
   `workspace_dirty`.
-- **`delete` retains by default wherever the provider can**, matching what the
-  app already does: retention is what makes an irreversible action safe, so
-  the default must not be the lossy one. `--retain`/`--no-retain` is a tri-state
-  flag (unspecified, forced on, forced off) — leaving it unspecified retains
-  when the provider declares `transcript.retain` and does nothing otherwise,
-  with no error either way; `--no-retain` destroys the transcript along with
-  the session even where the provider could have kept it; `--retain` against
-  a provider that has not declared `transcript.retain` is refused, naming the
-  missing capability, the same as any other missing-capability refusal.
-  Retention succeeding prints the key.
+- **`delete` retains by default wherever the provider can**, as the app's
+  delete does: retention is what makes an irreversible action safe, so the
+  default must not be the lossy one. This is caller policy and leaves the
+  contract's rule intact — retention is still never implied by capability
+  presence, because the CLI reads the provider's capabilities and, where it
+  chooses to retain, sends `--retain` explicitly. Retention succeeding prints
+  the key. `--retain`/`--no-retain` is a tri-state flag:
+  - **Unspecified** – sends `--retain` when the provider declares
+    `transcript.retain` and nothing otherwise, and is never refused for the
+    capability's absence. A delete that went ahead without retaining says so
+    on stderr. If retaining this way fails, the delete fails with it rather
+    than destroying the transcript; the error is reported unchanged, with a
+    stderr hint that `--no-retain` deletes without keeping it.
+  - **`--retain`** – against a provider that has not declared
+    `transcript.retain` is refused, naming the missing capability, the same as
+    any other missing-capability refusal.
+  - **`--no-retain`** – destroys the transcript along with the session even
+    where the provider could have kept it.
 - **A missing capability is a one-line refusal naming it, exit 1**, decided
   before any provider call — never a provider error surfaced raw.
 - **Key-returning commands print the bare key on stdout** and everything else on
