@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 import Testing
 import TBDShared
@@ -342,6 +343,93 @@ struct RemoteCommandsTests {
     @Test func anUnmirroredSessionIsNotRefusedOnAbsentInformation() {
         #expect(RemoteDeletePrecondition.refusal(
             state: nil, workspaceDirty: false, force: false, address: address) == nil)
+    }
+
+    // MARK: - delete: resolving --retain
+
+    /// The three capability sets every flag value is checked against: the
+    /// namespaced string, nothing, and the bare pre-namespace spelling.
+    private func retentionFleets() -> (declared: RemoteFleetSnapshot, absent: RemoteFleetSnapshot, bare: RemoteFleetSnapshot) {
+        (fleet(declaring: ["delete", RemoteCapability.transcriptRetain]),
+         fleet(declaring: ["delete"]),
+         fleet(declaring: ["delete", "retain"]))
+    }
+
+    private func retention(_ fleet: RemoteFleetSnapshot, requested: Bool?) -> RemoteDeleteRetention {
+        RemoteDelete.retention(fleet: fleet, provider: "agentbox", requested: requested)
+    }
+
+    /// Unspecified is not "off": it retains wherever the provider can, as the
+    /// app's delete does, and is never refused where it cannot — that is "no
+    /// receipt available", not a caller mistake. The bare `retain` admits
+    /// nothing here either, or a provider declaring only `transcript.retain`
+    /// would never retain.
+    @Test func unspecifiedRetainFollowsTheNamespacedCapabilityAndNeverRefuses() {
+        let fleets = retentionFleets()
+        #expect(retention(fleets.declared, requested: nil) == .retainedByDefault)
+        #expect(retention(fleets.absent, requested: nil) == .notRetainable)
+        #expect(retention(fleets.bare, requested: nil) == .notRetainable)
+    }
+
+    /// An explicit `--retain` is a request the provider must be able to honor,
+    /// so it is refused by name wherever `transcript.retain` is missing.
+    @Test func explicitRetainIsRefusedUnlessTheProviderDeclaresTranscriptRetain() {
+        let fleets = retentionFleets()
+        let refusal = remoteMissingCapability(RemoteCapability.transcriptRetain, provider: "agentbox")
+        #expect(retention(fleets.declared, requested: true) == .requested(true))
+        #expect(retention(fleets.absent, requested: true) == .refused(refusal))
+        #expect(retention(fleets.bare, requested: true) == .refused(refusal))
+    }
+
+    /// `--no-retain` declines whatever the provider declares — the explicit
+    /// opt-out always wins, and is never refused.
+    @Test func explicitNoRetainDeclinesWhateverTheProviderDeclares() {
+        let fleets = retentionFleets()
+        for fleet in [fleets.declared, fleets.absent, fleets.bare] {
+            #expect(retention(fleet, requested: false) == .requested(false))
+        }
+    }
+
+    /// `delete` itself is required whatever the flag says.
+    @Test func aProviderWithoutDeleteIsRefusedWhateverTheRetainFlag() {
+        let noDelete = fleet(declaring: [RemoteCapability.transcriptRetain])
+        let refusal = remoteMissingCapability("delete", provider: "agentbox")
+        for requested: Bool? in [nil, true, false] {
+            #expect(retention(noDelete, requested: requested) == .refused(refusal))
+        }
+    }
+
+    /// What reaches the provider: `--retain` exactly when retaining was asked
+    /// for or defaulted on.
+    @Test func onlyARequestedOrDefaultedRetentionSendsRetain() {
+        #expect(RemoteDeleteRetention.requested(true).sendsRetain)
+        #expect(RemoteDeleteRetention.retainedByDefault.sendsRetain)
+        #expect(!RemoteDeleteRetention.requested(false).sendsRetain)
+        #expect(!RemoteDeleteRetention.notRetainable.sendsRetain)
+        #expect(!RemoteDeleteRetention.refused("x").sendsRetain)
+    }
+
+    /// Help says retention is the default, so the not-retained note names
+    /// which provider fell short and what it would have to declare.
+    @Test func theNotRetainedNoteNamesTheProviderAndTheCapability() {
+        let note = RemoteDeleteRetention.notRetainedNote(provider: "agentbox")
+        #expect(note.contains("not retained"))
+        #expect(note.contains("'agentbox'"))
+        #expect(note.contains("'transcript.retain'"))
+    }
+
+    /// The way through a failed default retention is named, and it is the
+    /// opt-out flag — not `--force`, which answers a different refusal.
+    @Test func theDefaultRetainFailureHintPointsAtNoRetain() {
+        #expect(RemoteDeleteRetention.defaultRetainFailureHint.contains("--no-retain"))
+    }
+
+    /// The flag is tri-state on the command line: absent, `--retain` and
+    /// `--no-retain` stay distinguishable, which the default depends on.
+    @Test func theRetainFlagParsesToThreeStates() throws {
+        #expect(try RemoteDelete.parse(["x"]).retain == nil)
+        #expect(try RemoteDelete.parse(["x", "--retain"]).retain == true)
+        #expect(try RemoteDelete.parse(["x", "--no-retain"]).retain == false)
     }
 
     // MARK: - delete: the two outcomes
