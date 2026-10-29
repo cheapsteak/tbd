@@ -167,8 +167,8 @@ For `uv`, remove the `UV_LINK_MODE=hardlink` export, or set
 `UV_LINK_MODE=clone`. Existing environments keep their old link counts until
 something rewrites them, so the setting alone changes nothing on a machine that
 already has them. Convert them in place with the script under "Converting
-existing environments" below — no network, no lockfile, and safe against
-checkouts with live sessions. Reinstalling (`uv sync --reinstall`, or deleting
+existing environments" below — no network and no lockfile, run while nothing is
+installing. Reinstalling (`uv sync --reinstall`, or deleting
 and re-provisioning) also works and is the right choice if you wanted a fresh
 resolve anyway, but it is an alternative, not a requirement.
 
@@ -206,8 +206,9 @@ Three approaches, because the differences matter more than they look:
 - **`clonefile(2)` per file from a single process, replaced atomically** — the
   one to use. It has the speed of the recursive copy (~855 files/sec measured)
   without the window: each file is swapped with `os.replace()`, so a reader
-  sees either the old inode or the new one and never a missing path. Safe to
-  run against checkouts with live sessions.
+  sees either the old inode or the new one and never a missing path. Running
+  processes that only read the tree are unaffected, which the directory swap
+  cannot offer. Anything *writing* into the tree is another matter; see below.
 
 That third approach is implemented in
 [`scripts/reclone-hardlinked-deps.py`](../../scripts/reclone-hardlinked-deps.py)
@@ -229,8 +230,13 @@ rather than decorative:
 
 - **An installer preflight** — it declines to start while an installer for any
   tree kind it converts is visible in the process table running a subcommand
-  that writes: `uv`, `pip`, `poetry`, `npm`, `pnpm`, `yarn`, `bun` or Bundler.
-  It is a preflight, not a lock, so still run it when the fleet is idle.
+  that writes: `uv`, `pip`, `pip-sync`, `poetry`, `pdm`, `npm`, `pnpm`, `yarn`,
+  `bun` or Bundler. It reads the process table once, at start, so it is a
+  preflight, not a lock.
+- **A changed-file check** — just before each replace the original is looked up
+  again, and a file whose inode, size or mtime moved during its clone is left
+  as found and reported. That narrows the race with a concurrent installer; it
+  does not close it.
 - **Progress for every tree, unbuffered** — clean trees are reported too, so a
   long scan cannot be mistaken for a hang.
 - **Loud refusals** — a path that does not exist is an error instead of
@@ -238,16 +244,23 @@ rather than decorative:
   "everything is already converted" must not be indistinguishable.
 - **Orphan cleanup** — each swap goes through a short temp name,
   `.__reclone<pid>_<n>`, beside the file. A run killed mid-swap leaves one
-  behind, and the next run removes any whose process is gone.
+  behind, and the next run removes any whose process is gone — including the
+  `.__cl<pid>_<name>` temps of a bare `clonefile` loop.
 - **Verification afterwards** — no hardlinks and no temp files remain, and each
   converted virtualenv's interpreter still starts.
 
-Two things to check before running it against a live checkout:
+Two things to check around running it:
 
-- **No installer is mid-flight.** A running `uv sync` or `pip install` writing
-  into the tree is the one case that genuinely loses data. Everything else is
-  safe, including processes with open file descriptors — POSIX keeps the inode
-  alive across replace and unlink, so anything already executing is unaffected.
+- **Run it while the fleet is idle.** An installer writing into a tree during
+  the conversion is the one case that genuinely loses data, and neither check
+  above excludes one that starts after the preflight. That includes `uv run`,
+  which syncs the virtualenv before it runs its command. The preflight
+  deliberately does not match `uv run`, nor any other run or exec command:
+  each lives as long as what it runs, so matching them would block the script
+  for as long as any agent or dev server is up. Processes that only read the
+  tree are safe, including ones with open file descriptors — POSIX keeps the
+  inode alive across replace and unlink, so anything already executing is
+  unaffected.
 - **Verify afterwards**, since a silent partial conversion looks like success:
   the interpreter still starts, a few third-party imports resolve, the
   site-packages count is unchanged, and `find <venv> -type f -links +1` is
