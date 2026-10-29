@@ -31,20 +31,21 @@ import Testing
 ///    unlink; polling until the empty write lands before unlinking;
 ///    `removeSuite(named:)` first; per-key `removeObject` first; and an
 ///    `atexit`-registered second unlink. **All 60 files were present again
-///    after the process exited.** `cfprefsd` keeps the domain cached and
-///    flushes it to disk when the client disconnects, which is strictly after
-///    every `atexit` handler the process can run. The unlink does take effect
-///    (the file is gone the instant teardown returns, which is what
-///    `UserDefaultsTestSupportTests` asserts); it simply cannot be the last
-///    word.
+///    after the process exited**, and a sweeper started the instant the
+///    process exited still lost 1 trial in 10. Which writer puts the file back
+///    was not established — CF's own synchronization at exit and `cfprefsd`
+///    flushing the domain when its client disconnects both fit. The unlink
+///    does take effect (the file is gone the instant teardown returns, which
+///    is what `UserDefaultsTestSupportTests` asserts); it simply cannot be the
+///    last word.
 ///
 /// # The fix: containment
 ///
 /// A suite name containing `/` makes `cfprefsd` write to a *subdirectory* of
 /// `~/Library/Preferences`, creating it if absent (also measured). So every
 /// test domain is named `TBDTests.suites/<label>.<uuid>` and every backing file
-/// — including any that `cfprefsd` resurrects after the process exits — lands
-/// under the single directory `~/Library/Preferences/TBDTests.suites/`.
+/// — including one written back after the process exits — lands under the
+/// single directory `~/Library/Preferences/TBDTests.suites/`.
 ///
 /// That turns an unbounded population scattered through a directory nobody can
 /// safely walk into one exact path that can be reclaimed wholesale. Three
@@ -53,10 +54,12 @@ import Testing
 /// - **Per-suite unlink at teardown** (`TestDefaultsSuite.tearDown`), which
 ///   removes the file immediately.
 /// - **A once-per-process reclaim** of the whole container directory, run
-///   before the first suite is minted, which sweeps up whatever an earlier
-///   process's `cfprefsd` wrote after that process had already exited.
+///   before the first suite is minted, which sweeps up whatever was written
+///   back after an earlier process had already exited.
 /// - **`scripts/test.sh`**, which removes the container before and after each
-///   run, so a run leaves nothing behind for the next one to find.
+///   run. Its after-run removal can lose the same race the in-process unlink
+///   does, so a file written back late survives until the next reclaim — the
+///   population stays bounded by the one directory, not driven to zero.
 ///
 /// Wiping the directory while *other* processes hold live domains in it is
 /// safe and was verified: `cfprefsd` serves a live domain from memory, so reads
@@ -215,8 +218,8 @@ public enum TestDefaults {
     }
 
     /// Delete the container directory, and with it every backing file this
-    /// scheme has ever written — including the ones `cfprefsd` resurrected
-    /// after an earlier process exited.
+    /// scheme has ever written — including any written back after an earlier
+    /// process exited.
     ///
     /// One `removeItem` on one exact path: `~/Library/Preferences` itself is
     /// never enumerated. Safe to call while other processes hold live domains
@@ -254,7 +257,7 @@ public enum TestDefaults {
 
     /// Clear `suiteName`'s domain and unlink its backing file.
     ///
-    /// The primitive behind ``TestDefaultsSuite/tearDown()``, exposed for the
+    /// The primitive behind ``TestDefaultsSuite/tearDown(sourceLocation:)``, exposed for the
     /// rare site that cannot use the suite object — a `UserDefaults` *subclass*
     /// it has to construct itself, for instance. Pair it with
     /// ``makeSuiteName(label:)``.
@@ -264,12 +267,12 @@ public enum TestDefaults {
     /// happens: the domain is not cleared (clearing it would make `cfprefsd`
     /// write the refused path itself) and nothing is unlinked.
     ///
-    /// Order matters and was measured: `removePersistentDomain` writes the
-    /// now-empty domain back out, so unlinking *before* it simply invites the
-    /// file straight back. Remove, force the flush, then unlink. A suite that
-    /// was never written to has no file, and the unlink tolerates that.
+    /// Order matters: `removePersistentDomain` writes the now-empty domain
+    /// back out, so unlinking *before* it simply invites the file straight
+    /// back. Remove, force the flush, then unlink. A suite that was never
+    /// written to has no file, and the unlink tolerates that.
     ///
-    /// The unlink is not the last word — `cfprefsd` may re-flush this domain
+    /// The unlink is not the last word — the file was measured to reappear
     /// once the process exits, which is why the whole container directory is
     /// also reclaimed once per process. See this file's header.
     public static func tearDown(
@@ -311,7 +314,7 @@ public enum TestDefaults {
 /// `TestDefaultsSuite("x").defaults` drops the suite at the end of the
 /// statement, and `deinit` tears the domain down there and then.
 ///
-/// ``tearDown()`` is idempotent, and `deinit` calls it as a safety net so a
+/// ``tearDown(sourceLocation:)`` is idempotent, and `deinit` calls it as a safety net so a
 /// suite that is dropped without an explicit teardown still unlinks its file.
 ///
 /// `@unchecked Sendable` because tests capture a suite in `@Sendable` closures
@@ -338,7 +341,7 @@ public final class TestDefaultsSuite: @unchecked Sendable {
 
     /// A second, independent `UserDefaults` on this same domain — what a
     /// relaunched app would construct. Values written through either instance
-    /// are visible through the other. ``tearDown()`` covers both, because it
+    /// are visible through the other. ``tearDown(sourceLocation:)`` covers both, because it
     /// clears and unlinks the domain rather than an instance.
     public func reopen() -> UserDefaults {
         TestDefaultsSuite.open(name)
@@ -357,14 +360,17 @@ public final class TestDefaultsSuite: @unchecked Sendable {
     /// Clear the domain and unlink its backing file. Idempotent.
     ///
     /// See ``TestDefaults/tearDown(suiteName:defaults:sourceLocation:)`` for
-    /// the measured ordering and for why the unlink cannot be the last word.
-    public func tearDown() {
+    /// the ordering and for why the unlink cannot be the last word.
+    /// `sourceLocation` defaults to the caller's, so anything teardown has to
+    /// report lands on the test that tore down rather than on this file;
+    /// `deinit`, which has no caller to name, takes the default.
+    public func tearDown(sourceLocation: SourceLocation = #_sourceLocation) {
         let isFirst = lock.withLock { () -> Bool in
             defer { isTornDown = true }
             return !isTornDown
         }
         guard isFirst else { return }
-        TestDefaults.tearDown(suiteName: name, defaults: defaults)
+        TestDefaults.tearDown(suiteName: name, defaults: defaults, sourceLocation: sourceLocation)
     }
 
     deinit {

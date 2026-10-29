@@ -28,28 +28,81 @@ struct UserDefaultsTestSupportTests {
         "\(home)/Library/Preferences/\(name).plist"
     }
 
-    /// A bounded wait on `cfprefsd` landing (or not re-landing) a file, with
-    /// the observed state in the diagnostic.
-    private struct BackingFileTimeout: Error, CustomStringConvertible {
-        let path: String
-        let expectedToExist: Bool
+    /// Where a case expects its backing file to land.
+    private enum Backing: CustomStringConvertible {
+        /// The exact composed path. The strong form: it fails if the file
+        /// lands anywhere else, including outside the container.
+        case exactPath(String)
+        /// Exactly one file in the container whose name starts with
+        /// `<label>.`, for the scoped form, which never exposes its name.
+        case containerLabel(String)
+
+        /// The matching files that exist right now. The case is satisfied
+        /// when this holds exactly one path.
+        func observe() -> [String] {
+            switch self {
+            case .exactPath(let path):
+                return FileManager.default.fileExists(atPath: path) ? [path] : []
+            case .containerLabel(let label):
+                return UserDefaultsTestSupportTests.containerFiles(labelled: label)
+            }
+        }
+
         var description: String {
-            "backing plist \(expectedToExist ? "never appeared" : "never went away") within "
-                + "\(TestDeadlines.saturatedPass): \(path)"
+            switch self {
+            case .exactPath(let path):
+                return path
+            case .containerLabel(let label):
+                return "\(TestDefaults.containerDirectory)/\(label).<uuid>.plist (saw "
+                    + "\(UserDefaultsTestSupportTests.containerFiles(labelled: label)))"
+            }
         }
     }
 
-    /// Wait until `path`'s existence equals `expected`. Returns as soon as it
-    /// does, so the passing path costs one stat. Records a diagnostic on a
-    /// timeout and nothing on a cancellation; returns whether the state held.
-    private static func settle(_ path: String, toExist expected: Bool) async -> Bool {
+    /// The bounded wait for a backing file to appear ran out, with the
+    /// observed state in the diagnostic.
+    private struct BackingFileNeverLanded: Error, CustomStringConvertible {
+        let backing: String
+        let writes: Int
+        var description: String {
+            "backing plist never appeared within \(TestDeadlines.saturatedPass) "
+                + "across \(writes) write+synchronize rounds: \(backing)"
+        }
+    }
+
+    /// Write until the backing file exists, and return the one path observed
+    /// at that moment — `nil` if it never landed.
+    ///
+    /// Every probe writes a FRESH value and synchronizes before it looks,
+    /// rather than writing once and then only looking. `scripts/test.sh`
+    /// removes the container outside the build lock — when a run joins the
+    /// queue and after its test process exits — and ~40 worktrees share that
+    /// one directory, so another run can delete it between this case's write
+    /// and its check. `cfprefsd` serves the domain from memory and does not
+    /// rewrite a value that has not changed, so a single write would then never
+    /// land again and the case would time out on a healthy helper. A changing
+    /// value puts the file back on the next probe, so a concurrent deletion
+    /// only delays the check.
+    ///
+    /// The path is returned from the probe that succeeded rather than looked
+    /// up again afterwards, because a concurrent deletion between the two would
+    /// make a second look find nothing.
+    ///
+    /// Records a diagnostic on a timeout and nothing on a cancellation.
+    private static func writeUntilBacked(_ defaults: UserDefaults, at backing: Backing) async -> String? {
+        var writes = 0
+        var observed: [String] = []
         let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-            FileManager.default.fileExists(atPath: path) == expected
+            writes += 1
+            defaults.set(writes, forKey: "probe")
+            defaults.synchronize()
+            observed = backing.observe()
+            return observed.count == 1
         }
         if outcome == .timedOut {
-            Issue.record(BackingFileTimeout(path: path, expectedToExist: expected))
+            Issue.record(BackingFileNeverLanded(backing: backing.description, writes: writes))
         }
-        return outcome == .satisfied
+        return outcome == .satisfied ? observed.first : nil
     }
 
     // MARK: - Teardown unlinks the backing file
@@ -66,12 +119,13 @@ struct UserDefaultsTestSupportTests {
                 forSuiteNamed: suite.name, inHome: TestDefaults.realHomeDirectory) == path
         )
 
-        suite.defaults.set("written", forKey: "probe")
-        suite.defaults.synchronize()
-
         // Guard against a vacuous pass: if the write never produced a file,
-        // "gone after teardown" would hold no matter what teardown did.
-        guard await Self.settle(path, toExist: true) else { return }
+        // "gone after teardown" would hold no matter what teardown did. It
+        // waits on the EXACT composed path, so it also fails if the file lands
+        // anywhere else — which is the failure that would catch a future macOS
+        // that stops honouring `/` in a suite name and writes the plist flat
+        // into `~/Library/Preferences` instead of into the container.
+        guard await Self.writeUntilBacked(suite.defaults, at: .exactPath(path)) != nil else { return }
 
         suite.tearDown()
 
@@ -103,9 +157,7 @@ struct UserDefaultsTestSupportTests {
             TestDefaults.validatedBackingPlistPath(
                 forSuiteNamed: suite.name, inHome: TestDefaults.realHomeDirectory)
         )
-        suite.defaults.set(1, forKey: "probe")
-        suite.defaults.synchronize()
-        guard await Self.settle(path, toExist: true) else {
+        guard await Self.writeUntilBacked(suite.defaults, at: .exactPath(path)) != nil else {
             suite.tearDown()
             return
         }
@@ -123,29 +175,18 @@ struct UserDefaultsTestSupportTests {
         // it is small and ours; `~/Library/Preferences` itself is never walked.
         let label = "ScopedForm-\(UUID().uuidString)"
 
-        let written: [String] = await withTestDefaults(label) { (defaults: UserDefaults) async -> [String] in
-            defaults.set("written", forKey: "probe")
-            defaults.synchronize()
-            let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
-                Self.containerFiles(labelled: label).count == 1
-            }
-            let files = Self.containerFiles(labelled: label)
-            if outcome == .timedOut {
-                Issue.record(BackingFileTimeout(
-                    path: "\(TestDefaults.containerDirectory)/\(label).*.plist (saw \(files))",
-                    expectedToExist: true))
-            }
-            return files
+        let written: String? = await withTestDefaults(label) { (defaults: UserDefaults) async -> String? in
+            await Self.writeUntilBacked(defaults, at: .containerLabel(label))
         }
 
-        #expect(written.count == 1, "expected one backing file for \(label), saw \(written)")
-        for path in written {
-            #expect(FileManager.default.fileExists(atPath: path) == false, "scoped form leaked: \(path)")
-        }
+        // A nil here has already been reported as a timeout, with what the
+        // container held; there is nothing for the leak check to look at.
+        guard let written else { return }
+        #expect(FileManager.default.fileExists(atPath: written) == false, "scoped form leaked: \(written)")
     }
 
     /// Paths inside the container directory whose name starts with `label`.
-    private static func containerFiles(labelled label: String) -> [String] {
+    fileprivate static func containerFiles(labelled label: String) -> [String] {
         let dir = TestDefaults.containerDirectory
         let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
         return names.filter { $0.hasPrefix(label + ".") }.map { "\(dir)/\($0)" }
@@ -153,9 +194,9 @@ struct UserDefaultsTestSupportTests {
 
     // MARK: - Names and containment
 
-    /// Every backing file this scheme can create — including one `cfprefsd`
-    /// resurrects after the process exits, which no in-process unlink can
-    /// prevent — lives inside one directory. That containment is what makes
+    /// Every backing file this scheme can create — including one written back
+    /// after the process exits, which no in-process unlink can prevent — lives
+    /// inside one directory. That containment is what makes
     /// the leak reclaimable at all, so it is asserted rather than assumed.
     @Test("every suite's backing file is inside the container directory")
     func backingFilesAreContained() throws {
