@@ -494,9 +494,9 @@ struct PromptRailAppKitTests {
 
     @Test("an AppKit mount puts the rail in the gutter as presenter, feeds the card, and routes jumps to the table")
     func appKitMountWiresRailCardAndJump() async throws {
-        let suiteName = "prompt-rail-appkit-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-appkit")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let table = Self.table(appState: AppState(userDefaults: defaults), earlier: nil)
         let host = OffscreenHost(root: table, size: NSSize(width: 680, height: 600))
         defer { host.tearDown() }
@@ -523,9 +523,9 @@ struct PromptRailAppKitTests {
 
     @Test("the card's earlier row follows the pane's earlier-history state across updates")
     func earlierFollowsUpdate() async throws {
-        let suiteName = "prompt-rail-appkit-earlier-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-appkit-earlier")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let box = EarlierBox()
         let root = EarlierHarness(box: box, appState: AppState(userDefaults: defaults))
         let host = OffscreenHost(root: root, size: NSSize(width: 680, height: 600))

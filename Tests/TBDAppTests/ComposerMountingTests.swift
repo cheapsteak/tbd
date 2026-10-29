@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The composer's registration and focus plumbing — the parts of mounting that
 /// are not layout.
@@ -14,9 +15,9 @@ import TBDShared
 @Suite("composer mounting")
 struct ComposerMountingTests {
 
-    private func makeState() -> (AppState, String) {
-        let suiteName = "ComposerMountingTests-\(UUID().uuidString)"
-        return (AppState(userDefaults: UserDefaults(suiteName: suiteName)!), suiteName)
+    private func makeState() -> (AppState, TestDefaultsSuite) {
+        let suite = TestDefaultsSuite("ComposerMountingTests")
+        return (AppState(userDefaults: suite.defaults), suite)
     }
 
     /// Polls for a registered waiter instead of trusting a single
@@ -40,8 +41,8 @@ struct ComposerMountingTests {
     }
 
     @Test func registrationIsKeyedByTerminal() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let id = UUID()
         let view = NSView()
 
@@ -56,8 +57,8 @@ struct ComposerMountingTests {
     /// unregister it — the pane can be rebuilt while the old view is still
     /// deallocating.
     @Test func aStaleUnregisterDoesNotEvictTheLiveView() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let id = UUID()
         let old = NSView(), new = NSView()
 
@@ -72,8 +73,8 @@ struct ComposerMountingTests {
     /// the composer's `onDisappear` runs for a view whose registration a later
     /// pane may already have replaced, or that never happened at all.
     @Test func unregisteringSomethingNeverRegisteredIsANoOp() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
 
         state.unregisterComposerView(NSView(), for: UUID())
         #expect(state.composerFocusTargets.isEmpty)
@@ -81,8 +82,8 @@ struct ComposerMountingTests {
 
     /// The reference is weak: a pane that went away leaves no view behind.
     @Test func theRegistryHoldsTheViewWeakly() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let id = UUID()
         do {
             let view = NSView()
@@ -95,8 +96,8 @@ struct ComposerMountingTests {
     /// Focusing a terminal with no registered composer is a no-op, not a crash —
     /// Cmd+/ can be pressed with the transcript pane closed.
     @Test func focusingAnUnregisteredComposerIsANoOp() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
 
         state.focusComposer(terminalID: UUID())
         #expect(state.composerFocusTargets.isEmpty)
@@ -109,8 +110,8 @@ struct ComposerMountingTests {
     /// optional chain, so the discriminating check is that the composer's own
     /// registration survives the call untouched.
     @Test func focusTranscriptFallsBackToResigningFirstResponderWhenNoneIsRegistered() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let id = UUID()
         let composerView = NSView()
         state.registerComposerView(composerView, for: id)
@@ -125,8 +126,8 @@ struct ComposerMountingTests {
     /// actually mutates (it touches no `AppState` property; the registry read
     /// is the only state involved).
     @Test func revealTerminalMakesTheTerminalViewFirstResponder() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         _ = NSApplication.shared
         let id = UUID()
         let window = NSWindow(
@@ -135,7 +136,7 @@ struct ComposerMountingTests {
         let view = TBDTerminalView(
             frame: window.contentLayoutRect,
             font: TBDTerminalView.defaultMonospaceFont,
-            appearance: AppearanceSettings(defaults: UserDefaults(suiteName: suiteName)!))
+            appearance: AppearanceSettings(defaults: suite.reopen()))
         window.contentView?.addSubview(view)
         state.registerTerminalView(view, for: id)
 
@@ -148,8 +149,8 @@ struct ComposerMountingTests {
 
     /// The composer's own spawn reports in, and the hold releases.
     @Test func aMatchingIncarnationReleasesTheHold() async throws {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let terminalID = UUID()
         let incarnation = UUID()
 
@@ -171,8 +172,8 @@ struct ComposerMountingTests {
     /// regardless of whether anyone is waiting, and `awaitSessionStart`
     /// checks that latch before registering.
     @Test func aSessionStartBeforeTheWaiterStillReleases() async throws {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let terminalID = UUID()
         let incarnation = UUID()
 
@@ -188,8 +189,8 @@ struct ComposerMountingTests {
     /// short-circuit a later waiter for this one — the latch is scoped by
     /// exact incarnation, not "something started recently".
     @Test func aLatchedDifferentIncarnationDoesNotReleaseALaterWaiter() async throws {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let terminalID = UUID()
         let mine = UUID()
 
@@ -209,8 +210,8 @@ struct ComposerMountingTests {
     /// terminal — a competing wake, a recapture, a person typing
     /// `claude --resume` in the pane — leaves the hold held.
     @Test func anotherIncarnationDoesNotRelease() async throws {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let terminalID = UUID()
         let mine = UUID()
 
@@ -230,8 +231,8 @@ struct ComposerMountingTests {
     /// A SessionStart carrying NO incarnation releases nobody. A worktree's
     /// first spawn and an archive restore both produce one.
     @Test func anIncarnationlessSessionStartReleasesNobody() async throws {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let terminalID = UUID()
         let mine = UUID()
 
@@ -247,8 +248,8 @@ struct ComposerMountingTests {
 
     /// Another terminal's SessionStart is not this terminal's business.
     @Test func anotherTerminalsSessionStartReleasesNobody() async throws {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let mine = UUID(), incarnation = UUID()
 
         let task = Task { @MainActor in
@@ -265,17 +266,17 @@ struct ComposerMountingTests {
 
     private func stateWakingWith(
         _ result: Result<TerminalWakeResult, any Error>
-    ) -> (AppState, String) {
-        let (state, suiteName) = makeState()
+    ) -> (AppState, TestDefaultsSuite) {
+        let (state, suite) = makeState()
         state.composerWakeSender = { _, _, _, _ in try result.get() }
-        return (state, suiteName)
+        return (state, suite)
     }
 
     @Test func aWokenWakeReportsItsIncarnation() async throws {
         let incarnation = UUID()
-        let (state, suiteName) = stateWakingWith(
+        let (state, suite) = stateWakingWith(
             .success(TerminalWakeResult(woken: true, sessionIncarnationID: incarnation)))
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        defer { suite.tearDown() }
 
         let reply = await state.wakeTerminalForComposer(
             terminalID: UUID(), worktreeID: UUID(), prompt: "hi")
@@ -284,8 +285,8 @@ struct ComposerMountingTests {
 
     /// `woken: false` is a no-op, never a success: the prompt went nowhere.
     @Test func aNoOpWakeIsReportedAsSuch() async throws {
-        let (state, suiteName) = stateWakingWith(.success(TerminalWakeResult(woken: false)))
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = stateWakingWith(.success(TerminalWakeResult(woken: false)))
+        defer { suite.tearDown() }
 
         let reply = await state.wakeTerminalForComposer(
             terminalID: UUID(), worktreeID: UUID(), prompt: "hi")
@@ -293,9 +294,9 @@ struct ComposerMountingTests {
     }
 
     @Test func aFailedWakeCarriesItsMessage() async throws {
-        let (state, suiteName) = stateWakingWith(
+        let (state, suite) = stateWakingWith(
             .failure(DaemonClientError.rpcError("session gone", code: nil)))
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        defer { suite.tearDown() }
 
         let reply = await state.wakeTerminalForComposer(
             terminalID: UUID(), worktreeID: UUID(), prompt: "hi")
@@ -381,8 +382,8 @@ struct ComposerMountingTests {
     // MARK: - The transcript as a focus target
 
     @Test func transcriptRegistrationIsKeyedByTerminal() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let id = UUID()
         let table = NSTableView()
 
@@ -397,8 +398,8 @@ struct ComposerMountingTests {
     /// a session rollover rebuilds the table while the old one is still
     /// deallocating.
     @Test func aStaleTranscriptUnregisterDoesNotEvictTheLiveView() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let id = UUID()
         let old = NSTableView(), new = NSTableView()
 
@@ -413,8 +414,8 @@ struct ComposerMountingTests {
     /// `focusTranscript` moves AppKit's first responder onto it rather than
     /// taking the resign-first-responder fallback the earlier test pins.
     @Test func focusTranscriptMakesTheRegisteredTableFirstResponder() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         _ = NSApplication.shared
         let id = UUID()
         let window = NSWindow(
@@ -461,8 +462,8 @@ struct ComposerMountingTests {
     /// responder in this pane. Resolving through those two alone therefore named
     /// no terminal at all here.
     @Test func theComposerCommandNamesTheSelectedWorktreesActiveTranscriptTerminal() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let worktreeID = UUID(), terminalID = UUID()
         state.tabs[worktreeID] = [liveTranscriptTab(terminalID: terminalID)]
         state.selectedWorktreeIDs = [worktreeID]
@@ -477,8 +478,8 @@ struct ComposerMountingTests {
     /// looking at — ⌘/ there moved the caret in a tab that is not on screen.
     /// The registration is what decides: the terminal tab has no composer.
     @Test func aStaleTerminalTabContextDoesNotStealTheComposerCommand() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let worktreeID = UUID(), background = UUID(), transcript = UUID()
         let backgroundTab = terminalTab(terminalID: background)
         state.tabs[worktreeID] = [
@@ -499,8 +500,8 @@ struct ComposerMountingTests {
     /// terminal with no registered composer is a no-op, so an enabled item there
     /// would be an offer of nothing.
     @Test func withNoComposerRegisteredTheComposerCommandNamesNothing() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let worktreeID = UUID(), terminalID = UUID()
         state.tabs[worktreeID] = [liveTranscriptTab(terminalID: terminalID)]
         state.selectedWorktreeIDs = [worktreeID]
@@ -510,8 +511,8 @@ struct ComposerMountingTests {
 
     /// Nothing selected and nothing focused — nothing to act on either.
     @Test func withNoFocusedTabTheComposerCommandNamesNothing() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
 
         #expect(state.composerCommandTerminalID == nil)
     }
@@ -519,8 +520,8 @@ struct ComposerMountingTests {
     // MARK: - A dead terminal takes its composer state with it
 
     @Test func closingATabDiscardsItsComposerDraft() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let worktreeID = UUID(), terminalID = UUID()
         let tab = liveTranscriptTab(terminalID: terminalID)
         state.tabs[worktreeID] = [tab]
@@ -535,8 +536,8 @@ struct ComposerMountingTests {
     /// empty box per dead terminal accumulates for the app's lifetime. A closed
     /// tab leaves neither entry behind, nor the incarnation latch.
     @Test func closingATabLeavesNoComposerRegistryEntry() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let worktreeID = UUID(), terminalID = UUID()
         let tab = liveTranscriptTab(terminalID: terminalID)
         state.tabs[worktreeID] = [tab]
@@ -558,8 +559,8 @@ struct ComposerMountingTests {
     /// finishing after the row was gone then minted a fresh empty one through
     /// `composerDraft(for:)`.
     @Test func removingADeletedTerminalForgetsItsComposerState() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let worktreeID = UUID(), terminalID = UUID()
         state.composerDraft(for: terminalID).text = "half a sentence"
         let composerView = NSView(), transcriptView = NSView()
@@ -580,8 +581,8 @@ struct ComposerMountingTests {
     /// dropped: it is a suspended continuation, and one nobody resumes hangs its
     /// send for the life of the app instead of timing out.
     @Test func removingADeletedTerminalFailsItsPendingSessionStartWait() async throws {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let worktreeID = UUID(), terminalID = UUID()
 
         let task = Task { @MainActor in
@@ -599,8 +600,8 @@ struct ComposerMountingTests {
     /// The prune is scoped to the dead terminal. A live sibling's registrations
     /// and latch survive.
     @Test func forgettingOneTerminalLeavesAnothersRegistrationsAlone() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let dying = UUID(), surviving = UUID()
         let dyingView = NSView(), survivingView = NSView()
         state.registerComposerView(dyingView, for: dying)
@@ -620,8 +621,8 @@ struct ComposerMountingTests {
     /// The discard is scoped to the closed tab's own terminals. A sibling tab's
     /// half-written message survives.
     @Test func closingATabLeavesAnotherTabsDraftAlone() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let worktreeID = UUID(), closing = UUID(), surviving = UUID()
         state.tabs[worktreeID] = [
             liveTranscriptTab(terminalID: closing),

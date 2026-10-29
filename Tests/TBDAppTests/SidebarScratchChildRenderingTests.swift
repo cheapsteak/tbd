@@ -4,16 +4,17 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @MainActor
 private struct ScratchChildFixture {
-    let suite = "SidebarScratchChildRenderingTests.\(UUID().uuidString)"
+    let suite = TestDefaultsSuite("SidebarScratchChildRenderingTests")
     let state: AppState
     let parent: Worktree
     let scratch: Worktree
 
     init(remoteParent: Bool) {
-        let defaults = UserDefaults(suiteName: suite)!
+        let defaults = suite.defaults
         defaults.set(true, forKey: AppState.scratchSectionExpandedKey)
         defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
         state = AppState(userDefaults: defaults)
@@ -29,7 +30,7 @@ private struct ScratchChildFixture {
     }
 
     func cleanUp() {
-        state.userDefaults.removePersistentDomain(forName: suite)
+        suite.tearDown()
     }
 }
 

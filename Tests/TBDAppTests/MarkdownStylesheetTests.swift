@@ -9,7 +9,7 @@ import TestSupport
 /// documents.
 ///
 /// Every test supplies its own tmp themes directory and its own
-/// `UserDefaults(suiteName:)`. Neither `~/tbd` nor `UserDefaults.standard` is
+/// `TestDefaultsSuite`. Neither `~/tbd` nor `UserDefaults.standard` is
 /// reachable from here: `TBD_HOME` may not be `setenv`'d outside
 /// `TBDHomeSerialized` in `TBDDaemonTests`, and `.standard` on this unbundled
 /// executable is the developer's real `TBDApp.plist`.
@@ -25,11 +25,11 @@ struct MarkdownStylesheetTests {
         return dir
     }
 
-    /// A throwaway defaults suite, torn down with `removePersistentDomain`.
+    /// A throwaway defaults suite, torn down by `TestDefaultsSuite.tearDown()`.
     private func withDefaults<T>(_ body: (UserDefaults) throws -> T) throws -> T {
-        let name = "com.tbd.tests.markdown-stylesheet.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("com.tbd.tests.markdown-stylesheet")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         return try body(defaults)
     }
 

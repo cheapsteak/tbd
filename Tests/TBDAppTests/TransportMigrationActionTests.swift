@@ -9,10 +9,10 @@ import TestSupport
 @Suite("TransportMigrationAction")
 struct TransportMigrationActionTests {
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-transport-migration-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-transport-migration")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     private static func row(
@@ -388,9 +388,9 @@ struct TransportMigrationRaceTests {
     private static let mainActorHop = TestDeadlines.saturatedPass
 
     private func withAppState(_ body: (AppState) async throws -> Void) async rethrows {
-        let name = "tbd-transport-race-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("tbd-transport-race")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults))
     }
 

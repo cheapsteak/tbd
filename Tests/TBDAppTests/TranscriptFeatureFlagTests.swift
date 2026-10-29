@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Tests for the `enableTranscript` UserDefaults helper that gates the live
 /// transcript pane. The pane is on by default; the toggle only exists so a
@@ -9,7 +10,7 @@ import Testing
 /// Isolation matters: TBDApp ships as an unbundled SPM executable, so its
 /// `UserDefaults.standard` domain is `TBDApp.plist` in the developer's home
 /// — the SAME domain a running production TBDApp reads via `@AppStorage`.
-/// Every test below drives the helper through a per-test `UserDefaults(suiteName:)`
+/// Every test below drives the helper through a per-test `TestDefaultsSuite`
 /// so `.standard` is never touched.
 
 @MainActor
@@ -23,10 +24,10 @@ struct TranscriptFeatureFlagTests {
         seed: Bool?,
         _ body: (UserDefaults) -> Void
     ) {
-        let suiteName = "TBDAppTests.Transcript.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.Transcript")
+        let defaults = suite.defaults
         defer {
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
         if let seed {
             defaults.set(seed, forKey: key)

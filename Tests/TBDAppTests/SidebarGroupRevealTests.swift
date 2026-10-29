@@ -2,14 +2,15 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @MainActor
 @Suite("Sidebar group reveal")
 struct SidebarGroupRevealTests {
     private func withState(_ body: (AppState, UUID) -> Void) {
-        let suite = "SidebarGroupRevealTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarGroupRevealTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         state.repos = [repo]

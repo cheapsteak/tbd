@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 1: deterministic, in-process state only. No sleeps, no subprocesses, no
 // `~/tbd`. Every `AppState` is built through `withEmissionState`, against a
@@ -650,9 +651,9 @@ struct RemoteRefreshTests {
 
     @Test("a refresh that returns exactly what is already published")
     func idempotentRemoteRefresh() async {
-        let suiteName = "TBDAppTests.AppStateEmissions.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.AppStateEmissions")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         state.remoteProvidersFetcher = { RemoteProvidersResult(providers: []) }
         state.remoteSessionsFetcher = { RemoteSessionsResult(sessions: []) }

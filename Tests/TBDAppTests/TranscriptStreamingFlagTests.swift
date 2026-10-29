@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// `AppState.transcriptStreamingEnabled` — the single place the app asks
 /// whether a transcript pane should read the session mod's stream file at all.
@@ -14,10 +15,10 @@ import TBDShared
 struct TranscriptStreamingFlagTests {
 
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-transcript-streaming-flag-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-transcript-streaming-flag")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     /// The app is launched by `open`, which drops shell env, so capabilities

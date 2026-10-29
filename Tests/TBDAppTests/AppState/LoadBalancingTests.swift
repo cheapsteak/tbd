@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 struct LoadBalancingTests {
     // MARK: - Ordering Tests
@@ -136,9 +137,9 @@ struct LoadBalancingTests {
     /// TBDApp.plist (see CLAUDE.md, "Tests must not touch ~/tbd").
     @MainActor
     private func withAppState(_ tag: String, _ body: (AppState) async throws -> Void) async throws {
-        let suiteName = "test.loadbalancing.\(tag).\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("test.loadbalancing.\(tag)")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults))
     }
 

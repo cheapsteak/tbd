@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The Settings toggles for daemon-held feature flags. Each setter writes the
 /// gesture through its injected closure and reads the daemon back, and a
@@ -17,10 +18,10 @@ import TBDShared
 @Suite("Daemon flag settings")
 struct DaemonFlagSettingsTests {
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-daemon-flag-settings-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-daemon-flag-settings")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     // MARK: - The shared setter shape

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 // Spec C §11.3 — the pure shadow-compare comparator. Migration-validation
 // diagnostic only: exercises `PanelShadowCompare.mismatches` directly, no
@@ -210,9 +211,9 @@ struct ShadowCompareTests {
 struct ShadowCompareTriggerTests {
 
     @Test func flagOnCallsPanelGetAfterSuccessfulImport() async {
-        let suiteName = "ShadowCompareTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("ShadowCompareTriggerTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         let state = AppState(userDefaults: defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: true)
@@ -243,9 +244,9 @@ struct ShadowCompareTriggerTests {
         // "after a successful import (or imported == false)" — the daemon
         // already having a surface (create-if-absent no-op) must still run
         // the comparison, not just a fresh import.
-        let suiteName = "ShadowCompareTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("ShadowCompareTriggerTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         let state = AppState(userDefaults: defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: true)
@@ -271,9 +272,9 @@ struct ShadowCompareTriggerTests {
     }
 
     @Test func importFailureSkipsShadowCompare() async {
-        let suiteName = "ShadowCompareTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("ShadowCompareTriggerTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         let state = AppState(userDefaults: defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: true)
@@ -294,9 +295,9 @@ struct ShadowCompareTriggerTests {
     }
 
     @Test func flagOffNeverCallsPanelGet() async {
-        let suiteName = "ShadowCompareTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("ShadowCompareTriggerTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         let state = AppState(userDefaults: defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: false)
@@ -319,9 +320,9 @@ struct ShadowCompareTriggerTests {
     @Test func shadowCompareNeverMutatesAppState() async {
         // Log-only: even when the comparator finds real mismatches, AppState's
         // own tab/layout/history state must be untouched.
-        let suiteName = "ShadowCompareTriggerTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("ShadowCompareTriggerTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         let state = AppState(userDefaults: defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: true)

@@ -2,6 +2,7 @@ import Foundation
 import QuartzCore
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Tests for `TerminalCommitLatencyProbe` — the app-draw → render-server-commit
 /// instrument — and for the `enableCommitLatencyDiagnostic` gate that keeps it
@@ -10,7 +11,7 @@ import Testing
 /// Isolation matters: TBDApp ships as an unbundled SPM executable, so its
 /// `UserDefaults.standard` domain is `TBDApp.plist` in the developer's home —
 /// the same domain a running production TBDApp reads. Every test below drives
-/// the gate through a per-test `UserDefaults(suiteName:)` and tears the domain
+/// the gate through a per-test `TestDefaultsSuite` and tears the domain
 /// down afterwards, so `.standard` is never touched.
 @MainActor
 @Suite("Terminal commit-latency probe")
@@ -101,9 +102,9 @@ struct TerminalCommitLatencyProbeTests {
         seed: Bool?,
         _ body: (UserDefaults) -> Void
     ) {
-        let suiteName = "TBDAppTests.CommitLatency.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.CommitLatency")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         if let seed {
             defaults.set(seed, forKey: AppState.enableCommitLatencyDiagnosticKey)
         }

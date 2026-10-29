@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Renders the Session Workbench transcript UI to PNG.
 ///
@@ -63,9 +64,9 @@ struct WorkbenchSnapshotTests {
         let fixtureItems = try loadWorkbenchFixture()
         #expect(!fixtureItems.isEmpty, "fixture produced no items")
 
-        let suiteName = "workbench-harness-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("workbench-harness")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // Build the presentation

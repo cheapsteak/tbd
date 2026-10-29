@@ -198,8 +198,7 @@ struct TerminalHolderTransportGateTests {
         let runner: RefusingTmuxRunner
         let worktreeID: UUID
         let terminalID: UUID
-        let defaults: UserDefaults
-        let defaultsSuiteName: String
+        let defaultsSuite: TestDefaultsSuite
     }
 
     private static let paneID = "%1"
@@ -245,8 +244,8 @@ struct TerminalHolderTransportGateTests {
 
         // Isolated defaults: AppearanceSettings must never read or write the
         // developer's real TBDApp.plist.
-        let suiteName = "TBDAppTests.HolderTransportGate.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.HolderTransportGate")
+        let defaults = suite.defaults
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -273,8 +272,7 @@ struct TerminalHolderTransportGateTests {
             runner: runner,
             worktreeID: worktreeID,
             terminalID: terminalID,
-            defaults: defaults,
-            defaultsSuiteName: suiteName
+            defaultsSuite: suite
         )
     }
 
@@ -283,7 +281,7 @@ struct TerminalHolderTransportGateTests {
         // Releases the vended descriptor: the reader stops within a poll
         // interval and closes it on its way out.
         panel.coordinator.cleanup()
-        panel.defaults.removePersistentDomain(forName: panel.defaultsSuiteName)
+        panel.defaultsSuite.tearDown()
     }
 
     /// Whether `message` had already been fed into the panel.
@@ -578,9 +576,9 @@ struct TerminalHolderTransportGateTests {
     @MainActor
     @Test("a terminal's Retry count goes with the terminal")
     func retryCountIsForgottenWithItsTerminal() {
-        let suiteName = "TBDAppTests.HolderTransportGate.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.HolderTransportGate")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let worktreeID = UUID()
         func row() -> TBDShared.Terminal {

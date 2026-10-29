@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Tests for the background-tab unread-completion bold feature. A
 /// `.responseComplete` notification for a terminal whose tab is NOT the
@@ -18,9 +19,9 @@ import TBDShared
 struct TabUnreadCompletionTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.TabUnreadCompletion.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.TabUnreadCompletion")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

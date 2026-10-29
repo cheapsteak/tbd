@@ -4,6 +4,7 @@ import SwiftTerm
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Who gets a click or a drag over a panel terminal: TBD's own selection, or
 /// the program running in it.
@@ -77,7 +78,7 @@ struct TerminalMouseRoutingTests {
         let window: NSWindow
         let recorder = SendRecorder()
         private let defaults: UserDefaults
-        private let suiteName: String
+        private let suite: TestDefaultsSuite
         private var scratchDirectories: [URL] = []
 
         init(width: CGFloat = 600) {
@@ -87,8 +88,8 @@ struct TerminalMouseRoutingTests {
 
             // AppearanceSettings must never read or write the developer's real
             // TBDApp.plist.
-            suiteName = "TBDAppTests.TerminalMouseRouting.\(UUID().uuidString)"
-            defaults = UserDefaults(suiteName: suiteName)!
+            suite = TestDefaultsSuite("TBDAppTests.TerminalMouseRouting")
+            defaults = suite.defaults
             view = TBDTerminalView(
                 frame: CGRect(x: 0, y: 0, width: width, height: 300),
                 font: TBDTerminalView.defaultMonospaceFont,
@@ -225,7 +226,7 @@ struct TerminalMouseRoutingTests {
             }
             window.contentView = nil
             window.close()
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 

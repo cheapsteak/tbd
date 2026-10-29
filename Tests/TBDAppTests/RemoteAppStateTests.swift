@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Task 8 (remote agent backends — app state plumbing). Covers:
 /// - `.remoteSessionsChanged` triggers the refresh path.
@@ -44,9 +45,9 @@ private final class DeleteProbe {
 struct RemoteAppStateTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.Remote.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.Remote")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 
@@ -696,9 +697,9 @@ struct RemoteAppStateTests {
     }
 
     private func withStateAsync(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.Remote.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.Remote")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         await body(AppState(userDefaults: defaults))
     }
 }
