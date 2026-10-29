@@ -221,16 +221,26 @@ scripts/reclone-hardlinked-deps.py --base DIR         # another worktree root
 ```
 
 It defaults to `$TBD_HOME/worktrees/<repo>/<worktree>`, but takes explicit paths
-or `--base`, so it is useful outside TBD too. Beyond the bare `clonefile` loop it
-carries the parts this investigation showed were necessary rather than
-decorative: it declines to start when an installer is already running — a
-preflight, not a lock, so still run it when the fleet is idle — reports every
-tree including clean ones so a long scan cannot be mistaken for a hang, runs
-unbuffered for the same reason, treats a path that does not exist as an error
-instead of "nothing to do", verifies afterwards that no hardlinks remain and
-that each converted virtualenv's interpreter still starts, and reports an empty
-scan as a failure — because "found nothing" and "everything is already
-converted" must not be indistinguishable.
+or `--base`, so it is useful outside TBD too. A path may be a worktree or a
+dependency tree itself: `node_modules`, `vendor/bundle`, or a virtualenv, which
+is narrowed to its `lib/` exactly as the worktree scan does. Beyond the bare
+`clonefile` loop it carries the parts this investigation showed were necessary
+rather than decorative:
+
+- **An installer preflight** — it declines to start while an installer for any
+  tree kind it converts is visible in the process table running a subcommand
+  that writes: `uv`, `pip`, `poetry`, `npm`, `pnpm`, `yarn`, `bun` or Bundler.
+  It is a preflight, not a lock, so still run it when the fleet is idle.
+- **Progress for every tree, unbuffered** — clean trees are reported too, so a
+  long scan cannot be mistaken for a hang.
+- **Loud refusals** — a path that does not exist is an error instead of
+  "nothing to do", and an empty scan is a failure, because "found nothing" and
+  "everything is already converted" must not be indistinguishable.
+- **Orphan cleanup** — each swap goes through a short temp name,
+  `.__reclone<pid>_<n>`, beside the file. A run killed mid-swap leaves one
+  behind, and the next run removes any whose process is gone.
+- **Verification afterwards** — no hardlinks and no temp files remain, and each
+  converted virtualenv's interpreter still starts.
 
 Two things to check before running it against a live checkout:
 
