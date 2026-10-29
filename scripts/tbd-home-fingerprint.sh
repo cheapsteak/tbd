@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex`,
-# `~/Library/Logs/TBD/hang-stacks` and the tmux socket directory — deliberately
+# `~/Library/Logs/TBD/hang-stacks`, the tmux socket directory and the test
+# suites' files in `~/Library/Preferences` — deliberately
 # `$HOME/...` and the CALLER's `$TMUX_TMPDIR`, never
 # `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
 # `$TBD_TEST_CODEX_HOME` or the fenced socket dir, because the whole point is
@@ -219,8 +220,8 @@ else
   echo "<tmux-sockets> <absent>"
 fi
 
-# ~/Library/Logs/TBD/hang-stacks — the fifth root, and the only one a sweep
-# DELETES from. `HangStackCollector` (`OrphanGC`'s hang-stack phase) reclaims
+# ~/Library/Logs/TBD/hang-stacks — the fifth root, and the only one a product
+# sweep DELETES from. `HangStackCollector` (`OrphanGC`'s hang-stack phase) reclaims
 # files here, and `HangStackWriter` creates them, so this directory is reachable
 # in both directions: a test that escapes the fence can leave a hang stack
 # behind, and one that escapes it while the reclaimer runs can destroy a
@@ -252,3 +253,71 @@ if [ -d "$real_hang_stacks" ]; then
 else
   echo "~/Library/Logs/TBD/hang-stacks <absent>"
 fi
+
+# ~/Library/Preferences — the sixth root, and the only one no fence variable can
+# reach. `UserDefaults(suiteName: "X")` is backed by
+# `<home>/Library/Preferences/X.plist`, and `cfprefsd` resolves that home over
+# XPC, in its own process, ignoring this run's `HOME` and `CFFIXED_USER_HOME`.
+# ~520,000 orphaned suite plists accumulated in one real directory before this
+# arm existed.
+#
+# IT WATCHES A CONTAINER, NOT A SCATTER. `Tests/TestSupport/UserDefaultsTestSupport.swift`
+# names every suite `TBDTests.suites/<label>.<uuid>`; the `/` makes `cfprefsd`
+# write into one subdirectory, which `scripts/test.sh` removes before the first
+# snapshot and again after the run. The steady state is therefore count=0 on
+# both sides, and the container directory ALONE says nothing — a flat
+# `TBDTests.*` match at depth 1 would see only the container itself and could
+# never go red. So the count goes inside.
+#
+# TWO ARMS, ASKING DIFFERENT QUESTIONS AT DIFFERENT PRICES.
+#
+#   `<preferences>/TBDTests.suites` — suite plists in the container. Non-zero
+#   means the wrapper's reclaim did not happen or did not finish. Cheap: it
+#   reads one small directory this repo owns. Narrowed to `*.plist` so a temp
+#   file `cfprefsd` is midway through writing is not counted; the reclaim
+#   removes the whole directory regardless of names.
+#
+#   `<preferences> stray TBDTests.*` — a depth-1 `TBDTests.*` entry that is not
+#   the container directory: a suite minted with a flat name, outside the
+#   helper. The reclaim never globs, so a stray is permanent litter. This is
+#   the one expensive read here — a readdir of a directory with tens of
+#   thousands of entries — and it earns that by being the only thing between one
+#   hand-rolled `UserDefaults(suiteName:)` and another half-million files.
+#
+# COUNTS, NOT LISTINGS, unlike every arm above: listing a directory that size
+# would bury the diff. And an ABSENT directory reads count=0, not `<absent>` —
+# the reclaim's success IS the container being gone, and an empty container (a
+# concurrent run that minted one and leaked nothing) must read the same.
+#
+# WHAT IT CANNOT SEE: which suite leaked (read the names in the container); a
+# suite named with neither the helper nor the `TBDTests.` prefix, because every
+# other domain on the box churns while a run is in flight and counting them
+# would report the machine; and, on a developer box, whose run a count belongs
+# to — ~40 worktrees share one `~/Library/Preferences`, one more reason
+# detection is CI-only.
+real_prefs="${HOME}/Library/Preferences"
+# Pinned against `TestDefaults.containerName` and `scripts/test.sh` by
+# `scripts/test.test.sh`'s `test_the_container_name_matches_the_swift_helper`.
+prefs_container_name='TBDTests.suites'
+prefs_container="$real_prefs/$prefs_container_name"
+
+# `-name '*.plist'` is also why no `-mindepth` is needed: the container
+# directory does not match its own filter.
+if [ -d "$prefs_container" ]; then
+  prefs_container_count="$(find "$prefs_container" -maxdepth 1 -name '*.plist' -print 2>/dev/null | wc -l | tr -d ' ')"
+else
+  prefs_container_count=0
+fi
+echo "<preferences>/$prefs_container_name count=$prefs_container_count"
+
+# The container is excluded only while it is the DIRECTORY it should be: a file
+# or a symlink at that exact path is litter, which the reclaim refuses to remove
+# and the arm above cannot see, so it is counted here.
+if [ -d "$real_prefs" ]; then
+  prefs_stray_count="$(find "$real_prefs" -mindepth 1 -maxdepth 1 \
+      -name 'TBDTests.*' ! \( -name "$prefs_container_name" -a -type d \) -print 2>/dev/null \
+    | wc -l | tr -d ' ')"
+else
+  prefs_stray_count=0
+fi
+echo "<preferences> stray TBDTests.* count=$prefs_stray_count"
