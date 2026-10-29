@@ -393,15 +393,22 @@ custom_rules:
 
   no_raw_userdefaults_suite:
     name: "No raw UserDefaults suite in Tests/"
-    # included/excluded HERE take REGEX (not glob), matched against file path.
-    # Every test dir in the global lint scope above is reachable, but the ones
-    # with a nested .swiftlint.yml run this rule only because their
-    # `only_rules:` names it; a new test target needs the same entry.
+    # included/excluded HERE take REGEX (not glob), matched against the file's
+    # ABSOLUTE path and unanchored, so both are pinned to a `/Tests/<target>/`
+    # component. A bare `Tests/.*` also matches every `Sources/` file of a
+    # checkout that sits inside a directory whose name ends in `Tests` (e.g.
+    # `~/src/AcmeTests/tbd`), and the app's legitimate mock-mode suite in
+    # `Sources/TBDApp/TBDApp.swift` then fails `--strict`. The alternation
+    # names every Swift test dir under `Tests/`; a new target named
+    # `TBD…Tests` is covered, anything else must be added here. Every test dir
+    # in the global lint scope above is reachable, but the ones with a nested
+    # .swiftlint.yml run this rule only because their `only_rules:` names it,
+    # so a new target needs that entry too.
     included:
-      - "Tests/.*\\.swift"
+      - "/Tests/(?:TBD\\w*Tests|TestSupport|DaemonTestSupport)/.*\\.swift"
     excluded:
       # THE HELPER: the one file that mints, clears and unlinks a suite.
-      - "Tests/TestSupport/UserDefaultsTestSupport\\.swift"
+      - "/Tests/TestSupport/UserDefaultsTestSupport\\.swift"
     # THE LEAK THIS FENCES. `cfprefsd` resolves preferences over XPC, so a
     # suite's backing plist lands in the developer's REAL
     # `~/Library/Preferences` whatever `HOME` and `CFFIXED_USER_HOME` say, and
@@ -410,18 +417,22 @@ custom_rules:
     # machine. The helper names every suite `TBDTests.suites/<label>.<uuid>`, so
     # the files land in one container that its teardown unlinks from and
     # `scripts/test.sh` removes wholesale; a suite minted any other way is
-    # outside both.
+    # outside both, and this rule is the only guard against one.
     #
-    # Four shapes, each a way to put a domain on disk by name:
+    # Three shapes, each a way to put a domain on disk by name:
     #
-    #   - construction by type name, including a subclass (`\w*UserDefaults`,
-    #     which also covers `NSUserDefaults`): a subclass has to construct
-    #     itself, so it pairs `TestDefaults.makeSuiteName(label:)` with
+    #   - ANY call whose first argument label is `suiteName:`. That is every
+    #     construction — `UserDefaults(suiteName:)`, `.init(suiteName:)` on any
+    #     receiver (an inferred `let d: UserDefaults = .init(suiteName: x)!`
+    #     names no type), and a subclass under any name (`SpyDefaults` as much
+    #     as `WriteCountingUserDefaults`) — plus any helper that passes a raw
+    #     suite name around. A subclass has to construct itself, so it pairs
+    #     `TestDefaults.makeSuiteName(label:)` with
     #     `TestDefaults.tearDown(suiteName:defaults:)` under a reasoned
-    #     suppression;
-    #   - `.init(suiteName:` on any receiver, which is how an inferred
-    #     `let d: UserDefaults = .init(suiteName: x)!` spells it without the
-    #     type name;
+    #     suppression. That primitive is the one sanctioned `suiteName:` call
+    #     outside the helper, so the lookbehind exempts it, and only when
+    #     qualified by `TestDefaults.`: an unqualified `tearDown(suiteName:` is
+    #     somebody's own helper and still matches.
     #   - `removePersistentDomain(` and `setPersistentDomain(`, which act on a
     #     domain by name from any instance, `.standard` included — the first is
     #     also the teardown that leaks;
@@ -430,12 +441,12 @@ custom_rules:
     #
     # `\s*` spans newlines, so a call split across lines still matches.
     # `match_kinds` drops comments and string literals that only name one.
-    regex: '\b\w*UserDefaults\s*\(\s*suiteName\s*:|\.init\s*\(\s*suiteName\s*:|\b(?:remove|set)PersistentDomain\s*\(|\bCFPreferences\w*\s*\('
+    regex: '\b(?<!TestDefaults\.)\w+\s*\(\s*suiteName\s*:|\b(?:remove|set)PersistentDomain\s*\(|\bCFPreferences\w*\s*\('
     match_kinds:
       - identifier
       - typeidentifier
       - keyword
-    message: "Mint test UserDefaults suites through TestDefaultsSuite or withTestDefaults (Tests/TestSupport/UserDefaultsTestSupport.swift). Never construct one by name (UserDefaults(suiteName:), .init(suiteName:)), never call removePersistentDomain/setPersistentDomain, and never reach CFPreferences directly. cfprefsd writes every named domain's plist into the developer's real ~/Library/Preferences whatever HOME says, and removePersistentDomain leaves that file behind forever; only the helper's TBDTests.suites container is unlinked at teardown and reclaimed by scripts/test.sh. A UserDefaults subclass pairs TestDefaults.makeSuiteName(label:) with TestDefaults.tearDown(suiteName:defaults:) under `// swiftlint:disable:next no_raw_userdefaults_suite - <reason>`."
+    message: "Mint test UserDefaults suites through TestDefaultsSuite or withTestDefaults (Tests/TestSupport/UserDefaultsTestSupport.swift). Never construct one by name (UserDefaults(suiteName:), .init(suiteName:), a subclass's init(suiteName:)) or pass a raw suite name to a helper, never call removePersistentDomain/setPersistentDomain, and never reach CFPreferences directly. cfprefsd writes every named domain's plist into the developer's real ~/Library/Preferences whatever HOME says, and removePersistentDomain leaves that file behind forever; only the helper's TBDTests.suites container is unlinked at teardown and reclaimed by scripts/test.sh. A UserDefaults subclass pairs TestDefaults.makeSuiteName(label:) with TestDefaults.tearDown(suiteName:defaults:) under `// swiftlint:disable:next no_raw_userdefaults_suite - <reason>`."
     severity: error
 
   no_tui_scraping_literals:
