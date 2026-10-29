@@ -287,9 +287,11 @@ fi
 # CI-only.
 #
 # `$HOME`, like every arm here, so the harness can point it at a fixture. The
-# Swift helper resolves the account home through `getpwuid`; the two agree on
-# CI and ordinary accounts, and where they do not the helper's once-per-process
-# reclaim covers its own.
+# Swift helper resolves the account home through `getpwuid`. The two agree on CI
+# and ordinary accounts; where they differ, this arm counts under `$HOME` while
+# the files land under the account home, and the helper's own reclaim runs once
+# at process START — it clears an earlier process's files there, never this
+# run's late writes.
 real_prefs="${HOME}/Library/Preferences"
 # Pinned against `TestDefaults.containerName` and `scripts/test.sh` by
 # `scripts/test.test.sh`'s `test_the_container_name_matches_the_swift_helper`.
@@ -298,8 +300,15 @@ prefs_container="$real_prefs/$prefs_container_name"
 
 # `-name '*.plist'` is also why no `-mindepth` is needed: the container
 # directory does not match its own filter.
+#
+# `|| :` IS LOAD-BEARING. The wrapper reclaims this directory, and a sibling
+# run may reclaim it at any moment, so it can vanish between the `-d` test and
+# the `find`. `find` then exits non-zero, and under `set -euo pipefail` that
+# would kill this script — and with it the wrapper, silently, since the
+# snapshot is a command substitution under `set -e` there. A directory that
+# vanished has no files in it, so it reads count=0.
 if [ -d "$prefs_container" ]; then
-  prefs_container_count="$(find "$prefs_container" -maxdepth 1 -name '*.plist' -print 2>/dev/null | wc -l | tr -d ' ')"
+  prefs_container_count="$( { find "$prefs_container" -maxdepth 1 -name '*.plist' -print 2>/dev/null || :; } | wc -l | tr -d ' ')"
 else
   prefs_container_count=0
 fi

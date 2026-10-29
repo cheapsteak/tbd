@@ -291,7 +291,8 @@ run_script() {
                  -u TBD_SWIFT_HEARTBEAT_SECONDS -u TBD_SWIFT_ALLOW_ORPHAN \
                  -u FAKE_SWIFT_DISARM -u FAKE_SWIFT_LEAK -u FAKE_SWIFT_LEAK_FILE -u FAKE_SWIFT_RC \
                  -u FAKE_LATE_WRITE_CONTAINER -u FAKE_LATE_WRITE_LOG -u FAKE_LATE_WRITES \
-                 -u FAKE_LATE_WRITE_SHAPE -u FAKE_SLEEP_LOG \
+                 -u FAKE_LATE_WRITE_SHAPE -u FAKE_SLEEP_LOG -u FAKE_RM_FAIL_ON \
+                 -u FAKE_LATE_WRITE_AT_POLLS \
                  -u FAKE_SWIFT_TMUX_SOCKETS -u FAKE_SWIFT_TEST_COUNT \
                  -u FAKE_SWIFT_HOLDERS -u FAKE_SWIFT_DEAD_HOLDER_SOCKETS \
                  -u FAKE_HOLDER_START -u FAKE_SWIFT_COPY_RUN_CLAIM \
@@ -383,36 +384,50 @@ STUB
 
 # Stub `rm` and `sleep` on PATH, for the preferences settle.
 #
-# THE LATE WRITE IS ORDERED BY CONSTRUCTION, NOT BY TIMING. A background writer
-# that waits for the container to vanish and then rewrites it would race the
-# wrapper's very next line — the after-snapshot — and under a heavy load average
-# it could lose either way. So the "writer" is the removal itself: this `rm`
-# passes every call through to `/bin/rm`, and when the target is exactly
-# `FAKE_LATE_WRITE_CONTAINER` it then writes the container back, for the first
-# `FAKE_LATE_WRITES` such removals. The wrapper therefore always sees the path
-# reappear after a reclaim that succeeded — the shape the settle exists for —
-# and no process is left behind to outlive the case. `FAKE_LATE_WRITE_SHAPE=file`
-# writes a regular file at the path instead of a directory.
+# EVERY LATE WRITE IS ORDERED BY CONSTRUCTION, NOT BY TIMING. A background
+# writer that waits for the container to vanish and then rewrites it would race
+# the wrapper's very next line — the after-snapshot — and under a heavy load
+# average it could lose either way. So the writes come from the stubs the
+# wrapper itself calls, at a known point in its sequence, and no process is
+# left behind to outlive the case. All of it keys on one exact path,
+# `FAKE_LATE_WRITE_CONTAINER`; every other call passes straight through.
+#
+# `rm` logs each removal of that path to `FAKE_LATE_WRITE_LOG` and then:
+#   - on removal number `FAKE_RM_FAIL_ON`, stands in for a write landing while
+#     `rm -rf` walks the directory — the container is back with a file in it,
+#     and `rm` exits 1 saying "Directory not empty";
+#   - on each of the first `FAKE_LATE_WRITES` removals otherwise, writes the
+#     container back straight after a successful removal: the trailing write an
+#     instant sweeper loses to. `FAKE_LATE_WRITE_SHAPE=file` writes a regular
+#     file at the path instead of a directory.
 #
 # `sleep` returns at once and logs its argument to `FAKE_SLEEP_LOG`, so the
-# settle's polls are countable and cost nothing. Nothing else the wrapper runs
-# calls `sleep`.
+# settle's polls are countable and cost nothing. On each poll number listed in
+# `FAKE_LATE_WRITE_AT_POLLS` it writes the container back before returning — a
+# write that lands after some quiet polls, which is what restarts the window.
+# Nothing else the wrapper runs calls `sleep`.
 mk_stub_settle_tools() {
   local fix="$1"
   mkdir -p "$fix/settlebin"
   cat > "$fix/settlebin/rm" <<'STUB'
 #!/usr/bin/env bash
-/bin/rm "$@"; rc=$?
 for target; do :; done
-if [ -n "${FAKE_LATE_WRITE_CONTAINER:-}" ] && [ "${target:-}" = "$FAKE_LATE_WRITE_CONTAINER" ]; then
-  echo "$target" >> "$FAKE_LATE_WRITE_LOG"
-  removals="$(wc -l < "$FAKE_LATE_WRITE_LOG" | tr -d ' ')"
-  if [ "$removals" -le "${FAKE_LATE_WRITES:-1}" ]; then
-    if [ "${FAKE_LATE_WRITE_SHAPE:-dir}" = file ]; then
-      : > "$target"
-    else
-      /bin/mkdir -p "$target"; : > "$target/Late.$removals.plist"
-    fi
+if [ -z "${FAKE_LATE_WRITE_CONTAINER:-}" ] || [ "${target:-}" != "$FAKE_LATE_WRITE_CONTAINER" ]; then
+  exec /bin/rm "$@"
+fi
+echo "$target" >> "$FAKE_LATE_WRITE_LOG"
+removals="$(wc -l < "$FAKE_LATE_WRITE_LOG" | tr -d ' ')"
+/bin/rm "$@"; rc=$?
+if [ "$removals" = "${FAKE_RM_FAIL_ON:-}" ]; then
+  /bin/mkdir -p "$target"; : > "$target/Midway.$removals.plist"
+  echo "rm: $target: Directory not empty" >&2
+  exit 1
+fi
+if [ "$removals" -le "${FAKE_LATE_WRITES:-0}" ]; then
+  if [ "${FAKE_LATE_WRITE_SHAPE:-dir}" = file ]; then
+    : > "$target"
+  else
+    /bin/mkdir -p "$target"; : > "$target/Late.$removals.plist"
   fi
 fi
 exit "$rc"
@@ -420,6 +435,14 @@ STUB
   cat > "$fix/settlebin/sleep" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "${FAKE_SLEEP_LOG:-/dev/null}"
+if [ -n "${FAKE_LATE_WRITE_AT_POLLS:-}" ] && [ -n "${FAKE_SLEEP_LOG:-}" ]; then
+  polls="$(wc -l < "$FAKE_SLEEP_LOG" | tr -d ' ')"
+  for at in $FAKE_LATE_WRITE_AT_POLLS; do
+    if [ "$polls" = "$at" ]; then
+      /bin/mkdir -p "$FAKE_LATE_WRITE_CONTAINER"; : > "$FAKE_LATE_WRITE_CONTAINER/Poll.$polls.plist"
+    fi
+  done
+fi
 exit 0
 STUB
   chmod +x "$fix/settlebin/rm" "$fix/settlebin/sleep"
@@ -821,20 +844,27 @@ test_the_post_run_reclaim_is_load_bearing() {
   rmfix "$fix"
 }
 
-# `--no-fingerprint` TURNS OFF THE REPORT, NEVER THE SWEEP — the settle
-# included. Developer boxes, where detection is off by default, are where the
-# files piled up. (The case above runs the settle on the real `sleep`; this one
-# counts its polls instead.)
+# `--no-fingerprint` TURNS OFF THE REPORT, NEVER THE RECLAIM — developer boxes,
+# where detection is off by default, are where the files piled up. It DOES turn
+# off the settle, whose only job is a clean after-snapshot: ungated, on a shared
+# box a sibling's live container would keep it polling to the cap and removing
+# that container every 0.2 s.
 test_no_fingerprint_still_reclaims_the_container() {
   local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
   mk_stub_settle_tools "$fix"
   RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
            FAKE_SLEEP_LOG="$fix/sleeps")
   run_wrapper "$fix" --no-fingerprint
-  RUN_ENV=()
   assert_ok "the run is green" "$RUN_RC"
   assert_eq "the container is reclaimed with detection off" "false" "$(exists_of "$container")"
-  assert_eq "and settled with detection off" "$PREFERENCES_SETTLE_QUIET_POLLS" "$(log_lines "$fix/sleeps")"
+  assert_eq "but not settled with detection off" "0" "$(log_lines "$fix/sleeps")"
+
+  # MUTATION. Drop the detection gate and the same run settles anyway.
+  local mutant; mutant="$(mutant_of "$SCRIPT" 's/^\[ "\$fingerprint" -eq 0 \] \|\| (settle_preferences_container)/\1/')"
+  run_script "$mutant" "$fix" --no-fingerprint
+  RUN_ENV=()
+  assert_eq "MUTANT: ungated, the settle polls with detection off" \
+    "$PREFERENCES_SETTLE_QUIET_POLLS" "$(log_lines "$fix/sleeps")"
   rmfix "$fix"
 }
 
@@ -966,37 +996,55 @@ test_the_reclaim_refuses_a_container_that_is_not_a_directory() {
 }
 
 # THE SETTLE. A sweeper started the instant the test process exited still lost
-# 1 in 10 to a trailing write, so after a post-run reclaim that removed
-# something the wrapper keeps watching the path. These cases use
-# `mk_stub_settle_tools`: the container comes back after a successful removal by
-# construction, and the polls are counted rather than slept.
+# 1 in 10 to a trailing write, so with detection on, after a post-run reclaim
+# that found a container, the wrapper keeps watching the path. These cases use
+# `mk_stub_settle_tools`: every late write lands at a fixed point in the
+# wrapper's own sequence, and the polls are counted rather than slept.
 
-# The container is written back twice after the post-run reclaim. Each
-# reappearance is reclaimed and restarts the quiet window, so the watch is
-# exactly two reappearance polls plus one whole window.
-test_a_late_write_after_the_post_run_reclaim_is_settled() {
-  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
-  mk_stub_settle_tools "$fix"
+# The environment every settle case shares; extra assignments go after it.
+settle_run_env() {
+  local fix="$1" container="$2"
   RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
            FAKE_LATE_WRITE_CONTAINER="$container" FAKE_LATE_WRITE_LOG="$fix/late-writes"
-           FAKE_LATE_WRITES=2 FAKE_SLEEP_LOG="$fix/sleeps")
+           FAKE_SLEEP_LOG="$fix/sleeps")
+}
+
+# Two late writes: one straight after the post-run removal, seen on the first
+# poll, and one landing on poll 4, after two quiet polls. Each is reclaimed and
+# restarts the quiet window, so the watch is 4 polls plus one whole window.
+test_a_late_write_after_the_post_run_reclaim_is_settled() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_AT_POLLS=4)
   run_wrapper "$fix" --fingerprint
-  assert_ok "a container written back after the post-run reclaim leaves the run green" "$RUN_RC"
+  assert_ok "late writes after the post-run reclaim leave the run green" "$RUN_RC"
   assert_missing "and nothing is reported" "$RUN_OUT" "THE TEST RUN WROTE INTO"
   assert_eq "the container is gone afterwards" "false" "$(exists_of "$container")"
-  assert_eq "it was reclaimed after the run and once per write-back" "3" "$(log_lines "$fix/late-writes")"
+  assert_eq "it was reclaimed after the run and once per late write" "3" "$(log_lines "$fix/late-writes")"
   assert_eq "each reappearance restarted the quiet window" \
+    "$((4 + PREFERENCES_SETTLE_QUIET_POLLS))" "$(log_lines "$fix/sleeps")"
+  rmfix "$fix"
+
+  # MUTATION. Keep the quiet count across a reappearance and the watch ends two
+  # polls early — the window no longer means "absent for this long".
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" '/^      quiet=0$/d')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_AT_POLLS=4)
+  run_script "$mutant" "$fix" --fingerprint
+  assert_eq "MUTANT: without the reset the window is cut short" \
     "$((2 + PREFERENCES_SETTLE_QUIET_POLLS))" "$(log_lines "$fix/sleeps")"
   rmfix "$fix"
 
-  # MUTATION. Delete the settle and the first write-back is still there when
+  # MUTATION. Delete the settle and the first late write is still there when
   # the after-snapshot is taken.
-  local mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
   mk_stub_settle_tools "$fix"
-  mutant="$(mutant_of "$SCRIPT" '/^settle_preferences_container "\$preferences_container"$/d')"
-  RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
-           FAKE_LATE_WRITE_CONTAINER="$container" FAKE_LATE_WRITE_LOG="$fix/late-writes"
-           FAKE_LATE_WRITES=2 FAKE_SLEEP_LOG="$fix/sleeps")
+  mutant="$(mutant_of "$SCRIPT" '/^\[ "\$fingerprint" -eq 0 \] \|\| settle_preferences_container "\$preferences_container"$/d')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_AT_POLLS=4)
   run_script "$mutant" "$fix" --fingerprint
   RUN_ENV=()
   assert_nonzero "MUTANT: without the settle the run fails" "$RUN_RC"
@@ -1006,22 +1054,81 @@ test_a_late_write_after_the_post_run_reclaim_is_settled() {
   rmfix "$fix"
 }
 
-# A run that minted no suite has nothing to trail, and pays nothing for it.
+# A FAILED REMOVAL IS THE RACE ITSELF, NOT A REASON TO STOP. A write landing
+# while `rm -rf` walks the directory makes it fail with "Directory not empty"
+# and leaves the container there. That can happen to the post-run reclaim —
+# the settle must still start — or to a reclaim inside the watch — the watch
+# must carry on. Each half has its own mutation: the behaviour that let a
+# failure skip or end the settle.
+test_a_failed_removal_does_not_end_the_settle() {
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_RM_FAIL_ON=1)
+  run_wrapper "$fix" --fingerprint
+  assert_ok "a failed post-run removal is settled, and the run is green" "$RUN_RC"
+  assert_contains "the failure is reported" "$RUN_OUT" "could not remove '$container' after the run"
+  assert_eq "the container is gone afterwards" "false" "$(exists_of "$container")"
+  assert_eq "it was retried once" "2" "$(log_lines "$fix/late-writes")"
+  rmfix "$fix"
+
+  # MUTATION. Enter the settle only on a successful removal, and a failed
+  # post-run removal skips it, leaving the container for the after-snapshot.
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" 's/^  case "\$PREFERENCES_RECLAIM_OUTCOME" in removed\|failed\) /  case "$PREFERENCES_RECLAIM_OUTCOME" in removed) /')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_RM_FAIL_ON=1)
+  run_script "$mutant" "$fix" --fingerprint
+  assert_nonzero "MUTANT: a failed post-run removal skips the settle and fails the run" "$RUN_RC"
+  assert_contains "MUTANT: what it left is counted" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=1"
+  rmfix "$fix"
+
+  # The same race inside the watch: the post-run removal succeeds and is
+  # followed by a late write, and the reclaim of that write fails.
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_RM_FAIL_ON=2)
+  run_wrapper "$fix" --fingerprint
+  assert_ok "a failed removal inside the watch is retried, and the run is green" "$RUN_RC"
+  assert_contains "the failure is reported" "$RUN_OUT" "could not remove '$container' after a late write"
+  assert_eq "the container is gone afterwards" "false" "$(exists_of "$container")"
+  assert_eq "it was retried on the next poll" "3" "$(log_lines "$fix/late-writes")"
+  rmfix "$fix"
+
+  # MUTATION. End the watch on anything but a successful removal and the
+  # failed one is the last word.
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mk_stub_settle_tools "$fix"
+  mutant="$(mutant_of "$SCRIPT" 's/^      \[ "\$PREFERENCES_RECLAIM_OUTCOME" != refused \]/      [ "$PREFERENCES_RECLAIM_OUTCOME" = removed ]/')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_RM_FAIL_ON=2)
+  run_script "$mutant" "$fix" --fingerprint
+  RUN_ENV=()
+  assert_nonzero "MUTANT: a failed removal ends the watch and fails the run" "$RUN_RC"
+  assert_contains "MUTANT: what it left is counted" "$RUN_OUT" \
+    "+  <preferences>/TBDTests.suites count=1"
+  rmfix "$fix"
+}
+
+# A run whose post-run reclaim finds no container does not poll.
 test_the_settle_is_skipped_when_nothing_was_reclaimed() {
-  local fix; fix="$(mkfix)"
+  local fix mutant; fix="$(mkfix)"
   mk_stub_settle_tools "$fix"
   RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SLEEP_LOG="$fix/sleeps")
   run_wrapper "$fix" --fingerprint
   assert_ok "the run is green" "$RUN_RC"
   assert_eq "it never polls" "0" "$(log_lines "$fix/sleeps")"
 
-  # MUTATION. Drop the entry guard and the same run watches an empty path for a
+  # MUTATION. Drop the entry check and the same run watches an empty path for a
   # whole quiet window.
-  local mutant; mutant="$(mutant_of "$SCRIPT" '/^  \[ "\$PREFERENCES_CONTAINER_REMOVED" -eq 1 \] \|\| return 0$/d')"
+  mutant="$(mutant_of "$SCRIPT" '/^  case "\$PREFERENCES_RECLAIM_OUTCOME" in /d')"
   /bin/rm -f "$fix/sleeps"
   run_script "$mutant" "$fix" --fingerprint
   RUN_ENV=()
-  assert_eq "MUTANT: without the guard it polls for nothing" \
+  assert_eq "MUTANT: without the entry check it polls for nothing" \
     "$PREFERENCES_SETTLE_QUIET_POLLS" "$(log_lines "$fix/sleeps")"
   rmfix "$fix"
 }
@@ -1029,11 +1136,10 @@ test_the_settle_is_skipped_when_nothing_was_reclaimed() {
 # A container that never stops coming back: the watch ends at the cap and the
 # arm reports what is left — the settle is a reclaimer, not a wait.
 test_the_settle_gives_up_at_its_cap() {
-  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
   mk_stub_settle_tools "$fix"
-  RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
-           FAKE_LATE_WRITE_CONTAINER="$container" FAKE_LATE_WRITE_LOG="$fix/late-writes"
-           FAKE_LATE_WRITES=100000 FAKE_SLEEP_LOG="$fix/sleeps")
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=100000)
   run_wrapper "$fix" --fingerprint
   assert_nonzero "a container that keeps coming back is reported" "$RUN_RC"
   assert_contains "with its count" "$RUN_OUT" "+  <preferences>/TBDTests.suites count=1"
@@ -1045,12 +1151,11 @@ test_the_settle_gives_up_at_its_cap() {
   # MUTATION. Lower the cap and the watch ends there instead — the count above
   # is the cap's, not a coincidence of the stub. (Removing the cap outright
   # would never return against this stub, so it is moved rather than deleted.)
-  local mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
   mk_stub_settle_tools "$fix"
   mutant="$(mutant_of "$SCRIPT" 's/^PREFERENCES_SETTLE_MAX_POLLS=[0-9]+$/PREFERENCES_SETTLE_MAX_POLLS=3/')"
-  RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
-           FAKE_LATE_WRITE_CONTAINER="$container" FAKE_LATE_WRITE_LOG="$fix/late-writes"
-           FAKE_LATE_WRITES=100000 FAKE_SLEEP_LOG="$fix/sleeps")
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=100000)
   run_script "$mutant" "$fix" --fingerprint
   RUN_ENV=()
   assert_eq "MUTANT: with a cap of 3 the watch ends at 3" "3" "$(log_lines "$fix/sleeps")"
@@ -1058,14 +1163,14 @@ test_the_settle_gives_up_at_its_cap() {
 }
 
 # Something the reclaim refuses appears during the watch — here a regular file
-# at the container's path. Polling cannot change a refusal, so the watch ends
-# on the first one, and the run is not failed for it: a reclaimer, not a gate.
+# at the container's path. A refusal is a property of the path, which polling
+# cannot change, so the watch ends on the first one; and the run is not failed
+# for it: a reclaimer, not a gate.
 test_a_refusal_ends_the_settle() {
-  local fix container; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  local fix container mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
   mk_stub_settle_tools "$fix"
-  RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
-           FAKE_LATE_WRITE_CONTAINER="$container" FAKE_LATE_WRITE_LOG="$fix/late-writes"
-           FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_SHAPE=file FAKE_SLEEP_LOG="$fix/sleeps")
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_SHAPE=file)
   run_wrapper "$fix" --fingerprint
   assert_ok "a refusal during the settle does not fail the run" "$RUN_RC"
   assert_eq "it is refused once" "1" \
@@ -1075,12 +1180,11 @@ test_a_refusal_ends_the_settle() {
 
   # MUTATION. Drop the in-loop stop and the same refusal repeats on every poll
   # until the cap.
-  local mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
   mk_stub_settle_tools "$fix"
-  mutant="$(mutant_of "$SCRIPT" '/^      \[ "\$PREFERENCES_CONTAINER_REMOVED" -eq 1 \] \|\| return 0$/d')"
-  RUN_ENV=(PATH="$fix/settlebin:$PATH" FAKE_SWIFT_LEAK_FILE="$container/AppState.6F2C1A.plist"
-           FAKE_LATE_WRITE_CONTAINER="$container" FAKE_LATE_WRITE_LOG="$fix/late-writes"
-           FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_SHAPE=file FAKE_SLEEP_LOG="$fix/sleeps")
+  mutant="$(mutant_of "$SCRIPT" '/^      \[ "\$PREFERENCES_RECLAIM_OUTCOME" != refused \] \|\| return 0$/d')"
+  settle_run_env "$fix" "$container"
+  RUN_ENV+=(FAKE_LATE_WRITES=1 FAKE_LATE_WRITE_SHAPE=file)
   run_script "$mutant" "$fix" --fingerprint
   RUN_ENV=()
   assert_eq "MUTANT: without the stop it polls to the cap" \
@@ -1248,6 +1352,25 @@ test_fingerprint_script_sees_a_file_in_the_container() {
   assert_contains "a suite plist in the container reads count=1" "$after" \
     "<preferences>/TBDTests.suites count=1"
   assert_eq "without the arm the snapshots are identical" "$mutant_before" "$mutant_after"
+  rmfix "$fix"
+}
+
+# THE CONTAINER CAN VANISH BETWEEN THE `-d` TEST AND THE `find` — a sibling run
+# reclaims it — and `find` then exits non-zero. Under `set -euo pipefail` that
+# would kill the script, and the wrapper with it, silently. An unreadable
+# container makes the same `find` fail deterministically, so it stands in for
+# the race here.
+test_fingerprint_script_survives_a_container_find_cannot_read() {
+  local fix container out rc mutant; fix="$(mkfix)"; container="$(prefs_container_of "$fix")"
+  mkdir -p "$container"; : > "$container/SomeSuite.0F1E2D.plist"; chmod 000 "$container"
+  out="$(fingerprint_with_home "$fix/home" "$FINGERPRINT" 2>&1)"; rc=$?
+  assert_ok "a failing find does not abort the fingerprint" "$rc"
+  assert_contains "and reads count=0" "$out" "<preferences>/TBDTests.suites count=0"
+
+  # MUTATION. Drop the `|| :` and the same call aborts.
+  mutant="$(mutant_of "$FINGERPRINT" 's/ \|\| :; \} \| wc -l/; } | wc -l/')"
+  fingerprint_with_home "$fix/home" "$mutant" >/dev/null 2>&1; rc=$?
+  assert_nonzero "MUTANT: without the tolerance the fingerprint aborts" "$rc"
   rmfix "$fix"
 }
 
