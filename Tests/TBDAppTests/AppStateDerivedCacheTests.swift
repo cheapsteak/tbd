@@ -324,6 +324,7 @@ struct SelectionOrderWriteCoalescingTests {
         // A subclass has to construct itself, so this site pairs the helper's
         // two primitives instead of using `TestDefaultsSuite`.
         let suiteName = TestDefaults.makeSuiteName(label: "TBDAppTests.SelectionOrderWrites")
+        // swiftlint:disable:next no_raw_userdefaults_suite - a write-counting subclass; named and torn down by TestDefaults
         let defaults = WriteCountingUserDefaults(suiteName: suiteName)!
         defer { TestDefaults.tearDown(suiteName: suiteName, defaults: defaults) }
         let state = AppState(userDefaults: defaults)
