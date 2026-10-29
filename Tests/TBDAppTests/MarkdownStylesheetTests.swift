@@ -292,16 +292,24 @@ struct MarkdownStylesheetTests {
     /// delivers the *event*, while the debounce *timer* is virtual — production
     /// takes `clock: any Clock<Duration>`, so the 150 ms window is crossed by
     /// advancing an `EventDrivenTestClock` instead of being waited out on a loaded runner.
-    /// Waiting out a real debounce plus `AsyncStream` delivery under one 8 s
-    /// bound is exactly what starved here when the process carried >5000 tests.
     ///
     /// The bounded polls that remain wait only on legs that are genuinely
     /// real-time — the dispatch source delivering an event and production
     /// reaching `clock.sleep` (observed through `armed`), and the consuming
     /// `Task` receiving an `AsyncStream` element — never on the debounce
-    /// interval itself. Each is a hang guard whose healthy path exits on its
-    /// first probe, and each timeout travels as a thrown `Failure` carrying the
-    /// observed counts (Tests/CLAUDE.md rule 4).
+    /// interval itself. Both `armed` and `notified` move only after an
+    /// unstructured `Task` gets a turn on the cooperative pool, and one such
+    /// hop costs the fast pass's per-test latency (tens of seconds at p50). So
+    /// every one of these waits is a hang guard on the shared
+    /// `TestDeadlines.saturatedPass` budget, the same one `FileWatcherTests`
+    /// uses, whose healthy path exits on its first probe. Each timeout travels
+    /// as a thrown `Failure` carrying the observed counts and the elapsed time
+    /// (Tests/CLAUDE.md rule 4).
+    ///
+    /// `.clockDriven` tally: every wait here throws on timeout, so at most one
+    /// guard elapses in any run. The worst case is phase 1's — four 2 s
+    /// registration windows, then one saturated-pass wait — well inside the
+    /// 240 s limit.
     ///
     /// One-sidedness worth naming: this watches a *directory*, so the events
     /// are not attributable to a particular entry. A straggler probe event
@@ -337,36 +345,51 @@ struct MarkdownStylesheetTests {
         // Retrying is legitimate ONLY for that first-write race; every wait after
         // this one treats a missing event as event loss, not as something to
         // retry.
+        //
+        // `attemptWindow` is a discriminator, not a hang guard — the same
+        // exception `FileWatcherTests`' `attemptWindow` takes: it decides when a
+        // probe counts as lost to the race and earns another write. It cannot
+        // decide that nothing arrived, though: a `Task` created by any probe's
+        // event may merely be waiting for its turn on the pool. So when no
+        // window saw an arm, one saturated-pass wait follows before failing.
         let attempts = 4
         let attemptWindow: Duration = .seconds(2)
+        let registrationStart = ContinuousClock.now
         var registered = false
         for attempt in 0..<attempts {
             try "body{color:teal}".write(
                 to: dir.appendingPathComponent("probe-\(attempt).css"),
                 atomically: true, encoding: .utf8
             )
-            if await Self.waitUntil(attemptWindow, { armed.count > 0 }) {
+            let outcome = await pollUntilTrue(timeout: attemptWindow,
+                                              pollInterval: Self.pollInterval) { armed.count > 0 }
+            if outcome == .cancelled { throw CancellationError() }
+            if outcome == .satisfied {
                 registered = true
                 break
             }
         }
-        guard registered else {
-            throw Failure("""
+        if !registered {
+            try await Self.waitFor(TestDeadlines.saturatedPass, { armed.count > 0 }) { elapsed in
+                """
                 a FileWatcher on a directory armed no debounce timer for an entry being \
                 created — observed armed=\(armed.count) after \(attempts) attempts of \
-                \(attemptWindow) each
-                """)
+                \(attemptWindow) each plus a further wait of up to \
+                \(TestDeadlines.saturatedPass) (\(ContinuousClock.now - registrationStart) \
+                elapsed in all, \(elapsed) in the final wait)
+                """
+            }
         }
 
         // The timer is virtual, so crossing the window costs no wall time. The
         // poll after it is the real leg: `AsyncStream` delivery into the
-        // consuming `Task`, on the same 8 s budget `FileWatcherTests.poll` uses.
+        // consuming `Task`.
         try await clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
-        guard await Self.waitUntil(.seconds(8), { notified.count > 0 }) else {
-            throw Failure("""
-                the debounce window elapsed but no notification reached the consumer — \
-                observed \(notified.count) after polling up to 8 seconds
-                """)
+        try await Self.waitFor(TestDeadlines.saturatedPass, { notified.count > 0 }) { elapsed in
+            """
+            the debounce window elapsed but no notification reached the consumer — \
+            observed \(notified.count) after \(elapsed) (budget \(TestDeadlines.saturatedPass))
+            """
         }
 
         // Phase 2 — the event the viewer actually cares about: the selected
@@ -378,20 +401,23 @@ struct MarkdownStylesheetTests {
         try "body{color:teal}".write(to: url, atomically: true, encoding: .utf8)
         // No retry here: the source has already delivered once, so a missing arm
         // is event loss. This waits only for kernel event -> GCD handler ->
-        // production reaching `clock.sleep`, the leg `writeUntilArmed`'s 8 s
-        // budget covers.
-        guard await Self.waitUntil(.seconds(8), { armed.count > armedBefore }) else {
-            throw Failure("""
-                creating the selected stylesheet armed no new debounce timer — observed \
-                armed=\(armed.count) (baseline \(armedBefore)) after polling up to 8 seconds
-                """)
+        // the handler's `Task` getting a turn -> production reaching
+        // `clock.sleep`, the leg `FileWatcherTests.writeUntilArmed` bounds with
+        // the same saturated-pass budget.
+        try await Self.waitFor(TestDeadlines.saturatedPass, { armed.count > armedBefore }) { elapsed in
+            """
+            creating the selected stylesheet armed no new debounce timer — observed \
+            armed=\(armed.count) (baseline \(armedBefore)) after \(elapsed) \
+            (budget \(TestDeadlines.saturatedPass))
+            """
         }
         try await clock.requireAdvanceWhenArmed(by: FileWatcher.debounceInterval)
-        guard await Self.waitUntil(.seconds(8), { notified.count > before }) else {
-            throw Failure("""
-                creating the selected stylesheet produced no directory notification — \
-                observed \(notified.count) (baseline \(before)) after polling up to 8 seconds
-                """)
+        try await Self.waitFor(TestDeadlines.saturatedPass, { notified.count > before }) { elapsed in
+            """
+            creating the selected stylesheet produced no directory notification — \
+            observed \(notified.count) (baseline \(before)) after \(elapsed) \
+            (budget \(TestDeadlines.saturatedPass))
+            """
         }
 
         try withDefaults { defaults in
@@ -405,23 +431,28 @@ struct MarkdownStylesheetTests {
         _ = await consumer.value
     }
 
-    /// Bounded poll on a fact produced by **real** scheduling — a dispatch
+    private static let pollInterval: Duration = .milliseconds(25)
+
+    /// Bounded wait on a fact produced by **real** scheduling — a dispatch
     /// source delivering an event, or `AsyncStream` handing an element to its
-    /// consumer.
+    /// consumer — delegating the loop to `pollUntilTrue`.
     ///
     /// `timeout` is a hang guard, never a tolerance window: the healthy path
-    /// returns on the first probe. It returns a `Bool` rather than recording an
-    /// issue itself so each call site can throw a `Failure` naming what it
-    /// observed (Tests/CLAUDE.md rule 4) — only a thrown error lands on the
-    /// primary failure line that CI summaries quote.
-    private static func waitUntil(_ timeout: Duration,
-                                  pollInterval: Duration = .milliseconds(25),
-                                  _ condition: () -> Bool) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while !condition(), ContinuousClock.now < deadline {
-            try? await Task.sleep(for: pollInterval)
+    /// returns on the first probe. A timeout throws a `Failure` built by
+    /// `message`, which receives the elapsed wait and reads the counters at
+    /// that moment, so the diagnostic names what was observed (Tests/CLAUDE.md
+    /// rule 4) — only a thrown error lands on the primary failure line that CI
+    /// summaries quote. Cancellation rethrows as `CancellationError`, never a
+    /// fabricated timeout.
+    private static func waitFor(_ timeout: Duration,
+                                _ condition: () -> Bool,
+                                orFail message: (_ elapsed: Duration) -> String) async throws {
+        let start = ContinuousClock.now
+        switch await pollUntilTrue(timeout: timeout, pollInterval: pollInterval, { condition() }) {
+        case .satisfied: return
+        case .cancelled: throw CancellationError()
+        case .timedOut: throw Failure(message(ContinuousClock.now - start))
         }
-        return condition()
     }
 }
 
