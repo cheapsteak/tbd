@@ -349,20 +349,40 @@ struct RemoteCommandsTests {
     /// Unspecified is not "off" — it asks for a receipt whenever the provider
     /// can give one, matching what the app already does.
     @Test func unspecifiedRetainDefaultsOnWhenTheProviderDeclaresIt() {
-        #expect(RemoteDeletePrecondition.resolveRetain(nil, capabilities: ["delete", "retain"]))
+        #expect(RemoteDeletePrecondition.resolveRetain(
+            nil, capabilities: ["delete", RemoteCapability.transcriptRetain]))
     }
 
-    /// A provider that never declared `retain` has no receipt to give, and
-    /// that is "no receipt available", not a caller mistake — this must not
-    /// be conflated with the explicit-`--retain` refusal, which errors.
+    /// A provider that never declared `transcript.retain` has no receipt to
+    /// give, and that is "no receipt available", not a caller mistake — this
+    /// must not be conflated with the explicit-`--retain` refusal, which
+    /// errors. `run()` hands the refusal `retain == true`, so unspecified
+    /// reaches it as `false`.
     @Test func unspecifiedRetainStaysOffWithoutTheCapabilityAndDoesNotError() {
         #expect(!RemoteDeletePrecondition.resolveRetain(nil, capabilities: ["delete"]))
+        #expect(RemoteDelete.refusal(
+            fleet: fleet(declaring: ["delete"]), provider: "agentbox", retain: false) == nil)
+    }
+
+    /// The bare pre-namespace `retain` admits nothing here either: matching it
+    /// would make the default depend on a spelling every other check refuses,
+    /// and a provider declaring only `transcript.retain` would never retain.
+    @Test func unspecifiedRetainIgnoresTheBarePreNamespaceSpelling() {
+        #expect(!RemoteDeletePrecondition.resolveRetain(nil, capabilities: ["delete", "retain"]))
+    }
+
+    /// An explicit `--retain` that cleared the capability refusal is sent as
+    /// asked.
+    @Test func explicitRetainPassesThroughWhenTheProviderDeclaresIt() {
+        #expect(RemoteDeletePrecondition.resolveRetain(
+            true, capabilities: ["delete", RemoteCapability.transcriptRetain]))
     }
 
     /// `--no-retain` declines even against a provider that could have
     /// retained — the explicit opt-out always wins.
     @Test func explicitNoRetainDeclinesEvenWhenTheProviderCanRetain() {
-        #expect(!RemoteDeletePrecondition.resolveRetain(false, capabilities: ["delete", "retain"]))
+        #expect(!RemoteDeletePrecondition.resolveRetain(
+            false, capabilities: ["delete", RemoteCapability.transcriptRetain]))
     }
 
     // MARK: - delete: the two outcomes

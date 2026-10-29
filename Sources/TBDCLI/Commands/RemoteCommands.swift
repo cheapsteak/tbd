@@ -505,13 +505,15 @@ enum RemoteDeletePrecondition {
     /// provider declares.
     ///
     /// `nil` (unspecified) retains wherever the provider can honor it and does
-    /// nothing otherwise — an absent `retain` capability is "no receipt
-    /// available", not a caller mistake, so this branch never errors. `true`
-    /// and `false` pass through unchanged: an explicit `--retain` against a
-    /// provider that cannot honor it is refused elsewhere, by name, and
+    /// nothing otherwise — an absent `transcript.retain` capability is "no
+    /// receipt available", not a caller mistake, so this branch never errors.
+    /// The match is exact, as everywhere else: a bare pre-namespace `retain`
+    /// admits nothing. `true` and `false` pass through unchanged. An explicit
+    /// `--retain` the provider cannot honor is refused by
+    /// `RemoteDelete.refusal`, which names the missing capability.
     /// `--no-retain` declines even when the provider could have retained.
     static func resolveRetain(_ requested: Bool?, capabilities: Set<String>) -> Bool {
-        requested ?? capabilities.contains("retain")
+        requested ?? capabilities.contains(RemoteCapability.transcriptRetain)
     }
 }
 
