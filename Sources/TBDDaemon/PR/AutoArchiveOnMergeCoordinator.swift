@@ -132,16 +132,24 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
     /// only differences are this rail's own actuation actor and its
     /// notification, both of which it already writes for a local worktree.
     ///
-    /// A refusal — no manager, no declared `archive` on a lane that is not
-    /// `gone`, an agent still working, a provider-reported dirty checkout —
-    /// returns `false` and writes **no** actuation row. Nothing was attempted,
-    /// and a background rail that rewrote a `.dispose` request on every merged
-    /// transition it observed for an unretireable lane would fill the record
-    /// with acts that never happened. Logged at debug, not surfaced: this is a
-    /// background rail, and declining is its ordinary behavior.
+    /// A refusal from the archive decision — no declared `archive` on a lane
+    /// that is not `gone`, the stale inventory, an agent still working, a
+    /// provider-reported dirty checkout — returns `false` and records the
+    /// decline: a request row under the rail's daemon actor, confirmed
+    /// `refused` with the reason `not-eligible` and the refusal sentence. The
+    /// merged edge that triggered it is not seen again this daemon run, so
+    /// that row is how a lane left active after its PR merged is traced to the
+    /// refusal that kept it, and a refused outcome claims no act. Logged at
+    /// `.notice`, not surfaced: this is a background rail, and declining is
+    /// its ordinary behavior.
+    ///
+    /// With no provider manager (remote backends were off when the daemon
+    /// started) there is nothing to ask, so the rail makes
+    /// no decision and writes no row, exactly as for a lane it is not armed
+    /// for.
     private func archiveRemoteLane(_ wt: Worktree, prNumber: Int) async -> Bool {
         guard let remoteManager else {
-            logger.debug("auto-archive skipped (remote backends off): \(wt.id, privacy: .public)")
+            logger.debug("auto-archive skipped (no provider manager): \(wt.id, privacy: .public)")
             return false
         }
         let lanes = RemoteLaneLifecycle(
@@ -149,9 +157,10 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
         let step: RemoteLaneLifecycle.ArchiveStep
         do {
             switch try await lanes.archiveDecision(for: wt, force: false) {
-            case .refused(let message):
-                logger.debug(
-                    "auto-archive skipped for \(wt.id, privacy: .public): \(message, privacy: .public)")
+            case .refused(let message), .guarded(let message):
+                logger.notice(
+                    "auto-archive declined for \(wt.id, privacy: .public): \(message, privacy: .public)")
+                await recordDecline(of: wt, message: message)
                 return false
             case .proceed(let decided):
                 step = decided
@@ -165,12 +174,9 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
         // Fail-closed exactly as the local path is: an unrecordable archive
         // does not happen, and the worktree survives for the next merged
         // transition to retry.
-        var request = ActuationRow(
-            actor: .daemon(rail: ActuationRail.autoArchiveOnMerge), kind: .dispose)
-        request.target = ActuationTarget(worktree: wt.id.uuidString)
         let actuationID: String
         do {
-            actuationID = try await actuationLog.appendRequest(request)
+            actuationID = try await actuationLog.appendRequest(remoteDisposeRequest(for: wt))
         } catch {
             logger.warning("auto-archive skipped (record unwritable): \(wt.id, privacy: .public): \(error, privacy: .public)")
             return false
@@ -210,5 +216,29 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
         }
         logger.info("auto-archived remote lane \(wt.id, privacy: .public) on PR #\(prNumber, privacy: .public) merge")
         return true
+    }
+
+    /// The request row this rail writes for a remote lane, whether it then
+    /// archives the lane or declines it: no RPC carried it, so it names no
+    /// method, only the rail's actor and the worktree.
+    private func remoteDisposeRequest(for wt: Worktree) -> ActuationRow {
+        var request = ActuationRow(
+            actor: .daemon(rail: ActuationRail.autoArchiveOnMerge), kind: .dispose)
+        request.target = ActuationTarget(worktree: wt.id.uuidString)
+        return request
+    }
+
+    /// Records a declined remote archive as its request row confirmed
+    /// `refused`/`not-eligible`. The lane is declined either way, so an
+    /// unwritable record changes nothing about the outcome: it is logged and
+    /// the rail moves on.
+    private func recordDecline(of wt: Worktree, message: String) async {
+        do {
+            let actuationID = try await actuationLog.appendRequest(remoteDisposeRequest(for: wt))
+            await actuationLog.appendOutcome(
+                confirms: actuationID, result: .refused(.notEligible), error: message)
+        } catch {
+            logger.warning("auto-archive decline not recorded (record unwritable): \(wt.id, privacy: .public): \(error, privacy: .public)")
+        }
     }
 }

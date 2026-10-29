@@ -687,6 +687,12 @@ extension AppState {
     /// what keeps the call from failing. It stays because the two client-side
     /// settlements differ: `archiveScratch` also refreshes the Scratch
     /// section's Archived tab, which the repo-worktree leg has no reason to do.
+    ///
+    /// A remote lane's guard refusal is offered back as Archive anyway, which
+    /// sends the same archive with `force` set (`archiveFailureSurface`); every
+    /// other failure gets the plain alert. Local archive's `force` — archiving
+    /// over uncommitted changes in a directory the archive deletes — is a
+    /// different decision, and nothing here offers it.
     func archiveWorktree(id: UUID, force: Bool = false) async {
         let worktree = findWorktree(id: id)
         if worktree?.isScratch == true {
@@ -700,8 +706,66 @@ extension AppState {
             logger.info("Archived \(worktreeName)")
         } catch {
             logger.error("Failed to archive worktree: \(error)")
+            if case .rpcError(let refusal, let code)? = error as? DaemonClientError,
+               Self.archiveFailureSurface(forErrorCode: code, alreadyForced: force) == .offerArchiveAnyway {
+                if confirmArchiveAnyway(refusal: refusal) {
+                    await archiveWorktree(id: id, force: true)
+                }
+                return
+            }
             showAlert("Archive failed: \(error)", isError: true)
         }
+    }
+
+    /// How a failed archive is surfaced.
+    enum ArchiveFailureSurface: Equatable {
+        /// A guard `force` lifts refused a remote lane: offer Archive anyway.
+        case offerArchiveAnyway
+        /// The plain failure alert.
+        case plainFailure
+    }
+
+    /// Classify an archive failure. Archive anyway is offered only for
+    /// `remoteLaneArchiveGuarded` on a call that was not already forced. A
+    /// forced archive cannot meet a guard, so a forced call that fails has
+    /// failed for another reason and the offer can never repeat. Every other
+    /// failure gets the plain alert, because a button that would only fail
+    /// again is a dead control. Branches on the code, never the sentence, so
+    /// rewording a refusal cannot change which failures offer force.
+    static func archiveFailureSurface(
+        forErrorCode code: String?, alreadyForced: Bool
+    ) -> ArchiveFailureSurface {
+        if !alreadyForced, code == RPCErrorCode.remoteLaneArchiveGuarded.rawValue {
+            return .offerArchiveAnyway
+        }
+        return .plainFailure
+    }
+
+    /// Copy for the Archive anyway confirm: the daemon's refusal sentence is
+    /// the message, since it already says which guard fired. Pure so the
+    /// wording is unit-tested; the modal is `confirmArchiveAnyway`.
+    /// The checks it names are `RemoteLaneLifecycle.archiveDecision`'s and must
+    /// change with them.
+    static func archiveAnywayPrompt(
+        refusal: String
+    ) -> (message: String, informative: String, confirm: String) {
+        (message: refusal,
+         informative: "Archive anyway skips all three safety checks — a working agent, uncommitted work on the provider, "
+             + "and a stale inventory — and retires the lane on its provider.",
+         confirm: "Archive anyway")
+    }
+
+    /// Present the Archive anyway confirm. Returns true if the user chose to
+    /// archive anyway. Modal, like `confirmDefaultAccountFallback`.
+    func confirmArchiveAnyway(refusal: String) -> Bool {
+        let prompt = Self.archiveAnywayPrompt(refusal: refusal)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = prompt.message
+        alert.informativeText = prompt.informative
+        alert.addButton(withTitle: prompt.confirm)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Re-run the worktree's `preSession` hook. The daemon spawns a

@@ -30,7 +30,9 @@ struct ClaudeCloudGateTests: ~Copyable {
     /// The cloud provider is present in the manager — modelling a daemon that
     /// booted with BOTH flags on — so the only thing that can refuse a cloud
     /// verb in these tests is the gate itself.
-    private func router(cloud: FakeProviderInvoker) -> RPCRouter {
+    private func router(
+        cloud: FakeProviderInvoker, actuationLog: ActuationLog = makeTestActuationLog()
+    ) -> RPCRouter {
         let manager = RemoteProviderManager(
             db: db, subscriptions: StateSubscriptionManager(),
             runner: ProviderDispatcher(
@@ -47,7 +49,7 @@ struct ClaudeCloudGateTests: ~Copyable {
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
             subscriptions: StateSubscriptionManager(),
-            remoteManager: manager, actuationLog: makeTestActuationLog())
+            remoteManager: manager, actuationLog: actuationLog)
     }
 
     private func call(_ router: RPCRouter, _ method: String, _ params: String) async -> RPCResponse {
@@ -156,21 +158,45 @@ struct ClaudeCloudGateTests: ~Copyable {
     /// Outer ON, inner OFF — the case the inner gate exists for. Neither verb
     /// may reach the provider, and the refusal is the inner gate's message,
     /// not a capability refusal or a not-yet-known-provider error.
+    ///
+    /// The refusal carries no error code, because no retry gets past a gate
+    /// `force` does not lift, and each gesture's request row is confirmed
+    /// `refused` with the gate's sentence, like every other refusal on these
+    /// routes.
     @Test func worktreeAddressedArchiveAndReviveAreAlsoCloudGated() async throws {
         try await db.config.setRemoteBackendsEnabled(true)
         let cloud = FakeProviderInvoker(script: [])
-        let r = router(cloud: cloud)
+        let logPath = dir.appendingPathComponent("actuations.jsonl").path
+        let r = router(cloud: cloud, actuationLog: ActuationLog(path: logPath))
         let lane = try await seedCloudLane()
 
         let archiveResponse = await r.handle(try RPCRequest(
             method: RPCMethod.worktreeArchive, params: WorktreeArchiveParams(worktreeID: lane.id)))
         #expect(archiveResponse.error == "claude cloud sessions disabled")
+        #expect(archiveResponse.errorCode == nil)
 
         let reviveResponse = await r.handle(try RPCRequest(
             method: RPCMethod.worktreeRevive, params: WorktreeReviveParams(worktreeID: lane.id)))
         #expect(reviveResponse.error == "claude cloud sessions disabled")
+        #expect(reviveResponse.errorCode == nil)
 
         #expect(cloud.calls.isEmpty, "no cloud verb, and no describe probe, may run while the inner flag is off")
+
+        let contents = try String(contentsOfFile: logPath, encoding: .utf8)
+        let rows = try contents
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { line in
+                try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+            }
+        try #require(rows.count == 4, "each refusal writes its request row and one outcome, got \(rows.count)")
+        #expect(rows.map { $0["method"] as? String } == [
+            RPCMethod.worktreeArchive, nil, RPCMethod.worktreeRevive, nil])
+        for (request, outcome) in [(rows[0], rows[1]), (rows[2], rows[3])] {
+            #expect(outcome["confirms"] as? String == request["id"] as? String)
+            #expect(outcome["result"] as? String == "refused")
+            #expect(outcome["reason"] as? String == "not-eligible")
+            #expect(outcome["error"] as? String == "claude cloud sessions disabled")
+        }
     }
 
     /// Both flags off: the outer gate refuses first, same as every other

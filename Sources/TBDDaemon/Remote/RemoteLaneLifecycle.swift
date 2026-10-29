@@ -197,13 +197,29 @@ struct RemoteLaneLifecycle: Sendable {
     /// The refusal for a lane whose agent is mid-task. Parallels how local
     /// archive refuses on uncommitted changes: do not retire a session
     /// mid-task by accident.
+    ///
+    /// The sentence states the fact alone, as the dirty-checkout one does. The
+    /// remedy is each surface's to name, keyed off
+    /// `RPCErrorCode.remoteLaneArchiveGuarded` rather than read out of the
+    /// prose: the CLI appends its `--force` hint, and the app offers Archive
+    /// anyway.
     static func workingGuardRefusal(_ name: String) -> String {
-        "Cannot archive \(name): its agent is still working. Re-run with --force to retire it anyway."
+        "Cannot archive \(name): its agent is still working."
     }
 
-    /// The refusal for a lane whose provider's cached inventory has gone
-    /// stale — the same gate every `remote.*` mutation passes, and load
-    /// bearing here for a sharper reason than elsewhere.
+    /// The refusal for a revive of a lane whose provider's cached inventory
+    /// has gone stale — the stale gate every `remote.*` mutation passes. It
+    /// serves revive's `.invokeUnarchive` arm: revive has no `force`, so the
+    /// recovery is the provider's next good poll. Archive refuses through
+    /// `staleSnapshotArchiveRefusal`, which a forced retry can lift.
+    static func staleSnapshotRefusal(_ name: String, provider: String) -> String {
+        "Cannot act on \(name): provider '\(provider)' inventory is stale; refresh must recover " +
+        "before changing remote sessions."
+    }
+
+    /// The refusal for archiving a lane while its provider's inventory is
+    /// stale. States the fact alone: the working and dirty guards read the
+    /// stale mirror, so TBD cannot tell either. The surface adds the remedy.
     ///
     /// Both of archive's guards are read out of the mirror (`agentState`, and
     /// `meta.workspace_dirty`). On a stale mirror a session that was idle at
@@ -215,16 +231,18 @@ struct RemoteLaneLifecycle: Sendable {
     /// **It therefore covers the verb paths and nothing else.** The row-only
     /// paths make no provider call and read nothing out of the mirror they
     /// could be wrong about; gating them would strand the `gone` exemption —
-    /// the only route out for a lane whose provider cannot archive — behind a
-    /// `--force` that revive does not have and the row menu never sends.
-    static func staleSnapshotRefusal(_ name: String, provider: String) -> String {
-        "Cannot act on \(name): provider '\(provider)' inventory is stale; refresh must recover " +
-        "before changing remote sessions."
+    /// the only route out for a lane whose provider cannot archive.
+    ///
+    /// The app's Archive anyway copy (`AppState.archiveAnywayPrompt`) names
+    /// these three checks and must change with them.
+    static func staleSnapshotArchiveRefusal(_ name: String, provider: String) -> String {
+        "Cannot archive \(name): provider '\(provider)' inventory is stale, so TBD cannot tell " +
+        "whether its agent is working or its checkout has uncommitted work."
     }
 
     /// The refusal for a lane whose provider reports an unclean checkout.
     static func dirtyWorkspaceGuardRefusal(_ name: String) -> String {
         "Cannot archive \(name): its provider reports the session's checkout has uncommitted work " +
-        "(meta.\(dirtyWorkspaceMetaKey)). Re-run with --force to retire it anyway."
+        "(meta.\(dirtyWorkspaceMetaKey))."
     }
 }
