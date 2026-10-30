@@ -62,6 +62,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ShadowPeerPermissionClass.swift` — the permission class (`bypass` / `prompting`) a cross-session message attests
 - `RepoTOML.swift` — the name and path of a repository's committed `tbd.toml`
 - `ShellEscape.swift` — `shellEscape(_:)`, which single-quotes a string for a shell command line
+- `GatedIntervalSleep.swift` — `sleepThroughGatedInterval`, which sleeps in ticks until an interval it re-reads every tick has elapsed; the git fetch, git status and PR poll loops wait through it
 
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
