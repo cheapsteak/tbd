@@ -109,6 +109,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `RepoStore` / `WorktreeStore` / `TerminalStore` / `NotificationStore` / `NoteStore` / `TabStore` — GRDB CRUD stores
 - `ConfigStore.swift` — global config
 - `ModelProfileRecord.swift` / `ModelProfileUsageRecord.swift` — model profile GRDB records
+- `PRUndeterminedCause.swift` — the closed vocabulary of reasons a PR lookup produced no answer; PR's status manager reports them, and `WorktreeStore` names one for a record it cannot read
 
 ### ModelProfile/
 - `ModelProfileResolver.swift` — picks a profile per spawn (terminal → repo → global default)

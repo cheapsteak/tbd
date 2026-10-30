@@ -53,7 +53,6 @@ Codex -> Base
 Codex -> Process
 Database -> Base
 Database -> Lifecycle
-Database -> PR
 Database -> Remote
 DevServers -> Base
 DevServers -> Database
