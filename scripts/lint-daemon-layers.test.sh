@@ -317,6 +317,43 @@ test_nested_type_shadows() {
     'struct Box { struct Widget {}; let w = Widget() }'
 }
 
+# A generic parameter, and a protocol's primary associated type, is the file's
+# own name. A constraint on one is still a reference.
+test_generic_parameter_shadows() {
+  both_ways "generic function" 1 Widget 'func f<T>(_ x: T) -> Widget? { nil }' 'func f<Widget>(_ x: Widget) -> Widget? { nil }'
+  both_ways "generic type" 1 Widget 'struct Box<T, U> { let w: Widget }' 'struct Box<T, Widget> { let w: Widget }'
+  both_ways "generic initializer" 1 Widget 'struct Box { init?<T>(_ w: Widget) {} }' 'struct Box { init?<Widget>(_ w: Widget) {} }'
+  both_ways "parameter pack" 1 Widget 'func f<each T>(_ w: Widget) {}' 'func f<each Widget>(_ w: Widget) {}'
+  both_ways "primary associated type" 1 Widget 'protocol Holder<T> { var w: Widget { get } }' \
+    'protocol Holder<Widget> { var w: Widget { get } }'
+  both_ways "a constraint" 1 Widgeting 'struct Box<T: Widgeting> {}' 'struct Box<T: Equatable> {}'
+}
+
+test_associated_type_shadows() {
+  both_ways "associated type" 1 Widget 'protocol Holder { associatedtype Gadget; var w: Widget { get } }' \
+    'protocol Holder { associatedtype Widget; var w: Widget { get } }'
+}
+
+# A type or function declared inside a function's body is the file's own.
+test_local_declaration_shadows() {
+  both_ways "local type" 1 Widget 'func f() { struct Gizmo {}; _ = Widget() }' 'func f() { struct Widget {}; _ = Widget() }'
+  both_ways "local function" 1 widgetCount 'func f() { func helper() -> Int { 1 }; _ = widgetCount() }' \
+    'func f() { func widgetCount() -> Int { 1 }; _ = widgetCount() }'
+  # `actor` names a local only before a name on its line; here it is a value.
+  both_ways "actor as a value" 3 widgetCount $'func f(actor: Int) {\n    let a = actor\n    widgetCount()\n}' \
+    $'func f(actor: Int) {\n    let a = actor\n    count()\n}'
+  # `case let Kind.code(x)` binds x, and names Kind.
+  both_ways "a qualified let pattern" 1 Widget 'func f(e: Error) { if case let Widget.failed(x) = e {} }' \
+    'func f(e: Error) { if case let Gadget.failed(x) = e {} }'
+}
+
+# An enum's case list continues past a line break after a comma.
+test_enum_case_continuation_shadows() {
+  both_ways "case on a continuation line" 4 widgetLimit \
+    $'enum Mode {\n    case a,\n        b\n    static let all: [Mode] = [a, widgetLimit]\n}' \
+    $'enum Mode {\n    case a,\n        widgetLimit\n    static let all: [Mode] = [a, widgetLimit]\n}'
+}
+
 # A private extension declares nothing of its own; it still extends Widget.
 test_private_extension_still_counts() {
   both_ways "private extension" 1 Widget 'private extension Widget {}' 'private extension Int {}'

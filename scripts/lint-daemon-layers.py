@@ -82,7 +82,7 @@ class Token:
 class Declaration:
     name: str
     # The keyword: struct, enum, class, actor, protocol, extension,
-    # typealias, func, let, var or case.
+    # typealias, associatedtype, func, let, var or case.
     kind: str
     line: int
     at_file_scope: bool
@@ -388,7 +388,7 @@ def is_identifier(text: str) -> bool:
 # --------------------------------------------------------------------------
 
 TYPE_KEYWORDS = frozenset({"struct", "enum", "class", "actor", "protocol", "extension"})
-NAMED_KEYWORDS = frozenset({"func", "typealias", "let", "var"})
+NAMED_KEYWORDS = frozenset({"func", "typealias", "associatedtype", "let", "var"})
 PRIVATE_MODIFIERS = frozenset({"private", "fileprivate"})
 # Every keyword that starts a declaration, so takes the modifiers before it.
 DECLARATION_KEYWORDS = TYPE_KEYWORDS | NAMED_KEYWORDS | frozenset({
@@ -405,11 +405,11 @@ CLASS_AS_MODIFIER = frozenset({
 
 
 def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
-    """The declarations at file scope and in type bodies.
+    """Every declaration in the file, each marked whether it is at file scope.
 
-    A brace stack tells the two kinds of body apart: the first `{` after a type
+    A brace stack tells type bodies from the rest: the first `{` after a type
     keyword opens a type body, and every other `{` opens a body -- a function's,
-    an accessor's, a closure's -- whose contents are never recorded.
+    an accessor's, a closure's -- where a `case` is a pattern, not an enum case.
     """
     declarations: list[Declaration] = []
     # One entry per open `{`: the type keyword whose body it opens, or None,
@@ -459,11 +459,13 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
         if text == "class" and following is not None and following.text in CLASS_AS_MODIFIER:
             continue
         private, pending_private = pending_private, False
-        if stack and stack[-1][0] is None:
-            continue
 
         if text in TYPE_KEYWORDS:
             if following is None or not is_identifier(following.text):
+                continue
+            # `actor` is a keyword only before a name on its line; anywhere
+            # else it can be a variable's name, as in `actor: actor`.
+            if text == "actor" and following.line != token.line:
                 continue
             name = following.text
             if text == "extension":
@@ -477,7 +479,9 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
 
         if text in NAMED_KEYWORDS and following is not None:
             if is_identifier(following.text):
-                declare(following, text, private)
+                # `case let Failure.code(x)` binds x; Failure is a reference.
+                if not (i + 2 < count and tokens[i + 2].text == "."):
+                    declare(following, text, private)
             elif following.text == "(" and text in ("let", "var"):
                 # A tuple pattern: `let (a, b) = ...` declares both.
                 depth = 0
@@ -495,13 +499,16 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
 
         if text == "case" and stack and stack[-1][0] in ("enum", "extension"):
             # `case a, b(Int), c = 3`: the names at paren depth 0 that start
-            # the line's comma-separated items.
+            # the comma-separated items. The list ends at a line break, unless
+            # a comma or an open parenthesis carries it onto the next line.
             depth = 0
             expect_name = True
+            line = token.line
             for k in range(i + 1, count):
                 inner = tokens[k]
-                if inner.line != token.line:
+                if depth == 0 and (inner.text in ("{", "}", ";") or (inner.line != line and not expect_name)):
                     break
+                line = inner.line
                 if depth == 0 and expect_name and is_identifier(inner.text):
                     declare(inner, "case", private)
                 expect_name = False
@@ -598,17 +605,63 @@ def local_names(tokens: list[Token]) -> set[str]:
     return names
 
 
+# The declarations that can take a generic parameter list, or for a protocol,
+# primary associated types.
+GENERIC_OWNERS = frozenset({
+    "func", "struct", "enum", "class", "actor", "protocol", "typealias", "init", "subscript", "macro",
+})
+
+
+def generic_parameter_names(tokens: list[Token]) -> set[str]:
+    """The generic parameters the file declares, as in `func f<Widget>()` or
+    `struct Box<Widget: Equatable>`, and a protocol's primary associated types:
+    the first name of each comma-separated item at depth 1 of the `<...>` that
+    follows the declared name, or `init` and `subscript` themselves."""
+    names: set[str] = set()
+    count = len(tokens)
+    for i, token in enumerate(tokens):
+        if token.text not in GENERIC_OWNERS or (i and tokens[i - 1].text in (".", "import")):
+            continue
+        j = i + 1
+        if token.text in ("init", "subscript"):
+            while j < count and tokens[j].text in ("?", "!"):
+                j += 1  # `init?<T>`
+        else:
+            j += 1  # past the declared name
+        if j >= count or tokens[j].text != "<":
+            continue
+        depth = 0
+        expect_name = False
+        for k in range(j, count):
+            text = tokens[k].text
+            if text == "<":
+                depth += 1
+                expect_name = depth == 1
+            elif text == ">" and tokens[k - 1].text != "-":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif text == "," and depth == 1:
+                expect_name = True
+            elif expect_name and text != "each":  # `<each T>` declares T
+                if is_identifier(text):
+                    names.add(text)
+                expect_name = False
+    return names
+
+
 def own_names(source: SourceFile) -> set[str]:
     """Names the file declares for itself, which are never references from it:
-    members, nested types, private top-level declarations and locals. A
-    private extension declares nothing; its name is the extended type's."""
+    members, nested types, types and functions local to a body, generic
+    parameters, private top-level declarations and locals. A private extension
+    declares nothing; its name is the extended type's."""
     declared = {
         declaration.name
         for declaration in source.declarations
         if not declaration.at_file_scope
         or (declaration.private and declaration.kind != "extension")
     }
-    return declared | local_names(source.tokens)
+    return declared | local_names(source.tokens) | generic_parameter_names(source.tokens)
 
 
 def build_index(files: list[SourceFile]) -> dict[str, set[str]]:
