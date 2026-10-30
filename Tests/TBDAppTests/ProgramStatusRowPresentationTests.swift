@@ -21,6 +21,7 @@ struct ProgramStatusRowPresentationTests {
         id: UUID = UUID(),
         label: String? = nil,
         incarnation: UUID?,
+        kind: TerminalKind? = .claude,
         parked: Bool = false
     ) -> TBDShared.Terminal {
         TBDShared.Terminal(
@@ -30,7 +31,7 @@ struct ProgramStatusRowPresentationTests {
             tmuxPaneID: "%1",
             label: label,
             sessionIncarnationID: incarnation,
-            kind: .claude,
+            kind: kind,
             hibernatedAt: parked ? observedAt : nil,
             transport: .holder
         )
@@ -94,6 +95,23 @@ struct ProgramStatusRowPresentationTests {
         let task = ProgramStatusTaskEntry(id: "t1", entry: Self.entry(.working))
         let s = Self.snapshot(terminalID: t.id, incarnation: incarnation, main: nil, tasks: [task])
         #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s) == nil)
+    }
+
+    /// Codex reports a main entry and never a task entry; a blocked one
+    /// still resolves to awaiting input, carrying its kind.
+    @Test func codexMainOnlySnapshotResolves() throws {
+        let incarnation = UUID()
+        let t = Self.terminal(incarnation: incarnation, kind: .codex)
+        let s = Self.snapshot(
+            terminalID: t.id, incarnation: incarnation, main: Self.entry(.blocked, kind: .question))
+        let r = try #require(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s))
+        guard case .awaitingInput(let reason) = r.value else {
+            Issue.record("expected awaiting input, got \(r.value.label)")
+            return
+        }
+        #expect(reason?.programStatusBlock == ProgramStatusBlock(kind: .question, taskID: nil))
+        #expect(r.workingTaskCount == 0)
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: r.value) == .attention)
     }
 
     @Test func mapsErrorNeedsAuthAndWorkingTaskCount() throws {
@@ -176,6 +194,28 @@ struct ProgramStatusRowPresentationTests {
         #expect(ProgramStatusRowPresentation.tooltipLabel(for: Self.terminal(incarnation: nil)) == "Claude")
         #expect(ProgramStatusRowPresentation.tooltipLabel(
             for: Self.terminal(label: "Reviewer", incarnation: nil)) == "Reviewer")
+    }
+
+    @Test func unlabeledCodexFallsBackToCodex() {
+        #expect(ProgramStatusRowPresentation.tooltipLabel(
+            for: Self.terminal(incarnation: nil, kind: .codex)) == "Codex")
+        // A legacy no-kind row is Claude unless its label says Codex, and a
+        // label of its own wins either way.
+        #expect(ProgramStatusRowPresentation.tooltipLabel(
+            for: Self.terminal(incarnation: nil, kind: nil)) == "Claude")
+        #expect(ProgramStatusRowPresentation.tooltipLabel(
+            for: Self.terminal(label: "Reviewer", incarnation: nil, kind: .codex)) == "Reviewer")
+    }
+
+    /// A Codex snapshot has a main entry and nothing else — no task entries,
+    /// no title, msg or progress — so its tooltip is the one head line.
+    @Test func codexTooltipIsOneLine() {
+        let t = Self.terminal(incarnation: nil, kind: .codex)
+        let s = Self.snapshot(terminalID: t.id, incarnation: nil, main: Self.entry(.done))
+        let text = ProgramStatusRowPresentation.tooltip(terminals: [
+            (label: ProgramStatusRowPresentation.tooltipLabel(for: t), snapshot: s),
+        ])
+        #expect(text == "Codex: done")
     }
 
     // MARK: - Badge help
