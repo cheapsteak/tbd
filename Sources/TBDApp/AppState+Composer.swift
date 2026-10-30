@@ -35,8 +35,11 @@ extension AppState {
     /// Tell the daemon which terminals hold a composer draft, so a CLI
     /// `terminal close` refuses to discard one and `terminal list` shows it.
     /// Called when a draft gains or loses content, when one is forgotten, and
-    /// whenever the state subscription starts (the daemon forgets the set when
-    /// the last subscription closes).
+    /// each time the daemon acknowledges the state subscription. The daemon
+    /// keeps the last set it was given even after a subscription drops, so the
+    /// report on a resubscribe is what replaces a set gone stale while the
+    /// connection was down. An empty set is sent like any other: it is how a
+    /// stale entry gets cleared.
     ///
     /// Pushes are chained, and each reads the set when its turn comes rather
     /// than when it was queued: the RPCs travel on separate connections, so

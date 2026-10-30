@@ -3062,9 +3062,10 @@ final class AppState {
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe(onSubscribed: { [weak self] in
-                // The daemon forgets which terminals hold a composer draft
-                // when the last subscription closes, so each new one
-                // re-reports them once the daemon has registered it.
+                // Every acknowledged subscription re-reports the whole draft
+                // set. The daemon keeps the last set across a dropped
+                // subscription and loses it to a restart, so this report is
+                // what brings it back in line either way.
                 Task { @MainActor [weak self] in self?.pushComposerDrafts() }
             }) { [weak self] delta in
                 Task { @MainActor [weak self] in

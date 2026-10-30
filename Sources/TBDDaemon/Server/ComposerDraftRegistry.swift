@@ -8,10 +8,14 @@ import Foundation
 /// throw one away. `terminal.delete`'s rails refuse such a close, and
 /// `terminal.list` shows the flag so a caller can check before it tries.
 ///
-/// The app sends the whole set on every change and whenever its state
-/// subscription starts. The router forgets the set when the last subscription
-/// closes: a draft does not outlive the app that held it, and a set kept past
-/// the app's exit would refuse closes on drafts that no longer exist.
+/// The app sends the whole set on every change and each time the daemon
+/// acknowledges its state subscription, so every report replaces whatever the
+/// last one left. The set outlives the subscription on purpose: a subscription
+/// can drop while the app and its drafts live on, and forgetting the set then
+/// would leave those drafts unprotected until the app resubscribed. Keeping it
+/// fails safe. If the app quits for good, a rails close of a terminal still
+/// listed is refused until the caller passes `--force` or the app relaunches
+/// and reports again.
 public final class ComposerDraftRegistry: @unchecked Sendable {
     private let lock = NSLock()
     private var terminalIDs: Set<UUID> = []
@@ -25,10 +29,5 @@ public final class ComposerDraftRegistry: @unchecked Sendable {
 
     public func hasDraft(terminalID: UUID) -> Bool {
         lock.withLock { terminalIDs.contains(terminalID) }
-    }
-
-    /// Forget every draft — the app that held them is gone.
-    public func clear() {
-        replace(with: [])
     }
 }

@@ -253,22 +253,45 @@ struct TerminalCloseRailsTests {
         #expect(try await list(router, fx.worktree.id).first?.hasComposerDraft == true)
     }
 
-    /// The drafts lived in the app's memory, so once the app's last
-    /// subscription is gone they are gone too, and must not keep refusing.
-    @Test("the last subscription closing forgets every draft")
-    func lastSubscriptionClosingForgetsDrafts() async throws {
+    /// A subscription can drop while the app and its drafts live on, so the
+    /// last one closing is no proof the drafts are gone. The set stays, and a
+    /// rails close keeps refusing until the app reports again.
+    @Test("the last subscription closing keeps every draft")
+    func lastSubscriptionClosingKeepsDrafts() async throws {
         let fx = try await makeFixture()
         let router = makeRouter(db: fx.db)
-        let first = router.registerSubscription(writer: { _ in true })
-        let second = router.registerSubscription(writer: { _ in true })
+        let subscription = router.registerSubscription(writer: { _ in true })
         try await reportDrafts(router, [fx.terminal.id])
 
-        router.removeSubscription(id: first)
-        #expect(router.composerDrafts.hasDraft(terminalID: fx.terminal.id),
-                "a subscription is still open, so the app is still there")
+        router.removeSubscription(id: subscription)
 
-        router.removeSubscription(id: second)
-        #expect(!router.composerDrafts.hasDraft(terminalID: fx.terminal.id))
+        #expect(router.composerDrafts.hasDraft(terminalID: fx.terminal.id))
+        let resp = try await close(router, fx.terminal.id, rails: true)
+        #expect(resp.errorCode == RPCErrorCode.terminalHasComposerDraft.rawValue,
+                "a dropped subscription must not lift the refusal")
+        #expect(try await fx.db.terminals.get(id: fx.terminal.id) != nil)
+    }
+
+    /// The app reports the whole set when the daemon acknowledges a new
+    /// subscription, so that report replaces whatever the daemon kept, and an
+    /// empty one is what clears a stale entry.
+    @Test("a whole-set report after resubscribing replaces the kept set")
+    func reportAfterResubscribeReplacesKeptSet() async throws {
+        let fx = try await makeFixture()
+        let router = makeRouter(db: fx.db)
+        let other = UUID()
+        let dropped = router.registerSubscription(writer: { _ in true })
+        try await reportDrafts(router, [fx.terminal.id])
+        router.removeSubscription(id: dropped)
+
+        _ = router.registerSubscription(writer: { _ in true })
+        try await reportDrafts(router, [other])
+        #expect(!router.composerDrafts.hasDraft(terminalID: fx.terminal.id),
+                "the fresh report replaces the kept set rather than adding to it")
+        #expect(router.composerDrafts.hasDraft(terminalID: other))
+
+        try await reportDrafts(router, [])
+        #expect(!router.composerDrafts.hasDraft(terminalID: other))
         let resp = try await close(router, fx.terminal.id, rails: true)
         #expect(resp.success)
     }
