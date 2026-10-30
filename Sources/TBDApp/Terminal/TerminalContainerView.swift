@@ -271,15 +271,12 @@ struct SingleWorktreeView: View {
                       AppState.shouldPopulateHistoryForEmptyTabs(worktree: worktree) else { return }
                 await appState.fetchSessions(worktreeID: worktreeID)
             }
-            .task(id: PanelSurfaceLoadKey(
-                worktreeID: worktreeID, active: appState.panelTabsActive
-            )) {
-                // Fill the app's copy of this worktree's panel surfaces, once
-                // per worktree, so its tabs can render from the daemon. Deltas
-                // keep it current after that, a sync's imports included.
-                // Inert while `panel_tabs_enabled` is off.
-                guard appState.panelTabsActive else { return }
-                await appState.loadPanelSurfaces(worktreeID: worktreeID)
+            .task(id: panelSurfaceLoadKey) {
+                // Fill the app's copy of this worktree's panel surfaces when
+                // the shown tab has none, so it can render from the daemon.
+                // Deltas keep the copy current after that, a sync's imports
+                // included. Inert while `panel_tabs_enabled` is off.
+                await appState.loadPanelSurfacesForShownTab(panelSurfaceLoadKey)
             }
         } else {
             Text("Worktree not found")
@@ -347,6 +344,11 @@ struct SingleWorktreeView: View {
 
     private var activeTab: TBDShared.Tab? {
         appState.resolvedActiveTab(worktreeID: worktreeID)
+    }
+
+    /// When the panel-surface load task reruns, and whether it loads.
+    private var panelSurfaceLoadKey: PanelSurfaceLoadKey {
+        appState.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: activeTab?.id)
     }
 
     /// The active tab's terminal, if any — used to decide whether to show

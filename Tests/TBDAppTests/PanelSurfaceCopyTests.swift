@@ -141,6 +141,67 @@ struct PanelSurfaceCopyTests {
         }
     }
 
+    // MARK: - Loading the shown tab
+
+    @Test("a shown tab asks for a load only while the flag is on and the copy holds no surface for it")
+    func loadKeyAsksForALoadOnlyForAShownTabWithoutASurface() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let worktreeID = UUID()
+            let surfaced = Fixture.terminalTab(label: "surfaced")
+            let alsoSurfaced = Fixture.terminalTab(label: "also surfaced")
+            let bare = Fixture.terminalTab(label: "no surface")
+            state.panelSurfaces = [worktreeID: [
+                surfaced.id: Fixture.surface(tabID: surfaced.id, worktreeID: worktreeID, revision: 1),
+                alsoSurfaced.id: Fixture.surface(tabID: alsoSurfaced.id, worktreeID: worktreeID, revision: 2),
+            ]]
+
+            let onSurfaced = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: surfaced.id)
+            let onAlsoSurfaced = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: alsoSurfaced.id)
+            let onBare = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: bare.id)
+            let onNoTab = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: nil)
+
+            #expect(onBare.loads, "a failed load or a missed import is retried when the tab is shown")
+            #expect(!onSurfaced.loads, "deltas keep a tab with a surface current")
+            #expect(!onNoTab.loads)
+            #expect(onSurfaced == onAlsoSurfaced, "switching between tabs with surfaces reruns nothing")
+            #expect(onSurfaced != onBare, "switching to a tab without one reruns the load task")
+
+            state.daemonCapabilities = Fixture.capabilities(panelTabs: false)
+            let flagOff = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: bare.id)
+            #expect(!flagOff.loads)
+            #expect(flagOff != onBare, "the flag turning on reruns the load task")
+        }
+    }
+
+    @Test("a shown tab without a surface loads after the pending sync; one with a surface loads nothing")
+    func shownTabWithoutSurfaceLoadsAfterThePendingSync() async throws {
+        try await Fixture.withState(panelTabs: true) { state in
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: Fixture.collectSyncs(state))
+            let log = PanelEventLog()
+            _ = Fixture.collectSyncs(state, into: log)
+            let imported = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 3)
+            let gets = Fixture.collectGets(state, into: log) { _ in
+                PanelGetResult(tabs: [imported], activeTabID: nil)
+            }
+            // A change whose sync has not gone out yet.
+            state.tabs[worktreeID]?[0].label = "renamed"
+            let bareKey = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: tab.id)
+
+            await state.loadPanelSurfacesForShownTab(bareKey)
+
+            let expectedEvents: [String] = ["sync \(worktreeID)", "get \(worktreeID)"]
+            #expect(log.events == expectedEvents,
+                    "the get follows the pending sync, so the snapshot holds what that sync imports")
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == imported)
+
+            let surfacedKey = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: tab.id)
+            await state.loadPanelSurfacesForShownTab(surfacedKey)
+            await Fixture.drainMainActor()
+            #expect(gets.worktreeIDs == [worktreeID], "a tab with a surface asks for no load")
+        }
+    }
+
     @Test("a full get keeps a tab a delta adopted while it was in flight")
     func getKeepsTabAdoptedFromDeltaInFlight() async {
         await Fixture.withState(panelTabs: true) { state in

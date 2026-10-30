@@ -107,6 +107,27 @@ extension AppState {
         commitPanelSurfaces(surfaces)
     }
 
+    /// The load key for a worktree's detail view showing `activeTabID`, read
+    /// from the copy as it stands (see `PanelSurfaceLoadKey`).
+    func panelSurfaceLoadKey(worktreeID: UUID, activeTabID: UUID?) -> PanelSurfaceLoadKey {
+        PanelSurfaceLoadKey(
+            worktreeID: worktreeID,
+            active: panelTabsActive,
+            activeTabLacksSurface: activeTabID.map {
+                panelSurface(worktreeID: worktreeID, tabID: $0) == nil
+            } ?? false)
+    }
+
+    /// The load a shown tab asks for when its key `loads`: any tab sync still
+    /// pending goes out first, as before the flag's own load, so a tab that
+    /// sync imports is in the snapshot even if its delta reaches no
+    /// subscription. Nothing when the key does not load.
+    func loadPanelSurfacesForShownTab(_ key: PanelSurfaceLoadKey) async {
+        guard key.loads else { return }
+        await flushPanelTabSync()
+        await loadPanelSurfaces(worktreeID: key.worktreeID)
+    }
+
     /// The merge rules `loadPanelSurfaces` documents, on one worktree's entry.
     /// Returns nil for an entry left empty.
     private static func merge(

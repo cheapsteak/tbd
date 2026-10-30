@@ -1,17 +1,28 @@
 import SwiftUI
 import TBDShared
 
-/// The `.task(id:)` key for loading a worktree's surfaces into the app's copy:
-/// a new worktree, or the flag turning on, starts a load. Not the active tab:
-/// one load fills every tab of the worktree, and deltas keep the copy current
-/// after it, so switching tabs costs no `panel.get`. Not the resubscribe
-/// either: it refetches the worktrees the copy holds itself. A struct rather
-/// than an interpolated string, so a new dimension
-/// is a compile error at the call site instead of a key that silently stays
-/// equal.
+/// The `.task(id:)` key for loading a worktree's surfaces into the app's copy
+/// (`AppState.panelSurfaceLoadKey`). A load runs while the flag is on and the
+/// shown tab has no surface in the copy, so one starts when such a tab is
+/// shown — in a newly shown worktree, or by a tab switch — and when the flag
+/// turns on. That is the backstop for a tab a failed `panel.get`, or an
+/// import delta missed while the subscription was down, left without a
+/// surface: it loads again when it is shown, instead of rendering legacy
+/// until the user picks another worktree. A shown tab with a surface asks for
+/// no load: one load fills every tab of the worktree and deltas keep the copy
+/// current, so switching between such tabs costs no `panel.get`. Not the
+/// resubscribe either: it refetches the worktrees the copy holds itself. A
+/// struct rather than an interpolated string, so a new dimension is a compile
+/// error at the call site instead of a key that silently stays equal.
 struct PanelSurfaceLoadKey: Equatable {
     let worktreeID: UUID
+    /// The daemon reports `panel_tabs_enabled` on.
     let active: Bool
+    /// A tab is shown, and the copy holds no surface for it.
+    let activeTabLacksSurface: Bool
+
+    /// Whether the task this key starts loads the worktree's surfaces.
+    var loads: Bool { active && activeTabLacksSurface }
 }
 
 // MARK: - PanelSurfaceWorkspaceView

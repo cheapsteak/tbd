@@ -372,7 +372,12 @@ match: an agent opens content and lets the reuse rule place it.
 property of the `@Observable` `AppState`. It is filled by `panel.get` when the
 flag is on, kept current by a `panelSurfaceChanged` case in `handleDelta`, and
 cleared when the daemon reports the flag off. A delta or fetch while the flag is
-off leaves it untouched.
+off leaves it untouched. A worktree's detail view loads it whenever the shown
+tab has no surface in the copy — when that tab is shown, or when the flag turns
+on — after sending any tab sync still pending. So a tab left without a surface
+by a failed `panel.get`, or by an import delta missed while the subscription
+was down, loads again when it is shown, and a shown tab with a surface asks for
+no load.
 
 A full `panel.get` is merged into the copy rather than assigned, because deltas
 keep arriving during its flight. A tab the copy held when the get was issued,
