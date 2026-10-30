@@ -1272,15 +1272,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the Program Status Protocol gate (default OFF, soaking). Applies
-    /// to Claude sessions started after the change.
-    func setProgramStatus(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetProgramStatusEnabled,
-            params: ConfigSetProgramStatusEnabledParams(enabled: enabled)
-        )
-    }
-
     /// Persist the transcript prompt-answer gate (default OFF, soaking). New
     /// sessions pick up the hooks.
     func setTranscriptPromptAnswer(enabled: Bool) async throws {
@@ -2409,8 +2400,7 @@ actor DaemonClient {
         )
     }
 
-    /// Every terminal's current program-status snapshot. Empty while
-    /// `program_status_enabled` is off.
+    /// Every terminal's current program-status snapshot.
     func terminalProgramStatusList() async throws -> [ProgramStatusSnapshot] {
         let result = try await callNoParamsAsync(
             method: RPCMethod.terminalProgramStatusList,

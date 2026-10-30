@@ -54,8 +54,8 @@ struct WorktreeRowView: View {
         indicatorBinding?.status
     }
 
-    private var hasBoldNotification: Bool {
-        RowStatusIndicator.shouldBoldName(notification, hasPromptOnScreen: hasPromptOnScreenTerminal)
+    private func hasBoldNotification(_ resolutions: [UUID: ProgramStatusResolution]) -> Bool {
+        RowStatusIndicator.shouldBoldName(notification, hasPromptOnScreen: hasPromptOnScreenTerminal(resolutions))
     }
 
     private var prObservation: PRObservation? {
@@ -93,9 +93,8 @@ struct WorktreeRowView: View {
         return terminals.contains { $0.isParked }
     }
 
-    private var hasWorkingTerminal: Bool {
+    private func hasWorkingTerminal(_ resolutions: [UUID: ProgramStatusResolution]) -> Bool {
         let terminals = appState.terminals[worktree.id] ?? []
-        let resolutions = programStatusResolutions
         return terminals.contains { terminal in
             if let resolution = resolutions[terminal.id] {
                 return resolution.value == .working
@@ -106,23 +105,18 @@ struct WorktreeRowView: View {
 
     // MARK: - Program Status Protocol (OSC 7501)
 
-    /// Whether `program_status_enabled` is on, as the daemon last reported.
-    private var programStatusEnabled: Bool {
-        appState.daemonCapabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault
-    }
-
     /// The OSC-authoritative state of each of this row's terminals that has
     /// one. A terminal absent from the map keeps today's hook-rail reading.
+    ///
+    /// It walks every terminal of the row, so `body` reads it once and passes
+    /// the map to each helper below rather than letting each recompute it.
     private var programStatusResolutions: [UUID: ProgramStatusResolution] {
-        let enabled = programStatusEnabled
-        guard enabled else { return [:] }
         let terminals = appState.terminals[worktree.id] ?? []
         var result: [UUID: ProgramStatusResolution] = [:]
         for terminal in terminals {
             if let resolution = ProgramStatusRowPresentation.resolution(
                 terminal: terminal,
-                snapshot: appState.programStatusSnapshots[terminal.id],
-                enabled: enabled
+                snapshot: appState.programStatusSnapshots[terminal.id]
             ) {
                 result[terminal.id] = resolution
             }
@@ -130,18 +124,17 @@ struct WorktreeRowView: View {
         return result
     }
 
-    private var hasNeedsAuthTerminal: Bool {
-        programStatusResolutions.values.contains { $0.value == .needsAuth }
+    private func hasNeedsAuthTerminal(_ resolutions: [UUID: ProgramStatusResolution]) -> Bool {
+        resolutions.values.contains { $0.value == .needsAuth }
     }
 
-    private var hasTurnFailedTerminal: Bool {
-        programStatusResolutions.values.contains { $0.value == .error }
+    private func hasTurnFailedTerminal(_ resolutions: [UUID: ProgramStatusResolution]) -> Bool {
+        resolutions.values.contains { $0.value == .error }
     }
 
     /// The status badge's tooltip when any terminal is OSC-authoritative; nil
     /// otherwise, so the badge keeps its generic help text.
-    private var programStatusTooltip: String? {
-        let resolutions = programStatusResolutions
+    private func programStatusTooltip(_ resolutions: [UUID: ProgramStatusResolution]) -> String? {
         guard !resolutions.isEmpty else { return nil }
         let terminals = appState.terminals[worktree.id] ?? []
         var entries: [(label: String, snapshot: ProgramStatusSnapshot)] = []
@@ -162,9 +155,8 @@ struct WorktreeRowView: View {
     ///
     /// An OSC-authoritative terminal speaks for itself instead: it has a
     /// prompt on screen exactly when it resolves to awaiting input.
-    private var hasPromptOnScreenTerminal: Bool {
+    private func hasPromptOnScreenTerminal(_ resolutions: [UUID: ProgramStatusResolution]) -> Bool {
         let terminals = appState.terminals[worktree.id] ?? []
-        let resolutions = programStatusResolutions
         return terminals.contains { terminal in
             if let resolution = resolutions[terminal.id] {
                 if case .awaitingInput = resolution.value { return true }
@@ -588,18 +580,18 @@ struct WorktreeRowView: View {
     }
 
     @ViewBuilder
-    private func suffixIcon() -> some View {
-        let tooltip: String? = programStatusTooltip
-        let resolvedValues: [SessionStateValue] = programStatusResolutions.values.map(\.value)
+    private func suffixIcon(resolutions: [UUID: ProgramStatusResolution]) -> some View {
+        let tooltip: String? = programStatusTooltip(resolutions)
+        let resolvedValues: [SessionStateValue] = resolutions.values.map(\.value)
         switch RowStatusIndicator.suffix(
             notification: notification,
-            isWorking: hasWorkingTerminal,
+            isWorking: hasWorkingTerminal(resolutions),
             // Suspend retired: every parked session funnels to the moon.
             isSuspended: false,
             isHibernated: hasParkedTerminal,
-            hasPromptOnScreen: hasPromptOnScreenTerminal,
-            needsAuth: hasNeedsAuthTerminal,
-            turnFailed: hasTurnFailedTerminal
+            hasPromptOnScreen: hasPromptOnScreenTerminal(resolutions),
+            needsAuth: hasNeedsAuthTerminal(resolutions),
+            turnFailed: hasTurnFailedTerminal(resolutions)
         ) {
         case .working:
             TypingDotsView(color: SuffixRowIndicator.working.color)
@@ -637,6 +629,7 @@ struct WorktreeRowView: View {
     }
 
     var body: some View {
+        let resolutions = programStatusResolutions
         HStack(spacing: 6) {
             leadingIcon()
             RenameableLabel(
@@ -654,7 +647,7 @@ struct WorktreeRowView: View {
                 VStack(alignment: .leading, spacing: -2) {
                     Text(worktree.displayName)
                         .font(.system(size: 13))
-                        .fontWeight(hasBoldNotification ? .bold : .regular)
+                        .fontWeight(hasBoldNotification(resolutions) ? .bold : .regular)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .background(
@@ -684,7 +677,7 @@ struct WorktreeRowView: View {
                     }
                 }
             }
-            suffixIcon()
+            suffixIcon(resolutions: resolutions)
             if Self.showsServerDot(worktreeID: worktree.id, running: appState.devServerRunningWorktreeIDs) {
                 Circle()
                     .fill(Color.green)
@@ -849,7 +842,7 @@ struct WorktreeRowView: View {
     }
 
     private func updateNameTruncation(availableWidth: CGFloat) {
-        let font = NSFont.systemFont(ofSize: 13, weight: hasBoldNotification ? .bold : .regular)
+        let font = NSFont.systemFont(ofSize: 13, weight: hasBoldNotification(programStatusResolutions) ? .bold : .regular)
         let ideal = (worktree.displayName as NSString).size(withAttributes: [.font: font]).width
         let truncated = ideal > availableWidth + 0.5
         if truncated != isNameTruncated { isNameTruncated = truncated }

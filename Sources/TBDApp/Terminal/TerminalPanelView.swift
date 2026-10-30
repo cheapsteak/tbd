@@ -518,9 +518,9 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         context.coordinator.onHolderAttachRetryOffered = onHolderAttachRetryOffered
         context.coordinator.shouldSuppressEvents = shouldSuppressEvents
         // Program Status Protocol (OSC 7501): the probe is answered only by a
-        // holder-transport panel with the flag on — whatever agent the session
-        // runs, exactly as the daemon's reader answers — so a tmux panel never
-        // answers. Set before any byte is fed; re-evaluated in `updateNSView`.
+        // holder-transport panel — whatever agent the session runs, exactly as
+        // the daemon's reader answers — so a tmux panel never answers. Set
+        // before any byte is fed; re-evaluated in `updateNSView`.
         tv.programStatusGate.set(
             appState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
 

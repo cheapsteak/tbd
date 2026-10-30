@@ -16,7 +16,6 @@ import TestSupport
         let store: ProgramStatusStore
 
         init(
-            enabled: Bool = true,
             lookupGate: LookupGate? = nil,
             now: @escaping @Sendable () -> Date = { Date() }
         ) {
@@ -25,7 +24,6 @@ import TestSupport
             self.terminals = terminals
             self.published = published
             self.store = ProgramStatusStore(
-                enabled: enabled,
                 terminalLookup: { id in
                     if let lookupGate {
                         await lookupGate.wait()
@@ -115,16 +113,6 @@ import TestSupport
     }
 
     // MARK: - Trust
-
-    @Test func flagOffRejects() async {
-        let h = Harness(enabled: false)
-        let terminal = holderClaude()
-        h.add(terminal)
-        let outcome = await h.store.ingest(inbound(terminal, "state=working:app=claude-code"))
-        #expect(outcome == .rejected("flag off"))
-        #expect(await h.store.snapshot(for: terminal.id) == nil)
-        #expect(h.publishedSnapshots.isEmpty)
-    }
 
     @Test func nonClaudeOrNonHolderOrParkedTerminalsReject() async {
         let h = Harness()
@@ -440,23 +428,6 @@ import TestSupport
         h.remove(terminal.id)
         await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
         #expect(await h.store.snapshot(for: terminal.id) == nil)
-    }
-
-    @Test func setEnabledFalseRetractsEveryTerminal() async {
-        let h = Harness()
-        let a = holderClaude()
-        let b = holderClaude()
-        h.add(a)
-        h.add(b)
-        _ = await h.store.ingest(inbound(a, "state=working:app=claude-code", at: 1))
-        _ = await h.store.ingest(inbound(b, "state=done:app=claude-code", at: 1))
-        await h.store.setEnabled(false)
-        #expect(!h.store.gate.isEnabled)
-        #expect(await h.store.allSnapshots().isEmpty)
-        let retracted = Set(h.publishedSnapshots.filter(\.isEmpty).map(\.terminalID))
-        #expect(retracted == [a.id, b.id])
-        // Reports are rejected from here on.
-        #expect(await h.store.ingest(inbound(a, "state=working:app=claude-code", at: 2)) == .rejected("flag off"))
     }
 
     @Test func revisionIsMonotonicAcrossClears() async {
