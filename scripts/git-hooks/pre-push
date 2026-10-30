@@ -67,6 +67,14 @@ fi
 echo "[pre-push] Linting SQL migrations..."
 python3 scripts/lint-migrations.py --base "$base"
 
+# The links between the daemon's folders, checked against
+# scripts/daemon-links.txt. About 1 s, reading the working tree as the
+# migration lint does, and likewise NOT skipped by TBD_SKIP_PREPUSH_TESTS: a
+# new link is cheapest to answer before the push, while the change that made
+# it is still fresh.
+echo "[pre-push] Checking links between the daemon's folders..."
+python3 scripts/lint-daemon-layers.py
+
 if [ "${TBD_SKIP_PREPUSH_TESTS:-}" = "1" ]; then
   echo "[pre-push] TBD_SKIP_PREPUSH_TESTS=1 — skipping the guarded test pass."
   exit 0
