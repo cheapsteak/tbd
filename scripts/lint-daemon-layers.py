@@ -19,10 +19,12 @@ It matches names, not types. The index holds each unit's top-level
 declarations that are not private or fileprivate: types, typealiases,
 top-level functions and globals. A file references unit B when it names one
 of B's, in code or in a string's interpolation. A name in a comment, a
-literal or a raw identifier, after a `.` (but not after `...`), or as an
-argument label in parentheses is not a reference, and neither is a name the
-file declares for itself: a member, a nested type or one declared in a body, a
-generic parameter, a private declaration, or a lowercase local or parameter.
+literal or a raw identifier, after a `.` (but not after `...`), or as a label
+-- an argument label or a function type's parameter name in parentheses, a
+trailing closure's label, a statement label -- is not a reference, and
+neither is a name the file declares for itself: a member, a nested type or one
+declared in a body, a generic parameter, a private declaration, or a
+lowercase local, pattern binding or parameter.
 
 It fails closed: a file or folder it cannot open, and Swift it cannot read
 -- an unbalanced brace, a literal or comment that never closes, bytes that
@@ -234,6 +236,18 @@ def blank_literals_and_comments(source: str, path: str) -> str:
             position += 1
         return None
 
+    def raw_closes_on_its_line(quote: int, hashes: int) -> bool:
+        # Whether a raw string whose opening quote is at `quote`, and which
+        # starts with three quotes like a multi-line one, closes on its own
+        # line. Swift reads it as single-line then: `#"""#` is a string
+        # holding one quote. A quote and the string's hashes anywhere after
+        # the opening quote and the character after it, before the line
+        # ends, close it.
+        if not hashes:
+            return False
+        end = source.find("\n", quote)
+        return source.find('"' + "#" * hashes, quote + 2, size if end < 0 else end) >= 0
+
     def extended_regex_end(start: int, slash: int, hashes: int) -> int:
         closer = "/" + "#" * hashes
         position = slash + 1
@@ -348,7 +362,7 @@ def blank_literals_and_comments(source: str, path: str) -> str:
                 j += 1
             hashes = j - i
             if source[j:j + 1] == '"':
-                multi_line = source.startswith('"""', j)
+                multi_line = source.startswith('"""', j) and not raw_closes_on_its_line(j, hashes)
                 stack.append(_String(hashes, multi_line, i))
                 i = j + (3 if multi_line else 1)
             elif hashes and source[j:j + 1] == "/":
@@ -364,12 +378,14 @@ def blank_literals_and_comments(source: str, path: str) -> str:
     return "".join(out)
 
 
-PUNCTUATION = frozenset("{}()[]<>.,:;=@#?!&|+-*/%^~")
+PUNCTUATION = frozenset("{}()[]<>.,:;=@#?!&|+-*/%^~") | {"..."}
 
-# A newline; or an identifier or one punctuation character; or a number, which
-# is matched only so its digits never start an identifier. Everything else --
-# quotes, `$`, `\`, whitespace -- is skipped.
-_TOKEN = re.compile(r"(\n)|([^\W\d]\w*|[{}()\[\]<>.,:;=@#?!&|+\-*/%^~])|\d\w*")
+# A newline; or an identifier, `...` or one punctuation character; or a number,
+# which is matched only so its digits never start an identifier. Everything
+# else -- quotes, `$`, `\`, whitespace -- is skipped. `...` is one token so that
+# a `.` token is always a member access: in `0...limit` the name after it is a
+# range's bound, and in `0 ... .max` the `.max` is a member.
+_TOKEN = re.compile(r"(\n)|(\.\.\.|[^\W\d]\w*|[{}()\[\]<>.,:;=@#?!&|+\-*/%^~])|\d\w*")
 
 
 def tokenize(code: str) -> list[Token]:
@@ -387,6 +403,14 @@ def is_identifier(text: str) -> bool:
     return text not in PUNCTUATION
 
 
+def spelled_like_a_keyword(tokens: list[Token], i: int) -> bool:
+    """Whether tokens[i], whatever it spells, is no keyword where it stands:
+    a member after a `.`, as in `Foo.Type` or `level = .private`, or the kind
+    in a scoped import, as in `import struct M.Name`, which brings one
+    declaration in from another module and declares nothing here."""
+    return i > 0 and tokens[i - 1].text in (".", "import")
+
+
 # --------------------------------------------------------------------------
 # Declarations
 # --------------------------------------------------------------------------
@@ -398,6 +422,73 @@ PRIVATE_MODIFIERS = frozenset({"private", "fileprivate"})
 DECLARATION_KEYWORDS = TYPE_KEYWORDS | NAMED_KEYWORDS | frozenset({
     "case", "init", "deinit", "subscript", "import", "operator", "precedencegroup", "macro",
 })
+# No type takes one of these as its name. They follow `class` where it is a
+# modifier, as in `class func` or `class override var`, and `actor` where it is
+# a value, as in `actor as Sendable`.
+NOT_A_TYPE_NAME = frozenset({
+    "func", "var", "let", "subscript", "init", "deinit", "typealias",
+    "override", "final", "open", "public", "internal", "private", "fileprivate", "nonisolated", "dynamic",
+    "as", "is", "in",
+})
+
+
+def names_a_type(keyword: Token, following: Token) -> bool:
+    """Whether a type keyword declares the type `following` names."""
+    if not is_identifier(following.text) or following.text in NOT_A_TYPE_NAME:
+        return False
+    # `actor` is a keyword only before a name on its line; anywhere else it can
+    # be a variable's name, as in `actor: actor`.
+    return keyword.text != "actor" or following.line == keyword.line
+
+
+# Where a pattern ends, outside its parentheses.
+_PATTERN_ENDS = frozenset({"=", ":", "in", "where", "{", "}", ";", ","})
+
+
+def bound_names(tokens: list[Token], i: int) -> list[Token]:
+    """The names the `let`, `var` or `for` at tokens[i] binds.
+
+    `let x`, `for x in` and `for try await x in` bind that one name, whatever
+    its case. A pattern binds each lowercase name in it that is neither a
+    member, nor a value with a member after it, nor a label: `let (a, b)`,
+    `case let .some(a)`, `case let .pair(a, label: b)`, and only `a` in
+    `case let Result.success(a)` and `case let (Widget.zero, a)`, where Result
+    and Widget stay references. Only lowercase names, so no type in a pattern
+    is ever taken for a binding.
+    """
+    count = len(tokens)
+    start = i + 1
+    if tokens[i].text == "for":
+        while start < count and tokens[start].text in ("try", "await"):
+            start += 1
+        # `for case let x? in xs`: its `let` binds. Without one, a name in a
+        # case pattern is a value it matches, as in `for case .some(limit) in`.
+        if start < count and tokens[start].text == "case":
+            return []
+    if start >= count:
+        return []
+    following = tokens[start]
+    if is_identifier(following.text) and (start + 1 >= count or tokens[start + 1].text != "."):
+        return [following]
+    names: list[Token] = []
+    depth = 0
+    for k in range(start, count):
+        text = tokens[k].text
+        if depth == 0 and text in _PATTERN_ENDS:
+            break
+        if text == "(":
+            depth += 1
+        elif text == ")":
+            depth -= 1
+            if depth < 0:
+                break  # the pattern sat in parentheses, as in `case (_, let .some(a)):`
+        elif (
+            _is_local_name(text)
+            and tokens[k - 1].text != "."
+            and (k + 1 >= count or tokens[k + 1].text not in (".", ":"))
+        ):
+            names.append(tokens[k])
+    return names
 
 
 def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
@@ -440,6 +531,8 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
             stack.pop()
             pending_private = False
             continue
+        if spelled_like_a_keyword(tokens, i):
+            continue
         if text in PRIVATE_MODIFIERS:
             # `private(set)` restricts only the setter; the name stays visible.
             if i + 1 >= count or tokens[i + 1].text != "(":
@@ -447,19 +540,11 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
             continue
         if text not in DECLARATION_KEYWORDS:
             continue
-        # `Foo.Type` is no declaration, and neither is `import struct M.Name`,
-        # which brings one declaration in from another module.
-        if i and tokens[i - 1].text in (".", "import"):
-            continue
         following = tokens[i + 1] if i + 1 < count else None
         private, pending_private = pending_private, False
 
         if text in TYPE_KEYWORDS:
-            if following is None or not is_identifier(following.text):
-                continue
-            # `actor` is a keyword only before a name on its line; anywhere
-            # else it can be a variable's name, as in `actor: actor`.
-            if text == "actor" and following.line != token.line:
+            if following is None or not names_a_type(token, following):
                 continue
             name = following.text
             if text == "extension":
@@ -471,24 +556,13 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
             pending_type = text
             continue
 
-        if text in NAMED_KEYWORDS and following is not None:
-            if is_identifier(following.text):
-                # `case let Failure.code(x)` binds x; Failure is a reference.
-                if not (i + 2 < count and tokens[i + 2].text == "."):
-                    declare(following, text, private)
-            elif following.text == "(" and text in ("let", "var"):
-                # A tuple pattern: `let (a, b) = ...` declares both.
-                depth = 0
-                for k in range(i + 1, count):
-                    inner = tokens[k]
-                    if inner.text == "(":
-                        depth += 1
-                    elif inner.text == ")":
-                        depth -= 1
-                        if depth == 0:
-                            break
-                    elif is_identifier(inner.text):
-                        declare(inner, text, private)
+        if text in ("let", "var"):
+            for name_token in bound_names(tokens, i):
+                declare(name_token, text, private)
+            continue
+        if text in NAMED_KEYWORDS:
+            if following is not None and is_identifier(following.text):
+                declare(following, text, private)
             continue
 
         if text == "case" and stack and stack[-1][0] in ("enum", "extension"):
@@ -523,7 +597,7 @@ PARAMETER_OWNERS = frozenset({"func", "init", "subscript"})
 # A closure's head, `{ [weak self] (a: Int, b) -> T in`, holds only
 # identifiers and these. Any other token between a `{` and an `in` means the
 # `{` opened something else.
-CLOSURE_HEAD_PUNCTUATION = frozenset(",()[]:.<>-?!&@")
+CLOSURE_HEAD_PUNCTUATION = frozenset(",()[]:.<>-?!&@") | {"..."}
 CLOSURE_HEAD_STOPS = frozenset({
     "for", "let", "var", "case", "if", "guard", "while", "return", "try", "await", "switch",
 })
@@ -535,8 +609,8 @@ def _is_local_name(text: str) -> bool:
 
 def local_names(tokens: list[Token]) -> set[str]:
     """Lowercase names the file binds anywhere: `let`, `var` and `for`
-    bindings, function, initializer and subscript parameters, and closure
-    parameters.
+    bindings and patterns, function, initializer and subscript parameters,
+    and closure parameters.
 
     Only lowercase names, because only values are bound this way; a closure's
     `(w: Widget)` still references Widget. The check does not track scopes,
@@ -547,24 +621,9 @@ def local_names(tokens: list[Token]) -> set[str]:
     count = len(tokens)
     for i, token in enumerate(tokens):
         text = token.text
-        if text in LOCAL_BINDERS and i + 1 < count:
-            following = tokens[i + 1].text
-            if following != "(":
-                if _is_local_name(following):
-                    names.add(following)
-                continue
-            depth = 0
-            for k in range(i + 1, count):
-                inner = tokens[k]
-                if inner.text == "(":
-                    depth += 1
-                elif inner.text == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                elif _is_local_name(inner.text):
-                    names.add(inner.text)
-        elif text in PARAMETER_OWNERS and not (i and tokens[i - 1].text in (".", "import")):
+        if text in LOCAL_BINDERS:
+            names.update(name.text for name in bound_names(tokens, i) if _is_local_name(name.text))
+        elif text in PARAMETER_OWNERS and not spelled_like_a_keyword(tokens, i):
             # `func f<T>(_ a: Int, with b: [K: V] = [:])`: the name before
             # each `:` at depth 1 of the first parenthesised list.
             j = i + 1
@@ -588,7 +647,9 @@ def local_names(tokens: list[Token]) -> set[str]:
             for k in range(i + 1, count):
                 inner = tokens[k]
                 if inner.text == "in":
-                    names.update(head)
+                    # `{ f(in: x) }`: an argument label, so no closure head.
+                    if k + 1 >= count or tokens[k + 1].text != ":":
+                        names.update(head)
                     break
                 if inner.text in CLOSURE_HEAD_PUNCTUATION:
                     continue
@@ -604,6 +665,8 @@ def local_names(tokens: list[Token]) -> set[str]:
 GENERIC_OWNERS = frozenset({
     "func", "struct", "enum", "class", "actor", "protocol", "typealias", "init", "subscript", "macro",
 })
+# The punctuation an operator's name is made of.
+OPERATOR_PUNCTUATION = frozenset("/=-+!*%<>&|^~?.") | {"..."}
 
 
 def generic_parameter_names(tokens: list[Token]) -> set[str]:
@@ -614,12 +677,22 @@ def generic_parameter_names(tokens: list[Token]) -> set[str]:
     names: set[str] = set()
     count = len(tokens)
     for i, token in enumerate(tokens):
-        if token.text not in GENERIC_OWNERS or (i and tokens[i - 1].text in (".", "import")):
+        if token.text not in GENERIC_OWNERS:
             continue
         j = i + 1
         if token.text in ("init", "subscript"):
             while j < count and tokens[j].text in ("?", "!"):
                 j += 1  # `init?<T>`
+        elif token.text == "func" and j < count and tokens[j].text in OPERATOR_PUNCTUATION:
+            # An operator's name is a run of punctuation, as in
+            # `static func << (lhs: inout Buf, rhs: UInt8)`. Swift reads a
+            # generic list after it only as in `func ==<T>(...)`: the run's
+            # last `<`, before a name.
+            while j < count and tokens[j].text in OPERATOR_PUNCTUATION:
+                j += 1
+            if tokens[j - 1].text != "<" or j >= count or not is_identifier(tokens[j].text):
+                continue
+            j -= 1
         else:
             j += 1  # past the declared name
         if j >= count or tokens[j].text != "<":
@@ -671,6 +744,43 @@ def build_index(files: list[SourceFile]) -> dict[str, set[str]]:
     return index
 
 
+# The statements a label can name.
+LABELED_STATEMENTS = frozenset({"for", "while", "repeat", "do", "if", "switch"})
+
+
+def is_member_or_label(tokens: list[Token], i: int, brackets: list[str]) -> bool:
+    """Whether the name at tokens[i], which is not the first token, is a
+    member or a label rather than a reference. `brackets` holds the brackets
+    open around it, innermost last."""
+    before = tokens[i - 1]
+    # After a `.` it names a member of whatever precedes it. `...` is a token
+    # of its own, so in `0...widgetLimit` the name is a range's bound.
+    if before.text == ".":
+        return True
+    # `break widgetLimit` and `continue widgetLimit` name a statement label.
+    if before.text in ("break", "continue"):
+        return True
+    if i + 1 >= len(tokens) or tokens[i + 1].text != ":":
+        return False
+    after = tokens[i + 2].text if i + 2 < len(tokens) else ""
+    # Directly in parentheses: an argument label, as in `f(widgetLimit: 1)` and
+    # `f(a, widgetLimit: 1)`, or a parameter's name in a function type, as in
+    # `(_ widgetLimit: Int) -> Void`. In `[a: 1, widgetLimit: 2]` it is a
+    # dictionary key, and in `case 1, widgetLimit:` a pattern: both code.
+    if before.text in ("(", ",", "_") and brackets and brackets[-1] == "(":
+        return True
+    # A trailing closure's label: `f { ... } widgetLimit: { ... }`.
+    if before.text == "}" and after == "{":
+        return True
+    # A statement's label, `widgetLimit: for x in xs`, which starts a statement
+    # in a body or at file scope.
+    return (
+        after in LABELED_STATEMENTS
+        and (not brackets or brackets[-1] == "{")
+        and (before.line != tokens[i].line or before.text in ("{", ";"))
+    )
+
+
 def file_references(source: SourceFile, index: dict[str, set[str]]) -> list[Reference]:
     """Every reference the file makes into another unit.
 
@@ -680,7 +790,6 @@ def file_references(source: SourceFile, index: dict[str, set[str]]) -> list[Refe
     """
     own = own_names(source)
     tokens = source.tokens
-    count = len(tokens)
     seen: set[Reference] = set()
     references: list[Reference] = []
     # The open brackets, innermost last.
@@ -697,20 +806,7 @@ def file_references(source: SourceFile, index: dict[str, set[str]]) -> list[Refe
         units = index.get(text)
         if not units or source.unit in units or text in own:
             continue
-        before = tokens[i - 1].text if i else ""
-        # After a `.` it names a member of whatever precedes it. After `...`
-        # it is a range's bound, as in `0...widgetLimit`.
-        if before == "." and not (i >= 2 and tokens[i - 2].text == "."):
-            continue
-        # `f(widgetLimit: 1)` and `f(a, widgetLimit: 1)`: an argument label.
-        # Only directly in parentheses: in `[a: 1, widgetLimit: 2]` it is a
-        # dictionary key, and in `case 1, widgetLimit:` a pattern.
-        if (
-            before in ("(", ",")
-            and brackets and brackets[-1] == "("
-            and _is_local_name(text)
-            and i + 1 < count and tokens[i + 1].text == ":"
-        ):
+        if i and is_member_or_label(tokens, i, brackets):
             continue
         for unit in sorted(units):
             reference = Reference(source.path, token.line, text, (source.unit, unit))
@@ -793,7 +889,7 @@ def read_list(repo_root: Path) -> dict[Link, int]:
         raise CannotCheck(f"cannot read {LINKS_FILE}: not found")
     text = read_text(path, str(LINKS_FILE), "cannot read")
     listed: dict[Link, int] = {}
-    previous = ""
+    previous, previous_number = "", 0
     for number, raw in enumerate(text.split("\n"), start=1):
         # Trailing whitespace, `\r` included, so a hand edit with CRLF line
         # endings or trailing spaces reads the same as a clean one.
@@ -811,12 +907,16 @@ def read_list(repo_root: Path) -> dict[Link, int]:
             raise CannotCheck(f'{where}: "{line}" links a unit to itself')
         if link in listed:
             raise CannotCheck(f'{where}: "{line}" is listed twice')
-        # Sorted, so that parallel branches add lines in predictable places
-        # and their merges conflict only when they add the same link.
+        # Sorted byte by byte, so that parallel branches add lines in
+        # predictable places and their merges conflict only when they add the
+        # same link. The message names both lines: sorting the whole file
+        # would scramble the comments at its top.
         if line < previous:
-            raise CannotCheck(f"{where}: out of order; keep the list sorted (LC_ALL=C sort)")
+            raise CannotCheck(
+                f'{where}: "{line}" is out of order: it sorts before "{previous}" on line {previous_number}'
+            )
         listed[link] = number
-        previous = line
+        previous, previous_number = line, number
     return listed
 
 

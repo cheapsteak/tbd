@@ -239,6 +239,19 @@ test_raw_string_ignored() {
   both_ways "raw string" 1 Widget 'let s = Widget.make()' 'let s = #"say "Widget" \(Widget)"#'
 }
 
+# A raw string that opens with three quotes and closes on its own line is
+# single-line: `#"""#` holds one quote. Read as multi-line, it never closes.
+# One whose opening line holds no closer is multi-line, and a `"#` inside it
+# does not close it.
+test_raw_string_opening_with_three_quotes() {
+  both_ways "a raw string holding one quote" 2 Widget $'let quote = #"""#\nlet w = Widget()' \
+    $'let quote = #"""#\nlet w = 1'
+  both_ways "a raw string holding two quotes" 2 Widget $'let quote = ##""""##\nlet w = Widget()' \
+    $'let quote = ##""""##\nlet w = 1'
+  both_ways "a multi-line raw string" 4 Widget $'let s = #"""\nWidget "# x\n"""#\nlet w = Widget()' \
+    $'let s = #"""\nWidget "# x\n"""#\nlet w = 1'
+}
+
 test_multiline_string_ignored() {
   both_ways "multi-line string" 2 Widget $'let s = """\n\\(Widget.make())\n"""' $'let s = """\nWidget "quoted" {\n"""'
 }
@@ -284,6 +297,8 @@ test_name_after_a_range_counts() {
   both_ways "closed range" 1 widgetLimit 'for i in 0...widgetLimit {}' 'for i in 0...limit {}'
   both_ways "closed range, uppercase" 1 Widget 'for i in 1...Widget.maxAttempts {}' 'for i in 1...Int.max {}'
   both_ways "half-open range" 1 widgetLimit 'for i in 0..<widgetLimit {}' 'for i in 0..<limit {}'
+  # Spaced, the bound still counts, and a `.` before it still makes a member.
+  both_ways "a spaced range's member" 1 widgetLimit 'let r = 0 ... widgetLimit' 'let r = 0 ... .widgetLimit'
 }
 
 test_argument_label_ignored() {
@@ -305,6 +320,34 @@ test_label_does_not_hide_a_later_use() {
     $'takes(widgetLimit: 1)\nlet n = 0'
 }
 
+# A statement's label, and the name `break` or `continue` gives it; a trailing
+# closure's label; a function type's parameter name; an uppercase argument
+# label. None of them is a reference.
+test_labels_ignored() {
+  both_ways "a statement label and continue" 2 widgetLimit \
+    $'func f(xs: [Int]) {\n    for x in xs { _ = widgetLimit }\n}' \
+    $'func f(xs: [Int]) {\n    widgetLimit: for x in xs { continue widgetLimit }\n}'
+  both_ways "a statement label and break" 2 widgetLimit \
+    $'func f() {\n    while true { _ = widgetLimit }\n}' \
+    $'func f() {\n    widgetLimit: while true { break widgetLimit }\n}'
+  both_ways "a statement label after a brace" 1 widgetLimit 'func f() { while true { _ = widgetLimit } }' \
+    'func f() { widgetLimit: while true { break widgetLimit } }'
+  both_ways "a statement label after a semicolon" 1 widgetLimit 'func f() { _ = 1; while true { _ = widgetLimit } }' \
+    'func f() { _ = 1; widgetLimit: while true { break widgetLimit } }'
+  # A label starts a statement. After `case` it is a pattern, and in brackets
+  # a dictionary key, even before an `if`.
+  both_ways "a case pattern before an if" 1 widgetLimit 'switch n { case widgetLimit: if c {}; default: break }' \
+    'switch n { case limit: if c {}; default: break }'
+  both_ways "a dictionary key before an if" 2 widgetLimit $'let d = [\n    widgetLimit: if c { 1 } else { 2 },\n]' \
+    $'let d = [\n    limit: if c { 1 } else { 2 },\n]'
+  both_ways "a trailing closure's label" 1 widgetLimit 'func g() { run { } then: { widgetLimit } }' \
+    'func g() { run { } widgetLimit: { } }'
+  both_ways "a function type's parameter name" 1 widgetLimit \
+    'typealias Handler = (_ limit: Int) -> Int; let n = widgetLimit' \
+    'typealias Handler = (_ widgetLimit: Int) -> Int; let n = 0'
+  both_ways "an uppercase argument label" 1 Widget 'let x = f(Widget)' 'let x = f(Widget: 1)'
+}
+
 # The blind spot the guide names: a local of the same name shadows the global
 # for the whole file.
 test_local_let_shadows_lowercase_global() {
@@ -315,22 +358,71 @@ test_local_let_shadows_lowercase_global() {
 test_parameter_shadows() {
   both_ways "parameter" 1 widgetLimit 'func f(limit: Int) { _ = widgetLimit }' \
     'func f(widgetLimit: Int) { _ = widgetLimit }'
-  passes "an external label's internal name shadows too" 'func f(with widgetLimit: Int) { _ = widgetLimit }'
+  both_ways "an external label's internal name" 1 widgetLimit 'func f(with limit: Int) { _ = widgetLimit }' \
+    'func f(with widgetLimit: Int) { _ = widgetLimit }'
   # Only a `:` directly in the parameter list follows a parameter's name; one
   # inside brackets is a dictionary's.
   both_ways "a dictionary default argument" 1 widgetLimit 'func f(a: [Int: Int] = [widgetLimit: 1]) {}' \
     'func f(a: [Int: Int] = [limit: 1]) {}'
+  # `.init(...)` is a call, whose labels are no parameters.
+  both_ways "a call to .init" 1 widgetLimit 'let w = Box.init(widgetLimit: 1); let n = widgetLimit' \
+    'let w = Box.init(widgetLimit: 1); let n = 0'
 }
 
 test_closure_parameter_shadows() {
   both_ways "closure parameter" 1 widgetLimit 'let g = { (limit: Int) in widgetLimit }' \
     'let g = { (widgetLimit: Int) in widgetLimit }'
+  both_ways "a variadic closure parameter" 1 widgetLimit 'let g = { (limits: Int...) in widgetLimit }' \
+    'let g = { (widgetLimit: Int...) in widgetLimit }'
+  # An `in:` argument label is not a closure's `in`: no parameters precede it.
+  both_ways "an in: label" 1 widgetCount 'let g = { widgetCount(in: 1) }' 'let g = { count(in: 1) }'
 }
 
 test_for_in_shadows() {
   both_ways "for-in" 1 widgetLimit 'for x in xs { _ = widgetLimit }' 'for widgetLimit in xs { _ = widgetLimit }'
   both_ways "for-in over tuples" 1 widgetLimit 'for (i, limit) in pairs { _ = widgetLimit }' \
     'for (i, widgetLimit) in pairs { _ = widgetLimit }'
+  both_ways "for try await" 1 widgetLimit 'func f(s: S) async throws { for try await x in s { _ = widgetLimit } }' \
+    'func f(s: S) async throws { for try await widgetLimit in s { _ = widgetLimit } }'
+}
+
+# `let` or `var` before a pattern binds each lowercase name in it. A type that
+# qualifies a case, a name after a `.` and a label inside the pattern bind
+# nothing, and without a `let` or `var` a bare name in a case pattern matches
+# a value: all of those are still references.
+test_pattern_bindings_shadow() {
+  both_ways "if case let" 1 widgetLimit 'func f(x: Int?) { if case let .some(n) = x { _ = widgetLimit } }' \
+    'func f(x: Int?) { if case let .some(widgetLimit) = x { _ = widgetLimit } }'
+  both_ways "guard case let, qualified" 1 widgetLimit \
+    'func f(r: R) { guard case let Result.success(n) = r else { return }; _ = widgetLimit }' \
+    'func f(r: R) { guard case let Result.success(widgetLimit) = r else { return }; _ = widgetLimit }'
+  both_ways "for case let" 1 widgetLimit 'func f(xs: [Int?]) { for case let .some(n) in xs { _ = widgetLimit } }' \
+    'func f(xs: [Int?]) { for case let .some(widgetLimit) in xs { _ = widgetLimit } }'
+  both_ways "case let in a switch" 1 widgetLimit \
+    'func f(e: E) { switch e { case let .pair(n, other): _ = widgetLimit; default: break } }' \
+    'func f(e: E) { switch e { case let .pair(widgetLimit, other): _ = widgetLimit; default: break } }'
+  both_ways "the type qualifying a case" 1 Widget 'func f(r: R) { guard case let Widget.success(n) = r else { return } }' \
+    'func f(r: R) { guard case let Result.success(n) = r else { return } }'
+  both_ways "a qualified case in a tuple pattern" 1 Widget \
+    'func f(p: P) { switch p { case let (Widget.zero, n): _ = n; default: break } }' \
+    'func f(p: P) { switch p { case let (Gadget.zero, n): _ = n; default: break } }'
+  both_ways "a cast in a pattern" 1 Widget 'func f(e: E) { if case let .a(x as Widget) = e {} }' \
+    'func f(e: E) { if case let .a(x as Gadget) = e {} }'
+  both_ways "a label in a case pattern" 1 widgetLimit \
+    'func f(e: E) { switch e { case let .pair(widgetLimit: n): _ = widgetLimit; default: break } }' \
+    'func f(e: E) { switch e { case let .pair(limit: widgetLimit): _ = widgetLimit; default: break } }'
+  both_ways "a value in a for case pattern" 1 widgetLimit 'func f(xs: [Int?]) { for case .some(widgetLimit) in xs {} }' \
+    'func f(xs: [Int?]) { for case .some(limit) in xs {} }'
+  both_ways "a case name in a pattern" 1 widgetLimit 'func f(e: E) { if case let .widgetLimit(n) = e {}; _ = widgetLimit }' \
+    'func f(e: E) { if case let .widgetLimit(n) = e {}; _ = 0 }'
+  both_ways "a value with a member in a pattern" 1 widgetLimit \
+    'func f(p: P) { switch p { case let (widgetLimit.zero, n): _ = n; default: break } }' \
+    'func f(p: P) { switch p { case let (limit.zero, n): _ = n; default: break } }'
+  # A `let` inside a tuple pattern binds up to the parenthesis that closes
+  # the tuple, not past it into the case's body.
+  both_ways "a let inside a tuple pattern" 1 widgetLimit \
+    'func f(p: P) { switch p { case (_, let .some(n)): _ = widgetLimit; default: break } }' \
+    'func f(p: P) { switch p { case (_, let .some(widgetLimit)): _ = widgetLimit; default: break } }'
 }
 
 # An enum's case names are its own, the second of a list as much as the first.
@@ -358,6 +450,18 @@ test_generic_parameter_shadows() {
   both_ways "primary associated type" 1 Widget 'protocol Holder<T> { var w: Widget { get } }' \
     'protocol Holder<Widget> { var w: Widget { get } }'
   both_ways "a constraint" 1 Widgeting 'struct Box<T: Widgeting> {}' 'struct Box<T: Equatable> {}'
+  # A `->` inside the list does not close it, so a parameter after it counts.
+  both_ways "a function type in a constraint" 1 Widget \
+    'struct Box<F: Handler<(Int) -> Void>, T> { let w: Widget }' \
+    'struct Box<F: Handler<(Int) -> Void>, Widget> { let w: Widget }'
+  # An operator's name is punctuation: the `<` in `<<` opens no list, so the
+  # names after it are not parameters. `==<T>` has one.
+  both_ways "an operator function" 1 Widget \
+    'struct Buf { static func << (lhs: inout Buf, rhs: Int) {}; let w = (1, Widget()) }' \
+    'struct Buf { static func << (lhs: inout Buf, rhs: Int) {}; let w = (1, Gadget()) }'
+  both_ways "a generic operator function" 1 Widget \
+    'struct Box { static func ==<T>(a: T, b: Widget) -> Bool { false } }' \
+    'struct Box { static func ==<Widget>(a: Widget, b: Widget) -> Bool { false } }'
 }
 
 test_associated_type_shadows() {
@@ -418,6 +522,35 @@ test_privacy_is_per_declaration() {
   put "$d" Base/More.swift $'let seed = 1\nprivate\nstruct Gizmo {}'
   run_check "$d"
   assert_rc "a private on the line above its keyword is not" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# `.private` is a member, as in a log call's `privacy: .private`, not a
+# modifier: the declaration after it stays indexed.
+test_private_member_is_no_modifier() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let g = Gizmo()'
+  put "$d" Base/More.swift $'let level: Privacy = .private\nstruct Gizmo {}'
+  run_check "$d"
+  assert_rc "a declaration after .private is indexed" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: Gizmo"
+  put "$d" Base/More.swift $'let level: Privacy = .private\nprivate struct Gizmo {}'
+  run_check "$d"
+  assert_rc "a private one is not" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# `actor` used as a value, as in `actor as Int`, declares no type named `as`.
+# Read as one, every file with a cast would link to its unit.
+test_actor_as_a_value_declares_nothing() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let y = 1 as Gizmo'
+  put "$d" Base/More.swift 'actor Gizmo {}'
+  run_check "$d"
+  assert_rc "an actor is indexed" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: Gizmo"
+  put "$d" Top/User.swift 'let y = 1 as Int'
+  put "$d" Base/More.swift 'let x = actor as Int'
+  run_check "$d"
+  assert_rc "a cast is no reference to an actor used as a value" 0 "$RUN_RC" "$RUN_OUT"
 }
 
 # `private(set)` restricts only the setter, so the name stays indexed.
@@ -565,7 +698,8 @@ test_malformed_list_cannot_check() {
   list "$d" 'Top -> Base' 'Mid -> Base'
   run_check "$d"
   assert_rc "an unsorted list" 2 "$RUN_RC" "$RUN_OUT"
-  assert_contains "is named" "$RUN_OUT" 'scripts/daemon-links.txt:3: out of order; keep the list sorted (LC_ALL=C sort)'
+  assert_contains "is named, with the line it sorts before" "$RUN_OUT" \
+    'scripts/daemon-links.txt:3: "Mid -> Base" is out of order: it sorts before "Top -> Base" on line 2'
 
   list "$d" 'Top -> Top'
   run_check "$d"
