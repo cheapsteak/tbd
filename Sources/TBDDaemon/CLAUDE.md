@@ -32,7 +32,11 @@ The check indexes each unit's top-level declarations that are not `private` or `
 - in an extension of the type, or a conformance to the protocol;
 - in code inside a string's interpolation.
 
-It ignores a name after a `.` (though not after `...`), an argument label in parentheses, and every name in a comment, a string, a regex literal or a raw identifier such as `` `checks that Widget parses` ``.
+It ignores:
+
+- a name after a `.`, though not after `...`;
+- a label: an argument label or a function type's parameter name in parentheses, a trailing closure's label, or a statement's label, where it is declared and after `break` or `continue`;
+- every name in a comment, a string, a regex literal or a raw identifier such as `` `checks that Widget parses` ``.
 
 ### Links the check can miss
 
@@ -41,17 +45,19 @@ The check matches names, not types. It misses:
 - **an inferred type's member**, as in `db.terminals.setStartHeld()`;
 - **a member another folder's extension adds**;
 - **an implicit `.case` or `.init(...)`** whose type comes from context;
-- **a name the file declares for itself**: a local, a parameter, a generic parameter, a member, a nested type, a type or function declared in a body, or a private declaration with the same name as another unit's declaration. The check reads every use of that name in the file as the file's own;
+- **a name the file declares for itself**: a local, a name a pattern binds, a parameter, a generic parameter, a member, a nested type, a type or function declared in a body, or a private declaration with the same name as another unit's declaration. The check reads every use of that name in the file as the file's own;
 - **an overloaded top-level function** that the calling folder also declares under the same name.
 
 A missed reference makes no link, so the list can understate how two folders depend on each other. Nothing needs fixing for it.
 
 ### Links the check can report falsely
 
-- **A member used without `self.`, declared in another file.** A type's member declared in one file and used bare in the type's extension in another file reads as a reference to any other unit's top-level declaration of the same name. The check sees a member only in the file that declares it.
+- **A member or nested type used bare, declared in another file.** A type's member or nested type declared in one file and used bare in the type's extension in another file reads as a reference to any other unit's top-level declaration of the same name. The check sees a member only in the file that declares it.
 - **A subscript's argument label**, as in `cache[widgetLimit: 2]`, reads as a dictionary key.
+- **A statement label after a `case` on its line**, as in `case .a: outer: for x in xs`, reads as a reference. A label that starts its line, or follows `{` or `;`, does not.
+- **An uppercase name a pattern binds**, as in `case let .some(Widget)`. In a pattern the check binds only lowercase names, so that no type in it is taken for a binding.
 
-A false link is a bug in the check. For a bare member, write `self.` before it; for anything else, fix the check and add the case to `scripts/lint-daemon-layers.test.sh`. Never add a false link to the list: the name that makes it never goes away, so the line can never go stale, and from then on it admits every real reference between the two folders.
+A false link is a bug in the check. For a bare member, write `self.` before it, or `Self.` before a nested type or a static member; for anything else, fix the check and add the case to `scripts/lint-daemon-layers.test.sh`. Never add a false link to the list: the name that makes it never goes away, so the line can never go stale, and from then on it admits every real reference between the two folders.
 
 ### Reading a failure
 
@@ -89,9 +95,14 @@ Branch protection does not require a branch to be up to date with `main` before 
 
 Exit 2 means the check could not run. It stops rather than report links it may have read wrong.
 
-- **`cannot scan <file>:<line>`**: the check could not read that Swift. The reason is an unbalanced brace, a comment or literal that never closes, or bytes that are not UTF-8. The usual cause is an `#if` whose branches open different braces, such as two signatures sharing one body. Make each branch balance its own braces. Without a line, the file is in a folder with a space in its name, whose links the list could not hold.
+- **`cannot scan <file>:<line>`**: the check could not read that Swift. The reason is an unbalanced brace, a comment or literal that never closes, or bytes that are not UTF-8. The usual cause is an `#if` whose branches open different braces, such as two signatures sharing one body. Make each branch balance its own braces.
+- **`cannot scan` without a line**: either `Sources/TBDDaemon: not found`, because the check ran against a tree without it (see `--repo-root`), or a file in a folder with a space in its name, whose links the list could not hold.
 - **`cannot read <path>`**: the check could not open that file or list that folder, for the reason that follows.
-- **`cannot read scripts/daemon-links.txt:<line>`**: a line is not `A -> B`, has a space in a unit name, is listed twice, links a unit to itself, is out of order, or holds bytes that are not UTF-8. `LC_ALL=C sort` gives the order the check expects.
+- **`cannot read scripts/daemon-links.txt:<line>`**: a line is not `A -> B`, has a space in a unit name, is listed twice, links a unit to itself, is out of order, or holds bytes that are not UTF-8. An out-of-order line is named with the line it sorts before. The links are in byte order, below the comments at the top; sorting the whole file would scramble those comments. This sorts only the link lines:
+
+  ```
+  { grep -E '^(#|$)' scripts/daemon-links.txt; grep -Ev '^(#|$)' scripts/daemon-links.txt | LC_ALL=C sort; } > links.tmp && mv links.tmp scripts/daemon-links.txt
+  ```
 
 ### The cycle report
 
@@ -111,4 +122,4 @@ Within a group, every unit reaches every other by following links. The report is
 
 CI runs the check in the Lint job and the harness in the Script harnesses job. The Lint job runs the check under macOS's own `/usr/bin/python3`, Python 3.9, which is the `python3` the pre-push hook finds on a Mac without Homebrew; so the check must not use newer syntax.
 
-The pre-push hook runs the check on every push, even with `TBD_SKIP_PREPUSH_TESTS=1`. It checks the working tree, not the commits being pushed, so an untracked, half-written Swift file can block a push that does not include it. `git push --no-verify` skips the hook for that push.
+The pre-push hook runs the check on every push from a branch that has it, even with `TBD_SKIP_PREPUSH_TESTS=1`. It checks the working tree, not the commits being pushed, so an untracked, half-written Swift file can block a push that does not include it. `git push --no-verify` skips the hook for that push.

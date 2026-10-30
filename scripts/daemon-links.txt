@@ -7,7 +7,9 @@
 # scripts/lint-daemon-layers.py fails when code makes a link this list lacks,
 # and when the list holds a link no code makes. Add a new link by hand, in the
 # change that makes it, and delete a line in the change that removes its last
-# reference. Keep the lines sorted (LC_ALL=C sort).
+# reference. Keep the links in byte order, below these comments. Sorting the
+# whole file would scramble the comments; Sources/TBDDaemon/CLAUDE.md gives a
+# command that sorts only the links.
 #
 # How to read and fix a failure: Sources/TBDDaemon/CLAUDE.md,
 # "Links between folders".
