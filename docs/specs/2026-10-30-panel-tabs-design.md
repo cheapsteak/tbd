@@ -205,7 +205,10 @@ operation against current state regardless of the base; it uses a stale base
 only to relabel an already-failing vanished-target error as `staleTarget`.
 
 Staleness is handled in the app's copy instead: it never adopts a tab whose
-revision is lower than the one it holds. Without that guard a `panel.get` in
+revision is lower than the one it holds for that tab, under any worktree. Tab
+IDs are global, so a tab the copy adopts under one worktree, from a delta or a
+full `panel.get`, leaves every other worktree's entry: promoting a scratch
+worktree re-parents its tabs. Without that guard a `panel.get` in
 flight at revision N could land after a delta at N+1 and revert the copy, and
 since deltas fire only on change, nothing would correct it until the next
 mutation. Removal is exempt: a tab absent from a full `panel.get`, or named in a

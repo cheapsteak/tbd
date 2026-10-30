@@ -63,10 +63,12 @@ extension AppState {
     ///
     /// - **Removal:** a tab the copy held when the get was issued, and the
     ///   result omits, is dropped whatever its revision.
-    /// - **Content:** a listed tab the copy holds goes through the revision
-    ///   guard, so a delta's newer revision is not reverted. Revisions are
-    ///   daemon-wide and never decrease, so the guard holds across a daemon
-    ///   restart and across a tab deleted and imported again.
+    /// - **Content:** a listed tab the copy holds, under any worktree, goes
+    ///   through the revision guard, so a delta's newer revision is not
+    ///   reverted. Revisions are daemon-wide and never decrease, so the guard
+    ///   holds across a daemon restart and across a tab deleted and imported
+    ///   again. A tab the result adopts leaves every other worktree's entry,
+    ///   as it does from a delta: a scratch promote re-parents tabs.
     /// - **Changed in flight:** a tab a delta or an apply reply changed —
     ///   adopted or removed — while the get was in flight keeps what that
     ///   change left. One adopted then is not dropped by the result's
@@ -101,8 +103,8 @@ extension AppState {
             return
         }
         var surfaces = panelSurfaces
-        surfaces[worktreeID] = Self.merge(
-            result, into: panelSurfaces[worktreeID] ?? [:],
+        Self.merge(
+            result, worktreeID: worktreeID, into: &surfaces,
             heldAtIssue: heldAtIssue, touchedInFlight: touchedInFlight)
         commitPanelSurfaces(surfaces)
     }
@@ -128,34 +130,40 @@ extension AppState {
         await loadPanelSurfaces(worktreeID: key.worktreeID)
     }
 
-    /// The merge rules `loadPanelSurfaces` documents, on one worktree's entry.
-    /// Returns nil for an entry left empty.
+    /// The merge rules `loadPanelSurfaces` documents, for `worktreeID`'s
+    /// result, on the whole copy: an entry left empty is dropped, and a tab
+    /// adopted here leaves every other worktree's entry.
     private static func merge(
         _ result: PanelGetResult,
-        into current: [WorkspaceTabID: WorkspaceTabSurface],
+        worktreeID: UUID,
+        into surfaces: inout PanelSurfaceCopy,
         heldAtIssue: Set<WorkspaceTabID>,
         touchedInFlight: Set<WorkspaceTabID>
-    ) -> [WorkspaceTabID: WorkspaceTabSurface]? {
-        var merged = current
+    ) {
+        var merged = surfaces[worktreeID] ?? [:]
         let listed = Set(result.tabs.map(\.id))
         for tabID in heldAtIssue where !listed.contains(tabID) && !touchedInFlight.contains(tabID) {
             merged.removeValue(forKey: tabID)
         }
+        var adopted: [WorkspaceTabID] = []
         for incoming in result.tabs {
-            if let mine = current[incoming.id] {
-                guard incoming.revision >= mine.revision else {
-                    logRefusedRevision(incoming, held: mine.revision)
+            if let held = heldRevision(of: incoming.id, in: surfaces) {
+                guard incoming.revision >= held else {
+                    logRefusedRevision(incoming, held: held)
                     continue
                 }
-                merged[incoming.id] = incoming
-            } else if !touchedInFlight.contains(incoming.id) {
-                // Absent from the copy and untouched since the get was
-                // issued: new to the copy. Absent but touched means a delta
-                // removed it, or moved it to another worktree, in flight.
-                merged[incoming.id] = incoming
+            } else if touchedInFlight.contains(incoming.id) {
+                // Absent from the copy but touched since the get was issued:
+                // a delta removed it in flight, and the listing predates that.
+                continue
             }
+            merged[incoming.id] = incoming
+            adopted.append(incoming.id)
         }
-        return merged.isEmpty ? nil : merged
+        surfaces[worktreeID] = merged.isEmpty ? nil : merged
+        for tabID in adopted {
+            evict(tabID, fromAllBut: worktreeID, in: &surfaces)
+        }
     }
 
     /// Records that a delta or an apply reply changed these tabs — adopted or
@@ -220,24 +228,39 @@ extension AppState {
     }
 
     /// The revision guard, on a working copy; returns false when it refused
-    /// the surface. A tab's ID is global, so a surface adopted under one
-    /// worktree leaves every other worktree's entry: promoting a scratch
-    /// worktree re-parents its tabs, and the delta for that reaches only the
-    /// destination.
+    /// the surface. A tab's ID is global and its revisions daemon-wide, so the
+    /// guard compares against the tab under any worktree, and a surface
+    /// adopted under one worktree leaves every other worktree's entry:
+    /// promoting a scratch worktree re-parents its tabs, and the delta for
+    /// that reaches only the destination.
     private static func adopt(_ surface: WorkspaceTabSurface, into surfaces: inout PanelSurfaceCopy) -> Bool {
-        if let held = surfaces[surface.worktreeID]?[surface.id], surface.revision < held.revision {
-            logRefusedRevision(surface, held: held.revision)
+        if let held = heldRevision(of: surface.id, in: surfaces), surface.revision < held {
+            logRefusedRevision(surface, held: held)
             return false
         }
-        for worktreeID in Array(surfaces.keys) where worktreeID != surface.worktreeID {
-            guard surfaces[worktreeID]?[surface.id] != nil else { continue }
-            surfaces[worktreeID]?.removeValue(forKey: surface.id)
-            if surfaces[worktreeID]?.isEmpty == true {
-                surfaces.removeValue(forKey: worktreeID)
-            }
-        }
+        evict(surface.id, fromAllBut: surface.worktreeID, in: &surfaces)
         surfaces[surface.worktreeID, default: [:]][surface.id] = surface
         return true
+    }
+
+    /// The revision the copy holds for a tab, under whichever worktree holds
+    /// it, or nil when it holds none.
+    private static func heldRevision(of tabID: WorkspaceTabID, in surfaces: PanelSurfaceCopy) -> UInt64? {
+        surfaces.values.compactMap { $0[tabID]?.revision }.max()
+    }
+
+    /// Removes a tab from every worktree's entry but `worktreeID`'s, dropping
+    /// an entry that leaves empty.
+    private static func evict(
+        _ tabID: WorkspaceTabID, fromAllBut worktreeID: UUID, in surfaces: inout PanelSurfaceCopy
+    ) {
+        for other in Array(surfaces.keys) where other != worktreeID {
+            guard surfaces[other]?[tabID] != nil else { continue }
+            surfaces[other]?.removeValue(forKey: tabID)
+            if surfaces[other]?.isEmpty == true {
+                surfaces.removeValue(forKey: other)
+            }
+        }
     }
 
     /// Writes the copy only when it differs: every reader of the tracked

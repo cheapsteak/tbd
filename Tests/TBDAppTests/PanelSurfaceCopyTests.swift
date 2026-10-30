@@ -265,6 +265,42 @@ struct PanelSurfaceCopyTests {
         }
     }
 
+    @Test("a full get that lists a tab held under another worktree moves it there; an older listing does not")
+    func mergeEvictsTabFromOtherWorktree() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let scratchID = UUID()
+            let mainID = UUID()
+            let movedID = UUID()
+            let keptID = UUID()
+            let kept = Fixture.surface(tabID: keptID, worktreeID: scratchID, revision: 2)
+            let beforeMove = Fixture.surface(tabID: movedID, worktreeID: scratchID, revision: 4)
+            state.panelSurfaces = [scratchID: [movedID: beforeMove, keptID: kept]]
+            // Promoting the scratch worktree re-parented the tab, and the
+            // delta saying so reached no subscription.
+            let moved = Fixture.surface(tabID: movedID, worktreeID: mainID, revision: 9)
+            _ = Fixture.collectGets(state) { worktreeID in
+                worktreeID == mainID
+                    ? PanelGetResult(tabs: [moved], activeTabID: nil)
+                    // A snapshot of the scratch worktree from before the move.
+                    : PanelGetResult(tabs: [beforeMove, kept], activeTabID: nil)
+            }
+
+            await state.loadPanelSurfaces(worktreeID: mainID)
+
+            #expect(state.panelSurface(worktreeID: mainID, tabID: movedID) == moved)
+            #expect(state.panelSurface(worktreeID: scratchID, tabID: movedID) == nil,
+                    "a tab ID lives under one worktree, as `adopt` keeps it")
+            #expect(state.panelSurface(worktreeID: scratchID, tabID: keptID) == kept)
+
+            await state.loadPanelSurfaces(worktreeID: scratchID)
+
+            #expect(state.panelSurface(worktreeID: mainID, tabID: movedID) == moved,
+                    "revisions are daemon-wide, so the guard refuses an older copy held elsewhere")
+            #expect(state.panelSurface(worktreeID: scratchID, tabID: movedID) == nil)
+            #expect(state.panelSurface(worktreeID: scratchID, tabID: keptID) == kept)
+        }
+    }
+
     @Test("a delta's activeTabID does not move the selected workspace tab")
     func deltaActiveTabIDIgnored() async {
         await Fixture.withState(panelTabs: true) { state in
