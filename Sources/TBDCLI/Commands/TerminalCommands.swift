@@ -177,7 +177,8 @@ struct TerminalSend: AsyncParsableCommand {
               --keys "Escape Enter"  whitespace-separated key names, sent one
                                   at a time. Interrupt is a keys payload
                                   (--keys "C-c"). Enter is itself a key, so
-                                  --submit does not apply here.
+                                  --submit does not apply here. One printable
+                                  character is its own key: --keys 4 presses 4.
 
             A non-empty text payload sent to an AGENT session is delivered
             behind a one-line attribution envelope carrying the send's record id
@@ -204,7 +205,7 @@ struct TerminalSend: AsyncParsableCommand {
     @Option(name: .long, help: "Text to send")
     var text: String?
 
-    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\" or \"C-c\"")
+    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\", \"C-c\" or \"4\"")
     var keys: String?
 
     @Flag(name: .long, help: "Press Enter after sending text")

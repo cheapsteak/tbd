@@ -2514,6 +2514,37 @@ struct HolderTmuxAssumptionGateTests {
         #expect(recorded.snapshot().isEmpty)
     }
 
+    @Test("terminal.send --keys types a digit as a keypress, unwrapped even under bracketed paste")
+    func sendKeysTypesDigitAsKeypress() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let recorded = RecordedTmuxArgs()
+        let tmux = deadWindowTmux(recorded)
+        let (wt, dir) = try await seedWorktree(db)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let terminal = try await seedClaudeTerminal(
+            db, worktreeID: wt.id, transport: .holder)
+        let writes = HolderWrites()
+
+        let rpc = router(db, tmux: tmux)
+        rpc.holderInjectionCourier = writes.courier()
+        // The child has bracketed paste on, as Claude Code does. A `--text 4`
+        // would arrive inside the paste markers, which a numbered dialog
+        // ignores; a key must not.
+        rpc.holderModeOracle = oracle(bracketedPaste: true, applicationCursor: false)
+        let response = await rpc.handle(try RPCRequest(
+            method: RPCMethod.terminalSend,
+            params: TerminalSendParams(terminalID: terminal.id, keys: "4")))
+
+        #expect(response.success, "error: \(response.error ?? "nil")")
+        // One write of `0x34` and nothing around it: no `ESC [ 200 ~` paste
+        // start, no carriage return.
+        #expect(writes.all == [Data([0x34])],
+                "expected the single byte 0x34, got \(writes.all.map({ Array($0) }))")
+        let outcome = try #require(await Self.outcomeRow(of: rpc))
+        #expect(outcome["result"] as? String == "dispatched")
+        #expect(recorded.snapshot().isEmpty)
+    }
+
     @Test("terminal.send --keys refuses an unknown key name, having written nothing")
     func sendKeysRefusesUnknownKeyName() async throws {
         let db = try TBDDatabase(inMemory: true)
