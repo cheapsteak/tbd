@@ -250,13 +250,11 @@ public enum RPCMethod {
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalMigrateTransport = "terminal.migrateTransport"
     public static let terminalSessionEvent = "terminal.sessionEvent"
-    public static let terminalActivityEvent = "terminal.activityEvent"
     public static let terminalSessionEnded = "terminal.sessionEnded"
     /// Sent by `tbd hooks session-title` from Claude's `UserPromptSubmit`
     /// hook: asks for the title the session should take, when it has changed
     /// since the session was last given one.
     public static let terminalSessionTitle = "terminal.sessionTitle"
-    public static let terminalNotificationEvent = "terminal.notificationEvent"
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
     public static let terminalAskUserQuestionSatisfied = "terminal.askUserQuestionSatisfied"
@@ -4705,66 +4703,9 @@ public struct TerminalSessionEventParams: Codable, Sendable {
     }
 }
 
-public enum TerminalActivityEventOrigin: String, Codable, Sendable {
-    /// The app observed the user explicitly interrupting the foreground agent.
-    case userInterrupt = "user_interrupt"
-}
-
-public struct TerminalActivityEventParams: Codable, Sendable {
-    public let terminalID: UUID
-    public let activityState: TerminalActivityState
-    /// Codex hook session identity when the caller consumed hook stdin.
-    /// Optional for older hook overlays and non-hook callers.
-    public let sessionID: String?
-    /// Process incarnation planted by TBD before a managed replacement starts.
-    /// Optional for older hook overlays and non-hook callers.
-    public let sessionIncarnationID: UUID?
-    /// Absent for the existing agent-hook bridge. Optional so older clients'
-    /// payloads continue to decode unchanged.
-    public let origin: TerminalActivityEventOrigin?
-    /// Set by the Claude `UserPromptSubmit` hook (`--session-title`): asks the
-    /// daemon for the session's title when it has changed since the session
-    /// was last given one. Absent from Codex hooks and older overlays, which
-    /// therefore never receive a title.
-    public let wantsSessionTitle: Bool?
-    public init(
-        terminalID: UUID,
-        activityState: TerminalActivityState,
-        sessionID: String? = nil,
-        sessionIncarnationID: UUID? = nil,
-        origin: TerminalActivityEventOrigin? = nil,
-        wantsSessionTitle: Bool? = nil
-    ) {
-        self.terminalID = terminalID
-        self.activityState = activityState
-        self.sessionID = sessionID
-        self.sessionIncarnationID = sessionIncarnationID
-        self.origin = origin
-        self.wantsSessionTitle = wantsSessionTitle
-    }
-}
-
-/// Result of `terminal.activityEvent` when the request set
-/// `wantsSessionTitle`. Every other request gets an empty success.
-public struct TerminalActivityEventResult: Codable, Sendable, Equatable {
-    /// The title the session should take, via the hook's
-    /// `hookSpecificOutput.sessionTitle`. Nil when the session already carries
-    /// the title TBD wants for it.
-    public let sessionTitle: String?
-    public init(sessionTitle: String?) {
-        self.sessionTitle = sessionTitle
-    }
-}
-
 /// Params for `terminal.sessionEnded` — sent by `tbd session-end` from the
 /// Claude Code `SessionEnd` hook. Carries identity only: the daemon decides
 /// what ending a session means.
-///
-/// A dedicated method rather than a new `TerminalActivityEventOrigin` case:
-/// an unknown enum raw value throws inside the shared params decode on an
-/// older daemon, while an unknown *method* fails cleanly and the hook's
-/// trailing `|| true` swallows it. `~/.local/bin/tbd` can be stale relative
-/// to a running daemon, so that skew is real.
 public struct TerminalSessionEndedParams: Codable, Sendable, Equatable {
     public let terminalID: UUID
     /// Process incarnation planted by TBD before a managed replacement starts.
@@ -4810,54 +4751,6 @@ public struct TerminalSessionTitleResult: Codable, Sendable, Equatable {
     public let sessionTitle: String?
     public init(sessionTitle: String?) {
         self.sessionTitle = sessionTitle
-    }
-}
-
-/// Params for `terminal.notificationEvent` — sent by `tbd hooks notification`
-/// for EVERY Claude Code `Notification` event, whatever its type.
-///
-/// The CLI interprets nothing: it lifts the fields it can name, carries the
-/// whole payload in `rawPayload`, and lets the daemon do the only classifying
-/// there is. Keeping the fork daemon-side is deliberate — the hook entry lives
-/// in a file an operator can edit, so a matcher or a branch out there would be
-/// a policy decision TBD could not rely on.
-public struct TerminalNotificationEventParams: Codable, Sendable, Equatable {
-    public let terminalID: UUID
-    /// `notification_type` verbatim, or nil when the payload carried none.
-    /// Never normalized, never defaulted to a known type.
-    public let notificationType: String?
-    /// The notification text, verbatim.
-    public let message: String
-    /// The notification title, when the payload carried one. Reported rather
-    /// than persisted in a column of its own: `AwaitingInputReason` models the
-    /// message and the type, and the title survives inside `rawPayload` for a
-    /// consumer that wants it. Carried on the wire anyway so the daemon can
-    /// start using it without a CLI release — an older CLI is the thing that
-    /// cannot be fixed retroactively.
-    public let title: String?
-    /// The entire stdin payload as it arrived, so a later consumer can read a
-    /// field this build does not model.
-    public let rawPayload: String?
-    /// Claude's reported working directory, used only for the same
-    /// foreign-session guard `terminal.sessionEvent` applies: a hook fired by a
-    /// session living in another worktree must not write to this terminal.
-    /// Optional for backward compatibility with older CLIs.
-    public let cwd: String?
-
-    public init(
-        terminalID: UUID,
-        notificationType: String?,
-        message: String,
-        title: String? = nil,
-        rawPayload: String? = nil,
-        cwd: String? = nil
-    ) {
-        self.terminalID = terminalID
-        self.notificationType = notificationType
-        self.message = message
-        self.title = title
-        self.rawPayload = rawPayload
-        self.cwd = cwd
     }
 }
 

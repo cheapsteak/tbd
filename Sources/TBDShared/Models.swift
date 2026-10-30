@@ -862,30 +862,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
             value: activityState, source: activityStateSource, observedAt: activityStateObservedAt)
     }
 
-    /// The recorded wait reason as a fact — value, source, observed-at — or nil.
-    ///
-    /// The source is not a column of its own: a hook-recorded reason carries
-    /// the event's name, so `.hookEvent(name)` IS the provenance rather than a
-    /// second copy of it. A reason with no event name — the program status
-    /// store's, whose provenance is `activityStateSource` beside it, or one
-    /// with an empty name, which names a source just as poorly — is therefore
-    /// half a triple here and reports no fact, on the same rule
-    /// `observedActivity` follows. `SessionStateResolver` does not read this.
-    ///
-    /// This is a *recorded reason*, not a claim about what the session is doing
-    /// now — nothing here asserts `activityState`. Composing the two into a
-    /// session state is the resolver's job.
-    public var observedAwaitingInput: ObservedFact<AwaitingInputReason>? {
-        guard let awaitingInputReason,
-              let awaitingInputObservedAt,
-              let hookEventName = awaitingInputReason.hookEventName,
-              !hookEventName.isEmpty else { return nil }
-        return ObservedFact(
-            value: awaitingInputReason,
-            source: .hookEvent(hookEventName),
-            observedAt: awaitingInputObservedAt)
-    }
-
     /// Whether this row is parked because Claude's own process left, rather than
     /// because TBD parked it. Both columns are required: `hibernatedAt` is what
     /// makes it a park at all, and the reason is what says who ended it.

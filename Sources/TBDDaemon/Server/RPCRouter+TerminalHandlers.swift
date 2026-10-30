@@ -3642,20 +3642,10 @@ extension RPCRouter {
             inspector: paneProcessInspector, signaller: processSignaller, clock: clock,
             attempts: hibernationCoordinator.exitPollAttempts,
             interval: hibernationCoordinator.exitPollInterval)
-        // Legacy Notification hooks carry no incarnation token. Retract any
-        // wait reason the predecessor recorded during the interrupt, before
-        // launching a successor that could raise a legitimate new prompt.
-        do {
-            try await db.terminals.clearAwaitingInputReason(id: oldTerminal.id)
-            // Subscribers mirror the persisted reason. Only retract it after
-            // the write succeeds, so reconnecting cannot resurrect a reason
-            // that the live delta incorrectly claimed was cleared.
-            broadcastAwaitingInputRetraction(terminal: oldTerminal)
-        } catch {
-            // The predecessor is already stopped: a metadata cleanup failure
-            // must not prevent the replacement process from starting.
-            logger.warning("inPlace swap: prompt cleanup failed for terminal \(oldTerminal.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
-        }
+        // `prepareProfileAgentRespawn` committed the new incarnation with no
+        // wait reason; subscribers mirror the persisted reason, so retract the
+        // predecessor's.
+        broadcastAwaitingInputRetraction(terminal: oldTerminal)
 
         subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
             terminalID: prepared.id,
@@ -5841,11 +5831,9 @@ extension RPCRouter {
     /// terminal may have been deleted between hook fire and arrival).
     func handleTerminalSessionEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalSessionEventParams.self, from: paramsData)
-        // Establish event order before the first suspension. SessionStart and
-        // terminal.activityEvent share this activity-fact clock, so a fact with
-        // a later timestamp wins even when earlier handler work finishes
-        // afterward. The store gives explicit interrupts the safety tie-break
-        // when the date source returns an identical timestamp.
+        // Establish event order before the first suspension: a Codex
+        // SessionStart with a later timestamp wins the session-identity rail
+        // even when earlier handler work finishes afterward.
         let observedAt = now()
 
         guard let terminal = try await db.terminals.get(id: params.terminalID) else {
@@ -5903,10 +5891,9 @@ extension RPCRouter {
             ? observedTranscriptBoundary(atAbsolutePath: effectiveTranscriptPath)
             : nil
 
-        // Codex session identity, prompt retraction, and the idle fact are
-        // reconciled atomically on independent ordering rails. Other agent
-        // kinds retain the established last-writer session and prompt update
-        // in the same transaction.
+        // Codex session identity is reconciled on its own ordering rail; other
+        // agent kinds keep last-writer session identity. Neither writes
+        // activity: the agent reports that itself.
         guard let sessionApplication = try await db.terminals.applySessionStart(
             id: terminal.id,
             expectedIncarnation: expectedIncarnation,
@@ -6012,159 +5999,6 @@ extension RPCRouter {
             // reported in.
             sessionIncarnationID: params.sessionIncarnationID
         )))
-        if let application = sessionApplication.activityObservation {
-            subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
-                terminalID: terminal.id,
-                worktreeID: terminal.worktreeID,
-                activityState: application.activityState,
-                activityStateSource: application.source,
-                activityStateObservedAt: application.observedAt,
-                activityStateOrderObservedAt: application.orderObservedAt
-            )))
-        }
-        // A `/clear`, a resume, or a hand relaunch replaces the process the
-        // prompt was raised on, and the store retracts the reason with it.
-        if sessionApplication.clearedAwaitingInput {
-            broadcastAwaitingInputRetraction(terminal: terminal)
-        }
-        return .ok()
-    }
-
-    /// Bridge for Claude Code's `Notification` hook — the one event that can
-    /// say a prompt is on screen *now*.
-    ///
-    /// The hook entry that feeds this handler carries no matcher, so every
-    /// notification type arrives here and every fork lives in this function.
-    /// That placement is the design, not an accident: the hook entry sits in a
-    /// settings file an operator can edit, so a matcher out there would be a
-    /// policy decision TBD could not depend on, while a fork here is compiled
-    /// and testable.
-    ///
-    /// The handler records the reason columns, and for a prompt-on-screen
-    /// classification additionally raises an `.attentionNeeded` notification
-    /// so the macOS banner fires and the name bolds.
-    ///
-    /// The recorded reason is ALSO pushed as `.terminalAwaitingInputChanged`,
-    /// and that — not the notification — is what the sidebar's suffix slot
-    /// reads. The notification is unread mail: selecting the worktree marks it
-    /// read, so the row the user is looking at would lose the indicator while
-    /// the prompt was still on screen.
-    func handleTerminalNotificationEvent(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(TerminalNotificationEventParams.self, from: paramsData)
-        // Timestamp receipt before any actor or database suspension, exactly as
-        // `handleTerminalActivityEvent` and `handleTerminalSessionEvent` do.
-        // The stamp is one end of an ordering comparison the activity rail makes
-        // when it retracts this reason, so a busy daemon must not be able to
-        // date a prompt later than the answer to it.
-        let observedAt = now()
-
-        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
-            // Soft success — the caller is a fire-and-forget hook, and the
-            // terminal may have been deleted between fire and arrival. An
-            // error response here would be noise nobody reads and a non-zero
-            // exit nobody wants in a hook.
-            logger.debug("notificationEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
-            return .ok()
-        }
-        await activityLedger.recordAgentEvent(
-            terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
-
-        if let cwd = params.cwd, !cwd.isEmpty {
-            guard try await hookCWDBelongsToTerminal(cwd, terminal: terminal, event: "notificationEvent")
-            else { return .ok() }
-        }
-
-        // The classification is a label on the record, computed once here from
-        // the verbatim type. An unrecognized or absent type stays unrecognized.
-        let classification = AwaitingInputClass(notificationType: params.notificationType)
-        // A prompt-on-screen reason carries the transcript as it stood when the
-        // prompt was raised, so a later reader can tell "still waiting" from
-        // "answered, and the session moved on" without a hook to tell it —
-        // Claude Code fires none when a human decides. Only that class gets
-        // one: no other class raises a hand there would be anything to lower.
-        let fingerprint: TranscriptFingerprint? = classification == .promptOnScreen
-            ? terminal.transcriptPath.flatMap { $0.isEmpty ? nil : transcriptFingerprinter($0) }
-            : nil
-        let reason = AwaitingInputReason(
-            message: params.message,
-            hookEventName: "Notification",
-            raw: params.rawPayload,
-            notificationType: params.notificationType,
-            transcriptFingerprint: fingerprint)
-
-        // Deliberately NOT `setActivityState`: this hook reports that a prompt
-        // was raised, not that the session is still sitting on one, and
-        // `activityState` is a *gating* field — `HibernationGate.blockingRail`
-        // reads it, so writing `waiting_for_user` from here would silently
-        // change which sessions park, on the strength of a message TBD does
-        // not parse. `recordAwaitingInputReason` writes the reason columns and
-        // leaves the activity columns exactly as they were. The resolver
-        // composes `.awaitingInput(reason:)` from this record instead — so if
-        // you are here to "fix" a missing state transition, fix it there.
-        //
-        // `observedAt` comes from the router's date seam, never a bare `Date()`
-        // at the write site: a persisted observed-at is data, so it is the date
-        // seam rather than a `Clock`.
-        let write = try await db.terminals.recordAwaitingInputReason(
-            id: terminal.id, reason: reason, observedAt: observedAt)
-
-        // The reason columns are what the sidebar reads for "a prompt is on
-        // screen right now", so the app has to learn about them by push. A
-        // notification row would not do: notifications model unread mail and
-        // are marked read the moment the worktree is selected, which is
-        // exactly the worktree whose prompt the user most needs to see.
-        //
-        // Only writes that change whether a prompt is on screen are pushed.
-        // This hook carries no matcher, so it also fires for every
-        // `agent_completed` a parallel subagent produces and every 60-second
-        // `idle_prompt` across the fleet; announcing those would republish the
-        // app's whole terminal collection for a sidebar that cannot change by
-        // a pixel. A write that DISPLACES a standing prompt still goes out —
-        // that one takes the indicator down.
-        if case .written(let displacedPromptOnScreen) = write,
-           reason.classification == .promptOnScreen || displacedPromptOnScreen {
-            subscriptions.broadcast(delta: .terminalAwaitingInputChanged(
-                TerminalAwaitingInputDelta(
-                    terminalID: terminal.id,
-                    worktreeID: terminal.worktreeID,
-                    reason: reason,
-                    observedAt: observedAt)))
-        }
-
-        // A prompt on screen is the one class a human has to act on now, so
-        // it, and only it, raises the attention notification the sidebar
-        // renders (same pattern as the AskUserQuestion pending path). A
-        // failed insert must not fail a fire-and-forget hook.
-        if reason.classification == .promptOnScreen {
-            let bannerMessage = params.message.isEmpty
-                ? "Claude needs your input" : params.message
-            do {
-                let notification = try await db.notifications.create(
-                    worktreeID: terminal.worktreeID,
-                    type: .attentionNeeded,
-                    message: bannerMessage
-                )
-                subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
-                    notificationID: notification.id,
-                    worktreeID: notification.worktreeID,
-                    type: notification.type,
-                    message: notification.message
-                )))
-            } catch {
-                logger.debug("notificationEvent: failed to create attentionNeeded notification: \(String(describing: error), privacy: .public)")
-            }
-        }
-
-        // `message` may quote repo content, so it is `.private`; the type and
-        // the class are TBD's own closed vocabulary and stay public.
-        logger.debug(
-            """
-            notificationEvent: terminal=\(terminal.id.uuidString, privacy: .public) \
-            type=\(params.notificationType ?? "none", privacy: .public) \
-            class=\(reason.classification.rawValue, privacy: .public) \
-            message=\(params.message, privacy: .private)
-            """
-        )
         return .ok()
     }
 
@@ -6333,109 +6167,6 @@ extension RPCRouter {
         let sessionTitle = await ClaudeSessionTitle.forPrompt(
             db: db, store: lifecycle.sessionTitles, terminal: terminal)
         return try RPCResponse(result: TerminalSessionTitleResult(sessionTitle: sessionTitle))
-    }
-
-    func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
-        let params = try decoder.decode(TerminalActivityEventParams.self, from: paramsData)
-        guard params.origin != .userInterrupt || params.activityState == .idle else {
-            return RPCResponse(error: "user_interrupt origin requires idle activity")
-        }
-        // Timestamp receipt before any actor or database suspension. The
-        // conditional store write below uses this to prevent an earlier event
-        // whose handler finishes late from replacing a later observation.
-        let observedAt = now()
-
-        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
-            logger.debug("activityEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
-            return .ok()
-        }
-
-        // Any agent hook marks the worktree active for the PR schedule.
-        // Recorded here, before the unchanged-state early return below, so a
-        // session repeating the same state still counts as active. An
-        // app-originated interrupt shares this RPC but is a user action, not
-        // agent activity, so it does not count.
-        if params.origin == nil {
-            await activityLedger.recordAgentEvent(
-                terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
-        }
-
-        // Runs BEFORE the unchanged-state guard so repeated Stops keep
-        // converging.
-        if params.origin == nil, params.activityState == .idle {
-            await syncTranscriptIntoCurrentProjectDir(terminal)
-        }
-
-        // Hook callers are bridged through `tbd terminal-activity`; the params
-        // do not yet carry WHICH hook event fired, so the RPC surface stands in
-        // as their source name. The app's explicit interrupt declares its
-        // origin separately, bypasses process identity, and uses user-action
-        // provenance for Codex; Claude retains its legacy hook provenance.
-        // `observedAt` from the router's date seam, never the store's default
-        // `Date()`. The resolver's rung-4 decision is an ordering comparison
-        // between exactly this stamp and the one `recordAwaitingInputReason`
-        // writes above, so a test that cannot pin both ends cannot pin the
-        // decision at all.
-        let source: FactSource = params.origin == .userInterrupt && terminal.isCodexTerminal
-            ? .terminalInterrupt
-            : .hookEvent(RPCMethod.terminalActivityEvent)
-        let activityApplication = try await db.terminals.applyActivityObservation(
-            id: terminal.id,
-            activityState: params.activityState,
-            source: source,
-            observedAt: observedAt,
-            sessionID: params.sessionID,
-            sessionIncarnationID: params.sessionIncarnationID,
-            processBound: params.origin != .userInterrupt,
-            replaceSameValue: params.origin == .userInterrupt)
-        guard let activityApplication else { return .ok() }
-        if !terminal.isCodexTerminal {
-            // Keep Claude's delegation boundary bookkeeping behind the same
-            // atomic identity decision as its durable activity. A delayed
-            // outgoing-process hook must not advance this in-memory rail.
-            if params.origin == .userInterrupt {
-                await claudeDelegationTracker.clear(terminalID: terminal.id)
-            } else if params.activityState == .idle {
-                await claudeDelegationTracker.mark(
-                    terminalID: terminal.id,
-                    sessionIncarnationID: params.sessionIncarnationID)
-            }
-        }
-        // Accepted working hooks cancel their pending resume in the same
-        // writer transaction as identity validation. Wake the scheduler only
-        // when that atomic transition actually cancelled a row.
-        if activityApplication.cancelledPendingResume {
-            await limitResumeScheduler?.wake()
-        }
-        if activityApplication.activityStateChanged {
-            if terminal.isCodexTerminal {
-                subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
-                    terminalID: terminal.id,
-                    worktreeID: terminal.worktreeID,
-                    activityState: activityApplication.activityState,
-                    activityStateSource: activityApplication.source,
-                    activityStateObservedAt: activityApplication.observedAt,
-                    activityStateOrderObservedAt: activityApplication.orderObservedAt
-                )))
-            } else {
-                subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
-                    terminalID: terminal.id,
-                    worktreeID: terminal.worktreeID,
-                    activityState: activityApplication.activityState
-                )))
-            }
-        }
-        if activityApplication.clearedAwaitingInput {
-            broadcastAwaitingInputRetraction(terminal: terminal)
-        }
-        // Only a caller that asked gets a title — the Claude overlay's
-        // `UserPromptSubmit` entry. Asked after the identity check above, so a
-        // delayed hook from a replaced process is never handed one and never
-        // moves the record of what the live session carries.
-        guard params.wantsSessionTitle == true else { return .ok() }
-        let sessionTitle = await ClaudeSessionTitle.forPrompt(
-            db: db, store: lifecycle.sessionTitles, terminal: terminal)
-        return try RPCResponse(result: TerminalActivityEventResult(sessionTitle: sessionTitle))
     }
 
     /// Announce that a terminal's recorded wait reason is gone.

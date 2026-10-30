@@ -12,43 +12,41 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 /// its own overlay file pinned at spawn time without touching the user's
 /// settings.json at all.
 ///
-/// The overlay registers eight event types:
+/// No entry reports agent state. Claude Code reports that itself over the
+/// Program Status Protocol (OSC 7501), and `ProgramStatusStore` is the only
+/// writer of a terminal's activity columns
+/// (docs/specs/2026-10-30-osc-only-agent-status-design.md). Each entry here
+/// reports something else.
+///
+/// The overlay registers seven event types:
 /// - `SessionStart` (matcher `*`): calls `tbd session-event`, which
 ///   relays the new session ID + transcript path to the daemon. This is
-///   what fixes the post-`/clear`/`/compact` transcript freeze. Also
-///   sets the terminal activity state to idle.
+///   what fixes the post-`/clear`/`/compact` transcript freeze.
 /// - `Stop` (two entries):
 ///   - `tbd notify` for response-complete notifications, matching the
-///     legacy globally-installed hook. Also sets activity to idle.
+///     legacy globally-installed hook. The daemon also runs the turn-end
+///     transcript sync on this call.
 ///   - `tbd hooks stop-rename-check`, which prompts the agent to rename
 ///     a still-default worktree/branch at end-of-turn.
 /// - `StopFailure`: runs `tbd hooks stop-failure` to read the verbatim
 ///   API-error text from the transcript, then pipes that into
 ///   `tbd notify --type error` — `Stop` fires only on normal completion.
-///   Also sets activity to idle.
-/// - `UserPromptSubmit`: sets activity to working so the thinking
-///   indicator appears in the sidebar while Claude processes a prompt, and
-///   returns `hookSpecificOutput.sessionTitle` when the session's wanted title
+/// - `UserPromptSubmit`: runs `tbd hooks session-title`, which returns
+///   `hookSpecificOutput.sessionTitle` when the session's wanted title
 ///   (worktree display name plus tab suffix) has changed since TBD last set it
 ///   — see `ClaudeSessionTitle`.
 /// - `PreToolUse:AskUserQuestion` / `PostToolUse:AskUserQuestion`:
 ///   bridge tool input and `tool_use_id` so the transcript pane can
 ///   render the question before Claude flushes the assistant message
-///   to the JSONL. Pre sets activity to waiting_for_user; post sets
-///   it back to working (Claude continues processing after user answers).
+///   to the JSONL.
 /// - `PostToolUse:Bash`: greps the payload for `pr create` and, only on
 ///   a match, pipes it to `tbd pr bind --from-hook` to bind any PR the
 ///   command reported. The grep prefilter keeps every other Bash call
 ///   (the overwhelming majority) from spawning a `tbd` process. It is a
 ///   cost optimization, not a gate — `PRBindingExtractor`'s tokenizer
 ///   decides what actually counts as a create.
-/// - `Notification` (no matcher): runs `tbd hooks notification`, which
-///   forwards the payload verbatim so the daemon can record a structured
-///   reason an agent is waiting.
-/// - `SessionEnd` (no matcher): runs `tbd session-end`, which drops any
-///   standing delegation claim for the terminal. A session that exits
-///   while background subagents are live leaves a final `turn_duration`
-///   record still reporting them, and no later turn corrects it.
+/// - `SessionEnd` (no matcher): runs `tbd session-end`, which stamps the
+///   terminal exited when the session's process is leaving.
 ///
 /// The overlay is regenerated on every daemon startup so changes to the
 /// shape (new hooks, new commands) take effect on the next worktree open.
@@ -66,15 +64,14 @@ public enum ClaudeHookOverlay {
     /// The shell command for the SessionStart hook. Reads stdin (Claude's
     /// hook payload) into `tbd session-event`, which RPCs the daemon. The
     /// command tolerates `tbd` not being on PATH — silent failure is fine.
-    /// Also initializes terminal activity to idle.
     static let sessionStartCommand =
-        #"TBD_BIN="${TBD_CLI_PATH-tbd}"; "$TBD_BIN" session-event 2>/dev/null || true; "$TBD_BIN" terminal-activity idle 2>/dev/null || true"#
+        #"TBD_BIN="${TBD_CLI_PATH-tbd}"; "$TBD_BIN" session-event 2>/dev/null || true"#
 
     /// The shell command for the Stop hook. Mirrors the legacy
     /// `setup-hooks --global` command so TBD can replace it without
-    /// regressing notification behavior. Also clears the thinking indicator.
+    /// regressing notification behavior.
     static let stopCommand =
-        #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true; tbd terminal-activity idle 2>/dev/null || true"#
+        #"MSG=$(jq -r '.last_assistant_message // empty' 2>/dev/null); tbd notify --type response_complete --message "$MSG" 2>/dev/null || true"#
 
     /// Second Stop hook: prompt the agent to rename its worktree/branch at
     /// end-of-turn while the work is fresh and context is highest. Reads
@@ -88,76 +85,40 @@ public enum ClaudeHookOverlay {
     /// the transcript (so a session limit reads "You've hit your session limit
     /// · resets 3pm" rather than a generic "rate_limit"), then pipes the
     /// message into `tbd notify --type error`. Mirrors the `Stop` hook's
-    /// `MSG=$(…); tbd notify …` shape. Also clears the thinking indicator.
+    /// `MSG=$(…); tbd notify …` shape.
     /// Trailing `; true` keeps the hook exit 0 so it never wedges the agent.
     static let stopFailureCommand =
-        #"MSG=$(tbd hooks stop-failure 2>/dev/null); [ -n "$MSG" ] && tbd notify --type error --message "$MSG" 2>/dev/null; tbd terminal-activity idle 2>/dev/null || true; true"#
+        #"MSG=$(tbd hooks stop-failure 2>/dev/null); [ -n "$MSG" ] && tbd notify --type error --message "$MSG" 2>/dev/null; true"#
 
     /// Bridges the `PreToolUse:AskUserQuestion` hook into TBD. Captures the
     /// tool input and tool_use_id so the transcript pane can render the
     /// question before Claude flushes the assistant message to the JSONL.
-    /// Also signals waiting_for_user so the sidebar shows the correct state.
     static let askUserQuestionPreCommand =
-        #"tbd ask-user-question pre 2>/dev/null || true; tbd terminal-activity waiting_for_user 2>/dev/null || true"#
+        #"tbd ask-user-question pre 2>/dev/null || true"#
 
     /// Bridges the `PostToolUse:AskUserQuestion` hook into TBD. Defensive
     /// only — see RPCRouter+TerminalHandlers.swift for why we rely on JSONL
-    /// dedupe rather than eager cleanup. Also signals working since Claude
-    /// continues processing after the user answers.
+    /// dedupe rather than eager cleanup.
     static let askUserQuestionPostCommand =
-        #"tbd ask-user-question post 2>/dev/null || true; tbd terminal-activity working 2>/dev/null || true"#
+        #"tbd ask-user-question post 2>/dev/null || true"#
 
-    /// Bridges Claude Code's `Notification` hook into TBD, so "waiting" can
-    /// carry a structured reason instead of being inferred.
-    ///
-    /// Why `Notification` and not `PreToolUse`: only `Notification` can say a
-    /// prompt is on screen *now*. `PreToolUse` fires before *every* tool call —
-    /// it is where an agent-native hook decides a permission for itself, which
-    /// is configuration at the source, and it can never report that a raised
-    /// prompt is currently waiting on a human.
-    ///
-    /// Why no matcher: a matcher here would decide, in a file the operator can
-    /// edit, which notification types TBD ever hears about. Any supervision
-    /// fork belongs in the daemon's RPC handler, where it is compiled, tested,
-    /// and the same for every install — so this entry reports every type and
-    /// decides nothing. Silent failure like every other entry: a hook must
-    /// never wedge the agent.
-    static let notificationCommand =
-        #"tbd hooks notification 2>/dev/null || true"#
+    /// Asks for the session's title. When the worktree's display name (or the
+    /// tab's suffix) changed since the session was last named, the command
+    /// prints `hookSpecificOutput.sessionTitle` and Claude Code renames the
+    /// session; otherwise it prints nothing. stderr is discarded and stdout is
+    /// not, because stdout is the title — and `UserPromptSubmit`'s stdout is
+    /// model context, so the command prints nothing else.
+    static let sessionTitleCommand =
+        #"tbd hooks session-title 2>/dev/null || true"#
 
-    /// Sets the terminal activity state to working (shows the thinking
-    /// indicator in the sidebar while Claude processes a prompt), and asks for
-    /// the session's title on the same round trip. When the worktree's display
-    /// name (or the tab's suffix) changed since the session was last named,
-    /// the command prints `hookSpecificOutput.sessionTitle` and Claude Code
-    /// renames the session; otherwise it prints nothing. stderr is discarded
-    /// and stdout is not, because stdout is the title.
-    ///
-    /// A `tbd` older than the flag rejects it with a usage error, so the plain
-    /// command runs as a fallback: an out-of-date CLI loses the title but
-    /// keeps the working indicator. A rejected flag prints its usage to
-    /// stderr, never stdout, so the fallback cannot add a second output.
-    static let workingCommand =
-        #"tbd terminal-activity working --session-title 2>/dev/null || tbd terminal-activity working 2>/dev/null || true"#
-
-    /// Sets the terminal activity state to waiting_for_user.
-    static let waitingForUserCommand =
-        #"tbd terminal-activity waiting_for_user 2>/dev/null || true"#
-
-    /// Reports the end of a session, which lands two facts.
-    ///
-    /// It clears any standing delegation claim: a session that exits while
-    /// background agents are live leaves a final `turn_duration` record still
-    /// reporting them, and no later turn ever corrects it, so without this the
-    /// claim would stand forever.
-    ///
-    /// And, when the reason means the process itself is leaving, it stamps the
-    /// terminal as parked with `HibernateReason.exited` — the machine-readable
+    /// Reports the end of a session: when the reason means the process itself
+    /// is leaving, it stamps the terminal as parked with
+    /// `HibernateReason.exited` — the machine-readable
     /// "Claude is not running here" a send refuses on, rather than pasting a
     /// message into the shell sitting in the pane. The stamp is a fast path, not
     /// the guarantee: the send path also reads the pane's foreground process
-    /// group, so a lost hook costs a slower answer and a stale claim, never a
-    /// message run as a shell command.
+    /// group, so a lost hook costs a slower answer, never a message run as a
+    /// shell command.
     static let sessionEndCommand =
         #"tbd session-end 2>/dev/null || true"#
 
@@ -168,9 +129,9 @@ public enum ClaudeHookOverlay {
     /// actually bounds the hook is Claude Code's ~1.5-second SessionEnd
     /// shutdown budget, which cuts the callback off first either way; this
     /// value stays above it so a healthy RPC has the whole budget to land the
-    /// clear. Losing the hook to either bound costs a stale claim and an
-    /// unstamped row on a terminal whose session is gone; the send path's
-    /// foreground-process rail still refuses the send.
+    /// stamp. Losing the hook to either bound costs an unstamped row on a
+    /// terminal whose session is gone; the send path's foreground-process rail
+    /// still refuses the send.
     static let sessionEndTimeoutSeconds = 2
 
     /// The extended regex the prefilter greps a Bash hook payload for.
@@ -309,7 +270,7 @@ public enum ClaudeHookOverlay {
                     ]
                 ],
                 // No "matcher" key: SessionEnd carries a reason, not a matcher
-                // subject, and every reason retires the session's claim.
+                // subject, and the daemon decides which reasons park the row.
                 "SessionEnd": [
                     [
                         "hooks": [
@@ -321,7 +282,7 @@ public enum ClaudeHookOverlay {
                 "UserPromptSubmit": [
                     [
                         "hooks": [
-                            ["type": "command", "command": workingCommand]
+                            ["type": "command", "command": sessionTitleCommand]
                         ]
                     ]
                 ],
@@ -345,16 +306,6 @@ public enum ClaudeHookOverlay {
                         "hooks": [
                             ["type": "command", "command": prBindCommand,
                              "timeout": prBindTimeoutSeconds] as [String: Any]
-                        ]
-                    ]
-                ],
-                // No "matcher" key: omitting it runs the hook for every
-                // notification type. See `notificationCommand` for why the
-                // classification lives in the daemon instead.
-                "Notification": [
-                    [
-                        "hooks": [
-                            ["type": "command", "command": notificationCommand]
                         ]
                     ]
                 ]

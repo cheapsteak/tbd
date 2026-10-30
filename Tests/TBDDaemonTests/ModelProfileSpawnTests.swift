@@ -1541,17 +1541,12 @@ struct ModelProfileSpawnTests {
         let oldTerm = try createResp.decodeResult(Terminal.self)
 
         let workingAt = Date(timeIntervalSince1970: 1_700_000_000)
-        let promptAt = workingAt.addingTimeInterval(30)
-        try await db.terminals.setActivityState(
-            id: oldTerm.id, activityState: .working,
-            source: .hookEvent(RPCMethod.terminalActivityEvent), observedAt: workingAt)
-        try await db.terminals.recordAwaitingInputReason(
-            id: oldTerm.id,
-            reason: AwaitingInputReason(
-                message: "Claude needs your permission to use Bash",
-                hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: promptAt)
+        let reason = try #require(ProgramStatusColumnValue.waitingForUser(
+            ProgramStatusBlock(kind: .permission, taskID: nil)).awaitingInputReason)
+        _ = try #require(try await db.terminals.applyProgramStatusActivity(
+            id: oldTerm.id, scope: .anyLiveIncarnation, activityState: .waitingForUser,
+            awaitingInputReason: reason, observedAt: workingAt))
+        try #require(try await db.terminals.get(id: oldTerm.id)?.awaitingInputReason == reason)
 
         let swapResp = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSwapProfile,
@@ -2630,15 +2625,12 @@ struct ModelProfileSpawnTests {
 
         // A prompt from the login tab asks for a title and gets none.
         let prompt = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: login.id, activityState: .working,
-                sessionIncarnationID: login.sessionIncarnationID,
-                wantsSessionTitle: true)))
+            method: RPCMethod.terminalSessionTitle,
+            params: TerminalSessionTitleParams(
+                terminalID: login.id,
+                sessionIncarnationID: login.sessionIncarnationID)))
         #expect(prompt.success)
-        let promptTitle = prompt.result == nil
-            ? nil : try prompt.decodeResult(TerminalActivityEventResult.self).sessionTitle
-        #expect(promptTitle == nil)
+        #expect(try prompt.decodeResult(TerminalSessionTitleResult.self).sessionTitle == nil)
         #expect(await titles.lastApplied(terminalID: login.id) == nil)
 
         // The open login tab holds no number: the next Claude tab is second.

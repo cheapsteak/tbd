@@ -799,8 +799,8 @@ public struct LimitResumeActuator: LimitResumeActuating {
         return await send(terminalID, Self.holderSubmitPayload)
     }
 
-    /// Success signal within ~20s: the activity hook reports `working`, or
-    /// the transcript file grows (spec §Actuation 6).
+    /// Success signal within ~20s: the agent reports `working`, or the
+    /// transcript file grows (spec §Actuation 6).
     private func verifyResumed(terminalID: UUID, transcriptPath: String?, preSize: Int) async -> Bool {
         for _ in 0..<Self.verifyPolls {
             if let terminal = ((try? await db.terminals.get(id: terminalID)) ?? nil),

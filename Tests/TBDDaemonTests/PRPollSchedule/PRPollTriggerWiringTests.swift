@@ -4,36 +4,30 @@ import Testing
 @testable import TBDShared
 import TestSupport
 
-/// The PR schedule's triggers, driven through the real RPC handlers: hook
-/// events stamp the activity ledger, `pr.refresh` records a selection, a
+/// The PR schedule's triggers, driven through the real RPC handlers: agent
+/// reports and the hooks that remain stamp the activity ledger, `pr.refresh`
+/// records a selection, a
 /// `pr.attach` that binds a new PR kicks the scheduler. Triggers only move due
 /// times or wake the loop — none of them may call `gh` on its own.
 @Suite("PRPollTriggerWiring", .serialized)
 struct PRPollTriggerWiringTests {
-    @Test func aHookEventStampsTheLedger() async throws {
+    @Test func anAcceptedReportStampsTheLedger() async throws {
         let h = try await TriggerHarness.make()
         #expect(await h.router.activityLedger.snapshot().hooks[h.terminalID] == nil)
-        try await h.sendTerminalActivity(state: .idle)
+        try await h.sendReport(state: .idle)
         #expect(await h.router.activityLedger.snapshot().hooks[h.terminalID] != nil)
     }
 
-    /// Flag off, the ledger is disabled: the same hook and `pr.refresh` stamp
-    /// nothing, so nothing accumulates for a schedule that never prunes it.
-    @Test func aDisabledLedgerIsNotStampedByHooksOrRefresh() async throws {
+    /// Flag off, the ledger is disabled: the same report and `pr.refresh`
+    /// stamp nothing, so nothing accumulates for a schedule that never prunes
+    /// it.
+    @Test func aDisabledLedgerIsNotStampedByReportsOrRefresh() async throws {
         let h = try await TriggerHarness.make(ledgerEnabled: false)
-        try await h.sendTerminalActivity(state: .working)
+        try await h.sendReport(state: .working)
         try await h.sendPRRefresh()
         let snap = await h.router.activityLedger.snapshot()
         #expect(snap.hooks.isEmpty)
         #expect(snap.selections.isEmpty)
-    }
-
-    /// The other branch of the `origin == nil` guard: an app-originated
-    /// interrupt is a user action, not agent activity.
-    @Test func aUserInterruptDoesNotStampTheLedger() async throws {
-        let h = try await TriggerHarness.make()
-        try await h.sendTerminalActivity(state: .idle, origin: .userInterrupt)
-        #expect(await h.router.activityLedger.snapshot().hooks[h.terminalID] == nil)
     }
 
     @Test func anAskUserQuestionHookStampsTheLedger() async throws {
@@ -75,8 +69,8 @@ struct PRPollTriggerWiringTests {
         #expect(await kicks.count == 0)
     }
 
-    /// The closure `Daemon` installs on the ledger: the first hook after a
-    /// quiet window kicks the scheduler, and a second hook inside the window
+    /// The closure `Daemon` installs on the ledger: the first report after a
+    /// quiet window kicks the scheduler, and a second report inside the window
     /// does not.
     @Test func aPossibleActivationKicksOncePerWindow() async throws {
         let h = try await TriggerHarness.make()
@@ -86,18 +80,18 @@ struct PRPollTriggerWiringTests {
         await router.activityLedger.setOnPossibleActivation { [weak router] _ in
             await router?.prPollScheduler.kick()
         }
-        try await h.sendTerminalActivity(state: .working)
+        try await h.sendReport(state: .working)
         #expect(await kicks.count == 1)
-        try await h.sendTerminalActivity(state: .idle)
+        try await h.sendReport(state: .idle)
         #expect(await kicks.count == 1)
     }
 
     @Test func triggersAloneNeverCallGHOrStartTheScheduler() async throws {
         let h = try await TriggerHarness.make()
-        try await h.sendTerminalActivity(state: .working)
+        try await h.sendReport(state: .working)
         _ = try await h.sendPRAttach(url: "https://github.com/acme/acme-prod/pull/12")
         let before = await h.gh.allQueries().count
-        try await h.sendTerminalActivity(state: .idle)
+        try await h.sendReport(state: .idle)
         #expect(await h.router.prPollScheduler.isRunning == false)
         // A trigger alone never calls gh.
         #expect(await h.gh.allQueries().count == before)
@@ -124,18 +118,23 @@ private struct TriggerHarness {
         let legs = try await PRPollLegsHarness.make(
             bindings: [], responses: [:], worktreeCount: 1, activeWorktrees: [],
             ledgerEnabled: ledgerEnabled)
+        // A holder row: the transport that carries agent reports.
         let terminal = try await legs.db.terminals.create(
-            worktreeID: legs.worktreeID(0), tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
+            worktreeID: legs.worktreeID(0), tmuxWindowID: "", tmuxPaneID: "",
+            label: "Codex", kind: .codex, transport: .holder,
+            holderPID: 9101, childPID: 9102)
         return TriggerHarness(legs: legs, terminalID: terminal.id)
     }
 
-    func sendTerminalActivity(state: TerminalActivityState,
-                              origin: TerminalActivityEventOrigin? = nil) async throws {
+    /// One OSC 7501 report from the terminal's Codex, as the attached app
+    /// forwards it.
+    func sendReport(state: ProgramStatusState) async throws {
         let response = await router.handle(try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: terminalID, activityState: state, origin: origin)))
+            method: RPCMethod.terminalProgramStatusReport,
+            params: TerminalProgramStatusReportParams(
+                terminalID: terminalID, incarnationID: nil,
+                payload: "state=\(state.rawValue):app=\(ProgramStatusProtocol.codexApp)",
+                observedAt: Date())))
         #expect(response.success)
     }
 

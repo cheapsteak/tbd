@@ -74,8 +74,8 @@ extension TBDHomeSerialized {
             return try String(contentsOf: marker, encoding: .utf8)
         }
 
-        #expect(try await run(matchedPath: matched.path) == "matched:session-event\nmatched:terminal-activity\n")
-        #expect(try await run(matchedPath: nil) == "fallback:session-event\nfallback:terminal-activity\n")
+        #expect(try await run(matchedPath: matched.path) == "matched:session-event\n")
+        #expect(try await run(matchedPath: nil) == "fallback:session-event\n")
     }
 
     @Test func postToolUseBashHookBindsPRsAndKeepsAskUserQuestion() throws {
@@ -816,7 +816,7 @@ extension TBDHomeSerialized {
         #expect(parsed?.keys.sorted() == ["hooks"])
     }
 
-    // MARK: - Notification hook
+    // MARK: - Registered entries
 
     /// Renders the composed overlay body's `hooks` dict as one sorted line per
     /// registered command: `event|matcher|command`, with `matcher` rendered as
@@ -842,12 +842,9 @@ extension TBDHomeSerialized {
         return lines.sorted()
     }
 
-    @Test func registersNotificationHookWithoutAMatcherAndLeavesTheOthersUntouched() throws {
+    @Test func registersExactlyTheEntriesThatReportNoState() throws {
         let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
         let expected = [
-            // The new entry: no matcher key at all, so Claude Code runs it for
-            // EVERY notification type and the hook decides nothing.
-            "Notification|<none>|\(ClaudeHookOverlay.notificationCommand)",
             "PostToolUse|AskUserQuestion|\(ClaudeHookOverlay.askUserQuestionPostCommand)",
             "PostToolUse|Bash|\(ClaudeHookOverlay.prBindCommand)",
             "PreToolUse|AskUserQuestion|\(ClaudeHookOverlay.askUserQuestionPreCommand)",
@@ -856,26 +853,44 @@ extension TBDHomeSerialized {
             "Stop|<none>|\(ClaudeHookOverlay.stopCommand)",
             "Stop|<none>|\(ClaudeHookOverlay.stopRenameCheckCommand)",
             "StopFailure|<none>|\(ClaudeHookOverlay.stopFailureCommand)",
-            "UserPromptSubmit|<none>|\(ClaudeHookOverlay.workingCommand)"
+            "UserPromptSubmit|<none>|\(ClaudeHookOverlay.sessionTitleCommand)"
         ].sorted()
         #expect(rendered == expected)
     }
 
-    /// The `UserPromptSubmit` entry asks for the session's title, and keeps
-    /// stdout — the hook output that carries it — while still never failing.
-    /// A `tbd` too old to know `--session-title` rejects the flag, so the
-    /// plain command follows it and the working indicator survives.
-    @Test func userPromptSubmitAsksForTheSessionTitle() throws {
-        let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
-        let entry = try #require(rendered.first { $0.hasPrefix("UserPromptSubmit|") })
-        #expect(entry == "UserPromptSubmit|<none>|"
-            + "tbd terminal-activity working --session-title 2>/dev/null"
-            + " || tbd terminal-activity working 2>/dev/null"
-            + " || true")
-        #expect(!entry.contains(">/dev/null 2>&1"))
+    /// The agent reports its own state over OSC 7501, so no entry writes it —
+    /// in the default body or in a merged one.
+    @Test func noEntryCallsTerminalActivity() throws {
+        let plain = try ClaudeHookOverlay.generateBody()
+        let merged = try ClaudeHookOverlay.generateBody(
+            fallbackModels: ["claude-haiku-4-5-20251001"],
+            extraSettings: ["skillOverrides": ["x": "off"]])
+        for body in [plain, merged] {
+            #expect(!String(decoding: body, as: UTF8.self).contains("terminal-activity"))
+        }
     }
 
-    @Test func sessionEndCommandClearsTheClaimAndNeverFails() throws {
+    @Test func noNotificationEntry() throws {
+        let data = try ClaudeHookOverlay.generateBody(
+            fallbackModels: ["claude-haiku-4-5-20251001"],
+            extraSettings: ["skillOverrides": ["x": "off"]])
+        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let hooks = try #require(parsed?["hooks"] as? [String: Any])
+        #expect(hooks["Notification"] == nil)
+        #expect((parsed?["fallbackModel"] as? [String]) == ["claude-haiku-4-5-20251001"])
+    }
+
+    /// The `UserPromptSubmit` entry's only command asks for the session's
+    /// title, and keeps stdout — the hook output that carries it — while still
+    /// never failing.
+    @Test func userPromptSubmitSetsTheSessionTitle() throws {
+        let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
+        let entries = rendered.filter { $0.hasPrefix("UserPromptSubmit|") }
+        #expect(entries == ["UserPromptSubmit|<none>|tbd hooks session-title 2>/dev/null || true"])
+        #expect(entries == ["UserPromptSubmit|<none>|\(ClaudeHookOverlay.sessionTitleCommand)"])
+    }
+
+    @Test func sessionEndCommandReportsTheEndAndNeverFails() throws {
         let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
         let entry = try #require(rendered.first { $0.hasPrefix("SessionEnd|") })
         #expect(entry.contains("tbd session-end"))
@@ -891,27 +906,6 @@ extension TBDHomeSerialized {
         let inner = try #require((hooks?.first?["hooks"] as? [[String: Any]])?.first)
         #expect((inner["timeout"] as? Int) == ClaudeHookOverlay.sessionEndTimeoutSeconds)
         #expect(ClaudeHookOverlay.sessionEndTimeoutSeconds <= 2)
-    }
-
-    @Test func notificationCommandInvokesTheHookBridgeAndNeverFails() throws {
-        let rendered = try renderHookEntries(try ClaudeHookOverlay.generateBody())
-        let notification = try #require(rendered.first { $0.hasPrefix("Notification|") })
-        #expect(notification.contains("tbd hooks notification"))
-        // Silent + never-fail, like every other entry: a hook must not wedge
-        // the agent when `tbd` is missing or the daemon is down.
-        #expect(notification.hasSuffix("2>/dev/null || true"))
-    }
-
-    @Test func notificationHookSurvivesFragmentMergeAndFallbackModels() throws {
-        // The new event must ride the same merge paths as the rest, not just
-        // the default body.
-        let data = try ClaudeHookOverlay.generateBody(
-            fallbackModels: ["claude-haiku-4-5-20251001"],
-            extraSettings: ["skillOverrides": ["x": "off"]])
-        let rendered = try renderHookEntries(data)
-        #expect(rendered.contains("Notification|<none>|\(ClaudeHookOverlay.notificationCommand)"))
-        let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        #expect((parsed?["fallbackModel"] as? [String]) == ["claude-haiku-4-5-20251001"])
     }
 
     @Test func roundtripsAsValidJSON() throws {

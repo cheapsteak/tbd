@@ -172,76 +172,6 @@ struct CodexActivityReconciliationTests {
         #expect(persisted?.activityStateObservedAt == observedAt)
     }
 
-    @Test("ordinary activity hooks do not invalidate an in-flight transcript observation")
-    func ordinaryActivityHookKeepsTranscriptEvidence() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-hook-race-repo-\(UUID().uuidString)",
-            displayName: "car-hook-race-repo",
-            defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id,
-            name: "wt",
-            branch: "main",
-            path: "/tmp/car-hook-race-wt-\(UUID().uuidString)",
-            tmuxServer: "tbd-car-hook-race")
-        let transcript = try makeTranscript(
-            #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}}"#
-                + "\n")
-        defer { try? FileManager.default.removeItem(at: transcript.deletingLastPathComponent()) }
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id,
-            tmuxWindowID: "@1",
-            tmuxPaneID: "%1",
-            label: "Codex",
-            kind: .codex)
-        _ = try #require(try await db.terminals.applySessionStart(
-            id: terminal.id,
-            expectedIncarnation: TerminalSessionIncarnation(terminal: terminal),
-            sessionID: "current-session",
-            transcriptPath: transcript.path,
-            observedAt: Date(timeIntervalSince1970: 1_790_000_009)))
-        let initialActivityAt = Date(timeIntervalSince1970: 1_790_000_010)
-        try await db.terminals.setActivityState(
-            id: terminal.id,
-            activityState: .idle,
-            source: .hookEvent("Stop"),
-            observedAt: initialActivityAt)
-
-        let listAt = initialActivityAt.addingTimeInterval(1)
-        let hookAt = listAt.addingTimeInterval(1)
-        let dates = BlockingListDates(first: listAt, subsequent: hookAt)
-        let raceRouter = makeRouter(now: dates.provider)
-        let list = try RPCRequest(
-            method: RPCMethod.terminalList,
-            params: TerminalListParams(worktreeID: wt.id))
-        let hook = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: terminal.id,
-                activityState: .working))
-
-        let inFlightList = gateHoldingTask { await raceRouter.handle(list) }
-        guard await waitUntil(
-            { dates.firstCallIsBlocked }, timeout: Self.raceRendezvousTimeout
-        ) else {
-            dates.releaseFirstCall()
-            _ = await inFlightList.value
-            Issue.record("terminal.list never reached its transcript stamp")
-            return
-        }
-        #expect((await raceRouter.handle(hook)).success)
-        dates.releaseFirstCall()
-
-        let response = await inFlightList.value
-        #expect(response.success)
-        let listed = try #require(
-            response.decodeResult([Terminal].self).first(where: { $0.id == terminal.id }))
-        #expect(listed.activityState == .working)
-        #expect(listed.activityStateOrderObservedAt == hookAt)
-        #expect(listed.presentationActivityState == .working)
-        #expect(listed.presentationActivityObservedAt == listAt)
-    }
-
     @Test("accepted same-path SessionStart supersedes an orphan transcript turn")
     func samePathSessionStartResetsTranscriptLifecycle() async throws {
         let repo = try await db.repos.create(
@@ -492,7 +422,8 @@ struct CodexActivityReconciliationTests {
         #expect(recreated.claudeSessionID == "new-session")
         #expect(recreated.transcriptPath == transcript.path)
         #expect(recreated.sessionOrderObservedAt == dates.now)
-        #expect(recreated.activityState == .idle)
+        // The new incarnation has not reported its state.
+        #expect(recreated.activityState == .unknown)
         let launchCommands = launchRecorder.snapshot()
         let newWindowIndex = try #require(
             launchCommands.firstIndex(where: { $0.contains("new-window") }))
@@ -503,18 +434,6 @@ struct CodexActivityReconciliationTests {
             }))
         #expect(newWindowIndex < codexLaunchIndex)
         #expect(launchCommands[newWindowIndex].last?.contains(" --profile") == false)
-
-        // A delayed hook from the dead process must not mutate the replacement
-        // process after its new identity is attached.
-        dates.advance(by: 1)
-        let staleActivity = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: terminal.id,
-                activityState: .working,
-                sessionID: "old-session"))
-        #expect((await recreateRouter.handle(staleActivity)).success)
-        #expect(try await db.terminals.get(id: terminal.id)?.activityState == .idle)
 
         let working = await recreateRouter.handle(list)
         #expect(working.success)
@@ -1538,10 +1457,10 @@ struct CodexActivityReconciliationTests {
                 terminalID: terminal.id, sessionID: "same-session",
                 transcriptPath: transcript.path, source: "SessionStart"))
         #expect((await router.handle(sessionStart)).success)
-        _ = try await db.terminals.applyActivityObservation(
+        try await db.terminals.setActivityState(
             id: terminal.id,
             activityState: .working,
-            source: .hookEvent(RPCMethod.terminalActivityEvent),
+            source: .programStatus,
             observedAt: presentationObservedAt.addingTimeInterval(1))
 
         let restartedRouter = makeRouter(now: { presentationObservedAt })
@@ -2102,7 +2021,7 @@ struct CodexActivityReconciliationTests {
         try handle.write(contentsOf: data)
     }
 
-    // MARK: - The date seam on the two handlers that WRITE codex activity
+    // MARK: - The date seam on the handler that WRITES codex activity
 
     /// Pinned through the router's date seam, so each stored stamp is an exact
     /// assertion rather than a freshness window.
@@ -2127,31 +2046,6 @@ struct CodexActivityReconciliationTests {
             startTime: Date(),
             now: { Self.observedAt },
             actuationLog: makeTestActuationLog())
-    }
-
-    @Test("terminal.sessionEvent stamps the codex idle observation from the router's date seam")
-    func sessionEventStampsFromTheDateSeam() async throws {
-        let repo = try await db.repos.create(
-            path: "/tmp/car-seam-repo-\(UUID().uuidString)",
-            displayName: "car-seam-repo", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "wt", branch: "main",
-            path: "/tmp/car-seam-wt-\(UUID().uuidString)", tmuxServer: "tbd-car-seam")
-        let terminal = try await db.terminals.create(
-            worktreeID: wt.id, tmuxWindowID: "@1", tmuxPaneID: "%1",
-            label: "Codex", kind: .codex)
-
-        let request = try RPCRequest(
-            method: RPCMethod.terminalSessionEvent,
-            params: TerminalSessionEventParams(
-                terminalID: terminal.id, sessionID: "codex-session",
-                transcriptPath: nil, source: "SessionStart"))
-        #expect(await pinnedRouter().handle(request).success)
-
-        let after = try #require(try await db.terminals.get(id: terminal.id))
-        #expect(after.activityState == .idle)
-        #expect(after.activityStateObservedAt == Self.observedAt)
-        #expect(after.observedActivity?.observedAt == Self.observedAt)
     }
 
     @Test("terminal.recreateWindow stamps the derived codex unknown from the router's date seam")

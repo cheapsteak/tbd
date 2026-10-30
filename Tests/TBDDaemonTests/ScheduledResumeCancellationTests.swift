@@ -38,29 +38,49 @@ import TestSupport
             limitType: "session", rawMessage: "m"))
     }
 
-    private func assertCancelled() async throws {
-        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) == nil)
-        let terminal = try await db.terminals.get(id: terminalID)
+    private func assertCancelled(_ id: UUID? = nil) async throws {
+        let id = id ?? terminalID
+        #expect(try await db.scheduledResumes.pending(terminalID: id) == nil)
+        let terminal = try await db.terminals.get(id: id)
         #expect(terminal == nil || terminal?.pendingResumeAt == nil)
     }
 
-    @Test func userPromptSubmitCancels() async throws {
-        // UserPromptSubmit → overlay → `tbd terminal-activity working` →
-        // terminal.activityEvent(working): user continued manually.
-        let request = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(terminalID: terminalID, activityState: .working))
-        let response = await router.handle(request)
-        #expect(response.success)
-        try await assertCancelled()
+    /// A holder Claude row with a pending resume of its own: the transport
+    /// that carries agent reports.
+    private func makeReportingTerminal() async throws -> UUID {
+        let terminal = try await db.terminals.create(
+            worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, holderPID: 9101, childPID: 9102)
+        _ = try await db.scheduledResumes.insertPending(ScheduledResume(
+            terminalID: terminal.id, worktreeID: worktreeID,
+            resetsAt: Date().addingTimeInterval(3600),
+            fireAt: Date().addingTimeInterval(3660),
+            limitType: "session", rawMessage: "m"))
+        return terminal.id
     }
 
-    @Test func nonWorkingActivityDoesNotCancel() async throws {
-        let request = try RPCRequest(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(terminalID: terminalID, activityState: .idle))
-        _ = await router.handle(request)
-        #expect(try await db.scheduledResumes.pending(terminalID: terminalID) != nil)
+    private func report(_ terminalID: UUID, state: String, at date: Date) async throws {
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.terminalProgramStatusReport,
+            params: TerminalProgramStatusReportParams(
+                terminalID: terminalID, incarnationID: nil,
+                payload: "state=\(state):app=\(ProgramStatusProtocol.claudeCodeApp)",
+                observedAt: date)))
+        #expect(response.success)
+    }
+
+    /// The agent reporting `working` means the user continued by hand, so the
+    /// scheduled resume must not type into the session later. Any other state
+    /// leaves it pending.
+    @Test func onlyAWorkingReportCancels() async throws {
+        let id = try await makeReportingTerminal()
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+
+        try await report(id, state: "idle", at: base)
+        #expect(try await db.scheduledResumes.pending(terminalID: id) != nil)
+
+        try await report(id, state: "working", at: base.addingTimeInterval(1))
+        try await assertCancelled(id)
     }
 
     @Test func terminalDeleteCancels() async throws {

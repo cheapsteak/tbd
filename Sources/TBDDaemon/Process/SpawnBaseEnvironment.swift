@@ -24,11 +24,11 @@ import TBDShared
 /// prefix sets only `TBD_TERMINAL_ID` and `TBD_WORKTREE_ID`. Such a fresh
 /// terminal row has no incarnation, so the guard in
 /// `TerminalStore.applySessionStart` (`record.sessionIncarnationID ==
-/// reportedIncarnationID?.uuidString`) fails and the job's SessionStart,
-/// SessionEnd and activity hooks are all dropped: no session id, no transcript
-/// path, activity never updates. An inherited `TBD_CLI_PATH` is the same shape
-/// one layer down — it points the job's hooks (`"${TBD_CLI_PATH-tbd}"`) at
-/// whichever worktree's CLI the launcher happened to be given.
+/// reportedIncarnationID?.uuidString`) fails and the job's SessionStart and
+/// SessionEnd hooks are both dropped: no session id, no transcript path. An
+/// inherited `TBD_CLI_PATH` is the same shape one layer down — it points the
+/// job's hooks (`"${TBD_CLI_PATH-tbd}"`) at whichever worktree's CLI the
+/// launcher happened to be given.
 ///
 /// Claude Code has a second question it can ask on the tmux transport: when
 /// `$TMUX` is set it probes the tmux server's global environment for the same

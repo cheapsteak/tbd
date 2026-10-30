@@ -206,39 +206,6 @@ import Testing
         #expect(summary.contains(FactTimestamp.string(from: epoch)))
     }
 
-    /// Half a triple is not a fact here either. The wait reason's source is the
-    /// hook event that delivered it, so a reason with no event name — like a
-    /// reason with no observed-at — reports nothing rather than letting a bare
-    /// message masquerade as an observation.
-    @Test func awaitingInputFactNeedsBothItsHalves() {
-        let reason = AwaitingInputReason(
-            message: "Claude needs your permission",
-            hookEventName: "Notification",
-            notificationType: "permission_prompt")
-        func terminal(
-            reason: AwaitingInputReason?, observedAt: Date?
-        ) -> Terminal {
-            Terminal(
-                worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-                awaitingInputReason: reason, awaitingInputObservedAt: observedAt)
-        }
-
-        let whole = terminal(reason: reason, observedAt: epoch).observedAwaitingInput
-        #expect(whole?.value == reason)
-        #expect(whole?.source == .hookEvent("Notification"))
-        #expect(whole?.observedAt == epoch)
-
-        #expect(terminal(reason: reason, observedAt: nil).observedAwaitingInput == nil)
-        #expect(terminal(reason: nil, observedAt: epoch).observedAwaitingInput == nil)
-        let nameless = AwaitingInputReason(message: "m", hookEventName: nil)
-        #expect(terminal(reason: nameless, observedAt: epoch).observedAwaitingInput == nil)
-        // An EMPTY name names a source exactly as poorly as no name at all: it
-        // would render as the bare `hook:` and pass every "does this fact say
-        // where it came from" check while saying nothing.
-        let blank = AwaitingInputReason(message: "m", hookEventName: "")
-        #expect(terminal(reason: blank, observedAt: epoch).observedAwaitingInput == nil)
-    }
-
     // MARK: - Transcript fingerprint
 
     @Test func awaitingInputReasonCarriesATranscriptFingerprint() throws {

@@ -98,12 +98,7 @@ struct AwaitingInputSendGateOptInTests {
 
     @Test func anOptedInSendIntoAPromptIsRefused() async throws {
         let harness = try await SendHarness.make()
-        try await harness.db.terminals.recordAwaitingInputReason(
-            id: harness.terminal.id,
-            reason: AwaitingInputReason(
-                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try await harness.seedPrompt()
 
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "yes", submit: true,
@@ -119,12 +114,7 @@ struct AwaitingInputSendGateOptInTests {
     /// the send goes through, because that is how an agent answers a dialog.
     @Test func anOptedOutSendIntoTheSamePromptIsNotGated() async throws {
         let harness = try await SendHarness.make()
-        try await harness.db.terminals.recordAwaitingInputReason(
-            id: harness.terminal.id,
-            reason: AwaitingInputReason(
-                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try await harness.seedPrompt()
 
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "yes", submit: true),
@@ -152,12 +142,7 @@ struct AwaitingInputSendGateOptInTests {
         let recorder = HolderWriteRecorder()
         let harness = try await SendHarness.make(
             transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
-        try await harness.db.terminals.recordAwaitingInputReason(
-            id: harness.terminal.id,
-            reason: AwaitingInputReason(
-                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try await harness.seedPrompt()
 
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "yes", submit: true,
@@ -176,12 +161,7 @@ struct AwaitingInputSendGateOptInTests {
         let recorder = HolderWriteRecorder()
         let harness = try await SendHarness.make(
             transport: .holder, holderDeliveryRecorder: { recorder.record($0) })
-        try await harness.db.terminals.recordAwaitingInputReason(
-            id: harness.terminal.id,
-            reason: AwaitingInputReason(
-                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: Date(timeIntervalSince1970: 1_800_000_000))
+        try await harness.seedPrompt()
 
         let response = try await harness.send(TerminalSendParams(
             terminalID: harness.terminal.id, text: "yes", submit: true),
@@ -189,6 +169,21 @@ struct AwaitingInputSendGateOptInTests {
 
         #expect(response.success, "error was: \(response.error ?? "none")")
         #expect(recorder.writes.count == 1)
+    }
+}
+
+private extension SendHarness {
+    /// A standing permission prompt with its text, so a refusal can be shown
+    /// to quote it.
+    func seedPrompt() async throws {
+        _ = try await db.terminals.setActivityState(
+            id: terminal.id,
+            activityState: .waitingForUser,
+            source: .programStatus,
+            observedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            awaitingInputReason: AwaitingInputReason(
+                message: "Allow Bash(rm -rf)?", hookEventName: "Notification",
+                notificationType: "permission_prompt"))
     }
 }
 

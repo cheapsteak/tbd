@@ -233,7 +233,7 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
         kind: .codex,
         activityState: .working,
         presentationActivityState: .working,
-        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateSource: .programStatus,
         activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 10)
     )
 
@@ -276,7 +276,7 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
         kind: .codex,
         activityState: .working,
         presentationActivityState: .idle,
-        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateSource: .programStatus,
         activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 10)
     )
 
@@ -1011,7 +1011,7 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
         terminalID: fixture.terminalID,
         worktreeID: fixture.worktreeID,
         activityState: .working,
-        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateSource: .programStatus,
         activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 10)
     )))
 
@@ -1044,34 +1044,13 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
 }
 
 @MainActor
-@Test func appState_bestEffortInterruptSurvivesNewerSameStateHookSnapshot() throws {
-    let state = AppState()
-    let worktreeID = UUID()
-    let terminalID = UUID()
-    state.terminals = [
-        worktreeID: [
-            Terminal(
-                id: terminalID,
-                worktreeID: worktreeID,
-                tmuxWindowID: "@1",
-                tmuxPaneID: "%1",
-                label: "Codex",
-                kind: .codex,
-                activityState: .working,
-                presentationActivityState: .working,
-                activityStateSource: .hookEvent("UserPromptSubmit"),
-                activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 10)
-            )
-        ]
-    ]
-
-    state.handleTerminalInterrupt(terminalID: terminalID)
-    let interrupted = try #require(state.terminals[worktreeID]?.first)
-    let interruptedAt = try #require(interrupted.activityStateObservedAt)
+@Test func appState_codexInterruptSurvivesNewerSameStateHookSnapshot() throws {
+    let interruptedAt = Date(timeIntervalSinceReferenceDate: 20)
+    let fixture = interruptedCodexState(observedAt: interruptedAt)
     let newerOrder = interruptedAt.addingTimeInterval(1)
     let snapshot = Terminal(
-        id: terminalID,
-        worktreeID: worktreeID,
+        id: fixture.terminalID,
+        worktreeID: fixture.worktreeID,
         tmuxWindowID: "@1",
         tmuxPaneID: "%1",
         label: "Codex",
@@ -1083,9 +1062,9 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
         activityStateOrderObservedAt: newerOrder
     )
 
-    state.adoptTerminalSnapshot([snapshot], worktreeID: worktreeID)
+    fixture.state.adoptTerminalSnapshot([snapshot], worktreeID: fixture.worktreeID)
 
-    let terminal = try #require(state.terminals[worktreeID]?.first)
+    let terminal = try #require(fixture.state.terminals[fixture.worktreeID]?.first)
     #expect(terminal.activityState == .idle)
     #expect(terminal.activityStateSource == .terminalInterrupt)
     #expect(terminal.activityStateObservedAt == interruptedAt)
@@ -1142,7 +1121,7 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
         kind: .codex,
         activityState: .working,
         presentationActivityState: .working,
-        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateSource: .programStatus,
         activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 20)
     )
 
@@ -1163,7 +1142,7 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
         terminalID: fixture.terminalID,
         worktreeID: fixture.worktreeID,
         activityState: .working,
-        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateSource: .programStatus,
         activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 20)
     )))
 
@@ -1302,7 +1281,7 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
         kind: .codex,
         activityState: .working,
         presentationActivityState: .working,
-        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateSource: .programStatus,
         activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 30)
     )
 
@@ -1310,7 +1289,7 @@ func appState_nonCodexActivityDeltaRetainsLegacyArrivalOrder(kind: TerminalKind)
 
     let terminal = fixture.state.terminals[fixture.worktreeID]![0]
     #expect(terminal.activityState == .working)
-    #expect(terminal.activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
+    #expect(terminal.activityStateSource == .programStatus)
     #expect(terminal.activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 30))
     #expect(WorktreeRowView.isForegroundWorking(terminal))
 }
@@ -1421,7 +1400,7 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
             terminalID: fixture.terminalID,
             worktreeID: fixture.worktreeID,
             activityState: .working,
-            activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent)
+            activityStateSource: .programStatus
         )
     case .observedAtOnly:
         delta = TerminalActivityDelta(
@@ -1622,7 +1601,7 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
         terminalID: terminalID,
         worktreeID: worktreeID,
         activityState: .idle,
-        activityStateSource: .hookEvent(RPCMethod.terminalActivityEvent),
+        activityStateSource: .hookEvent("Stop"),
         activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 1)
     )))
 
@@ -1632,62 +1611,7 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
 }
 
 @MainActor
-@Test func appState_interruptClearsCodexActivityImmediately() {
-    let state = AppState()
-    let worktreeID = UUID()
-    let terminalID = UUID()
-    state.terminals = [
-        worktreeID: [
-            Terminal(
-                id: terminalID,
-                worktreeID: worktreeID,
-                tmuxWindowID: "@1",
-                tmuxPaneID: "%1",
-                label: "Codex",
-                kind: .codex,
-                activityState: .working,
-                presentationActivityState: .working
-            )
-        ]
-    ]
-
-    state.handleTerminalInterrupt(terminalID: terminalID)
-
-    #expect(state.terminals[worktreeID]?[0].activityState == .idle)
-    #expect(state.terminals[worktreeID]?[0].activityStateSource?.kind == "user-action")
-    #expect(state.terminals[worktreeID]?[0].activityStateSource?.detail == "terminal-interrupt")
-    #expect(!WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
-}
-
-@MainActor
-@Test func appState_interruptRecordsProvenanceWhenCodexIsAlreadyRawIdle() {
-    let state = AppState()
-    let worktreeID = UUID()
-    let terminalID = UUID()
-    state.terminals = [
-        worktreeID: [
-            Terminal(
-                id: terminalID,
-                worktreeID: worktreeID,
-                tmuxWindowID: "@1",
-                tmuxPaneID: "%1",
-                label: "Codex",
-                kind: .codex,
-                activityState: .idle,
-                presentationActivityState: .working
-            )
-        ]
-    ]
-
-    state.handleTerminalInterrupt(terminalID: terminalID)
-
-    #expect(state.terminals[worktreeID]?[0].activityStateSource?.kind == "user-action")
-    #expect(state.terminals[worktreeID]?[0].activityStateSource?.detail == "terminal-interrupt")
-    #expect(!WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
-}
-
-@MainActor
-@Test func appState_workingHookDeltaSupersedesCodexInterrupt() throws {
+@Test func appState_workingDeltaSupersedesCodexInterrupt() throws {
     let state = AppState()
     let worktreeID = UUID()
     let terminalID = UUID()
@@ -1698,7 +1622,7 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
     let delta = try JSONDecoder().decode(
         TerminalActivityDelta.self,
         from: Data(
-            #"{"terminalID":"\#(terminalID.uuidString)","worktreeID":"\#(worktreeID.uuidString)","activityState":"working","activityStateSource":{"kind":"hook","detail":"terminal.activityEvent"},"activityStateObservedAt":0}"#.utf8
+            #"{"terminalID":"\#(terminalID.uuidString)","worktreeID":"\#(worktreeID.uuidString)","activityState":"working","activityStateSource":{"kind":"program-status"},"activityStateObservedAt":0}"#.utf8
         )
     )
     state.terminals = [
@@ -1720,124 +1644,7 @@ private func appState_halfProvenanceDeltaClearsBothHalvesWhenApplied(
     state.handleDelta(.terminalActivityUpdated(delta))
 
     #expect(state.terminals[worktreeID]?[0].activityState == .working)
-    #expect(state.terminals[worktreeID]?[0].activityStateSource == .hookEvent(RPCMethod.terminalActivityEvent))
+    #expect(state.terminals[worktreeID]?[0].activityStateSource == .programStatus)
     #expect(state.terminals[worktreeID]?[0].activityStateObservedAt == Date(timeIntervalSinceReferenceDate: 0))
     #expect(WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
-}
-
-@MainActor
-@Test func appState_interruptDoesNotTouchShellTerminals() {
-    let state = AppState()
-    let worktreeID = UUID()
-    let terminalID = UUID()
-    state.terminals = [
-        worktreeID: [
-            Terminal(
-                id: terminalID,
-                worktreeID: worktreeID,
-                tmuxWindowID: "@1",
-                tmuxPaneID: "%1",
-                label: "shell",
-                kind: .shell,
-                activityState: .working
-            )
-        ]
-    ]
-
-    state.handleTerminalInterrupt(terminalID: terminalID)
-
-    #expect(state.terminals[worktreeID]?[0].activityState == .working)
-}
-
-@MainActor
-@Test(
-    "Claude Ctrl+C and Esc retain legacy raw-idle interrupt behavior",
-    arguments: [false, true]
-)
-func appState_claudeInterruptRetainsLegacyRawIdle(viaEscape: Bool) {
-    let state = AppState()
-    let worktreeID = UUID()
-    let terminalID = UUID()
-    let observedAt = Date(timeIntervalSinceReferenceDate: 20)
-    state.terminals = [
-        worktreeID: [
-            Terminal(
-                id: terminalID,
-                worktreeID: worktreeID,
-                tmuxWindowID: "@1",
-                tmuxPaneID: "%1",
-                label: "Claude",
-                kind: .claude,
-                activityState: .working,
-                activityStateSource: .hookEvent("UserPromptSubmit"),
-                activityStateObservedAt: observedAt
-            )
-        ]
-    ]
-
-    state.handleTerminalInterrupt(terminalID: terminalID, viaEscape: viaEscape)
-
-    #expect(state.terminals[worktreeID]?[0].activityState == .idle)
-    #expect(state.terminals[worktreeID]?[0].activityStateSource == .hookEvent("UserPromptSubmit"))
-    #expect(state.terminals[worktreeID]?[0].activityStateObservedAt == observedAt)
-}
-
-@MainActor
-@Test(
-    "Interrupting a delegating Claude clears the cached delegation claim",
-    arguments: [false, true]
-)
-func appState_claudeInterruptClearsCachedPresentationState(viaEscape: Bool) {
-    let state = AppState()
-    let worktreeID = UUID()
-    let terminalID = UUID()
-    state.terminals = [
-        worktreeID: [
-            Terminal(
-                id: terminalID,
-                worktreeID: worktreeID,
-                tmuxWindowID: "@1",
-                tmuxPaneID: "%1",
-                label: "Claude",
-                kind: .claude,
-                activityState: .idle,
-                presentationActivityState: .working,
-                activityStateSource: .hookEvent("Stop"),
-                activityStateObservedAt: Date(timeIntervalSinceReferenceDate: 20)
-            )
-        ]
-    ]
-    #expect(WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
-
-    state.handleTerminalInterrupt(terminalID: terminalID, viaEscape: viaEscape)
-
-    // The delta rail carries no presentation field, so only this optimistic
-    // clear keeps the spinner from outliving the interrupt by a poll interval.
-    #expect(state.terminals[worktreeID]?[0].presentationActivityState == nil)
-    #expect(!WorktreeRowView.isForegroundWorking(state.terminals[worktreeID]![0]))
-}
-
-@MainActor
-@Test func appState_escDoesNotInterruptCodex() {
-    let state = AppState()
-    let worktreeID = UUID()
-    let terminalID = UUID()
-    state.terminals = [
-        worktreeID: [
-            Terminal(
-                id: terminalID,
-                worktreeID: worktreeID,
-                tmuxWindowID: "@1",
-                tmuxPaneID: "%1",
-                label: "Codex",
-                kind: .codex,
-                activityState: .working,
-                presentationActivityState: .working)
-        ]
-    ]
-
-    state.handleTerminalInterrupt(terminalID: terminalID, viaEscape: true)
-
-    #expect(state.terminals[worktreeID]?[0].activityState == .working)
-    #expect(state.terminals[worktreeID]?[0].presentationActivityState == .working)
 }

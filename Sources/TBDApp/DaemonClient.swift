@@ -912,22 +912,6 @@ actor DaemonClient {
         try await callVoidAsync(method: RPCMethod.terminalSend, params: params)
     }
 
-    /// Publish an explicit terminal activity state transition.
-    func setTerminalActivity(
-        terminalID: UUID,
-        activityState: TerminalActivityState,
-        origin: TerminalActivityEventOrigin? = nil
-    ) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.terminalActivityEvent,
-            params: TerminalActivityEventParams(
-                terminalID: terminalID,
-                activityState: activityState,
-                origin: origin
-            )
-        )
-    }
-
     /// Send a notification.
     func notify(worktreeID: UUID?, type: NotificationType, message: String? = nil,
                 terminalID: UUID? = nil) async throws {

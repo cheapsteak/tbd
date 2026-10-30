@@ -277,17 +277,6 @@ enum ClaudeSpawnExtrasColumn {
     }
 }
 
-/// What a `recordAwaitingInputReason` call did to the record.
-public enum AwaitingInputWrite: Sendable, Equatable {
-    /// The guard refused the report; the standing reason is unchanged.
-    case declined
-    /// The reason columns now hold the reported reason.
-    /// `displacedPromptOnScreen` says whether a prompt-on-screen reason was
-    /// standing before — the case a display consumer has to hear about even
-    /// when the new class is one it does not render.
-    case written(displacedPromptOnScreen: Bool)
-}
-
 /// What `applyProgramStatusActivity` did to an accepted row.
 public struct ProgramStatusActivityWrite: Sendable, Equatable {
     /// The row's worktree, for the deltas and the banner.
@@ -303,53 +292,12 @@ public struct ProgramStatusActivityWrite: Sendable, Equatable {
     public let cancelledPendingResume: Bool
 }
 
-public struct AppliedTerminalActivityObservation: Sendable {
-    public let activityState: TerminalActivityState
-    public let source: FactSource
-    public let observedAt: Date
-    public let orderObservedAt: Date
-    /// Whether the durable activity value changed. Legacy non-Codex hooks
-    /// still return an accepted observation when only an awaiting-input reason
-    /// was cleared or the value was already current.
-    public let activityStateChanged: Bool
-    /// Whether this accepted working observation atomically cancelled a
-    /// scheduled resume for the same terminal incarnation.
-    public let cancelledPendingResume: Bool
-    /// True when applying this observation retracted a standing awaiting-input
-    /// reason, so the caller knows there is a retraction worth broadcasting.
-    public let clearedAwaitingInput: Bool
-
-    public init(
-        activityState: TerminalActivityState,
-        source: FactSource,
-        observedAt: Date,
-        orderObservedAt: Date,
-        activityStateChanged: Bool = true,
-        cancelledPendingResume: Bool = false,
-        clearedAwaitingInput: Bool = false
-    ) {
-        self.activityState = activityState
-        self.source = source
-        self.observedAt = observedAt
-        self.orderObservedAt = orderObservedAt
-        self.activityStateChanged = activityStateChanged
-        self.cancelledPendingResume = cancelledPendingResume
-        self.clearedAwaitingInput = clearedAwaitingInput
-    }
-}
-
 struct AppliedTerminalSessionStart: Sendable {
     let sessionID: String
     let transcriptPath: String?
     let orderObservedAt: Date?
     let transcriptBoundaryOffset: Int64?
     let isInitialAttachment: Bool
-    let activityObservation: AppliedTerminalActivityObservation?
-    /// True when applying this SessionStart retracted a standing awaiting-input
-    /// reason. Reported separately from `activityObservation` because the
-    /// Claude/shell branch retracts one while returning no activity observation
-    /// at all — a retraction read off that field alone would be missed there.
-    let clearedAwaitingInput: Bool
 }
 
 struct ObservedTranscriptBoundary: Sendable {
@@ -594,112 +542,6 @@ private func resetRecreatedShellLifecycle(
     return incarnationID
 }
 
-private func preservesStoredActivityAtEqualOrder(
-    storedState: TerminalActivityState,
-    storedSource: FactSource?,
-    incomingState: TerminalActivityState,
-    incomingSource: FactSource
-) -> Bool {
-    if incomingSource == .terminalInterrupt { return false }
-    if storedSource == .terminalInterrupt { return true }
-    if storedState == .waitingForUser, incomingState != .waitingForUser { return true }
-    return storedState != .working && incomingState == .working
-}
-
-/// Retract a standing awaiting-input reason unless it is newer than the
-/// observation superseding it. Returns whether a standing reason was actually
-/// retracted, so a caller can broadcast the retraction without re-reading the
-/// row.
-@discardableResult
-private func clearAwaitingInputIfNotNewer(
-    record: inout TerminalRecord,
-    than observedAt: Date
-) -> Bool {
-    guard record.awaitingInputObservedAt.map({ $0 >= observedAt }) != true else { return false }
-    let hadReason = record.awaitingInputReason != nil || record.awaitingInputObservedAt != nil
-    record.awaitingInputReason = nil
-    record.awaitingInputObservedAt = nil
-    return hadReason
-}
-
-private func applyActivityObservationToRecord(
-    to record: inout TerminalRecord,
-    activityState: TerminalActivityState,
-    source: FactSource,
-    observedAt: Date,
-    replaceSameValue: Bool
-) -> AppliedTerminalActivityObservation? {
-    let storedOrderObservedAt = record.activityStateOrderObservedAt
-        ?? record.activityStateObservedAt
-    if let storedOrderObservedAt, storedOrderObservedAt > observedAt {
-        return nil
-    }
-    let storedSource = FactColumnJSON.decode(
-        FactSource.self, from: record.activityStateSource)
-    let storedState = record.activityState.flatMap(TerminalActivityState.init(rawValue:))
-        ?? .unknown
-    if storedOrderObservedAt == observedAt,
-       preservesStoredActivityAtEqualOrder(
-           storedState: storedState,
-           storedSource: storedSource,
-           incomingState: activityState,
-           incomingSource: source) {
-        return nil
-    }
-
-    let sameCompleteFact = record.activityState == activityState.rawValue
-        && storedSource != nil
-        && record.activityStateObservedAt != nil
-        && !replaceSameValue
-    if sameCompleteFact,
-       let storedSource,
-       let storedObservedAt = record.activityStateObservedAt {
-        record.activityStateOrderObservedAt = observedAt
-        let cleared = clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
-        return AppliedTerminalActivityObservation(
-            activityState: activityState,
-            source: storedSource,
-            observedAt: storedObservedAt,
-            orderObservedAt: observedAt,
-            clearedAwaitingInput: cleared
-        )
-    }
-
-    record.activityState = activityState.rawValue
-    record.activityStateSource = FactColumnJSON.encode(source)
-    record.activityStateObservedAt = observedAt
-    record.activityStateOrderObservedAt = observedAt
-    let cleared = clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
-    return AppliedTerminalActivityObservation(
-        activityState: activityState,
-        source: source,
-        observedAt: observedAt,
-        orderObservedAt: observedAt,
-        clearedAwaitingInput: cleared
-    )
-}
-
-private func finishActivityObservation(
-    _ application: AppliedTerminalActivityObservation,
-    activityState: TerminalActivityState,
-    terminalID: String,
-    in db: Database
-) throws -> AppliedTerminalActivityObservation {
-    guard activityState == .working,
-          try ScheduledResumeStore.cancelPendingInTransaction(
-              db, terminalID: terminalID) else {
-        return application
-    }
-    return AppliedTerminalActivityObservation(
-        activityState: application.activityState,
-        source: application.source,
-        observedAt: application.observedAt,
-        orderObservedAt: application.orderObservedAt,
-        activityStateChanged: application.activityStateChanged,
-        cancelledPendingResume: true,
-        clearedAwaitingInput: application.clearedAwaitingInput)
-}
-
 /// One transaction's worth of activity-write result: what to hand the caller,
 /// and whether the write crossed the `working -> idle` edge (and for which
 /// profile), so the notification can be fired AFTER the transaction commits
@@ -709,12 +551,8 @@ private struct ActivityWriteOutcome<Result: Sendable>: Sendable {
     var becameIdleProfileID: UUID?
 }
 
-/// Spelled out so every `return` in `applyActivityObservation` states the
+/// Spelled out so every `return` in `applyProgramStatusActivity` states the
 /// generic argument instead of leaning on inference through an optional.
-private typealias AppliedActivityWriteOutcome =
-    ActivityWriteOutcome<AppliedTerminalActivityObservation?>
-
-/// The same, for `applyProgramStatusActivity`.
 private typealias ProgramStatusWriteOutcome = ActivityWriteOutcome<ProgramStatusActivityWrite?>
 
 /// Fan-out for `working -> idle` activity transitions.
@@ -763,21 +601,16 @@ public struct TerminalStore: Sendable {
     /// profile's utilization moved*. It is not "the `activity_state` column
     /// changed value".
     ///
-    /// **Three writers fire it**, and they are the ones that carry an outside
+    /// **Two writers fire it**, and they are the ones that carry an outside
     /// observation of what the agent did: `applyProgramStatusActivity` (the
-    /// agent's own OSC 7501 report), `applyActivityObservation` (the path
-    /// every Claude and Codex hook takes) and `setActivityState`. The edge is
+    /// agent's own OSC 7501 report) and `setActivityState`. The edge is
     /// detected inside the store rather than at their call sites because a
     /// caller-side check would have to be written twice, kept in sync, and
     /// would still miss the next call site.
     ///
-    /// **Four other writers set `activityState = .idle` and deliberately do
+    /// **Three other writers set `activityState = .idle` and deliberately do
     /// not fire it**, because none of them observed a turn finishing:
     ///
-    /// - `applySessionStart`'s Codex branch — a session *starting* is the
-    ///   opposite of a turn completing, and it is also how a resumed session
-    ///   arrives. The non-ordered path's `unknown -> idle` case is excluded
-    ///   for the same reason.
     /// - `beginHibernatedShellRespawn`, `finalizeHibernatedShellRespawn`,
     ///   `persistHibernatedState` — a park writes `.idle` with
     ///   `FactSource.database`: TBD's own bookkeeping that it stopped the
@@ -1054,20 +887,18 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Apply a SessionStart in one database transaction. Codex session,
-    /// prompt, and activity facts use independent ordering rails; other agent
-    /// kinds retain their established last-writer session semantics.
+    /// Apply a SessionStart's session identity in one database transaction.
+    /// Codex session identity uses its own ordering rail; other agent kinds
+    /// retain their established last-writer session semantics. Neither path
+    /// writes activity or the wait reason: the agent reports those itself
+    /// over OSC 7501, and `ProgramStatusStore` is their only writer.
     ///
-    /// Codex session identity is ordered only against other SessionStarts. A
-    /// delayed permission or activity hook can carry a later server-receipt
-    /// timestamp while still describing the previous session, so it must not
-    /// suppress a genuine identity rollover. Prompt and activity each retain
-    /// their own conservative ordering: a same/newer prompt survives, and an
-    /// older SessionStart cannot regress newer activity. Codex SessionStart is
-    /// first-wins at an equal session watermark; an exact retry is an
-    /// idempotent no-op and therefore cannot move a transcript boundary. The
-    /// same transaction classifies an initial attachment from the complete
-    /// prior session history so callers never decide from a stale row snapshot.
+    /// Codex session identity is ordered only against other SessionStarts.
+    /// Codex SessionStart is first-wins at an equal session watermark; an exact
+    /// retry is an idempotent no-op and therefore cannot move a transcript
+    /// boundary. The same transaction classifies an initial attachment from the
+    /// complete prior session history so callers never decide from a stale row
+    /// snapshot.
     /// A handler's durable incarnation snapshot must still match, preventing
     /// a delayed hook from attaching to a recreated terminal even when tmux
     /// reuses the same launch coordinates.
@@ -1100,27 +931,20 @@ public struct TerminalStore: Sendable {
                 || record.label == TerminalLabel.codex
             guard isCodex else {
                 // Preserve the established Claude/shell hook behavior: the
-                // last SessionStart to finish replaces identity and retracts
-                // the prior prompt without changing activity. The ordering
+                // last SessionStart to finish replaces identity. The ordering
                 // rail exists only for Codex transcript reconciliation.
                 record.claudeSessionID = sessionID
                 if let transcriptPath {
                     record.transcriptPath = transcriptPath
                 }
                 record.sessionOrderObservedAt = nil
-                let hadReason = record.awaitingInputReason != nil
-                    || record.awaitingInputObservedAt != nil
-                record.awaitingInputReason = nil
-                record.awaitingInputObservedAt = nil
                 try record.update(db)
                 return AppliedTerminalSessionStart(
                     sessionID: sessionID,
                     transcriptPath: record.transcriptPath,
                     orderObservedAt: nil,
                     transcriptBoundaryOffset: record.codexTranscriptBoundaryOffset,
-                    isInitialAttachment: false,
-                    activityObservation: nil,
-                    clearedAwaitingInput: hadReason)
+                    isInitialAttachment: false)
             }
             let isInitialAttachment = record.claudeSessionID == nil
                 && record.transcriptPath == nil
@@ -1131,14 +955,6 @@ public struct TerminalStore: Sendable {
                 return nil
             }
             record.sessionOrderObservedAt = observedAt
-
-            let activityObservation = applyActivityObservationToRecord(
-                to: &record,
-                activityState: .idle,
-                source: .hookEvent("SessionStart"),
-                observedAt: observedAt,
-                replaceSameValue: true
-            )
 
             let effectiveTranscriptPath = transcriptPath ?? record.transcriptPath
             record.claudeSessionID = sessionID
@@ -1159,10 +975,6 @@ public struct TerminalStore: Sendable {
             } else {
                 record.codexTranscriptBoundaryOffset = nil
             }
-            // The activity helper performs this when it accepts Codex's idle
-            // fact. Keep the independent call so a rejected stale activity
-            // transition still retracts only a prompt known to be older.
-            let clearedHere = clearAwaitingInputIfNotNewer(record: &record, than: observedAt)
             try record.update(db)
             guard let persistedRecord = try TerminalRecord.fetchOne(
                 db, key: id.uuidString
@@ -1176,10 +988,7 @@ public struct TerminalStore: Sendable {
                 // terminal-list read will reload.
                 orderObservedAt: persistedRecord.sessionOrderObservedAt,
                 transcriptBoundaryOffset: persistedRecord.codexTranscriptBoundaryOffset,
-                isInitialAttachment: isInitialAttachment,
-                activityObservation: activityObservation,
-                clearedAwaitingInput: clearedHere
-                    || (activityObservation?.clearedAwaitingInput ?? false))
+                isInitialAttachment: isInitialAttachment)
         }
     }
 
@@ -1422,9 +1231,10 @@ public struct TerminalStore: Sendable {
             record.codexTranscriptBoundaryOffset = nil
             record.sessionIncarnationID = expectedPendingIncarnationID.uuidString
             record.pendingSessionIncarnationID = nil
-            record.activityState = TerminalActivityState.idle.rawValue
-            record.activityStateSource = FactColumnJSON.encode(
-                FactSource.hookEvent("SessionStart"))
+            // A new incarnation: nothing is known about it until its agent
+            // reports, exactly as `resetAgentProcessLifecycle` records it.
+            record.activityState = TerminalActivityState.unknown.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
             record.activityStateObservedAt = observedAt
             record.activityStateOrderObservedAt = observedAt
             record.awaitingInputReason = nil
@@ -1461,9 +1271,10 @@ public struct TerminalStore: Sendable {
             record.codexTranscriptBoundaryOffset = nil
             record.sessionIncarnationID = expectedPendingIncarnationID.uuidString
             record.pendingSessionIncarnationID = nil
-            record.activityState = TerminalActivityState.idle.rawValue
-            record.activityStateSource = FactColumnJSON.encode(
-                FactSource.hookEvent("SessionStart"))
+            // A new incarnation: nothing is known about it until its agent
+            // reports, exactly as `resetAgentProcessLifecycle` records it.
+            record.activityState = TerminalActivityState.unknown.rawValue
+            record.activityStateSource = FactColumnJSON.encode(FactSource.derived)
             record.activityStateObservedAt = observedAt
             record.activityStateOrderObservedAt = observedAt
             record.awaitingInputReason = nil
@@ -1848,212 +1659,6 @@ public struct TerminalStore: Sendable {
         return outcome.result
     }
 
-    /// Apply an activity fact after validating process identity in the same
-    /// writer transaction. Codex and explicit-interrupt facts additionally
-    /// obey the durable ordering watermark.
-    ///
-    /// The ordering comparison and write share one database-writer
-    /// transaction. Callers may therefore do
-    /// arbitrary asynchronous work between observing an event and reaching
-    /// this method without allowing that older event to roll back a newer one.
-    ///
-    /// A repeated Codex value advances only the ordering watermark and clears
-    /// an awaiting-input reason strictly older than itself. Its semantic transition
-    /// timestamp and source remain unchanged, which both preserves
-    /// hibernation's at-rest clock and prevents an idle echo from erasing an
-    /// explicit interrupt.
-    /// Events that establish meaningful same-value provenance (currently a user
-    /// interrupt and SessionStart) opt into replacement. Exact timestamp ties
-    /// cannot establish event order, so explicit interrupts and permission
-    /// waits are preserved, while ambiguous working/non-working ties resolve
-    /// toward non-working; the next strictly newer hook advances order. Other
-    /// agent hooks retain their established changed-value replacement and
-    /// same-value no-op behavior. `processBound` is false only for app actions
-    /// such as the explicit user interrupt; hook callers must leave it true.
-    public func applyActivityObservation(
-        id: UUID,
-        activityState: TerminalActivityState,
-        source: FactSource,
-        observedAt: Date,
-        sessionID: String? = nil,
-        sessionIncarnationID: UUID? = nil,
-        processBound: Bool = true,
-        replaceSameValue: Bool = false
-    ) async throws -> AppliedTerminalActivityObservation? {
-        let outcome = try await writer.write { db -> AppliedActivityWriteOutcome in
-            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
-                throw DatabaseError(message: "Terminal not found")
-            }
-            // Read before any mutation, for the same reason `setActivityState`
-            // does: the edge is only visible against the state on entry.
-            // `AppliedTerminalActivityObservation.activityStateChanged` is NOT
-            // a substitute — the ordered path returns it true for an accepted
-            // observation that changed no durable value.
-            let previousState = record.activityState
-                .flatMap(TerminalActivityState.init(rawValue:))
-            let rowProfileID = record.profile_id.flatMap(UUID.init(uuidString:))
-            let usesOrderedCodexActivity = record.kind == TerminalKind.codex.rawValue
-                || record.label == TerminalLabel.codex
-                || source == .terminalInterrupt
-            // Hook observations name a running process. During the staged
-            // hibernation replacement there intentionally is no process
-            // entitled to mutate the row: the outgoing token remains current
-            // only for rollback, and the staged token has not launched yet.
-            // Non-process-bound app actions remain valid throughout.
-            if processBound {
-                guard record.pendingSessionIncarnationID == nil,
-                      record.sessionIncarnationID == sessionIncarnationID?.uuidString else {
-                    return AppliedActivityWriteOutcome(result: nil)
-                }
-                if let sessionID, sessionID != record.claudeSessionID {
-                    return AppliedActivityWriteOutcome(result: nil)
-                }
-            }
-            guard usesOrderedCodexActivity else {
-                // This API is public to the daemon module, so keep the scope
-                // boundary here as well as at the RPC router. An accidental
-                // non-Codex caller must retain the pre-existing changed-value
-                // replacement and same-value no-op behavior.
-                guard record.activityState != activityState.rawValue else {
-                    let cleared = clearAwaitingInputIfNotNewer(
-                        record: &record, than: observedAt)
-                    if cleared { try record.update(db) }
-                    let application = AppliedTerminalActivityObservation(
-                        activityState: activityState,
-                        source: source,
-                        observedAt: observedAt,
-                        orderObservedAt: observedAt,
-                        activityStateChanged: false,
-                        clearedAwaitingInput: cleared)
-                    // The durable value did not move, so no edge was crossed.
-                    let finished: AppliedTerminalActivityObservation? =
-                        try finishActivityObservation(
-                            application,
-                            activityState: activityState,
-                            terminalID: id.uuidString,
-                            in: db)
-                    return AppliedActivityWriteOutcome(result: finished)
-                }
-                let hadReason = record.awaitingInputReason != nil
-                    || record.awaitingInputObservedAt != nil
-                record.activityState = activityState.rawValue
-                record.activityStateSource = FactColumnJSON.encode(source)
-                record.activityStateObservedAt = observedAt
-                record.activityStateOrderObservedAt = observedAt
-                record.awaitingInputReason = nil
-                record.awaitingInputObservedAt = nil
-                try record.update(db)
-                let application = AppliedTerminalActivityObservation(
-                    activityState: activityState,
-                    source: source,
-                    observedAt: observedAt,
-                    orderObservedAt: observedAt,
-                    clearedAwaitingInput: hadReason)
-                let finished: AppliedTerminalActivityObservation? =
-                    try finishActivityObservation(
-                        application,
-                        activityState: activityState,
-                        terminalID: id.uuidString,
-                        in: db)
-                let becameIdle = previousState == .working && activityState == .idle
-                return AppliedActivityWriteOutcome(
-                    result: finished,
-                    becameIdleProfileID: becameIdle ? rowProfileID : nil)
-            }
-            guard let application = applyActivityObservationToRecord(
-                to: &record,
-                activityState: activityState,
-                source: source,
-                observedAt: observedAt,
-                replaceSameValue: replaceSameValue
-            ) else { return AppliedActivityWriteOutcome(result: nil) }
-            try record.update(db)
-            // The ordered path may keep the stored value (`sameCompleteFact`),
-            // so ask the record what was actually committed rather than what
-            // the observation asserted.
-            let becameIdle = previousState == .working
-                && record.activityState == TerminalActivityState.idle.rawValue
-            let finished: AppliedTerminalActivityObservation? =
-                try finishActivityObservation(
-                    application,
-                    activityState: activityState,
-                    terminalID: id.uuidString,
-                    in: db)
-            return AppliedActivityWriteOutcome(
-                result: finished,
-                becameIdleProfileID: becameIdle ? rowProfileID : nil)
-        }
-        if let profileID = outcome.becameIdleProfileID {
-            activityTransitions.notifySessionBecameIdle(profileID: profileID)
-        }
-        return outcome.result
-    }
-
-    /// Record a wait reason observed by a hook, WITHOUT asserting an activity
-    /// state.
-    ///
-    /// `setActivityState` writes a reason alongside a state it is also
-    /// asserting; this writer exists for the one source that can report a
-    /// reason it is not entitled to turn into a state. Claude Code's
-    /// `Notification` hook says a prompt was raised — it does not say the
-    /// session is still sitting on it, and `activityState` is a *gating* field:
-    /// `HibernationGate.blockingRail` reads it, so writing `waiting_for_user`
-    /// here would change which sessions park, from a hook whose only job is to
-    /// report. So the two activity columns are left exactly as they were, and
-    /// the recorded reason is composed into a session state downstream instead.
-    ///
-    /// The superseding rail is unchanged and is what keeps this honest: the
-    /// next `setActivityState` observation clears both columns (its
-    /// `awaitingInputReason` defaults to nil), so a reason recorded here cannot
-    /// outlive the wait it described.
-    ///
-    /// `observedAt` is the moment the hook reported, following the one-shot
-    /// stamp seam — it is data, not behavior.
-    ///
-    /// **A write from a class that establishes no state cannot clear a standing
-    /// `promptOnScreen`.** The hook overlay registers `Notification` with no
-    /// matcher, so every type arrives here — including the ones that fire while
-    /// a permission prompt is up. A subagent finishing sends `agent_completed`
-    /// (`.informational`); an unconditional overwrite would replace the live
-    /// prompt with it, and the session would read as un-blocked while a human is
-    /// still being waited on. `.informational` and `.unrecognized` say nothing
-    /// about whether a prompt went away, so they are recorded only when no
-    /// `promptOnScreen` reason is standing. `.promptOnScreen` and `.doneWaiting`
-    /// write unconditionally: the first is a newer prompt, the second is the
-    /// agent reporting it is back at its own prompt.
-    ///
-    /// The *activity* rail is untouched by this and keeps superseding as it
-    /// always has: `setActivityState` clears both columns, so a genuine
-    /// observation of the session moving on still retracts the reason. This
-    /// guard only refuses to let a report that observed nothing do it.
-    ///
-    /// Reports what the write did, so a caller can decide whether it is worth
-    /// announcing. `.declined` means the guard above refused and the standing
-    /// reason is unchanged.
-    @discardableResult
-    public func recordAwaitingInputReason(
-        id: UUID,
-        reason: AwaitingInputReason,
-        observedAt: Date
-    ) async throws -> AwaitingInputWrite {
-        try await writer.write { db in
-            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
-                throw DatabaseError(message: "Terminal not found")
-            }
-            let standing = FactColumnJSON.decode(
-                AwaitingInputReason.self, from: record.awaitingInputReason)
-            let establishesNothing = reason.classification == .informational
-                || reason.classification == .unrecognized
-            if establishesNothing, standing?.classification == .promptOnScreen {
-                return .declined
-            }
-            record.awaitingInputReason = FactColumnJSON.encode(reason)
-            record.awaitingInputObservedAt = observedAt
-            try record.update(db)
-            return .written(displacedPromptOnScreen: standing?.classification == .promptOnScreen)
-        }
-    }
-
     /// Retract a standing prompt whose transcript no longer matches the
     /// fingerprint taken when it was recorded, WITHOUT asserting an activity
     /// state: this caller knows the prompt is gone, not what the session is
@@ -2154,41 +1759,6 @@ public struct TerminalStore: Sendable {
                     transcriptFingerprint: fingerprint))
             try record.update(db)
             return true
-        }
-    }
-
-    /// Retract a standing wait reason WITHOUT asserting an activity state.
-    ///
-    /// The mirror of `recordAwaitingInputReason`, and it exists for the same
-    /// reason: a caller can be entitled to say a recorded prompt is gone
-    /// without being entitled to say what the session is doing instead. The two
-    /// callers are both TBD's own knowledge that the process the prompt was
-    /// raised on has been replaced — the in-place profile swap, which kills the
-    /// pane's agent itself, and the SessionStart bridge, where Claude Code
-    /// reports a new session context (a `/clear`, a resume, a hand relaunch).
-    /// Neither knows what the new process is doing, so `activityState` and its
-    /// provenance are left exactly as they were; writing one here would move a
-    /// field `HibernationGate.blockingRail` gates on, from a step that observed
-    /// no turn boundary.
-    ///
-    /// The activity rail is **not** a sufficient retraction on its own here,
-    /// which is why this writer is not just a `setActivityState` call. It is
-    /// unconditional where the rail is ordered: the rail retracts only a reason
-    /// not newer than the observation superseding it, and these two callers
-    /// know the process the prompt was raised on is gone regardless of when it
-    /// was recorded. The rail is also a second, separate, best-effort CLI
-    /// invocation that a stale `tbd` on `PATH` can lose while the first one
-    /// lands.
-    ///
-    /// Idempotent: clearing columns that are already nil is a no-op write.
-    public func clearAwaitingInputReason(id: UUID) async throws {
-        try await writer.write { db in
-            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString) else {
-                throw DatabaseError(message: "Terminal not found")
-            }
-            record.awaitingInputReason = nil
-            record.awaitingInputObservedAt = nil
-            try record.update(db)
         }
     }
 
@@ -2418,8 +1988,8 @@ public struct TerminalStore: Sendable {
     ///
     /// `reportedIncarnationID` is the hook's own process-incarnation nonce,
     /// checked by exact equality against the record's — the same reading
-    /// `applySessionStart`, `applyActivityObservation` and
-    /// `updateSessionIDIfIncarnationMatches` each give it. A mismatch means the
+    /// `applySessionStart` and `updateSessionIDIfIncarnationMatches` each give
+    /// it. A mismatch means the
     /// hook describes a process TBD has already replaced, so stamping would
     /// park a live successor. A `nil` report matches only a record that still
     /// carries no incarnation of its own — once TBD mints one (a replacement

@@ -114,6 +114,9 @@ struct ContinueInClaudeTransactionTests {
         #expect(committed.transcriptPath == "/tmp/claude-session.jsonl")
         #expect(committed.sessionIncarnationID == token)
         #expect(committed.pendingSessionIncarnationID == nil)
+        // A new incarnation, which has not reported its state yet.
+        #expect(committed.activityState == .unknown)
+        #expect(committed.activityStateSource == .derived)
         #expect(try await fixture.db.terminals.list(
             worktreeID: source.worktreeID).count == 1)
     }
@@ -151,6 +154,8 @@ struct ContinueInClaudeTransactionTests {
         #expect(restored.transcriptPath == fixture.rollout.path)
         #expect(restored.sessionIncarnationID == recoveryToken)
         #expect(restored.pendingSessionIncarnationID == nil)
+        #expect(restored.activityState == .unknown)
+        #expect(restored.activityStateSource == .derived)
     }
 
     @Test("changed activity makes the continuation CAS refuse without mutation")

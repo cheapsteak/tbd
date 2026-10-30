@@ -535,13 +535,6 @@ import Testing
             sessionID: "replacement-session",
             transcriptPath: "/tmp/replacement-session.jsonl",
             observedAt: Date(timeIntervalSinceReferenceDate: 30)))
-        _ = try #require(try await database.terminals.applyActivityObservation(
-            id: terminal.id,
-            activityState: .working,
-            source: .hookEvent("UserPromptSubmit"),
-            observedAt: Date(timeIntervalSinceReferenceDate: 31),
-            sessionID: "replacement-session",
-            sessionIncarnationID: token))
         try await database.terminals.clearHibernated(id: terminal.id)
 
         let released = try #require(try await database.terminals.get(id: terminal.id))
@@ -549,7 +542,6 @@ import Testing
         #expect(released.sessionIncarnationID == prepared.sessionIncarnationID)
         #expect(released.claudeSessionID == "replacement-session")
         #expect(released.transcriptPath == "/tmp/replacement-session.jsonl")
-        #expect(released.activityState == .working)
     }
 
     @Test func hibernationBeginRejectsAReplacedProcessWithoutMutation() async throws {
@@ -644,13 +636,12 @@ import Testing
         #expect(prepared.activityState == .idle)
         #expect(prepared.activityStateSource == .database)
 
-        let staleActivity = try await database.terminals.applyActivityObservation(
+        let staleActivity = try await database.terminals.applyProgramStatusActivity(
             id: terminal.id,
+            scope: .incarnation(oldToken),
             activityState: .working,
-            source: .hookEvent("UserPromptSubmit"),
-            observedAt: Date(timeIntervalSinceReferenceDate: 40),
-            sessionID: "resume-session",
-            sessionIncarnationID: oldToken)
+            awaitingInputReason: nil,
+            observedAt: Date(timeIntervalSinceReferenceDate: 40))
         #expect(staleActivity == nil)
         #expect(try await database.terminals.get(id: terminal.id)?.activityState == .idle)
         let staleStart = try await database.terminals.applySessionStart(

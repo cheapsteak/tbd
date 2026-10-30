@@ -372,13 +372,13 @@ struct OutgoingInputQueueTests {
 /// path — `makeCoordinatorHarness()` builds a `Coordinator` on production
 /// wiring with a real pty child.
 ///
-/// Scope, stated plainly: the chunks are handed to the delegate directly, the
-/// way `QuietIngestTests` does, so this pins the CLASSIFICATION rather than
-/// SwiftTerm's chunking. Driving the fork's own chunking would mean going
-/// through `paste(_:)`, which reads `NSPasteboard.general` — the developer's
-/// real clipboard. What happens if that chunking ever coalesces a marker with
-/// its payload is therefore recorded where it can be acted on — the comment
-/// in `Coordinator.send(source:data:)` — and not as a test: no assertion here
+/// Scope, stated plainly: the chunks are handed to the delegate directly, so
+/// this pins the CLASSIFICATION rather than SwiftTerm's chunking. Driving the
+/// fork's own chunking would mean going through `paste(_:)`, which reads
+/// `NSPasteboard.general` — the developer's real clipboard. What happens if
+/// that chunking ever coalesces a marker with its payload is therefore
+/// recorded where it can be acted on — the comment in
+/// `Coordinator.send(source:data:)` — and not as a test: no assertion here
 /// could tell a coalescing fork from a chunking one, since the classifier
 /// behaves the same either way.
 @MainActor
