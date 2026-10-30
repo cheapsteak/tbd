@@ -56,8 +56,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var gc_enabled: Bool?
     var gc_grace_seconds: Int?
     var gc_snapshot_retention_days: Int?
-    var daemon_panel_surface_enabled: Bool?
-    var agent_panel_control_enabled: Bool?
     var remote_backends_enabled: Bool?
     /// Delivery acknowledgement (design §12). Nil/absent means OFF — the
     /// `v69_config_delivery_verification` column default.
@@ -194,6 +192,11 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` means "never chose". Resolve it through
     /// `Config.cloneCheckoutDefault`, never through `?? false`.
     var clone_checkout_enabled: Bool?
+    /// The side panel with tabs, shared with agents. **Genuinely tri-state**:
+    /// the `panel_tabs` migration carries no SQL default, so `nil` means
+    /// "never chose". Resolve it through `Config.panelTabsDefault`, never
+    /// through `?? false`.
+    var panel_tabs_enabled: Bool?
     /// The update mode: 'off', 'check' or 'auto'
     /// (design 2026-09-04 §6). **Genuinely tri-state**, same shape as
     /// `gc_retained_transcripts_enabled`: the
@@ -277,6 +280,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter cloneCheckoutDefault: same shape again, for
     ///   `clone_checkout_enabled` — the clone-backed worktree checkout's soak
     ///   gate.
+    /// - Parameter panelTabsDefault: same shape again, for
+    ///   `panel_tabs_enabled` — the side panel with tabs' soak gate.
     /// - Parameter worktreeParksOnMerge: whether a worktree that is not
     ///   archived overrides park-on-merge to true. It lives in the `worktree`
     ///   table, so `ConfigStore.get()` reads it with one query beside this row;
@@ -305,6 +310,7 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
         programStatusDefault: Bool = Config.programStatusEnabledDefault,
         cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault,
+        panelTabsDefault: Bool = Config.panelTabsDefault,
         worktreeParksOnMerge: Bool = false
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
@@ -344,8 +350,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             gcEnabled: gc_enabled ?? true,
             gcGraceSeconds: gc_grace_seconds ?? Config.defaultGCGraceSeconds,
             gcSnapshotRetentionDays: gc_snapshot_retention_days ?? Config.defaultGCSnapshotRetentionDays,
-            panelSurfaceEnabled: daemon_panel_surface_enabled ?? false,
-            agentPanelControlEnabled: agent_panel_control_enabled ?? false,
             remoteBackendsEnabled: remote_backends_enabled ?? false,
             deliveryVerificationEnabled: delivery_verification_enabled ?? false,
             // NOT `?? false`. The column has no SQL default, so NULL really
@@ -429,6 +433,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // construction, like the fields around it, to keep the initializer
         // call inside the type-checker's budget.
         config.programStatusEnabled = program_status_enabled ?? programStatusDefault
+        // Side panel with tabs gate — NOT `?? false`.
+        config.panelTabsEnabled = panel_tabs_enabled ?? panelTabsDefault
         return config
     }
 }
@@ -1091,24 +1097,14 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the daemon panel-surface store master switch (spec C Phase 2
-    /// §8). Default OFF; the store stays inert until this flips on.
-    public func setPanelSurfaceEnabled(_ enabled: Bool) async throws {
+    /// Persist the side panel with tabs gate (default OFF, soaking). Written
+    /// on every call, so either value is the explicit gesture that lifts the
+    /// column out of NULL. It turns on the panel store, the tab sync, app
+    /// rendering and agent control together.
+    public func setPanelTabsEnabled(_ enabled: Bool) async throws {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE config SET daemon_panel_surface_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the agent-originated panel-control gate. Default OFF and
-    /// independent of `daemon_panel_surface_enabled` — both must be true for
-    /// an agent to mutate panel layout.
-    public func setAgentPanelControlEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET agent_panel_control_enabled = ? WHERE id = ?",
+                sql: "UPDATE config SET panel_tabs_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

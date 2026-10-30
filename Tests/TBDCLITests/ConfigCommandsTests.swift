@@ -309,6 +309,35 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("holder-claim-reconcile: on"))
     }
 
+    // MARK: - panel-tabs: the soak switch for the side panel with tabs
+
+    @Test func panelTabsIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("panel-tabs"))
+        #expect(ConfigSet.allKeys.contains("panel-tabs"))
+        #expect(try ConfigSet.parseOnOff("on", key: "panel-tabs") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "panel-tabs") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "panel-tabs")
+        }
+    }
+
+    @Test func panelTabsDescribesBothStates() {
+        let on = ConfigSet.confirmation(key: "panel-tabs", value: .on)
+        let off = ConfigSet.confirmation(key: "panel-tabs", value: .off)
+        #expect(on.hasPrefix("Set panel-tabs to on."))
+        #expect(off.hasPrefix("Set panel-tabs to off."))
+        #expect(on.contains("agents"))
+        #expect(off.contains("refused"))
+        #expect(on != off)
+    }
+
+    @Test func configGetPrintsPanelTabsInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("panel-tabs: off"))
+        config.panelTabsEnabled = true
+        #expect(ConfigGet.render(config).contains("panel-tabs: on"))
+    }
+
     // MARK: - No transport-shaped switch
 
     /// Hibernation takes one switch — `auto_hibernate_enabled` — for every

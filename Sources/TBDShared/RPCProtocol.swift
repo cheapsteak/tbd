@@ -371,6 +371,11 @@ public enum RPCMethod {
     /// would take back. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetHolderClaimReconcileEnabled = "config.setHolderClaimReconcileEnabled"
+    /// The side panel with tabs gate (`panel_tabs_enabled`): one switch for
+    /// the daemon's panel store, the tab sync, app rendering and agent
+    /// control. Reading needs no method of its own: `config.get` and
+    /// `daemon.capabilities` carry the resolved value.
+    public static let configSetPanelTabsEnabled = "config.setPanelTabsEnabled"
     /// Turns agent background priority on (with a lease), off, or reports it.
     /// Not an actuation row: it changes no session's input, pty or lifecycle,
     /// and its effect lives in `agent-background.json`. Design:
@@ -3592,6 +3597,14 @@ public struct ConfigSetHolderClaimReconcileParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
+/// Params for `config.setPanelTabsEnabled` — the side panel with tabs gate
+/// (default OFF during soak). Design:
+/// `docs/specs/2026-10-30-panel-tabs-design.md`.
+public struct ConfigSetPanelTabsParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
 /// What `agents.background` does.
 public enum AgentBackgroundAction: String, Codable, Sendable {
     case on
@@ -3991,11 +4004,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// never a fork-PR-head checkout (default ON). Re-evaluated by the daemon on
     /// every call.
     public let autoTrustWorktrees: Bool
-    /// Whether the daemon owns panel-surface state (`daemon_panel_surface_enabled`,
-    /// spec C Phase 2 §8/§10). Default OFF while the feature soaks — the app
-    /// uses this to decide whether `panel.get`/`panel.apply` are live or the
-    /// legacy client-owned layout path should still be used.
-    public let panelSurfaceEnabled: Bool
     /// Whether `config.remoteBackendsEnabled` is currently set. Default OFF
     /// while the feature soaks (Task 7). The app can already read this off
     /// `Config`, but this lets `remoteBackendsLive` sit next to it in one
@@ -4114,6 +4122,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Default OFF while it soaks. Resolved through
     /// `Config.sessionModUsageDefault`.
     public var sessionModUsageEnabled: Bool = Config.sessionModUsageDefault
+    /// Whether the side panel with tabs is on (`panel_tabs_enabled`). Default
+    /// OFF while it soaks. Resolved through `Config.panelTabsDefault`. The app
+    /// renders the daemon's panels, and syncs its tabs, only while it is on.
+    ///
+    /// Assigned after construction rather than passed to the initializer, for
+    /// the type-checker reason `profileBalancingEnabled` gives.
+    public var panelTabsEnabled: Bool = Config.panelTabsDefault
     /// Balancing's usage ceiling and maximum reading age as stored, nil when
     /// never set, so the app runs the picker under the daemon's thresholds.
     /// Assigned after construction, for the type-checker reason
@@ -4141,7 +4156,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
                 autoCloseSetupEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
                 autoTrustWorktrees: Bool = true,
-                panelSurfaceEnabled: Bool = false,
                 remoteBackendsEnabled: Bool = false,
                 remoteBackendsLive: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
@@ -4159,7 +4173,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.autoTrustWorktrees = autoTrustWorktrees
-        self.panelSurfaceEnabled = panelSurfaceEnabled
         self.remoteBackendsEnabled = remoteBackendsEnabled
         self.remoteBackendsLive = remoteBackendsLive
         self.queuedPromptEnabled = queuedPromptEnabled
@@ -4188,8 +4201,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // New field for worktree auto-trust; absent from older daemons defaults
         // to true, matching the column default (it is not a soak flag).
         autoTrustWorktrees = try c.decodeIfPresent(Bool.self, forKey: .autoTrustWorktrees) ?? true
-        // New field for the panel-surface flag; absent from older daemons defaults to false (soaking).
-        panelSurfaceEnabled = try c.decodeIfPresent(Bool.self, forKey: .panelSurfaceEnabled) ?? false
         // New fields for the remote-backends flag; absent from older daemons defaults to false (soaking).
         remoteBackendsEnabled = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsEnabled) ?? false
         remoteBackendsLive = try c.decodeIfPresent(Bool.self, forKey: .remoteBackendsLive) ?? false
@@ -4264,6 +4275,11 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
             ?? Config.holderClaimReconcileEnabledDefault
         sessionModUsageEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
+        // A daemon that does not send it has no tabbed panel store, so fall
+        // through to the shipped default. An older daemon's v1 panel flag is
+        // a different flag and is not read.
+        panelTabsEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .panelTabsEnabled) ?? Config.panelTabsDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.
         profileBalancingUsageCeilingPercent = try c.decodeIfPresent(
             Int.self, forKey: .profileBalancingUsageCeilingPercent)

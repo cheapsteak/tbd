@@ -33,7 +33,7 @@ struct ProgramStatusAppTests {
     }
 
     private func capabilities(programStatus: Bool) -> DaemonCapabilitiesResult {
-        var caps = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: false)
+        var caps = DaemonCapabilitiesResult(controlModeEnabled: false)
         caps.programStatusEnabled = programStatus
         return caps
     }

@@ -7,18 +7,14 @@ import TBDShared
 @Suite("PanelSurfaceMigrationTests")
 struct PanelSurfaceMigrationTests {
 
-    @Test func v59CreatesTablesAndFlags() async throws {
+    /// v59's config and worktree columns are retired; `PanelColumnsRetirementTests`
+    /// covers them.
+    @Test func v59CreatesTables() async throws {
         let db = try TBDDatabase(inMemory: true)
-        let config = try await db.config.get()
-        #expect(config.panelSurfaceEnabled == false)
-        #expect(config.agentPanelControlEnabled == false)
         try await db.writerForTests.read { dbConn in
             #expect(try dbConn.tableExists("workspace_tab_surface"))
             #expect(try dbConn.tableExists("panel_history"))
             #expect(try dbConn.tableExists("panel_operation_receipt"))
-            let cols = try Row.fetchAll(dbConn, sql: "PRAGMA table_info(worktree)")
-                .compactMap { $0["name"] as String? }
-            #expect(cols.contains("panel_surface_imported_at"))
         }
     }
 
@@ -32,23 +28,6 @@ struct PanelSurfaceMigrationTests {
         )
         let isEmpty = try await db.panelSurface.surfaces(worktreeID: wt.id).isEmpty
         #expect(isEmpty)
-    }
-
-    @Test func panelSurfaceImportedAtDefaultsNilAndCanBeStamped() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let repo = try await db.repos.create(
-            path: "/tmp/v56b-\(UUID())", displayName: "v56b", defaultBranch: "main")
-        let wt = try await db.worktrees.create(
-            repoID: repo.id, name: "w2", branch: "b2",
-            path: "/tmp/v56-wt2-\(UUID())", tmuxServer: "srv"
-        )
-        let before = try await db.worktrees.panelSurfaceImportedAt(worktreeID: wt.id)
-        #expect(before == nil)
-
-        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
-        try await db.worktrees.stampPanelSurfaceImported(worktreeID: wt.id, at: stamp)
-        let after = try await db.worktrees.panelSurfaceImportedAt(worktreeID: wt.id)
-        #expect(after == stamp)
     }
 
     /// Deleting a worktree must cascade-delete its workspace_tab_surface,
@@ -102,8 +81,8 @@ struct PanelSurfaceMigrationTests {
 
     /// Seeds a pre-v59 DB (migrated only through v55) with a real repo/worktree
     /// row, then applies the rest (including v59) and confirms the existing row survives untouched
-    /// and the new columns/tables show up alongside it — no data loss on
-    /// forward migration.
+    /// and the new tables show up alongside it — no data loss on forward
+    /// migration.
     @Test func forwardMigrationFromPreV59DBPreservesExistingData() throws {
         let queue = try DatabaseQueue()
         let migrator = TBDDatabase.buildMigratorForTests()
@@ -128,15 +107,9 @@ struct PanelSurfaceMigrationTests {
             let count = try Int.fetchOne(
                 db, sql: "SELECT COUNT(*) FROM worktree WHERE id = ?", arguments: [wtID]) ?? -1
             #expect(count == 1, "pre-existing worktree row must survive v59")
-            let row = try Row.fetchOne(db, sql: "SELECT * FROM worktree WHERE id = ?", arguments: [wtID])
-            #expect(row?["panel_surface_imported_at"] == nil)
             #expect(try db.tableExists("workspace_tab_surface"))
             #expect(try db.tableExists("panel_history"))
             #expect(try db.tableExists("panel_operation_receipt"))
-            let configCols = try Row.fetchAll(db, sql: "PRAGMA table_info(config)")
-                .compactMap { $0["name"] as String? }
-            #expect(configCols.contains("daemon_panel_surface_enabled"))
-            #expect(configCols.contains("agent_panel_control_enabled"))
         }
     }
 }

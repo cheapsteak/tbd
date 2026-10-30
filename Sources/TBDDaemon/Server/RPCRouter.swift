@@ -1074,6 +1074,8 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetStartAdmissionEnabled(request.paramsData)
             case RPCMethod.configSetHolderClaimReconcileEnabled:
                 return try await handleConfigSetHolderClaimReconcileEnabled(request.paramsData)
+            case RPCMethod.configSetPanelTabsEnabled:
+                return try await handleConfigSetPanelTabsEnabled(request.paramsData)
             case RPCMethod.configSetAgentBackgroundEnabled:
                 return try await handleConfigSetAgentBackgroundEnabled(request.paramsData)
             case RPCMethod.configSetSessionModUsageEnabled:
@@ -1186,7 +1188,6 @@ public final class RPCRouter: Sendable {
             autoCloseSetupEnabled: config.autoCloseSetupEnabled,
             deliveryVerificationEnabled: config.deliveryVerificationEnabled,
             autoTrustWorktrees: config.autoTrustWorktrees,
-            panelSurfaceEnabled: config.panelSurfaceEnabled,
             remoteBackendsEnabled: config.remoteBackendsEnabled,
             remoteBackendsLive: remoteManager != nil,
             queuedPromptEnabled: config.queuedPromptEnabled,
@@ -1219,6 +1220,7 @@ public final class RPCRouter: Sendable {
         result.startAdmissionEnabled = config.startAdmissionEnabled
         result.holderClaimReconcileEnabled = config.holderClaimReconcileEnabled
         result.sessionModUsageEnabled = config.sessionModUsageEnabled
+        result.panelTabsEnabled = config.panelTabsEnabled
         result.profileBalancingUsageCeilingPercent = config.profileBalancingUsageCeilingPercent
         result.profileBalancingMaxReadingAgeSeconds = config.profileBalancingMaxReadingAgeSeconds
         result.remoteTranscriptLiveSyncEnabled = config.remoteTranscriptLiveSyncEnabled
