@@ -86,17 +86,24 @@ public struct ProgramStatusColumnWrite: Sendable, Equatable {
     public let value: ProgramStatusColumnValue
     public let scope: ProgramStatusWriteScope
     public let observedAt: Date
+    /// The provenance the write stamps on `activityState`: `.programStatus`
+    /// for a value the agent reported, `.processLiveness` for the `.unknown`
+    /// a child exit writes — so a reader can tell an agent that stopped
+    /// reporting because its process is gone from one that never reported.
+    public let source: FactSource
 
     public init(
         terminalID: UUID,
         value: ProgramStatusColumnValue,
         scope: ProgramStatusWriteScope,
-        observedAt: Date
+        observedAt: Date,
+        source: FactSource = .programStatus
     ) {
         self.terminalID = terminalID
         self.value = value
         self.scope = scope
         self.observedAt = observedAt
+        self.source = source
     }
 }
 

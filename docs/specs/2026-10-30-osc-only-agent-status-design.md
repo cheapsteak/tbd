@@ -105,7 +105,8 @@ The mapping:
   message text
 - `done`, `idle`, `error`, and `blocked kind=auth` → `.idle`
 - a main-entry `clear`, a child exit, or an incarnation change → `.unknown`,
-  with the wait reason cleared
+  with the wait reason cleared; a child exit's is stamped
+  `activityStateSource = .processLiveness`, the fact it comes from
 
 A park keeps writing `.idle` through `TerminalStore.setHibernated`; it is not
 a second state source, because a parked session runs no agent to report.
@@ -189,7 +190,9 @@ its existing checks and is unaffected.
 
 The sidebar row draws a small "no status" mark for a Claude or Codex terminal
 whose `activityState` is `.unknown`, that is neither parked nor gone, once the
-app has seen its current incarnation in that state for 15 seconds. The grace
+app has seen its current incarnation in that state for 15 seconds. A
+`.unknown` a child exit wrote (`.processLiveness`) draws no mark: that agent's
+process is gone, which the tooltip below would misexplain. The grace
 period keeps a starting session from flashing the mark before its first
 report. The app keeps the first-seen time in memory per incarnation; a new
 incarnation restarts it. The wait uses an injected clock.

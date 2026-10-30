@@ -239,6 +239,11 @@ import TestSupport
         #expect(row.activityState == .unknown)
         #expect(row.awaitingInputReason == nil)
         #expect(row.activityStateObservedAt == Self.dropInstant)
+        // Stamped with the fact it comes from, on the row and on the delta, so
+        // the app can tell an agent whose process died from one that never
+        // reported.
+        #expect(row.activityStateSource == .processLiveness)
+        #expect(h.activityDeltas(terminal).last?.activityStateSource == .processLiveness)
     }
 
     @Test func anIncarnationChangeResetsTheColumnAndTheMemo() async throws {

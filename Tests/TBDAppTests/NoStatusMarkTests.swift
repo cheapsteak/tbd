@@ -24,9 +24,13 @@ struct NoStatusMarkTests {
         transport: TerminalTransport = .tmux,
         incarnation: UUID? = NoStatusMarkTests.incarnation,
         hibernated: Bool = false,
-        suspended: Bool = false
+        suspended: Bool = false,
+        source: FactSource? = nil
     ) -> TBDShared.Terminal {
-        TBDShared.Terminal(
+        // Hoisted: the memberwise initializer is near the type checker's
+        // expression budget.
+        let observedAt: Date? = source == nil ? nil : stamp
+        return TBDShared.Terminal(
             worktreeID: UUID(),
             tmuxWindowID: transport == .tmux ? "@1" : "",
             tmuxPaneID: transport == .tmux ? "%1" : "",
@@ -36,6 +40,8 @@ struct NoStatusMarkTests {
             kind: kind,
             activityState: activity,
             hibernatedAt: hibernated ? stamp : nil,
+            activityStateSource: source,
+            activityStateObservedAt: observedAt,
             transport: transport)
     }
 
@@ -67,6 +73,24 @@ struct NoStatusMarkTests {
         let waiting = NoStatusSighting(incarnationID: Self.incarnation, graceElapsed: false)
         #expect(NoStatusMark.help(for: Self.terminal(), sighting: waiting) == nil)
         #expect(NoStatusMark.help(for: Self.terminal(), sighting: nil) == nil)
+    }
+
+    /// A child exit writes `.unknown` stamped `.processLiveness`: the agent's
+    /// process is gone, which "needs a newer version" would misexplain. The
+    /// other ways a row reads `.unknown` — a wake's or respawn's reset
+    /// (`.derived`), the upgrade reset (no source), an agent's bare clear
+    /// (`.programStatus`) — still show the mark.
+    @Test func aChildExitsUnknownShowsNoMark() {
+        let exited = Self.terminal(transport: .holder, source: .processLiveness)
+        #expect(!NoStatusMark.isCandidate(exited))
+        #expect(NoStatusMark.help(for: exited, sighting: Self.elapsed) == nil)
+
+        let sources: [FactSource?] = [.derived, nil, .programStatus]
+        for source in sources {
+            let row = Self.terminal(transport: .holder, source: source)
+            #expect(NoStatusMark.help(for: row, sighting: Self.elapsed) == NoStatusMark.holderHelp,
+                    "\(String(describing: source))")
+        }
     }
 
     @Test func aSightingOfAnotherIncarnationShowsNothing() {

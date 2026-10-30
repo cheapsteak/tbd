@@ -1629,9 +1629,10 @@ public struct TerminalStore: Sendable {
     /// the value and `activityStateObservedAt` stay as they are, so the
     /// at-rest clock hibernation reads keeps the moment the value was first
     /// reported; only the ordering watermark advances, so every accepted
-    /// report fences off older ones. Otherwise the state, its source
-    /// (`.programStatus`), both observation stamps and the wait-reason columns
-    /// are written together, so the stored reason always describes the state
+    /// report fences off older ones. Otherwise the state, its `source`
+    /// (`.programStatus` for a report, `.processLiveness` for a child exit's
+    /// `.unknown`), both observation stamps and the wait-reason columns are
+    /// written together, so the stored reason always describes the state
     /// beside it.
     ///
     /// A `.working` report cancels a pending scheduled resume — the session is
@@ -1642,7 +1643,8 @@ public struct TerminalStore: Sendable {
         scope: ProgramStatusWriteScope,
         activityState: TerminalActivityState,
         awaitingInputReason: AwaitingInputReason?,
-        observedAt: Date
+        observedAt: Date,
+        source: FactSource = .programStatus
     ) async throws -> ProgramStatusActivityWrite? {
         let outcome = try await writer.write { db -> ProgramStatusWriteOutcome in
             guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
@@ -1685,7 +1687,7 @@ public struct TerminalStore: Sendable {
                 }
             } else {
                 record.activityState = activityState.rawValue
-                record.activityStateSource = FactColumnJSON.encode(FactSource.programStatus)
+                record.activityStateSource = FactColumnJSON.encode(source)
                 record.activityStateObservedAt = observedAt
                 record.activityStateOrderObservedAt = observedAt
                 record.awaitingInputReason = FactColumnJSON.encode(awaitingInputReason)

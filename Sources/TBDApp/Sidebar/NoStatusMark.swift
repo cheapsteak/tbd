@@ -18,7 +18,9 @@ struct NoStatusSighting: Equatable, Sendable {
 /// session from flashing the mark before its first report; the first accepted
 /// report moves the column off `.unknown` and clears it. A terminal the app no
 /// longer lists is gone, and an exit-stamped row is parked, so neither shows
-/// it. Shell terminals never do.
+/// it. Nor does a row whose `.unknown` the daemon stamped `.processLiveness`:
+/// that is a child exit, an agent whose process is gone, which the version
+/// tooltip would misexplain. Shell terminals never show it.
 /// Design: `docs/specs/2026-10-30-osc-only-agent-status-design.md`, "Sessions
 /// that cannot report".
 enum NoStatusMark {
@@ -38,11 +40,13 @@ enum NoStatusMark {
         + "after it is relaunched."
 
     /// Whether `terminal` is the kind of row the mark is for: an agent that
-    /// reports (Claude or Codex), not parked, with no state in its column.
+    /// reports (Claude or Codex), not parked, with no state in its column for
+    /// a reason other than its process having exited.
     static func isCandidate(_ terminal: TBDShared.Terminal) -> Bool {
         ProgramStatusProtocol.expectedApp(for: terminal) != nil
             && !terminal.isParked
             && terminal.activityState == .unknown
+            && terminal.activityStateSource != .processLiveness
     }
 
     /// The mark's tooltip for `terminal`, or nil when it shows no mark: not a

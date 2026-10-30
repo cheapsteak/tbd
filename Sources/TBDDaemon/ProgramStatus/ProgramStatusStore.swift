@@ -413,7 +413,9 @@ public actor ProgramStatusStore {
     ///
     /// A child exit also writes `.unknown` to the columns, for whichever
     /// incarnation is live, whatever this store holds: the column may carry a
-    /// value written before a daemon restart that the store never saw. A park
+    /// value written before a daemon restart that the store never saw. It is
+    /// stamped `.processLiveness`, the fact it comes from, so the app does not
+    /// read a session whose agent died as one that never reported. A park
     /// writes nothing here — the park itself wrote `.idle`, and the writer
     /// refuses a parked row — and neither does a wake: its lifecycle reset
     /// already wrote `.unknown` for the new incarnation, which the woken agent
@@ -435,7 +437,8 @@ public actor ProgramStatusStore {
         guard reason == .childExited else { return }
         _ = await writeColumn(ProgramStatusColumnWrite(
             terminalID: terminalID, value: .unknown,
-            scope: .anyLiveIncarnation, observedAt: droppedNow))
+            scope: .anyLiveIncarnation, observedAt: droppedNow,
+            source: .processLiveness))
     }
 
     /// Drop the terminal's entries only if they belong to an incarnation other
@@ -641,7 +644,7 @@ extension ProgramStatusEffects {
                         id: write.terminalID, scope: write.scope,
                         activityState: write.value.activityState,
                         awaitingInputReason: write.value.awaitingInputReason,
-                        observedAt: write.observedAt)
+                        observedAt: write.observedAt, source: write.source)
                 } catch {
                     programStatusLog.debug(
                         "column write failed terminal=\(write.terminalID.uuidString, privacy: .public) error=\(String(describing: error), privacy: .public)")
@@ -653,7 +656,7 @@ extension ProgramStatusEffects {
                         terminalID: write.terminalID,
                         worktreeID: applied.worktreeID,
                         activityState: write.value.activityState,
-                        activityStateSource: .programStatus,
+                        activityStateSource: write.source,
                         activityStateObservedAt: write.observedAt,
                         activityStateOrderObservedAt: write.observedAt)))
                 }
