@@ -114,18 +114,28 @@ import TestSupport
 
     // MARK: - Trust
 
-    @Test func nonClaudeOrNonHolderOrParkedTerminalsReject() async {
+    @Test func shellNonHolderAndParkedTerminalsReject() async {
         let h = Harness()
-        let codex = holderClaude(kind: .codex)
-        let codexByLabel = holderClaude(kind: nil, label: TerminalLabel.codex)
-        let shell = holderClaude(kind: .shell)
-        let tmux = holderClaude(transport: .tmux)
-        let hibernated = holderClaude(hibernatedAt: t0)
-        for terminal in [codex, codexByLabel, shell, tmux, hibernated] {
+        let cases: [(Terminal, String)] = [
+            (holderClaude(kind: .shell), "not an agent session"),
+            (holderClaude(transport: .tmux), "not a holder session"),
+            (holderClaude(hibernatedAt: t0), "terminal is parked"),
+        ]
+        for (terminal, reason) in cases {
             h.add(terminal)
             let outcome = await h.store.ingest(inbound(terminal, "state=working:app=claude-code"))
-            #expect(isRejected(outcome))
+            #expect(outcome == .rejected(reason))
         }
+        #expect(h.publishedSnapshots.isEmpty)
+    }
+
+    /// A state report with no `app` is refused as missing, before the lookup;
+    /// only a clear may omit it.
+    @Test func aStateReportWithNoAppIsRefusedAsMissing() async {
+        let h = Harness()
+        let codex = holderClaude(kind: .codex)
+        h.add(codex)
+        #expect(await h.store.ingest(inbound(codex, "state=working")) == .rejected("missing app"))
         #expect(h.publishedSnapshots.isEmpty)
     }
 

@@ -154,9 +154,10 @@ public actor ProgramStatusStore {
         // refused. Refusing app-less clears left a finished task entry
         // standing, and with it a session stuck reading as working. Whether
         // the app is the terminal's own agent is checked after the lookup.
-        let appKnown = report.app.map { ProgramStatusProtocol.knownApps.contains($0) }
-            ?? (report.state == .clear)
-        guard appKnown else {
+        guard report.app != nil || report.state == .clear else {
+            return reject(terminalID, "missing app")
+        }
+        if let app = report.app, !ProgramStatusProtocol.knownApps.contains(app) {
             return reject(terminalID, "unknown app")
         }
 
