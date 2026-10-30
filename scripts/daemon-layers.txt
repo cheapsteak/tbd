@@ -1,0 +1,25 @@
+# The daemon's layers, bottom first: one line per layer, listing its units,
+# separated by commas.
+#
+# A unit is a folder directly under Sources/TBDDaemon, with its subfolders,
+# or (root), the files directly in it except main.swift. A unit may use only
+# units on a lower line. Units on the same line may not use each other.
+#
+# scripts/lint-daemon-layers.py fails when a unit names a declaration from
+# its own line or a higher one, and when no line lists a unit. To let a unit
+# use one on its own line or above, move its name to a higher line, or to a
+# new line, in the change that needs it; the reviewer sees the move.
+#
+# How to read and fix a failure: Sources/TBDDaemon/CLAUDE.md,
+# "Folder layers".
+
+Base, Diagnostics, Keychain, SSH, Update
+AskUserQuestion, Database, SessionMod
+Actuation, ModChannel, ModelProfile, PanelSurface, Process, ProgramStatus
+Codex, Git, Holder, StartAdmission, Tmux
+Claude, DevServers, Mock
+Hooks, Remote
+Lifecycle
+GC, PR
+Server
+(root)
