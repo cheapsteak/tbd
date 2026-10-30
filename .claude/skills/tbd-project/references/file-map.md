@@ -56,6 +56,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ShutdownLatch.swift` — runs a server's async shutdown once and lets every caller await that run
 - `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
 - `ModChannelToken.swift` — the HMAC token a session mod presents to the daemon's channel socket
+- `ContinuationGuard.swift` — one-shot claim that keeps a shared `CheckedContinuation` resumed exactly once
 
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
@@ -110,6 +111,8 @@ The bottom folder: code that several daemon folders share and that uses no other
 ### Process/
 - `AgentReaper.swift` — detects and reaps orphaned agent child processes
 - `ProcessSignaller.swift` — injectable protocol wrapping OS process operations (signals, liveness checks)
+- `BoundedProcessRunner.swift` — `runBoundedProcess`: runs a subprocess under a deadline that a dedicated watchdog thread enforces; git, tmux, GC and remote-provider subprocesses run through it
+- `PipeDataAccumulator.swift` — thread-safe pipe reader that drains without waiting for EOF, so a grandchild holding the write end leaks nothing
 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references

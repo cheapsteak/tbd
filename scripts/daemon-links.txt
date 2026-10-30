@@ -51,7 +51,7 @@ Claude -> Remote
 Claude -> SessionMod
 Claude -> Tmux
 Codex -> Lifecycle
-Codex -> Tmux
+Codex -> Process
 Database -> Base
 Database -> Claude
 Database -> Lifecycle
@@ -71,12 +71,11 @@ GC -> Keychain
 GC -> Lifecycle
 GC -> Process
 GC -> SessionMod
-GC -> Tmux
-Git -> Tmux
+Git -> Process
+Holder -> Base
 Holder -> Database
 Holder -> Process
 Holder -> ProgramStatus
-Holder -> Tmux
 Hooks -> Claude
 Hooks -> Lifecycle
 Lifecycle -> Actuation
@@ -110,8 +109,8 @@ PR -> Git
 PR -> Lifecycle
 PR -> Remote
 PanelSurface -> Database
+Process -> Base
 Process -> SessionMod
-Process -> Tmux
 ProgramStatus -> Base
 ProgramStatus -> Database
 Remote -> Actuation
@@ -120,7 +119,6 @@ Remote -> Claude
 Remote -> Database
 Remote -> PR
 Remote -> Process
-Remote -> Tmux
 Server -> Actuation
 Server -> AskUserQuestion
 Server -> Base
@@ -147,9 +145,8 @@ Server -> StartAdmission
 Server -> Tmux
 Server -> Update
 SessionMod -> Base
-StartAdmission -> Tmux
+StartAdmission -> Process
 Tmux -> Database
-Tmux -> Git
 Tmux -> Lifecycle
 Tmux -> Process
 Tmux -> SSH
