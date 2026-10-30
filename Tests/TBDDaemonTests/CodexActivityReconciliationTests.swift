@@ -2113,10 +2113,10 @@ struct CodexActivityReconciliationTests {
     /// `setActivityState` defaults `observedAt` to a bare `Date()` **at the
     /// store**, so a handler that omits the argument mints a timestamp nothing
     /// outside the store can name. That is not a cosmetic difference: the stamp
-    /// is *compared* — `SessionStateResolver` orders it against the
-    /// awaiting-input stamp at rung 4 to decide which observation is newer — so
-    /// per the root `CLAUDE.md` date-seam rule it is data, and it belongs on the
-    /// router's seam like every sibling call site in this file.
+    /// is *compared* — hibernation ages the at-rest clock by it, and an ordered
+    /// write refuses an observation older than it — so per the root
+    /// `CLAUDE.md` date-seam rule it is data, and it belongs on the router's
+    /// seam like every sibling call site in this file.
     private func pinnedRouter() -> RPCRouter {
         RPCRouter(
             db: db,

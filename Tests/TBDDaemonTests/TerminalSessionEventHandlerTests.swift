@@ -446,16 +446,8 @@ struct TerminalSessionEventHandlerTests {
 
     /// A `/clear`, a resume after an in-place profile swap, and a hand relaunch
     /// all arrive here as one event: a NEW session context in this pane. A
-    /// prompt recorded against the previous one died with it.
-    ///
-    /// Nothing else retracts it. `SessionStateResolver`'s rung 4 keeps a
-    /// standing `promptOnScreen` live while the transcript has not grown past
-    /// it, and after a `/clear` the new `transcriptPath` points at a file Claude
-    /// Code creates lazily — so the growth fact is absent and "we could not look
-    /// is not evidence it went away" pins the dead prompt in place. The
-    /// overlay's own `tbd terminal-activity idle` does not save it either: this
-    /// row already reads idle, and `handleTerminalActivityEvent` returns early
-    /// on an unchanged state without rewriting provenance.
+    /// prompt recorded against the previous one died with it, and the row must
+    /// not keep carrying it.
     @Test("SessionStart retracts a wait reason recorded against the previous session")
     func sessionStartRetractsAStandingWaitReason() async throws {
         let (terminal, _) = try await makeTerminal(initialSession: "old-id")
@@ -473,11 +465,8 @@ struct TerminalSessionEventHandlerTests {
             observedAt: promptAt)
 
         let before = try #require(try await db.terminals.get(id: terminal.id))
-        guard case .awaitingInput = SessionStateResolver()
-            .resolve(SessionStateFacts(terminal: before)).value else {
-            Issue.record("precondition: the prompt should read as live before the SessionStart")
-            return
-        }
+        try #require(before.awaitingInputReason != nil,
+                     "precondition: the prompt should be on the row before the SessionStart")
 
         let response = await router.handle(try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
@@ -677,9 +666,6 @@ struct TerminalSessionEventHandlerTests {
         #expect(updated.transcriptPath == transcript.path)
         #expect(updated.awaitingInputReason?.classification == .promptOnScreen)
         #expect(updated.awaitingInputObservedAt == laterPromptAt)
-        #expect(SessionStateResolver(now: { laterPromptAt })
-            .resolve(SessionStateFacts(terminal: updated)).value
-            == .awaitingInput(reason: updated.awaitingInputReason))
         // A rejected old SessionStart must not reset the current transcript's
         // reducer; only an accepted lifecycle boundary may do that.
         #expect(await raceRouter.codexActivityTracker.observe(

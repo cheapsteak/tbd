@@ -864,12 +864,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
 
     /// The recorded wait reason as a fact — value, source, observed-at — or nil.
     ///
-    /// The source is not a column of its own: a wait reason is only ever
-    /// recorded from a hook event, and the event's name is already carried on
-    /// the reason, so `.hookEvent(name)` IS the provenance rather than a second
-    /// copy of it. A reason with no event name — or with an empty one, which
-    /// names a source just as poorly — is therefore half a triple and reports
-    /// no fact, on the same rule `observedActivity` follows.
+    /// The source is not a column of its own: a hook-recorded reason carries
+    /// the event's name, so `.hookEvent(name)` IS the provenance rather than a
+    /// second copy of it. A reason with no event name — the program status
+    /// store's, whose provenance is `activityStateSource` beside it, or one
+    /// with an empty name, which names a source just as poorly — is therefore
+    /// half a triple here and reports no fact, on the same rule
+    /// `observedActivity` follows. `SessionStateResolver` does not read this.
     ///
     /// This is a *recorded reason*, not a claim about what the session is doing
     /// now — nothing here asserts `activityState`. Composing the two into a

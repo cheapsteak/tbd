@@ -131,7 +131,7 @@ struct SessionStatesRPCTests {
             worktreeID: fixture.worktreeID, tmuxWindowID: "@2", tmuxPaneID: "%2",
             label: "codex", kind: .codex)
         try await fixture.db.terminals.setActivityState(
-            id: a.id, activityState: .working, source: .hookEvent(RPCMethod.terminalActivityEvent))
+            id: a.id, activityState: .working, source: .programStatus)
 
         let reports = try await states(fixture)
         #expect(reports.count == 2)
@@ -146,7 +146,7 @@ struct SessionStatesRPCTests {
 
         let reportA = try #require(reports.first { $0.terminalID == a.id })
         #expect(reportA.state.value == .working)
-        #expect(reportA.state.source == .hookEvent(RPCMethod.terminalActivityEvent))
+        #expect(reportA.state.source == .programStatus)
 
         // The terminal nothing ever spoke about is `unknown`, not `idle`.
         let reportC = try #require(reports.first { $0.terminalID == c.id })
@@ -177,73 +177,45 @@ struct SessionStatesRPCTests {
         #expect(!reported.contains(shell.id))
     }
 
-    /// End to end for the resolver's staleness rule: the append stamp has to be
-    /// a real file's, or the rule is a well-tested decoration.
-    ///
-    /// The prompt is recorded AFTER the turn's `working` stamp, so it wins on
-    /// observed-at and nothing on the hook rail will ever retract it — the
-    /// activity handler returns early on an unchanged value. Then the transcript
-    /// grows, which could be the answered tool's result or a parallel subagent's
-    /// records with the prompt still up. Machine facts cannot separate the two,
-    /// so the answer becomes `unknown` — never `.working`, which is what the
-    /// stale hook stamp on the row would otherwise say.
-    @Test func aPromptTheTranscriptHasGrownPastIsReportedAsUnknownByTheRPC() async throws {
+    /// End to end for the column rung: a wait the program status store wrote is
+    /// reported with its block, and a transcript that grows afterwards — a
+    /// parallel subagent's records, a queued message — changes nothing, because
+    /// nothing on this path reads growth.
+    @Test func aWaitingColumnIsReportedWithItsBlockByTheRPC() async throws {
         let fixture = try await makeFixture()
         defer { fixture.cleanUp() }
 
         let terminal = try await fixture.db.terminals.create(
-            worktreeID: fixture.worktreeID, tmuxWindowID: "@0", tmuxPaneID: "%0",
-            label: "claude", kind: .claude)
+            worktreeID: fixture.worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            label: "claude", kind: .claude, transport: .holder)
         let path = try writeTranscript(
             fixture, name: "prompt.jsonl",
             lines: [#"{"type":"assistant","message":{"usage":{"input_tokens":10}}}"#])
         try await fixture.db.terminals.updateSession(
             id: terminal.id, sessionID: "sess-prompt", transcriptPath: path)
 
-        let turnStartedAt = Date().addingTimeInterval(-120)
-        try await fixture.db.terminals.setActivityState(
-            id: terminal.id, activityState: .working,
-            source: .hookEvent(RPCMethod.terminalActivityEvent), observedAt: turnStartedAt)
-        // Recorded a minute into the turn, and never superseded.
-        let promptAt = turnStartedAt.addingTimeInterval(60)
-        // The transcript's last append is the assistant record that RAISED the
-        // prompt, so it predates it — which is what an unanswered prompt looks
-        // like in bytes.
-        try FileManager.default.setAttributes(
-            [.modificationDate: turnStartedAt.addingTimeInterval(59)], ofItemAtPath: path)
-        try await fixture.db.terminals.recordAwaitingInputReason(
-            id: terminal.id,
-            reason: AwaitingInputReason(
-                message: "Claude needs your permission to run rm",
-                hookEventName: "Notification",
-                notificationType: "permission_prompt"),
-            observedAt: promptAt)
+        let block = ProgramStatusBlock(kind: .permission, taskID: nil)
+        // Whole seconds: the column stores milliseconds.
+        let reportedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        _ = try #require(try await fixture.db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .anyLiveIncarnation, activityState: .waitingForUser,
+            awaitingInputReason: AwaitingInputReason(message: "", programStatusBlock: block),
+            observedAt: reportedAt))
 
-        let beforeAnswer = try #require(try await states(fixture).first)
-        #expect(beforeAnswer.state.value.label == "awaiting input")
-
-        // Something appended. It could be the answered tool's result — or a
-        // parallel subagent's sidechain record with the prompt still on screen.
-        // Nothing reads what was appended, so nothing can tell those apart.
         let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
         try handle.seekToEnd()
         try handle.write(contentsOf: Data(#"{"type":"user","message":{"role":"user"}}"#.utf8))
         try handle.write(contentsOf: Data("\n".utf8))
         try handle.close()
 
-        let afterGrowth = try #require(try await states(fixture).first)
-        // NOT `.working`: the stale `working` stamp from `UserPromptSubmit` is
-        // still on the row, and reporting it would present a session possibly
-        // blocked on a human as one making progress.
-        #expect(afterGrowth.state.value != .working)
-        guard case .unknown(let why) = afterGrowth.state.value else {
-            Issue.record("expected .unknown, got \(afterGrowth.state.value)")
+        let report = try #require(try await states(fixture).first)
+        guard case .awaitingInput(let reason) = report.state.value else {
+            Issue.record("expected .awaitingInput, got \(report.state.value)")
             return
         }
-        #expect(why.contains("a prompt was reported"))
-        #expect(why.contains("the transcript has grown since"))
-        #expect(afterGrowth.state.source == .transcriptTail)
-        #expect(!afterGrowth.state.summary.contains("permission to run rm"))
+        #expect(reason?.programStatusBlock == block)
+        #expect(report.state.source == .programStatus)
+        #expect(report.state.observedAt == reportedAt)
     }
 
     @Test func performsNoSubprocessOrPaneRead() async throws {

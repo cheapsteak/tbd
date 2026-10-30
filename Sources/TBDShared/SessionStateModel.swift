@@ -462,7 +462,11 @@ public enum SessionStateValue: Sendable, Equatable, Codable {
     /// Finished a turn and waiting for nothing in particular.
     case idle
     /// Blocked on a human — a permission prompt or a question. The reason is
-    /// present when the `Notification` hook supplied one.
+    /// the block the agent reported over OSC 7501 (`programStatusBlock`): from
+    /// the program status store with the agent's own `title` or `msg` as its
+    /// message, or from the activity columns with the block alone and an
+    /// empty message, since a stored row never holds the agent's text. nil
+    /// when no block is on record.
     case awaitingInput(reason: AwaitingInputReason?)
     /// Stopped by a usage limit. `until` is absolute when the limit announced
     /// one, nil when it did not.

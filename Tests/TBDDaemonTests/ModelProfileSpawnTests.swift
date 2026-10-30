@@ -1564,10 +1564,11 @@ struct ModelProfileSpawnTests {
         #expect(after.profileID == b.id)
         #expect(after.awaitingInputReason == nil)
         #expect(after.awaitingInputObservedAt == nil)
-        // The dead prompt and activity are gone from the composed answer.
+        // The dead prompt and activity are gone from the composed answer: the
+        // new incarnation has not reported yet.
         let state = SessionStateResolver().resolve(SessionStateFacts(terminal: after))
-        #expect(state.value == .unknown(
-            why: "the activity rail recorded state 'unknown' for this session"))
+        #expect(!state.value.isConfident)
+        #expect(state.source == .unavailable)
         #expect(after.activityState == .unknown)
         #expect(after.activityStateSource == .derived)
         #expect(after.activityStateObservedAt != workingAt)

@@ -978,10 +978,6 @@ struct TerminalActivityEventHandlerTests {
         let updated = try #require(await db.terminals.get(id: terminal.id))
         #expect(updated.awaitingInputReason == reason)
         #expect(updated.awaitingInputObservedAt == instant)
-        let resolved = SessionStateResolver(now: { instant }).resolve(
-            SessionStateFacts(terminal: updated))
-        #expect(resolved.value == .awaitingInput(reason: reason))
-        #expect(resolved.observedAt == instant)
     }
 
     @Test("a same-time earlier working hook cannot erase a later interrupt")
