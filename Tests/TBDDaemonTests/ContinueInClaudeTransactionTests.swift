@@ -264,6 +264,75 @@ struct ContinueInClaudeTransactionTests {
         #expect(try response.decodeResult(Terminal.self).kind == .claude)
     }
 
+    /// Admits every start, after running `between` — consulted once
+    /// preparation has read the rollout and before the final fence, so a test
+    /// can change the source in exactly that window.
+    private final class AdmitAfter: StartAdmissionEvaluating {
+        private let between: @Sendable () async throws -> Void
+
+        init(_ between: @escaping @Sendable () async throws -> Void) {
+            self.between = between
+        }
+
+        func evaluate(_ request: StartAdmissionRequest) async -> StartAdmissionVerdict {
+            do {
+                try await between()
+            } catch {
+                Issue.record("changing the source between preparation and the fence failed: \(error)")
+            }
+            return .admit
+        }
+    }
+
+    /// The rollout read in preparation is the idle gate; the final fence holds
+    /// it to the source it read. A turn started since, or any write to the
+    /// row's activity since, refuses before anything is replaced.
+    @Test("the final fence refuses a source that changed after preparation")
+    func finalFenceRefusesASourceChangedAfterPreparation() async throws {
+        do {
+            let fixture = try await makeRPCFixture(ownsPane: true)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            try await fixture.db.config.setStartAdmissionEnabled(true)
+            let rollout = fixture.rollout
+            fixture.router.startAdmission = AdmitAfter {
+                let started = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"late-turn","started_at":40}}"#
+                let handle = try FileHandle(forWritingTo: rollout)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: Data((started + "\n").utf8))
+            }
+            let before = try #require(
+                try await fixture.db.terminals.get(id: fixture.terminal.id))
+
+            let response = await continueRequest(fixture)
+
+            #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
+            #expect(try await fixture.db.terminals.get(id: before.id) == before)
+            #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+        }
+        do {
+            let fixture = try await makeRPCFixture(ownsPane: true)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            try await fixture.db.config.setStartAdmissionEnabled(true)
+            let db = fixture.db
+            let terminalID = fixture.terminal.id
+            fixture.router.startAdmission = AdmitAfter {
+                try await db.terminals.setActivityState(
+                    id: terminalID, activityState: .unknown, source: .derived,
+                    observedAt: Date(timeIntervalSinceReferenceDate: 40))
+            }
+
+            let response = await continueRequest(fixture)
+
+            #expect(response.errorCode == RPCErrorCode.terminalBusy.rawValue)
+            let after = try #require(try await fixture.db.terminals.get(id: terminalID))
+            #expect(after.kind == .codex)
+            #expect(after.pendingSessionIncarnationID == nil)
+            #expect(after.activityStateSource == .derived)
+            #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+        }
+    }
+
     @Test("start admission holds the continuation before the source is replaced")
     func startAdmissionHoldsTheContinuation() async throws {
         let fixture = try await makeRPCFixture(ownsPane: true)

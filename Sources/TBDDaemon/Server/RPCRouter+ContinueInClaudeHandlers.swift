@@ -460,11 +460,15 @@ extension RPCRouter {
         _ prepared: PreparedContinueInClaude,
         currentWorktree: LocalWorktree
     ) async throws -> RPCResponse {
+        // The final fence. Preparation's rollout read is the idle gate, since a
+        // tmux Codex row carries no agent status; this guard holds the source
+        // to that read. The snapshot must still match, activity columns
+        // included, and an unchanged rollout fingerprint proves no new turn
+        // has started since.
         guard let current = try await db.terminals.get(id: prepared.source.id),
               prepared.sourceSnapshot.matches(current),
               current.kind == .codex,
               !current.isParked,
-              current.observedActivity?.value == .idle,
               try CodexRolloutFingerprint.read(
                 path: prepared.rolloutFingerprint.path) == prepared.rolloutFingerprint else {
             throw ContinueInClaudeError(

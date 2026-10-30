@@ -400,8 +400,9 @@ struct TerminalReplacementSnapshot: Sendable {
 
 /// The complete durable fact set that authorizes a Codex-to-Claude provider
 /// replacement. General replacement snapshots deliberately ignore activity;
-/// Continue may interrupt only a positively idle Codex turn, so its CAS must
-/// include the value, provenance, and both observation watermarks.
+/// Continue proceeds only after its rollout read showed Codex idle, so its
+/// CAS also includes the activity value, provenance, and both observation
+/// watermarks: a change to any of them after that read rejects the replacement.
 struct TerminalContinueInClaudeSnapshot: Sendable {
     let replacement: TerminalReplacementSnapshot
     let activityState: TerminalActivityState
