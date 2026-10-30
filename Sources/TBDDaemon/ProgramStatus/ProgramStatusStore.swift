@@ -50,12 +50,9 @@ public actor ProgramStatusStore {
         case childExited
         case parked
         case woke
-        case flagOff
         case incarnationChanged
     }
 
-    /// Readable synchronously from the readers' parse threads.
-    public nonisolated let gate: ProgramStatusGate
     public nonisolated let now: @Sendable () -> Date
     private let terminalLookup: @Sendable (UUID) async -> Terminal?
     private let publish: @Sendable (ProgramStatusSnapshot) -> Void
@@ -85,12 +82,10 @@ public actor ProgramStatusStore {
     private var droppedAt: [UUID: Date] = [:]
 
     public init(
-        enabled: Bool,
         terminalLookup: @escaping @Sendable (UUID) async -> Terminal?,
         publish: @escaping @Sendable (ProgramStatusSnapshot) -> Void,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
-        self.gate = ProgramStatusGate(enabled: enabled)
         self.now = now
         self.terminalLookup = terminalLookup
         self.publish = publish
@@ -105,11 +100,9 @@ public actor ProgramStatusStore {
     public static func live(
         db: TBDDatabase,
         subscriptions: StateSubscriptionManager,
-        enabled: Bool,
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> ProgramStatusStore {
         ProgramStatusStore(
-            enabled: enabled,
             terminalLookup: { id in
                 do {
                     return try await db.terminals.get(id: id)
@@ -141,10 +134,7 @@ public actor ProgramStatusStore {
     public func ingest(_ inbound: Inbound) async -> Outcome {
         let terminalID = inbound.terminalID
 
-        // 1. Flag.
-        guard gate.isEnabled else { return reject(terminalID, "flag off") }
-
-        // 2. Parse.
+        // 1. Parse.
         guard let payload = ProgramStatusParser.parse(inbound.payload) else {
             return reject(terminalID, "unparseable payload")
         }
@@ -156,7 +146,7 @@ public actor ProgramStatusStore {
             report = parsed
         }
 
-        // 3. App. Claude Code stamps `app=claude-code` on every state report
+        // 2. App. Claude Code stamps `app=claude-code` on every state report
         // but writes both clears without it — the bare `state=clear` and
         // `state=clear:id=X` (read from the v2.1.301 bundle) — so a clear with
         // no `app` is accepted; one naming another app is still refused.
@@ -174,7 +164,7 @@ public actor ProgramStatusStore {
             return reject(terminalID, "observed before drop")
         }
 
-        // 4. A live holder session whose recorded agent is Claude.
+        // 3. A live holder session whose recorded agent is Claude.
         let generationBeforeLookup = dropGenerations[terminalID] ?? 0
         guard let terminal = await terminalLookup(terminalID) else {
             return reject(terminalID, "unknown terminal")
@@ -184,7 +174,7 @@ public actor ProgramStatusStore {
         let isClaude = terminal.kind == .claude || (terminal.kind == nil && !terminal.isCodexTerminal)
         guard isClaude else { return reject(terminalID, "not a Claude session") }
 
-        // 5. Incarnation.
+        // 4. Incarnation.
         let incarnationID: UUID?
         switch inbound.incarnation {
         case .currentRow:
@@ -196,15 +186,13 @@ public actor ProgramStatusStore {
             incarnationID = claimed
         }
 
-        // The flag may have been turned off while the lookup was suspended.
-        guard gate.isEnabled else { return reject(terminalID, "flag off") }
         // A drop that ran while the lookup was suspended found nothing to
         // drop; applying now would hold an entry nothing ever clears.
         guard (dropGenerations[terminalID] ?? 0) == generationBeforeLookup else {
             return reject(terminalID, "dropped during lookup")
         }
 
-        // 6. Re-read state after the await (actor reentrancy).
+        // 5. Re-read state after the await (actor reentrancy).
         var current: Held
         if let existing = held[terminalID], existing.incarnationID == incarnationID {
             if inbound.observedAt < existing.lastObservedAt {
@@ -221,7 +209,7 @@ public actor ProgramStatusStore {
                 lastObservedAt: inbound.observedAt)
         }
 
-        // 7. Apply.
+        // 6. Apply.
         let entry = ProgramStatusEntry(report: report, observedAt: inbound.observedAt)
         if let taskID = report.id {
             if report.state == .clear {
@@ -265,6 +253,18 @@ public actor ProgramStatusStore {
             revision: revisions[terminalID] ?? 0)
     }
 
+    /// `snapshot(for:)` for each of `terminalIDs`, in one actor hop, keyed by
+    /// terminal ID. A terminal the store holds nothing for is absent.
+    public func snapshots(for terminalIDs: [UUID]) -> [UUID: ProgramStatusSnapshot] {
+        var out: [UUID: ProgramStatusSnapshot] = [:]
+        for terminalID in terminalIDs {
+            if let snapshot = snapshot(for: terminalID) {
+                out[terminalID] = snapshot
+            }
+        }
+        return out
+    }
+
     /// Every terminal that holds a main entry or task entries.
     public func allSnapshots() -> [ProgramStatusSnapshot] {
         var out: [ProgramStatusSnapshot] = []
@@ -281,8 +281,7 @@ public actor ProgramStatusStore {
     /// suspended on its terminal lookup right now. Publishes a retraction
     /// when anything was held.
     ///
-    /// For an end that is unconditional: the child exited, the row parked, or
-    /// the flag went off.
+    /// For an end that is unconditional: the child exited or the row parked.
     public func drop(terminalID: UUID, reason: DropReason) {
         dropGenerations[terminalID] = (dropGenerations[terminalID] ?? 0) + 1
         droppedAt[terminalID] = now()
@@ -301,16 +300,6 @@ public actor ProgramStatusStore {
         guard let current = held[terminalID] else { return }
         if let terminal, current.incarnationID == terminal.sessionIncarnationID { return }
         removeHeld(terminalID: terminalID, reason: reason)
-    }
-
-    /// Set the gate. Turning it off drops every terminal's entries.
-    public func setEnabled(_ enabled: Bool) {
-        gate.set(enabled)
-        guard !enabled else { return }
-        let terminalIDs: [UUID] = Array(held.keys)
-        for terminalID in terminalIDs {
-            drop(terminalID: terminalID, reason: .flagOff)
-        }
     }
 
     // MARK: - Private

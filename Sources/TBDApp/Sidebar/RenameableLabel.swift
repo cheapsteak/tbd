@@ -14,8 +14,6 @@ struct RenameableLabel<DisplayContent: View>: View {
     @Binding var isEditing: Bool
     let onCommit: (String) -> Void
     var onCancel: () -> Void = {}
-    var onStartEditing: () -> Void = {}
-    var onStopEditing: () -> Void = {}
     /// Font for the inline editor. Default mirrors the sidebar's 13pt system font.
     var editorFont: NSFont? = nil
     /// When true, the entire text is selected the first time the editor gains focus.
@@ -84,7 +82,6 @@ struct RenameableLabel<DisplayContent: View>: View {
             .onChange(of: isEditing, initial: true) { _, editing in
                 guard editing else { return }
                 editText = text
-                onStartEditing()
                 isTextFieldFocused = true
                 // Re-assert focus after a delay to win any focus race with terminal views
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -107,7 +104,6 @@ struct RenameableLabel<DisplayContent: View>: View {
     private func commit() {
         let trimmed = editText.trimmingCharacters(in: .whitespaces)
         isEditing = false
-        onStopEditing()
         if trimmed.isEmpty {
             // Treat empty as "clear" when the caller opted in; otherwise cancel.
             if allowsEmptyCommit { onCommit("") }
@@ -119,7 +115,6 @@ struct RenameableLabel<DisplayContent: View>: View {
 
     private func cancel() {
         isEditing = false
-        onStopEditing()
         onCancel()
     }
 

@@ -1,84 +1,96 @@
 import Testing
 import Foundation
 @testable import TBDDaemonLib
+import TestSupport
 
-@Suite("RepoSerializer")
+/// Ordering and overlap are shown by what the bodies record and wait on,
+/// never by wall-clock timestamps around sleeps: a body parks on a gate the
+/// test holds, or until it sees the other body running, so what the
+/// assertions see does not depend on how promptly a loaded runner schedules
+/// each task. The one wall-clock window left is a negative one, which a slow
+/// run cannot redden. `.fastPassBounded` bounds the one shape that regresses
+/// as a hang, a submit that waits on its predecessor.
+@Suite("RepoSerializer", .fastPassBounded)
 struct RepoSerializerTests {
-
-    /// Records start/end timestamps for each tagged piece of work so tests can
-    /// assert ordering and overlap properties.
-    actor TimelineRecorder {
-        struct Span { let tag: String; let start: Date; let end: Date }
-        private(set) var spans: [Span] = []
-
-        func record(tag: String, work: () async -> Void) async {
-            let start = Date()
-            await work()
-            let end = Date()
-            spans.append(Span(tag: tag, start: start, end: end))
-        }
-
-        func allSpans() -> [Span] { spans }
-    }
 
     @Test("same repoID serializes consecutively, never overlapping")
     func sameRepoSerializes() async throws {
         let serializer = RepoSerializer()
-        let recorder = TimelineRecorder()
         let repoID = UUID()
-        let sleep: UInt64 = 150_000_000 // 150ms
+        let log = EventLog()
+        let aStarted = AsyncSignal()
+        let aMayFinish = AsyncSignal()
 
-        // Submit two pieces of work back-to-back for the same repo. They must
-        // run in submission order with zero overlap.
+        // Submit two pieces of work back-to-back for the same repo. A parks
+        // mid-work on a gate the test holds, so "B never overlaps A" does not
+        // depend on how long A happens to take.
         let t1 = await serializer.submit(repoID: repoID) {
-            await recorder.record(tag: "A") {
-                try? await Task.sleep(nanoseconds: sleep)
-            }
+            log.append("A start")
+            await aStarted.signal()
+            await aMayFinish.wait()
+            log.append("A end")
         }
         let t2 = await serializer.submit(repoID: repoID) {
-            await recorder.record(tag: "B") {
-                try? await Task.sleep(nanoseconds: sleep)
-            }
+            log.append("B start")
+            log.append("B end")
         }
+        await aStarted.wait()
+
+        // Negative-assertion window: B must not start while A is parked. The
+        // window is the assertion, and a correct serializer cannot start B
+        // inside it however long it runs, so it never reddens a slow run.
+        let bStartedEarly = await pollUntilTrue(timeout: .milliseconds(100)) {
+            log.entries.contains("B start")
+        }
+        #expect(bStartedEarly != .satisfied, "B started while A was still in flight")
+
+        await aMayFinish.signal()
         await t1.value
         await t2.value
 
-        let spans = await recorder.allSpans()
-        #expect(spans.count == 2)
-        #expect(spans[0].tag == "A")
-        #expect(spans[1].tag == "B")
-        // B must start strictly after A ends.
-        #expect(spans[1].start >= spans[0].end)
+        // B runs in submission order, strictly after A ends.
+        #expect(log.entries == ["A start", "A end", "B start", "B end"])
     }
 
     @Test("different repoIDs run in parallel")
     func differentReposOverlap() async throws {
         let serializer = RepoSerializer()
-        let recorder = TimelineRecorder()
         let repoA = UUID()
         let repoB = UUID()
-        let sleep: UInt64 = 200_000_000 // 200ms
+        let aRunning = SendableBox(false)
+        let bRunning = SendableBox(false)
+        let aWaitedForB = SendableBox<PollOutcome?>(nil)
+        let bWaitedForA = SendableBox<PollOutcome?>(nil)
 
+        // Each body starts, then finishes only once it has seen the other one
+        // running. Both waits succeed only if the two bodies are in flight at
+        // the same time; serialized, the first body's wait would expire.
         let t1 = await serializer.submit(repoID: repoA) {
-            await recorder.record(tag: "A") {
-                try? await Task.sleep(nanoseconds: sleep)
-            }
+            aRunning.set(true)
+            aWaitedForB.set(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { bRunning.get() })
         }
         let t2 = await serializer.submit(repoID: repoB) {
-            await recorder.record(tag: "B") {
-                try? await Task.sleep(nanoseconds: sleep)
-            }
+            bRunning.set(true)
+            bWaitedForA.set(await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { aRunning.get() })
         }
         await t1.value
         await t2.value
 
-        let spans = await recorder.allSpans()
-        #expect(spans.count == 2)
-        let aSpan = try #require(spans.first { $0.tag == "A" })
-        let bSpan = try #require(spans.first { $0.tag == "B" })
-        // Overlap proof: each one started before the other finished.
-        #expect(aSpan.start < bSpan.end)
-        #expect(bSpan.start < aSpan.end)
+        // Overlap proof: each one saw the other running before it finished.
+        // Only a timeout is a failure, reported as one; a body that never ran
+        // fails the #require instead of passing vacuously.
+        let aOutcome = try #require(aWaitedForB.get(), "A's body never ran")
+        let bOutcome = try #require(bWaitedForA.get(), "B's body never ran")
+        if aOutcome == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "B to start while A was running", observed: "B had not started",
+                deadline: TestDeadlines.saturatedPass))
+        }
+        if bOutcome == .timedOut {
+            Issue.record(BoundedWaitTimeout(
+                what: "A to start while B was running", observed: "A had not started",
+                deadline: TestDeadlines.saturatedPass))
+        }
     }
 
     @Test("lane entries are pruned after work completes")
@@ -92,12 +104,10 @@ struct RepoSerializerTests {
         await t1.value
         await t2.value
 
-        // Cleanup tasks chain off the work tasks; give the actor a couple of
-        // hops to drain them before asserting.
-        for _ in 0..<10 {
-            let count = await serializer.trackedRepoCount
-            if count == 0 { break }
-            try? await Task.sleep(nanoseconds: 10_000_000)
+        // Cleanup tasks chain off the work tasks, so they need their own turn
+        // on the actor after the work completes.
+        _ = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await serializer.trackedRepoCount == 0
         }
         let finalCount = await serializer.trackedRepoCount
         #expect(finalCount == 0)
@@ -117,12 +127,12 @@ struct RepoSerializerTests {
         }
         await firstStarted.wait()
 
-        // The second submit must not block on the in-flight first.
-        let t0 = Date()
+        // The second submit must not block on the in-flight first. Returning
+        // here while the first is still gated is the proof: a submit that
+        // waited on its predecessor would never come back.
         let queued = await serializer.submit(repoID: repoID) {
             sentinel.set(true)
         }
-        #expect(Date().timeIntervalSince(t0) < 0.05)
         #expect(sentinel.get() == false)
 
         await firstMayFinish.signal()
@@ -158,4 +168,12 @@ private final class SendableBox<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
     func get() -> T { lock.lock(); defer { lock.unlock() }; return value }
     func set(_ v: T) { lock.lock(); value = v; lock.unlock() }
+}
+
+/// Append-only record of what the bodies did, in the order they did it.
+private final class EventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    func append(_ entry: String) { lock.lock(); recorded.append(entry); lock.unlock() }
+    var entries: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
 }

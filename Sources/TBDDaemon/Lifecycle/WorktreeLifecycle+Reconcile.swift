@@ -117,21 +117,6 @@ extension WorktreeLifecycle {
         let baseTip = tips["origin/\(repo.defaultBranch)"]
         await conflictSweepCache.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
 
-        // §13's "commits unchanged across cycles" rides along on the map that
-        // was just resolved: the sweep already knows every branch tip, so
-        // remembering when each one first arrived costs one actor hop and no
-        // subprocess. A tip that keeps arriving unchanged keeps its original
-        // stamp. Deliberately no working-tree diff fact — answering that half
-        // would mean a `git status` per worktree per sweep, and an
-        // unestablished fact is reported as nil rather than as "unchanged".
-        let observedAt = now()
-        await branchTipTracker.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
-        for wt in worktrees {
-            guard let branchTip = tips[wt.branch] else { continue }
-            await branchTipTracker.record(
-                repoID: repoID, worktreeID: wt.id, branchTip: branchTip, at: observedAt)
-        }
-
         // PR-poll trigger: a push moves `origin/<branch>`, and that makes the
         // worktree's PR check due now. The local tip is deliberately ignored —
         // a check before the push is wasted. Same tips map, no subprocess.
@@ -361,6 +346,7 @@ extension WorktreeLifecycle {
                 await stopDevServersForArchive(worktree: current)
                 let terminals = try await db.terminals.list(worktreeID: current.id)
                 var recordedEveryKill = true
+                var sessions = SessionTeardownTally()
                 for terminal in terminals {
                     var row = ActuationRow(
                         actor: .daemon(rail: ActuationRail.reconcile), kind: .dispose)
@@ -375,6 +361,7 @@ extension WorktreeLifecycle {
                     // nothing while the holder and its job outlive the rows
                     // deleted below. Its Closed Terminals entry is written
                     // before the disposal releases the reader it is read from.
+                    let stopped: Bool
                     if terminal.transport == .holder {
                         await Self.recordHolderClosedTerminal(
                             terminal, registry: holderRegistry,
@@ -384,12 +371,15 @@ extension WorktreeLifecycle {
                                 "reconcile: auto-archive left a holder running: \(failure, privacy: .public)")
                             await actuationLog.appendOutcome(
                                 confirms: actuationID, result: .transportFailed, error: failure)
+                            sessions.record(terminal, teardownStoppedIt: false)
                             continue
                         }
+                        stopped = true
                     } else {
-                        await captureThenKillWindow(
+                        stopped = await captureThenKillWindow(
                             terminal: terminal, server: current.tmuxServer)
                     }
+                    sessions.record(terminal, teardownStoppedIt: stopped)
                     await actuationLog.appendOutcome(
                         confirms: actuationID, result: .dispatched)
                 }
@@ -399,6 +389,11 @@ extension WorktreeLifecycle {
                     logger.warning("reconcile: leaving \(current.id, privacy: .public) for the next sweep — the actuation record is unwritable, so its windows were not killed")
                     return
                 }
+                // Only now, as in `beginArchiveWorktree`: every session counted
+                // as ended here has had its teardown, and an early return
+                // above leaves the directories with the rows for the next
+                // sweep.
+                removeSessionDirectories(for: sessions)
                 try await db.terminals.deleteForWorktree(worktreeID: current.id)
                 await sessionTitles.forget(worktreeID: current.id)
                 try await db.tabs.deleteForWorktree(worktreeID: current.id)
@@ -752,10 +747,6 @@ extension WorktreeLifecycle {
         // 2026-09-02. `unknown` is ignorance, not evidence: it parks nothing,
         // deletes nothing, and leaves the row for the next sweep.
         var serverPresenceByName: [String: TmuxPresence] = [:]
-        // Read once for the whole pass rather than per row. It only ever makes
-        // a route lookup cheaper (`ModelProxyRouteAttachment.retire`), and an
-        // unreadable config answers "on", which skips nothing.
-        let modelProxyEnabled = (try? await db.config.get())?.modelProxyEnabled ?? true
         for wt in worktrees {
             let serverPresence: TmuxPresence
             if let cached = serverPresenceByName[wt.tmuxServer] {
@@ -887,21 +878,6 @@ extension WorktreeLifecycle {
                     disposal = "window \(terminal.tmuxWindowID) gone or reassigned"
                 }
 
-                // Whichever of the two shapes below the row becomes, its
-                // session is over — that is what `disposal` above established —
-                // so the route that named its process goes now. Ahead of the
-                // branch rather than inside both arms, because the delete arm
-                // removes the only row that could ever name this terminal
-                // again, and a route retired for a row that no longer exists is
-                // a directory listing nobody will make.
-                if terminal.transport == .holder {
-                    await ModelProxyRouteAttachment.retire(
-                        terminalID: terminal.id,
-                        streamPath: terminal.transcriptStreamPath,
-                        proxyEnabled: modelProxyEnabled,
-                        supervisor: modelProxySupervisor)
-                }
-
                 // **What a finished session's row becomes is one rule, on every
                 // transport.** A resumable Claude row is PARKED, preserving its
                 // session id for a later wake; anything else is deleted,
@@ -931,10 +907,6 @@ extension WorktreeLifecycle {
                         if terminal.transport == .holder {
                             try await db.terminals.setHolderProcess(
                                 id: terminal.id, holderPID: nil, childPID: nil, startedAt: nil)
-                            // Same reason, same write: the column names a
-                            // stream file the retirement above just dropped.
-                            try await db.terminals.setTranscriptStreamPath(
-                                terminalID: terminal.id, path: nil)
                         }
                         await actuationLog.appendOutcome(
                             confirms: actuationID, result: .dispatched)

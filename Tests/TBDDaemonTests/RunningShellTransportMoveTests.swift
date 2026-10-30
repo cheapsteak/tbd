@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// `HibernationCoordinator.moveRunningShellToHolder` — the one path that moves
@@ -334,7 +335,6 @@ struct RunningShellTransportMoveTests {
         #expect(after.activityState == .unknown,
                 "the killed process's activity state outlived it")
         #expect(after.claudeSessionID == nil)
-        #expect(after.transcriptStreamPath == nil)
         #expect(after.pendingSessionIncarnationID == nil)
     }
 

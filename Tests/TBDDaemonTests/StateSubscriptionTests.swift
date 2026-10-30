@@ -99,4 +99,37 @@ struct StateSubscriptionTests {
         #expect(secondReceived.count == 1)
         #expect(manager.subscriberCount == 2)
     }
+
+    @Test("send delivers to the named subscriber only")
+    func sendDeliversToOneSubscriber() {
+        let manager = StateSubscriptionManager()
+        let otherReceived = SendableBox<Data>()
+        let targetReceived = SendableBox<Data>()
+        manager.addSubscriber { data in
+            otherReceived.append(data)
+            return true
+        }
+        let target = manager.addSubscriber { data in
+            targetReceived.append(data)
+            return true
+        }
+
+        manager.send(delta: makeDelta(), to: target)
+
+        #expect(targetReceived.count == 1)
+        #expect(otherReceived.count == 0)
+        // An id no longer subscribed is a no-op.
+        manager.send(delta: makeDelta(), to: UUID())
+        #expect(targetReceived.count == 1)
+        #expect(otherReceived.count == 0)
+    }
+
+    @Test("send removes the subscriber when it returns false")
+    func sendRemovesDeadSubscriber() {
+        let manager = StateSubscriptionManager()
+        let dead = manager.addSubscriber { _ in false }
+        manager.addSubscriber { _ in true }
+        manager.send(delta: makeDelta(), to: dead)
+        #expect(manager.subscriberCount == 1)
+    }
 }

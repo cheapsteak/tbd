@@ -3,9 +3,16 @@ import os
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 struct FakeTmuxSendError: Error {}
+
+/// The text the rail types, spelled out rather than read from the actuator:
+/// the actuator's constant is what these tests pin.
+private let expectedResumeText =
+    "[Automatic: TBD's auto-resume typed this, not a person. "
+    + "It answers no question and approves nothing.] continue"
 
 /// Records every tmux call; scriptable pane state.
 final class FakeResumeTmux: ResumeSendingTmux, @unchecked Sendable {
@@ -176,7 +183,7 @@ struct FakeInspector: PaneProcessInspecting {
         try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func paneIdentityMatchIsCaseInsensitiveAndSends() async throws {
@@ -184,7 +191,7 @@ struct FakeInspector: PaneProcessInspecting {
         try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func vanishedPaneIsTerminalGone() async throws {
@@ -256,7 +263,7 @@ struct FakeInspector: PaneProcessInspecting {
         try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func verifyTimeoutRetriesOnceThenFails() async throws {
@@ -265,8 +272,8 @@ struct FakeInspector: PaneProcessInspecting {
         let outcome = await makeActuator().actuate(row)
         if case .failed = outcome {} else { Issue.record("expected .failed, got \(outcome)") }
         // Sequence sent twice: initial + one retry (spec §Actuation 6).
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter",
-                               "key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter",
+                               "key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func transcriptGrowthCountsAsVerification() async throws {
@@ -296,7 +303,7 @@ struct FakeInspector: PaneProcessInspecting {
         tmux.inModeSequence = [false, true]
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .paneInCopyMode)
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func userContinuedBetweenAttemptsCancelsAfterOneSend() async throws {
@@ -324,7 +331,7 @@ struct FakeInspector: PaneProcessInspecting {
             transcriptModifiedAt: { _ in nil }, waiter: { _ in }, actuationLog: makeTestActuationLog())
         let outcome = await actuator.actuate(row)
         #expect(outcome == .userAlreadyContinued)
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func toggleFlippedOffBetweenAttemptsCancelsAfterOneSend() async throws {
@@ -352,7 +359,7 @@ struct FakeInspector: PaneProcessInspecting {
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
         // Only attempt 1's 3 sends — attempt 2 never fires.
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     // MARK: - Eligibility 0a: limitType-aware gate (spec 2026-07-08 §Gating)
@@ -391,7 +398,7 @@ struct FakeInspector: PaneProcessInspecting {
         let outcome = await makeActuator().actuate(apiErrorRow)
         // Falls through past 0a and runs the full send sequence (happy path).
         #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func sessionRowUnaffectedByApiErrorToggle() async throws {
@@ -400,7 +407,7 @@ struct FakeInspector: PaneProcessInspecting {
         try await db.terminals.setActivityState(id: terminalID, activityState: .working, source: .derived)
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func sessionRowCancelledExternallyWhenLimitResetOffEvenIfApiErrorOn() async throws {
@@ -436,7 +443,7 @@ struct FakeInspector: PaneProcessInspecting {
         let outcome = await actuator.actuate(row)
         #expect(outcome == .cancelledExternally)
         // Only attempt 1's 3 sends — attempt 2 never fires.
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
         // The row stays cancelled — not resurrected by a stray write.
         let stored = try await db.scheduledResumes.get(id: row.id)
         #expect(stored?.status == .cancelled)
@@ -544,7 +551,7 @@ struct FakeInspector: PaneProcessInspecting {
         let outcome = await makeActuator().actuate(row)
         #expect(outcome == .sent)
         // Attempt 1 threw before recording anything; attempt 2 sent in full.
-        #expect(tmux.sends == ["key:Escape", "text:continue", "key:Enter"])
+        #expect(tmux.sends == ["key:Escape", "text:" + expectedResumeText, "key:Enter"])
     }
 
     @Test func throwingSendOnBothAttemptsFails() async throws {

@@ -104,14 +104,14 @@ public struct TerminalScreen: Codable, Sendable, Equatable {
     /// applied by accident. The consumers the design names read it as follows:
     /// the input-path oracle proceeds on `staleDaemon` modes — trusting a
     /// stale bracketed-paste "on", and a stale "off" only for a shell — and
-    /// records the source on the actuation row; the hibernation pending-input
-    /// rail refuses on anything but `daemon`, because a frozen screen cannot
-    /// prove the composer is empty and a live one a viewer answered has
-    /// somebody at its keyboard; and a person reading `tbd terminal output` is
-    /// shown the source and the age on stderr.
+    /// records the source on the actuation row; the hibernation display
+    /// snapshot freezes only a `daemon` screen, because a frozen screen or one
+    /// a viewer answered is not the frame the session was showing; and a
+    /// person reading `tbd terminal output` is shown the source and the age on
+    /// stderr.
     ///
     /// **The raw values must stay identical to `ActuationModeSource`'s.** A
-    /// supervisor correlates the `screen.source` it read from `tbd terminal
+    /// caller correlates the `screen.source` it read from `tbd terminal
     /// output --json` against the `modeSource` on the actuation row its send
     /// produced, and it does that by string comparison — so two spellings of
     /// one fact make exactly the case that matters, `staleDaemon`, fail to

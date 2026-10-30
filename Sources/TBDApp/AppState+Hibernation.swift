@@ -46,13 +46,25 @@ extension AppState {
     /// Manually hibernate one Claude terminal. The daemon enforces the
     /// running/permission rails and returns an error string we surface.
     func hibernateTerminal(terminalID: UUID, worktreeID: UUID) async {
-        do {
-            try await daemonClient.terminalHibernate(terminalID: terminalID)
-            await refreshTerminals(worktreeID: worktreeID)
-        } catch {
-            logger.error("Failed to hibernate terminal: \(error, privacy: .public)")
-            showAlert("Couldn't hibernate: \(error.localizedDescription)", isError: false)
+        await hibernateTerminals([terminalID], worktreeID: worktreeID)
+    }
+
+    /// Manually hibernate several terminals, one request each. A refusal shows
+    /// the plain "Couldn't hibernate" alert and the pass goes on to the rest.
+    func hibernateTerminals(_ terminalIDs: [UUID], worktreeID: UUID) async {
+        for id in terminalIDs {
+            do {
+                try await terminalHibernateSender(id)
+            } catch {
+                reportHibernateFailure(error)
+            }
         }
+        await refreshTerminals(worktreeID: worktreeID)
+    }
+
+    private func reportHibernateFailure(_ error: Error) {
+        logger.error("Failed to hibernate terminal: \(error, privacy: .public)")
+        showAlert("Couldn't hibernate: \(error.localizedDescription)", isError: false)
     }
 
     /// Core explicit/implicit wake returning the structured outcome. `wakeTerminal`

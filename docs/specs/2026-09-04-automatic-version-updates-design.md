@@ -197,10 +197,13 @@ arguments, and inherits the user's environment. The script is the procedure:
    must be safe to `checkout --detach` at any time. Its `origin` is the
    upstream URL resolved as in §5.
 2. **Fetch and check out** `origin/main` detached. If the fetched
-   `scripts/update.sh`, or either library it sources, differs from the running
-   copy, re-exec the fetched script with the same arguments (guarded by an
-   environment marker so it happens once). This is how the procedure itself
-   updates.
+   `scripts/update.sh`, or any of the libraries it sources, differs from the
+   copy that was running before the fetch, re-exec the fetched script with the
+   same arguments (guarded by an environment marker so it happens once). The
+   running copies are snapshotted before the fetch, not read back after it:
+   `tbd update` runs the script out of the daemon's source worktree, which
+   after the first update is the update clone itself, so the checkout
+   rewrites those files in place. This is how the procedure itself updates.
 3. **Stamp** `TBDBuildIdentity.json` into `.build/<config>/` (commit, branch,
    time, worktree, dirty) and **build** every product in `RUNTIME_PRODUCTS`
    (`scripts/restart-bundle-lib.sh`, the list `restart.sh` builds from too:
@@ -214,8 +217,14 @@ arguments, and inherits the user's environment. The script is the procedure:
    sidecar is copied into `Contents/`, next to `SourceWorktreePath.txt`,
    which now points at the update clone.
 5. **Hand over** (§8): start the new daemon with
-   `TBD_HANDOVER_FROM_PID=<old pid>` and wait until `tbd daemon status`
-   reports the new executable path and build identity, bounded at 120 s.
+   `TBD_HANDOVER_FROM_PID=<old pid>` and wait until the old pid has exited
+   and `tbd daemon status` then reports the new executable path and build
+   identity, bounded at 120 s across both. The status alone cannot tell the
+   two daemons apart: a local build runs both from the update clone's
+   `.build/release/TBDDaemon`, and the old one answers until its `stop()`
+   ends. The successor binds only after the old pid has exited, so from then
+   on the answer is the successor's. A successor that exits first fails the
+   handover at once.
 6. **Restart the app** — kill the exact installed executable path, `open`
    the bundle with `--env PATH=$PATH` as `restart.sh` does. `--no-app` skips
    this. The app is a viewer; nothing in it holds a session.
@@ -300,8 +309,10 @@ Sequence, with the app running throughout:
 Why successor-first: the app polls every two seconds and spawns a daemon the
 moment the socket is missing *and* the pid file does not name a live daemon.
 With the successor's pid in the file from the first instant, every spurious
-spawn — the app's, or a stray `restart.sh` — exits at the gate. This closes
-the race that a plain kill-then-start opens, and it needs no new RPC.
+spawn — the app's, or a daemon started by hand — exits at the gate. This
+closes the race that a plain kill-then-start opens, and it needs no new RPC.
+`scripts/restart.sh` replaces the daemon through the same handover for that
+reason.
 
 Why not overlap (successor serving while the predecessor drains): two daemons
 would be two writers on `state.db` and two reconcilers with different

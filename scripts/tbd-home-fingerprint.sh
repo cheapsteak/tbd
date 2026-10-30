@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Prints a stable fingerprint of the REAL `~/tbd`, `~/.claude`, `~/.codex`,
-# `~/Library/Logs/TBD/hang-stacks` and the tmux socket directory — deliberately
+# `~/Library/Logs/TBD/hang-stacks`, the tmux socket directory and the test
+# suites' files in `~/Library/Preferences` — deliberately
 # `$HOME/...` and the CALLER's `$TMUX_TMPDIR`, never
 # `$TBD_HOME` / `$TBD_CLAUDE_HOST_HOME` /
 # `$TBD_TEST_CODEX_HOME` or the fenced socket dir, because the whole point is
@@ -62,7 +63,7 @@ volatile_dirs=(
 # The one name excluded outright. Finder creates and deletes `.DS_Store`
 # wherever someone happens to browse, which has nothing to do with a test run.
 #
-# `sock`, `vend.sock`, `port` and `tbdd.pid` are deliberately NOT excluded:
+# `sock`, `vend.sock` and `tbdd.pid` are deliberately NOT excluded:
 # a daemon restart recreates them under the same names, so they are stable
 # between two snapshots, and a test that opens a socket in the real config dir
 # is precisely the kind of leak worth failing on.
@@ -219,8 +220,8 @@ else
   echo "<tmux-sockets> <absent>"
 fi
 
-# ~/Library/Logs/TBD/hang-stacks — the fifth root, and the only one a sweep
-# DELETES from. `HangStackCollector` (`OrphanGC`'s hang-stack phase) reclaims
+# ~/Library/Logs/TBD/hang-stacks — the fifth root, and the only one a product
+# sweep DELETES from. `HangStackCollector` (`OrphanGC`'s hang-stack phase) reclaims
 # files here, and `HangStackWriter` creates them, so this directory is reachable
 # in both directions: a test that escapes the fence can leave a hang stack
 # behind, and one that escapes it while the reclaimer runs can destroy a
@@ -252,3 +253,63 @@ if [ -d "$real_hang_stacks" ]; then
 else
   echo "~/Library/Logs/TBD/hang-stacks <absent>"
 fi
+
+# ~/Library/Preferences — the sixth root, and the only one no fence variable can
+# reach. `UserDefaults(suiteName: "X")` is backed by
+# `<home>/Library/Preferences/X.plist`, and `cfprefsd` resolves that home over
+# XPC, in its own process, ignoring this run's `HOME` and `CFFIXED_USER_HOME`.
+# ~520,000 orphaned suite plists accumulated in one real directory before this
+# arm existed.
+#
+# IT COUNTS INSIDE ONE CONTAINER. `Tests/TestSupport/UserDefaultsTestSupport.swift`
+# names every suite `TBDTests.suites/<label>.<uuid>`; the `/` makes `cfprefsd`
+# write into one subdirectory, which `scripts/test.sh` removes before the first
+# snapshot and again after the run. The steady state is count=0 on both sides,
+# so a non-zero count means the wrapper's reclaim did not happen or did not
+# finish. It reads one small directory this repo owns and never the parent,
+# which on a box still holding the old pile takes minutes to list.
+#
+# It is the run-level BACKSTOP, not the guard against a suite minted outside the
+# helper — that is the SwiftLint rule `no_raw_userdefaults_suite`, plus the
+# helper's own test asserting the backing file lands at the exact path inside
+# the container.
+#
+# A COUNT, NOT A LISTING, unlike every arm above, and narrowed to `*.plist` so a
+# temp file a writer is midway through is not counted; the reclaim removes the
+# whole directory regardless of names. An ABSENT container reads count=0, not
+# `<absent>` — the reclaim's success IS the container being gone, and an empty
+# one (a concurrent run that minted it and leaked nothing) must read the same.
+#
+# WHAT IT CANNOT SEE: which suite leaked (read the names in the container); a
+# file or symlink sitting at the container's own path, which the reclaim
+# refuses and says so; and, on a developer box, whose run a count belongs to —
+# ~40 worktrees share one `~/Library/Preferences`, one more reason detection is
+# CI-only.
+#
+# `$HOME`, like every arm here, so the harness can point it at a fixture. The
+# Swift helper resolves the account home through `getpwuid`. The two agree on CI
+# and ordinary accounts; where they differ, this arm counts under `$HOME` while
+# the files land under the account home, and the helper's own reclaim runs once
+# at process START — it clears an earlier process's files there, never this
+# run's late writes.
+real_prefs="${HOME}/Library/Preferences"
+# Pinned against `TestDefaults.containerName` and `scripts/test.sh` by
+# `scripts/test.test.sh`'s `test_the_container_name_matches_the_swift_helper`.
+prefs_container_name='TBDTests.suites'
+prefs_container="$real_prefs/$prefs_container_name"
+
+# `-name '*.plist'` is also why no `-mindepth` is needed: the container
+# directory does not match its own filter.
+#
+# `|| :` IS LOAD-BEARING. The wrapper reclaims this directory, and a sibling
+# run may reclaim it at any moment, so it can vanish between the `-d` test and
+# the `find`. `find` then exits non-zero, and under `set -euo pipefail` that
+# would kill this script — and with it the wrapper, silently, since the
+# snapshot is a command substitution under `set -e` there. A directory that
+# vanished has no files in it, so it reads count=0.
+if [ -d "$prefs_container" ]; then
+  prefs_container_count="$( { find "$prefs_container" -maxdepth 1 -name '*.plist' -print 2>/dev/null || :; } | wc -l | tr -d ' ')"
+else
+  prefs_container_count=0
+fi
+echo "<preferences>/$prefs_container_name count=$prefs_container_count"

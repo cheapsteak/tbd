@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 @testable import TBDShared
+import TestSupport
 
 /// `AppState`'s mirror of the daemon's pending prompts, carried by
 /// `.terminalPendingPromptsChanged`. One delta carries both the legacy
@@ -14,9 +15,9 @@ import Testing
 struct PendingPromptDeltaTests {
 
     private func withAppState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.PendingPromptDelta.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PendingPromptDelta")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

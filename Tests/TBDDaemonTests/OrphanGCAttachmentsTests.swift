@@ -48,7 +48,10 @@ struct OrphanGCAttachmentsTests {
             scratchpadBase: home.appendingPathComponent("s", isDirectory: true),
             now: { fixed },
             profileDirBase: home.appendingPathComponent("p", isDirectory: true),
-            holdersBase: home.appendingPathComponent("h", isDirectory: true))
+            holdersBase: home.appendingPathComponent("h", isDirectory: true),
+            // Not under TBD_HOME in production (`~/.local/state/dev-servers`),
+            // so the isolated home alone would not keep this sweep off it.
+            devServersBase: home.appendingPathComponent("ds", isDirectory: true))
     }
 
     /// Writes one attachment and backdates it, so the 14-day floor has elapsed
@@ -429,7 +432,8 @@ struct OrphanGCAttachmentsTests {
             now: { fixed },
             profileDirBase: home.appendingPathComponent("p", isDirectory: true),
             holdersBase: home.appendingPathComponent("h", isDirectory: true),
-            attachmentsBase: attachmentsBase)
+            attachmentsBase: attachmentsBase,
+            devServersBase: home.appendingPathComponent("ds", isDirectory: true))
         let result = await gc.sweep()
 
         #expect(!fm.fileExists(atPath: orphanDir.path))

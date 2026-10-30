@@ -22,15 +22,15 @@
 # Downstream files compile happily against the new module interface and then the
 # linker cannot resolve the new symbol — an "Undefined symbols" flake that
 # disappears on retry. `.github/workflows/test.yml` defends against it by
-# removing the build artifacts of TBDShared and TBDDaemonLib before any compile,
-# forcing SPM to re-emit them.
+# removing the build artifacts of TBDShared, TBDDaemonLib and
+# TBDTerminalSerialization before any compile, forcing SPM to re-emit them.
 #
 # That defence is not free. Measured on a run whose commit touched only
 # `Sources/TBDDaemon` and one test file, the wipe cost about three of the 278
 # seconds the first pass spent compiling: all 89 TBDShared files and 265
 # TBDDaemonLib files recompiled, TestSupport and TBDDaemonTests re-emitted on
 # top, and a 38-second relink. Over the last 40 commits on `main`, 18 touched
-# neither library's sources nor the manifest and paid that for nothing.
+# none of the compared paths and paid that for nothing.
 #
 # The bug's precondition is that a library's SOURCES differ from the sources its
 # cached artifacts were built from. When they are identical, the archive and the
@@ -47,22 +47,24 @@
 # for the cache this run goes on to save:
 #
 #   - on `wipe`, the libraries are re-emitted from the current sources, and the
-#     marker the job records at the end describes those same sources;
+#     marker the job records after its build describes those same sources;
 #   - on `skip`, the restored artifacts already match the current sources — that
-#     is precisely what was just proved — and the marker recorded at the end
-#     describes them too.
+#     is precisely what was just proved — and the marker recorded after the
+#     build describes them too.
 #
 # The workflow keeps its half of that bargain by REMOVING the marker as soon as
-# it has read it, and recording a new one from an unconditional step placed
-# after every compile in the job — so reaching the recording is itself the
-# evidence that the build finished. A source fingerprint cannot supply that
-# evidence on its own: it says what the artifacts were built FROM, not that
-# they were finished, and a marker written over a compile that was killed part
-# way through would let a rerun of the same commit skip the wipe that used to
-# heal it.
+# it has read it, and recording a new one from a step with no condition placed
+# right after the build step, the job's only compile — so reaching the
+# recording is itself the evidence that the build finished. A source
+# fingerprint cannot supply that evidence on its own: it says what the
+# artifacts were built FROM, not that they were finished, and a marker written
+# over a compile that was killed part way through would let a rerun of the same
+# commit skip the wipe that used to heal it. The cache save comes right after
+# the recording, so every saved entry carries the marker; the test passes after
+# it run with `--skip-build` and compile nothing that could outdate it.
 #
-# A run that dies anywhere in between therefore leaves no marker, and the next
-# run wipes. A run that died before ever reading the marker leaves the restored
+# A run that dies anywhere in between therefore records no marker and saves
+# nothing. A run that died before ever reading the marker leaves the restored
 # one in place, and `--record` refuses to overwrite a marker that is still
 # there for exactly that reason: it was never consumed, so this run took no
 # responsibility for `.build/` and the marker still describes the artifacts
@@ -98,20 +100,31 @@
 set -uo pipefail
 
 # The paths whose CONTENT decides it. Keep this list in step with the modules
-# the wipe step removes in `.github/workflows/test.yml`: it must cover their
-# sources AND the sources of every first-party target they depend on, because a
-# library is recompiled when its own files change or when a module it imports
-# is re-emitted — and either way its cached archive is the one that can go
-# stale underneath a fresh `.swiftmodule`.
+# the wipe step removes in `.github/workflows/test.yml`, in both directions. It
+# must cover their sources AND the sources of every first-party target they
+# depend on, because a library is recompiled when its own files change or when
+# a module it imports is re-emitted — and either way its cached archive is the
+# one that can go stale underneath a fresh `.swiftmodule`. And every library
+# target whose sources are on it must be one of those modules: a change
+# confined to that library answers `wipe` here, and a wipe that leaves the
+# library's own artifacts in place has not removed the stale archive.
 #
-# `Sources/TBDDaemon` is not a typo for a third target: it is where the
+# `scripts/ci/first-party-wipe-needed.test.sh` reads both lists and
+# `Package.swift`, and holds part of that: each module against its OWN sources,
+# in both directions, and every source directory here belonging to exactly one
+# library target. It does not read dependencies, so that this list covers each
+# module's first-party dependencies is for review to hold.
+#
+# `Sources/TBDDaemon` does not name the `TBDDaemon` target: it is where the
 # TBDDaemonLib *library* lives (`path: "Sources/TBDDaemon"` in `Package.swift`),
 # the `TBDDaemon` executable target beside it being `main.swift` alone. A list
 # naming a `Sources/TBDDaemonLib` directory would match nothing.
 #
-# `Sources/TBDTerminalSerialization` is TBDDaemonLib's one first-party
-# dependency beyond TBDShared, so a commit touching only that target still
-# recompiles TBDDaemonLib and still needs the wipe.
+# `Sources/TBDTerminalSerialization` is here for two reasons. It is a library
+# the wipe step removes in its own right — TBDDaemonLib and TBDApp both import
+# it, so a symbol added to it is the change #7715 breaks on. And it is
+# TBDDaemonLib's one first-party dependency beyond TBDShared, so a commit
+# touching only that target recompiles TBDDaemonLib as well.
 #
 # `Package.swift` and `Package.resolved` are here because a manifest or
 # dependency change can move a library's module boundary without touching a

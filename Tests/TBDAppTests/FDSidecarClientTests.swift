@@ -420,6 +420,35 @@ struct FDSidecarClientTests {
         #expect(client.isConnected)
     }
 
+    /// The daemon vends before it answers `attach.request`, so when that
+    /// answer is lost the descriptor has usually settled the promise by the
+    /// time the caller cancels. Nobody will ever take it: `cancel()` must close
+    /// it, or it stays open, unread, in this process. A descriptor a caller
+    /// already took is the caller's, and a cancel after that must not touch it.
+    @Test("cancel closes a delivered descriptor no caller took, and leaves one a caller took")
+    func cancelClosesAnUntakenDescriptor() async throws {
+        let untaken = HolderTestPTY()
+        defer { untaken.closeFar() }
+        let abandoned = FDPromise()
+        abandoned.settle(fd: untaken.vended, error: nil)
+        abandoned.cancel()
+        #expect(untaken.vendedIsClosed, "a cancel left a delivered, untaken descriptor open")
+
+        let taken = HolderTestPTY()
+        defer { taken.closeFar() }
+        let awaited = FDPromise()
+        awaited.settle(fd: taken.vended, error: nil)
+        let fd = try await awaited.value(timeout: TestDeadlines.saturatedPass)
+        awaited.cancel()
+        #expect(fd == taken.vended)
+        let closedByCancel = taken.vendedIsClosed
+        #expect(!closedByCancel, "a cancel closed a descriptor its caller had already taken")
+        // Closed only if the cancel left it open. After a regression that closed
+        // it, the number may already belong to a descriptor a sibling test was
+        // just given, and closing it again would close theirs.
+        if !closedByCancel { Darwin.close(fd) }
+    }
+
     @Test("a valid vend followed by a desync-tripping tail in one read still delivers the fd")
     func validFrameBeforeDesyncStillDelivers() async throws {
         let (daemonSide, appSide) = try makeSocketPair()

@@ -5,37 +5,37 @@ import TBDShared
 /// sidebar worktree row: whether a snapshot speaks for a terminal, and the
 /// plain-text tooltip the row's status badge carries.
 ///
-/// A terminal this returns nothing for — flag off, not OSC-authoritative,
-/// parked, or a snapshot from another incarnation — keeps today's hook-rail
-/// presentation unchanged.
+/// A terminal this returns nothing for — not OSC-authoritative, parked, or a
+/// snapshot from another incarnation — keeps today's hook-rail presentation
+/// unchanged.
 /// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`, "UI".
 enum ProgramStatusRowPresentation {
-    /// The OSC-authoritative state of `terminal`, or nil unless the flag is on
-    /// and `snapshot` speaks for this process: a parked terminal's process is
-    /// gone, and a snapshot accepted for another incarnation describes a
-    /// process that no longer runs in this row.
+    /// The OSC-authoritative state of `terminal`, or nil unless `snapshot`
+    /// speaks for this process: a parked terminal's process is gone, and a
+    /// snapshot accepted for another incarnation describes a process that no
+    /// longer runs in this row.
     static func resolution(
         terminal: TBDShared.Terminal,
-        snapshot: ProgramStatusSnapshot?,
-        enabled: Bool
+        snapshot: ProgramStatusSnapshot?
     ) -> ProgramStatusResolution? {
-        guard enabled, let snapshot else { return nil }
+        guard let snapshot else { return nil }
         guard !terminal.isParked else { return nil }
         guard snapshot.incarnationID == terminal.sessionIncarnationID else { return nil }
         return ProgramStatusRollup.resolve(snapshot)
     }
 
     /// The suffix badge an OSC-authoritative state selects, or nil for a
-    /// state that selects none (idle, unknown, and the TBD-owned states,
-    /// which never come out of a resolution).
+    /// state that selects none: idle and done (a done session shows like an
+    /// idle one; the bold name already marks a finished turn the user has not
+    /// read), unknown, and the TBD-owned states, which never come out of a
+    /// resolution.
     static func suffixIndicator(for value: SessionStateValue) -> SuffixRowIndicator? {
         switch value {
         case .working: return .working
         case .awaitingInput: return .attention
         case .needsAuth: return .needsAuth
         case .error: return .turnFailed
-        case .done: return .finished
-        case .idle, .rateLimited, .parked, .gone, .unknown: return nil
+        case .idle, .done, .rateLimited, .parked, .gone, .unknown: return nil
         }
     }
 

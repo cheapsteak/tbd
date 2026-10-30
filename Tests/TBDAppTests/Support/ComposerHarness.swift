@@ -86,7 +86,7 @@ final class ComposerHarness {
     private static let appearance = NSAppearance(named: .aqua)
 
     private let defaults: UserDefaults
-    private let suiteName: String
+    private let defaultsSuite: TestDefaultsSuite
     private let scratchDirectory: URL
     private let backdrop: Backdrop
     private var mounted: OffscreenHost<AnyView>?
@@ -109,12 +109,10 @@ final class ComposerHarness {
         backdrop: Backdrop = .empty,
         prepare: (Setup) throws -> Void = { _ in }
     ) throws {
-        suiteName = "\(name)-\(UUID().uuidString)"
         // A suite of its own, never `UserDefaults.standard`: this executable is
         // unbundled, so "standard" is the developer's real `TBDApp.plist`.
-        guard let defaults = UserDefaults(suiteName: suiteName) else {
-            fatalError("UserDefaults refused the suite name \(suiteName)")
-        }
+        defaultsSuite = TestDefaultsSuite(name)
+        let defaults = defaultsSuite.defaults
         self.defaults = defaults
         appState = AppState(userDefaults: defaults)
         appState.composerCompletionsFetcher = { _ in Self.inventory() }
@@ -141,7 +139,7 @@ final class ComposerHarness {
                 draft: appState.composerDraft(for: terminal.id),
                 scratchDirectory: scratchDirectory))
         } catch {
-            defaults.removePersistentDomain(forName: suiteName)
+            defaultsSuite.tearDown()
             throw error
         }
     }
@@ -151,7 +149,7 @@ final class ComposerHarness {
     /// Safe to call from a `defer`, and safe on a harness that never mounted.
     func tearDown() {
         mounted?.tearDown()
-        defaults.removePersistentDomain(forName: suiteName)
+        defaultsSuite.tearDown()
         try? FileManager.default.removeItem(at: scratchDirectory)
     }
 

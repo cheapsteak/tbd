@@ -27,10 +27,10 @@ struct HolderLifecycleTests {
 
     // MARK: 1 — it binds and describes
 
-    @Test func holderBindsItsSocketAndDescribesItsChild() throws {
-        let fixture = try HolderFixture.start(launch: Self.idleJob())
+    @Test func holderBindsItsSocketAndDescribesItsChild() async throws {
+        let fixture = try await HolderFixture.start(launch: Self.idleJob())
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         let client = try fixture.connect()
         defer { client.close() }
@@ -60,10 +60,10 @@ struct HolderLifecycleTests {
     /// The fixture always launches through a bootstrap `/bin/sh` that
     /// backgrounds the holder and exits, so by the time any test body runs the
     /// spawner is already gone. This one asserts that instead of assuming it.
-    @Test func childSurvivesTheSpawningProcessExiting() throws {
-        let fixture = try HolderFixture.start(launch: Self.idleJob())
+    @Test func childSurvivesTheSpawningProcessExiting() async throws {
+        let fixture = try await HolderFixture.start(launch: Self.idleJob())
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         #expect(fixture.spawnerExitStatus == 0, "the bootstrap shell should have exited cleanly")
 
@@ -86,10 +86,10 @@ struct HolderLifecycleTests {
     /// lands first wins the bytes and the other reader never learns they
     /// existed. So the second connection is accepted, answered with a version
     /// that cannot be mistaken for a real one, and closed.
-    @Test func secondConcurrentClientIsRejected() throws {
-        let fixture = try HolderFixture.start(launch: Self.idleJob())
+    @Test func secondConcurrentClientIsRejected() async throws {
+        let fixture = try await HolderFixture.start(launch: Self.idleJob())
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         let first = try fixture.connect()
         defer { first.close() }
@@ -114,10 +114,10 @@ struct HolderLifecycleTests {
 
     /// The holder never reads the master, so everything the job has written
     /// since it started is still queued when a reader finally arrives.
-    @Test func handsOverAPTYThatCarriesChildOutput() throws {
-        let fixture = try HolderFixture.start(launch: Self.idleJob(marker: "HOLDER-OK"))
+    @Test func handsOverAPTYThatCarriesChildOutput() async throws {
+        let fixture = try await HolderFixture.start(launch: Self.idleJob(marker: "HOLDER-OK"))
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         let client = try fixture.connect()
         defer { client.close() }
@@ -133,7 +133,7 @@ struct HolderLifecycleTests {
 
         let pty = try #require(fds.first)
         var seen = Data()
-        waitUntil("the job's output on the handed-over pty") {
+        await waitUntil("the job's output on the handed-over pty") {
             drainPTY(pty, into: &seen)
             return String(decoding: seen, as: UTF8.self).contains("HOLDER-OK")
         }
@@ -147,10 +147,10 @@ struct HolderLifecycleTests {
     /// once, drops the pty master, unlinks its rendezvous and exits — and the
     /// job it was holding is left for its caller to reap, because holder death
     /// is deliberately not child death.
-    @Test func forgetStopsReportingAndDoesNotResurrectTheChild() throws {
-        let fixture = try HolderFixture.start(launch: Self.idleJob())
+    @Test func forgetStopsReportingAndDoesNotResurrectTheChild() async throws {
+        let fixture = try await HolderFixture.start(launch: Self.idleJob())
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         let client = try fixture.connect()
         guard case .described(let description) = try client.request(.describe) else {
@@ -162,7 +162,7 @@ struct HolderLifecycleTests {
         #expect(try client.request(.forget) == .forgotten)
         client.close()
 
-        waitUntil("the holder to unlink its socket and exit") {
+        await waitUntil("the holder to unlink its socket and exit") {
             !FileManager.default.fileExists(atPath: fixture.socketPath)
                 && !processIsAlive(fixture.holderPID)
         }
@@ -185,10 +185,10 @@ struct HolderLifecycleTests {
     /// The sequencing is what gives the assertion meaning: the holder is killed
     /// while the job is still alive, so if the reacquire succeeds it can only
     /// be because the job never had the lock.
-    @Test func theJobDoesNotInheritTheCreationLock() throws {
-        let fixture = try HolderFixture.start(launch: Self.idleJob())
+    @Test func theJobDoesNotInheritTheCreationLock() async throws {
+        let fixture = try await HolderFixture.start(launch: Self.idleJob())
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         // **The master is taken and held**, which is what keeps the job alive
         // across the kill below — and it is what the daemon holds in production
@@ -219,7 +219,7 @@ struct HolderLifecycleTests {
         defer { close(master) }
 
         kill(fixture.holderPID, SIGKILL)
-        waitUntil("the holder to die") { !processIsAlive(fixture.holderPID) }
+        await waitUntil("the holder to die") { !processIsAlive(fixture.holderPID) }
         // Without a live job this test would pass vacuously — the lock would be
         // free because nothing at all was left holding it.
         try #require(processIsAlive(childPID), "the job must outlive the holder for this to mean anything")
@@ -251,7 +251,7 @@ struct HolderLifecycleTests {
     ///
     /// Nothing here depends on the holder observing or reporting an exit, so
     /// machine load cannot turn the assertion into a timeout.
-    @Test func theJobDoesNotInheritStrayDescriptors() throws {
+    @Test func theJobDoesNotInheritStrayDescriptors() async throws {
         let home = HolderFixture.scratchHome()
         let probe = HolderFixture.strayDescriptorNumber
         let script = [
@@ -266,9 +266,9 @@ struct HolderLifecycleTests {
             environment: Self.rcFreeEnvironment,
             columns: 80,
             rows: 24)
-        let fixture = try HolderFixture.start(launch: launch, strayDescriptorProbe: true, home: home)
+        let fixture = try await HolderFixture.start(launch: launch, strayDescriptorProbe: true, home: home)
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         let client = try fixture.connect()
         defer { client.close() }
@@ -278,7 +278,7 @@ struct HolderLifecycleTests {
         }
         fixture.trackChild(description.childPID)
 
-        waitUntil("the job to run past its probe") {
+        await waitUntil("the job to run past its probe") {
             FileManager.default.fileExists(atPath: home + "/ran.marker")
         }
         let leaked = (try? String(contentsOfFile: home + "/stray.probe", encoding: .utf8)) ?? ""
@@ -301,7 +301,7 @@ struct HolderLifecycleTests {
     /// that inherited `SIG_IGN` could not install the trap, never sees the
     /// signal, and leaves the marker absent. The `ran` marker is the positive
     /// control, so "no marker" cannot be satisfied by a job that never started.
-    @Test func theJobDoesNotStartWithSIGPIPEIgnored() throws {
+    @Test func theJobDoesNotStartWithSIGPIPEIgnored() async throws {
         let home = HolderFixture.scratchHome()
         let script = [
             "trap 'echo TRAPPED > \"\(home)/sigpipe.marker\"; exit 42' PIPE",
@@ -316,9 +316,9 @@ struct HolderLifecycleTests {
             environment: Self.rcFreeEnvironment,
             columns: 80,
             rows: 24)
-        let fixture = try HolderFixture.start(launch: launch, home: home)
+        let fixture = try await HolderFixture.start(launch: launch, home: home)
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         let client = try fixture.connect()
         defer { client.close() }
@@ -328,10 +328,10 @@ struct HolderLifecycleTests {
         }
         fixture.trackChild(description.childPID)
 
-        waitUntil("the job to run past its trap") {
+        await waitUntil("the job to run past its trap") {
             FileManager.default.fileExists(atPath: home + "/ran.marker")
         }
-        waitUntil("the job to take its SIGPIPE trap") {
+        await waitUntil("the job to take its SIGPIPE trap") {
             FileManager.default.fileExists(atPath: home + "/sigpipe.marker")
         }
         #expect(
@@ -353,7 +353,7 @@ struct HolderLifecycleTests {
     /// queue is empty, and the four bytes of canonical echo for `"go\n"` are
     /// enough to wedge it forever — the holder must never drain them itself.
     /// See `drainPTY`.
-    @Test func reportsTheJobsExitCodeToAConnectedClient() throws {
+    @Test func reportsTheJobsExitCodeToAConnectedClient() async throws {
         // Every path this job touches lives under the fixture's own scratch
         // root. A fixed `/tmp/…` name is shared by every concurrent run of this
         // suite on the machine — several worktrees test here at once — so one
@@ -366,9 +366,9 @@ struct HolderLifecycleTests {
             environment: Self.rcFreeEnvironment,
             columns: 80,
             rows: 24)
-        let fixture = try HolderFixture.start(launch: launch, home: home)
+        let fixture = try await HolderFixture.start(launch: launch, home: home)
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         let client = try fixture.connect(receiveTimeout: 15.0)
         defer { client.close() }
@@ -386,7 +386,7 @@ struct HolderLifecycleTests {
         let line = Array("go\n".utf8)
         #expect(write(pty, line, line.count) == line.count)
         var echoed = Data()
-        waitUntil("the job to finish its read and exit") {
+        await waitUntil("the job to finish its read and exit") {
             drainPTY(pty, into: &echoed)
             return !processIsAlive(description.childPID)
         }
@@ -402,7 +402,7 @@ struct HolderLifecycleTests {
 
         // Having reported, the holder is done: it unlinks its rendezvous and
         // goes, rather than sitting on a socket nothing can use.
-        waitUntil("the holder to unlink its socket and exit") {
+        await waitUntil("the holder to unlink its socket and exit") {
             !FileManager.default.fileExists(atPath: fixture.socketPath)
                 && !processIsAlive(fixture.holderPID)
         }
@@ -411,10 +411,10 @@ struct HolderLifecycleTests {
     /// A job killed by a signal has no exit code. The holder must say it could
     /// not observe one rather than reporting a number that downstream cannot
     /// tell apart from a real exit.
-    @Test func reportsAnUnknownStatusForASignalledJob() throws {
-        let fixture = try HolderFixture.start(launch: Self.idleJob())
+    @Test func reportsAnUnknownStatusForASignalledJob() async throws {
+        let fixture = try await HolderFixture.start(launch: Self.idleJob())
         defer { fixture.tearDown() }
-        fixture.waitForSocket()
+        await fixture.waitForSocket()
 
         let client = try fixture.connect(receiveTimeout: 15.0)
         defer { client.close() }
@@ -465,13 +465,13 @@ struct HolderLifecycleTests {
     /// restarts and comes back for a job that finished while it was away.
     private static func holderWithAnAlreadyExitedChild(
         code: Int32
-    ) throws -> (fixture: HolderFixture, jobPID: Int32) {
+    ) async throws -> (fixture: HolderFixture, jobPID: Int32) {
         let home = HolderFixture.scratchHome()
-        let fixture = try HolderFixture.start(launch: jobThatExitsOnCue(home: home, code: code), home: home)
-        fixture.waitForSocket()
+        let fixture = try await HolderFixture.start(launch: jobThatExitsOnCue(home: home, code: code), home: home)
+        await fixture.waitForSocket()
 
         var jobPID: Int32 = 0
-        waitUntil("the job to report its pid\n\(fixture.diagnostics())") {
+        await waitUntil("the job to report its pid\n\(fixture.diagnostics())") {
             guard let text = try? String(contentsOfFile: home + "/job.pid", encoding: .utf8) else { return false }
             jobPID = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
             return jobPID > 0
@@ -479,7 +479,7 @@ struct HolderLifecycleTests {
         fixture.trackChild(jobPID)
 
         FileManager.default.createFile(atPath: home + "/go", contents: nil)
-        waitUntil("the holder to reap its exited job") { !processIsAlive(jobPID) }
+        await waitUntil("the holder to reap its exited job") { !processIsAlive(jobPID) }
         return (fixture, jobPID)
     }
 
@@ -492,8 +492,8 @@ struct HolderLifecycleTests {
     /// frame recorded then ended the serve loop before the request was ever
     /// read. Every existing hand-over test connects while the child is alive,
     /// which is why it shipped.
-    @Test func handsOverThePTYToAClientThatArrivesAfterTheChildExited() throws {
-        let (fixture, jobPID) = try Self.holderWithAnAlreadyExitedChild(code: 7)
+    @Test func handsOverThePTYToAClientThatArrivesAfterTheChildExited() async throws {
+        let (fixture, jobPID) = try await Self.holderWithAnAlreadyExitedChild(code: 7)
         defer { fixture.tearDown() }
 
         let client = try fixture.connect()
@@ -513,15 +513,21 @@ struct HolderLifecycleTests {
     /// The same client, asking the cheaper question. Two claims, and the first
     /// is what the second rests on: the holder says **nothing** to a client
     /// that has asked for nothing, and then answers what it is asked.
-    @Test func describesAnAlreadyExitedChildOnlyWhenAsked() throws {
-        let (fixture, jobPID) = try Self.holderWithAnAlreadyExitedChild(code: 3)
+    @Test func describesAnAlreadyExitedChildOnlyWhenAsked() async throws {
+        let (fixture, jobPID) = try await Self.holderWithAnAlreadyExitedChild(code: 3)
         defer { fixture.tearDown() }
 
-        let client = try fixture.connect(receiveTimeout: 1.0)
+        // The silence probe waits out its whole receive timeout, so it gets a
+        // short one. A greeting would be sent at accept time, the instant the
+        // holder's poll wakes on the connect, so one that was coming arrives
+        // long before 0.3 s. The answer to the real request below gets the
+        // ordinary budget back.
+        let client = try fixture.connect(receiveTimeout: 0.3)
         defer { client.close() }
         #expect(
             try client.frameArrivingUnsolicited() == nil,
             "the holder greeted a client that had asked for nothing")
+        client.setReceiveTimeout(5.0)
 
         guard case .described(let description) = try client.request(.describe) else {
             Issue.record("expected .described\n\(fixture.diagnostics())")
@@ -533,15 +539,15 @@ struct HolderLifecycleTests {
 
     /// `forget` must work on this path too, and it is the request the old
     /// behaviour could never answer: the connection was already torn down.
-    @Test func forgetsForAClientThatArrivesAfterTheChildExited() throws {
-        let (fixture, _) = try Self.holderWithAnAlreadyExitedChild(code: 0)
+    @Test func forgetsForAClientThatArrivesAfterTheChildExited() async throws {
+        let (fixture, _) = try await Self.holderWithAnAlreadyExitedChild(code: 0)
         defer { fixture.tearDown() }
 
         let client = try fixture.connect()
         #expect(try client.request(.forget) == .forgotten)
         client.close()
 
-        waitUntil("the holder to unlink its socket and exit") {
+        await waitUntil("the holder to unlink its socket and exit") {
             !FileManager.default.fileExists(atPath: fixture.socketPath)
                 && !processIsAlive(fixture.holderPID)
         }

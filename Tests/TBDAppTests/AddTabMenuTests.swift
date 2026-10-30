@@ -134,7 +134,7 @@ private func makeExecutable(named name: String, in directory: URL) throws {
 @MainActor
 @Test func addTabMenu_withProfiles_insertsIndentedItemsAfterClaude() {
     // One logged-in oauth profile, one not — the titles carry the identity suffix.
-    let work = makeProfile(name: "Work", loginIdentity: "zadam@longeye.co")
+    let work = makeProfile(name: "Work", loginIdentity: "dev@acme.example")
     let personal = makeProfile(name: "Personal")
     let menu = AddTabMenu.build(profiles: [work, personal], coordinator: makeCoordinator())
 
@@ -142,7 +142,7 @@ private func makeExecutable(named name: String, in directory: URL) throws {
     let first = menu.items[idx + 1]
     let second = menu.items[idx + 2]
 
-    #expect(first.title == "Work — zadam@longeye.co")
+    #expect(first.title == "Work — dev@acme.example")
     #expect(first.indentationLevel == 0)
     #expect(first.image != nil)
     #expect(first.representedObject as? UUID == work.profile.id)

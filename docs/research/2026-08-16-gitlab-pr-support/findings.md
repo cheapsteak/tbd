@@ -177,8 +177,8 @@ of the host plumbing GitLab will also need — is one of the open questions.
   `/usr/local/bin/gh`, `/opt/homebrew/bin/gh`, `/usr/bin/gh`, then `PATH`
   (`PRStatusManager.swift:2236-2249`), and `runGHResult` is the only place a
   forge subprocess is spawned (`:2196-2233`). A repo-wide grep for a forge
-  binary finds `gh` in exactly this file and in the seeded Nightwatch scripts;
-  no other `Sources/` target shells out to a forge.
+  binary finds `gh` in exactly this file; no other `Sources/` target shells
+  out to a forge.
 - **The seam already exists.** `PRStatusManager.GHRunner`
   (`:129-131`) is an injected closure taking `(args, repoPath)`, used by tests.
   Whatever a second forge needs, it does not need a new process-spawning

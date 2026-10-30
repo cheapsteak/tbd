@@ -153,6 +153,11 @@ enum RefusedReason: String, Codable, Sendable, CaseIterable {
     /// stale coordinate names a live stranger (issue #384); the record has to
     /// be able to say that is what happened.
     case targetMismatch = "target-mismatch"
+    /// The user's start-admission command said no to an agent start or wake
+    /// (docs/specs/2026-10-21-agent-start-admission-design.md). The request is
+    /// well formed and its target exists; a policy the user wrote declined it,
+    /// and the detail carries that command's reason. Nothing was started.
+    case held
 }
 
 /// The synchronous outcome of one act, as the daemon classifies it just before
@@ -197,14 +202,15 @@ enum ActuationOutcome: Sendable, Equatable {
 /// modes can mis-paste — markers printed by a child that has turned
 /// bracketing off since an "on" was frozen, or by an agent session that a
 /// stale "off" was not trusted for and so got wrapped — and that is accepted,
-/// because refusing would make every supervision send fail closed exactly when
-/// the app is napping or wedged, which is when supervision most needs to send. What makes
+/// because refusing would make every send — an agent's `tbd terminal send`,
+/// the queued prompt — fail closed exactly when the app is napping or wedged,
+/// and those senders do not wait for it to wake. What makes
 /// it honest rather than merely optimistic is that the guess is recorded: a row
 /// reading `dispatched, modeSource: staleDaemon` tells whoever reads the record
 /// afterwards that the composition was a guess, and the age says how old.
 ///
 /// **The three shared raw values must stay identical to
-/// `TerminalScreen.Source`'s.** A supervisor correlates the `screen.source` it
+/// `TerminalScreen.Source`'s.** A caller correlates the `screen.source` it
 /// read from `tbd terminal output --json` against the `modeSource` on the row
 /// its send produced, by string comparison — so a second spelling of
 /// `staleDaemon` would defeat exactly the case worth correlating. The default
@@ -293,8 +299,8 @@ struct ActuationRow: Codable, Sendable, Equatable {
     var message: String?
     var submit: Bool?
     /// Set on a request row when the caller armed delivery verification, and
-    /// only then. Without it the startup replay and the account cannot tell
-    /// which sends owe an observation from the ones that never asked for one.
+    /// only then. Without it the startup replay cannot tell which sends owe
+    /// an observation from the ones that never asked for one.
     var verify: Bool?
     var prompt: String?
     var agent: String?

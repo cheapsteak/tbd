@@ -143,9 +143,9 @@ struct HolderVerifiedSendTests {
     /// there is a window where the column says yes and there is nothing to arm.
     /// An explicit `--verify` is refused there — the caller asked for evidence
     /// and must not be handed a silence that reads like confirmation. Every
-    /// other send is delivered: a supervision send that failed closed because
-    /// supervision's own witness was not ready is the exact failure the design
-    /// exists to prevent.
+    /// other send is delivered: a send that failed closed because a witness it
+    /// never asked for was not ready is the exact failure the design exists to
+    /// prevent.
     @Test("a daemon rail's send is delivered unarmed when no verifier is wired")
     func aDaemonRailSendIsNotRefusedWithoutAWiredVerifier() async throws {
         let writes = HolderVerifyWriteRecorder()

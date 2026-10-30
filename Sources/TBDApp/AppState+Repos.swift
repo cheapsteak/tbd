@@ -14,15 +14,27 @@ extension AppState {
 
     // MARK: - Repo Actions
 
-    /// Add a repository by path.
+    /// Add a repository by path, logging a failure.
     func addRepo(path: String) async {
+        do {
+            try await tryAddRepo(path: path)
+        } catch {
+            logger.error("Failed to add repo: \(error, privacy: .public)")
+        }
+    }
+
+    /// Add a repository by path and return the failure to the caller — the
+    /// clone sheet shows it, where `addRepo(path:)` only logs it.
+    @discardableResult
+    func tryAddRepo(path: String) async throws -> Repo {
         do {
             let repo = try await daemonClient.addRepo(path: path)
             repos.append(repo)
             isConnected = true
+            return repo
         } catch {
-            logger.error("Failed to add repo: \(error)")
             handleConnectionError(error)
+            throw error
         }
     }
 

@@ -125,6 +125,10 @@ private struct PreparedContinueInClaude: Sendable {
     let profileID: UUID?
     let freshClaudeSessionID: String
     let claudeCommand: String
+    /// The `--settings` overlay `claudeCommand` names, planned before the
+    /// destination's incarnation exists and written at launch, so a
+    /// continuation that fails before launch writes no overlay.
+    let claudeOverlay: ReplacementSpawnOverlay
     /// The `--name` in `claudeCommand`, reserved in the title store by
     /// preparation; the handler confirms it once the replacement is finalized
     /// and releases it on every other outcome.
@@ -174,6 +178,15 @@ extension RPCRouter {
         } catch {
             await lifecycle.sessionTitles.release(prepared.claudeSpawnTitle)
             throw error
+        }
+
+        // Start admission: the replacement launches Claude. Nothing has been
+        // replaced yet, so a hold only gives back the reserved session name.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude,
+            worktreeID: prepared.source.worktreeID, terminalID: prepared.source.id) {
+            await lifecycle.sessionTitles.release(prepared.claudeSpawnTitle)
+            return held
         }
 
         let response: RPCResponse
@@ -359,6 +372,15 @@ extension RPCRouter {
             db: db, store: lifecycle.sessionTitles,
             worktreeID: worktree.id, displayName: worktree.displayName,
             terminalID: source.id)
+        // The destination's incarnation is minted only when the replacement
+        // begins, so its session mod is prepared at launch, and the overlay is
+        // only planned here and written there.
+        let claudeOverlay = ReplacementSpawnOverlay.plan(
+            fallbackModels: resolvedProfile?.fallbackModels,
+            sessionKey: source.id.uuidString,
+            repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+            // A Codex tab has no Claude values to carry.
+            extraSettingsJSON: nil)
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
@@ -374,17 +396,12 @@ extension RPCRouter {
             profileConfigDir: profileConfigDir,
             cmd: nil,
             shellFallback: "",
-            settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
-                fallbackModels: resolvedProfile?.fallbackModels,
-                sessionKey: source.id.uuidString,
-                repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                watchDeskRole: source.watchDeskRole,
-                worktreePath: worktree.path,
-                profileConfigDir: profileConfigDir,
-                promptAnswerHooks: config?.transcriptPromptAnswerEnabled ?? Config.transcriptPromptAnswerDefault),
+            settingsOverlayPath: claudeOverlay.path,
             pluginDirPath: PluginDirWriter.pluginDirPath,
             envSettingOverrides: config?.envSettingOverrides ?? [:],
-            sessionName: claudeSpawnTitle.name)
+            sessionName: claudeSpawnTitle.name,
+            // The overlay is written at launch, so its path counts as present.
+            fileExists: claudeOverlay.commandFileExists)
         let claudeSensitiveEnv = EnvOverrideResolver.merge(
             global: config?.envOverrides,
             repo: repo?.envOverrides,
@@ -415,6 +432,7 @@ extension RPCRouter {
             profileID: resolvedProfile?.profileID,
             freshClaudeSessionID: freshClaudeSessionID,
             claudeCommand: claudeSpawn.command,
+            claudeOverlay: claudeOverlay,
             claudeSpawnTitle: claudeSpawnTitle,
             packetFilePath: packetFilePath,
             claudeEnv: claudeEnv,
@@ -489,6 +507,14 @@ extension RPCRouter {
         let destinationEnv = AgentProcessEnvironment.replacement(
             base: prepared.claudeEnv,
             incarnationID: destinationToken)
+        // The pending token is the incarnation finalization promotes to the
+        // row, so it is the one the destination's spawn record names.
+        let sessionMod = SessionModSpawn.prepare(
+            config: try? await db.config.get(),
+            claudeSessionID: prepared.freshClaudeSessionID,
+            incarnationID: destinationToken,
+            sessionsDir: sessionsDir, now: now())
+        let claudeCommand = prepared.claudeOverlay.settle(command: prepared.claudeCommand)
         var destinationFailure: Error?
         do {
             // No graceful interrupt: this single tmux operation kills Codex
@@ -497,9 +523,9 @@ extension RPCRouter {
                 server: currentWorktree.tmuxServer,
                 windowID: staged.tmuxWindowID,
                 cwd: currentWorktree.path,
-                shellCommand: prepared.claudeCommand,
+                shellCommand: claudeCommand,
                 env: destinationEnv,
-                sensitiveEnv: prepared.claudeSensitiveEnv,
+                sensitiveEnv: prepared.claudeSensitiveEnv.addingSessionMod(sessionMod),
                 cols: prepared.cols,
                 rows: prepared.rows)
             let ready = try await continueInClaudeReadiness.wait(

@@ -36,7 +36,7 @@ RELEASE_ALREADY_CURRENT=6
 # its own Bundle.main, and its bundles sit beside it. Bringing TBDApp into the
 # asset needs the resource lookups made relocatable first.
 # shellcheck disable=SC2034 # read by update.sh and scripts/ci/package-release.sh
-RELEASE_PRODUCTS=(TBDDaemon TBDCLI TBDHolder TBDPeerHelper TBDModelProxy)
+RELEASE_PRODUCTS=(TBDDaemon TBDCLI TBDHolder TBDPeerHelper)
 # shellcheck disable=SC2034 # read by update.sh
 RELEASE_LOCAL_PRODUCTS=(TBDApp)
 
@@ -315,10 +315,14 @@ release_link_yield_to_swiftpm() {
 # local build that did not lead to an install, the running daemon's tree is
 # the one a reboot must respawn. A previous target that was SwiftPM's own
 # directory is SwiftPM's again already.
+#
+# Non-zero when the link could not be put back, so a caller that goes on to
+# launch something from that path can tell it still names the new build.
+# Callers that only tidy up on their way out ignore it.
 restore_release_link() {
     local link="${1-}" previous="${2-}"
     case "$previous" in
-        "$PREBUILT_HOME"/*) point_release_link "$link" "$previous" ;;
+        "$PREBUILT_HOME"/*) point_release_link "$link" "$previous" || return 1 ;;
     esac
     return 0
 }

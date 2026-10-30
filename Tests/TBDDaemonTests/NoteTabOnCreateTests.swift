@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -72,7 +73,7 @@ struct NoteTabOnCreateTests {
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         let completion = try await lifecycle.completeCreateWorktree(
             worktreeID: pending.id, skipClaude: true
         )
@@ -107,7 +108,7 @@ struct NoteTabOnCreateTests {
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         let completion = try await lifecycle.completeCreateWorktree(
             worktreeID: pending.id, skipClaude: true
         )
@@ -137,7 +138,7 @@ struct NoteTabOnCreateTests {
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         let completion = try await lifecycle.completeCreateWorktree(
             worktreeID: pending.id,
             skipClaude: true,

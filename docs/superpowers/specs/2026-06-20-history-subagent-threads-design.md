@@ -25,7 +25,7 @@ transcript.
 
 The gaps:
 - There is **no way to browse subagent conversations as first-class threads**.
-  In a real session (longeye-app worktree `20260619-bewildered-parakeet`,
+  In a real session (acme-app worktree `20260619-bewildered-parakeet`,
   session `860D6437…`) one conversation spawned **99 subagents** — too many to
   navigate via per-row overlays, with no session-level index.
 - The **overlay** is a cramped way to read a full subagent conversation, and it

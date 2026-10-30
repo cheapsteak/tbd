@@ -9,18 +9,18 @@ import Foundation
 // every state-shaped thing in this file either is one or is built out of them.
 //
 // The consequence that matters is what becomes unspellable. A value with no
-// provenance cannot be constructed, so it cannot drift into a briefing, a
+// provenance cannot be constructed, so it cannot drift into a report, a
 // threshold comparison, or a rendered surface pretending to be current. And
 // because provenance is structural rather than conventional, `unknown` gets to
 // be a first-class answer — "nothing could speak to this" is a fact with a
 // source (`.unavailable`) and an observed-at like any other, not an error and
 // not an excuse to substitute a confident value that happens to be at hand.
 //
-// This is the state-model half of the fleet-supervision design
-// (`docs/specs/2026-07-26-fleet-supervision-design.md` §2). It defines shapes
-// and says nothing about policy: no thresholds, no verdicts, no actions. What
-// counts as too long, too many, or too full is a project's convention and lives
-// in its sweep program.
+// The vocabulary was first set out in the fleet-supervision design
+// (`docs/specs/2026-07-26-fleet-supervision-design.md` §2), which is retired and
+// kept as the design record. It defines shapes and says nothing about policy:
+// no thresholds, no verdicts, no actions. What counts as too long, too many, or
+// too full is for whoever reads these facts to decide.
 
 // MARK: - FactSource
 
@@ -54,9 +54,11 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
     case userAction(String)
     /// The session's transcript JSONL, read from the tail.
     case transcriptTail
-    /// The statusline wrapper's captured stdin JSON — the one surface on which
-    /// Claude Code tells a third party its *resolved* context window.
-    case statuslineTee
+    /// The session mod's `usage.json`, written from `$.session.usage()` and
+    /// each `session.measure` — the surface on which Claude Code tells a third
+    /// party its *resolved* context window, read only while the mod is
+    /// confirmed running in the session.
+    case sessionMod
     /// TBD's own persisted record: the hibernation columns, the scheduled-resume
     /// rows, anything the daemon wrote down earlier and is now reading back.
     case database
@@ -96,7 +98,7 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         case .hookEvent: return "hook"
         case .userAction: return "user-action"
         case .transcriptTail: return "transcript-tail"
-        case .statuslineTee: return "statusline-tee"
+        case .sessionMod: return "session-mod"
         case .database: return "database"
         case .processLiveness: return "process-liveness"
         case .forge: return "forge"
@@ -138,7 +140,7 @@ public enum FactSource: Sendable, Equatable, Hashable, Codable {
         case "user-action":
             if let detail, !detail.isEmpty { self = .userAction(detail) } else { self = .unrecognized(kind) }
         case "transcript-tail": self = .transcriptTail
-        case "statusline-tee": self = .statuslineTee
+        case "session-mod": self = .sessionMod
         case "database": self = .database
         case "process-liveness": self = .processLiveness
         case "forge": self = .forge
@@ -233,9 +235,8 @@ public enum FactTimestamp {
 ///
 /// The class is a *label on a recorded fact*, not a branch in a decision. What
 /// a class means — whether `promptOnScreen` warrants waking someone, whether
-/// `informational` is worth a line in a briefing — is a project's convention
-/// and lives in its sweep program, exactly as the thresholds in this file's
-/// other types do.
+/// `informational` is worth surfacing — is for whoever reads the fact to
+/// decide, as is every threshold this file's other types decline to hold.
 public enum AwaitingInputClass: String, Sendable, Equatable, Codable {
     /// A prompt is on screen now and a human has to answer it.
     case promptOnScreen = "prompt_on_screen"
@@ -319,13 +320,12 @@ public struct TranscriptFingerprint: Codable, Sendable, Equatable {
 /// The structured reason an agent is waiting, carried verbatim from Claude
 /// Code's `Notification` hook.
 ///
-/// **TBD never branches on `message`.** It is carried into a briefing, into a
-/// question raised on a project's question route, and into the one-minute
-/// re-check — and read by a human or by a project's own program, both of which
-/// may interpret it however they like. Compiled TBD may not, because matching
-/// on that text would be screen-scraping with an extra hop: the string is a
-/// display artifact of one Claude Code version, and a reworded prompt would
-/// silently change TBD's behavior.
+/// **TBD never branches on `message`.** It is carried to a caller of
+/// `session.states` and to the app — and read by a human or by a caller's own
+/// program, both of which may interpret it however they like. Compiled TBD
+/// may not, because matching on that text would be screen-scraping with an
+/// extra hop: the string is a display artifact of one Claude Code version, and
+/// a reworded prompt would silently change TBD's behavior.
 ///
 /// `raw` keeps the payload JSON as it arrived, so a later consumer can read a
 /// field this build does not model without waiting for a TBD release.
@@ -351,9 +351,9 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
     /// decode** rather than trusted from the wire, so the pair can never
     /// disagree: a stored row cannot claim a class its own type does not
     /// support, and this build's vocabulary is always the one that decides.
-    /// It is encoded anyway, because a reader outside TBD — a briefing, a
-    /// project's own program — should not have to reimplement the grouping to
-    /// read the record.
+    /// It is encoded anyway, because a reader outside TBD — a caller of
+    /// `session.states` — should not have to reimplement the grouping to read
+    /// the record.
     public let classification: AwaitingInputClass
     /// The block Claude Code announced over OSC 7501, when the wait was
     /// reported that way rather than by the `Notification` hook. Absent on
@@ -446,7 +446,7 @@ extension AwaitingInputReason: FactValueSummarizable {
 ///
 /// `.unknown` is a real answer, not an error path. Every other case asserts
 /// something about the session, and asserting one of them wrongly is worse than
-/// admitting ignorance — a supervisor that is told `idle` about a session
+/// admitting ignorance — a caller that is told `idle` about a session
 /// nobody could read will act on a session it cannot see. So `unknown` carries
 /// `why`, rides the same triple as every other value, and is what a decoder
 /// produces when it meets a tag it does not recognize. It is never repaired
@@ -468,7 +468,7 @@ public enum SessionStateValue: Sendable, Equatable, Codable {
     case rateLimited(until: Date?)
     /// Parked by TBD — the agent's process was torn down deliberately. The
     /// reason is free text because who-parked-and-why is TBD's own vocabulary
-    /// (`HibernateReason`) plus whatever a wake program adds.
+    /// (`HibernateReason`), which grows on its own schedule.
     case parked(reason: String)
     /// The session no longer exists: the pane, the window, or the process is
     /// gone.
@@ -613,9 +613,9 @@ public typealias SessionState = ObservedFact<SessionStateValue>
 /// full at the boundary, which is exactly where being wrong costs the most.
 ///
 /// The only party that knows the resolved window is Claude Code, and the one
-/// surface where it tells a third party is the statusline's stdin JSON. Where
-/// that tee has not fired, the answer is `.unknown` and the report carries raw
-/// token counts with no percentage.
+/// surface where it tells a third party is the session mod's `usage.json`.
+/// Where that has not been written, the answer is `.unknown` and the report
+/// carries raw token counts with no percentage.
 public enum ContextWindow: Codable, Sendable, Equatable {
     case observed(ObservedFact<Int>)
     case unknown(why: String)
@@ -627,12 +627,6 @@ public enum ContextWindow: Codable, Sendable, Equatable {
     /// flag on the way to a surface. 200k is chosen because it errs early: if
     /// the real window is larger, a threshold fires sooner than it needed to,
     /// which costs attention. The opposite error costs a session.
-    ///
-    /// The same number is spelled again in Python as `ASSUMED_WINDOW`, in the
-    /// `tick.py` body inside `NightwatchSkillContent.swift`. Two languages, one
-    /// assumption and no way to share it, so it is stated twice on purpose —
-    /// change one, change the other, and keep it labeled as an assumption in
-    /// whatever a human reads.
     public static let assumedTokens = 200_000
 
     /// The denominator to use, and whether it was assumed.
@@ -686,10 +680,11 @@ public enum ContextWindow: Codable, Sendable, Equatable {
 /// denominator that may be assumed.
 ///
 /// The two halves are separately fallible and are modeled separately for that
-/// reason. `used` comes from the last assistant record's `usage` block at the
-/// transcript tail; the window comes from the statusline tee. Either can be
-/// missing without the other, and collapsing them into one optional percentage
-/// would lose which one was missing.
+/// reason. `used` comes from the session mod's `usage.json` or from the last
+/// assistant record's `usage` block at the transcript tail; the window comes
+/// only from the session mod. Either can be missing without the other, and
+/// collapsing them into one optional percentage would lose which one was
+/// missing.
 public struct ContextLoad: Codable, Sendable, Equatable {
     /// Tokens currently in the window. nil when the transcript tail could not
     /// be read or carried no usage block.
@@ -704,11 +699,11 @@ public struct ContextLoad: Codable, Sendable, Equatable {
     /// Whether numerator and denominator are one reading rather than two.
     ///
     /// True only when both halves came from the same source at the same
-    /// instant — in practice, when the statusline tee's captured payload
-    /// carried a `current_usage` and a `context_window_size` together, which is
-    /// Claude Code computing both at once from its own state. False whenever
-    /// the numerator was read from the transcript tail while the denominator
-    /// came from an earlier capture, and false when the window is unknown.
+    /// instant — in practice, when the session mod's `usage.json` carried
+    /// `tokens` beside its `window`, which is Claude Code computing both at once
+    /// from its own state. False whenever the numerator was read from the
+    /// transcript tail while the denominator came from an earlier reading, and
+    /// false when the window is unknown.
     ///
     /// The distinction is not pedantry: a numerator and a denominator observed
     /// at different moments were never simultaneously true, so a percentage
@@ -811,75 +806,30 @@ public struct PRObservation: Codable, Sendable, Equatable {
     }
 }
 
-// MARK: - Counters
-
-/// Runaway-input counters for one session: how much has happened lately, and
-/// how long the working tree has stood still.
-///
-/// Every number here is a count of *events*, never of content. `turnsInWindow`
-/// counts records appended to the session's transcript JSONL without parsing a
-/// single one of them — the file is a version-unstable internal format, and
-/// counting appended lines is the one thing that stays true across its changes.
-///
-/// **Crossing any of these numbers causes nothing to happen here.** There are
-/// no thresholds in this type and there will not be any: what counts as a
-/// runaway is a project's convention and lives in its shipped sweep program.
-/// This type reports numbers; something else decides what they mean.
-public struct SessionCounters: Codable, Sendable, Equatable {
-    /// Transcript JSONL records appended since `windowStart`.
-    public let turnsInWindow: Int
-    /// Hook events received since `windowStart`.
-    public let hookEventsInWindow: Int
-    /// Start of the window both counts are taken over.
-    public let windowStart: Date
-    /// When the counts were read.
-    public let observedAt: Date
-    /// Since when the worktree's commits have not changed. nil when that was
-    /// not established — distinct from "changed just now".
-    public let commitsUnchangedSince: Date?
-
-    public init(
-        turnsInWindow: Int,
-        hookEventsInWindow: Int,
-        windowStart: Date,
-        observedAt: Date,
-        commitsUnchangedSince: Date? = nil
-    ) {
-        self.turnsInWindow = turnsInWindow
-        self.hookEventsInWindow = hookEventsInWindow
-        self.windowStart = windowStart
-        self.observedAt = observedAt
-        self.commitsUnchangedSince = commitsUnchangedSince
-    }
-}
-
 // MARK: - Report
 
 /// Everything the state model knows about one terminal, at one moment.
 ///
-/// The optionals are optional because their sources are separately fallible,
-/// not because they are unimportant: a session whose transcript could not be
-/// read still has a state, and reporting the state without the context load is
-/// the honest shape. A caller that needs one of them must handle its absence
-/// rather than receiving a filled-in default.
+/// The context load is optional because its source is separately fallible, not
+/// because it is unimportant: a session whose transcript could not be read
+/// still has a state, and reporting the state without the context load is the
+/// honest shape. A caller that needs it must handle its absence rather than
+/// receiving a filled-in default.
 public struct SessionStateReport: Codable, Sendable, Equatable {
     public let terminalID: UUID
     public let worktreeID: UUID
     public let state: SessionState
     public let contextLoad: ContextLoad?
-    public let counters: SessionCounters?
 
     public init(
         terminalID: UUID,
         worktreeID: UUID,
         state: SessionState,
-        contextLoad: ContextLoad? = nil,
-        counters: SessionCounters? = nil
+        contextLoad: ContextLoad? = nil
     ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
         self.state = state
         self.contextLoad = contextLoad
-        self.counters = counters
     }
 }

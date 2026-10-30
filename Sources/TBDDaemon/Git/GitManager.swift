@@ -142,6 +142,19 @@ public struct GitManager: Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Returns the names of the configured remotes, one per `git remote` line.
+    ///
+    /// Empty when the repo has no remotes. Throws when git fails, for example
+    /// when `repoPath` is not a repository, so a caller can tell "no remotes"
+    /// from "could not ask".
+    public func remoteNames(repoPath: String) async throws -> [String] {
+        let output = try await run(arguments: ["remote"], at: repoPath)
+        return output
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
     /// Returns the upstream head branch name configured for the current worktree branch.
     public func upstreamBranchName(worktreePath: String, branch: String) async -> String? {
         guard let mergeRef = try? await run(

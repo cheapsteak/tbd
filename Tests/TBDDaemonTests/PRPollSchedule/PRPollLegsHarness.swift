@@ -1,6 +1,7 @@
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// A router over an in-memory DB with one repo (`acme/acme-prod`), N active

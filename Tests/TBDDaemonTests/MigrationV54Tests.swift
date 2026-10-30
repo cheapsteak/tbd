@@ -6,15 +6,6 @@ import TBDShared
 
 @Suite struct MigrationV54Tests {
 
-    @Test func prNumberColumnExists() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.writerForTests.read { dbConn in
-            let columns = try Row.fetchAll(dbConn, sql: "PRAGMA table_info(worktree)")
-            let names = columns.compactMap { $0["name"] as String? }
-            #expect(names.contains("pr_number"))
-        }
-    }
-
     @Test func existingRowDecodesNilPRNumber() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: "/tmp/v54-\(UUID())", displayName: "v54", defaultBranch: "main")

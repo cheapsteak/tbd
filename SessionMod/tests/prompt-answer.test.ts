@@ -1,0 +1,509 @@
+// prompt-answer's hooks, called directly with a stand-in `$` and a stand-in
+// daemon (fake-channel.ts). Each test starts its tool calls itself and lets
+// every one of them settle, so the feature's records of calls in flight and
+// open dialogs, which last as long as this file, are empty between tests.
+import type { ClassicEventOf, Frozen, Next, ToolCallInput } from 'claude-code'
+import { expect, test } from 'claude-code/testing'
+
+import { permissionRequested, toolCalled } from '../hooks/features/prompt-answer.ts'
+import { startPolling } from '../hooks/shared/channel.ts'
+import { CHANNEL, SESSION_ID, below, fakeChannel, flush, sentTo } from './fake-channel.ts'
+import type { Below, FakeChannel } from './fake-channel.ts'
+
+type PermissionInput = ClassicEventOf['classic.PermissionRequest']
+
+const OPEN = '/v1/prompts/open'
+const TOOL_RESULT = { result: { ok: true } }
+// What the hooks beneath a permission request answer when nothing decides.
+const PASSED = {}
+const DENY_TEXT = 'The user declined this from TBD.'
+const SESSION_RULE = [
+  { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'ls:*' }], behavior: 'allow', destination: 'session' },
+]
+
+const answerPath = (id: string): string => `/v1/prompts/${id}/answer`
+const receiptPath = (id: string): string => `/v1/prompts/${id}/receipt`
+const closedPath = (id: string): string => `/v1/prompts/${id}/closed`
+
+type Call = { done: Promise<unknown>; tool: Below<Next<'tool.call'>> }
+type Dialog = { done: Promise<unknown>; below: Below<Next<'classic.PermissionRequest'>> }
+
+/** Starts a tool call through the feature's tool.call hook; the tool runs until the test settles it. */
+function startCall(fake: FakeChannel, input: Record<string, unknown>): Call {
+  const tool = below<Next<'tool.call'>>()
+  const done = toolCalled(fake.engine, CHANNEL, input as unknown as Frozen<ToolCallInput>, tool.next)
+  return { done, tool }
+}
+
+/** Raises a permission dialog through the feature's classic.PermissionRequest hook. */
+function requestPermission(fake: FakeChannel, input: Record<string, unknown>): Dialog {
+  const passOn = below<Next<'classic.PermissionRequest'>>(PASSED)
+  const event = {
+    hook_event_name: 'PermissionRequest',
+    session_id: SESSION_ID,
+    transcript_path: '',
+    cwd: '/work',
+    ...input,
+  }
+  const done = permissionRequested(fake.engine, CHANNEL, event as unknown as Frozen<PermissionInput>, passOn.next)
+  return { done, below: passOn }
+}
+
+/** The tool use ids the mod posted `open` for, in order. */
+function openedIds(fake: FakeChannel): unknown[] {
+  return sentTo(fake, 'POST', OPEN).map(request => (request.body as { toolUseID: unknown }).toolUseID)
+}
+
+async function finish(call: Call, result: unknown = TOOL_RESULT): Promise<void> {
+  call.tool.settle(result)
+  await call.done
+  await flush()
+}
+
+test('pairsPermissionWithCallByExactArgs', async () => {
+  const fake = fakeChannel()
+  const first = startCall(fake, { tool: 'Read', tool_use_id: 'toolu_a', file_path: '/a', limit: 10 })
+  const second = startCall(fake, { tool: 'Read', tool_use_id: 'toolu_b', file_path: '/b', limit: 10 })
+  await flush()
+
+  // The payload's keys come in another order; the values decide.
+  const forSecond = requestPermission(fake, { tool_name: 'Read', tool_input: { limit: 10, file_path: '/b' } })
+  await flush()
+  const forFirst = requestPermission(fake, { tool_name: 'Read', tool_input: { limit: 10, file_path: '/a' } })
+  await flush()
+  expect(openedIds(fake)).toEqual(['toolu_b', 'toolu_a'])
+
+  await fake.answer('GET', answerPath('toolu_a'), { status: 200, json: { state: 'decision', decision: { behavior: 'deny', message: DENY_TEXT } } })
+  await fake.answer('GET', answerPath('toolu_b'), { status: 200, json: { state: 'decision', decision: { behavior: 'allow' } } })
+
+  expect(await forFirst.done).toEqual({ decision: { behavior: 'deny', message: DENY_TEXT } })
+  expect(await forSecond.done).toEqual({ decision: { behavior: 'allow' } })
+  // The deny took effect: the call ends refused.
+  await finish(first, { deny: DENY_TEXT })
+  await finish(second)
+  expect(sentTo(fake, 'POST', receiptPath('toolu_a'))).toHaveLength(1)
+  expect(sentTo(fake, 'POST', receiptPath('toolu_b'))).toHaveLength(1)
+  expect(fake.sent.filter(request => request.path.endsWith('/closed'))).toEqual([])
+
+  // A dialog with no call in flight is left to the terminal.
+  const stray = requestPermission(fake, { tool_name: 'Read', tool_input: { file_path: '/a', limit: 10 } })
+  expect(await stray.done).toEqual(PASSED)
+  expect(stray.below.calls()).toBe(1)
+  expect(openedIds(fake)).toHaveLength(2)
+})
+
+test('allowReturnsDecisionAndPostsReceipt', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+  await flush()
+  expect(sentTo(fake, 'POST', OPEN).map(request => request.body)).toEqual([
+    { toolUseID: 'toolu_1', sessionID: SESSION_ID, toolName: 'Bash', toolInput: { command: 'ls' }, suggestions: null },
+  ])
+  // Nothing answered yet: the wait is asked again.
+  await fake.answer('GET', answerPath('toolu_1'), { status: 200, json: { state: 'pending' } })
+  await fake.answer('GET', answerPath('toolu_1'), { status: 200, json: { state: 'decision', decision: { behavior: 'allow' } } })
+
+  expect(await dialog.done).toEqual({ decision: { behavior: 'allow' } })
+  expect(dialog.below.calls()).toBe(0)
+  await flush()
+  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toHaveLength(1)
+
+  // The tool then runs; its end posts nothing more.
+  await finish(call)
+  expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
+})
+
+test('allowAlwaysPassesUpdatedPermissionsThrough', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+
+  const dialog = requestPermission(fake, {
+    tool_name: 'Bash',
+    tool_input: { command: 'ls' },
+    permission_suggestions: [{ ...SESSION_RULE[0], destination: 'localSettings' }],
+  })
+  await flush()
+  expect((sentTo(fake, 'POST', OPEN)[0]?.body as { suggestions: unknown }).suggestions).toEqual([
+    { ...SESSION_RULE[0], destination: 'localSettings' },
+  ])
+  await fake.answer('GET', answerPath('toolu_1'), {
+    status: 200,
+    json: { state: 'decision', decision: { behavior: 'allow', updatedPermissions: SESSION_RULE } },
+  })
+
+  expect(await dialog.done).toEqual({ decision: { behavior: 'allow', updatedPermissions: SESSION_RULE } })
+  await finish(call)
+})
+
+test('denyCarriesMessageAndNoInterrupt', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'rm -rf build' })
+  await flush()
+
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'rm -rf build' } })
+  // Even a decision that asked for it never interrupts the turn.
+  await fake.answer('GET', answerPath('toolu_1'), {
+    status: 200,
+    json: { state: 'decision', decision: { behavior: 'deny', message: DENY_TEXT, interrupt: true } },
+  })
+
+  const result = (await dialog.done) as { decision: Record<string, unknown> }
+  expect(result).toEqual({ decision: { behavior: 'deny', message: DENY_TEXT } })
+  expect('interrupt' in result.decision).toBe(false)
+  await finish(call, { deny: DENY_TEXT })
+  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toHaveLength(1)
+})
+
+/** Starts a Bash call, raises its dialog, and has TBD deny it; resolves the call and what the hook returned. */
+async function deniedFromTBD(fake: FakeChannel): Promise<{ call: Call; returned: unknown }> {
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'make' })
+  await flush()
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'make' } })
+  await fake.answer('GET', answerPath('toolu_1'), {
+    status: 200,
+    json: { state: 'decision', decision: { behavior: 'deny', message: DENY_TEXT } },
+  })
+  const returned = await dialog.done
+  await flush()
+  return { call, returned }
+}
+
+// A terminal Yes does not abort the hook, so a card clicked Deny while the
+// tool runs returns a deny Claude Code ignores.
+test('denyAfterTerminalYesPostsClosedNotReceipt', async () => {
+  const fake = fakeChannel()
+  const { call, returned } = await deniedFromTBD(fake)
+  expect(returned).toEqual({ decision: { behavior: 'deny', message: DENY_TEXT } })
+  // Nothing is confirmed until the call ends.
+  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
+
+  await finish(call, TOOL_RESULT)
+  // `closed` goes out from the outbox's timer.
+  await fake.advance(0)
+
+  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
+  expect(sentTo(fake, 'POST', closedPath('toolu_1')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+})
+
+test('denyTakingEffectPostsReceiptAfterToolDenied', async () => {
+  for (const ended of [{ deny: DENY_TEXT }, { result: 'refused', isError: true }]) {
+    const fake = fakeChannel()
+    const { call } = await deniedFromTBD(fake)
+    expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
+
+    await finish(call, ended)
+    await fake.advance(0)
+
+    expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toHaveLength(1)
+    expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
+  }
+})
+
+test('failedWaitStopsRetryingWhenBudgetRunsLow', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+  dialog.below.budget.remainingMs = 1_500
+
+  await fake.answer('GET', answerPath('toolu_1'), 'fail')
+
+  // No pause is started: the dialog is left to the terminal at once.
+  expect(await dialog.done).toEqual(PASSED)
+  expect(fake.sleeps).toEqual([])
+  // The card stays standing, so the call's end tells the daemon the
+  // terminal took the dialog.
+  expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
+  await finish(call)
+  await fake.advance(0)
+  expect(sentTo(fake, 'POST', closedPath('toolu_1')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+})
+
+test('receiptIsAwaitedBeforeTheHookReturns', async () => {
+  const fake = fakeChannel()
+  fake.replies.set(`POST ${receiptPath('toolu_1')}`, 'hold')
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+  let returned = false
+  void dialog.done.then(() => {
+    returned = true
+  })
+  await fake.answer('GET', answerPath('toolu_1'), { status: 200, json: { state: 'decision', decision: { behavior: 'allow' } } })
+
+  // The receipt is in flight: the hook has not returned.
+  expect(fake.heldCount('POST', receiptPath('toolu_1'))).toBe(1)
+  expect(returned).toBe(false)
+
+  await fake.answer('POST', receiptPath('toolu_1'), { status: 200, json: {} })
+  expect(await dialog.done).toEqual({ decision: { behavior: 'allow' } })
+  await finish(call)
+})
+
+// No or Escape in the terminal aborts the hook's dispatch, and every `$` call
+// the hook makes afterwards fails before it reaches the socket. The close goes
+// out from the outbox's timer instead.
+test('abortedPermissionQueuesClosedOnTimer', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+  await flush()
+  expect(fake.heldCount('GET', answerPath('toolu_1'))).toBe(1)
+
+  fake.abortHookCalls()
+  dialog.below.abort()
+
+  expect(await dialog.done).toEqual(PASSED)
+  expect(dialog.below.calls()).toBe(1)
+  await flush()
+  // Nothing was posted from inside the aborted hook.
+  expect(fake.refused).toEqual([])
+  expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
+
+  await fake.advance(0)
+  expect(sentTo(fake, 'POST', closedPath('toolu_1')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+  expect(sentTo(fake, 'POST', receiptPath('toolu_1'))).toEqual([])
+
+  // The refused tool's end posts no second close.
+  await finish(call, { deny: 'refused' })
+  await fake.advance(0)
+  expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toHaveLength(1)
+})
+
+test('escapedQuestionQueuesClosedOnTimer', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  expect(fake.heldCount('GET', answerPath('toolu_q'))).toBe(1)
+
+  // Escape settles the dialog and aborts the hook.
+  const escaped = { result: 'The user declined to answer.', isError: true }
+  fake.abortHookCalls()
+  call.tool.abort()
+  call.tool.settle(escaped)
+
+  // The call returns without waiting on a post.
+  expect(await call.done).toEqual(escaped)
+  await flush()
+  expect(fake.refused).toEqual([])
+  expect(sentTo(fake, 'POST', closedPath('toolu_q'))).toEqual([])
+
+  await fake.advance(0)
+  expect(sentTo(fake, 'POST', closedPath('toolu_q')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+  expect(sentTo(fake, 'POST', receiptPath('toolu_q'))).toEqual([])
+})
+
+test('disabledOpenPassesOn', async () => {
+  const fake = fakeChannel()
+  fake.replies.set(`POST ${OPEN}`, { status: 409, json: { error: 'disabled' } })
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+
+  expect(await dialog.done).toEqual(PASSED)
+  expect(dialog.below.calls()).toBe(1)
+  expect(sentTo(fake, 'GET', answerPath('toolu_1'))).toEqual([])
+  await finish(call)
+  expect(fake.sent.filter(request => request.path !== OPEN)).toEqual([])
+
+  // A daemon that cannot be reached passes the dialog on the same way.
+  fake.replies.set(`POST ${OPEN}`, 'fail')
+  const unreachable = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_2', command: 'pwd' })
+  await flush()
+  const dialog2 = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'pwd' } })
+  expect(await dialog2.done).toEqual(PASSED)
+  await finish(unreachable)
+  expect(fake.sent.filter(request => request.path !== OPEN)).toEqual([])
+})
+
+const QUESTIONS = [
+  {
+    question: 'Which database?',
+    header: 'Database',
+    multiSelect: false,
+    options: [
+      { label: 'SQLite', description: 'One file' },
+      { label: 'Postgres', description: 'A server' },
+    ],
+  },
+]
+
+test('questionAnsweredFromTBDReturnsQuestionsAndAnswers', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+
+  // The dialog opened in the terminal and its card in TBD.
+  expect(call.tool.calls()).toBe(1)
+  expect(sentTo(fake, 'POST', OPEN).map(request => request.body)).toEqual([
+    { toolUseID: 'toolu_q', sessionID: SESSION_ID, toolName: 'AskUserQuestion', toolInput: { questions: QUESTIONS }, suggestions: null },
+  ])
+  const answers = { 'Which database?': 'SQLite' }
+  await fake.answer('GET', answerPath('toolu_q'), {
+    status: 200,
+    json: { state: 'decision', decision: { behavior: 'allow', updatedInput: { questions: QUESTIONS, answers } } },
+  })
+
+  expect(await call.done).toEqual({ result: { questions: QUESTIONS, answers } })
+  await flush()
+  expect(sentTo(fake, 'POST', receiptPath('toolu_q'))).toHaveLength(1)
+
+  // The dialog the answer closed settles later; nothing more is posted.
+  call.tool.settle(TOOL_RESULT)
+  await flush()
+  expect(sentTo(fake, 'POST', closedPath('toolu_q'))).toEqual([])
+
+  // A question never goes through the permission hook.
+  const dialog = requestPermission(fake, { tool_name: 'AskUserQuestion', tool_input: { questions: QUESTIONS } })
+  expect(await dialog.done).toEqual(PASSED)
+  expect(sentTo(fake, 'POST', OPEN)).toHaveLength(1)
+})
+
+test('questionAnsweredInTerminalPostsClosed', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  expect(fake.heldCount('GET', answerPath('toolu_q'))).toBe(1)
+
+  const answeredHere = { result: { questions: QUESTIONS, answers: { 'Which database?': 'Postgres' } } }
+  call.tool.settle(answeredHere)
+
+  expect(await call.done).toEqual(answeredHere)
+  await fake.advance(0)
+  expect(sentTo(fake, 'POST', closedPath('toolu_q')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+  expect(sentTo(fake, 'POST', receiptPath('toolu_q'))).toEqual([])
+
+  // The close resolves the daemon's prompt; the wait still held ends there.
+  await fake.answer('GET', answerPath('toolu_q'), { status: 200, json: { state: 'resolved' } })
+  expect(fake.heldCount('GET', answerPath('toolu_q'))).toBe(0)
+})
+
+test('repostAfterReconnect', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'Bash', tool_use_id: 'toolu_1', command: 'ls' })
+  await flush()
+  const dialog = requestPermission(fake, { tool_name: 'Bash', tool_input: { command: 'ls' } })
+  await flush()
+  const opened = sentTo(fake, 'POST', OPEN)[0]?.body
+
+  // The daemon goes away and comes back: a poll fails, the next succeeds.
+  startPolling(fake.engine, CHANNEL)
+  await fake.advance(0)
+  await fake.answer('GET', '/v1/poll?after=0', { status: 200, json: { items: [] } })
+  expect(sentTo(fake, 'POST', OPEN)).toHaveLength(1)
+  await fake.answer('GET', '/v1/poll?after=0', 'fail')
+  await fake.advance(1_000)
+  await fake.answer('GET', '/v1/poll?after=0', { status: 200, json: { items: [] } })
+
+  expect(sentTo(fake, 'POST', OPEN).map(request => request.body)).toEqual([opened, opened])
+
+  // A dialog no longer open is not posted again.
+  await fake.answer('GET', answerPath('toolu_1'), { status: 200, json: { state: 'resolved' } })
+  expect(await dialog.done).toEqual(PASSED)
+  await finish(call)
+  await fake.answer('GET', '/v1/poll?after=0', 'fail')
+  await fake.advance(1_000)
+  await fake.answer('GET', '/v1/poll?after=0', { status: 200, json: { items: [] } })
+  expect(sentTo(fake, 'POST', OPEN)).toHaveLength(2)
+  // A prompt the daemon resolved gets no close from the mod.
+  expect(sentTo(fake, 'POST', closedPath('toolu_1'))).toEqual([])
+})
+
+test('subagentAgentIdSeparatesPairing', async () => {
+  const fake = fakeChannel()
+  // The main loop's call is older and has the same arguments.
+  const main = startCall(fake, { tool: 'Read', tool_use_id: 'toolu_main', file_path: '/x' })
+  const sub = startCall(fake, { tool: 'Read', tool_use_id: 'toolu_sub', file_path: '/x', agentId: 'agent-1' })
+  await flush()
+
+  const forSub = requestPermission(fake, { tool_name: 'Read', tool_input: { file_path: '/x' }, agent_id: 'agent-1' })
+  await flush()
+  const forMain = requestPermission(fake, { tool_name: 'Read', tool_input: { file_path: '/x' } })
+  await flush()
+  expect(openedIds(fake)).toEqual(['toolu_sub', 'toolu_main'])
+
+  // Another subagent's dialog matches neither.
+  const other = requestPermission(fake, { tool_name: 'Read', tool_input: { file_path: '/x' }, agent_id: 'agent-2' })
+  expect(await other.done).toEqual(PASSED)
+
+  await fake.answer('GET', answerPath('toolu_sub'), { status: 200, json: { state: 'decision', decision: { behavior: 'allow' } } })
+  await fake.answer('GET', answerPath('toolu_main'), { status: 200, json: { state: 'resolved' } })
+  expect(await forSub.done).toEqual({ decision: { behavior: 'allow' } })
+  expect(await forMain.done).toEqual(PASSED)
+  await finish(main)
+  await finish(sub)
+})
+
+// A daemon restart while a question is open: its waits fail for as long as
+// the daemon is down, and the question keeps retrying, posting the card open
+// again before each wait, until the daemon answers.
+test('questionWaitRetriesAcrossADaemonRestart', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  const opened = sentTo(fake, 'POST', OPEN)[0]?.body
+
+  const pauses = [1_000, 2_000, 5_000, 10_000, 10_000, 10_000, 10_000]
+  for (const pause of pauses) {
+    await fake.answer('GET', answerPath('toolu_q'), 'fail')
+    expect(fake.sleeps.at(-1)).toBe(pause)
+    await fake.advance(pause)
+  }
+  expect(fake.sleeps).toEqual(pauses)
+  // One open, then one before each retried wait.
+  expect(sentTo(fake, 'POST', OPEN).map(request => request.body)).toEqual(Array(pauses.length + 1).fill(opened))
+
+  const answers = { 'Which database?': 'SQLite' }
+  await fake.answer('GET', answerPath('toolu_q'), {
+    status: 200,
+    json: { state: 'decision', decision: { behavior: 'allow', updatedInput: { questions: QUESTIONS, answers } } },
+  })
+  expect(await call.done).toEqual({ result: { questions: QUESTIONS, answers } })
+  expect(sentTo(fake, 'POST', receiptPath('toolu_q'))).toHaveLength(1)
+  call.tool.settle(TOOL_RESULT)
+  await flush()
+})
+
+test('questionRetriesStopWhenTheDialogSettles', async () => {
+  const fake = fakeChannel()
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  await fake.answer('GET', answerPath('toolu_q'), 'fail')
+  expect(fake.sleeps).toEqual([1_000])
+
+  // The terminal answers during the pause.
+  const answeredHere = { result: { questions: QUESTIONS, answers: { 'Which database?': 'Postgres' } } }
+  call.tool.settle(answeredHere)
+  expect(await call.done).toEqual(answeredHere)
+  await fake.advance(1_000)
+
+  expect(sentTo(fake, 'POST', OPEN)).toHaveLength(1)
+  expect(fake.heldCount('GET', answerPath('toolu_q'))).toBe(0)
+  expect(sentTo(fake, 'POST', closedPath('toolu_q')).map(request => request.body)).toEqual([{ by: 'terminal' }])
+})
+
+// Once the dialog is open, a failure on TBD's side returns the dialog's own
+// result rather than throwing: a throw would make register.ts call next(e)
+// again and open a second dialog.
+test('questionFailureAfterTheDialogOpensReturnsTheDialog', async () => {
+  const fake = fakeChannel()
+  const session = (fake.engine as unknown as { session: { id: () => Promise<string> } }).session
+  session.id = async () => {
+    throw new Error('session unavailable')
+  }
+  const call = startCall(fake, { tool: 'AskUserQuestion', tool_use_id: 'toolu_q', questions: QUESTIONS })
+  await flush()
+  expect(call.tool.calls()).toBe(1)
+  expect(sentTo(fake, 'POST', OPEN)).toEqual([])
+
+  call.tool.settle(TOOL_RESULT)
+  expect(await call.done).toEqual(TOOL_RESULT)
+  expect(call.tool.calls()).toBe(1)
+})

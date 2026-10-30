@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// `remote.answer` through the router: every gate, the stale-prompt short
@@ -156,8 +157,8 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
     }
 
     /// Only the TBD app may answer: another socket peer, a missing connection
-    /// context, and the HTTP transport's `handleRaw` are all refused before
-    /// the provider is asked or an actuation is recorded.
+    /// context, and raw bytes through `handleRaw` with no connection are all
+    /// refused before the provider is asked or an actuation is recorded.
     @Test func refusedUnlessTheConnectionIsTheApp() async throws {
         try await enable()
         let (invoker, r) = await primed([])
@@ -171,8 +172,8 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
             params: RemoteAnswerParams(
                 provider: "agentbox", sessionID: "s-1", promptID: "p-1", answer: Self.allowAnswer),
             actor: .app)
-        let http = await r.handleRaw(try JSONEncoder().encode(request))
-        #expect(http.error == RPCRouter.promptAnswerNotFromAppRefusal)
+        let raw = await r.handleRaw(try JSONEncoder().encode(request))
+        #expect(raw.error == RPCRouter.promptAnswerNotFromAppRefusal)
 
         #expect(Self.answers(invoker).isEmpty)
         #expect(try actuationRows().isEmpty)

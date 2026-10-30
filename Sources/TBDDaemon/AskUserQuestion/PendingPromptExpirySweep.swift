@@ -2,8 +2,9 @@ import Foundation
 import os
 import TBDShared
 
-/// Reaps stranded `AskUserQuestion` captures, and prompts no hook has been
-/// attached to for `maxDetached`, on a timer.
+/// Reaps stranded `AskUserQuestion` captures on a timer. Open prompts are not
+/// its concern: the session mod's own signals and the disconnect sweep end
+/// them.
 ///
 /// This ran as a side effect of `handleTerminalTranscript` until the app began
 /// reading transcripts itself, at which point that handler stops being called
@@ -19,14 +20,10 @@ actor PendingPromptExpirySweep {
 
     private static let log = Logger(subsystem: "com.tbd.daemon", category: "askUserQuestion")
 
-    /// Unchanged from the value the RPC handler passed, so moving the sweep
-    /// changes when it runs but not what it reaps.
+    /// How old a capture must be before it is reaped. The `terminal.transcript`
+    /// handler's own reap passes this same value, so the two passes always
+    /// agree on what counts as stranded.
     static let maxAge = Duration.seconds(900)
-
-    /// How long an open prompt may go with no `prompt.await` attached before
-    /// it resolves. A safety net, not the normal path: a prompt ordinarily
-    /// resolves by an answer, the tool finishing, or its hook going away.
-    static let maxDetached = Duration.seconds(3600)
 
     /// Cadence. Well under `maxAge`, so the worst-case lifetime of a stranded
     /// entry is `maxAge + interval` rather than a multiple of either.
@@ -56,9 +53,7 @@ actor PendingPromptExpirySweep {
     /// Reap once. Split out from the loop so a test can drive a pass without
     /// arming a timer.
     func sweepOnce() async {
-        let stamp = now()
-        var reaped = await store.gcExpired(now: stamp, maxAge: Self.maxAge)
-        reaped.formUnion(await store.sweepDetachedPrompts(now: stamp, maxDetached: Self.maxDetached))
+        let reaped = await store.gcExpired(now: now(), maxAge: Self.maxAge)
         guard !reaped.isEmpty else { return }
         Self.log.debug("expiry sweep reaped terminals=\(reaped.count, privacy: .public)")
         for terminalID in reaped {

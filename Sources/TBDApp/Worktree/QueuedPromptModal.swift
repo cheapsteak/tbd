@@ -98,8 +98,8 @@ enum QueuedPromptComposer {
     /// since the app already calls that in `TBDApp.swift` and
     /// `TableTranscriptView.swift` — would make `object(forKey:)` answer for a
     /// key nobody chose, collapsing "never chose" back into "chose off". The
-    /// tests cannot catch that: they use isolated `UserDefaults(suiteName:)`,
-    /// whose registration domains are empty.
+    /// tests cannot catch that: they use the isolated defaults of a
+    /// `TestDefaultsSuite`, whose registration domains are empty.
     static let sendImmediatelyKey = "queuedPromptSendImmediately"
 
     /// Whether a NEW first message sends itself once it reaches the composer,

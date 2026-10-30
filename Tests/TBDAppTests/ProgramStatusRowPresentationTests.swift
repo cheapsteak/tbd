@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 1: pure functions and in-memory AppState mutation; no daemon, no sleeps.
 
@@ -61,37 +62,30 @@ struct ProgramStatusRowPresentationTests {
 
     // MARK: - resolution(...)
 
-    @Test func resolvesWhenEnabledUnparkedAndSameIncarnation() throws {
+    @Test func resolvesWhenUnparkedAndSameIncarnation() throws {
         let incarnation = UUID()
         let t = Self.terminal(incarnation: incarnation)
         let s = Self.snapshot(terminalID: t.id, incarnation: incarnation, main: Self.entry(.done))
-        let r = try #require(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s, enabled: true))
+        let r = try #require(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s))
         #expect(r.value == .done)
-    }
-
-    @Test func nilWhenFlagOff() {
-        let incarnation = UUID()
-        let t = Self.terminal(incarnation: incarnation)
-        let s = Self.snapshot(terminalID: t.id, incarnation: incarnation, main: Self.entry(.done))
-        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s, enabled: false) == nil)
     }
 
     @Test func nilWhenNoSnapshot() {
         let t = Self.terminal(incarnation: UUID())
-        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: nil, enabled: true) == nil)
+        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: nil) == nil)
     }
 
     @Test func nilWhenParked() {
         let incarnation = UUID()
         let t = Self.terminal(incarnation: incarnation, parked: true)
         let s = Self.snapshot(terminalID: t.id, incarnation: incarnation, main: Self.entry(.working))
-        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s, enabled: true) == nil)
+        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s) == nil)
     }
 
     @Test func nilWhenIncarnationsDiffer() {
         let t = Self.terminal(incarnation: UUID())
         let s = Self.snapshot(terminalID: t.id, incarnation: UUID(), main: Self.entry(.working))
-        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s, enabled: true) == nil)
+        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s) == nil)
     }
 
     @Test func nilWhenNoMainEntry() {
@@ -99,7 +93,7 @@ struct ProgramStatusRowPresentationTests {
         let t = Self.terminal(incarnation: incarnation)
         let task = ProgramStatusTaskEntry(id: "t1", entry: Self.entry(.working))
         let s = Self.snapshot(terminalID: t.id, incarnation: incarnation, main: nil, tasks: [task])
-        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s, enabled: true) == nil)
+        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s) == nil)
     }
 
     @Test func mapsErrorNeedsAuthAndWorkingTaskCount() throws {
@@ -107,11 +101,11 @@ struct ProgramStatusRowPresentationTests {
         let t = Self.terminal(incarnation: incarnation)
 
         let failed = Self.snapshot(terminalID: t.id, incarnation: incarnation, main: Self.entry(.error))
-        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: failed, enabled: true)?.value == .error)
+        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: failed)?.value == .error)
 
         let auth = Self.snapshot(
             terminalID: t.id, incarnation: incarnation, main: Self.entry(.blocked, kind: .auth))
-        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: auth, enabled: true)?.value == .needsAuth)
+        #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: auth)?.value == .needsAuth)
 
         let busy = Self.snapshot(
             terminalID: t.id, incarnation: incarnation, main: Self.entry(.working),
@@ -120,7 +114,7 @@ struct ProgramStatusRowPresentationTests {
                 ProgramStatusTaskEntry(id: "b", entry: Self.entry(.working)),
                 ProgramStatusTaskEntry(id: "c", entry: Self.entry(.done)),
             ])
-        let r = try #require(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: busy, enabled: true))
+        let r = try #require(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: busy))
         #expect(r.value == .working)
         #expect(r.workingTaskCount == 2)
     }
@@ -211,9 +205,17 @@ struct ProgramStatusRowPresentationTests {
 
     @Test func badgeHelpMatchesAnyOSCTerminalNotOnlyTheFirst() {
         let help = ProgramStatusRowPresentation.badgeHelp(
-            selected: .finished, oscTooltip: "both",
-            resolvedValues: [.idle, .done], genericHelp: "Finished")
+            selected: .turnFailed, oscTooltip: "both",
+            resolvedValues: [.idle, .error], genericHelp: "The last turn failed")
         #expect(help == "both")
+    }
+
+    /// A done session shows exactly like an idle one: no suffix. The bold
+    /// name already marks a finished turn the user has not read, and done
+    /// stays set until the next turn, so a badge would sit on nearly every
+    /// waiting row.
+    @Test func doneSelectsNoSuffixLikeIdle() {
+        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .done) == nil)
     }
 
     @Test func suffixIndicatorMapsEachOSCState() {
@@ -221,7 +223,6 @@ struct ProgramStatusRowPresentationTests {
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .awaitingInput(reason: nil)) == .attention)
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .needsAuth) == .needsAuth)
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .error) == .turnFailed)
-        #expect(ProgramStatusRowPresentation.suffixIndicator(for: .done) == .finished)
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .idle) == nil)
         #expect(ProgramStatusRowPresentation.suffixIndicator(for: .unknown(why: "x")) == nil)
     }
@@ -232,16 +233,10 @@ struct ProgramStatusRowPresentationTests {
 @Suite("AppState program-status mirror")
 struct ProgramStatusMirrorTests {
     private func makeAppState() -> (AppState, () -> Void) {
-        let suiteName = "TBDAppTests.ProgramStatusMirror.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.ProgramStatusMirror")
+        let defaults = suite.defaults
         let state = AppState(userDefaults: defaults)
-        return (state, { defaults.removePersistentDomain(forName: suiteName) })
-    }
-
-    private func capabilities(programStatus: Bool) -> DaemonCapabilitiesResult {
-        var caps = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: false)
-        caps.programStatusEnabled = programStatus
-        return caps
+        return (state, { suite.tearDown() })
     }
 
     private func snapshot(
@@ -298,7 +293,6 @@ struct ProgramStatusMirrorTests {
         defer { cleanup() }
         let a = UUID()
         let b = UUID()
-        state.daemonCapabilities = capabilities(programStatus: true)
         let listed = [snapshot(a, revision: 1, state: .done), snapshot(b, revision: 7, state: .working)]
         state.programStatusListFetcher = { @MainActor in listed }
         await state.hydrateProgramStatus()
@@ -309,7 +303,6 @@ struct ProgramStatusMirrorTests {
     @Test func hydrateDoesNotOverwriteANewerDelta() async {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let id = UUID()
         state.applyProgramStatusSnapshot(snapshot(id, revision: 9, state: .done))
         let stale = [snapshot(id, revision: 8, state: .working)]
@@ -318,54 +311,15 @@ struct ProgramStatusMirrorTests {
         #expect(state.programStatusSnapshots[id]?.main?.state == .done)
     }
 
-    /// The flag goes off while the list is in flight: the capabilities
-    /// refresh has already emptied the mirror, so the list must not refill it.
-    @Test func hydrateAppliesNothingWhenTheFlagWentOffDuringTheFetch() async {
+    /// A capabilities refresh carries nothing about program status, so it
+    /// leaves the mirror alone.
+    @Test func aCapabilitiesRefreshKeepsSnapshots() async {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
-        let id = UUID()
-        let listed = [snapshot(id, revision: 1, state: .working)]
-        let off = capabilities(programStatus: false)
-        state.programStatusListFetcher = { @MainActor [weak state] in
-            state?.daemonCapabilities = off
-            return listed
-        }
-        await state.hydrateProgramStatus()
-        #expect(state.programStatusSnapshots.isEmpty)
-    }
-
-    @Test func hydrateAppliesNothingWithTheFlagOff() async {
-        let (state, cleanup) = makeAppState()
-        defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: false)
-        let id = UUID()
-        let listed = [snapshot(id, revision: 1, state: .working)]
-        state.programStatusListFetcher = { @MainActor in listed }
-        await state.hydrateProgramStatus()
-        #expect(state.programStatusSnapshots.isEmpty)
-    }
-
-    @Test func turningTheFlagOffDropsSnapshots() async {
-        let (state, cleanup) = makeAppState()
-        defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
         let id = UUID()
         state.applyProgramStatusSnapshot(snapshot(id, revision: 1, state: .done))
-        let off = capabilities(programStatus: false)
-        state.daemonCapabilitiesFetcher = { @MainActor in off }
-        await state.refreshDaemonCapabilities()
-        #expect(state.programStatusSnapshots.isEmpty)
-    }
-
-    @Test func aRefreshThatLeavesTheFlagOnKeepsSnapshots() async {
-        let (state, cleanup) = makeAppState()
-        defer { cleanup() }
-        state.daemonCapabilities = capabilities(programStatus: true)
-        let id = UUID()
-        state.applyProgramStatusSnapshot(snapshot(id, revision: 1, state: .done))
-        let on = capabilities(programStatus: true)
-        state.daemonCapabilitiesFetcher = { @MainActor in on }
+        let refreshed = DaemonCapabilitiesResult(controlModeEnabled: false, panelSurfaceEnabled: false)
+        state.daemonCapabilitiesFetcher = { @MainActor in refreshed }
         await state.refreshDaemonCapabilities()
         #expect(state.programStatusSnapshots[id]?.main?.state == .done)
     }

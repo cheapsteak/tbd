@@ -144,7 +144,7 @@ jobs:
           bash scripts/sweep-scratchpads.test.sh
 
       # The three installer harnesses, which cannot join the Linux collection
-      # in `plans-guard`: the plist writer drives `plutil`, and the bundle
+      # in `script-harnesses`: the plist writer drives `plutil`, and the bundle
       # assembly hard-links into a `.app` and installs it with `cp -cR`. The
       # update harness could run on Linux for its argument, lock, re-exec and
       # wake cases, but then its install-and-handover cases — the ones that
@@ -164,7 +164,7 @@ jobs:
       # bash 5 on the runner, and `tbd update` has to work on a machine whose
       # only bash is 3.2. Each harness pins every nested `bash` to its own
       # interpreter, so the whole run stays on 3.2. The build-library harness
-      # lives here rather than in `plans-guard` for the same reason — Linux
+      # lives here rather than in `script-harnesses` for the same reason — Linux
       # has no bash 3.2 — and because its SDK cases model an Apple toolchain.
       - name: Test the restart, bundle and update helpers
         run: |
@@ -184,9 +184,29 @@ jobs:
       - name: Test the flake fixer's macOS steps under bash 3.2
         run: /bin/bash scripts/flake-bash32.test.sh
 
+      # The harness for the Swift suite gate (the `changes` job below), and the
+      # one check that keeps its skip honest: a drift check that gathers every
+      # script the `test` job can reach — the two wrappers, what the job names,
+      # a `"scripts/…"` literal in a Swift file, and whatever any of those
+      # names or loads in turn — and fails if the gate's list of suite scripts
+      # is missing one, or if the job uses a local action. A PR that makes the
+      # suite depend on a new script edits one of those files, so it runs the
+      # suite and this step reddens until the script is listed. It also pins
+      # the `needs:`/`if:` wiring below that makes the gate fail closed. It
+      # lives in this job because Lint is never skipped, and under `/bin/bash`
+      # because the gate has to stay runnable by hand on a Mac, where it is
+      # replayed over merged PRs' file lists. Fixture repos in temp dirs, no
+      # build, a few seconds.
+      # `!cancelled()` for the same reason as the stall watchdog below: an
+      # earlier red guard in this job must not cost this one its verdict.
+      # docs/specs/2026-10-25-skip-swift-suite-for-non-code-prs-design.md
+      - name: Test the Swift suite gate
+        if: ${{ !cancelled() }}
+        run: /bin/bash scripts/ci/swift-suite-needed.test.sh
+
       # The stall watchdog's own harness: fixture directories, a stub
       # `scripts/test.sh` and a stub `sample`, no build, no SwiftPM, no real
-      # store touched. It cannot join the Linux collection in `plans-guard`
+      # store touched. It cannot join the Linux collection in `script-harnesses`
       # because everything it drives is BSD — `script(1)` takes different
       # arguments on Linux, `ps` there is GNU, and `sample` does not exist at
       # all — the same reason the fence and installer harnesses above it sit
@@ -212,54 +232,131 @@ jobs:
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
-    # 10: a shell guard plus harnesses that build fixture repos in temp dirs and
-    # touch no network — 0.2 min median, 0.6 min worst. Linux runners are not
-    # rationed against the macOS cap, but an unbounded wedge still occupies one
-    # for six hours and leaves this check unreported for the whole of it.
-    timeout-minutes: 10
+    # 5: a shallow checkout and one scan of the tracked tree. The scan takes
+    # well under a second and the checkout about 3 s, so this is the `changes`
+    # job's bound for the same shape of work. Linux runners are not rationed
+    # against the macOS cap, but an unbounded wedge still occupies one for six
+    # hours and leaves this check unreported for the whole of it.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
       - name: Check for committed implementation plans
         run: scripts/check-no-committed-plans.sh
 
-      # Every script harness that needs nothing but bash, git and python lives
-      # here — a test file no workflow runs is worth nothing, and three of
-      # these shipped that way before this step collected them. They are on
-      # `ubuntu-latest` because none of them reads a BSD-only tool. The
-      # exceptions stay in the macOS `lint` job: the fence harness
-      # (`scripts/test.test.sh`), whose guards read BSD `stat -f`, the three
-      # installer harnesses, the build-library harness
-      # (`scripts/restart-build-lib.test.sh`), which must run under bash 3.2,
-      # the flake fixer's bash 3.2 harness (`scripts/flake-bash32.test.sh`),
-      # and the stall-watchdog harness
-      # (`scripts/ci/watched-test-pass.test.sh`), which drives BSD `ps`,
-      # `script(1)` and `sample`.
-      #
-      # Nothing here touches the network, a real remote, `~/tbd`, or a real
-      # `gh`: each harness builds a fixture repo in a temp dir and puts a stub
-      # `gh` first on PATH. `test-claude-stub.py` does bind a loopback socket,
-      # and where a `claude` binary is on PATH it runs the real CLI against
-      # that socket — still no egress, and it self-skips on runners, which
-      # have no `claude` installed.
-      #
-      # The flake bot's harnesses (`flake-*.test.sh`) are the same shape: pure
-      # Python and bash over fixtures cut from real CI artifacts, with a stub
-      # `gh` supplied through `FLAKE_GH_CMD`.
-      #
-      # `cache-save-policy.test.sh` is the odd one out in what it reads: it
-      # extracts two pieces of THIS file — the cache-save decision step's shell
-      # and the save step's `if:` — and drives the first against fixture repos.
-      # It is here rather than in the `test` job because a wrong answer there
-      # has no red symptom anywhere else: too few saves leaves every later run
-      # paying a cold build, too many churns main's entry out of a 10 GB store,
-      # and neither shows up in a suite.
-      #
-      # `sweep-foreign-worktrees.test.sh` also needs `jq` (preinstalled on the
-      # runner). Its fixtures are real repos with real linked worktrees in a
-      # temp dir, and every tool it would otherwise reach — `tbd`, `gh`, `lsof`
-      # — is a fake behind a seam, with failing shims first on PATH.
-      #
+  # Every script harness that needs nothing but bash, git and python runs
+  # here or in `flake-harnesses` below — a test file no workflow runs is worth
+  # nothing, and three of these have shipped that way. They are on
+  # `ubuntu-latest` because none of them reads a BSD-only tool. The exceptions
+  # stay in the macOS `lint` job: the fence harness (`scripts/test.test.sh`),
+  # whose guards read BSD `stat -f`, the three installer harnesses, the
+  # build-library harness (`scripts/restart-build-lib.test.sh`), which must run
+  # under bash 3.2, the flake fixer's bash 3.2 harness
+  # (`scripts/flake-bash32.test.sh`), the Swift suite gate's harness
+  # (`scripts/ci/swift-suite-needed.test.sh`), which runs under bash 3.2, and
+  # the stall-watchdog harness (`scripts/ci/watched-test-pass.test.sh`), which
+  # drives BSD `ps`, `script(1)` and `sample`.
+  #
+  # Nothing here touches the network, a real remote, `~/tbd`, or a real `gh`:
+  # each harness builds a fixture repo in a temp dir and puts a stub `gh` first
+  # on PATH.
+  #
+  # One step per harness, so a red check names the harness that failed. Every
+  # harness step carries `!cancelled()` rather than the implicit `success()`,
+  # for the reason the `lint` job's last two steps do: one harness going red
+  # must not cost the others their verdicts, and the author fixing it wants
+  # every verdict at once.
+  script-harnesses:
+    name: Script harnesses
+    runs-on: ubuntu-latest
+    # 10: the harness steps below took about 73 s in all on a green `main` run
+    # (job 123819217683, timed from its log timestamps). That run is a slow
+    # one: its harnesses, these and the flake bot's together, took about
+    # 360 s, the top of the 220 to 364 s range they have taken on `main`. The
+    # slowest are `nightly-flake-stress.test.sh` at about 26 s,
+    # `test-claude-stub.py` at 14 s and `test-swift-safe.py` at 12 s;
+    # `remote-verify.test.sh` and the two sweep harnesses take 5 to 6 s each,
+    # and every other step under 2 s. The bound leaves room for a runner
+    # several times slower than that one; an unbounded wedge would occupy a
+    # Linux runner for six hours and leave this check unreported for the
+    # whole of it.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the agent guardrails
+        if: ${{ !cancelled() }}
+        run: python3 .claude/hooks/guardrails/dispatch.py --self-test
+
+      # The `pr-user-story` check script is stdlib-only and shared with the
+      # `pr-user-story` guardrail, whose own tests the self-test above runs
+      # against the same file.
+      - name: Test the pr-user-story check script
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest discover -s .github/workflows/pr-user-story/tests
+
+      - name: Test scripts/swift-safe
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test-swift-safe.py
+
+      # It binds a loopback socket, and where a `claude` binary is on PATH it
+      # runs the real CLI against that socket — still no egress, and it
+      # self-skips on runners, which have no `claude` installed.
+      - name: Test scripts/claude-stub.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test-claude-stub.py
+
+      - name: Test scripts/remote_verify.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test-remote-verify.py
+
+      - name: Test scripts/remote-verify.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/remote-verify.test.sh
+
+      - name: Test scripts/sweep-preflight-refs.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/sweep-preflight-refs.test.sh
+
+      # This one also needs `jq` (preinstalled on the runner). Its fixtures are
+      # real repos with real linked worktrees in a temp dir, and every tool it
+      # would otherwise reach — `tbd`, `gh`, `lsof` — is a fake behind a seam,
+      # with failing shims first on PATH.
+      - name: Test scripts/sweep-foreign-worktrees.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/sweep-foreign-worktrees.test.sh
+
+      # It extracts two pieces of THIS file — the cache-save decision step's
+      # shell and the save step's `if:` — and drives the first against fixture
+      # repos. It is here rather than in the `test` job because a wrong answer
+      # there has no red symptom anywhere else: too few saves leaves every later
+      # run paying a cold build, too many churns main's entry out of a 10 GB
+      # store, and neither shows up in a suite.
+      - name: Test the SwiftPM cache-save policy
+        if: ${{ !cancelled() }}
+        run: bash scripts/cache-save-policy.test.sh
+
+      # It reads THIS file too: it checks its own table of CI passes against
+      # the `test` job's four pass invocations, that every step forwarding
+      # `--skip-build` is gated on the build step's success, and that every
+      # command in the `test` job that reaches SwiftPM carries the CI build
+      # flags.
+      - name: Test scripts/nightly-flake-stress.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/nightly-flake-stress.test.sh
+
+      - name: Test scripts/restart-guard-lib.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/restart-guard-lib.test.sh
+
+      - name: Test scripts/dsym-prune-lib.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/dsym-prune-lib.test.sh
+
+      - name: Test scripts/ci/first-party-wipe-needed.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/first-party-wipe-needed.test.sh
+
       # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
       # drives the spike detector, the report and the run-directory sweep over
       # synthetic series and temp directories: it touches no kernel counter, no
@@ -267,26 +364,55 @@ jobs:
       # the `ctypes.CDLL` loads behind the process-identity seam, which fail
       # closed on Linux and are caught there, and the libproc leg skips itself
       # off macOS. So it runs here rather than costing a rationed macOS runner.
-      - name: Test agent guardrails and the script harnesses
-        run: |
-          python3 .claude/hooks/guardrails/dispatch.py --self-test
-          python3 scripts/test-swift-safe.py
-          python3 scripts/test-claude-stub.py
-          python3 scripts/test-remote-verify.py
-          bash scripts/remote-verify.test.sh
-          bash scripts/sweep-preflight-refs.test.sh
-          bash scripts/sweep-foreign-worktrees.test.sh
-          bash scripts/cache-save-policy.test.sh
-          bash scripts/nightly-flake-stress.test.sh
-          bash scripts/flake-ledger.test.sh
-          bash scripts/flake-pick.test.sh
-          bash scripts/flake-verify.test.sh
-          bash scripts/flake-pr.test.sh
-          bash scripts/restart-guard-lib.test.sh
-          bash scripts/dsym-prune-lib.test.sh
-          bash scripts/ci/first-party-wipe-needed.test.sh
-          python3 scripts/diag/daemon-footprint-watch.py --self-test
-          python3 scripts/diag/terminal-latency-report.py --self-test
+      - name: Self-test scripts/diag/daemon-footprint-watch.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/diag/daemon-footprint-watch.py --self-test
+
+      - name: Self-test scripts/diag/terminal-latency-report.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/diag/terminal-latency-report.py --self-test
+
+  # The flake bot's four Linux harnesses, one matrix leg each. They are the
+  # same shape as the harnesses in `script-harnesses`: pure Python and bash
+  # over fixtures cut from real CI artifacts, with a stub `gh` supplied through
+  # `FLAKE_GH_CMD`, and nothing reaching the network, a real remote or `~/tbd`.
+  # The fifth, `scripts/flake-bash32.test.sh`, is in the macOS `lint` job
+  # because Linux has no bash 3.2.
+  #
+  # They are the slow ones. On the same green `main` run (job 123819217683)
+  # `flake-ledger.test.sh` took about 111 s for its 123 cases — 29 s of it in
+  # one case, the big watchlist split across comments — `flake-pr.test.sh`
+  # about 103 s, `flake-verify.test.sh` about 62 s and `flake-pick.test.sh`
+  # about 9 s: 4.7 minutes in sequence. As parallel legs the slowest check is
+  # `flake-ledger`'s at about 2 minutes. Linux runners are not rationed
+  # against the macOS cap, so the three extra runners cost nothing scarce.
+  # `fail-fast: false` keeps one red leg from cancelling the other three, and
+  # each leg's check name says which harness it ran.
+  flake-harnesses:
+    name: Flake bot harness (${{ matrix.harness }})
+    runs-on: ubuntu-latest
+    # 10: the slowest leg, `flake-ledger`, took about 111 s on that slow run,
+    # so the bound is about five times the slowest measured leg. An unbounded
+    # wedge would occupy a Linux runner for six hours and leave its check
+    # unreported for the whole of it.
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - harness: flake-ledger
+            command: bash scripts/flake-ledger.test.sh
+          - harness: flake-pick
+            command: bash scripts/flake-pick.test.sh
+          - harness: flake-verify
+            command: bash scripts/flake-verify.test.sh
+          - harness: flake-pr
+            command: bash scripts/flake-pr.test.sh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test ${{ matrix.harness }}
+        run: ${{ matrix.command }}
 
   review-scripts-tests:
     name: Review scripts tests
@@ -318,19 +444,104 @@ jobs:
       - name: Run review-script tests
         run: python3 -m pytest .github/workflows/claude-review-v2/tests/ -q
 
+  session-mod:
+    name: Session mod
+    runs-on: ubuntu-latest
+    # 10: one npm install of the pinned Claude Code, then a validate and a test
+    # run over a handful of TypeScript files. Nearly all of the bound is there
+    # to absorb a slow package registry rather than the checks themselves.
+    timeout-minutes: 10
+    # The session mod's TypeScript under SessionMod/ is the source; the daemon
+    # ships the copy embedded in Sources/TBDShared/SessionModContent.swift, so
+    # the first step fails when that copy is stale. Claude Code is pinned to the
+    # release whose plugin API the mod is written against
+    # (docs/specs/2026-10-19-tbd-session-mod-design.md).
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check the embedded copy is current
+        run: python3 scripts/gen-session-mod-content.py --check
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.303
+
+      - name: Validate the session mod
+        run: claude plugin validate --strict SessionMod
+
+      - name: Test the session mod
+        run: claude plugin test SessionMod
+
+  # Whether the `test` job can say anything about this run's changes
+  # (docs/specs/2026-10-25-skip-swift-suite-for-non-code-prs-design.md). A PR
+  # that changes only specs, skills, review-gate workflows or scripts the suite
+  # never reaches would otherwise hold one of the five macOS slots for 10 to 13
+  # minutes and learn nothing. `scripts/ci/swift-suite-needed.sh` answers
+  # `run=false` only when every file the PR changed matches a skip rule, and
+  # `run=true` for every other event and for anything it cannot answer
+  # honestly. Its step summary lists each changed file and the rule that
+  # decided it. The rule, its list of the suite's own scripts, and the drift
+  # check that keeps that list true are in the script and its harness, which
+  # the `lint` job runs.
+  #
+  # On Linux, so deciding never occupies a macOS slot. `fetch-depth: 0` puts
+  # `origin/<base>` and the history to find a merge base with in the clone,
+  # for the same three-dot diff the cache-policy step in `test` takes.
+  changes:
+    name: Swift suite gate
+    runs-on: ubuntu-latest
+    # 5: a full-history checkout and one `git diff`, well under a minute. Kept
+    # short because `test` waits for this job, so a wedge here delays the
+    # suite by up to this bound.
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether this run needs the Swift suite
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/swift-suite-needed.sh
+
   test:
+    # Skipped only when the gate above answered an explicit `false`. A job
+    # skipped by its own `if:` reports success to branch protection, so the
+    # required `test` check passes and a docs-only PR can merge. When the gate
+    # fails, is skipped, or ends without writing an answer, its output is
+    # empty, `!= 'false'` holds, and the suite runs: a broken gate costs a full
+    # run, never a missed one.
+    #
+    # `!cancelled()` is what lets this job run after a FAILED gate. With no
+    # status function in a job's `if:`, GitHub adds an implicit `success()`, so
+    # a failed dependency would skip this job — and a skipped `test` passes the
+    # required check. `!cancelled()` still skips it when the run itself is
+    # cancelled, as a newer push to the branch does through `concurrency`.
+    #
+    # Do not give this job a `name:`: branch protection matches the required
+    # check by the job's name, which is `test`.
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.run != 'false' }}
     runs-on: macos-26
-    # 100, deliberately NOT sized to this job's 15.3-minute observed worst case
-    # (10.7 median). The four test steps below carry `timeout-minutes` of 35, 15,
-    # 15 and 15 — an 80-minute step budget — and they exist so that a wedged
-    # suite dies on a step that names which pass hung, after that step's own
-    # watchdog has captured the stacks. A job bound at or below 80 would pre-empt
-    # all four and kill the run with the uninformative message those step bounds
-    # were written to avoid. 100 clears the step budget with room for checkout,
-    # `brew install tmux`, the cache restore and the final build — none of which
-    # is individually timed — while cutting worst-case occupancy of one of the
-    # five macOS slots from six hours to about an hour and forty minutes.
-    timeout-minutes: 100
+    # 120, deliberately NOT sized to this job's 15.3-minute observed worst case
+    # (10.7 median). The build step, the cache save and the four test steps
+    # below carry `timeout-minutes` of 30, 10, 15, 15, 15 and 15 — a
+    # 100-minute step budget — and they exist so that a wedged run dies on a
+    # step that names what hung: the compile, the save, or which pass, after
+    # that pass's own watchdog has captured the stacks. A job bound at or below
+    # 100 would pre-empt them and kill the run with the uninformative message
+    # those step bounds were written to avoid. 120 clears the step budget with
+    # room for checkout, `brew install tmux`, the cache restore and the result
+    # uploads — none of which is individually timed — while cutting worst-case
+    # occupancy of one of the five macOS slots from six hours to two.
+    timeout-minutes: 120
     # All four test steps below append their `.flaky(issue:)` retry records
     # here (docs/specs/2026-07-24-test-hardening-design.md §7), so one run
     # produces one artifact covering all three fast passes and the quiet pass
@@ -346,10 +557,55 @@ jobs:
       TBD_RETRY_METRICS_PATH: /tmp/retry-metrics.jsonl
       # The ~7 GB runner's OOM cap, pinned HERE rather than inherited from
       # `scripts/swift-safe`'s default — see the "Three parallel swift-frontend
-      # processes" block below. Job-level so every step gets it: the three
-      # `scripts/test.sh` steps through the wrapper, and the bare build at the
-      # end of the job by spelling `-j "$TBD_SWIFT_JOBS"`. One cap, one place.
+      # processes" block below. Job-level so every step gets it: the build step
+      # by spelling `-j "$TBD_SWIFT_JOBS"`, and the four `scripts/test.sh` steps
+      # through the wrapper. One cap, one place.
       TBD_SWIFT_JOBS: "3"
+      # The debug information this job compiles with, lighter than SwiftPM's
+      # debug default. `--disable-index-store` stops every compile writing an
+      # index store, which nothing on a runner reads. `-Xswiftc
+      # -gline-tables-only` keeps function names and line tables and drops
+      # type and variable information.
+      #
+      # What that keeps: crash reports and `sample` stacks still name each
+      # frame's function and file:line, and lldb breakpoints and backtraces
+      # keep file:line. What it loses: lldb shows shorter function names and
+      # no local variables. Nothing in this job needs either loss back. The
+      # stall watchdog's `sample` files are read for the function and line a
+      # thread is parked in (docs/specs/2026-09-04-quiet-pass-stall-watchdog-design.md),
+      # no step runs `atos`, lldb or any other symbolicator, and macOS finds
+      # the tests by loading the bundle, not by reading an index.
+      #
+      # Measured as paired cold builds, both arms on one `macos-26` runner
+      # (3 cores, Swift 6.3.3), in both orders: SwiftPM's defaults 795.1 s then
+      # these flags 656.1 s (run 40222086540), and these flags 927.5 s then the
+      # defaults 1124.8 s (run 40232573803). The ratio is 0.825 in both orders,
+      # so building second buys nothing, and only same-runner pairs count: the
+      # same build took about 41% longer on the slower of the two runners
+      # (795.1 s against 1124.8 s with the defaults, 656.1 s against 927.5 s
+      # with these flags). `.build` shrinks from
+      # about 4.9 GB to 4.4 GB — the 174 MB index store goes, and the test
+      # bundle's dSYM drops from 655 MB to 443 MB. On a typical incremental
+      # build (513 s median) the same ratio predicts 85-95 s saved; that figure
+      # is inferred, not measured.
+      #
+      # ONE DEFINITION, SPELLED BY EVERY STEP THAT REACHES SWIFTPM: the build
+      # and all four passes. Each reads it with `${CI_SWIFTPM_FLAGS:?…}`, so a
+      # step that runs without it fails on its first line instead of building
+      # with the defaults, and expands it on its own command line rather than
+      # leaving a wrapper to supply it. The passes carry the flags although
+      # they compile nothing; see "THE PASSES CARRY THE BUILD'S FLAGS" at the
+      # build step.
+      # `scripts/nightly-flake-stress.test.sh`, which `script-harnesses` runs, fails
+      # when a command in this job runs `scripts/swift-safe`, `scripts/test.sh`
+      # or `scripts/ci/watched-test-pass.sh` without them, so a new pass or a
+      # retry cannot drop them silently.
+      #
+      # CI ONLY. `scripts/swift-safe` and `scripts/test.sh` forward the flags
+      # untouched and their defaults are unchanged, so a developer's build
+      # keeps full debug information for lldb. The cache key carries this
+      # value; see the restore step.
+      CI_SWIFTPM_FLAGS: "--disable-index-store -Xswiftc -gline-tables-only"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -357,8 +613,8 @@ jobs:
 
       # Which runs may SAVE the SwiftPM cache is a storage-policy question, and
       # the pull_request half of it needs the diff — so it is answered once here,
-      # next to the checkout that makes the diff available, and the save step at
-      # the end of the job is left as a single `if:`. `fetch-depth: 0` above is
+      # next to the checkout that makes the diff available, and the save step
+      # after the build is left as a single `if:`. `fetch-depth: 0` above is
       # what puts `origin/<base>` in the clone; without it there is no ref to
       # diff against.
       #
@@ -406,9 +662,10 @@ jobs:
           # would be silent: a pathspec absent from both sides of a `git diff`
           # exits 0, so every PR touching the library would score as not touching
           # it and never save the cache this decision exists to grant it.
-          # `Sources/TBDTerminalSerialization` is TBDDaemonLib's one first-party
-          # dependency beyond TBDShared, so a change confined to it still
-          # recompiles the library and still cascades downstream.
+          # `Sources/TBDTerminalSerialization` is a first-party library the #7715
+          # wipe removes in its own right, and TBDDaemonLib's one first-party
+          # dependency beyond TBDShared, so a change confined to it re-emits its
+          # own module, recompiles TBDDaemonLib and cascades downstream.
           #
           # Three-dot: what this PR changed since it forked, not everything that
           # has landed on the base since.
@@ -454,21 +711,23 @@ jobs:
       - name: Record runner CPU width
         run: 'echo "runner cores: $(sysctl -n hw.ncpu)"'
 
-      # Restore. Whether this run also SAVES is decided by the last step in
-      # this job, and the reason the two are separate is GitHub's cache access
-      # scope: a run reads caches created on its own branch, on its base branch,
-      # or on the default branch, and among prefix matches it takes the most
-      # recently created one. The store is capped at 10 GB and an entry for this
-      # package is ~1.56 GB, so it holds about six of them and evicts the least
-      # recently used.
+      # Restore. Whether this run also SAVES is decided by the save step right
+      # after the build, and the reason the two are separate is GitHub's cache
+      # access scope: a run reads caches created on its own branch, on its base
+      # branch, or on the default branch, and among prefix matches it takes the
+      # most recently created one. The store is capped at 10 GB and an entry for
+      # this package is ~1.56 GB, so it holds about six of them and evicts the
+      # least recently used.
       #
       # The measurement that shapes the policy, taken over the 30 days to
       # 2026-09-21: this workflow ran 849 times — 516 on `pull_request`, 195 on
       # `workflow_dispatch`, 138 on `push` to main — and 475 of those runs
-      # concluded successfully, which is the set that writes an entry, since
-      # `actions/cache` saves under `post-if: success()`. The store held six
-      # entries at that moment, 9.4 GB in all: two on `refs/heads/main` and four
-      # on `refs/pull/<n>/merge`, every one of them created or last read within
+      # concluded successfully. Every one of those built successfully, and a
+      # run whose build succeeds may write an entry whether or not its tests
+      # then pass or the run is cancelled, so the 475 are a lower bound on the
+      # runs the event policy below has to sort. The store held six entries at
+      # that moment, 9.4 GB in all: two on `refs/heads/main` and four on
+      # `refs/pull/<n>/merge`, every one of them created or last read within
       # the previous hour. The whole store turns over in under an hour. Three
       # consequences follow, and together they are the save policy.
       #
@@ -484,10 +743,11 @@ jobs:
       #    entries in the store — which is what pushes main's entry, the one
       #    entry every branch can read, toward the bottom of the LRU. When it
       #    goes, the next push to main and the next PR's first run restore
-      #    nothing and rebuild from scratch — the step comment below puts the
-      #    first test step at 1250 s on a cold cache (run 34255164378) against
-      #    73-996 s warm, where a warm restore itself costs 30-54 s, measured
-      #    across the eight most recent green runs.
+      #    nothing and rebuild from scratch — the build step's comment below
+      #    records 1250 s for the compile plus the first test pass on a cold
+      #    cache (run 34255164378) against 73-996 s warm, where a warm restore
+      #    itself costs 30-54 s, measured across the eight most recent green
+      #    runs.
       #  - Every save costs the run that makes it 26-49 s of upload, measured
       #    across those same eight runs.
       - name: Restore SwiftPM build artifacts and dependencies
@@ -502,9 +762,25 @@ jobs:
           # set (same Package.resolved hash) — without this scoping, restore
           # could pull a cache from before a dep was added, leaving stale
           # `.build/checkouts/` that breaks SPM resolution of binary targets.
-          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
+          #
+          # Both also carry the job's CI_SWIFTPM_FLAGS, so this job restores
+          # only artifacts compiled with the flags it compiles with. Every
+          # compile command names those flags, so an entry built with others
+          # gives back its dependency checkouts and nothing else: the whole
+          # package compiles again. An exact-key hit on such an entry would
+          # also skip the save below (`cache-hit`), so every later run with the
+          # same sources would restore it and pay that compile again. And an
+          # index store restored into `.build` would ride along, unread, in
+          # every entry built on top of it.
+          #
+          # The flags sit after the dependency hash, not before it, because the
+          # nightly and the flake fixer restore this job's entries through the
+          # `…-deps-<hash>-` prefix. They build with SwiftPM's defaults, so what
+          # they take from an entry is its dependency checkouts, and those do
+          # not depend on the flags.
+          key: spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-flags-${{ env.CI_SWIFTPM_FLAGS }}-src-${{ hashFiles('Package.swift', 'Sources/**/*.swift', 'Tests/**/*.swift') }}
           restore-keys: |
-            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-
+            spm-build-${{ runner.os }}-${{ env.SWIFT_VERSION }}-deps-${{ hashFiles('Package.resolved') }}-flags-${{ env.CI_SWIFTPM_FLAGS }}-
 
       # A restored `.build/` can come back with a dependency checkout present but
       # its manifest missing, which fails the job at manifest planning before a
@@ -529,19 +805,32 @@ jobs:
       # library build artifacts forces SPM to re-emit them while keeping the
       # rest of `.build/` warm.
       #
+      # The libraries wiped are TBDShared, TBDDaemonLib and
+      # TBDTerminalSerialization: every first-party library target whose
+      # sources the decision below compares. TBDTerminalSerialization is
+      # exposed in its own right, not only as something TBDDaemonLib imports —
+      # TBDDaemonLib and TBDApp both import it, so a symbol added to it is the
+      # same shape of change. Comparing a library's sources without removing
+      # its artifacts would answer `wipe` on exactly the run that needs it and
+      # still leave that library's stale objects in place.
+      #
       # The wipe is not free: measured on a run whose commit touched only
       # `Sources/TBDDaemon` and one test file, it cost about three of the 278
-      # seconds the first pass spent compiling — 89 TBDShared files and 265
+      # seconds that run spent compiling — 89 TBDShared files and 265
       # TBDDaemonLib files recompiled, TestSupport and TBDDaemonTests re-emitted
       # on top, and a 38-second relink. Over the last 40 commits on `main`, 18
-      # touched neither library's sources nor the manifest and paid it for
-      # nothing.
+      # touched none of the compared paths and paid it for nothing.
+      # TBDTerminalSerialization adds little to that: it is five
+      # files, and every module that imports it already depends on TBDShared,
+      # so its wipe brings no new module into the rebuild — only its own files
+      # and the few downstream files that import it but not TBDShared or
+      # TBDDaemonLib.
       #
       # The bug's precondition is that a library's SOURCES differ from the
       # sources its cached artifacts were built from, so the wipe is conditional
-      # on exactly that. A step at the end of this job, after every compile and
-      # just before the cache save, records a fingerprint of those sources — one
-      # git object id per compared path — in
+      # on exactly that. The record step right after the build — the job's only
+      # compile — and just before the cache save writes a fingerprint of those
+      # sources — one git object id per compared path — in
       # `.build/tbd-first-party-fingerprint`, which rides the same cache entry
       # as the artifacts it describes; `scripts/ci/first-party-wipe-needed.sh`
       # compares it against the tree being built now and answers `wipe` or
@@ -552,23 +841,33 @@ jobs:
       # broken decider on the safe side rather than failing the job.
       #
       # The marker is REMOVED the moment it has been read, and a fresh one is
-      # recorded only by that later step. That is what keeps the marker and the
-      # artifacts from drifting apart no matter how this run ends: a job that
-      # dies anywhere after this step leaves no marker at all, so the next run
-      # wipes, while a job that dies before this step leaves the restored marker
-      # untouched, still describing the restored artifacts.
+      # recorded only by that later step, which runs only after the build
+      # succeeded. That is what keeps the marker and the artifacts from
+      # drifting apart no matter how this run ends: a job that dies between
+      # here and the record step has no marker in `.build/` and saves nothing,
+      # because the save comes after the record, while a job that dies before
+      # this step leaves the restored marker untouched, still describing the
+      # restored artifacts.
       - name: Force-rebuild first-party libraries (workaround SPM #7715)
         run: |
           decision="$(bash scripts/ci/first-party-wipe-needed.sh .build/tbd-first-party-fingerprint || echo wipe)"
           rm -f .build/tbd-first-party-fingerprint
           if [ "$decision" = "skip" ]; then
-            echo "Keeping the restored first-party artifacts: nothing either library target is built from changed since these artifacts were built (reason above)."
+            echo "Keeping the restored first-party artifacts: nothing the wiped library targets are built from changed since these artifacts were built (reason above)."
             exit 0
           fi
-          # Adding a module here means adding its sources — and the sources of
-          # every first-party target it depends on — to `WIPE_PATHS` in the
-          # script above, or its wipe becomes conditional on unrelated files.
-          for module in TBDShared TBDDaemonLib; do
+          # These modules are exactly the library targets whose sources
+          # `WIPE_PATHS` in the script above compares. Adding a module here
+          # means adding its sources — and the sources of every first-party
+          # target it depends on — to that list, or its wipe becomes conditional
+          # on unrelated files. A library whose sources are on that list belongs
+          # here, or a change confined to it answers `wipe` and still leaves its
+          # own stale objects in place. `scripts/ci/first-party-wipe-needed.test.sh`
+          # checks each module against its OWN sources, in both directions, and
+          # that every source directory on the list is one library target's.
+          # It does not check dependencies: that a module's first-party
+          # dependencies are on the list is for review to hold.
+          for module in TBDShared TBDDaemonLib TBDTerminalSerialization; do
             echo "=== $module artifacts before wipe ==="
             ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"
             ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
@@ -587,18 +886,274 @@ jobs:
       # all-per-file builds, default parallelism OOMed late in the build with
       # a bare `error: fatalError`, which is why a cap exists at all.
       #
-      # The test steps below do NOT pass `-j` themselves: `scripts/swift-safe`,
-      # which `scripts/test.sh` runs SwiftPM through, supplies `--jobs` from
-      # TBD_SWIFT_JOBS and refuses a command line above it. That variable is
-      # pinned in this job's `env:` block, so the cap above is stated
-      # explicitly here instead of riding on the wrapper's default — raising
-      # that default would otherwise lift CI past the runner's memory ceiling
-      # silently. A developer box, which sets its own TBD_SWIFT_JOBS, is no
-      # longer failed or throttled by a hardcoded number. The bare build at the
-      # end of the job bypasses the wrapper, so it spells the same variable on
-      # its own command line rather than repeating the number — one cap, one
-      # place to change it.
+      # Every compile in this job goes through `scripts/swift-safe`, which
+      # supplies `--jobs` from TBD_SWIFT_JOBS and refuses a command line
+      # above it. That variable is pinned in this job's `env:` block, so the cap
+      # above is stated explicitly here instead of riding on the wrapper's
+      # default — raising that default would otherwise lift CI past the runner's
+      # memory ceiling silently. A developer box, which sets its own
+      # TBD_SWIFT_JOBS, is no longer failed or throttled by a hardcoded number.
+      # The build step below is the only step that compiles, and it spells the
+      # same variable on its own command line rather than repeating the number,
+      # so the cap reads off the step that spends it — one cap, one place to
+      # change it. The test steps pass no `-j`: they compile nothing, and the
+      # wrapper bounds them anyway.
       #
+      # ---------------------------------------------------------------------
+      # Why the build is its own step
+      #
+      # This step compiles the package and every test target once, and the four
+      # test steps below run against its output with `--skip-build`. A
+      # `swift test` that builds for itself re-checks the whole build graph
+      # first: run that way, the first pass carries the entire compile inside a
+      # test step, and over 96 green runs each later pass spent a median
+      # 10–13 s on a check that found nothing to do. The flag reaches SwiftPM
+      # untouched: `scripts/ci/watched-test-pass.sh` hands everything after its
+      # `--` to `scripts/test.sh`, which consumes only `--fingerprint` and
+      # `--no-fingerprint` and forwards the rest to `swift test`.
+      #
+      # WHAT `--skip-build` SKIPS IS THE BUILD, NOT THE PLANNING. A pass with it
+      # compiles and links nothing, but SwiftPM still loads the package and asks
+      # for the build description to find the test bundle, and that runs its
+      # `PackageStructure` step, whose signature hashes the build parameters and
+      # the whole process environment (`PackageStructureCommand` in SwiftPM's
+      # `LLBuildCommands.swift`). `scripts/test.sh` gives every run a fresh
+      # fenced environment, so every pass re-plans the build graph before it
+      # runs a test. Re-planning is part of what the 10–13 s above paid for, so
+      # the flag removes llbuild's walk over every compile and link command and
+      # keeps the planning; how much of the 10–13 s a pass still spends is for
+      # the step timings to show.
+      #
+      # `--build-tests` builds what the passes would have built for themselves.
+      # SwiftPM maps it to the `allIncludingTests` subset, which is the subset
+      # `swift test` builds when it is given no `--test-product`
+      # (`buildTestsIfNeeded` in SwiftPM's `SwiftTestCommand.swift`), and in a
+      # debug build testability is on either way. Of what the passes forward,
+      # `--parallel`, `--no-parallel`, `--filter`, `--skip` and the xUnit pair
+      # choose which tests run and where the results go, and change nothing that
+      # is compiled. The flags that do bear on the build are this step's own:
+      # `-j` comes from the same TBD_SWIFT_JOBS through the same wrapper, and
+      # every pass spells the same CI_SWIFTPM_FLAGS this step does.
+      #
+      # IT ALSO BUILDS EVERY EXECUTABLE TARGET, which is why the job has no
+      # separate build of TBDCLI and TBDDaemon. A build without `--build-tests`
+      # selects the `allExcludingTests` subset (llbuild target `main`), and
+      # SwiftPM's manifest builder adds every root non-test module and every
+      # non-test product to llbuild target `test` as well as to `main`
+      # (`LLBuildManifestBuilder+Swift.swift` and `+Product.swift`), so
+      # `allIncludingTests` is a superset. Package.swift alone would not show
+      # it: TBDCLI is a test dependency, but no test target depends on the
+      # TBDDaemon executable, only on TBDDaemonLib. The field record agrees: a
+      # build of `main` run after the first `swift test`, which builds this
+      # same subset, was a no-op in 96 of 96 green runs.
+      #
+      # THE PASSES RUN ONLY ON THIS STEP'S SUCCESS, and each one states it in
+      # its own `if:` rather than inheriting it from 1a's skip. `--skip-build`
+      # runs whatever test bundle `.build/` holds, and after a failed or killed
+      # compile that is the bundle the cache restored, or a half-relinked one —
+      # tests of a different tree, which could well pass. So a red build leaves
+      # the job red on this step, with the `::error::` line below naming the
+      # cause, and every pass is skipped rather than run against the wrong code.
+      #
+      # THE PASSES CARRY THE BUILD'S FLAGS, the job's CI_SWIFTPM_FLAGS, although
+      # they compile nothing. A pass re-plans the build graph (see "WHAT
+      # `--skip-build` SKIPS" above) from its own command line, and the test
+      # bundle it then looks for sits under `.build/<triple>/debug/` whatever
+      # the debug-information flags are, so a pass planned without them would
+      # most likely still find the bundle this step linked and run it. "Most
+      # likely" is not good enough for a verdict, and identical flags remove the
+      # question: every pass plans exactly what this step compiled, and a pass
+      # that ever lost `--skip-build` would find the build up to date rather
+      # than compile the whole package again with other flags.
+      #
+      # THE IMPORT CHECK IS THIS STEP'S ALONE. With
+      # `--explicit-target-dependency-import-check error`, SwiftPM pre-scans
+      # each target's imports before it compiles and fails the build when a
+      # target imports a module of the package graph that its dependency tree
+      # does not reach. Every module SwiftPM builds lands in one shared search
+      # directory, so without the check such an import compiles whenever that
+      # module happens to be built first. SwiftPM skips the check for any
+      # target whose dependency tree holds a build plugin, and SwiftTerm's
+      # library uses one, so the check covers TestSupport but not TBDAppTests or
+      # any other target that reaches SwiftTerm. What keeps both TBDAppTests and
+      # TestSupport off TBDDaemonLib is the SwiftLint rule
+      # no_daemon_import_in_app_tests, in the lint job and the pre-push hook;
+      # for TestSupport this check is a second guard. The option changes
+      # nothing that is compiled, so it stays out of CI_SWIFTPM_FLAGS, and so
+      # out of the cache key that carries that value, and the passes, which run
+      # with `--skip-build`, do not spell it. It is best-effort: SwiftPM skips
+      # the check without a message when the compiler offers no import
+      # pre-scan, stops checking when one target's pre-scan fails, and visits
+      # targets in an order that changes from run to run, so a green build does
+      # not prove that it ran. See
+      # docs/specs/2026-10-26-daemon-test-support-design.md, which also says how
+      # to prove that the check bites.
+      #
+      # 30 minutes, which is 1800 s: 45% above the slowest measured run of a
+      # first test step that compiled for itself, and that figure covers the
+      # compile AND a full daemon test pass, so the compile alone has more room
+      # than 45%. Measured over the 45 most recent concluded runs of this
+      # workflow (2026-09-05 to 2026-09-09), such a step took between 73 s and
+      # 1250 s. The three slowest — 1010 s (run 34255127220), 1115 s
+      # (34267900663) and 1250 s (34255164378) — are exactly the runs whose
+      # SwiftPM cache restore finished in 1–4 s, which is what a cache MISS
+      # looks like: a hit spends 25–56 s restoring. So 1250 s is the measured
+      # cold-cache figure, over a full 5,529-test daemon pass on top of the
+      # compile. Warm-cache runs still spread 73–996 s, because the runs
+      # measured all force-rebuilt TBDShared and TBDDaemonLib and a PR's first
+      # run restores only a fallback entry. Those runs compiled with SwiftPM's
+      # default debug information. Paired cold builds put CI_SWIFTPM_FLAGS at
+      # about 0.825 of the default's compile time on the same runner; whether
+      # these warm and compile-plus-test figures shrink by the same factor is
+      # inferred, not measured, so the bound stays sized against them as
+      # measured.
+      #
+      # NO STALL WATCHDOG, unlike the passes. The watchdog exists for one
+      # failure: a test process wedged where no time limit can reach it — the
+      # cooperative-pool wedge recorded below — whose stacks the platform
+      # timeout would destroy. A compile does not fail that way in this job's
+      # record. The compile failures it does record end on their own, with the
+      # diagnostic in the log: the OOM that surfaces as a bare
+      # `error: fatalError`, and the stale-archive link failure the #7715 wipe
+      # above defends against. And `scripts/ci/watched-test-pass.sh` is built
+      # around a test run — it runs `scripts/test.sh`, fails a run that reports
+      # fewer tests than its floor, and picks what to sample by the test
+      # runner's argv — so wrapping a build would take a new mode in that script
+      # and its harness, for a stall nothing has shown. What this gives up: a
+      # compile run inside a watched pass gets its stall sampled, and here
+      # `timeout-minutes` ends one with no stacks. The bound still names this
+      # step, and so the compile, as what hung; a stall that does turn up here
+      # is the evidence for adding a watchdog.
+      - name: Build (every target, including the test targets, once for all four passes)
+        id: build
+        timeout-minutes: 30
+        run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
+          status=0
+          scripts/swift-safe build --build-tests --explicit-target-dependency-import-check error -j "$TBD_SWIFT_JOBS" "${swiftpm_flags[@]}" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::The build exited $status, so all four test passes are skipped: they run with --skip-build, and after a failed build that would test whatever stale bundle .build/ still holds instead of this commit."
+          fi
+          exit "$status"
+
+      # Record which sources produced the artifacts now sitting in `.build/`, so
+      # the next run that restores this cache can tell whether the SPM #7715
+      # wipe above is needed at all. It goes right after the build step — the
+      # job's only compile — and immediately before the cache-save step below,
+      # and writes inside `.build/` so a saved entry carries the marker with the
+      # artifacts it describes. It has to come before the save: an entry saved
+      # without it makes every run that restores that entry wipe.
+      #
+      # A marker beats reading the cache key: the key is built from
+      # `hashFiles(...)` digests, which identify a tree but say nothing that can
+      # be compared path by path against another one. Object ids can, and unlike
+      # a commit they survive the ephemeral merge commit a `pull_request` run is
+      # checked out at.
+      #
+      # It carries NO condition, so it runs only when every step before it —
+      # setup, the wipe and the build — succeeded. A fingerprint of the sources
+      # says what `.build/` was built FROM, never that the build finished: a run
+      # whose compile was OOM-killed or wedged part way through — shapes this
+      # job's comments record as real — would otherwise record a marker over
+      # half-written artifacts, and a rerun of the same commit restores that
+      # cache by an exact key hit and skips the wipe that used to heal it.
+      # Reaching this step is the completion signal, and its position, after
+      # the job's only compile, is what makes it one. The test passes that follow
+      # it compile nothing (`--skip-build`), so nothing they do can leave the
+      # marker describing artifacts other than the ones in `.build/`.
+      #
+      # A run that ends before here records nothing and, the save coming after
+      # this step, saves nothing. A run that ended before the wipe step leaves
+      # the restored marker untouched, still describing the artifacts it was
+      # restored with.
+      - name: Record the sources these build artifacts came from
+        run: bash scripts/ci/first-party-wipe-needed.sh --record .build/tbd-first-party-fingerprint
+
+      # Saved RIGHT AFTER THE BUILD, before any test runs, because a run
+      # cancelled part way through is otherwise a run that saved nothing.
+      # `concurrency` cancels a run in progress when a newer push to its branch
+      # arrives, and a run spends most of its life in the test passes. Measured
+      # on main: 19 of 49 push runs were cancelled by a newer push and saved
+      # nothing, so main's entry lagged main, and 4 of 27 green push runs then
+      # compiled a wider cascade than their own commit. A run cancelled during
+      # its tests has already saved here.
+      #
+      # The entry is the one a save at the end of a green run would store. The
+      # build step is the only step that writes compiled artifacts into
+      # `.build` — every pass runs with `--skip-build`, and the debug-symbol
+      # bundles a local test run prunes stay put under `CI`
+      # (`scripts/dsym-prune-lib.sh`) — so what the tests add afterwards is a
+      # re-plan of the build graph, which the next run's build redoes anyway.
+      # A green suite never vouched for the entry; the build and the #7715
+      # marker do. The build has to succeed for this step to run, so no entry
+      # holds a compile that failed or was killed part way, and the record step
+      # above has written the marker the next run's wipe decision reads. A
+      # failing test says something about the code, not about whether `.build`
+      # matches it.
+      #
+      # `key:` is the restore step's own resolved primary key rather than a
+      # second copy of that expression, so the two cannot drift apart.
+      #
+      # The conditions, in the order they are written:
+      #
+      #  - `steps.build.outcome == 'success'`, with no status function, so GitHub
+      #    prepends its implicit `success()` as well: the build finished, and so
+      #    did every step before this one, the marker recording included.
+      #  - `cache-hit != 'true'`. An exact hit means this key is already in the
+      #    store and the save would be a duplicate of what was just restored.
+      #  - The event. A `push` (main, per this workflow's triggers) always saves:
+      #    main's entry is the one every branch can read, and it is all that
+      #    stands between a fresh PR and a cold build. A `workflow_dispatch`
+      #    never saves, because nothing can read what it would write — see the
+      #    restore step above.
+      #  - For a `pull_request`, whether it touched a first-party library or the
+      #    package manifest. The primary key hashes every source file, so a PR's
+      #    own entry is restorable by that same PR's later pushes and by nothing
+      #    else; it earns 1.5 GB of a 10 GB store only when the next push would
+      #    otherwise rebuild nearly everything. Touching TBDShared,
+      #    TBDDaemonLib or TBDTerminalSerialization is exactly that case — an
+      #    interface change cascades into every downstream module, and this job
+      #    wipes and re-emits the libraries on such a run regardless. Touching
+      #    Package.resolved moves the dependency set the restore-keys prefix is
+      #    scoped to, which leaves main's entry no longer a fallback this PR can
+      #    use at all; touching Package.swift re-plans the build graph, which
+      #    cascades the way a library change does. A PR that touches
+      #    neither rebuilds a small delta on top of main's entry for about what
+      #    restoring its own would have cost, so it keeps main's entry alive for
+      #    everyone instead of evicting it.
+      #
+      # A pull request's save happens here too, for one policy in one step and
+      # because the PR runs it adds are the ones a next push wants most. A
+      # library-touching PR whose run went red, or was cancelled by the PR's
+      # own next push, is the PR most likely to push again, and that push
+      # restores this entry by prefix and builds a small delta instead of the
+      # library cascade. The PR saves it adds are only those library-touching
+      # runs that built and then went red or were cancelled, each costing the
+      # same 1.5 GB of the 10 GB store as any other.
+      #
+      # The save serves the next run, so it must never cost this one its tests.
+      # Pass 1a runs on `!cancelled()` and a successful build, so it still runs
+      # after a failed recording, which reddens the job, or a failed save,
+      # which only warns: `actions/cache/save@v4` catches every error in the
+      # save and logs it as a warning, and its step exits 0.
+      #
+      # 10 minutes, against 26-49 s of measured upload: the one way left for a
+      # save to cost the tests is to stall. It sits before every pass, so a
+      # stalled upload would hold the job to its own bound with nothing tested.
+      # `continue-on-error` so a save ended by that bound warns like any other
+      # failed save rather than reddening a run whose tests then pass.
+      - name: Save SwiftPM build artifacts and dependencies
+        if: ${{ steps.build.outcome == 'success' && steps.spm-cache.outputs.cache-hit != 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && steps.cache_policy.outputs.library_touched == 'true')) }}
+        timeout-minutes: 10
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .build
+            ~/Library/Caches/org.swift.swiftpm
+          key: ${{ steps.spm-cache.outputs.cache-primary-key }}
+
+      # ---------------------------------------------------------------------
       # Four sequential steps, one job (docs/specs/2026-07-24-test-hardening-design.md
       # §4): the tier-3 live suites live in their own target so they can run
       # serially on an otherwise idle machine instead of contending with the
@@ -644,7 +1199,12 @@ jobs:
       # the honest figure: a single iteration showed +6 s and it did not hold up
       # across the run. Set against a step that already spends 139-404 s on the
       # compile, it is a good trade for halving the tail. Splitting again pays
-      # that startup cost a third time for the same reason.
+      # that startup cost a third time for the same reason. That measurement
+      # included SwiftPM's no-op build check. Every pass here runs with
+      # `--skip-build` against the build step above, which drops the build
+      # half of that check but not the re-planning before it (see "WHAT
+      # `--skip-build` SKIPS" above), so each extra invocation re-pays process
+      # startup and a re-plan of the build graph.
       #
       # This is NOT the "sharding across runners" that §1 considered and
       # rejected and §2 lists as a non-goal. That rejection was about extra
@@ -759,8 +1319,10 @@ jobs:
       # second one whose `tbd`, `.claude` and `.codex` entries are mode 000 (so
       # code that assembles a path out of the home directory rather than asking
       # fails with EACCES at its own call site) and, as a backstop, fingerprints
-      # the real `~/tbd`, `~/.claude`, `~/.codex` and tmux socket directory on
-      # either side and fails the step if anything appeared or vanished.
+      # the real `~/tbd`, `~/.claude`, `~/.codex`,
+      # `~/Library/Logs/TBD/hang-stacks`, tmux socket directory and test-suite
+      # plists in `~/Library/Preferences` on either side and fails the step if
+      # anything appeared or vanished.
       # `CLAUDE.md` has said "Tests must not touch ~/tbd" all along, and the
       # suite quietly violated it anyway: 18k orphan profile dirs, ~2.9k fake
       # worktrees and ~7,100 dead tmux sockets accumulated on a developer box
@@ -802,62 +1364,67 @@ jobs:
       # ---------------------------------------------------------------------
       - name: Test (fast parallel pass 1a — TBDDaemonTests A–O)
         id: fast_pass_daemon_a
-        # 35, against 15 for its neighbours, because this step runs the FIRST
-        # `swift test` and so pays the whole test-target compile on top of its
-        # own runtime — and because the cost of that compile is dominated by
-        # whether the SwiftPM cache hit.
-        #
-        # Measured over the 45 most recent concluded runs of this workflow
-        # (2026-09-05 to 2026-09-09), the first test step took between 73 s and
-        # 1250 s. The three slowest — 1010 s (run 34255127220), 1115 s
-        # (34267900663) and 1250 s (34255164378) — are exactly the runs whose
-        # SwiftPM cache restore finished in 1–4 s, which is what a cache MISS
-        # looks like: a hit spends 25–56 s restoring. So 1250 s is the measured
-        # cold-cache figure, and it covers a full 5,529-test daemon pass, more
-        # than this step now runs. Warm-cache runs still spread
-        # 73–996 s, because every run force-rebuilds TBDShared and TBDDaemonLib
-        # and a PR's first run restores only the deps-only fallback key.
-        #
-        # The 1800 s watchdog budget below is what actually bounds a wedge — 45%
-        # above that measured worst case — and this step bound is the platform
+        # Only on the build step's success — see "THE PASSES RUN ONLY ON THIS
+        # STEP'S SUCCESS" above. `!cancelled()` in place of the implicit
+        # `success()` because the only steps between the build and here are the
+        # marker recording and the cache save, which serve the next run: a
+        # failed recording reddens the job and a failed save only warns, and
+        # neither may cost this run its tests. Every setup step comes before
+        # the build, so a failure there still skips this pass through the build
+        # clause.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        # 15 and a 600 s budget, the same as 1b: the build step pays the
+        # compile, so this pass is a re-plan of the build graph (see "WHAT
+        # `--skip-build` SKIPS" above) and then test runtime, over the A–O half
+        # of TBDDaemonTests — predicted near 2,500 tests against 1b's 3,120 (see
+        # "The two daemon halves" above), and 1b measured 128 s of step time.
+        # The watchdog budget bounds a wedge; this step bound is the platform
         # backstop behind it, sized to clear the budget with room for the
         # sampling and the kill sweep.
-        timeout-minutes: 35
+        timeout-minutes: 15
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
-            --name fast-pass-daemon-a --budget-seconds 1800 \
+            --name fast-pass-daemon-a --budget-seconds 600 \
             --floor 1200 \
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
-            -- --fingerprint --parallel --filter '^TBDDaemonTests\.[A-O]' \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --filter '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-a.xml --experimental-xunit-message-failure
 
       - name: Test (fast parallel pass 1b — the rest of TBDDaemonTests)
         id: fast_pass_daemon_b
         # Runs even when 1a went red, but not when the job was cancelled and not
-        # when the build or setup never reached 1a at all. Until this landed, a
-        # red fast pass skipped every step after it, so one flake in the tail of
-        # pass 1 hid the live verdict for the whole run and the next push learned
-        # nothing new. The job still fails; the cost is the +2–4 min the later
-        # passes take on a run that is already red.
-        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
-        # 15: the compile is already paid, so this is test runtime plus SPM's
-        # no-op build check — 128 s of step time on the split's first CI run.
-        # The 600 s budget bounds a wedge; this clears it.
+        # when setup never reached 1a at all. Until this landed, a red fast pass
+        # skipped every step after it, so one flake in the tail of pass 1 hid
+        # the live verdict for the whole run and the next push learned nothing
+        # new. The job still fails; the cost is the +2–4 min the later passes
+        # take on a run that is already red. And never after a failed build:
+        # 1a's own condition already implies it, and the clause is spelled out
+        # here anyway so that no change to 1a's `if:` can ever let a
+        # `--skip-build` pass run a stale bundle.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # 15: the build step pays the compile and `--skip-build` skips the
+        # build, so this is a re-plan of the build graph (see "WHAT
+        # `--skip-build` SKIPS" above) and then test runtime — 128 s of step
+        # time on the split's first CI run, a figure that included SwiftPM's
+        # whole no-op build check. The 600 s budget bounds a wedge; this clears
+        # it.
         timeout-minutes: 15
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-daemon-b --budget-seconds 600 \
             --floor 1500 \
             --floor-message 'the --filter/--skip pair over-matched or the target was renamed.' \
-            -- --fingerprint --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]' \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --filter '^TBDDaemonTests\.' --skip '^TBDDaemonTests\.[A-O]' \
                --xunit-output /tmp/xunit-daemon-b.xml --experimental-xunit-message-failure
 
       - name: Test (fast parallel pass 2 — everything except TBDDaemonTests and the live target)
         id: fast_pass_app
         # Expressed as a COMPLEMENT, not a list of targets — see the "Why step 1b
         # and step 2 are COMPLEMENTS" block above. A new test target lands here
-        # on its own.
-        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # on its own. Its `if:` is 1b's, for 1b's reasons.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
         # 15. A step bound wide enough for the per-test limits to fire first and
         # attribute a hang to a named test would buy nothing now: the watchdog
         # does that job sooner and with a stack. It bounds the pass at 600 s —
@@ -866,18 +1433,20 @@ jobs:
         # sweep.
         timeout-minutes: 15
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name fast-pass-app --budget-seconds 600 \
             --floor 1900 \
             --floor-message 'the --skip regex over-matched or a target was renamed.' \
-            -- --fingerprint --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --parallel --skip '^(TBDDaemonTests|TBDDaemonLiveTests)\.' \
                --xunit-output /tmp/xunit-app.xml --experimental-xunit-message-failure
 
       - name: Test (quiet pass — tier-3 live suites, serial, idle machine)
         id: quiet_pass
         # Runs on a red fast pass for the same reason 1b and 2 do: the live
-        # suites are the ones a fast-pass flake most often hides.
-        if: ${{ !cancelled() && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
+        # suites are the ones a fast-pass flake most often hides. Like theirs,
+        # its `if:` also names the build step outright.
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && (steps.fast_pass_daemon_a.outcome == 'success' || steps.fast_pass_daemon_a.outcome == 'failure') }}
         # `--no-parallel` is REQUIRED and is not the same as omitting
         # `--parallel`. SwiftPM's `--parallel` governs XCTest's process-level
         # sharding; Swift Testing parallelizes suites in-process on its own and
@@ -894,11 +1463,12 @@ jobs:
         # the artifact upload. The whole expiry path was measured at 42 s.
         timeout-minutes: 15
         run: |
+          read -r -a swiftpm_flags <<< "${CI_SWIFTPM_FLAGS:?must be set in the test job env block}"
           scripts/ci/watched-test-pass.sh \
             --name quiet-pass --budget-seconds 720 \
             --floor 35 \
             --floor-message 'the --filter regex matched nothing or the target was renamed.' \
-            -- --fingerprint --filter '^TBDDaemonLiveTests\.' --no-parallel \
+            -- --fingerprint --skip-build "${swiftpm_flags[@]}" --filter '^TBDDaemonLiveTests\.' --no-parallel \
                --xunit-output /tmp/xunit-quiet.xml --experimental-xunit-message-failure
 
       # Every watched pass writes its stall files as `<name>-stall-*.txt`, so one
@@ -947,81 +1517,3 @@ jobs:
           path: /tmp/xunit-*.xml
           if-no-files-found: warn
           retention-days: 7
-
-      - name: Build (verify TBDCLI and TBDDaemon executable targets compile)
-        run: swift build -j "$TBD_SWIFT_JOBS"
-
-      # Record which sources produced the artifacts now sitting in `.build/`, so
-      # the next run that restores this cache can tell whether the SPM #7715
-      # wipe above is needed at all. It goes after every compile in the job and
-      # immediately before the cache-save step below, and writes inside
-      # `.build/` so a saved entry carries the marker with the artifacts it
-      # describes.
-      #
-      # A marker beats reading the cache key: the key is built from
-      # `hashFiles(...)` digests, which identify a tree but say nothing that can
-      # be compared path by path against another one. Object ids can, and unlike
-      # a commit they survive the ephemeral merge commit a `pull_request` run is
-      # checked out at.
-      #
-      # It carries NO condition, so it runs only when every step before it
-      # succeeded. A fingerprint of the sources says what `.build/` was built
-      # FROM, never that the build finished: a run whose compile was OOM-killed
-      # or wedged part way through — shapes this job's comments record as real —
-      # would otherwise record a marker over half-written artifacts, and a rerun
-      # of the same commit restores that cache by an exact key hit and skips the
-      # wipe that used to heal it. Reaching this step is the completion signal,
-      # and the step's own position, after every compile in the job, is what
-      # makes it one.
-      #
-      # A run that ends before here therefore records nothing, and that is the
-      # safe outcome in every case: the wipe step already removed the marker it
-      # read, so the next run to restore this cache finds none and wipes. A run
-      # that ended before the wipe step leaves the restored marker untouched,
-      # still describing the artifacts it was restored with.
-      - name: Record the sources these build artifacts came from
-        run: bash scripts/ci/first-party-wipe-needed.sh --record .build/tbd-first-party-fingerprint
-
-      # Saved LAST, after the final writer into `.build`, so the stored entry
-      # carries the linked executables as well as the test artifacts. `key:` is
-      # the restore step's own resolved primary key rather than a second copy of
-      # that expression, so the two cannot drift apart.
-      #
-      # The conditions, in the order they are written:
-      #
-      #  - `success()`. A red run stores nothing. That is also what
-      #    `actions/cache` does unattended — its `action.yml` declares
-      #    `post-if: success()`, so its saving post step does not run on a failed
-      #    job — and the build step above, the last step that compiles into
-      #    `.build`, is itself skipped on a red run, so there would be nothing
-      #    freshly linked to store.
-      #  - `cache-hit != 'true'`. An exact hit means this key is already in the
-      #    store and the save would be a duplicate of what was just restored.
-      #  - The event. A `push` (main, per this workflow's triggers) always saves:
-      #    main's entry is the one every branch can read, and it is all that
-      #    stands between a fresh PR and a cold build. A `workflow_dispatch`
-      #    never saves, because nothing can read what it would write — see the
-      #    restore step above.
-      #  - For a `pull_request`, whether it touched a first-party library or the
-      #    package manifest. The primary key hashes every source file, so a PR's
-      #    own entry is restorable by that same PR's later pushes and by nothing
-      #    else; it earns 1.5 GB of a 10 GB store only when the next push would
-      #    otherwise rebuild nearly everything. Touching TBDShared,
-      #    TBDDaemonLib or TBDTerminalSerialization is exactly that case — an
-      #    interface change cascades into every downstream module, and this job
-      #    wipes and re-emits the libraries on such a run regardless. Touching
-      #    Package.resolved moves the dependency set the restore-keys prefix is
-      #    scoped to, which leaves main's entry no longer a fallback this PR can
-      #    use at all; touching Package.swift re-plans the build graph, which
-      #    cascades the way a library change does. A PR that touches
-      #    neither rebuilds a small delta on top of main's entry for about what
-      #    restoring its own would have cost, so it keeps main's entry alive for
-      #    everyone instead of evicting it.
-      - name: Save SwiftPM build artifacts and dependencies
-        if: ${{ success() && steps.spm-cache.outputs.cache-hit != 'true' && (github.event_name == 'push' || (github.event_name == 'pull_request' && steps.cache_policy.outputs.library_touched == 'true')) }}
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            .build
-            ~/Library/Caches/org.swift.swiftpm
-          key: ${{ steps.spm-cache.outputs.cache-primary-key }}

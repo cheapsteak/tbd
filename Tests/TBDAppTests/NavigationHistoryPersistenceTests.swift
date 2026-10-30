@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Sidebar back/forward history survives an app restart. A second AppState
 /// built on the same throwaway UserDefaults suite stands in for a relaunch.
@@ -11,9 +12,9 @@ import TBDShared
 struct NavigationHistoryPersistenceTests {
 
     private func withSuite(_ body: (UserDefaults) async throws -> Void) async rethrows {
-        let suiteName = "TBDAppTests.NavHistoryPersist.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.NavHistoryPersist")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(defaults)
     }
 

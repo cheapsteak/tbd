@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 @Suite("Continue in Claude transaction")
@@ -219,6 +220,85 @@ struct ContinueInClaudeTransactionTests {
             return terminal
         }.last
         #expect(replacement == updated)
+    }
+
+    @Test("start admission holds the continuation before the source is replaced")
+    func startAdmissionHoldsTheContinuation() async throws {
+        let fixture = try await makeRPCFixture(ownsPane: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let stub = StubAdmission(.hold(reason: "camera in use"))
+        fixture.router.startAdmission = stub
+        try await fixture.db.config.setStartAdmissionEnabled(true)
+
+        let response = await continueRequest(fixture)
+
+        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
+        #expect(response.error == "camera in use")
+        #expect(stub.requests.map(\.kind) == [.create])
+        #expect(stub.requests.first?.agent == .claude)
+        #expect(stub.requests.first?.terminalID == fixture.terminal.id)
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+        // The Codex source is exactly as it was.
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
+    }
+
+    /// The Claude destination launches under the pending incarnation that
+    /// finalization promotes to the row. With the flag on, that launch carries
+    /// the session mod and its spawn record — written before the launch —
+    /// names the pending incarnation; with the flag off, neither.
+    @Test("the Claude destination carries the session mod only with the flag on",
+          arguments: [true, false])
+    func continueInClaudeExportsTheMod(flagOn: Bool) async throws {
+        let sessionsDir = try makeSessionsDir()
+        defer { try? FileManager.default.removeItem(at: sessionsDir) }
+        let fixture = try await makeRPCFixture(ownsPane: true, sessionsDir: sessionsDir)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try await fixture.db.config.setComposerDraftEnabled(flagOn)
+
+        let request = try RPCRequest(
+            method: RPCMethod.terminalContinueInClaude,
+            params: TerminalContinueInClaudeParams(
+                sourceTerminalID: fixture.terminal.id))
+        let responseTask = Task { await fixture.router.handle(request) }
+        let pending = try await waitForPending(
+            terminalID: fixture.terminal.id, in: fixture.db)
+        let freshSessionID = try #require(await waitForFreshClaudeSessionID(
+            in: fixture.recorder))
+        // The launch has been issued, so whatever it carried is recorded and
+        // the spawn record, if any, is already on disk.
+        let launch = try #require(
+            fixture.recorder.commands.last { $0.contains("respawn-window") })
+        let launchEnv = tmuxEnvironmentFlags(launch)
+        if flagOn {
+            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == sessionsDir.path)
+            #expect(launchEnv[SessionModSpawn.featuresVariable] == "composer-draft")
+            #expect(launchEnv[SessionModSpawn.incarnationVariable] == pending.uuidString)
+            let spawn = try #require(readSpawnRecord(
+                sessionsDir: sessionsDir, sessionID: freshSessionID))
+            #expect(spawn.sessionId == freshSessionID)
+            #expect(spawn.incarnationId == pending.uuidString)
+            #expect(spawn.features == ["composer-draft"])
+        } else {
+            #expect(launchEnv[SessionModSpawn.sessionsDirVariable] == nil)
+            #expect(launchEnv[SessionModSpawn.featuresVariable] == nil)
+            #expect(launchEnv[SessionModSpawn.incarnationVariable] == nil)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: sessionsDir.path).isEmpty)
+        }
+
+        // Finish the transaction so the request returns.
+        let hook = try RPCRequest(
+            method: RPCMethod.terminalSessionEvent,
+            params: TerminalSessionEventParams(
+                terminalID: fixture.terminal.id,
+                sessionID: freshSessionID,
+                transcriptPath: fixture.root.appendingPathComponent("claude.jsonl").path,
+                source: "startup",
+                cwd: fixture.root.path,
+                sessionIncarnationID: pending))
+        #expect((await fixture.router.handle(hook)).success)
+        let response = await responseTask.value
+        #expect(response.success)
+        #expect(try response.decodeResult(Terminal.self).sessionIncarnationID == pending)
     }
 
     @Test("a packet far over tmux's command limit travels as a file and is reclaimed")
@@ -745,13 +825,14 @@ struct ContinueInClaudeTransactionTests {
         paneProbeThrows: Bool = false,
         sourceWindowID: String = "@source",
         paneTargetOverride: PaneSendTarget? = nil,
-        userMessage: String = "Continue the task."
+        userMessage: String = "Continue the task.",
+        sessionsDir: URL? = nil
     ) async throws -> RPCFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true)
-        try run("/usr/bin/git", ["init", root.path])
+        try await run("/usr/bin/git", ["init", root.path])
         let rollout = root.appendingPathComponent("rollout.jsonl")
         let sessionMeta = """
             {"type":"session_meta","payload":{"id":"codex-thread","cwd":\(json(root.path))}}
@@ -804,6 +885,7 @@ struct ContinueInClaudeTransactionTests {
             tmux: tmux,
             subscriptions: subscriptions,
             configDirManager: isolatedConfigDirManager(),
+            sessionsDir: sessionsDir ?? root.appendingPathComponent("sessions", isDirectory: true),
             actuationLog: makeTestActuationLog())
         router.codexExecutableResolver = { "/opt/test/bin/codex" }
         router.codexHomeEnsurer = {
@@ -894,11 +976,13 @@ struct ContinueInClaudeTransactionTests {
     private func waitForFreshClaudeSessionID(
         in recorder: CommandRecorder
     ) async -> String? {
-        for _ in 0..<2_000 {
-            if let sessionID = recorder.freshClaudeSessionID { return sessionID }
-            await Task.yield()
+        _ = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass,
+            pollInterval: .milliseconds(10)
+        ) {
+            recorder.freshClaudeSessionID != nil
         }
-        return nil
+        return recorder.freshClaudeSessionID
     }
 
     private func json(_ value: String) -> String {
@@ -907,15 +991,15 @@ struct ContinueInClaudeTransactionTests {
         return String(array.dropFirst().dropLast())
     }
 
-    private func run(_ executable: String, _ arguments: [String]) throws {
+    /// Runs `executable` to completion, discarding its output, and waits
+    /// through `collectOutput(of:)` so the wait parks no cooperative-pool
+    /// thread.
+    private func run(_ executable: String, _ arguments: [String]) async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        let output = try await collectOutput(of: process)
+        guard output.status == 0 else {
             throw CocoaError(.executableRuntimeMismatch)
         }
     }

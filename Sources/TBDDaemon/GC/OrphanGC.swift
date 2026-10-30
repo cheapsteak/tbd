@@ -43,16 +43,17 @@ public enum OrphanGCError: LocalizedError, CustomStringConvertible, Equatable {
 /// and broadcasts `.reapRecordsChanged` whenever anything actually changed.
 ///
 /// Every failure direction here is toward keeping/no-op: a DB read failure
-/// short-circuits the whole sweep, an `lsof` timeout skips the whole sweep
-/// (never treated as "no live processes"), and `dryRun` never touches disk or
-/// the DB regardless of `gcEnabled`.
+/// short-circuits the whole sweep, an `lsof` timeout skips every leg but the
+/// database-only notification prune (never treated as "no live processes"),
+/// and `dryRun` never touches disk or the DB regardless of `gcEnabled`.
 public actor OrphanGC {
     private let db: TBDDatabase
     private let git: GitManager
     private let broadcast: @Sendable (StateDelta) -> Void
     /// Optional-returning live-cwd provider. The provider returning `nil`
-    /// means "live cwds could not be determined" and makes `sweep` skip
-    /// entirely; the property itself being `nil` means "use the real lsof".
+    /// means "live cwds could not be determined" and makes `sweep` skip every
+    /// leg but the notification prune; the property itself being `nil` means
+    /// "use the real lsof".
     private let liveCWDsProvider: (@Sendable () async -> [String]?)?
     private let scratchpadBase: URL
     private let now: @Sendable () -> Date
@@ -63,7 +64,6 @@ public actor OrphanGC {
     private let deletionQueueCollector: DeletionQueueCollector
     private let profileDirCollector: ProfileDirCollector
     private let holderRendezvousCollector: HolderRendezvousCollector
-    private let modelProxyFileCollector: ModelProxyFileCollector
     private let attachmentsCollector: AttachmentsCollector
     /// The attachments root both halves of the reconciler pair read — the hourly
     /// sweep through `attachmentsCollector`, and `removedWorktreeCleanup`
@@ -81,12 +81,31 @@ public actor OrphanGC {
     /// The `~/tbd/repos` root the unsent-prompt leg walks. `TBDConstants` in
     /// production; tests pass a temp directory.
     private let unsentPromptsReposBase: URL
+    /// The `~/tbd/sessions` root the session-directory leg walks.
+    /// `TBDConstants.sessionsDir()` in production; tests pass a temp directory.
+    private let sessionsBase: URL
     /// The shared dev-server running-file directory the stale-file leg
     /// walks. `TBDConstants.devServersDir()` in production (honors
     /// `DEV_SERVERS_DIR`); tests pass a temp directory.
     private let devServersStore: DevServerRunningFileStore
     /// Liveness read for that leg. `.live` in production.
     private let devServerProbe: DevServerProcessProbe
+    /// The `~/tbd/transcripts` root the retained-transcript leg walks, and the
+    /// root it names every receipt's file under, so the walk and the reference
+    /// set cannot disagree. `TBDConstants.retainedTranscriptsDir` in
+    /// production; tests pass a temp directory.
+    private let retainedTranscriptsBase: URL
+    /// The scratch-space pool, `~/tbd/scratch`. The deletion-queue leg drains
+    /// its `.deleting/` queue whatever the database holds and takes it as an
+    /// archived scratch row's only allowed prefix; the orphan-process leg
+    /// classifies against it. `TBDConstants.scratchDir` in production; tests
+    /// pass a temp directory.
+    private let scratchSpacesBase: URL
+    /// Where each repo row's canonical worktree pool lives, read by the same
+    /// two legs: the deletion-queue leg drains every pool's `.deleting/` queue.
+    /// `WorktreeLayout()` in production, which reads `TBDConstants.worktreesDir`;
+    /// tests pass a temp directory as `worktreesBase`.
+    private let worktreeLayout: WorktreeLayout
     private let hangStackCollector: HangStackCollector
     /// Deletes the path-keyed Claude Code credentials item belonging to a
     /// quarantined profile dir. Injected so tests never reach the real login
@@ -136,9 +155,7 @@ public actor OrphanGC {
         hangStackBase: URL? = nil,
         credentialsKeychain: any ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
         signaller: any ProcessSignaller = ProductionProcessSignaller(),
-        holdersBase: URL? = nil,
-        modelProxyBase: URL? = nil,
-        streamsBase: URL? = nil
+        holdersBase: URL? = nil
     ) {
         var wrapped: (@Sendable () async -> [String]?)?
         if let lsofProvider {
@@ -149,15 +166,14 @@ public actor OrphanGC {
             scratchpadBase: scratchpadBase, now: now,
             profileDirBase: profileDirBase, hangStackBase: hangStackBase,
             credentialsKeychain: credentialsKeychain,
-            signaller: signaller, holdersBase: holdersBase,
-            modelProxyBase: modelProxyBase, streamsBase: streamsBase
+            signaller: signaller, holdersBase: holdersBase
         )
     }
 
     /// Internal seam (tests): the provider may return `nil` to simulate the
     /// real lsof path's "unavailable" sentinel (timeout / spawn failure /
-    /// non-zero exit), which must make `sweep` skip entirely rather than be
-    /// treated as "no live processes". `liveCWDsProvider` has no default so
+    /// non-zero exit), which must make `sweep` skip every leg but the
+    /// notification prune rather than be treated as "no live processes". `liveCWDsProvider` has no default so
     /// this never collides with the public init's defaulted overload.
     init(
         db: TBDDatabase,
@@ -178,16 +194,18 @@ public actor OrphanGC {
         orphanProcessPollInterval: Duration = .milliseconds(100),
         clock: any Clock<Duration> = ContinuousClock(),
         holdersBase: URL? = nil,
-        modelProxyBase: URL? = nil,
-        streamsBase: URL? = nil,
         attachmentsBase: URL? = nil,
         remoteTranscriptsEnvironment: [String: String]? = nil,
         reposBase: URL? = nil,
+        sessionsBase: URL? = nil,
         devServersBase: URL? = nil,
         devServerProbe: DevServerProcessProbe? = nil,
         holderListenerProbe: (@Sendable (String) async -> Bool)? = nil,
         rowlessHolderHandshake: (@Sendable (String) async -> RowlessHolderHandshake)? = nil,
-        rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil
+        rowlessHolderReclaimer: (any RowlessHolderReclaiming)? = nil,
+        retainedTranscriptsBase: URL? = nil,
+        scratchSpacesBase: URL? = nil,
+        worktreesBase: URL? = nil
     ) {
         let resolvedNow = now ?? Date.init
         let resolvedScratchpadBase = scratchpadBase ?? TBDConstants.claudeScratchpadBase
@@ -222,19 +240,6 @@ public actor OrphanGC {
             base: resolvedHoldersBase,
             now: resolvedNow,
             isListening: holderListenerProbe ?? HolderRendezvousCollector.probeForListener)
-        // Both directories come from the injected seams or from
-        // `TBDConstants`, never from a literal join: the fence moves `TBD_HOME`
-        // and a hand-built path would sweep the developer's real one.
-        //
-        // Pointed at `routes/` rather than at the proxy directory, which is what
-        // keeps `proxy.lock`, `proxy.pid` and `proxy.log` structurally out of
-        // this leg's reach — see `ModelProxyFileCollector` for why an unheld
-        // lock is the wrong anchor for them.
-        self.modelProxyFileCollector = ModelProxyFileCollector(
-            routesDir: modelProxyBase.map { $0.appendingPathComponent("routes") }
-                ?? TBDConstants.modelProxyRoutesDir(),
-            streamsDir: streamsBase ?? TBDConstants.streamsDir(),
-            now: resolvedNow)
         self.rowlessHolderCollector = RowlessHolderCollector(
             base: resolvedHoldersBase,
             now: resolvedNow,
@@ -248,9 +253,15 @@ public actor OrphanGC {
         self.remoteTranscriptsEnvironment = remoteTranscriptsEnvironment
             ?? ProcessInfo.processInfo.environment
         self.unsentPromptsReposBase = reposBase ?? TBDConstants.reposDir
+        self.sessionsBase = sessionsBase ?? TBDConstants.sessionsDir()
         self.devServersStore = DevServerRunningFileStore(
             directory: devServersBase ?? TBDConstants.devServersDir())
         self.devServerProbe = devServerProbe ?? .live
+        self.retainedTranscriptsBase = retainedTranscriptsBase
+            ?? TBDConstants.retainedTranscriptsDir
+        self.scratchSpacesBase = scratchSpacesBase ?? TBDConstants.scratchDir
+        self.worktreeLayout = worktreesBase.map { WorktreeLayout(worktreesBase: $0) }
+            ?? WorktreeLayout()
         self.processCWDsProvider = processCWDsProvider
         let resolvedSnapshotProvider: @Sendable () async -> [ProcessSnapshotEntry]? =
             processSnapshotProvider ?? { await OrphanProcessCollector.realProcessSnapshot() }
@@ -267,7 +278,8 @@ public actor OrphanGC {
     /// Runs one full orphan-GC pass. `dryRun` computes and returns `planned`
     /// without touching disk or the DB, regardless of `gcEnabled`. When
     /// `gcEnabled` is `false` and `dryRun` is also `false`, the sweep does
-    /// nothing at all — not even the `lsof` pass.
+    /// nothing at all — not even the `lsof` pass. When `lsof` fails, only the
+    /// notification prune, which runs before it, takes effect.
     public func sweep(dryRun: Bool = false) async -> GCSweepResult {
         var planned: [String] = []
         var reaped = 0
@@ -280,16 +292,24 @@ public actor OrphanGC {
         // Same reasoning as `hangStacksReaped`: unsent-prompt files produce no
         // `ReapRecord`.
         var unsentPromptsReaped = 0
+        var sessionDirectoriesReaped = 0
         var devServerFilesReaped = 0
         // Same reasoning again: a checkout template produces no `ReapRecord`.
         var checkoutTemplatesReaped = 0
+        // And again: a notification row produces no `ReapRecord`.
+        var notificationsReaped = 0
 
         guard let config = try? await db.config.get() else { return .init(planned: [], reaped: 0) }
         guard config.gcEnabled || dryRun else { return .init(planned: ["gc disabled"], reaped: 0) }
 
+        // Before the lsof gate, deliberately: this leg reads and writes only
+        // the database, so an lsof outage is no reason to skip it.
+        await reclaimNotifications(dryRun: dryRun, planned: &planned, reaped: &notificationsReaped)
+
         guard let live = await liveCWDs() else {
-            logger.error("gc: lsof unavailable this sweep (timeout or spawn failure) — skipping entirely")
-            return .init(planned: ["lsof unavailable - sweep skipped"], reaped: 0)
+            logger.error("gc: lsof unavailable this sweep (timeout or spawn failure) — skipping the rest")
+            return .init(
+                planned: planned + ["lsof unavailable - sweep skipped"], reaped: notificationsReaped)
         }
 
         // nil when the read failed: the template leg must tell that apart
@@ -378,10 +398,6 @@ public actor OrphanGC {
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
 
-        await reclaimModelProxyFiles(
-            config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
-        )
-
         await reclaimRetainedTranscripts(
             config: config, dryRun: dryRun, planned: &planned, reaped: &reaped
         )
@@ -393,6 +409,10 @@ public actor OrphanGC {
         await reclaimAttachments(dryRun: dryRun, planned: &planned, reaped: &reaped)
 
         reclaimUnsentPrompts(dryRun: dryRun, planned: &planned, reaped: &unsentPromptsReaped)
+
+        await reclaimSessionDirectories(
+            config: config, dryRun: dryRun, planned: &planned, reaped: &sessionDirectoriesReaped
+        )
 
         reclaimStaleDevServerFiles(
             config: config, dryRun: dryRun, planned: &planned, reaped: &devServerFilesReaped)
@@ -415,7 +435,69 @@ public actor OrphanGC {
         return .init(
             planned: planned,
             reaped: reaped + hangStacksReaped + unsentPromptsReaped + devServerFilesReaped
-                + checkoutTemplatesReaped)
+                + checkoutTemplatesReaped
+                + sessionDirectoriesReaped
+                + notificationsReaped)
+    }
+
+    // MARK: - Notifications
+
+    /// How long a read notification is kept. Nothing reads a notification
+    /// back once it is marked read — the only production reader is the
+    /// per-worktree unread summary — so this is a short history, not a
+    /// contract anything depends on.
+    static let notificationReadRetention: TimeInterval = 7 * 24 * 60 * 60
+
+    /// Prunes the `notification` table, which otherwise only grows: one row
+    /// per turn end of every session, each holding that turn's final message
+    /// (`docs/specs/2026-10-25-state-db-retention-design.md`).
+    ///
+    /// Removes read rows older than `notificationReadRetention` and every row,
+    /// read or unread, on an archived worktree, whose badges nobody can see.
+    /// Unread rows on any other worktree are never removed. Runs under
+    /// `gcEnabled` alone, with no flag of its own: it removes data nothing
+    /// reads.
+    ///
+    /// A dry run counts what a real run would remove and deletes nothing. No
+    /// `ReapRecord` is written: there is no worktree directory involved and
+    /// nothing a `tbd gc restore` could put back.
+    private func reclaimNotifications(
+        dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        // Through the date seam: the cutoff is compared against a persisted
+        // timestamp, which is data rather than behavior.
+        let cutoff = now().addingTimeInterval(-Self.notificationReadRetention)
+
+        if dryRun {
+            do {
+                let count = try await db.notifications.countExpired(readBefore: cutoff)
+                if count > 0 { planned.append("REAP notifications \(count)") }
+            } catch {
+                planned.append("KEEP rows-unreadable notifications")
+                logger.error("""
+                gc: notification rows unreadable this sweep \
+                (\(error.localizedDescription, privacy: .public)) — skipping the phase
+                """)
+            }
+            return
+        }
+
+        do {
+            let removed = try await db.notifications.deleteExpired(readBefore: cutoff)
+            guard removed > 0 else { return }
+            planned.append("REAP notifications \(removed)")
+            reaped += removed
+            logger.info("""
+            gc: dropped \(removed, privacy: .public) notification row(s): read and created \
+            before \(cutoff.description, privacy: .public), or on archived worktrees
+            """)
+        } catch {
+            planned.append("KEEP row-delete-failed notifications")
+            logger.warning("""
+            gc: could not drop expired notification rows \
+            (\(error.localizedDescription, privacy: .public))
+            """)
+        }
     }
 
     // MARK: - Checkout templates
@@ -542,6 +624,124 @@ public actor OrphanGC {
         }
     }
 
+    // MARK: - Session directories
+
+    /// How long a `composer-draft.unrestored` file is kept after its last
+    /// write: 30 days. The root `CLAUDE.md` OrphanGC entry states the same figure.
+    static let unrestoredDraftRetention: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Reclaims `~/tbd/sessions/<claudeSessionID>/` — the named reconciler for
+    /// the per-session files the session mod and the daemon share
+    /// (`docs/specs/2026-10-19-tbd-session-mod-design.md`, "Reclaiming files").
+    ///
+    /// A directory stays while a terminal row, or a closed-terminal history
+    /// row in a worktree that is not archived, names its session ID: both are
+    /// ways a person can still resume the session. An unreferenced directory
+    /// goes once nothing in it was created or modified within `gcGraceSeconds`.
+    /// Inside a kept directory, a `composer-draft.unrestored` goes 30 days
+    /// after its last write, since nothing else ever clears it.
+    ///
+    /// Under `gcEnabled` alone. If either reference query throws, the whole
+    /// arm is skipped: an unread table must never read as "nothing refers to
+    /// it". No `ReapRecord`: there is no worktree to key one by. `dryRun`
+    /// plans without touching disk.
+    private func reclaimSessionDirectories(
+        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) async {
+        let candidates = Self.sessionDirectoryNames(base: sessionsBase.path)
+        guard !candidates.isEmpty else { return }
+
+        let referenced: Set<String>
+        do {
+            let terminals = try await db.terminals.claudeSessionReferences()
+            let history = try await db.terminalHistory.claudeSessionReferencesInUnarchivedWorktrees()
+            referenced = terminals.union(history)
+        } catch {
+            logger.error("""
+            gc: rows unreadable this sweep (\(error.localizedDescription, privacy: .public)) \
+            — skipping the session-directory phase
+            """)
+            planned.append("KEEP rows-unreadable session-directories")
+            return
+        }
+
+        let asOf = now()
+        for name in candidates {
+            let directory = sessionsBase.appendingPathComponent(name).path
+            if referenced.contains(name) {
+                planned.append("KEEP referenced \(directory)")
+                reclaimStaleUnrestoredDraft(
+                    directory: directory, asOf: asOf, dryRun: dryRun, planned: &planned,
+                    reaped: &reaped)
+                continue
+            }
+            if let reason = Self.youngRemoteTranscriptCacheKeepReason(
+                directory: directory, asOf: asOf, graceSeconds: config.gcGraceSeconds) {
+                planned.append("KEEP \(reason) \(directory)")
+                continue
+            }
+            planned.append("REAP session-directory \(directory)")
+            guard !dryRun else { continue }
+            do {
+                try FileManager.default.removeItem(atPath: directory)
+                reaped += 1
+                logger.info("gc: reclaimed session directory \(directory, privacy: .public)")
+            } catch {
+                planned.append("KEEP remove-failed \(directory)")
+                logger.warning("""
+                gc: could not remove \(directory, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            }
+        }
+    }
+
+    /// Names of the non-hidden subdirectories of the sessions root, sorted. A
+    /// synchronous helper so the async arm never holds a `FileManager` across
+    /// an `await`. An unreadable or absent root yields nothing.
+    private static func sessionDirectoryNames(base: String) -> [String] {
+        let fm = FileManager.default
+        guard let names = try? fm.contentsOfDirectory(atPath: base) else { return [] }
+        return names.sorted().filter { name in
+            guard !name.hasPrefix(".") else { return false }
+            var isDirectory: ObjCBool = false
+            return fm.fileExists(atPath: "\(base)/\(name)", isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        }
+    }
+
+    /// The 30-day rule for one kept session directory's `composer-draft.unrestored`.
+    private func reclaimStaleUnrestoredDraft(
+        directory: String, asOf: Date, dryRun: Bool, planned: inout [String], reaped: inout Int
+    ) {
+        let fm = FileManager.default
+        let path = "\(directory)/\(SessionModFiles.composerDraftUnrestoredFileName)"
+        guard let attributes = try? fm.attributesOfItem(atPath: path),
+              attributes[.type] as? FileAttributeType == .typeRegular
+        else { return }
+        guard let modified = attributes[.modificationDate] as? Date else {
+            planned.append("KEEP unknown-age \(path)")
+            return
+        }
+        guard asOf.timeIntervalSince(modified) >= Self.unrestoredDraftRetention else {
+            planned.append("KEEP retention \(path)")
+            return
+        }
+        planned.append("REAP unrestored-draft \(path)")
+        guard !dryRun else { return }
+        do {
+            try fm.removeItem(atPath: path)
+            reaped += 1
+            logger.info("gc: reclaimed unrestored draft \(path, privacy: .public)")
+        } catch {
+            planned.append("KEEP remove-failed \(path)")
+            logger.warning("""
+            gc: could not remove \(path, privacy: .public): \
+            \(error.localizedDescription, privacy: .public)
+            """)
+        }
+    }
+
     // MARK: - Dev server running files
 
     /// Deletes running files in the shared dev-server directory whose
@@ -659,8 +859,8 @@ public actor OrphanGC {
         repos: [Repo], archived: [Worktree], live: [String], graceSeconds: Int, dryRun: Bool,
         planned: inout [String], reaped: inout Int
     ) async {
-        let layout = WorktreeLayout()
-        let scratchPrefix = TBDConstants.scratchDir.path
+        let layout = worktreeLayout
+        let scratchPrefix = scratchSpacesBase.path
         var repoPathByID: [UUID: String] = [:]
         var prefixesByRepoID: [UUID: [String]] = [:]
         var pools: Set<String> = []
@@ -1165,76 +1365,6 @@ public actor OrphanGC {
         }
     }
 
-    /// Reclaims model proxy route files and stream files whose sessions are
-    /// gone (spec, "Durable resources and their reconcilers").
-    ///
-    /// Under `gcEnabled` alone, with no flag of its own: the files are the
-    /// proxy's own output, nothing else can reclaim them, and unlike the holder
-    /// legs this one signals no process and reads no rendezvous — it unlinks a
-    /// route file whose terminal no longer exists and a stream file nothing will
-    /// ever tail again.
-    ///
-    /// The keep bias in `ModelProxyFileCollector` is what makes that safe, and
-    /// the cost it is sized against is the **route** file's, not the stream
-    /// file's: a stream reaped early loses one turn's provisional transcript
-    /// view, while a route reaped from under a live session 404s that session
-    /// from the proxy's next restart onward. See the collector's own note.
-    ///
-    /// Rows are read once, before any gate. A row that commits during the sweep
-    /// is therefore not in the set — which is exactly what the grace window
-    /// covers, since a file written by a spawn that recent is younger than
-    /// `gcGraceSeconds` and kept on age alone.
-    private func reclaimModelProxyFiles(
-        config: Config, dryRun: Bool, planned: inout [String], reaped: inout Int
-    ) async {
-        let candidates = modelProxyFileCollector.candidates()
-        guard !candidates.isEmpty else { return }
-
-        guard let terminals = try? await db.terminals.list() else {
-            logger.error("gc: session rows unreadable this sweep — skipping the model proxy file phase")
-            planned.append("KEEP rows-unreadable model-proxy-file phase")
-            return
-        }
-        // Holder rows only, because only a holder spawn is ever routed (spec:
-        // pty-holder transport only), and only rows Claude's process has not
-        // left: an exit-stamped row is a session whose stream nothing will
-        // resume, and keeping its files for it would keep them forever.
-        let live = Set(
-            terminals
-                .filter { $0.transport == .holder && $0.hibernateReason != .exited }
-                .map(\.id))
-
-        for candidate in candidates {
-            switch modelProxyFileCollector.decide(
-                candidate, graceSeconds: config.gcGraceSeconds, liveTerminalIDs: live
-            ) {
-            case .keep(let reason):
-                // `planned` is a return value, printed for the operator who
-                // asked for the sweep, and it names the file in full. The log
-                // line is a different audience — see `ModelProxyFileCandidate
-                // .loggablePath` — and this one is the sharpest case for it: a
-                // `live-terminal` or `grace` keep names, by construction, the
-                // route file of a session that is running right now.
-                planned.append("KEEP \(reason) \(candidate.path)")
-                logger.debug("""
-                gc: keep \(reason, privacy: .public) \(candidate.loggablePath, privacy: .public)
-                """)
-            case .reap:
-                planned.append("REAP model-proxy-file \(candidate.path)")
-                // The outer `gcEnabled || dryRun` guard means every line below
-                // runs only with gcEnabled == true.
-                guard !dryRun else { continue }
-                guard modelProxyFileCollector.reap(candidate) else {
-                    planned.append("KEEP unlink-failed \(candidate.path)")
-                    continue
-                }
-                // No `ReapRecord`: these files are unlinked, not quarantined,
-                // and there is nothing a `tbd gc restore` could put back.
-                reaped += 1
-            }
-        }
-    }
-
     // MARK: - Retained transcripts
 
     /// Reclaims the local half of the retained-transcript exchange — the JSONL
@@ -1353,13 +1483,15 @@ public actor OrphanGC {
         var referenced = Set<String>()
         for row in liveRows {
             referenced.insert(deletionQueueCollector.resolvedPath(
-                TBDConstants.retainedTranscriptPath(provider: row.provider, key: row.key).path))
+                TBDConstants.retainedTranscriptPath(
+                    provider: row.provider, key: row.key, directory: retainedTranscriptsBase
+                ).path))
             if let localPath = row.localPath {
                 referenced.insert(deletionQueueCollector.resolvedPath(localPath))
             }
         }
 
-        for file in Self.retainedTranscriptFiles(in: TBDConstants.retainedTranscriptsDir) {
+        for file in Self.retainedTranscriptFiles(in: retainedTranscriptsBase) {
             guard !referenced.contains(deletionQueueCollector.resolvedPath(file.path)) else {
                 continue
             }
@@ -1944,7 +2076,7 @@ public actor OrphanGC {
     private func orphanProcessRoots(
         repos: [Repo], archived: [Worktree], liveRows: [LocalWorktree]
     ) -> (TBDProcessRoots, [String: String]) {
-        let layout = WorktreeLayout()
+        let layout = worktreeLayout
         var pools: [String] = []
         var repoPathByPool: [String: String] = [:]
         var repoPathByID: [UUID: String] = [:]
@@ -1959,7 +2091,7 @@ public actor OrphanGC {
         // The scratch-worktree pool is TBD's outright, and belongs to no repo —
         // hence no `repoPathByPool` entry, which stamps the record with `""`
         // the same way the scratchpad phase does.
-        pools.append(deletionQueueCollector.resolvedPath(TBDConstants.scratchDir.path))
+        pools.append(deletionQueueCollector.resolvedPath(scratchSpacesBase.path))
         // The Claude scratchpad base is SHARED, not owned. Claude Code creates
         // one directory there per project it has ever run in, and TBD manages
         // almost none of them — a single census of one developer machine found

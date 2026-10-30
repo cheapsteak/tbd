@@ -2,9 +2,10 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The shared `remoteTranscriptOpen` preference. Every test drives a fresh
-/// `AppState` over its own `UserDefaults(suiteName:)` and removes that domain
+/// `AppState` over its own `TestDefaultsSuite` and tears it down
 /// afterwards: `.standard` on this unbundled executable is the developer's
 /// real `TBDApp.plist`.
 @MainActor
@@ -13,9 +14,9 @@ struct RemoteTranscriptOpenPreferenceTests {
     private let key = AppState.remoteTranscriptOpenKey
 
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.RemoteTranscriptOpen.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteTranscriptOpen")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(defaults)
     }
 

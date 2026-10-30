@@ -137,6 +137,28 @@ struct RemoteLaneFixture {
             }
     }
 
+    /// The record a refusal leaves: exactly one request row, and the one
+    /// outcome confirming it `refused` with the reason `not-eligible`. Returned
+    /// as a pair so each caller checks what names its own request — the RPC
+    /// method, or the merge rail's daemon actor — and the refusal sentence on
+    /// the outcome.
+    func refusalRecord(
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws -> (request: [String: Any], outcome: [String: Any]) {
+        let rows = try actuationRows()
+        try #require(
+            rows.count == 2,
+            "a refusal writes its request row and one outcome, got \(rows.count)",
+            sourceLocation: sourceLocation)
+        let request = rows[0]
+        let outcome = rows[1]
+        #expect(outcome["confirms"] as? String == request["id"] as? String,
+                "the outcome does not confirm the request", sourceLocation: sourceLocation)
+        #expect(outcome["result"] as? String == "refused", sourceLocation: sourceLocation)
+        #expect(outcome["reason"] as? String == "not-eligible", sourceLocation: sourceLocation)
+        return (request, outcome)
+    }
+
     func status(of worktree: Worktree) async throws -> WorktreeStatus? {
         try await db.worktrees.get(id: worktree.id)?.status
     }

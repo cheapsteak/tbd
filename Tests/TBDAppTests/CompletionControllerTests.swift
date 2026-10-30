@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The menu as a state machine: what is showing, what is highlighted, and what
 /// Enter would do.
@@ -14,9 +15,9 @@ import TBDShared
 @Suite("CompletionController")
 struct CompletionControllerTests {
 
-    private func makeController(suiteName: String) -> CompletionController {
+    private func makeController(defaults: UserDefaults) -> CompletionController {
         let controller = CompletionController(
-            frecency: FrecencyStore(defaults: UserDefaults(suiteName: suiteName)!))
+            frecency: FrecencyStore(defaults: defaults))
         controller.adopt(inventory: TerminalCompletionsResult(
             commands: [
                 CompletionCommand(name: "compact", description: "Compact"),
@@ -29,9 +30,9 @@ struct CompletionControllerTests {
     }
 
     private func run(_ body: (CompletionController) -> Void) {
-        let suiteName = "CompletionControllerTests-\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
-        body(makeController(suiteName: suiteName))
+        let suite = TestDefaultsSuite("CompletionControllerTests")
+        defer { suite.tearDown() }
+        body(makeController(defaults: suite.defaults))
     }
 
     @Test func typingASlashOpensIt() {
@@ -118,10 +119,10 @@ struct CompletionControllerTests {
     /// the inventory arrives — otherwise the menu reopens with no keystroke,
     /// the trap the spec forbids.
     @Test func escapeWhileLoadingStaysClosedWhenInventoryArrives() {
-        let suiteName = "CompletionControllerTests-\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("CompletionControllerTests")
+        defer { suite.tearDown() }
         let c = CompletionController(
-            frecency: FrecencyStore(defaults: UserDefaults(suiteName: suiteName)!))
+            frecency: FrecencyStore(defaults: suite.defaults))
         c.update(text: "/comp", selectionLocation: 5, hasMarkedText: false)
         #expect(c.presentation == .loading)
         c.close(suppressingCurrentToken: true)
@@ -149,10 +150,10 @@ struct CompletionControllerTests {
     /// Before the inventory lands, a single dim row — and NOTHING preselected, so
     /// Enter cannot accept a row that appeared under the finger.
     @Test func withNoInventoryItShowsLoadingAndPreselectsNothing() {
-        let suiteName = "CompletionControllerTests-\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("CompletionControllerTests")
+        defer { suite.tearDown() }
         let c = CompletionController(
-            frecency: FrecencyStore(defaults: UserDefaults(suiteName: suiteName)!))
+            frecency: FrecencyStore(defaults: suite.defaults))
         c.update(text: "/comp", selectionLocation: 5, hasMarkedText: false)
         #expect(c.presentation == .loading)
         #expect(c.selectedIndex == nil)

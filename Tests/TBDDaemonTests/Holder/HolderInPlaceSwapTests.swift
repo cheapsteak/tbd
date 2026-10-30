@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// `terminal.swapProfile` in `.inPlace` mode, where the row it is asked about
@@ -47,6 +48,9 @@ struct HolderInPlaceSwapTests {
         let destProfileID: UUID
         let home: String
         let actuationLogPath: String
+        /// The router's (and so the coordinator's) session-mod root, inside
+        /// `home`. Nothing is written there unless a test turns a feature on.
+        let sessionsDir: URL
 
         func tearDown() {
             try? ModelProfileKeychain.delete(id: destProfileID.uuidString)
@@ -108,9 +112,11 @@ struct HolderInPlaceSwapTests {
             db: db, git: GitManager(), tmux: tmux, hooks: HookResolver(),
             configDirManager: configDirManager)
         let actuationLogPath = "\(home)/actuations.jsonl"
+        let sessionsDir = URL(fileURLWithPath: "\(home)/sessions", isDirectory: true)
         let router = RPCRouter(
             db: db, lifecycle: lifecycle, tmux: tmux, startTime: Date(),
             configDirManager: configDirManager,
+            sessionsDir: sessionsDir,
             actuationLog: ActuationLog(path: actuationLogPath))
         // The registry both halves reach: the router's own for the swap's
         // transport decision, and the coordinator's for the park and the wake.
@@ -142,7 +148,8 @@ struct HolderInPlaceSwapTests {
 
         return Fixture(
             db: db, router: router, recorder: recorder, worktree: worktree,
-            destProfileID: dest.id, home: home, actuationLogPath: actuationLogPath)
+            destProfileID: dest.id, home: home, actuationLogPath: actuationLogPath,
+            sessionsDir: sessionsDir)
     }
 
     /// A holder-backed Claude row with a NON-blank transcript, so the swap
@@ -220,8 +227,8 @@ struct HolderInPlaceSwapTests {
     /// actuation says `transport-failed` rather than inheriting a success.
     ///
     /// The refusal is the park's own text, not a new one: this fixture's
-    /// registry adopted nothing, so the daemon holds no reader to write the
-    /// polite `/exit` through.
+    /// registry adopted nothing, so the daemon holds no reader for the
+    /// session, and a park refuses a session it has not adopted.
     @Test("a swap whose park refuses leaves the row awake on its old account and records transport-failed")
     func swapParkRefusalLeavesTheRowAwake() async throws {
         let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
@@ -251,9 +258,10 @@ struct HolderInPlaceSwapTests {
     }
 
     /// The field report: "Swap profile" on a tab whose holder was killed with
-    /// its job. The park finalizes without the screen rail — nothing is left
-    /// to hold unsent input — so the swap goes on to re-home the row and try
-    /// the wake, where it used to refuse for a reader that cannot come back.
+    /// its job. The park finalizes without the reader check and the
+    /// transcript rail — no process is left to end — so the swap goes on to
+    /// re-home the row and try the wake rather than refusing for a reader
+    /// that cannot come back.
     ///
     /// The pids are above macOS's pid range, so the real process table this
     /// fixture's coordinator asks answers "nothing runs there" for the child;
@@ -433,9 +441,10 @@ struct HolderInPlaceSwapTests {
             expectedReplacementState: TerminalReplacementSnapshot(terminal: rehomed),
             spawnCommand: "claude --resume \(Self.sessionID)",
             env: ["TBD_TERMINAL_ID": rehomed.id.uuidString],
-            attachment: .unproxied([:]),
+            sensitiveEnv: [:],
             cols: 80,
-            rows: 24)
+            rows: 24,
+            overlay: Self.plainOverlay(rehomed))
 
         guard case .respawnFailed(let reason) = result else {
             Issue.record("expected .respawnFailed from a daemon that cannot spawn, got \(result)")
@@ -476,10 +485,11 @@ struct HolderInPlaceSwapTests {
             expectedReplacementState: TerminalReplacementSnapshot(terminal: terminal),
             spawnCommand: "claude --resume \(Self.sessionID)",
             env: ["TBD_TERMINAL_ID": terminal.id.uuidString],
-            attachment: .unproxied([:]),
+            sensitiveEnv: [:],
             cols: 80,
             rows: 24,
-            spawnTitle: spawnTitle)
+            spawnTitle: spawnTitle,
+            overlay: Self.plainOverlay(terminal))
 
         guard case .respawnFailed = result else {
             Issue.record("expected .respawnFailed from a daemon that cannot spawn, got \(result)")
@@ -489,6 +499,104 @@ struct HolderInPlaceSwapTests {
                 "a refused wake kept a title no session launched with")
         #expect(await titles.isReserved(terminalID: terminal.id) == false,
                 "a refused wake left its reservation behind")
+    }
+
+    // MARK: - The session mod on a holder wake
+
+    /// A draft the mod saved before the park, byte for byte as it wrote it.
+    private static let savedDraft = Data(
+        #"{"schemaVersion":1,"sessionId":"swap-holder-session","hasDraft":true,"text":"unsent","cursor":6,"restorable":true,"savedAtMs":1}"#.utf8)
+
+    /// Seeds the session's saved draft, and returns its file.
+    private static func seedDraft(_ fixture: Fixture) throws -> URL {
+        let directory = fixture.sessionsDir.appendingPathComponent(sessionID, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let draft = directory.appendingPathComponent(SessionModFiles.composerDraftFileName)
+        try savedDraft.write(to: draft)
+        return draft
+    }
+
+    /// Wakes a parked holder row through the swap's wake half, on a spawner
+    /// that cannot start a holder — so the wake runs every step up to the
+    /// spawn itself and then refuses.
+    private static func wakeParkedRow(_ fixture: Fixture, _ terminal: Terminal) async throws -> WakeResult {
+        await fixture.router.hibernationCoordinator.wakeHolderAfterInPlaceChange(
+            terminal: terminal,
+            worktree: try await fixture.local(),
+            sessionID: sessionID,
+            expectedReplacementState: TerminalReplacementSnapshot(terminal: terminal),
+            spawnCommand: "claude --resume \(sessionID)",
+            env: ["TBD_TERMINAL_ID": terminal.id.uuidString],
+            sensitiveEnv: [:],
+            cols: 80,
+            rows: 24,
+            overlay: plainOverlay(terminal))
+    }
+
+    /// The overlay a row with no fallback models or fragments plans: the shared
+    /// global file, which `settle` never writes.
+    private static func plainOverlay(_ terminal: Terminal) -> ReplacementSpawnOverlay {
+        ReplacementSpawnOverlay.plan(
+            fallbackModels: nil,
+            sessionKey: terminal.id.uuidString,
+            repoSettingsJSON: nil,
+            extraSettingsJSON: nil)
+    }
+
+    /// With the flag on, a holder wake — the in-place swap's wake included —
+    /// writes the spawn record before it starts the holder, naming the
+    /// incarnation `prepareHibernatedAgentRespawn` persisted for the launch,
+    /// and leaves the saved draft alone.
+    ///
+    /// The launch's process environment is not observable in this suite: its
+    /// spawner cannot start a holder, and a real spawn belongs to the live
+    /// target. What this pins is the record written ahead of the launch, which
+    /// the same `SessionModSpawn.prepare` call returns the variables from.
+    @Test("a holder wake with the flag on writes the spawn record for the incarnation it persisted")
+    func holderWakeWithTheFlagOnWritesTheSpawnRecord() async throws {
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        try await fixture.db.config.setComposerDraftEnabled(true)
+        let terminal = try await Self.holderRow(fixture, parked: true)
+        let draft = try Self.seedDraft(fixture)
+
+        let result = try await Self.wakeParkedRow(fixture, terminal)
+
+        guard case .respawnFailed = result else {
+            Issue.record("expected the unspawnable holder to refuse the wake, got \(result)")
+            return
+        }
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        let incarnation = try #require(after.sessionIncarnationID)
+        #expect(incarnation != terminal.sessionIncarnationID,
+                "the wake never reached its replacement reservation")
+        let spawn = try #require(readSpawnRecord(
+            sessionsDir: fixture.sessionsDir, sessionID: Self.sessionID))
+        #expect(spawn.sessionId == Self.sessionID)
+        #expect(spawn.incarnationId == incarnation.uuidString)
+        #expect(spawn.features == ["composer-draft"])
+        #expect(try Data(contentsOf: draft) == Self.savedDraft)
+    }
+
+    /// With the flag off, the same wake writes nothing under the sessions
+    /// directory.
+    @Test("a holder wake with the flag off writes no spawn record")
+    func holderWakeWithTheFlagOffWritesNothing() async throws {
+        let fixture = try await Self.makeFixture(spawner: Self.unspawnableSpawner())
+        defer { fixture.tearDown() }
+        let terminal = try await Self.holderRow(fixture, parked: true)
+
+        let result = try await Self.wakeParkedRow(fixture, terminal)
+
+        guard case .respawnFailed = result else {
+            Issue.record("expected the unspawnable holder to refuse the wake, got \(result)")
+            return
+        }
+        let after = try #require(try await fixture.db.terminals.get(id: terminal.id))
+        #expect(after.sessionIncarnationID != terminal.sessionIncarnationID,
+                "the wake never reached the point where the record would be written")
+        #expect(!FileManager.default.fileExists(atPath: fixture.sessionsDir.path),
+                "a wake with every feature off wrote under the sessions directory")
     }
 }
 

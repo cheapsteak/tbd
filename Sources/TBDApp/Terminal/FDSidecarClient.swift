@@ -175,7 +175,7 @@ final class FDSidecarClient: @unchecked Sendable {
     /// frame. Never blocks the caller: encodes inline (cheap) then enqueues the
     /// write on `sendQueue`. Errors — including a disconnected socket — are
     /// logged and dropped; the receive loop's EOF path handles daemon death and
-    /// Phase B owns reconnect.
+    /// `DaemonClient` owns reconnect.
     ///
     /// Returns whether the frame was **handed to `sendQueue`** — `false` for
     /// either refusal that is knowable at call time (over-cap payload, encode
@@ -426,8 +426,9 @@ final class FDSidecarClient: @unchecked Sendable {
                 break
             }
         }
-        // EOF: fail everything pending, mark disconnected (reconnect is a
-        // Phase B crash-recovery concern).
+        // EOF: fail everything pending, mark disconnected. Reconnecting is
+        // `DaemonClient`'s: `connect()` while the app is disconnected, and
+        // `reconnectSidecarIfDown` while it stays connected.
         lock.lock()
         let pending = waiters; waiters = [:]
         socketFD = -1
@@ -531,6 +532,9 @@ final class FDPromise: @unchecked Sendable {
     private let lock = NSLock()
     private var outcome: Result<Int32, Error>?
     private var continuation: CheckedContinuation<Int32, Error>?
+    /// Whether `value(timeout:)` has handed `outcome` to its caller. Until it
+    /// has, a delivered descriptor is still this promise's to close.
+    private var taken = false
     var onCancelOrTimeout: (() -> Void)?
 
     func settle(fd: Int32?, error: Error?) {
@@ -543,6 +547,7 @@ final class FDPromise: @unchecked Sendable {
         let result: Result<Int32, Error> = fd.map { .success($0) } ?? .failure(error ?? FDSidecarError.disconnected)
         outcome = result
         let cont = continuation; continuation = nil
+        if cont != nil { taken = true }
         lock.unlock()
         cont?.resume(with: result)
     }
@@ -561,6 +566,7 @@ final class FDPromise: @unchecked Sendable {
         return try await withCheckedThrowingContinuation { cont in
             lock.lock()
             if let outcome {
+                taken = true
                 lock.unlock()
                 cont.resume(with: outcome)
                 return
@@ -570,8 +576,28 @@ final class FDPromise: @unchecked Sendable {
         }
     }
 
+    /// Give up on the fd: deregister the waiter and fail the promise. Called by
+    /// a caller that will never await `value(timeout:)`.
+    ///
+    /// **A descriptor that already arrived is closed here.** The daemon vends
+    /// before it answers `attach.request`, so when that answer is lost the fd
+    /// has usually settled this promise by the time the caller's RPC fails and
+    /// it cancels. Nobody will ever take that fd, and `settle` cannot close it
+    /// (the promise is already settled), so without this it would leak: an
+    /// open, unread copy of the session's pty in this process. A later vend
+    /// needs nothing here — the deregistered waiter sends it down the receive
+    /// loop's no-waiter path, which closes it. A descriptor `value(timeout:)`
+    /// already handed out belongs to its caller and is left alone.
     func cancel() {
         onCancelOrTimeout?()
         settle(fd: nil, error: FDSidecarError.timedOut)
+        lock.lock()
+        var untaken: Int32?
+        if !taken, case .success(let fd)? = outcome {
+            untaken = fd
+            outcome = .failure(FDSidecarError.timedOut)
+        }
+        lock.unlock()
+        if let untaken { Darwin.close(untaken) }
     }
 }

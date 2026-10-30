@@ -17,7 +17,7 @@ public enum ClaudeCloudLedgerState: String, Codable, Sendable {
 ///
 /// Distinct from the `remote_session` mirror, which is what the manager last
 /// observed. Daemon-internal — it never crosses the RPC wire, so it has no
-/// `TBDShared` Codable model, exactly like `watch_desk_judge_lease`.
+/// `TBDShared` Codable model.
 ///
 /// This ledger is the whole of the `claude-cloud` provider's inventory: no
 /// supported interface enumerates an account's cloud sessions, so `list`

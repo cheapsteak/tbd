@@ -127,11 +127,10 @@ public extension Trait where Self == TimeLimitTrait {
     ///   `GatedIntervalSleepTests.returnsAfterExpectedPollCount` pays six
     ///   guards (3 `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1
     ///   `FireRecorder.next()`) for 270 s, past this limit;
-    ///   `GatedIntervalSleepTests.boundaryIsExact` and
-    ///   `DaywatchRunnerLoopTests.testSubsequentTicksAtInterval` pay five for
-    ///   225 s — but they are on `EventDrivenTestClock`'s strict waits, where a
-    ///   missed arming throws before anything advances, so the chain stops at
-    ///   the first bad step. Their one non-throwing guard, `next()`, sits last
+    ///   `GatedIntervalSleepTests.boundaryIsExact` pays five for 225 s — but
+    ///   they are on `EventDrivenTestClock`'s strict waits, where a missed
+    ///   arming throws before anything advances, so the chain stops at the
+    ///   first bad step. Their one non-throwing guard, `next()`, sits last
     ///   with nothing behind it to inherit the run, so at most one 45 s guard
     ///   elapses in any single run and 270 s describes a run that cannot
     ///   happen (see "The event-driven clock" below).
@@ -293,9 +292,9 @@ public extension TestClock {
     /// queued on the same cooperative pool the poller needs a turn from. The
     /// field signature is this helper's own diagnostic
     /// reading **"observed 1 clock advance"**: the first tick landed and the
-    /// re-arm after it was never seen. On 2026-09-08 that reddened
-    /// `ModelProxySupervisorTests` on three consecutive CI dispatches of one
-    /// SHA, over 45–170 s, with nothing wrong with the supervisor.
+    /// re-arm after it was never seen. On 2026-09-08 that reddened a
+    /// supervisor's suite on three consecutive CI dispatches of one SHA, over
+    /// 45–170 s, with nothing wrong with the supervisor.
     ///
     /// So this helper is for a **one-shot** wait — something that arms once and
     /// fires once. A re-arming loop belongs on `EventDrivenTestClock`

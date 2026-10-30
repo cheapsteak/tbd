@@ -3,6 +3,7 @@ import TBDShared
 import Testing
 
 @testable import TBDApp
+import TestSupport
 
 /// Tests for `TerminalLatencyDiagnostic` — the gate, the panel registry, and
 /// the request handling that decides whether a probe ever types into a
@@ -11,7 +12,7 @@ import Testing
 /// Isolation matters: TBDApp ships as an unbundled SPM executable, so its
 /// `UserDefaults.standard` domain is `TBDApp.plist` in the developer's home —
 /// the same domain a running production TBDApp reads. Every test below drives
-/// the gate through a per-test `UserDefaults(suiteName:)` and tears the domain
+/// the gate through a per-test `TestDefaultsSuite` and tears the domain
 /// down afterwards, so `.standard` is never touched. The request-file tests
 /// drive `consumeRequestFiles()` against a directory of their own under
 /// `NSTemporaryDirectory()`, so TBD's real runtime directory is never read;
@@ -39,9 +40,9 @@ struct TerminalLatencyDiagnosticTests {
     }
 
     private func withDefaults(_ body: (UserDefaults) throws -> Void) rethrows {
-        let suiteName = "TBDAppTests.TerminalLatency.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.TerminalLatency")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try body(defaults)
     }
 

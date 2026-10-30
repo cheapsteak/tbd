@@ -25,8 +25,33 @@ extension StateSubscriptionManager {
         terminalID: UUID,
         from store: PendingPromptStore
     ) async {
+        let delta = await Self.pendingPromptsDelta(terminalID: terminalID, from: store)
+        broadcast(delta: delta)
+    }
+
+    /// Send a new subscriber the pending set of every terminal that holds a
+    /// capture or an open prompt, one delta per terminal, to that subscriber
+    /// only. Without it a freshly connected app shows no cards until the next
+    /// change to each terminal's set
+    /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`,
+    /// "Snapshot"). Each delta carries its revision, so one that races a
+    /// concurrent broadcast is ordered by the app like any other.
+    func replayPendingPrompts(
+        to subscriber: SubscriberID,
+        from store: PendingPromptStore
+    ) async {
+        for terminalID in await store.terminalsWithPendingState() {
+            let delta = await Self.pendingPromptsDelta(terminalID: terminalID, from: store)
+            send(delta: delta, to: subscriber)
+        }
+    }
+
+    private static func pendingPromptsDelta(
+        terminalID: UUID,
+        from store: PendingPromptStore
+    ) async -> StateDelta {
         let snapshot = await store.snapshot(forTerminal: terminalID)
-        broadcast(delta: .terminalPendingPromptsChanged(
+        return .terminalPendingPromptsChanged(
             TerminalPendingPromptsDelta(
                 terminalID: terminalID,
                 captures: snapshot.entries.map {
@@ -36,6 +61,6 @@ extension StateSubscriptionManager {
                         timestamp: $0.timestamp)
                 },
                 prompts: snapshot.prompts,
-                revision: snapshot.revision)))
+                revision: snapshot.revision))
     }
 }

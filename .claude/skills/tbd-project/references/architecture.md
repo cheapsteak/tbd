@@ -7,8 +7,7 @@ Three components, one SPM package. All daemon-managed paths live under `~/tbd/` 
 ### tbdd (Daemon)
 Long-running headless process. Owns all state and logic.
 - **SQLite** at `~/tbd/state.db` — worktree ledger, repo list, terminals, notes, tabs, model profiles (WAL mode, GRDB)
-- **Unix socket** at `~/tbd/sock` — primary RPC interface
-- **HTTP** on localhost (port in `~/tbd/port`) — for debugging/curl
+- **Unix socket** at `~/tbd/sock` — the RPC interface
 - **Tmux manager** — one tmux server per repo (`tbd-<djb2-hash-of-repo-path>`), creates/destroys windows
 - **Git manager** — fetch, worktree add/remove/list, conflict check, headSHA, merge-base ancestry
 - **Hook resolver** — resolves and runs worktree lifecycle hooks per priority chain
@@ -16,7 +15,7 @@ Long-running headless process. Owns all state and logic.
 - **PR status manager** — polls GitHub for PR state (open/merged/closed, mergeable) per worktree, persists last-known status to the DB so icons survive restart
 - **Auto-archive-on-merge coordinator** — archives a worktree automatically once its PR merges, when armed per-worktree or via the global default
 - **SSH agent resolver** — finds live SSH agent socket, maintains `~/.ssh/tbd-agent.sock` symlink
-- **Suspend/resume coordinator** — auto-suspends idle Claude sessions on worktree deselection, supports manual suspend/resume
+- **Hibernation coordinator** — parks Claude sessions and wakes them with `claude --resume`, on tmux and on the pty holder. Parks come from "Hibernate now" (`terminal.hibernate`), from the idle sweep and park-on-merge (both off by default), and from the in-place profile swap and the transport migration; the session mod is a park's only guard for an unsent draft. A session parked by hand wakes only when asked; an automatic park also wakes when its worktree is focused
 - **Model profile resolver** — picks the credential profile (oauth/apiKey/proxy/bedrock) for a spawned Claude session
 - **Claude usage poller** — polls Claude OAuth usage every 30 min, broadcasts to clients
 - **Session instrumentation writers** — `PluginDirWriter`, `ClaudeHookOverlay`, `SkillFileWriter`, `CodexHomeManager` (see "Session Instrumentation")
@@ -51,7 +50,7 @@ Stateless. Connects to daemon socket, sends RPC, prints result, exits.
 
 TBD instruments the agent sessions it spawns. At `Daemon.start()`:
 
-- **`PluginDirWriter`** writes a Claude Code plugin to `~/Library/Application Support/TBD/plugin/` containing `.claude-plugin/plugin.json` and `skills/tbd/SKILL.md`. The skill body is `TBDSkillContent.body`.
+- **`PluginDirWriter`** writes a Claude Code plugin to `~/Library/Application Support/TBD/plugin/` containing `.claude-plugin/plugin.json` and `skills/tbd/SKILL.md`. The skill body is `TBDSkillContent.body`. While a session-mod feature flag is on, it also writes the session mod — the hooks module in `hooks/` and its `$.state` contract in `types/`, which the manifest names — from `SessionModContent` (generated from `SessionMod/` by `scripts/gen-session-mod-content.py`), and removes both when every flag is off. It runs after the database opens (the flags live there) and before any spawn path, writes only files whose bytes changed (each write hot-reloads the plugin in running sessions), and is skipped in mock mode. The daemon half of the mod — `spawn.json` and the other per-session files under `~/tbd/sessions/<claudeSessionID>/`, liveness, the spawn variables and the composer-draft park gate's status — lives in `Sources/TBDDaemon/SessionMod/`.
 - **`ClaudeHookOverlay`** writes `~/tbd/runtime/claude-overlay.json` registering `SessionStart`, `Stop` (×2), and `AskUserQuestion` Pre/PostToolUse hooks.
 - **`SkillFileWriter`** drops the same skill body to a failsafe path so a session can `Read` it even with no harness skill registered.
 - **`ClaudeSpawnCommandBuilder`** (pure function) builds the `claude` command, appending `--plugin-dir` and `--settings` (each only if the file exists). It also returns `sensitiveEnv` carrying auth/routing vars (`ANTHROPIC_API_KEY`, `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_USE_BEDROCK`, ...) — passed via tmux `-e KEY=VALUE` so secrets never appear in `ps` argv.
@@ -121,7 +120,7 @@ tmux server: tbd-<djb2-hash-of-repo-path>
 - Secrets/routing env reach windows via tmux's `-e KEY=VALUE` (`createWindow(sensitiveEnv:)`), keeping them out of `ps`
 
 ### TmuxManager API highlights
-- `sendKeys` — literal text (tmux `-l`); `sendKey` — a key name like "Enter"; `sendCommand` — text + Enter
+- `sendKeys` — literal text (tmux `-l`); `sendKey` — a key name like "Enter"
 - `capturePaneOutput` / `capturePaneWithAnsi` — plain or ANSI-escaped snapshot
 - `paneCurrentCommand` / `panePID` — used by `ClaudeStateDetector`
 - `windowExists` — reconcile check; `dryRun` mode for tests
@@ -161,14 +160,14 @@ Maintains a stable symlink at `~/.ssh/tbd-agent.sock` pointing to a live SSH age
 
 ## RPC Protocol
 
-JSON-RPC style over Unix socket (newline-delimited) and HTTP POST `/rpc`. Method families (see `Sources/TBDDaemon/Server/RPCRouter+*Handlers.swift`):
+JSON-RPC style over the Unix socket (newline-delimited). Method families (see `Sources/TBDDaemon/Server/RPCRouter+*Handlers.swift`):
 
 - **Repo**: `repo.add`, `repo.remove`, `repo.list`, `repo.rename`, `repo.relocate`, `repo.updateInstructions`, `repo.listBranches`, hidden/expanded toggles
-- **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.forget` (untrack without `git worktree remove`), `.rename`, `.reorder`, `.move` (reparent), `.selectionChanged`, `.suspend`, `.resume`, `.setAutoArchive`
+- **Worktree**: `worktree.create`, `.list`, `.archive`, `.revive`, `.adopt`, `.forget` (untrack without `git worktree remove`), `.rename`, `.reorder`, `.move` (reparent), `.suspend`, `.resume`, `.setAutoArchive`
 - **Terminal**: `terminal.create` (`type`/`prompt`), `.list`, `.send` (`submit`), `.focus`, `.delete`, `.setPin`, `.output`, `.conversation`, `.transcript`, `.transcriptItemFullBody`, `.suspend`, `.resume`, `.recreateWindow`, `.swapProfile`, `.activityEvent` (internal — fired by the terminal-activity hook)
 - **Tab**: `tab.setLabel`, `tab.setOrder`, `tab.list`, `worktree.setActiveTab`
 - **Session**: `session.list`, `session.messages` — list/parse Claude JSONL transcripts; plus `terminal.sessionEvent` (SessionStart hook bridge)
-- **AskUserQuestion**: `terminal.askUserQuestionPending` / `terminal.askUserQuestionCleared`, backed by `PendingQuestionStore`
+- **AskUserQuestion**: `terminal.askUserQuestionPending` / `terminal.askUserQuestionCleared`, backed by `PendingPromptStore`
 - **Model profile**: `modelProfile.list`/`.add`/`.delete`/`.rename`/`.updateEndpoint`/`.updateBedrock`/`.setGlobalDefault`/`.setPrimaryAgentPreference`/`.setRepoOverride`/`.fetchUsage`/`.healthCheck`
 - **Claude preferences**: `claude.setSpawnPreferences` — stores Claude spawn-env overrides (`ClaudeSpawnPreferences`) into the config row; handled by `RPCRouter+ClaudePreferencesHandlers.swift`
 - **Env overrides**: `config.setEnvOverrides`, `repo.setEnvOverrides`, `modelProfile.setEnvOverrides` — persist free-form `[String: String]` env vars per scope; `config.get` reads the config row; `config.setAutoArchiveOnMergeDefault` sets the global auto-archive default. Handled by `RPCRouter+EnvOverridesHandlers.swift`
@@ -187,6 +186,6 @@ See `Sources/TBDCLI/Commands/`. Highlights:
 - `tbd hooks status` — show the Claude overlay + legacy hook state; `tbd hooks stop-rename-check` — internal Stop-hook
 - `tbd session-event`, `tbd terminal-activity`, `tbd ask-user-question pre|post` — internal hooks fired by the settings overlay
 - `tbd config get|set` — show/set global settings (e.g. auto-archive-on-merge default, env overrides)
-- `tbd link` — print a `tbd://` deep link for the current worktree
+- `tbd link [<worktree>] [--terminal <uuid> | --this-terminal] [--https]` — print a `tbd://` deep link for a worktree (default: current), optionally anchored to one terminal's tab; `--https` prints the shareable redirector form
 - `tbd doctor [--dry-run]` — diagnose and repair the `~/.local/bin/tbd` CLI install (checks that it is a hard link to the TBDCLI binary sibling of the running daemon; repairs stale or missing links)
 - `tbd notify`, `tbd daemon status`, `tbd cleanup`, `tbd setup-hooks` (deprecated)

@@ -20,8 +20,9 @@ import TBDShared
 /// the incarnation id is the load-bearing one. `AgentProcessEnvironment.replacement`
 /// exports `TBD_TERMINAL_INCARNATION_ID` on every woken or restarted agent, so a
 /// daemon restarted from such a session carries it; nothing on a fresh spawn
-/// overwrites it, because the export prefix sets only `TBD_TERMINAL_ID` and
-/// `TBD_WORKTREE_ID`. A fresh terminal row has no incarnation, so the guard in
+/// made with every session-mod feature off overwrites it, because the export
+/// prefix sets only `TBD_TERMINAL_ID` and `TBD_WORKTREE_ID`. Such a fresh
+/// terminal row has no incarnation, so the guard in
 /// `TerminalStore.applySessionStart` (`record.sessionIncarnationID ==
 /// reportedIncarnationID?.uuidString`) fails and the job's SessionStart,
 /// SessionEnd and activity hooks are all dropped: no session id, no transcript
@@ -121,9 +122,20 @@ enum SpawnBaseEnvironment {
     /// scrub runs, so dropping it for children costs that read nothing.
     /// Installation-wide configuration (TBD_HOME, TBD_SOCKET_PATH) is
     /// deliberately not here.
+    ///
+    /// The session mod's other variables travel with the incarnation: a
+    /// spawn sets them all or none (`SessionModSpawn`). Inherited, the pair
+    /// would list mod features in a spawn that set none of them and carries no
+    /// incarnation — a fork, a carryover, or any spawn made with every feature
+    /// off — so `TBD_SESSIONS_DIR` is per-spawn here even though its value
+    /// follows `TBD_HOME`.
     static let tbdProcessMarkers: Set<String> = [
         "TBD_TERMINAL_ID",
         "TBD_TERMINAL_INCARNATION_ID",
+        SessionModSpawn.sessionsDirVariable,
+        SessionModSpawn.featuresVariable,
+        SessionModSpawn.tokenVariable,
+        SessionModSpawn.socketVariable,
         "TBD_WORKTREE_ID",
         "TBD_CLI_PATH",
         "TBD_EVENT",

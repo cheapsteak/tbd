@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// REGRESSION GUARD on `TableTranscriptView.Coordinator.estimate(for:width:)`.
 ///
@@ -430,33 +431,32 @@ struct TranscriptEstimatorAccuracyTests {
         for _ in 0..<Self.corpusMessageCount {
             let (shape, text) = Self.randomMessage(&generator)
             for width in Self.widths {
-                for role in [TranscriptBubbleGeometry.Role.assistant, .user] {
-                    for badged in [false, true] {
-                        // A user prompt never carries a usage badge.
-                        let usage: TokenUsage? = (badged && role == .assistant)
-                            ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0)
-                            : nil
-                        let item: TranscriptItem = role == .user
-                            ? .userPrompt(id: "corpus", text: text, timestamp: nil)
-                            : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
-                        let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(item),
-                                                        badgeUsage: usage)
-                        let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
-                        let measured = TranscriptBubbleGeometry.rowHeight(
-                            blocksHeight: MessageBlockMeasurer().blocksHeight(
-                                TranscriptBubbleGeometry.composedBlocks(
-                                    for: item, badgeUsage: usage, linkResolver: nil),
-                                bodyWidth: TranscriptBubbleGeometry.bodyWidth(
-                                    columnWidth: width, role: role)),
-                            role: role)
-                        total += 1
-                        signedTotal += estimate - measured
-                        if estimate - measured > 0.5 {
-                            overReserving.append((
-                                "\(shape) @\(Self.f(width)) \(role == .user ? "user" : "assistant")"
-                                    + (usage != nil ? " +badge" : ""),
-                                measured, estimate, estimate - measured))
-                        }
+                for arm in Self.corpusArms {
+                    let role = arm.role
+                    let usage: TokenUsage? = arm.badged
+                        ? TokenUsage(inputTokens: 124_000, cacheCreationTokens: 0, cacheReadTokens: 0)
+                        : nil
+                    let item: TranscriptItem = role == .user
+                        ? .userPrompt(id: "corpus", text: text, timestamp: nil)
+                        : .assistantText(id: "corpus", text: text, timestamp: nil, usage: usage)
+                    let node = TranscriptRenderNode(id: "corpus", kind: .chatBubble(item),
+                                                    badgeUsage: usage)
+                    let estimate = TableTranscriptView.Coordinator.estimate(for: node, width: width)
+                    let measured = TranscriptBubbleGeometry.rowHeight(
+                        blocksHeight: MessageBlockMeasurer().blocksHeight(
+                            TranscriptBubbleGeometry.composedBlocks(
+                                for: item, badgeUsage: usage, linkResolver: nil),
+                            bodyWidth: TranscriptBubbleGeometry.bodyWidth(
+                                columnWidth: width, role: role)),
+                        role: role)
+                    total += arm.weight
+                    signedTotal += CGFloat(arm.weight) * (estimate - measured)
+                    if estimate - measured > 0.5 {
+                        let row: (label: String, exact: CGFloat, estimate: CGFloat, delta: CGFloat) = (
+                            "\(shape) @\(Self.f(width)) \(role == .user ? "user" : "assistant")"
+                                + (usage != nil ? " +badge" : ""),
+                            measured, estimate, estimate - measured)
+                        overReserving.append(contentsOf: repeatElement(row, count: arm.weight))
                     }
                 }
             }
@@ -500,6 +500,19 @@ struct TranscriptEstimatorAccuracyTests {
     }
 
     private static let corpusMessageCount = 400
+
+    /// The role-and-badge combinations each corpus message is measured in.
+    ///
+    /// An assistant row is measured with and without a usage badge. A user
+    /// prompt never carries one, so a badged user arm would rebuild the
+    /// unbadged row exactly and measure the same height again: it is measured
+    /// once and counted twice instead. The weight keeps the rate and mean
+    /// thresholds reading over the 3200 combinations they were swept against.
+    private static let corpusArms: [(role: TranscriptBubbleGeometry.Role, badged: Bool, weight: Int)] = [
+        (.assistant, false, 1),
+        (.assistant, true, 1),
+        (.user, false, 2),
+    ]
 
     /// A deterministic PRNG, so the corpus is the same on every run and on every
     /// machine — a fuzzer that finds a different defect each run cannot be a
@@ -657,9 +670,9 @@ struct TranscriptEstimatorAccuracyTests {
 
         var measurements: [Measurement] = []
         for width in widths {
-            let suiteName = "estimator-accuracy-\(UUID().uuidString)"
-            let defaults = try #require(UserDefaults(suiteName: suiteName))
-            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let suite = TestDefaultsSuite("estimator-accuracy")
+            let defaults = suite.defaults
+            defer { suite.tearDown() }
             let appState = AppState(userDefaults: defaults)
 
             let nodes = characterizationNodes(imagePath: imagePath)
@@ -742,7 +755,7 @@ struct TranscriptEstimatorAccuracyTests {
 
     private static let shortAssistantText = "Done — the row now measures exactly."
 
-    /// Verbatim from `TableTranscriptHarness.allKindsFixture()`'s `k-assistant`.
+    /// Verbatim from `TableTranscriptScene.allKindsFixture()`'s `k-assistant`.
     private static let twoParagraphAssistantText = """
         Here is the rundown. Each upstream item becomes a render node, cached by \
         `(id, contentVersion, width)` so a re-poll never rebuilds an unchanged row. \
@@ -1261,6 +1274,7 @@ struct TranscriptEstimatorAccuracyTests {
         case .toolCall(_, let name, _, _, _, _): return "toolCall/\(name)"
         case .activityGroupSummary: return "activityGroup"
         case .subagentSummary: return "subagentSummary"
+        case .thinking: return "thinking"
         }
     }
 
@@ -1274,7 +1288,7 @@ struct TranscriptEstimatorAccuracyTests {
         let window: NSWindow
     }
 
-    /// Mirrors `TableTranscriptHarness.makeScene` — a real offscreen scroll view +
+    /// Mirrors `TableTranscriptScene` — a real offscreen scroll view +
     /// table over the production Coordinator. The `scrollerStyle = .legacy` pin is
     /// deliberate and kept (commit bbf8474c).
     private static func makeScene(appState: AppState, nodes: [TranscriptRenderNode]) -> Scene {

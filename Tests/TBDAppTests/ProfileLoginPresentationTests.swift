@@ -72,8 +72,8 @@ private func probeSnapshot(_ statusKind: ProfileUsageStatusKind) -> ProfileUsage
 }
 
 @Test func menuItemTitle_composesDisplayNameAndSuffix() {
-    let loggedIn = makeEntry(loginIdentity: "zadam@longeye.co")
-    #expect(ProfileLoginPresentation.menuItemTitle(for: loggedIn) == "Work — zadam@longeye.co")
+    let loggedIn = makeEntry(loginIdentity: "dev@acme.example")
+    #expect(ProfileLoginPresentation.menuItemTitle(for: loggedIn) == "Work — dev@acme.example")
 
     let needsLogin = makeEntry()
     #expect(ProfileLoginPresentation.menuItemTitle(for: needsLogin) == "Work — needs /login")

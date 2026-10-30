@@ -42,7 +42,7 @@ struct HolderPanelFocusTests {
         init(attachment: HolderAttachment) { self.attachment = attachment }
 
         func attach(
-            worktreeID: UUID, paneID: String, terminalID: UUID
+            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
         ) async throws -> HolderAttachment { attachment }
 
         func ready(
@@ -67,7 +67,7 @@ struct HolderPanelFocusTests {
         let tabCloseContext: TabCloseContext
         private let sessionEnd: Int32
         let defaults: UserDefaults
-        private let suiteName: String
+        private let suite: TestDefaultsSuite
 
         init() throws {
             // Enough of an application for AppKit to have an app object;
@@ -94,8 +94,8 @@ struct HolderPanelFocusTests {
             let terminalID = UUID()
             tabCloseContext = TabCloseContext(worktreeID: worktreeID, tabID: terminalID)
 
-            suiteName = "TBDAppTests.HolderPanelFocus.\(UUID().uuidString)"
-            defaults = UserDefaults(suiteName: suiteName)!
+            suite = TestDefaultsSuite("TBDAppTests.HolderPanelFocus")
+            defaults = suite.defaults
             state = AppState(userDefaults: defaults)
             state.terminals[worktreeID] = [Terminal(
                 id: terminalID, worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
@@ -186,7 +186,7 @@ struct HolderPanelFocusTests {
             window.contentView = nil
             window.close()
             if sessionEnd >= 0 { Darwin.close(sessionEnd) }
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 

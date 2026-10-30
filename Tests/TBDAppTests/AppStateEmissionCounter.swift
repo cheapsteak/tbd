@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 // Tier 1: deterministic, in-process state only. No sleeps, no subprocesses,
 // no `~/tbd`.
@@ -135,12 +136,10 @@ final class AppStateEmissionTracker {
         _ = state.expandedSidebarGroups
         _ = state.sidebarSelectionGeneration
         _ = state.pendingWorktreeIDs
-        _ = state.suspendingTerminalIDs
-        _ = state.suspendingSnapshots
         _ = state.switchingAccountTerminals
         _ = state.terminalAttachEpochs
+        _ = state.terminalAttachRetries
         _ = state.editingWorktreeID
-        _ = state.isRenamingWorktree
         _ = state.prStatuses
         _ = state.prObservations
         _ = state.prBindings
@@ -164,10 +163,8 @@ final class AppStateEmissionTracker {
         _ = state.gcRetainedTranscriptsEnabled
         _ = state.gcHangStacksEnabled
         _ = state.autoCreateNotesEnabled
-        _ = state.nightwatchMode
         _ = state.autoHibernateEnabled
         _ = state.hibernateIdleMinutes
-        _ = state.supervisionEnabled
         _ = state.autoResumeOnLimitReset
         _ = state.autoResumeOnApiError
         _ = state.dismissedProxyWarnings
@@ -264,12 +261,10 @@ final class AppStateEmissionTracker {
         "expandedSidebarGroups",
         "sidebarSelectionGeneration",
         "pendingWorktreeIDs",
-        "suspendingTerminalIDs",
-        "suspendingSnapshots",
         "switchingAccountTerminals",
         "terminalAttachEpochs",
+        "terminalAttachRetries",
         "editingWorktreeID",
-        "isRenamingWorktree",
         "prStatuses",
         "prObservations",
         "prBindings",
@@ -293,10 +288,8 @@ final class AppStateEmissionTracker {
         "gcRetainedTranscriptsEnabled",
         "gcHangStacksEnabled",
         "autoCreateNotesEnabled",
-        "nightwatchMode",
         "autoHibernateEnabled",
         "hibernateIdleMinutes",
-        "supervisionEnabled",
         "autoResumeOnLimitReset",
         "autoResumeOnApiError",
         "dismissedProxyWarnings",
@@ -376,8 +369,8 @@ func countEmissions(of state: AppState, duringAsync body: () async -> Void) asyn
 /// the root `CLAUDE.md`. Mirrors `AppStateDerivedCacheTests.withState`.
 @MainActor
 func withEmissionState(_ body: (AppState) -> Void) {
-    let suiteName = "TBDAppTests.AppStateEmissions.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let suite = TestDefaultsSuite("TBDAppTests.AppStateEmissions")
+    let defaults = suite.defaults
+    defer { suite.tearDown() }
     body(AppState(userDefaults: defaults))
 }

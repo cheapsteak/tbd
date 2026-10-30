@@ -158,20 +158,12 @@ private actor GitLabFake {
     /// budget sat an order of magnitude under the noise floor. See
     /// `ciSafeDeadline`'s own derivation in `ControlModeTestSupport.swift`.
     ///
-    /// Cancellation ends the wait rather than being swallowed: `Task.sleep`
-    /// throws immediately once the task is cancelled, so a `try?` here would
-    /// leave the loop spinning with nothing to suspend on for the rest of its
-    /// budget — the anti-pattern `Tests/CLAUDE.md` names.
-    func waitForRecheck(within timeout: Duration = ciSafeDeadline) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while !sawRecheck && ContinuousClock.now < deadline {
-            do {
-                try await Task.sleep(for: .milliseconds(5))
-            } catch {
-                return sawRecheck
-            }
-        }
-        return sawRecheck
+    /// `nonisolated` so the poll's condition can read the actor with `await`
+    /// instead of being an actor-isolated closure handed off the actor. A
+    /// cancelled wait returns true, so the caller's `#expect` reports nothing:
+    /// attribution belongs to the canceller.
+    nonisolated func waitForRecheck(within timeout: Duration = ciSafeDeadline) async -> Bool {
+        await pollUntilTrue(timeout: timeout) { await self.sawRecheck } != .timedOut
     }
 
     func run(args: [String], repoPath: String) -> GHCommandResult? {
@@ -241,44 +233,53 @@ private actor GHCallLog {
 
 /// A mergeability recheck that never returns until the test lets it, so a test
 /// can assert what the poll does *while* one is outstanding.
+///
+/// The waits below are `nonisolated` so `pollUntilTrue`'s condition reads the
+/// actor with `await` rather than being an actor-isolated closure handed off
+/// the actor. A cancelled wait returns the answer that passes the caller's
+/// `#expect`, so it reports nothing: attribution belongs to whatever cancelled
+/// the test.
 private actor HangingRecheck {
     private var entered = false
     private var released = false
+    /// Rechecks parked in `hang()`, resumed together by `release()`.
+    private var parked: [CheckedContinuation<Void, Never>] = []
     /// How many rechecks were issued, so a test can assert a second one never
     /// was — the whole point of the single-flight gate.
     private(set) var issued = 0
 
+    /// Parks until `release()`, and returns at once after it. Cancellation
+    /// does not end the hang: the test, not the recheck's deadline, decides
+    /// when it ends.
     func hang() async {
         entered = true
         issued += 1
-        while !released { try? await Task.sleep(for: .milliseconds(5)) }
+        guard !released else { return }
+        await withCheckedContinuation { parked.append($0) }
     }
 
     /// Whether the issued count is still `count` after `grace`. A recheck is
     /// issued from a detached task nobody schedules, so "a second one never
-    /// appeared" can only be asserted by giving it a window to appear in.
-    func issuedStayedAt(_ count: Int, for grace: Duration = .milliseconds(500)) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: grace)
-        while ContinuousClock.now < deadline {
-            if issued != count { return false }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        return issued == count
+    /// appeared" can only be asserted by giving it a window to appear in. The
+    /// window is the assertion, so its literal stays.
+    nonisolated func issuedStayedAt(_ count: Int, for grace: Duration = .milliseconds(500)) async -> Bool {
+        await pollUntilTrue(timeout: grace) { await self.issued != count } != .satisfied
     }
 
-    func release() { released = true }
+    func release() {
+        released = true
+        let waiters = parked
+        parked.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
 
     /// Whether the recheck was reached within `timeout`. Polled, because it is
     /// issued from a detached task whose scheduling no test owns — SE-0417
     /// carries no executor preference across that hop, so the deadline is the
     /// shared saturated-pass budget rather than a literal (`gateHoldingTask` in
     /// `Tests/TestSupport/BoundedGateSupport.swift`).
-    func wasEntered(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while !entered && ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        return entered
+    nonisolated func wasEntered(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
+        await pollUntilTrue(timeout: timeout) { await self.entered } != .timedOut
     }
 }
 
@@ -291,10 +292,15 @@ private actor CancellableRecheck {
     private var entered = false
     private var cancelled = false
 
+    /// Parks until the calling task is cancelled; the cancellation handler
+    /// opens the gate, so nothing polls.
     func hangUntilCancelled() async {
         entered = true
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(5))
+        let gate = CancellationGate()
+        await withTaskCancellationHandler {
+            await gate.wait()
+        } onCancel: {
+            gate.open()
         }
         cancelled = true
     }
@@ -303,20 +309,42 @@ private actor CancellableRecheck {
     /// scheduling no test owns. The bound under test is virtual time; these
     /// waits only cover that scheduling, so they take the shared saturated-pass
     /// budget rather than a literal.
-    func wasEntered(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while !entered && ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        return entered
+    nonisolated func wasEntered(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
+        await pollUntilTrue(timeout: timeout) { await self.entered } != .timedOut
     }
 
-    func wasCancelled(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while !cancelled && ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(5))
+    nonisolated func wasCancelled(within timeout: Duration = TestDeadlines.saturatedPass) async -> Bool {
+        await pollUntilTrue(timeout: timeout) { await self.cancelled } != .timedOut
+    }
+}
+
+/// A one-shot gate a synchronous cancellation handler can open. Opening it
+/// before anyone waits makes the wait return at once.
+private final class CancellationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if isOpen {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiter = continuation
+            lock.unlock()
         }
-        return cancelled
+    }
+
+    func open() {
+        lock.lock()
+        isOpen = true
+        let parked = waiter
+        waiter = nil
+        lock.unlock()
+        parked?.resume()
     }
 }
 
@@ -328,12 +356,9 @@ private actor OneShot<Value: Sendable> {
 
     func fulfil(_ value: Value) { stored = value }
 
-    func value(within timeout: Duration = TestDeadlines.saturatedPass) async -> Value? {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while stored == nil && ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        return stored
+    nonisolated func value(within timeout: Duration = TestDeadlines.saturatedPass) async -> Value? {
+        _ = await pollUntilTrue(timeout: timeout) { await self.stored != nil }
+        return await stored
     }
 }
 

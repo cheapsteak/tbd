@@ -3,6 +3,7 @@ import os
 import TBDShared
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLifecycle")
+private let overlayLogger = Logger(subsystem: "com.tbd.daemon", category: "claude-overlay")
 
 /// Descriptor for a spawned pre-session hook terminal. Phase 3 (the marker
 /// wait + primary terminal spawn) consumes it.
@@ -152,11 +153,17 @@ extension WorktreeLifecycle {
     ///
     /// `repo` is optional because scratch spaces have none. `TBD_REPO_PATH`
     /// then falls back to the worktree's own path.
+    ///
+    /// `claudeSpawnExtras` are the Claude values of the create this hook gates,
+    /// stored on the hook's row so phase 3 can apply them to the primary even
+    /// when it runs from recovery, with nothing but rows to go on. The hook
+    /// itself is a shell and ignores them.
     func spawnPreSessionTerminal(
         worktree: Worktree, repo: Repo?,
         worktreePath: String,
         cols: Int? = nil, rows: Int? = nil,
-        claimsFocus: Bool = true
+        claimsFocus: Bool = true,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil
     ) async throws -> PreSessionSpawn? {
         guard let hookPath = hooks.resolve(
             event: .preSession,
@@ -233,8 +240,7 @@ extension WorktreeLifecycle {
                 profileID: nil,
                 kind: .shell,
                 transport: transport,
-                attachment: nil,
-                modelProxySupervisor: modelProxySupervisor)
+                claudeSpawnExtras: claudeSpawnExtras)
             // Kill the untracked initial window that new-session created, but skip
             // if a restarted tmux server reused the window ID for the replacement
             // we just created (ABA scenario: the fresh window and the old ID are
@@ -380,12 +386,20 @@ extension WorktreeLifecycle {
     /// `completionAction` decides the final status flip (`.markActive` on the
     /// create path, `.revive` on the revive path); it always runs no matter
     /// what happened, so the row never sticks in `.creating`.
+    ///
+    /// `claudeSpawnExtras` are the create's Claude values for the primary.
+    /// When the caller passes none — recovery, which resumes a wait from rows
+    /// alone — the hook's own row supplies them (`spawnPreSessionTerminal`
+    /// stored them there). `archivedClaudeSpawnExtras` is a revive's archived
+    /// map, passed from the same worktree row as `archivedClaudeSessions`:
+    /// each restored session starts with its own values from it.
     func runPreSessionPhase3(
         preSession: PreSessionSpawn,
         worktree: Worktree, repo: Repo,
         worktreePath: String,
         skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil,
+        archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil,
         initialPrompt: String? = nil,
         cols: Int? = nil, rows: Int? = nil,
         completionAction: PreSessionCompletionAction,
@@ -393,10 +407,25 @@ extension WorktreeLifecycle {
         modelOverride: String? = nil,
         codexModelOverride: String? = nil,
         primaryAgentPreference: PrimaryAgentPreference? = nil,
-        claudeSettingsOverlay: String? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil,
         carryover: ConversationCarryover? = nil,
         preparedCodexLaunch: CodexLaunchPreparation? = nil
     ) async {
+        // Read before the wait: the hook's row is certain to exist now, and a
+        // holder-backed tab the user closes mid-wait takes its row with it.
+        let primarySpawnExtras: ClaudeSpawnExtras?
+        if let claudeSpawnExtras {
+            primarySpawnExtras = claudeSpawnExtras
+        } else {
+            do {
+                primarySpawnExtras = try await db.terminals.get(id: preSession.terminalID)?
+                    .claudeSpawnExtras
+            } catch {
+                overlayLogger.warning("phase-3: could not read the Claude values on pre-session terminal \(preSession.terminalID, privacy: .public): \(error.localizedDescription, privacy: .public) — the primary starts without them")
+                primarySpawnExtras = nil
+            }
+        }
+
         let outcome = await waitForPreSessionCompletion(
             preSession: preSession, tmuxServer: preSession.tmuxServer
         )
@@ -452,8 +481,7 @@ extension WorktreeLifecycle {
                 // The terminal row went with the worktree, so nothing can read
                 // the pids back any more — this is the last moment either can
                 // be named, and the descriptor phase 2b returned is where they
-                // are. A hook tab is never routed through the model proxy, so
-                // there is no route to retire here.
+                // are.
                 await abandonHookHolder(
                     terminalID: preSession.terminalID,
                     holderPID: preSession.holderPID,
@@ -491,6 +519,7 @@ extension WorktreeLifecycle {
                 worktreePath: worktreePath,
                 skipClaude: skipClaude,
                 archivedClaudeSessions: archivedClaudeSessions,
+                archivedClaudeSpawnExtras: archivedClaudeSpawnExtras,
                 initialPrompt: initialPrompt,
                 cols: cols, rows: rows,
                 // On success the hook tab is about to be deleted — never splice
@@ -500,7 +529,7 @@ extension WorktreeLifecycle {
                 modelOverride: modelOverride,
                 codexModelOverride: codexModelOverride,
                 primaryAgentPreference: primaryAgentPreference,
-                claudeSettingsOverlay: claudeSettingsOverlay,
+                claudeSpawnExtras: primarySpawnExtras,
                 carryover: carryover,
                 preparedCodexLaunch: preparedCodexLaunch
             )
@@ -591,11 +620,9 @@ extension WorktreeLifecycle {
     /// which is a strictly safer place to take it from than the alternative of
     /// giving up on a teardown whose whole purpose is reclamation. The two
     /// halves then differ only in where the pids are read from — both reclaim
-    /// through `abandonHookHolder`, and neither retires a model-proxy route,
-    /// because a hook tab is spawned with no attachment (`attachment: nil` at
-    /// both hook-tab spawn sites) and so is never routed. A row-backed *agent*
-    /// tab would not be safe to tear down this way, which is why this
-    /// reasoning is local to hook tabs.
+    /// through `abandonHookHolder`. A row-backed *agent* tab would not be safe
+    /// to tear down this way, which is why this reasoning is local to hook
+    /// tabs.
     func closeHookTerminal(worktree: Worktree, preSession: PreSessionSpawn) async {
         await closeHookTerminal(
             worktree: worktree,
@@ -664,11 +691,9 @@ extension WorktreeLifecycle {
             // rendezvous files would outlive the row that is their only record.
             //
             // Reclaimed through `abandonHookHolder` on both halves, not
-            // through `disposeHolder`: a hook tab is spawned with
-            // `attachment: nil`, so it is never routed through the model proxy
-            // and there is no route for the row-shaped teardown to retire —
-            // what is left of it is an unverified kill by recorded pid, which
-            // is exactly what a hook tab must not do (see
+            // through `disposeHolder`: the row-shaped teardown is an
+            // unverified kill by recorded pid, which is exactly what a hook
+            // tab must not do (see
             // `HolderRegistry.abandonVerifiedJob`). The row is still the better
             // source for the pids while it can be read.
             if let terminal {

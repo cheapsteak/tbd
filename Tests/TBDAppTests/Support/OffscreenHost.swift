@@ -38,6 +38,43 @@ enum OffscreenHostDefaults {
     static let minLuminanceVariance = 0.0005
 }
 
+/// `OffscreenHost`'s run-loop pump without an `OffscreenHost`, for a scene
+/// built straight on AppKit — a bare table, a hosting view in a window the
+/// test made itself — and for a caller that cannot await.
+///
+/// It drives run-loop-scheduled work only: AppKit's layout and display,
+/// timers, sources. It drains neither `DispatchQueue.main` nor a suspended
+/// `@MainActor` task — see `Tests/CLAUDE.md`, "`@MainActor` tests: suspend to
+/// drain, never pump" — and a run loop with nothing attached returns from a
+/// turn at once, so a caller waits on a condition, never on turns as time.
+@MainActor
+enum RunLoopPump {
+    /// One turn of the main run loop, blocking at most
+    /// `OffscreenHostDefaults.runLoopSpin`.
+    static func turn() {
+        _ = RunLoop.current.run(
+            mode: .default,
+            before: Date().addingTimeInterval(OffscreenHostDefaults.runLoopSpin))
+    }
+
+    /// Turn the run loop until `condition` holds, bounded by a turn count —
+    /// `OffscreenHost.settle(maxPumps:until:)` for a synchronous caller.
+    ///
+    /// - Returns: whether the condition held, so a caller can `#require` it and
+    ///   fail with a sentence rather than proceed on a state that never arrived.
+    @discardableResult
+    static func until(
+        maxTurns: Int = OffscreenHostDefaults.maxPumps,
+        _ condition: () -> Bool
+    ) -> Bool {
+        for _ in 0..<maxTurns {
+            if condition() { return true }
+            turn()
+        }
+        return condition()
+    }
+}
+
 /// A SwiftUI view mounted in a real — but offscreen — AppKit window, for the
 /// questions no pure function can answer: where a view actually landed, what an
 /// accessibility client can actually reach, and what the thing actually looks
@@ -287,9 +324,7 @@ final class OffscreenHost<Root: View> {
     /// async context, and one bounded turn of the main run loop is exactly what
     /// AppKit needs to lay out and display what SwiftUI just published.
     private static func spinRunLoop() {
-        _ = RunLoop.current.run(
-            mode: .default,
-            before: Date().addingTimeInterval(OffscreenHostDefaults.runLoopSpin))
+        RunLoopPump.turn()
     }
 
     // MARK: - Finding views

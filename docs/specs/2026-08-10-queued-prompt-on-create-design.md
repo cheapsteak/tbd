@@ -323,13 +323,6 @@ human, which is precisely the property the envelope exists to provide. The act
 is still written to the actuation log under its own rail, so the record of who
 typed what stays complete.
 
-The paste does **not** buy the pending-input hibernate veto.
-`InputActivityTracker.recordInput` has one caller, the app's own keystroke
-stream, and nothing in the tmux paste path touches it — so an unsubmitted queued
-prompt staged in a composer is invisible to the idle sweep, exactly like any
-other daemon-side paste. Wiring the veto to daemon-side pastes is a separate
-change, and this design does not make it.
-
 ### Envelope-free delivery is bounded by the socket, not by this verb
 
 `worktree.setPendingPrompt` can put envelope-free text into an agent that is
@@ -437,8 +430,8 @@ That single rule covers three cases that used to need their own machinery:
 - **After a restart** the licence is gone, so the pane that comes up types
   nothing and the prompt surfaces as recoverable instead.
 - **After an undeliverable outcome** the text stays in the column on purpose,
-  but the licence is spent — so a revive, a Watch Desk session, or an
-  archive-and-revive weeks later types nothing into a conversation the words
+  but the licence is spent — so a revive or an archive-and-revive weeks later
+  types nothing into a conversation the words
   were never written for.
 - **Deliver-now** re-parks, which grants the licence again. The operator's own
   gesture is what makes a retained prompt deliverable, which is the attendedness

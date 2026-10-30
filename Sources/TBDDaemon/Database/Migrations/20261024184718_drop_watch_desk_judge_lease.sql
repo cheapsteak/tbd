@@ -1,0 +1,14 @@
+-- The Watch Desk judge lease table, created by the frozen block's
+-- `v68_watch_desk_judge_lease`. No reader or writer of it remains, so it goes.
+--
+-- Safe for the previous build `tbd update` keeps for rollback. That build
+-- reaches this table only from its Watch Desk code (the judge-lease RPCs and
+-- the desk session manager); nothing else in it reads or writes the table, so
+-- everything outside the Watch Desk runs against this schema as before. It
+-- does not recreate the table either: `v68` is already recorded as applied.
+--
+-- The table is a child of `worktree` and nothing references it, so dropping
+-- it removes no other row and trips no foreign key. The two columns the same
+-- feature added, `config.nightwatch_mode` and `terminal.watch_desk_role`, are
+-- not touched here.
+DROP TABLE IF EXISTS watch_desk_judge_lease;

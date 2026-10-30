@@ -111,10 +111,9 @@ public final class GateExecutor: TaskExecutor, @unchecked Sendable {
 /// `BoundedGateWaitTests`'s whole subject, which parks every cooperative
 /// thread for 120 s — a releasing side left on the pool may not run at all,
 /// and the hand-off that releases the gate needs `gateHoldingTask` too, not
-/// just the held side. `ModelProxySupervisorTests.swift`'s `runBlocking` is
-/// the sanctioned pattern for that case: both the held side and the
-/// `signal()`-equivalent hand-off run through `gateHoldingTask`, and its own
-/// doc comment explains why.
+/// just the held side. The sanctioned pattern for that case runs both the
+/// held side and the `signal()`-equivalent hand-off through
+/// `gateHoldingTask`, so the hand-off completes whatever the pool is doing.
 ///
 /// **The preference stops at an unstructured task.** SE-0417 carries a task
 /// executor preference into child tasks (`async let`, task groups) and into

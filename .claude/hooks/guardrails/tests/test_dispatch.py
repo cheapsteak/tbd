@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 from contextlib import redirect_stdout
+from unittest import mock
 
 _HOOKS_DIR = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,7 +15,9 @@ if _HOOKS_DIR not in sys.path:
     sys.path.insert(0, _HOOKS_DIR)
 
 from guardrails import dispatch  # noqa: E402
+from guardrails.lib.registry import load_rules  # noqa: E402
 from guardrails.lib.rule import Decision, Rule  # noqa: E402
+from guardrails.rules.pr_worktree_link import MCP_CREATE_PR_TOOL  # noqa: E402
 
 
 def _run_hook_with_stdin(text):
@@ -117,6 +120,15 @@ class _InfoBRule(Rule):
         return Decision.info("[info-b] reason B")
 
 
+class _MCPInfoRule(Rule):
+    id = "info-mcp"
+    description = "always informs on the MCP create tool"
+    tools = {MCP_CREATE_PR_TOOL}
+
+    def check(self, _tool_input, ctx):
+        return Decision.info(f"[info-mcp] tool_name={ctx.get('tool_name')}")
+
+
 class EvaluateUnitTests(unittest.TestCase):
     """Drive evaluate() directly with injected rule sets via monkeypatch."""
 
@@ -198,6 +210,50 @@ class InfoEmissionTests(unittest.TestCase):
         code, out = _run_hook_with_stdin(json.dumps(payload))
         self.assertEqual(code, 0)
         self.assertEqual(out, "")
+
+
+def _mcp_payload(**fields):
+    tool_input = {"owner": "acme", "repo": "acme-prod", "title": "feat: x", "body": "y", "head": "feat-b"}
+    tool_input.update(fields)
+    return {"tool_name": MCP_CREATE_PR_TOOL, "cwd": "/nonexistent/elsewhere", "tool_input": tool_input}
+
+
+class MCPRoutingTests(unittest.TestCase):
+    """The GitHub MCP create-PR tool reaches the rules that list it, and no others."""
+
+    def setUp(self):
+        self._orig = dispatch.load_rules
+
+    def tearDown(self):
+        dispatch.load_rules = self._orig
+
+    def test_mcp_payload_skips_bash_only_rules(self):
+        dispatch.load_rules = lambda: [_InfoARule(), _DenyARule(), _MCPInfoRule()]
+        code, out = _run_hook_with_stdin(json.dumps(_mcp_payload(base="feat-a")))
+        self.assertEqual(code, 0)
+        hso = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(hso["permissionDecision"], "allow")
+        self.assertEqual(hso["additionalContext"], f"[info-mcp] tool_name={MCP_CREATE_PR_TOOL}")
+
+    def test_registered_rules_for_the_mcp_tool(self):
+        ids = {rule.id for rule in load_rules() if MCP_CREATE_PR_TOOL in rule.tools}
+        self.assertEqual(ids, {"pr-stack-link", "pr-user-story", "pr-worktree-link"})
+
+    def test_real_rules_on_an_mcp_payload(self):
+        # Outside TBD, so pr-worktree-link stays out of the way.
+        with mock.patch.dict(os.environ, {"TBD_HOME": "/nonexistent/tbd"}):
+            os.environ.pop("TBD_WORKTREE_ID", None)
+            code, out = _run_hook_with_stdin(json.dumps(_mcp_payload(base="feat-a")))
+            self.assertEqual(code, 0)
+            hso = json.loads(out)["hookSpecificOutput"]
+            self.assertEqual(hso["permissionDecision"], "allow")
+            self.assertIn("[pr-stack-link]", hso["additionalContext"])
+            self.assertIn("[pr-user-story]", hso["additionalContext"])
+
+            quiet = _mcp_payload(base="main", title="fix: x")
+            code, out = _run_hook_with_stdin(json.dumps(quiet))
+            self.assertEqual(code, 0)
+            self.assertEqual(out, "")
 
 
 if __name__ == "__main__":

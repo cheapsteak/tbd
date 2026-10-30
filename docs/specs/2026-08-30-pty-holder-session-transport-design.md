@@ -389,7 +389,7 @@ are swallowed into the pasted text, and a torn marker leaves the TUI's paste
 state desynchronized.
 
 Two writers exist for any session: the person at the keyboard, and the daemon
-(`tbd terminal send`, queued prompts, supervision nudges). The person writes
+(`tbd terminal send`, queued prompts, the limit-resume rail). The person writes
 directly, because routing a keystroke through a second process is the latency
 this transport exists to remove. Every daemon injection is therefore routed by
 **who is reading that session's pty right now** (`HolderInjectionCourier`):
@@ -530,14 +530,14 @@ it reads back to the daemon:
 
 - The app's SwiftTerm is authoritative while attached; the daemon's emulator
   is authoritative while detached.
-- When the daemon needs an attached session's screen (supervision, `tbd
-  terminal read`), it **pulls a snapshot from the app** over the existing
-  RPC; the app serializes its live terminal state on request. A machine read
-  therefore reaches whichever store is live, instead of a store that stopped
-  being updated at attach. That is a routing guarantee, not a freshness
-  guarantee: when the pull cannot be answered, the consumer's declared policy
-  below decides, and one of the two policies deliberately returns a stale
-  answer.
+- When the daemon needs an attached session's screen (`tbd terminal output`,
+  the modes a send composes against), it **pulls a snapshot from the app**
+  over the app sidecar; the app serializes its live terminal state on
+  request. A machine read therefore reaches whichever store is live, instead
+  of a store that stopped being updated at attach. That is a routing
+  guarantee, not a freshness guarantee: when the pull cannot be answered, the
+  consumer's declared policy below decides, and one of the two policies
+  deliberately returns a stale answer.
 - The handback is the orderly path only. An app that dies attached hands back
   nothing, so the daemon reverts to an emulator frozen at that attach and
   heals it with the jiggle alone — which repairs programs that repaint on
@@ -546,10 +546,10 @@ it reads back to the daemon:
 - Pulls are bounded (timeout on an injected clock), and every consumer
   declares a failure policy, because the app can legitimately go quiet —
   macOS App Nap coalesces a backgrounded app's work, and an app being wedged
-  or busy correlates with exactly the moments supervision most wants a
+  or busy correlates with exactly the moments a machine reader most wants a
   screen, so "quiet" is not the rare case it looks like.
-  Safety-critical consumers fail closed: the hibernation pending-input rail
-  acts only on a screen the daemon rendered live, and its refusals are set out
+  A consumer that needs the screen the daemon rendered live declines every
+  other answer, so it never pulls: the park's display snapshot is one, set out
   under "Feature parity" below. Best-effort consumers fall back to the
   daemon's frozen-at-attach emulator, labeled stale, rather than blocking on
   an unresponsive app.
@@ -598,64 +598,56 @@ Everything TBD does through tmux today, and its replacement:
 - **Input injection** (`tbd terminal send`, queued prompts) — the daemon is the
   sole injector, writing through the session's holder whether or not a viewer is
   attached.
-- **Machine reads** (`tbd terminal read`, the
-  hibernation pending-input rail, the embedded supervision babysitter) — the
-  daemon renders its own emulator when it is the reader and pulls a snapshot
+- **Machine reads** (`tbd terminal output`) —
+  the daemon renders its own emulator when it is the reader and pulls a snapshot
   from the app when a viewer is attached. Every such read answers with a
   typed screen that names which store answered and how stale it is, so a
   consumer can hold a policy rather than a hope
   ([`2026-09-05-child-as-contract-party-design.md`](2026-09-05-child-as-contract-party-design.md)).
   This replaces `capture-pane` with a first-party interface, which the
-  no-TUI-scraping rule already pushes toward; the two sanctioned scrapers
-  migrate onto it as part of this work.
-- **Hibernation and revive** — hibernate instructs the holder to terminate its
-  child (the holder reports status and exits); revive spawns a fresh holder.
+  no-TUI-scraping rule already pushes toward.
+- **Hibernation and revive** — hibernate ends the holder's child by signal
+  (the holder reports status and exits); revive spawns a fresh holder.
   The queued-prompt flag keeps its semantics, now gating daemon writes to the
-  master instead of tmux `send-keys`. The **input veto does not carry over**:
-  its fact source is the app's keystroke stream, and on this transport those
-  keystrokes go straight down the pty the viewer holds — which is exactly the
-  state a park refuses anyway — so the veto is vacuous for a holder row and
-  the screen rail below is the pending-input rail there. Recording the
-  daemon's own writes in its place would be strictly worse than recording
-  nothing: an auto-resume or a peer's `terminal.send` would then read as
-  unsent typed input forever against the merge rail's
-  `activityStateObservedAt` anchor, vetoing every park of that row. Three
-  properties of the park are load-bearing rather than incidental:
+  master instead of tmux `send-keys`. A park reads no keystrokes and judges no
+  screen: the session mod's saved composer draft is the only guard for unsent
+  input, on this transport as on tmux
+  ([`2026-10-24-mod-only-park-guard-design.md`](2026-10-24-mod-only-park-guard-design.md)).
+  The park reads the screen once, for display: it freezes the last frame as
+  the parked tab's backdrop only when the daemon rendered that frame live,
+  from an emulator that watched the child from its start (`contentObserved`).
+  A frame frozen when a viewer attached, one from a re-adopted emulator, or one
+  that will not project costs the backdrop, never the park. Four properties of
+  the park are load-bearing rather than incidental:
 
   - **The row never finalizes parked while the child is still running.** The
     park writes its intent, ends the child, confirms the exit, and only then
     finalizes and clears the row's holder and child pids. A child that survives
-    both the polite `/exit` and the escalation rolls the intent back and leaves
+    both the `SIGTERM` and the escalation rolls the intent back and leaves
     the session awake, because a row that claims parked over a live process is
     reclaimable by nothing: no sweep reads it, and a wake would put a second
     agent on the same session.
-  - **The park escalates in rungs, and each rung is identity-checked.** An
-    in-band `/exit`, then `SIGTERM` to the child pid alone, then telling the
-    holder to forget the pty and killing the job by process group — each with
-    its own bounded window, so a session whose Stop hooks and MCP teardown
-    outlast the polite one still gets to shut itself down rather than being
-    killed mid-write. Before any signal the recorded pid is verified as this
-    session's own child, the way every other signalling site in the daemon
-    verifies one; an identity that cannot be established signals nothing, lets
-    the holder go without a kill, and leaves the row awake for a reconciler to
-    judge.
-  - **The pending-input rail acts only on a screen the daemon rendered live.**
-    It reads the typed screen the machine-read contract answers with and
-    branches on that answer's `source`. A `daemon` screen is judged for a
-    half-composed prompt; every other answer is refused, each by a name of its
-    own, because the remedies differ — a `staleDaemon` or `viewer` screen
-    means somebody has the session open and the tab is what to close, a
-    session with no reader is one the daemon has lost track of, and a screen
-    that will not project is a defect to fix. A live `daemon` screen is also
-    refused, by a name of its own, when its emulator did not observe the child
-    from that child's start — the re-adoption case the screen carries as
-    `contentObserved`: such an emulator inherited a blank grid under a child
-    that repaints only what it is changing, so its screen can show a phantom
-    composer where the session is idle and a blank one where somebody is
-    typing. Refusing is recoverable; eating a half-composed prompt is not. The
-    idle sweep asks the same question before it arms a row, reading those two
-    facts alone rather than paying for the lines, so a session the park could
-    never complete costs no request-and-refusal pair on every pass.
+  - **The park escalates in rungs, and each rung is identity-checked.**
+    `SIGTERM` to the child pid alone, then telling the holder to forget the pty
+    and killing the job by process group — each with its own bounded window, so
+    a session whose Stop hooks and MCP teardown take a while still gets to shut
+    itself down rather than being killed mid-write. Nothing is typed into the
+    pty: `SIGTERM` runs Claude Code's graceful shutdown, which is where the
+    session mod makes its final save. Before any signal the recorded pid is
+    verified as this session's own child, the way every other signalling site
+    in the daemon verifies one; an identity that cannot be established signals
+    nothing, lets the holder go without a kill, and leaves the row awake for a
+    reconciler to judge.
+  - **A live session parks only if this daemon has adopted it.** The daemon's
+    reader for the session is the proof of adoption. With no reader, the
+    session was never adopted or its reader is gone, and the park refuses by a
+    name of its own rather than end a process nothing in this daemon reads. A
+    session whose holder and child are both verifiably gone is the exception:
+    no reader can come back for it and there is nothing left to end, so it
+    parks without one rather than stay awake over nothing. That check fails
+    closed — a pid this daemon cannot confirm as gone counts as live. The idle
+    sweep asks the reader question before it arms a row, so a session the park
+    could never complete costs no request-and-refusal pair on every pass.
   - **Revive re-anchors the identity check.** The row records when its current
     child started, because a woken session's child is younger than its row and
     every reclaimer that verifies a recorded pid against a start time would
