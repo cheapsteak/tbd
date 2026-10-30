@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 // BUG 2: SocketServer must increment its connected-client count when a client

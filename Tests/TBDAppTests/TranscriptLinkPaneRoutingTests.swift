@@ -136,7 +136,7 @@ struct TranscriptLinkPaneRoutingTests {
     // sufficient — the Coordinator caches fully-composed rows, link ranges and
     // all, and only consults this closure on a cache MISS. That the pane
     // actually recomposes is asserted by
-    // `TableTranscriptHarness.lateWorktreeRootRelinksComposedRows`.
+    // `TableTranscriptPaneTests.lateWorktreeRootRelinksComposedRows`.
     @Test func linkResolverClosureAlone_readsTheRootLiveWhenItArrivesLate() throws {
         try withTempWorktree { root in
             let box = RootBox("")

@@ -1,5 +1,8 @@
 import Foundation
 import TBDShared
+import os
+
+private let pluginDirLogger = Logger(subsystem: "com.tbd.daemon", category: "claude-overlay")
 
 /// Builds the shell command string for spawning (or respawning) a claude terminal.
 ///
@@ -61,6 +64,10 @@ import TBDShared
 /// so tmux's `-e KEY=VALUE` flag puts it directly into the spawned window's
 /// environment without appearing in the long-running shell command's `ps` argv.
 ///
+/// `sessionModEnvironment` (from `SessionModSpawn.prepare`) is merged into
+/// `sensitiveEnv` on both claude branches; it is empty when every session-mod
+/// feature is off, which leaves the result unchanged.
+///
 /// `sensitiveEnv` is **not** populated when the resolved path is `cmd` or
 /// `shellFallback`, since those branches are for non-claude shells.
 enum ClaudeSpawnCommandBuilder {
@@ -103,8 +110,10 @@ enum ClaudeSpawnCommandBuilder {
         shellFallback: String,
         settingsOverlayPath: String? = nil,
         pluginDirPath: String? = nil,
+        extraPluginDirs: [String] = [],
         envSettingOverrides: [String: ClaudeEnvValue] = [:],
         sessionName: String? = nil,
+        sessionModEnvironment: [String: String] = [:],
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Result {
         // Optional --settings flag merged into the claude invocation.
@@ -121,12 +130,26 @@ enum ClaudeSpawnCommandBuilder {
             settingsFlag = ""
         }
 
-        let pluginFlag: String
+        let ownPluginFlag: String
         if let p = pluginDirPath, fileExists(p) {
-            pluginFlag = " --plugin-dir \(SystemPromptBuilder.shellEscape(p))"
+            ownPluginFlag = " --plugin-dir \(SystemPromptBuilder.shellEscape(p))"
         } else {
-            pluginFlag = ""
+            ownPluginFlag = ""
         }
+
+        // A terminal's own plugin folders follow TBD's, in order. A folder that
+        // vanished is skipped with a warning (a stale entry must not stop the
+        // session from starting); repeats and TBD's own folder are dropped.
+        var extraPluginFlag = ""
+        var seenPluginDirs: Set<String> = pluginDirPath.map { [$0] } ?? []
+        for dir in extraPluginDirs where seenPluginDirs.insert(dir).inserted {
+            if fileExists(dir) {
+                extraPluginFlag += " --plugin-dir \(SystemPromptBuilder.shellEscape(dir))"
+            } else {
+                pluginDirLogger.warning("skipping missing plugin folder: \(dir, privacy: .public)")
+            }
+        }
+        let pluginFlag = ownPluginFlag + extraPluginFlag
 
         // Session name for Claude Code's cross-session peer registry. Blank,
         // whitespace-only and control-character-only names are dropped rather
@@ -208,6 +231,10 @@ enum ClaudeSpawnCommandBuilder {
                 env[setting.envVar] = envValue
             }
         }
+        // The session mod's variables (`SessionModSpawn.prepare`), empty when
+        // every feature is off. Process env only: like the registry settings
+        // above they are not routing keys, so they are never inlined.
+        env.merge(sessionModEnvironment) { _, mod in mod }
 
         // Re-export the profile ROUTING env inline, ahead of the claude
         // invocation. tmux's `-e KEY=VALUE` seeds the pane's initial process
@@ -246,14 +273,6 @@ enum ClaudeSpawnCommandBuilder {
     /// of them is a credential: `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN`
     /// come from `credentialEnv` and are never returned here, so nothing this
     /// function produces can leak a secret into `ps`.
-    ///
-    /// The one qualification is `ANTHROPIC_BASE_URL` on a proxied session,
-    /// where the value carries a model-proxy route token. That is not a
-    /// credential either — it authorizes nothing but a forward to an upstream
-    /// the daemon itself wrote — and it is deliberately inlined anyway: see
-    /// `ModelProxyRouteAttachment.Outcome.builderBaseURL`, which explains why
-    /// the rc-file defence is worth more than keeping the token out of `ps`
-    /// when the route file backing it is already readable by the same user.
     ///
     /// Extracted from `build` because the spawn path is no longer the only
     /// caller that has to run a session's `claude` binary the way the session
@@ -323,17 +342,13 @@ enum ClaudeSpawnCommandBuilder {
     /// terminal.
     ///
     /// The profile's routing keys and credential are layered **on top of** the
-    /// merged env overrides, the order
-    /// `ModelProxyRouteAttachment.Outcome.launchEnvironment(mergingBuilder:)`
-    /// gives a session, so an override can never clobber the account the
-    /// profile names.
+    /// merged env overrides, the order every spawn path gives a session, so an
+    /// override can never clobber the account the profile names.
     ///
     /// What `build` adds beyond that is left out, because it belongs to a
     /// terminal rather than to a profile: `DISABLE_AUTO_UPDATE` exists to keep
     /// an interactive rc file from prompting, and the `ClaudeEnvRegistry`
-    /// settings tune the interactive UI. A headless child has neither. A
-    /// session's model-proxy route is left out too: it is attached to one
-    /// terminal on the holder transport, and an exec child is not a terminal.
+    /// settings tune the interactive UI. A headless child has neither.
     static func execEnvironment(
         profileSecret: String?,
         profileKind: CredentialKind?,

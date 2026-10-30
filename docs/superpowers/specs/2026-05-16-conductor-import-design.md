@@ -141,14 +141,14 @@ For each workspace:
 Conductor → TBD migration plan
 ──────────────────────────────
 Repos:
-  + longeye-app    /Users/chang/projects/longeye-app    (default branch: main)
-  ~ standup-kit    /Users/chang/projects/standup-kit    (already in TBD, reusing)
+  + acme-app    /Users/me/projects/acme-app    (default branch: main)
+  ~ standup-kit    /Users/me/projects/standup-kit    (already in TBD, reusing)
 
 Workspaces:
-  + denver-v3      cw/denver-v3    →  longeye-app
-  + cambridge-v1   cw/cambridge-v1 →  longeye-app
+  + denver-v3      cw/denver-v3    →  acme-app
+  + cambridge-v1   cw/cambridge-v1 →  acme-app
   + atlanta        main            →  standup-kit
-  - riyadh-v1      (skip: path /Users/chang/conductor/workspaces/longeye-docs/riyadh-v1 not found)
+  - riyadh-v1      (skip: path /Users/me/conductor/workspaces/acme-docs/riyadh-v1 not found)
 
 Summary: 1 repo to add, 1 to reuse · 3 workspaces to adopt, 1 to skip
 ```
@@ -158,7 +158,7 @@ Under `--dry-run`, exit here.
 **5. Execute.** Stream per-item progress:
 
 ```
-[1/4] adding repo longeye-app… ok
+[1/4] adding repo acme-app… ok
 [2/4] adopting denver-v3… ok
 [3/4] adopting cambridge-v1… ok
 [4/4] adopting atlanta… ok
@@ -201,7 +201,7 @@ Adopt your existing Conductor worktrees into TBD in place — no files moved, br
 
 Flags:
 - `--all` — also adopt archived Conductor workspaces.
-- `--repo <name>` — limit to one Conductor repo (e.g. `--repo longeye-app`).
+- `--repo <name>` — limit to one Conductor repo (e.g. `--repo acme-app`).
 - `--dry-run` — print the plan, don't write anything.
 
 Idempotent — safe to re-run as you create new Conductor worktrees.
@@ -271,7 +271,7 @@ repository_id TEXT,
 directory_name TEXT,
 branch TEXT,
 state TEXT DEFAULT 'active',   -- observed values: 'ready', 'archived'
-workspace_path TEXT,            -- absolute path, e.g. /Users/chang/conductor/workspaces/longeye-app/denver-v3
+workspace_path TEXT,            -- absolute path, e.g. /Users/me/conductor/workspaces/acme-app/denver-v3
 -- (plus many fields we don't read: setup_log_path, derived_status, linked_workspace_ids, etc.)
 ```
 

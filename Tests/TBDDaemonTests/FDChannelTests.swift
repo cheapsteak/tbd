@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Testing
 import TBDShared
+import TBDKernel
 
 @Suite("FDChannel")
 struct FDChannelTests {

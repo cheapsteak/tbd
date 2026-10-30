@@ -142,20 +142,17 @@ experiment: an A/B that compares two identical CoreGraphics terminals and report
 "no difference". The bundling step stages every dependency resource bundle, and
 the per-view `.notice` line above is what proves the path is live.
 
-**Pane snapshots read the view backing store.** The screenshot path captures by
-re-running the view's draw down the subview tree. A Metal-backed view renders into
-a layer that path does not see, so snapshots come back blank — and a blank image
-is a *silent* regression, because it still renders as an image and nothing
-downstream reports it. Snapshots feed the sidebar context menu and pane
-placeholders.
-
-`setUseMetal(_:)` is togglable in both directions at runtime, so the capture drops
-to CoreGraphics for its duration and restores Metal afterwards. The whole round
-trip happens inside one main-thread turn, so the compositor never commits the
-intermediate hierarchy and the swap is not visible; a synchronous frame is forced
-on the way back so the rebuilt Metal view is not blank until the next runloop
-turn. Re-enabling rebuilds the renderer and glyph atlas, which is acceptable only
-because captures are user-gestured and occasional rather than per-frame.
+**Nothing captures the terminal view's pixels.** A capture through a view's
+backing store re-runs the view's draw down the subview tree, and a Metal-backed
+view renders into a layer that path does not see, so such a capture comes back
+blank — a *silent* failure, because a blank image still renders as an image and
+nothing downstream reports it. TBD takes no image of a terminal view: the frozen
+backdrop a parked pane shows is the session's text snapshot fed into a terminal
+view, not a picture of one. So the Metal renderer needs no capture round trip.
+Code that does capture a terminal view's pixels has to drop the view to
+CoreGraphics for the capture and restore Metal afterwards — `setUseMetal(_:)` is
+togglable in both directions at runtime — and pays a rebuild of the renderer and
+glyph atlas on every capture.
 
 **Terminal views are reparented across windows.** The keep-alive pager retains up
 to eight terminal views and moves them between windows, which is precisely the
@@ -250,13 +247,13 @@ dominant.
 
 **Tests cover both branches of the flag.** With the flag off, no `setUseMetal`
 call is made and the CoreGraphics path is byte-for-byte what existed before. With
-it on, Metal is requested and a captured snapshot is non-blank. The three states
-of the default are distinguishable: an unset key reads the shipped default, and an
-explicit `false` survives a change to that constant. Two decisions are extracted
-into pure functions — the capture-time renderer swap and the wait-for-window
-deferral — because a test process resolves shaders against a helper binary rather
-than the build directory, so the Metal branch itself cannot be exercised
-in-process; deleting either decision then goes red anyway.
+it on, Metal is requested, and a request made before the view has a window waits
+for one rather than being dropped. The three states of the default are
+distinguishable: an unset key reads the shipped default, and an explicit `false`
+survives a change to that constant. The wait-for-window deferral is extracted into
+a pure function because a test process resolves shaders against a helper binary
+rather than the build directory, so the Metal branch itself cannot be exercised
+in-process; deleting the deferral then goes red anyway.
 
 ## Rejected alternatives
 

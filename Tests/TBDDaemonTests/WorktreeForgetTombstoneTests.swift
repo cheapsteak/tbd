@@ -1,5 +1,5 @@
 import Foundation
-import GRDB
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -182,24 +182,6 @@ private func makeLifecycle(db: TBDDatabase) -> WorktreeLifecycle {
 }
 
 @Suite struct MigrationForgottenWorktreeTests {
-
-    /// v35 applies on a fresh DB: table + columns + repoID index all present.
-    @Test func forgottenWorktreeTableExists() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.writerForTests.read { dbConn in
-            let columns = try Row.fetchAll(dbConn, sql: "PRAGMA table_info(forgotten_worktree)")
-            let names = columns.compactMap { $0["name"] as String? }
-            #expect(names.contains("path"))
-            #expect(names.contains("repoID"))
-            #expect(names.contains("forgottenAt"))
-
-            let indexExists = try Bool.fetchOne(dbConn, sql: """
-                SELECT 1 FROM sqlite_master
-                WHERE type = 'index' AND name = 'idx_forgotten_worktree_repoID'
-                """) ?? false
-            #expect(indexExists, "repoID index must be created by v35")
-        }
-    }
 
     /// Store round-trip against the fresh schema: insert → contains → delete.
     @Test func storeRoundTrip() async throws {

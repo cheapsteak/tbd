@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// Records every path the list pass measured, and answers with one fixed

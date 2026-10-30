@@ -41,11 +41,14 @@ struct OrphanGCUnsentPromptTests: ~Copyable {
             hangStackBase: home.appendingPathComponent("hs", isDirectory: true),
             processSnapshotProvider: { [] },
             holdersBase: home.appendingPathComponent("h", isDirectory: true),
-            modelProxyBase: home.appendingPathComponent("mp", isDirectory: true),
-            streamsBase: home.appendingPathComponent("st", isDirectory: true),
             attachmentsBase: home.appendingPathComponent("a", isDirectory: true),
             remoteTranscriptsEnvironment: environment,
-            reposBase: TBDConstants.reposDir(environment: environment))
+            reposBase: TBDConstants.reposDir(environment: environment),
+            sessionsBase: TBDConstants.sessionsDir(environment: environment),
+            devServersBase: home.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: TBDConstants.retainedTranscriptsDir(environment: environment),
+            scratchSpacesBase: TBDConstants.scratchDir(environment: environment),
+            worktreesBase: TBDConstants.worktreesDir(environment: environment))
     }
 
     /// Writes an unsent-prompt file at the path `TBDConstants` gives the repo,

@@ -43,6 +43,7 @@ enum TranscriptSignposts {
         case .toolCall(_, let name, _, _, _, _): return "tool:\(name)"
         case .activityGroupSummary: return "activityGroup"
         case .subagentSummary: return "subagentSummary"
+        case .thinking: return "provisionalThinking"
         }
     }
 
@@ -75,6 +76,8 @@ enum TranscriptSignposts {
             return summary.itemCount
         case .subagentSummary:
             return 0
+        case .thinking(_, let text):
+            return text.count
         }
     }
 }

@@ -17,6 +17,9 @@ private let shadowCompareLogger = Logger(subsystem: "com.tbd.app", category: "pa
 /// Silent by default; activate with `log stream --level debug`.
 private let perfRPCLogger = Logger(subsystem: "com.tbd.app", category: "perf-rpc")
 private let perfRPCSignposter = OSSignposter(subsystem: "com.tbd.app", category: "perf-rpc")
+/// The holder claim sweep (`sweepHolderClaims`). Same category as the
+/// daemon's take-back lines, so one predicate streams both sides.
+private let holderClaimSweepLogger = Logger(subsystem: "com.tbd.app", category: "holder")
 
 /// Transition state for a worktree being revived from the archived view.
 /// Holds a snapshot of the `Worktree` so the row can keep rendering even
@@ -259,9 +262,10 @@ final class AppState {
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
-    /// severity dot. Worktrees the user is currently viewing are excluded
-    /// from this dictionary because `refreshNotifications` auto-marks them
-    /// read on every poll.
+    /// severity dot. While TBD is active, worktrees the user is viewing
+    /// (`attendedWorktreeIDs`) are excluded from this dictionary because
+    /// `refreshNotifications` auto-marks them read on every poll; while TBD is
+    /// in the background, a selected or pinned worktree can hold an entry here.
     var unreadByWorktree: [UUID: UnreadSummary] = [:] {
         didSet { sidebarParentRemoteGroupsCache.removeAll() }
     }
@@ -567,6 +571,10 @@ final class AppState {
             sidebarParentRemoteGroupsCache.removeAll()
         }
     }
+    /// Whether `remoteProviders` holds a roster the daemon actually reported
+    /// (set by a successful `refreshRemote()`, cleared when remote backends are
+    /// unavailable), so an empty list at launch is not read as "no providers".
+    var remoteProvidersLoaded = false
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = [] {
@@ -731,6 +739,19 @@ final class AppState {
         return ids
     }
 
+    /// Whether TBD is the frontmost app. Production reads `NSApp.isActive`;
+    /// tests inject a value, because under `swift test` `NSApp` is nil (or,
+    /// once something has touched `NSApplication.shared`, never active).
+    @ObservationIgnored var isAppActive: @MainActor () -> Bool = { NSApp?.isActive ?? false }
+
+    /// Worktree IDs the user is actually looking at: `visibleWorktreeIDs`
+    /// while TBD is active, and none while it is in the background. A selected
+    /// or pinned worktree is not being watched while the user is in another
+    /// app, so its notifications must still post a banner and stay unread.
+    var attendedWorktreeIDs: Set<UUID> {
+        isAppActive() ? visibleWorktreeIDs : []
+    }
+
     /// Worktree IDs with at least one terminal currently in the `.working`
     /// activity state (an agent is actively running). These must not have their
     /// view trees torn down by keep-alive eviction — unmounting kills the
@@ -891,10 +912,6 @@ final class AppState {
     /// resurrect the row. Value is the time the tombstone was created, used for
     /// TTL-based eviction when an archive fails or stalls.
     @ObservationIgnored var recentlyArchivedWorktreeIDs: [UUID: Date] = [:]
-    var suspendingTerminalIDs: Set<UUID> = []
-    /// Closures registered by live TerminalPanelView instances to capture a screenshot.
-    /// Keyed by terminal UUID. Populated in makeNSView, cleared on view disappear.
-    @ObservationIgnored var snapshotProviders: [UUID: () -> NSImage?] = [:]
     /// Weak terminal views keyed by terminal UUID, used to restore AppKit first
     /// responder after worktree navigation.
     @ObservationIgnored var terminalFocusTargets: [UUID: TerminalFocusTarget] = [:]
@@ -963,9 +980,6 @@ final class AppState {
     /// latch before registering, so a already-arrived start is a same-frame
     /// `true` rather than a wait.
     @ObservationIgnored var lastStartedIncarnation: [UUID: UUID] = [:]
-    /// Visual screenshots taken at suspend-click time, shown while daemon works.
-    /// Keyed by terminal UUID. Cleared when suspend completes.
-    var suspendingSnapshots: [UUID: NSImage] = [:]
     /// Terminals whose account "Switch account" is changing in place, keyed by
     /// terminal id. Set by `swapTerminalProfile` before the RPC, for a row the
     /// cache holds awake and only by the first swap to claim it, and cleared
@@ -980,16 +994,29 @@ final class AppState {
     /// once. Never reset: dropping back to zero when the record clears would
     /// rebuild the pane a second time. Absent reads as zero.
     var terminalAttachEpochs: [UUID: Int] = [:]
+    /// Per-terminal part of a terminal view's SwiftUI identity, advanced by
+    /// each Retry on the attach-failed placard (`retryTerminalAttach`).
+    ///
+    /// Separate from `terminalAttachEpochs` on purpose: an in-place account
+    /// switch reads that epoch to decide whether it still owes the pane its
+    /// one rebuild, and a Retry landing mid-switch must not answer that
+    /// question for it. Absent reads as zero; a terminal's entry goes with
+    /// the terminal (`recordTerminalRemoval`).
+    var terminalAttachRetries: [UUID: Int] = [:]
 
-    func setSuspendingSnapshot(_ image: NSImage, for id: UUID) {
-        suspendingSnapshots[id] = image
+    /// The attach-failed placard's Retry: rebuild this terminal's panel so it
+    /// attaches again from scratch.
+    ///
+    /// Advancing the retry count changes the panel's SwiftUI identity — a
+    /// pane's and the pinned dock's both carry it — so the failed panel is torn
+    /// down and a fresh one built, and the fresh one waits out anything the old
+    /// one still has in flight for this terminal before it asks. Unlike closing
+    /// the tab, it leaves the session alone.
+    func retryTerminalAttach(terminalID: UUID) {
+        terminalAttachRetries[terminalID, default: 0] += 1
     }
 
-    func removeSuspendingSnapshot(for id: UUID) {
-        suspendingSnapshots.removeValue(forKey: id)
-    }
     var editingWorktreeID: UUID? = nil
-    var isRenamingWorktree = false
     var prStatuses: [UUID: PRStatus] = [:]
     /// The outcome of the daemon's last attempt to learn each worktree's PR
     /// state. Kept beside `prStatuses`, never merged into it: a worktree absent
@@ -1112,19 +1139,11 @@ final class AppState {
     /// Bumped by each `loadGCConfig()` before it fetches, so a load whose
     /// fetch returns after a newer one started applies nothing.
     @ObservationIgnored var gcConfigLoadGeneration: UInt64 = 0
-    var nightwatchMode: NightwatchMode = .off
     /// Auto-hibernate master switch. Loaded from the daemon `Config` via
     /// `loadHibernationConfig()`.
     var autoHibernateEnabled: Bool = false
     /// Auto-hibernate idle timeout in minutes. Loaded from `Config`.
     var hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes
-    /// Supervision's fleet-wide authority switch (design 2026-07-26 §3, §7).
-    /// `true` means supervision is enabled — the fleet brake is *released*,
-    /// the opposite sense from the brake's own name. Shipped OFF (braked);
-    /// for now inert, since the rest of the supervision subsystem is landing
-    /// in the same series of changes. Loaded from the daemon `Config` via
-    /// `loadSupervisionConfig()`.
-    var supervisionEnabled: Bool = false
     /// Daemon-persisted gate for session-limit auto-resume (default OFF).
     /// Daemon-side (not @AppStorage) because the daemon must act while the
     /// app is closed.
@@ -1815,7 +1834,7 @@ final class AppState {
     /// keyed by terminal id. Mirrored, never derived: seeded from
     /// `terminal.programStatusList` and kept current by
     /// `.terminalProgramStatusChanged`. Memory only — `title` and `msg` can
-    /// carry content from the user's work. Empty while the flag is off.
+    /// carry content from the user's work.
     var programStatusSnapshots: [UUID: ProgramStatusSnapshot] = [:]
     /// Last `ProgramStatusSnapshot.revision` applied per terminal, so a late
     /// snapshot cannot overwrite a newer one. Bookkeeping, not UI state, so it
@@ -1888,9 +1907,9 @@ final class AppState {
     /// Published so the Settings control-mode toggle re-renders after
     /// `setControlModeEnabled` refreshes it.
     var daemonCapabilities: DaemonCapabilitiesResult?
-    /// Whether the daemon reports transcript streaming as effective — the
-    /// conjunction of `transcript_streaming_enabled` and `model_proxy_enabled`,
-    /// already resolved daemon-side, so the app never re-derives the pair.
+    /// Whether the daemon reports transcript streaming as on — the resolved
+    /// `transcript_streaming_enabled` flag, which spawns sessions with the
+    /// session mod's `transcript-stream` feature.
     ///
     /// False until capabilities have been fetched, which is the conservative
     /// reading: a pane that registers no stream file renders exactly what it
@@ -1905,6 +1924,25 @@ final class AppState {
     /// been fetched, so a card never offers an answer the daemon would refuse.
     var transcriptPromptAnswerEnabled: Bool {
         daemonCapabilities?.transcriptPromptAnswerEnabled ?? false
+    }
+    /// Whether composer drafts are saved and restored, as the daemon reports
+    /// it. False until capabilities have been fetched.
+    var composerDraftEnabled: Bool {
+        daemonCapabilities?.composerDraftEnabled ?? false
+    }
+    /// Whether automatic parking holds composer drafts on, as the daemon
+    /// reports it, which greys the Settings toggle. False until capabilities
+    /// have been fetched.
+    var composerDraftRequiredByAutoPark: Bool {
+        daemonCapabilities?.composerDraftRequiredByAutoPark ?? false
+    }
+    /// The caption under the composer-draft toggle while automatic parking
+    /// holds the feature on.
+    static let composerDraftRequiredByAutoParkCaption = "On while auto-hibernation is on"
+    /// Whether session usage is recorded, as the daemon reports it. False
+    /// until capabilities have been fetched.
+    var sessionModUsageEnabled: Bool {
+        daemonCapabilities?.sessionModUsageEnabled ?? false
     }
     /// How `loadModelProfiles()` fetches its config-bearing response.
     /// Injectable because `DaemonClient` is concrete, matching the other
@@ -1934,10 +1972,6 @@ final class AppState {
     /// protocol), so the Settings-toggle tests can exercise the success branch.
     @ObservationIgnored lazy var controlModeSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setControlMode(enabled: enabled) }
-    /// How `setHibernateInputVetoEnabled` persists the flag — injectable for
-    /// the same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var hibernateInputVetoSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setHibernateInputVeto(enabled: enabled) }
     /// How `setAutoCloseSetupEnabled` persists the flag — injectable for the
     /// same reason as `controlModeSetter`.
     @ObservationIgnored lazy var autoCloseSetupSetter: @MainActor (Bool) async throws -> Void =
@@ -1977,6 +2011,27 @@ final class AppState {
     /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var ptyHolderFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPtyHolderEnabled(enabled: enabled) }
+    /// How `setHolderClaimReconcileEnabled` persists the holder claim-reconcile
+    /// soak flag — injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var holderClaimReconcileFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setHolderClaimReconcileEnabled(enabled) }
+    /// How `sweepHolderClaims` sends `holder.reconcileClaims` — injectable for
+    /// the same reason as `controlModeSetter`, so the sweep's cadence and its
+    /// answers are testable without a daemon.
+    @ObservationIgnored
+    lazy var holderClaimSweepSender:
+        @MainActor (HolderReconcileClaimsParams) async throws -> HolderReconcileClaimsResult =
+        { [daemonClient] params in
+            try await daemonClient.reconcileHolderClaims(
+                held: params.held, throughSeq: params.throughSeq, appPID: params.appPID)
+        }
+    /// How `hibernateTerminals` reaches the daemon — injectable so the batch
+    /// and its failure alert are testable without a daemon.
+    @ObservationIgnored
+    lazy var terminalHibernateSender: @MainActor (UUID) async throws -> Void =
+        { [daemonClient] terminalID in
+            try await daemonClient.terminalHibernate(terminalID: terminalID)
+        }
     /// How `wakeTerminalOutcome` reaches the daemon — injectable for the same
     /// reason as `controlModeSetter`, so the wake's prompt plumbing and its
     /// failure branches are testable without a running daemon.
@@ -2053,18 +2108,8 @@ final class AppState {
             try await daemonClient.remoteTranscriptLoadEarlier(
                 provider: selection.provider, sessionID: selection.sessionID)
         }
-    /// How `setModelProxyEnabled` persists the model-proxy gate — injectable
-    /// for the same reason as `controlModeSetter`.
-    @ObservationIgnored
-    lazy var modelProxyFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in
-            try await daemonClient.setModelProxyEnabled(enabled: enabled)
-        }
     /// How `setTranscriptStreamingEnabled` persists the streaming gate —
-    /// injectable for the same reason as `controlModeSetter`. Separate from
-    /// `modelProxyFlagSetter` even though the two flags are coupled: the
-    /// coupling is the daemon's, and an app that wrote both would be guessing
-    /// at a rule it does not own.
+    /// injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored
     lazy var transcriptStreamingFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in
@@ -2082,10 +2127,6 @@ final class AppState {
     /// gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var prPollScheduleFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setPRPollSchedule(enabled: enabled) }
-    /// How `setProgramStatusEnabled` persists the Program Status Protocol gate
-    /// — injectable for the same reason as `controlModeSetter`.
-    @ObservationIgnored lazy var programStatusFlagSetter: @MainActor (Bool) async throws -> Void =
-        { [daemonClient] enabled in try await daemonClient.setProgramStatus(enabled: enabled) }
     /// Carries OSC 7501 reports an attached panel read off a holder pty to the
     /// daemon, one at a time and in order — see `forwardProgramStatusReport`.
     /// Replaceable for the same reason as `controlModeSetter`, so a test can
@@ -2100,6 +2141,14 @@ final class AppState {
     /// prompt-answer gate — injectable for the same reason as `controlModeSetter`.
     @ObservationIgnored lazy var transcriptPromptAnswerFlagSetter: @MainActor (Bool) async throws -> Void =
         { [daemonClient] enabled in try await daemonClient.setTranscriptPromptAnswer(enabled: enabled) }
+    /// How `setComposerDraftEnabled` persists the composer draft gate —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var composerDraftFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setComposerDraft(enabled: enabled) }
+    /// How `setSessionModUsageEnabled` persists the session usage gate —
+    /// injectable for the same reason as `controlModeSetter`.
+    @ObservationIgnored lazy var sessionModUsageFlagSetter: @MainActor (Bool) async throws -> Void =
+        { [daemonClient] enabled in try await daemonClient.setSessionModUsage(enabled: enabled) }
     /// How `setRemoteTranscriptLiveSyncEnabled` persists the live remote
     /// transcript sync gate — injectable for the same reason as
     /// `controlModeSetter`.
@@ -2414,10 +2463,7 @@ final class AppState {
     /// (new panes would silently fall back to grouped sessions).
     func refreshDaemonCapabilities() async {
         if let capabilities = await daemonCapabilitiesFetcher() {
-            let wasProgramStatusEnabled = daemonCapabilities?.programStatusEnabled
-                ?? Config.programStatusEnabledDefault
             daemonCapabilities = capabilities
-            programStatusCapabilitiesChanged(wasEnabled: wasProgramStatusEnabled)
         }
     }
     @ObservationIgnored lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
@@ -2431,8 +2477,31 @@ final class AppState {
     /// Count of poll ticks skipped because a previous cycle was still in flight.
     /// Storm indicator for observability and tests.
     @ObservationIgnored private(set) var skippedPollCycles = 0
+    /// True while a holder claim sweep waits on the daemon. A sweep is skipped
+    /// while it is set, so a stalled daemon never collects one more open
+    /// connection per tick.
+    @ObservationIgnored private(set) var holderClaimSweepInFlight = false
+    /// Set when the daemon answered `holder.reconcileClaims` with "unknown
+    /// method", as a daemon older than the RPC does. Sweeps stop until the next
+    /// connect or the next state subscription starts, either of which may
+    /// reach a newer daemon.
+    @ObservationIgnored private(set) var holderClaimSweepUnsupported = false
     @ObservationIgnored private var subscriptionTask: Task<Void, Never>?
     let macNotificationManager = MacNotificationManager()
+    /// How `handleNotificationDelta` posts a macOS banner, given the delta and
+    /// the worktree's resolved display name — injectable because
+    /// `postIfEnabled` returns early on the unbundled test executable, so tests
+    /// replace this with a recorder to observe which arrivals post.
+    @ObservationIgnored lazy var postNotificationBanner: @MainActor (NotificationDelta, String?) -> Void =
+        { [macNotificationManager] notification, worktreeName in
+            macNotificationManager.postIfEnabled(
+                worktreeID: notification.worktreeID,
+                message: notification.message,
+                worktreeName: worktreeName,
+                type: notification.type,
+                terminalID: notification.terminalID
+            )
+        }
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let paneHistoriesKey = "com.tbd.app.paneHistories"
@@ -2456,8 +2525,9 @@ final class AppState {
     @ObservationIgnored private var focusObservers: [NSObjectProtocol] = []
 
     /// UserDefaults domain this AppState reads instance-level preferences from.
-    /// Production uses `.standard`; tests inject a per-suite `UserDefaults(suiteName:)`
-    /// so they never clobber the developer's running app preferences.
+    /// Production uses `.standard`; tests inject the defaults of a per-test
+    /// `TestDefaultsSuite` so they never clobber the developer's running app
+    /// preferences.
     let userDefaults: UserDefaults
 
     init(
@@ -2966,16 +3036,17 @@ final class AppState {
         recordNavigation(.worktrees(filteredIDs))
     }
 
-    func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-        stopSubscription()
-    }
-
     /// Start listening for real-time state deltas from the daemon.
     func startSubscription() {
         subscriptionTask?.cancel()
         resetDeltaOrdering()
+        // A new subscription is the visible sign of a possibly new daemon. RPCs
+        // ride one-shot connections, so a daemon replaced under a running app
+        // may never register as a disconnect, and an "unknown method" from the
+        // daemon it replaced would otherwise keep claim sweeps off for good.
+        // That verdict belongs to the old daemon, so it goes here as on a
+        // connect.
+        holderClaimSweepUnsupported = false
         // Same reason for program status: the daemon's `ProgramStatusStore` is
         // memory-only and counts revisions from zero after a restart. Re-seed
         // from the list; deltas from the new subscription keep it current.
@@ -3018,7 +3089,6 @@ final class AppState {
             Task { [weak self] in
                 await self?.loadModelProfiles()
                 await self?.loadHibernationConfig()
-                await self?.loadSupervisionConfig()
                 await self?.loadGCConfig()
                 // The daemon reuses this delta for config changes including
                 // the control-mode toggle (handleConfigSetControlMode), so
@@ -3053,8 +3123,6 @@ final class AppState {
             applyPendingPromptsDelta(d)
         case .terminalProfileChanged(let d):
             applyTerminalProfileDelta(d)
-        case .watchDeskRolesChanged(let d):
-            Task { [weak self] in await self?.refreshTerminals(worktreeID: d.worktreeID) }
         case .terminalHibernationChanged(let d):
             applyTerminalHibernationDelta(d)
         case .worktreeMoved(let d):
@@ -3554,6 +3622,10 @@ final class AppState {
             // semantics — reconnect backdrop, overwritten on the next park).
             terminals[delta.worktreeID]?[idx].hibernateReason = nil
             terminals[delta.worktreeID]?[idx].suspendedAt = nil
+            // A successful wake ends any held-wake note (the daemon's
+            // `clearHibernated` clears the same columns).
+            terminals[delta.worktreeID]?[idx].startHeldReason = nil
+            terminals[delta.worktreeID]?[idx].startHeldAt = nil
         }
     }
 
@@ -3623,16 +3695,17 @@ final class AppState {
         // Record a background-tab arrival so its tab label bolds. Fires for any
         // terminal-stamped delta (any type — response completions, errors, focus
         // pushes, etc.), as long as it isn't the tab the user is already looking
-        // at. Done BEFORE the visible-worktree early-return because a worktree
-        // can be "visible" (selected) while the stamped terminal lives on a
-        // background tab.
+        // at. Done BEFORE the attended-worktree early-return because a worktree
+        // can be attended (selected while TBD is active) while the stamped
+        // terminal lives on a background tab.
         if let tid = notification.terminalID,
            !isActiveTabTerminal(tid, inFocusedWorktree: notification.worktreeID) {
             unreadTerminals.insert(tid)
         }
 
-        let visible = visibleWorktreeIDs
-        guard !visible.contains(notification.worktreeID) else { return }
+        // Only a worktree the user is actually looking at skips the summary
+        // and the banner; a visible one does not while TBD is in the background.
+        guard !attendedWorktreeIDs.contains(notification.worktreeID) else { return }
 
         // Update local unread summary state. The delta doesn't carry a
         // timestamp so we use "now" — close enough for the jump menu's
@@ -3653,14 +3726,11 @@ final class AppState {
 
         // Post the macOS notification. Its sound rides on the notification,
         // so Focus and Do Not Disturb silence both together.
-        macNotificationManager.postIfEnabled(
-            worktreeID: notification.worktreeID,
-            message: notification.message,
+        postNotificationBanner(
+            notification,
             // Resolve the name here (scratch-aware) instead of handing over
             // the whole materialized allWorktrees array for one lookup.
-            worktreeName: findWorktree(id: notification.worktreeID)?.displayName,
-            type: notification.type,
-            terminalID: notification.terminalID
+            findWorktree(id: notification.worktreeID)?.displayName
         )
     }
 
@@ -3710,11 +3780,78 @@ final class AppState {
         return true
     }
 
+    /// Tells the daemon which holder sessions this app holds, so it can take
+    /// back the viewer claims this app owns on every other session: the
+    /// reconciler for a handback or an attach reply lost in transit
+    /// (docs/specs/2026-10-25-holder-claim-reconcile-design.md). Sent on every
+    /// poll tick and once right after a connect, while connected.
+    ///
+    /// The app never reads `holder_claim_reconcile_enabled`; the daemon decides
+    /// whether to act. A failed call is ignored, and the next tick sends again.
+    /// An "unknown method" answer means a daemon older than the RPC, so sweeps
+    /// stop until the next connect or the next state subscription. One sweep
+    /// at a time: while one waits on the daemon, the next returns at once.
+    ///
+    /// Nothing is sent before this app has numbered its first attach: a sweep
+    /// through `throughSeq` 0 covers only claims with a seq at or below 0, and
+    /// every seq is 1 or more, so it could take nothing back. An app that has
+    /// never attached a holder session sends nothing at all.
+    func sweepHolderClaims() async {
+        guard isConnected, !holderClaimSweepInFlight, !holderClaimSweepUnsupported else { return }
+        // The snapshot and the params are built in one main-actor step, before
+        // the first suspension: every attach numbered at or below `throughSeq`
+        // whose attempt has not ended is in `held`.
+        let snapshot = holderHandbackLedger.reconcileSnapshot()
+        guard snapshot.throughSeq > 0 else { return }
+        let params = HolderReconcileClaimsParams(
+            appPID: getpid(), held: snapshot.held, throughSeq: snapshot.throughSeq)
+        holderClaimSweepInFlight = true
+        defer { holderClaimSweepInFlight = false }
+        do {
+            let result = try await holderClaimSweepSender(params)
+            if !result.takenBack.isEmpty || !result.wouldTakeBack.isEmpty {
+                holderClaimSweepLogger.debug("""
+                    holder claim sweep: takenBack=\(result.takenBack.count, privacy: .public) \
+                    wouldTakeBack=\(result.wouldTakeBack.count, privacy: .public) \
+                    held=\(params.held.count, privacy: .public) \
+                    throughSeq=\(params.throughSeq, privacy: .public)
+                    """)
+            }
+        } catch DaemonClientError.rpcError(let message, _) where message.hasPrefix("Unknown method:") {
+            holderClaimSweepUnsupported = true
+            holderClaimSweepLogger.notice("""
+                The daemon has no holder.reconcileClaims; claim sweeps stop until the next connect \
+                or state subscription
+                """)
+        } catch {
+            holderClaimSweepLogger.debug(
+                "holder claim sweep failed; the next tick sends again: \(error, privacy: .public)")
+        }
+    }
+
+    /// What a successful connect does for the holder claim sweep. The new
+    /// connection may reach a newer daemon than one that answered "unknown
+    /// method", so sweeps are allowed again. `startSubscription` allows them
+    /// again too, for a daemon replaced without a disconnect the app noticed.
+    ///
+    /// - Parameter sweepNow: Send a sweep at once. `connectAndLoadInitialState`
+    ///   passes true. The poll tick's reconnect passes false, because the same
+    ///   tick's own sweep follows, and one tick never sends two.
+    func holderClaimSweepDidConnect(sweepNow: Bool) async {
+        holderClaimSweepUnsupported = false
+        if sweepNow { await sweepHolderClaims() }
+    }
+
     /// Poll daemon for state changes every 2 seconds.
     private func startPolling() {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Whether this tick connected through `startDaemonAndConnect`,
+                // whose `connectAndLoadInitialState` sends a claim sweep of its
+                // own. This tick's sweep then stays out, so one tick never
+                // sends two.
+                var connectSentSweep = false
                 // Connection/reconnection stays OUTSIDE the in-flight guard so a
                 // dropped socket is retried every tick even while a slow refresh
                 // is still draining; only the refresh (the list RPCs) is guarded.
@@ -3722,10 +3859,12 @@ final class AppState {
                     // Try to start the daemon if socket doesn't exist
                     if !FileManager.default.fileExists(atPath: TBDConstants.socketPath) {
                         await self.startDaemonAndConnect()
+                        connectSentSweep = true
                     } else {
                         let didConnect = await self.daemonClient.connect()
                         self.isConnected = didConnect
                         if didConnect {
+                            await self.holderClaimSweepDidConnect(sweepNow: false)
                             self.pushClaudeSpawnPreferences()
                             self.pushForegroundState()
                         } else if !AppState.pidFilePointsAtLiveDaemon() {
@@ -3737,9 +3876,24 @@ final class AppState {
                             // transient connect failures with a healthy pid
                             // stay on the plain retry path above.
                             await self.startDaemonAndConnect()
+                            connectSentSweep = true
                         }
                     }
                     if !self.isConnected { return }
+                }
+                // The block above runs only while `isConnected` is false, so it
+                // never sees a sidecar that dropped on its own while the app
+                // stayed connected. This does, and it is paced inside — free
+                // while the sidecar is up, and backed off so a second app
+                // instance cannot make the two take it from each other every
+                // tick.
+                await self.daemonClient.reconnectSidecarIfDown(.poll)
+                // The holder claim sweep runs beside the refresh, outside its
+                // guard and under its own single-flight flag: a slow refresh
+                // cannot starve it, and a slow sweep cannot hold up the
+                // refresh.
+                if !connectSentSweep {
+                    Task { @MainActor [weak self] in await self?.sweepHolderClaims() }
                 }
                 // Guard the whole refresh cycle (refreshAll + the every-15th
                 // pr.list) so a slow daemon can never stack overlapping cycles or
@@ -3797,7 +3951,6 @@ final class AppState {
             }
             await loadModelProfiles()
             await loadHibernationConfig()
-            await loadSupervisionConfig()
             await loadGCConfig()
             await refreshRemote()
             startSubscription()
@@ -3805,6 +3958,8 @@ final class AppState {
             await refreshDevServerSummary()
             pushClaudeSpawnPreferences()
             pushForegroundState()
+            // Last, so the initial load never waits on it.
+            await holderClaimSweepDidConnect(sweepNow: true)
         } else {
             logger.warning("Could not connect to daemon — is tbdd running?")
         }
@@ -4421,16 +4576,17 @@ final class AppState {
     }
 
     /// Refresh unread notifications from the daemon.
-    /// Notifications for currently visible worktrees (selected or pinned) are
-    /// automatically marked as read so the badge never appears while the user
-    /// is looking at the terminal.
+    /// While TBD is active, notifications for currently visible worktrees
+    /// (selected or pinned) are automatically marked as read so the badge
+    /// never appears while the user is looking at the terminal. While it is in
+    /// the background nothing is attended, so every unread stays unread.
     func refreshNotifications() async {
         do {
             let fetched = try await daemonClient.listNotifications()
 
             // Auto-mark-as-read for worktrees the user is currently looking at
-            let visible = visibleWorktreeIDs
-            let toMarkRead = Self.worktreeIDsToAutoMarkRead(unreadSummaries: fetched, visible: visible)
+            let attended = attendedWorktreeIDs
+            let toMarkRead = Self.worktreeIDsToAutoMarkRead(unreadSummaries: fetched, visible: attended)
             for worktreeID in toMarkRead {
                 do {
                     try await daemonClient.markNotificationsRead(worktreeID: worktreeID)
@@ -4439,8 +4595,8 @@ final class AppState {
                 }
             }
 
-            // Only include notifications for non-visible worktrees in UI state
-            let filtered = fetched.filter { !visible.contains($0.key) }
+            // Only include notifications for unattended worktrees in UI state
+            let filtered = fetched.filter { !attended.contains($0.key) }
             if filtered != unreadByWorktree {
                 unreadByWorktree = filtered
             }
@@ -4452,14 +4608,16 @@ final class AppState {
 
     /// Pure mirror of `refreshNotifications`' auto-mark-read reconcile: a
     /// `notifications.markRead` RPC is due only for worktrees that BOTH have
-    /// unread rows (present in the daemon's unread-only summary) AND are
-    /// currently visible. Keying off the fetched summary is load-bearing in
-    /// two directions: idle poll ticks (no unread anywhere) fire zero RPCs,
-    /// and a notification arriving while its worktree is already visible is
-    /// still marked read on the next tick. A guard on `unreadByWorktree`
-    /// would break the latter — it excludes visible worktrees by
-    /// construction, so an arrive-while-visible notification would never
-    /// qualify and would resurface as unread once the worktree left view.
+    /// unread rows (present in the daemon's unread-only summary) AND are in
+    /// `visible` — which the caller passes as `attendedWorktreeIDs`, the
+    /// worktrees visible while TBD is active. Keying off the fetched summary is
+    /// load-bearing in two directions: idle poll ticks (no unread anywhere)
+    /// fire zero RPCs, and a notification arriving while its worktree is
+    /// already visible is still marked read on the next tick. A guard on
+    /// `unreadByWorktree` would break the latter — it excludes attended
+    /// worktrees by construction, so an arrive-while-visible notification
+    /// would never qualify and would resurface as unread once the worktree
+    /// left view.
     nonisolated static func worktreeIDsToAutoMarkRead(
         unreadSummaries: [UUID: UnreadSummary],
         visible: Set<UUID>
@@ -4606,88 +4764,6 @@ final class AppState {
     /// Whether the WIP main-area resize broadcast is enabled. Default false.
     private var terminalAutoResizeEnabled: Bool {
         userDefaults.bool(forKey: Self.terminalAutoResizeKey)
-    }
-
-    /// UserDefaults key mirroring the `@AppStorage("autoSuspendClaude")`
-    /// toggle in the Settings → Experimental section. Read from non-View
-    /// contexts (the pre-sleep suspend hook) so the gate is honored outside
-    /// the View layer.
-    static let autoSuspendClaudeKey = "autoSuspendClaude"
-
-    /// Whether auto-suspend is enabled. Fails closed: defaults to false when
-    /// the user has never touched the toggle, matching the `@AppStorage`
-    /// defaults. Tests pass a private `UserDefaults(suiteName:)` so they
-    /// never mutate the developer's live app preferences.
-    static func autoSuspendClaudeEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: autoSuspendClaudeKey) as? Bool ?? false
-    }
-
-    /// UserDefaults key mirroring the `@AppStorage` toggle in
-    /// Settings → Fleet Automation that gates the Nightwatch / Daywatch feature.
-    /// When off (the default), the sidebar mode control is hidden entirely —
-    /// the desk agent acts on the live fleet (nudging stuck sessions,
-    /// dispatching work) and its safety rules are still changing, so it
-    /// stays opt-in.
-    static let nightwatchExperimentalKey = "nightwatchExperimentalEnabled"
-
-    /// Whether the experimental Nightwatch / Daywatch UI is enabled. Fails
-    /// closed: defaults to false so the sidebar control only appears once the
-    /// user opts in from Settings → Fleet Automation. Tests pass a private
-    /// `UserDefaults(suiteName:)` so they never touch live app preferences.
-    static func nightwatchExperimentalEnabled(defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: nightwatchExperimentalKey) as? Bool ?? false
-    }
-
-    /// Pure target-selection for the pre-sleep suspend hook. Returns the
-    /// worktree IDs to best-effort suspend before the machine sleeps:
-    /// `[]` when auto-suspend is disabled, otherwise every worktree ID
-    /// (flattened across repos, plus repo-less scratch spaces — the daemon's
-    /// suspend handler is worktree-kind agnostic). No I/O — trivially
-    /// unit-testable for both gate branches without a live daemon.
-    static func worktreeIDsToSuspendForSleep(
-        worktrees: [UUID: [Worktree]],
-        scratchWorktrees: [Worktree],
-        autoSuspendEnabled: Bool
-    ) -> [UUID] {
-        guard autoSuspendEnabled else { return [] }
-        return worktrees.values.flatMap { $0 }.map(\.id) + scratchWorktrees.map(\.id)
-    }
-
-    /// Best-effort suspend of idle Claude terminals across all worktrees when
-    /// the machine is about to sleep, so if the tmux server dies during a long
-    /// sleep, wake has less to recover.
-    ///
-    /// This is an OPT-IN optimization gated on the existing `autoSuspendClaude`
-    /// toggle (default OFF) — NOT the safety net. Short sleeps (lid close)
-    /// usually leave the tmux server alive, so unconditionally exiting every
-    /// idle Claude session on every sleep would force needless manual resumes.
-    /// The unconditional safety is #284 (park-on-reboot), which already
-    /// guarantees no OOM by parking terminals as suspended on reboot/server
-    /// death. Gating keeps all proactive-suspend behavior under the one toggle
-    /// the user already controls.
-    ///
-    /// When the gate is off this makes ZERO daemon calls. Otherwise it fires a
-    /// fire-and-forget `worktreeSuspend` per worktree; the daemon filters to
-    /// `isClaudeResumable && suspendedAt == nil`, waits briefly per terminal
-    /// for idle, and skips busy ones — so firing for every worktree is safe and
-    /// no-ops worktrees with nothing to suspend.
-    func suspendIdleClaudeForSleep(defaults: UserDefaults = .standard) {
-        let enabled = Self.autoSuspendClaudeEnabled(defaults: defaults)
-        let ids = Self.worktreeIDsToSuspendForSleep(
-            worktrees: worktrees,
-            scratchWorktrees: scratchWorktrees,
-            autoSuspendEnabled: enabled
-        )
-        guard !ids.isEmpty else {
-            logger.debug("suspendIdleClaudeForSleep: nothing to do (enabled=\(enabled, privacy: .public))")
-            return
-        }
-        logger.info("suspendIdleClaudeForSleep: best-effort suspending \(ids.count, privacy: .public) worktree(s) before sleep")
-        for id in ids {
-            Task { [daemonClient] in
-                try? await daemonClient.worktreeSuspend(worktreeID: id)
-            }
-        }
     }
 
     /// UserDefaults key for the `@AppStorage` toggle in the Settings → Claude

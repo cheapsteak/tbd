@@ -169,6 +169,58 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("transcript-prompt-answer: on"))
     }
 
+    // MARK: - composer-draft: the soak switch for saving and restoring composer drafts
+
+    @Test func composerDraftDescribesBothStates() {
+        let on = ConfigSet.confirmation(key: "composer-draft", value: .on)
+        let off = ConfigSet.confirmation(key: "composer-draft", value: .off)
+        #expect(on.hasPrefix("Set composer-draft to on."))
+        #expect(off.hasPrefix("Set composer-draft to off."))
+        #expect(on != off)
+    }
+
+    @Test func composerDraftIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("composer-draft"))
+        #expect(try ConfigSet.parseOnOff("on", key: "composer-draft") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "composer-draft") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "composer-draft")
+        }
+    }
+
+    @Test func configGetPrintsComposerDraftInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("composer-draft: off"))
+        config.composerDraftEnabled = true
+        #expect(ConfigGet.render(config).contains("composer-draft: on"))
+    }
+
+    // MARK: - session-usage: the soak switch for recording session usage
+
+    @Test func sessionUsageDescribesBothStates() {
+        let on = ConfigSet.confirmation(key: "session-usage", value: .on)
+        let off = ConfigSet.confirmation(key: "session-usage", value: .off)
+        #expect(on.hasPrefix("Set session-usage to on."))
+        #expect(off.hasPrefix("Set session-usage to off."))
+        #expect(on != off)
+    }
+
+    @Test func sessionUsageIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("session-usage"))
+        #expect(try ConfigSet.parseOnOff("on", key: "session-usage") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "session-usage") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "session-usage")
+        }
+    }
+
+    @Test func configGetPrintsSessionUsageInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("session-usage: off"))
+        config.sessionModUsageEnabled = true
+        #expect(ConfigGet.render(config).contains("session-usage: on"))
+    }
+
     // MARK: - clone-checkout: the soak switch for clone-backed worktree checkout
 
     @Test func cloneCheckoutDescribesBothStates() {
@@ -194,6 +246,67 @@ struct ConfigCommandsTests {
         #expect(ConfigGet.render(config).contains("clone-checkout: off"))
         config.cloneCheckoutEnabled = true
         #expect(ConfigGet.render(config).contains("clone-checkout: on"))
+    }
+
+    // MARK: - start-admission and agent-background
+
+    @Test(arguments: ["start-admission", "agent-background"])
+    func admissionAndBackgroundAreOnOffKeys(key: String) throws {
+        #expect(ConfigSet.onOffKeys.contains(key))
+        #expect(ConfigSet.allKeys.contains(key))
+        #expect(try ConfigSet.parseOnOff("on", key: key) == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: key) == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: key)
+        }
+    }
+
+    @Test(arguments: ["start-admission", "agent-background"])
+    func admissionAndBackgroundDescribeBothStates(key: String) {
+        let on = ConfigSet.confirmation(key: key, value: .on)
+        let off = ConfigSet.confirmation(key: key, value: .off)
+        #expect(on.hasPrefix("Set \(key) to on."))
+        #expect(off.hasPrefix("Set \(key) to off."))
+        #expect(on != off)
+    }
+
+    @Test func configGetPrintsAdmissionAndBackgroundInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("start-admission: off"))
+        #expect(ConfigGet.render(config).contains("agent-background: off"))
+        config.startAdmissionEnabled = true
+        config.agentBackgroundEnabled = true
+        #expect(ConfigGet.render(config).contains("start-admission: on"))
+        #expect(ConfigGet.render(config).contains("agent-background: on"))
+    }
+
+    // MARK: - holder-claim-reconcile: the soak switch for the holder viewer-claim sweep
+
+    @Test func holderClaimReconcileIsAnOnOffKey() throws {
+        #expect(ConfigSet.onOffKeys.contains("holder-claim-reconcile"))
+        #expect(ConfigSet.allKeys.contains("holder-claim-reconcile"))
+        #expect(try ConfigSet.parseOnOff("on", key: "holder-claim-reconcile") == .on)
+        #expect(try ConfigSet.parseOnOff("off", key: "holder-claim-reconcile") == .off)
+        #expect(throws: CLIError.self) {
+            _ = try ConfigSet.parseOnOff("auto", key: "holder-claim-reconcile")
+        }
+    }
+
+    @Test func holderClaimReconcileDescribesBothStates() {
+        let on = ConfigSet.confirmation(key: "holder-claim-reconcile", value: .on)
+        let off = ConfigSet.confirmation(key: "holder-claim-reconcile", value: .off)
+        #expect(on.hasPrefix("Set holder-claim-reconcile to on."))
+        #expect(off.hasPrefix("Set holder-claim-reconcile to off."))
+        #expect(on.contains("takes back"))
+        #expect(off.contains("only logs"))
+        #expect(on != off)
+    }
+
+    @Test func configGetPrintsHolderClaimReconcileInBothStates() {
+        var config = Config()
+        #expect(ConfigGet.render(config).contains("holder-claim-reconcile: off"))
+        config.holderClaimReconcileEnabled = true
+        #expect(ConfigGet.render(config).contains("holder-claim-reconcile: on"))
     }
 
     // MARK: - No transport-shaped switch

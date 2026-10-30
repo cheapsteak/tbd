@@ -37,12 +37,22 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
     }
 
     /// Returns `true` ONLY when it actually began archiving the worktree (i.e.
-    /// `beginArchiveWorktree` succeeded). Every early return — not active,
-    /// remote, not effective, active children, or the outer catch — returns
-    /// `false`. The
-    /// `MergedTransitionDispatcher` keys the archive-supersedes-hibernate
-    /// precedence off this Bool: an armed-but-blocked archive returns `false`, so
-    /// the worktree survives and its idle sessions are still eligible for merge-park.
+    /// `beginArchiveWorktree` succeeded, or a remote lane's archive went
+    /// through `archiveRemoteLane`). Every early return — not active, not
+    /// effective, active children, an unwritable record, uncommitted changes
+    /// in the folder, or the outer catch — returns `false`. The
+    /// `MergedTransitionDispatcher` keys the
+    /// archive-supersedes-hibernate precedence off this Bool: an
+    /// armed-but-blocked archive returns `false`, so the worktree survives and
+    /// its idle sessions are still eligible for merge-park.
+    ///
+    /// Uncommitted changes are the one refusal the user hears about. The
+    /// worktree's folder holds work an archive would delete, so the request
+    /// row is confirmed `refused`/`not-eligible` with the refusal sentence and
+    /// an attention notification says the worktree was kept and why: the
+    /// merged edge that triggered this is not seen again this daemon run, and
+    /// without the notification a user expecting the archive would find the
+    /// worktree still active with no reason given.
     @discardableResult
     public func handleMergedTransition(worktreeID: UUID, prNumber: Int) async -> Bool {
         do {
@@ -91,10 +101,20 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
                 return false
             }
 
+            // The uncommitted-changes guard stays on: the user armed a rail,
+            // not a decision about files they have not committed, and this
+            // archive happens with nobody at the keyboard to ask.
             let worktree: Worktree
             let repo: Repo
             do {
                 (worktree, repo) = try await lifecycle.beginArchiveWorktree(worktreeID: worktreeID)
+            } catch WorktreeArchiveError.uncommittedChanges(let refusal) {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .refused(.notEligible), error: refusal.message)
+                logger.notice(
+                    "auto-archive declined for \(worktreeID, privacy: .public): \(refusal.message, privacy: .public)")
+                await notifyKept(wt, prNumber: prNumber, refusal: refusal)
+                return false
             } catch {
                 await actuationLog.appendOutcome(
                     confirms: actuationID, result: .transportFailed, error: "\(error)")
@@ -127,21 +147,60 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
         }
     }
 
+    /// Persists and broadcasts the notification for a worktree the rail kept
+    /// because its folder holds uncommitted changes, or because its status
+    /// could not be read. Non-activating, like the archive notification: it
+    /// asks for attention without taking focus. The worktree is kept whether
+    /// or not this lands, so a failed write is logged and changes nothing.
+    private func notifyKept(
+        _ wt: Worktree, prNumber: Int, refusal: UncommittedArchiveRefusal
+    ) async {
+        let message: String
+        switch refusal.kind {
+        case .dirty:
+            message = "Kept \(wt.displayName): PR #\(prNumber) merged, but it has uncommitted changes that archiving would delete."
+        case .unverifiable:
+            message = "Kept \(wt.displayName): PR #\(prNumber) merged, but TBD could not check it for uncommitted changes."
+        }
+        do {
+            let notification = try await db.notifications.create(
+                worktreeID: wt.id,
+                type: .attentionNeeded,
+                message: message,
+                terminalID: nil)
+            subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
+                notificationID: notification.id, worktreeID: notification.worktreeID,
+                type: notification.type, message: notification.message,
+                terminalID: notification.terminalID, activate: false)))
+        } catch {
+            logger.error(
+                "auto-archive kept \(wt.id, privacy: .public) but could not record a notification: \(error, privacy: .public)")
+        }
+    }
+
     /// The remote lane's half of the rail. Same routing, same guards and the
     /// same record shape as the manual `worktree.archive` remote branch — the
     /// only differences are this rail's own actuation actor and its
     /// notification, both of which it already writes for a local worktree.
     ///
-    /// A refusal — no manager, no declared `archive` on a lane that is not
-    /// `gone`, an agent still working, a provider-reported dirty checkout —
-    /// returns `false` and writes **no** actuation row. Nothing was attempted,
-    /// and a background rail that rewrote a `.dispose` request on every merged
-    /// transition it observed for an unretireable lane would fill the record
-    /// with acts that never happened. Logged at debug, not surfaced: this is a
-    /// background rail, and declining is its ordinary behavior.
+    /// A refusal from the archive decision — no declared `archive` on a lane
+    /// that is not `gone`, the stale inventory, an agent still working, a
+    /// provider-reported dirty checkout — returns `false` and records the
+    /// decline: a request row under the rail's daemon actor, confirmed
+    /// `refused` with the reason `not-eligible` and the refusal sentence. The
+    /// merged edge that triggered it is not seen again this daemon run, so
+    /// that row is how a lane left active after its PR merged is traced to the
+    /// refusal that kept it, and a refused outcome claims no act. Logged at
+    /// `.notice`, not surfaced: this is a background rail, and declining is
+    /// its ordinary behavior.
+    ///
+    /// With no provider manager (remote backends were off when the daemon
+    /// started) there is nothing to ask, so the rail makes
+    /// no decision and writes no row, exactly as for a lane it is not armed
+    /// for.
     private func archiveRemoteLane(_ wt: Worktree, prNumber: Int) async -> Bool {
         guard let remoteManager else {
-            logger.debug("auto-archive skipped (remote backends off): \(wt.id, privacy: .public)")
+            logger.debug("auto-archive skipped (no provider manager): \(wt.id, privacy: .public)")
             return false
         }
         let lanes = RemoteLaneLifecycle(
@@ -149,9 +208,10 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
         let step: RemoteLaneLifecycle.ArchiveStep
         do {
             switch try await lanes.archiveDecision(for: wt, force: false) {
-            case .refused(let message):
-                logger.debug(
-                    "auto-archive skipped for \(wt.id, privacy: .public): \(message, privacy: .public)")
+            case .refused(let message), .guarded(let message):
+                logger.notice(
+                    "auto-archive declined for \(wt.id, privacy: .public): \(message, privacy: .public)")
+                await recordDecline(of: wt, message: message)
                 return false
             case .proceed(let decided):
                 step = decided
@@ -165,12 +225,9 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
         // Fail-closed exactly as the local path is: an unrecordable archive
         // does not happen, and the worktree survives for the next merged
         // transition to retry.
-        var request = ActuationRow(
-            actor: .daemon(rail: ActuationRail.autoArchiveOnMerge), kind: .dispose)
-        request.target = ActuationTarget(worktree: wt.id.uuidString)
         let actuationID: String
         do {
-            actuationID = try await actuationLog.appendRequest(request)
+            actuationID = try await actuationLog.appendRequest(remoteDisposeRequest(for: wt))
         } catch {
             logger.warning("auto-archive skipped (record unwritable): \(wt.id, privacy: .public): \(error, privacy: .public)")
             return false
@@ -210,5 +267,29 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
         }
         logger.info("auto-archived remote lane \(wt.id, privacy: .public) on PR #\(prNumber, privacy: .public) merge")
         return true
+    }
+
+    /// The request row this rail writes for a remote lane, whether it then
+    /// archives the lane or declines it: no RPC carried it, so it names no
+    /// method, only the rail's actor and the worktree.
+    private func remoteDisposeRequest(for wt: Worktree) -> ActuationRow {
+        var request = ActuationRow(
+            actor: .daemon(rail: ActuationRail.autoArchiveOnMerge), kind: .dispose)
+        request.target = ActuationTarget(worktree: wt.id.uuidString)
+        return request
+    }
+
+    /// Records a declined remote archive as its request row confirmed
+    /// `refused`/`not-eligible`. The lane is declined either way, so an
+    /// unwritable record changes nothing about the outcome: it is logged and
+    /// the rail moves on.
+    private func recordDecline(of wt: Worktree, message: String) async {
+        do {
+            let actuationID = try await actuationLog.appendRequest(remoteDisposeRequest(for: wt))
+            await actuationLog.appendOutcome(
+                confirms: actuationID, result: .refused(.notEligible), error: message)
+        } catch {
+            logger.warning("auto-archive decline not recorded (record unwritable): \(wt.id, privacy: .public): \(error, privacy: .public)")
+        }
     }
 }

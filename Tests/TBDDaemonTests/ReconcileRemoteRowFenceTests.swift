@@ -1,4 +1,5 @@
 import Testing
+import DaemonTestSupport
 import TestSupport
 import Foundation
 @testable import TBDDaemonLib
@@ -128,9 +129,24 @@ import Foundation
         let base = tempDir.appendingPathComponent("scratchpads", isDirectory: true)
         let fixture = try await seedScratchpads(db: db, repoPath: repoDir.path, base: base)
 
+        // Every other base the sweep walks sits under a directory nothing
+        // creates, so `reaped` counts this fixture alone and no leg drains or
+        // deletes anything under the process-global `TBD_HOME`.
+        let root = tempDir.appendingPathComponent("gc", isDirectory: true)
         let gc = OrphanGC(
             db: db, git: GitManager(), broadcast: { _ in },
-            lsofProvider: { [] }, scratchpadBase: base)
+            liveCWDsProvider: { [] }, scratchpadBase: base,
+            profileDirBase: root.appendingPathComponent("p", isDirectory: true),
+            hangStackBase: root.appendingPathComponent("hs", isDirectory: true),
+            holdersBase: root.appendingPathComponent("h", isDirectory: true),
+            attachmentsBase: root.appendingPathComponent("a", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": root.path],
+            reposBase: root.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: root.appendingPathComponent("se", isDirectory: true),
+            devServersBase: root.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: root.appendingPathComponent("rt", isDirectory: true),
+            scratchSpacesBase: root.appendingPathComponent("sc", isDirectory: true),
+            worktreesBase: root.appendingPathComponent("wt", isDirectory: true))
         let result = await gc.sweep(dryRun: false)
 
         #expect(FileManager.default.fileExists(atPath: fixture.remoteScratchpad.path),

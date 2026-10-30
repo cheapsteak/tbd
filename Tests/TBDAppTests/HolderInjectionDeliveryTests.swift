@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import SwiftTerm
 import TBDShared
+import TBDKernel
 import Testing
 
 @testable import TBDApp
@@ -312,12 +313,12 @@ struct HolderInjectionDeliveryTests {
         /// reader, which closes it on its way out.
         let sessionEnd: Int32
         let defaults: UserDefaults
-        let suiteName: String
+        let suite: TestDefaultsSuite
 
         func tearDown() {
             coordinator.cleanup()
             Darwin.close(sessionEnd)
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 
@@ -327,7 +328,7 @@ struct HolderInjectionDeliveryTests {
         let attachment: HolderAttachment
 
         func attach(
-            worktreeID: UUID, paneID: String, terminalID: UUID
+            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
         ) async throws -> HolderAttachment { attachment }
 
         func ready(
@@ -367,8 +368,8 @@ struct HolderInjectionDeliveryTests {
 
         // Isolated defaults: `AppearanceSettings` must never read or write the
         // developer's real TBDApp.plist.
-        let suiteName = "TBDAppTests.HolderInjectionDelivery.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let suite = TestDefaultsSuite("TBDAppTests.HolderInjectionDelivery")
+        let defaults = suite.defaults
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -385,7 +386,7 @@ struct HolderInjectionDeliveryTests {
 
         return HolderPanel(
             state: state, coordinator: coordinator, view: view, terminalID: terminalID,
-            sessionEnd: sessionEnd, defaults: defaults, suiteName: suiteName)
+            sessionEnd: sessionEnd, defaults: defaults, suite: suite)
     }
 
     /// A torn-down panel must not withdraw a successor's claim: rebuilding a

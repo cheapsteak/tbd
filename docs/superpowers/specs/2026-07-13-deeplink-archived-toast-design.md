@@ -39,7 +39,7 @@ Cold-start deep links keep the existing buffering (`pendingDeepLinkID`); the toa
 
 ### Components
 
-**`ToastState`** (new, `Sources/TBDApp/`) — a value published on `AppState` (e.g. `@Published var activeToast: Toast?`). `Toast` carries: `id`, message text, style (`.progress`, `.notice`, `.error`). Deliberately minimal and reusable — deep-link is the first client; future banners (Nightwatch-style advisories) can adopt it, but no queueing until a second client needs it.
+**`ToastState`** (new, `Sources/TBDApp/`) — a value published on `AppState` (e.g. `@Published var activeToast: Toast?`). `Toast` carries: `id`, message text, style (`.progress`, `.notice`, `.error`). Deliberately minimal and reusable — deep-link is the first client; future banners can adopt it, but no queueing until a second client needs it.
 
 **`ToastOverlay`** (new view) — attached via `.overlay(alignment: .bottomTrailing)` on `ContentView`. Rounded-rect material background, `.transition(.move(edge: .trailing).combined(with: .opacity))`. Purely presentational: spinner for `.progress`, archivebox icon for `.notice`, warning icon for `.error` — no interactive controls. Anchored bottom-**right**, not bottom-center: live verification found a bottom-center banner too disruptive (it sits over the content the user is reading), so the toast slides in from the trailing edge.
 

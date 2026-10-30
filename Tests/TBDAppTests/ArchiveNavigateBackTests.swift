@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Tests for back-navigation on archive: when the archived worktree is the
 /// *only* selected worktree, `removeArchivedWorktreeFromState` walks back
@@ -19,9 +20,9 @@ import TBDShared
 struct ArchiveNavigateBackTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.ArchiveNavigateBack.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.ArchiveNavigateBack")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

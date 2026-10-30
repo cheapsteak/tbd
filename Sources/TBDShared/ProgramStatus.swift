@@ -1,5 +1,4 @@
 import Foundation
-import os
 
 /// Constants of the Program Status Protocol (OSC 7501): a program running in
 /// a terminal reports its own state (working, blocked, done, ...) through an
@@ -256,24 +255,6 @@ public enum ProgramStatusParser {
     }
 }
 
-/// A lock-guarded Bool, readable synchronously from any thread (the SwiftTerm
-/// parse thread reads it inside `registerOscHandler`).
-public final class ProgramStatusGate: Sendable {
-    private let state: OSAllocatedUnfairLock<Bool>
-
-    public init(enabled: Bool = false) {
-        state = OSAllocatedUnfairLock(initialState: enabled)
-    }
-
-    public var isEnabled: Bool {
-        state.withLock { $0 }
-    }
-
-    public func set(_ enabled: Bool) {
-        state.withLock { $0 = enabled }
-    }
-}
-
 // MARK: - Snapshot and roll-up
 
 /// The latest report for one entry (the main entry or one task entry), as the
@@ -369,8 +350,8 @@ public struct ProgramStatusSnapshot: Codable, Sendable, Equatable {
 /// The state an OSC-authoritative terminal resolves to.
 public struct ProgramStatusResolution: Sendable, Equatable {
     public let value: SessionStateValue
-    /// Task entries currently `working` — the row's background count. Set in
-    /// every branch, not only the working one.
+    /// Task entries currently `working`. Set in every branch, not only the
+    /// working one. The sidebar row does not draw it.
     public let workingTaskCount: Int
     public let observedAt: Date
 

@@ -42,7 +42,7 @@ private struct SplitMix64: RandomNumberGenerator {
     }
 }
 
-@Suite("RepoSectionView — matched sessions: order, parse-once, cost")
+@Suite("RepoSectionView — matched sessions: order, parse-once")
 struct RepoSectionMatchedSessionsTests {
     static let repoID = UUID()
 
@@ -152,53 +152,6 @@ struct RepoSectionMatchedSessionsTests {
         // Exact, not merely at least: a parse for a filtered-out session would
         // push this above the survivor count.
         #expect(parseCalls == survivors)
-    }
-
-    /// The whole duration as milliseconds, including the seconds component.
-    /// `Duration.components` splits seconds from attoseconds, so reading only
-    /// one of them would undercount by 1000x or more.
-    private static func milliseconds(_ duration: Duration) -> Double {
-        let parts = duration.components
-        return Double(parts.seconds) * 1_000 + Double(parts.attoseconds) / 1e15
-    }
-
-    /// The fastest of `runs` executions, to keep one scheduling hiccup from
-    /// deciding the result.
-    private static func fastest(runs: Int, _ body: () -> Void) -> Duration {
-        let clock = ContinuousClock()
-        var best: Duration?
-        for _ in 0..<runs {
-            let elapsed = clock.measure(body)
-            best = min(best ?? elapsed, elapsed)
-        }
-        return best ?? .zero
-    }
-
-    @Test func newPathIsAtLeastThreeTimesFasterThanTheReference() {
-        let (all, adopted) = Self.corpus()
-        let adoptedLocations = RepoSectionView.adoptedLocations(adopted)
-        var referenceSink = 0
-        var newSink = 0
-
-        let referenceTime = Self.fastest(runs: 3) {
-            referenceSink &+= Self.referenceIDs(
-                all, repoID: Self.repoID, adopted: adoptedLocations).count
-        }
-        let newTime = Self.fastest(runs: 3) {
-            newSink &+= RepoSectionView.matchedRemoteSessionIndices(
-                all, repoID: Self.repoID, adopted: adoptedLocations).count
-        }
-
-        let referenceMs = Self.milliseconds(referenceTime)
-        let newMs = Self.milliseconds(newTime)
-        let ratio = referenceMs / max(newMs, 0.000_001)
-        print("BENCH matchedRemoteSessions sessions=\(all.count) "
-            + "reference=\(String(format: "%.2f", referenceMs))ms "
-            + "new=\(String(format: "%.2f", newMs))ms "
-            + "ratio=\(String(format: "%.1f", ratio))x")
-
-        #expect(referenceSink > 0 && newSink > 0)
-        #expect(referenceMs >= 3 * newMs, "expected at least 3x, measured \(String(format: "%.1f", ratio))x")
     }
 
     @Test func sameMatchInputsPinsExactlyTheFilterAndSortFields() {

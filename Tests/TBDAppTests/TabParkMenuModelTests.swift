@@ -5,12 +5,10 @@ import TBDShared
 
 /// The per-tab Hibernate/Wake context-menu affordance (the park control that
 /// returned to the tab after PR #362 retired the play/pause Suspend button).
-/// Tests the pure decision
-/// `TabParkMenuModel.action(for:panelHoldsPTY:)`
-/// across every branch without SwiftUI: hibernate for a live
-/// manually-hibernatable Claude session, wake for a parked one (authoritative
-/// `hibernatedAt` AND legacy `suspendedAt`), and neither for
-/// busy/nil/non-Claude terminals or a holder tab whose panel owns the pty.
+/// Tests the pure decision `TabParkMenuModel.action(for:)` across every branch
+/// without SwiftUI: hibernate for a live manually-hibernatable Claude session
+/// on either transport, wake for a parked one (authoritative `hibernatedAt`
+/// AND legacy `suspendedAt`), and neither for busy/nil/non-Claude terminals.
 @Suite("Tab park menu decision (per-tab Hibernate/Wake)")
 struct TabParkMenuModelTests {
     /// A live, resumable Claude terminal — the shape `isManuallyHibernatable`
@@ -31,13 +29,13 @@ struct TabParkMenuModelTests {
     @Test func manuallyHibernatableTerminalOffersHibernate() {
         let terminal = claudeTerminal()
         #expect(terminal.isManuallyHibernatable())
-        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == .hibernate)
+        #expect(TabParkMenuModel.action(for: terminal) == .hibernate)
     }
 
     /// Branch 2: a parked session (authoritative `hibernatedAt`) → offer Wake.
     @Test func parkedTerminalOffersWake() {
         let terminal = claudeTerminal(hibernatedAt: Date())
-        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == .wake)
+        #expect(TabParkMenuModel.action(for: terminal) == .wake)
     }
 
     /// Branch 2 (legacy): a row parked by the pre-merge Suspend feature has
@@ -45,26 +43,26 @@ struct TabParkMenuModelTests {
     @Test func legacySuspendedOnlyTerminalOffersWake() {
         let terminal = claudeTerminal(suspendedAt: Date())
         #expect(terminal.hibernatedAt == nil)
-        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == .wake)
+        #expect(TabParkMenuModel.action(for: terminal) == .wake)
     }
 
     /// Branch 3: a Claude session mid-turn (`.working`) is neither parked nor
     /// manually hibernatable → no item.
     @Test func workingTerminalOffersNothing() {
         let terminal = claudeTerminal(activityState: .working)
-        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: terminal) == nil)
     }
 
     /// Branch 3: a Claude session waiting on a permission prompt — hibernating
     /// would eat the raised hand → no item.
     @Test func waitingForUserTerminalOffersNothing() {
         let terminal = claudeTerminal(activityState: .waitingForUser)
-        #expect(TabParkMenuModel.action(for: terminal, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: terminal) == nil)
     }
 
     /// Branch 3: no terminal backing the tab → no item.
     @Test func nilTerminalOffersNothing() {
-        #expect(TabParkMenuModel.action(for: nil, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: nil) == nil)
     }
 
     /// Branch 3: non-Claude terminals (plain shell, Codex) are never
@@ -74,8 +72,8 @@ struct TabParkMenuModelTests {
                              tmuxPaneID: "%1", kind: .shell, activityState: .idle)
         let codex = Terminal(id: UUID(), worktreeID: UUID(), tmuxWindowID: "@2",
                              tmuxPaneID: "%2", kind: .codex, activityState: .idle)
-        #expect(TabParkMenuModel.action(for: shell, panelHoldsPTY: false) == nil)
-        #expect(TabParkMenuModel.action(for: codex, panelHoldsPTY: false) == nil)
+        #expect(TabParkMenuModel.action(for: shell) == nil)
+        #expect(TabParkMenuModel.action(for: codex) == nil)
     }
 
     /// A live holder tab offers Hibernate exactly as a tmux tab does: manual
@@ -86,9 +84,9 @@ struct TabParkMenuModelTests {
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             claudeSessionID: "session-1", kind: .claude, activityState: .idle,
             transport: .holder)
-        #expect(TabParkMenuModel.action(for: holder, panelHoldsPTY: false) == .hibernate)
+        #expect(TabParkMenuModel.action(for: holder) == .hibernate)
         #expect(
-            TabParkMenuModel.action(for: claudeTerminal(), panelHoldsPTY: false) == .hibernate)
+            TabParkMenuModel.action(for: claudeTerminal()) == .hibernate)
     }
 
     /// A PARKED holder tab offers Wake, exactly as a parked tmux tab does.
@@ -97,53 +95,6 @@ struct TabParkMenuModelTests {
             id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             claudeSessionID: "session-1", kind: .claude, activityState: .idle,
             hibernatedAt: Date(), transport: .holder)
-        #expect(TabParkMenuModel.action(for: parked, panelHoldsPTY: false) == .wake)
-    }
-
-    /// Both branches of the viewer suppression, on a holder tab — so the only
-    /// thing moving is whether this app's panel owns the pty.
-    ///
-    /// The daemon fail-closes a park while a viewer holds the pty: its
-    /// pending-input rail judges its own emulator, which is frozen for the
-    /// duration of the attach. A Hibernate item offered there errors every
-    /// single time, which is worse than no item at all.
-    @Test func holderTabWithAnAttachedPanelOffersNothing() {
-        let holder = Terminal(
-            id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
-            claudeSessionID: "session-1", kind: .claude, activityState: .idle,
-            transport: .holder)
-        #expect(
-            TabParkMenuModel.action(
-                for: holder, panelHoldsPTY: true) == nil)
-        #expect(
-            TabParkMenuModel.action(
-                for: holder, panelHoldsPTY: false)
-                == .hibernate)
-    }
-
-    /// A tmux tab is unaffected by the same input, which is what makes the test
-    /// above about the transport rather than about an attached panel alone: the
-    /// daemon reads a tmux pane's screen with `capture-pane` whoever is looking
-    /// at it.
-    @Test func tmuxTabIsUnaffectedByAnAttachedPanel() {
-        let terminal = claudeTerminal()
-        for held in [false, true] {
-            #expect(
-                TabParkMenuModel.action(
-                    for: terminal, panelHoldsPTY: held)
-                    == .hibernate)
-        }
-    }
-
-    /// A PARKED holder tab still offers Wake with a panel attached: a parked
-    /// row has no pty for anything to hold, and the wake path reads no screen.
-    @Test func parkedHolderTabOffersWakeEvenWithAnAttachedPanel() {
-        let parked = Terminal(
-            id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
-            claudeSessionID: "session-1", kind: .claude, activityState: .idle,
-            hibernatedAt: Date(), transport: .holder)
-        #expect(
-            TabParkMenuModel.action(
-                for: parked, panelHoldsPTY: true) == .wake)
+        #expect(TabParkMenuModel.action(for: parked) == .wake)
     }
 }

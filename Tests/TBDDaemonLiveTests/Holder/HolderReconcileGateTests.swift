@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The gates that stop the row sweep judging a session somebody still holds —
 /// and the probe that no longer destroys the screen it exists to preserve.

@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Records only evaluations made by the mounted SwiftUI body. This reference
 /// is deliberately not observable: recording a render must not cause another.
@@ -83,9 +84,9 @@ struct SidebarHibernationObservationTests {
     /// needs none of those inputs to return its value. Removing the matching
     /// unconditional source read in either getter must fail its test here.
     private func checkWarmDependency(_ source: Source) async throws {
-        let suite = "SidebarHibernationObservationTests.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarHibernationObservationTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let repoID = UUID()
         let row = Worktree(

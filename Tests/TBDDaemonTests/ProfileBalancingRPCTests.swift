@@ -3,6 +3,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// The RPC surface and data model for account load balancing (design 2026-09-05):

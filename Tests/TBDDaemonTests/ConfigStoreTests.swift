@@ -36,10 +36,14 @@ struct ConfigStoreTests {
         #expect(cfg.defaultProfileID == nil)
     }
 
+    /// Both env-override columns start empty: the Claude settings overrides
+    /// (`claude_env_settings`) and the free-form global env overrides
+    /// (`env_overrides`, set through `config.setEnvOverrides`).
     @Test func envOverridesDefaultEmpty() async throws {
         let db = try TBDDatabase(inMemory: true)
         let cfg = try await db.config.get()
         #expect(cfg.envSettingOverrides.isEmpty)
+        #expect(cfg.envOverrides.isEmpty)
     }
 
     @Test func setAndGetEnvOverrides() async throws {
@@ -143,61 +147,6 @@ struct ConfigStoreTests {
         #expect(cfg.scratchProfileOverrideID == nil)
     }
 
-    @Test func nightwatchModeDefaultsToOff() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let cfg = try await db.config.get()
-        #expect(cfg.nightwatchMode == .off)
-    }
-
-    @Test func setAndGetNightwatchModeOff() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setNightwatchMode(.off)
-        let cfg = try await db.config.get()
-        #expect(cfg.nightwatchMode == .off)
-    }
-
-    @Test func setAndGetNightwatchModeDaywatch() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setNightwatchMode(.daywatch)
-        let cfg = try await db.config.get()
-        #expect(cfg.nightwatchMode == .daywatch)
-    }
-
-    @Test func setAndGetNightwatchModeNightwatch() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setNightwatchMode(.nightwatch)
-        let cfg = try await db.config.get()
-        #expect(cfg.nightwatchMode == .nightwatch)
-    }
-
-    @Test func nightwatchModeTransitions() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setNightwatchMode(.nightwatch)
-        var cfg = try await db.config.get()
-        #expect(cfg.nightwatchMode == .nightwatch)
-
-        try await db.config.setNightwatchMode(.daywatch)
-        cfg = try await db.config.get()
-        #expect(cfg.nightwatchMode == .daywatch)
-
-        try await db.config.setNightwatchMode(.off)
-        cfg = try await db.config.get()
-        #expect(cfg.nightwatchMode == .off)
-    }
-
-    @Test func hibernateInputVetoDefaultsToFalse() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        let cfg = try await db.config.get()
-        #expect(cfg.hibernateInputVetoEnabled == false)
-    }
-
-    @Test func setAndGetHibernateInputVetoEnabled() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setHibernateInputVeto(enabled: true)
-        let cfg = try await db.config.get()
-        #expect(cfg.hibernateInputVetoEnabled == true)
-    }
-
     /// `delivery_verification_enabled` (v69) ships default OFF: the re-check
     /// acts on no user gesture and its retry types into a live session.
     @Test func deliveryVerificationDefaultsToFalse() async throws {
@@ -219,14 +168,6 @@ struct ConfigStoreTests {
         try await db.config.setDeliveryVerification(enabled: false)
         let cfg = try await db.config.get()
         #expect(cfg.deliveryVerificationEnabled == false)
-    }
-
-    @Test func setHibernateInputVetoToFalse() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setHibernateInputVeto(enabled: true)
-        try await db.config.setHibernateInputVeto(enabled: false)
-        let cfg = try await db.config.get()
-        #expect(cfg.hibernateInputVetoEnabled == false)
     }
 
     /// `auto_trust_worktrees` (v66) ships default ON, unlike its soak-flag

@@ -1,4 +1,5 @@
 import Foundation
+import DaemonTestSupport
 import GRDB
 import TestSupport
 import Testing
@@ -147,7 +148,7 @@ import Testing
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
 
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         let base = WorktreeLayout().basePath(for: repo)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o555], ofItemAtPath: base
@@ -317,7 +318,7 @@ import Testing
 
         // Reserve the name, then occupy its path so the FIRST attempt fails
         // with "fatal: '<path>' already exists" after having created the branch.
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         try occupy(pending.localPath)
 
         let completion = try await lifecycle.completeCreateWorktree(
@@ -562,7 +563,7 @@ import Testing
         // cleanup instead of exposing it. Here nothing holds `owned-by-caller`,
         // so only the pre-existence gate keeps it alive.
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "owned-by-caller", skipClaude: true
+            repoID: repo.id, branch: "owned-by-caller"
         )
         try occupy(pending.localPath)
 
@@ -587,18 +588,32 @@ import Testing
     /// `.repoLevel` makes the create throw instead of retrying, and dropping
     /// the `branchPreExisted == false` guard in `cleanUpFailedWorktreeAdd`
     /// makes the cleanup delete the colliding branch.
-    @Test func nameCollisionStillRetriesUnderAFreshName() async throws {
-        let (tempDir, repoDir) = try await createTestRepo()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+    ///
+    /// Runs with and without an `origin`. With one, `origin/main` resolves and
+    /// the collision is git's answer on the first base, which is the shape of
+    /// an ordinary repo. Without one, `origin/main` is unresolvable and the
+    /// collision arrives on the second base, after a failure of another kind.
+    @Test(arguments: [false, true])
+    func nameCollisionStillRetriesUnderAFreshName(withOrigin: Bool) async throws {
+        let fixture: (cleanupDir: URL, tempDir: URL, repoDir: URL)
+        if withOrigin {
+            let cloned = try await makeClonedTestRepo()
+            fixture = (cloned.parentDir, cloned.hostDir, cloned.repoDir)
+        } else {
+            let plain = try await createTestRepo()
+            fixture = (plain.tempDir, plain.tempDir, plain.repoDir)
+        }
+        defer { try? FileManager.default.removeItem(at: fixture.cleanupDir) }
+        let repoDir = fixture.repoDir
 
         let db = try TBDDatabase(inMemory: true)
         let lifecycle = makeLifecycle(db: db)
-        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let repo = try await makeTestRepo(db: db, tempDir: fixture.tempDir, repoDir: repoDir)
 
         // Reserve the name first, then plant a branch on it — the only way to
         // collide with an auto-generated `tbd/<name>` whose name nobody knows
         // until it is generated.
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         try await shell("git branch '\(pending.branch)'", at: repoDir)
 
         let completion = try await lifecycle.completeCreateWorktree(
@@ -614,6 +629,13 @@ import Testing
         #expect(created.count == 1, "expected exactly one tbd/ worktree: \(listed)")
         #expect(created.first?.branch != pending.branch,
                 "retry reused the colliding branch name")
+
+        // The row finished on the retry, and the failed attempt left no
+        // directory beside the one that landed.
+        let row = try #require(try await db.worktrees.get(id: pending.id))
+        #expect(row.status == .active)
+        let worktreeRoot = try #require(repo.worktreeRoot)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: worktreeRoot).count == 1)
 
         // And the branch that caused the collision is untouched.
         let branches = try await localBranches(repoDir)
@@ -662,7 +684,7 @@ import Testing
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, displayName: "my feature", skipClaude: true
+            repoID: repo.id, displayName: "my feature"
         )
         try await failTheFinalStatusFlip(db)
 
@@ -705,7 +727,7 @@ import Testing
         let repo = try await makeTestRepo(db: db, tempDir: resolvedHost, repoDir: resolvedRepo)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "pr-7", skipClaude: true,
+            repoID: repo.id, branch: "pr-7",
             useExistingBranch: true, prNumber: 7
         )
         try await failTheFinalStatusFlip(db)
@@ -759,7 +781,7 @@ import Testing
         try await shell("git branch feature", at: repoDir)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "feature", skipClaude: true, useExistingBranch: true
+            repoID: repo.id, branch: "feature", useExistingBranch: true
         )
         try await failTheFinalStatusFlip(db)
 
@@ -798,7 +820,7 @@ import Testing
         let repo = try await makeTestRepo(db: db, tempDir: resolvedHost, repoDir: resolvedRepo)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, folder: "taken", skipClaude: true
+            repoID: repo.id, folder: "taken"
         )
         try occupy(pending.localPath)
 
@@ -824,7 +846,7 @@ import Testing
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         try await shell("git branch '\(pending.branch)'", at: repoDir)
 
         let completion = try await lifecycle.completeCreateWorktree(
@@ -895,7 +917,7 @@ import Testing
         let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "pr-7", skipClaude: true,
+            repoID: repo.id, branch: "pr-7",
             useExistingBranch: true, prNumber: 7
         )
         // Fail the checkout that follows the fetch, so the failure lands with
@@ -944,7 +966,7 @@ import Testing
         try await shell("git branch pr-7", at: repoDir)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "pr-7", skipClaude: true,
+            repoID: repo.id, branch: "pr-7",
             useExistingBranch: true, prNumber: 7
         )
         // Fail the checkout that follows the fetch, so cleanup runs with the
@@ -1034,7 +1056,7 @@ import Testing
         try await shell("git branch pr-7", at: repoDir)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "pr-7", skipClaude: true,
+            repoID: repo.id, branch: "pr-7",
             useExistingBranch: true, prNumber: 7
         )
 
@@ -1277,7 +1299,7 @@ import Testing
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
 
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "owned-by-caller", skipClaude: true,
+            repoID: repo.id, branch: "owned-by-caller",
             useExistingBranch: true
         )
         try occupy(pending.localPath)
@@ -1463,7 +1485,7 @@ import Testing
         // one that trips over the occupied path (see the occupied-path test
         // above for why an origin-less repo dissolves the setup).
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, branch: "mine", skipClaude: true
+            repoID: repo.id, branch: "mine"
         )
         try occupy(pending.localPath)
 
@@ -1501,7 +1523,7 @@ import Testing
         let lifecycle = makeLifecycle(db: db)
         let repo = try await makeTestRepo(db: db, tempDir: hostDir, repoDir: repoDir)
 
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         try occupy(pending.localPath)
 
         let base = WorktreeLayout().basePath(for: repo)

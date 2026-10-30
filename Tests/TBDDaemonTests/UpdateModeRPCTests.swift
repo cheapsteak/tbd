@@ -3,6 +3,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// `config.setUpdateMode` and `daemon.checkForUpdate` — the write half of the

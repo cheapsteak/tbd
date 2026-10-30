@@ -29,43 +29,30 @@ Scope:
 
 ## Facts this design rests on
 
-These were measured against Claude Code 2.1.296. The measurements ran the real
+These were measured against Claude Code 2.1.296 and 2.1.303. The measurements ran the real
 interactive TUI against the loopback fake model (`scripts/claude-stub.py`), so
 they cost no tokens.
 
-- **A `PermissionRequest` hook can answer a dialog while the terminal dialog
-  stays usable.** The hook fires for `AskUserQuestion` and for ordinary tool
-  permission dialogs. While it blocks, the dialog stays fully visible and
-  usable.
-  - **The hook answers first:** the dialog closes and the hook's decision
-    applies.
-  - **The terminal answers first:** the hook's later output is silently
-    ignored, even if a second dialog is open by then.
-  - Pressing Yes in the terminal leaves the hook running. Pressing No or
-    Escape sends it SIGTERM.
-- **A `PreToolUse` hook that blocks hides the dialog** until it returns. So it
-  can't race the terminal and is not used.
-- **The `PermissionRequest` payload has no `tool_use_id`.** It carries
-  `session_id`, `transcript_path`, `cwd`, `prompt_id`, `permission_mode`,
-  `tool_name`, `tool_input`, and sometimes `permission_suggestions`.
-  `PreToolUse` fires about 55 ms earlier with the `tool_use_id`, so the two
-  are paired by session.
+- **A hook can answer a dialog while the terminal dialog stays usable.** The
+  session mod's hooks do so for `AskUserQuestion` and for ordinary tool
+  permission dialogs; the measurements and the answer shapes are in
+  [the session-mod channel design](2026-10-20-mod-channel-prompt-answer-design.md).
+  - **TBD answers first:** the dialog closes and the answer applies.
+  - **The terminal answers first:** TBD's later answer is silently ignored,
+    even if a second dialog is open by then.
 - **These decision outputs work:**
-  - **Question:** `{"behavior":"allow","updatedInput":{"questions":[…original…],"answers":{"<question text>":"<value>"}}}`
+  - **Question:** the original `questions` plus `answers`, keyed by question
+    text.
     - A multi-select value is one string joined with `", "`. An array reaches
       the model, but the TUI doesn't display it.
     - Free text is accepted as a value, and the model is told to read it
       carefully.
     - An unanswered question is silently dropped.
-    - `allow` without `updatedInput` is ignored, and the dialog stays.
-  - **Permission:** `{"behavior":"allow"}`. `updatedPermissions` applies
-    "don't ask again" entries. With destination `session`, nothing is written
-    to disk.
-  - **Deny:** `{"behavior":"deny","message":"…"}`. The model receives the
-    message as an error tool result, and the turn continues.
-    `"interrupt": true` throws the message away and stops the turn.
-- **Printing nothing and exiting 0 hands control back to the terminal
-  dialog.** This is the fallback for every error and timeout.
+  - **Permission:** allow. A permission update applies "don't ask again"
+    entries. With destination `session`, nothing is written to disk.
+  - **Deny:** a message the model receives as an error tool result, and the
+    turn continues. An interrupting deny throws the message away and stops the
+    turn, so TBD never uses it.
 - **Claude Code's "don't ask again" suggestions are not always permission
   rules.** For a plain Bash `touch` in default mode, Claude Code suggested
   "add this directory" and "switch the session to acceptEdits".
@@ -110,105 +97,40 @@ The answer payload, for both paths:
 
 ## Local delivery
 
-### Hooks
-
-`ClaudeHookOverlay` adds these hooks, and only when the flag is on. The
-existing `AskUserQuestion` pre and post hooks stay as they are.
-- **`PreToolUse`, no matcher: `tbd prompt note`.** It records
-  `{terminal, session, tool_use_id, tool_name, input hash}` with the daemon
-  and returns at once. It never prints a decision. Every tool call sends one
-  under a 3-second hook timeout, and the note only touches in-memory state,
-  so `prompt.note` bypasses the RPC concurrency limiter.
-- **`PostToolUse` and `PostToolUseFailure`, no matcher: `tbd prompt note`.**
-  These tell the daemon that a tool call finished, which resolves any prompt
-  still open for its `tool_use_id`. They carry the input hash too, so they
-  also resolve the session's open prompt when it has no `tool_use_id` and
-  shows the same tool and input. This is how the daemon learns that the
-  terminal won with Yes, because that answer leaves the waiting hook running.
-  - For `AskUserQuestion` the hash covers `questions` alone, on the notes and
-    the register alike. The post's input carries the merged `answers` as
-    well, so a whole-input hash would never match.
-  - These signals come after the tool finishes, not when you answer. So after
-    a Yes in the terminal, the card still looks pending while the tool runs.
-  - An answer sent from the card in that window reaches a hook whose output
-    Claude Code ignores. The card holds "Answered" until the tool result
-    lands, and the result shows what actually happened.
-- **`PermissionRequest`, no matcher: `tbd prompt wait`.** Its hook `timeout`
-  is 86400 seconds.
-  1. It reads the payload and calls `prompt.register`. The daemon pairs it
-     with a `prompt note` from the same terminal, session and tool name, which
-     supplies the `tool_use_id`. Notes and the one-open-dialog rule below are
-     scoped to the session in its terminal, because two terminals can share a
-     session id (`--resume` without `--fork-session`).
-     - It matches the tool input's hash first, so two calls to the same tool
-       in one message pair correctly.
-     - If no hash matches, it falls back to the session's note for that tool
-       only when there is exactly one. With several, recency can't say which
-       call the dialog shows, so the prompt stays unpaired.
-     - A note that arrives up to 5 seconds after its register still pairs.
-     - An unpaired prompt gets a fresh UUID id instead.
-     - The reply names the `tool_use_id` the prompt was paired with. A
-       restarted daemon has lost its notes, so the hook sends its id and that
-       `tool_use_id` back when it registers again, and the prompt keeps both.
-       A prompt that was never paired stays unpaired, and its card stays on
-       the fallback row described under "Placement".
-  2. While the flag is off, `prompt.register` answers `disabled`, and the
-     hook exits silently. Sessions that started while the flag was on still
-     carry the hooks until they restart. A `PreToolUse` note is dropped while
-     the flag is off, but a `PostToolUse` note is still applied, so a prompt
-     registered before the flag was turned off still resolves when the
-     terminal answers it rather than staying open with its hook parked.
-  3. It then holds `prompt.await(id)`, a long-poll RPC on the daemon socket.
-     - Like `state.subscribe`, the call bypasses the RPC concurrency limiter,
-       so many waiting sessions can't block the daemon.
-     - The HTTP transport refuses it, because HTTP can't see a closed
-       connection.
-     - If the connection drops while the daemon restarts, the hook reconnects
-       and registers again, backing off for at most three minutes per outage.
-       A successful register ends the outage, so a dialog left open across
-       several restarts survives each of them.
-  4. **An answer arrives:** it prints the decision JSON wrapped as
-     `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":…}}`,
-     acknowledges delivery to the daemon, and exits 0. A deny without a
-     message carries the text "The user declined this from TBD.".
-  5. **The prompt resolved elsewhere, or anything failed:** it prints nothing
-     and exits 0, and the terminal stays in charge.
-
-  When the daemon is unreachable, the command exits silently at once. So a
-  session behaves exactly as it does today whenever TBD can't answer.
+Local delivery runs through the session mod's `prompt-answer` feature, which
+the daemon enables for a session when the flag is on. The mod watches the
+session's dialogs from inside the Claude process and reports each one to the
+daemon over `~/tbd/mod.sock`; an answer from a card travels back the same way.
+The mod, the channel and the hook mechanics are specified in
+[the session-mod channel design](2026-10-20-mod-channel-prompt-answer-design.md).
+This document owns what the store does with those reports.
 
 ### Daemon: `PendingPromptStore`
 
-`PendingPromptStore` is an actor that generalises today's
-`PendingQuestionStore`. It lives in memory and holds pending prompts keyed by
-id, each with its waiting `prompt.await` continuation.
+`PendingPromptStore` is an actor that generalises `PendingQuestionStore`. It
+lives in memory and holds pending prompts keyed by id.
 
 A prompt resolves on the first of these:
 - **`prompt.answer` from the app.** Only the TBD app may answer: the
   daemon accepts the RPC only on a socket connection whose kernel-reported
   peer is the recorded app identity, the check `terminal.send` uses for
   envelope suppression, so another session's process and the HTTP transport
-  are refused. The store hands the payload to the
-  waiting hook, and the RPC returns once the hook acknowledges it. A hook
-  that reports it never got the decision answers `already_resolved`. If no
-  acknowledgement arrives within 5 seconds, the decision may or may not have
-  reached Claude, so the RPC answers `unknown` and the card shows "May not
-  have arrived" with Retry; the prompt resolves either way, so a retry of an
-  answer that did arrive comes back `already_resolved`. The acknowledgement (`prompt.ack`) bypasses the RPC
-  concurrency limiter, so a burst of slow RPCs can't delay it past that
-  window and turn a delivered answer into "answered elsewhere".
-  - If no hook is attached at that moment, for example while a daemon restart
-    is still reconnecting it, the RPC returns a retryable error. The card
-    offers Retry.
-- **`PostToolUse` or `PostToolUseFailure` for its `tool_use_id`**, or, for
-  an unpaired prompt, for the same tool and input hash. The terminal won. The existing `AskUserQuestion` post hook also covers
-  questions.
-- **A new `prompt.register` in the same session and terminal.** A session
-  has one open dialog at a time, so the old one is over.
-- **The hook's connection closing.** No or Escape in the terminal killed it.
-- **The terminal or session ending.**
-- **An hour with no hook attached.** This is a safety sweep, not the normal
-  path.
+  are refused. The store hands the payload to the session's mod, and the RPC
+  returns once the mod acknowledges delivery. The RPC answers
+  `already_resolved` when the prompt is gone or a second answer arrives, and
+  when the mod reports the dialog closed (the terminal answered first) while
+  the answer waits for its acknowledgement. If no acknowledgement arrives
+  within 5 seconds, the decision may or may not have reached Claude, so the
+  RPC answers `unknown` and the card shows "May not have arrived" with Retry;
+  the prompt resolves either way, so a retry of an answer that did arrive
+  comes back `already_resolved`.
+  - If no wait request from the mod picks the answer up within 60 seconds,
+    the store withdraws it, the prompt stays open, and the RPC returns a
+    retryable error. The card offers Retry.
+- **The mod reporting the dialog closed.** The terminal answered, or the tool
+  finished.
+- **The terminal or session ending**, or no wait request from the mod for
+  60 seconds.
 
 Each change emits a per-terminal `pendingPrompts` delta, which carries
 everything the cards render. The daemon stops sending the old
@@ -219,12 +141,9 @@ The phrase "pending prompt" already names the queued first message of a new
 worktree (`worktree.pending_prompt`, `PendingPromptCoordinator`). The two are
 unrelated, and the new types say so in their doc comments.
 
-No new durable resource is created:
-- Claude Code owns the waiting hook process and ends it.
-- The store is in memory, and its records clear themselves.
-
-So the named-reconciler question is answered by "no orphan can outlive the
-daemon or the session".
+No new durable resource is created: the store is in memory, and its records
+clear themselves. So the named-reconciler question is answered by "no orphan
+can outlive the daemon or the session".
 
 ### The awaiting-input gate
 
@@ -271,8 +190,7 @@ within the current major version and need no bump.
   describes `answer`.
 
 The first provider implements all of this, along with `events`, in its own
-repository. Its box hooks use the same `PermissionRequest` mechanism
-described above.
+repository.
 
 ### Daemon
 
@@ -430,13 +348,15 @@ through `DaemonCapabilitiesResult` and toggled in Settings under
 Experimental, after the transcript-streaming toggle.
 
 The flag gates two things:
-- **Off:** the overlay leaves out both new hooks, `prompt.answer` and
+- **Off:** the session mod's `prompt-answer` feature is not enabled for new
+  sessions, `prompt.answer` and
   `remote.answer` refuse, and the transcript renders exactly as it would with
   no pending prompt: no card, no appended row, no row lifted out of its
   activity group.
 - **On:** everything above.
 
-Hook changes reach a session on its next start, as with every overlay change.
+The feature list is fixed when a session spawns, so a flag change reaches a
+session on its next start.
 
 The flag exists because the feature sends input to sessions. The soak runs
 with the flag on. Graduation flips the default constant, and a later change
@@ -459,15 +379,13 @@ Each branch of the flag gets a test, following the repo rule.
     appending a duplicate, while a live one, open or answered, still appends
   - never a window start
 - **Store:** each way a prompt resolves; a second answer refused; delivery
-  acknowledged or timed out; `disabled` while the flag is off; the pairing
-  of `PermissionRequest` with `PreToolUse`, including concurrent sessions and
-  an unpaired prompt.
+  acknowledged or timed out; `disabled` while the flag is off. The mod side
+  and the channel are tested in the channel design.
 - **Decision encoding:** the question, multi-select, free-text, allow,
-  `allow_always` and deny outputs, asserted against the exact shapes above.
-- **`tbd prompt wait`:**
-  - silent exit when the daemon is down
-  - silent exit when the prompt resolves elsewhere
-  - a printed decision when answered
+  `allow_always` and deny outputs, asserted against the decision shapes
+  `PromptDecisionEncoder` produces, which the
+  [channel design](2026-10-20-mod-channel-prompt-answer-design.md) describes
+  under "Permission dialogs" and "Questions".
 - **`remote.answer`:**
   - capability refusal
   - flag refusal

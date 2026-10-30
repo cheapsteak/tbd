@@ -15,9 +15,9 @@ import TBDShared
 struct DeepLinkToastTests {
 
     private func withState(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.DeepLinkToast.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.DeepLinkToast")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         state.toastTickDuration = .milliseconds(5)
         await body(state)

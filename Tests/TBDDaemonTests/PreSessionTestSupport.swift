@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib

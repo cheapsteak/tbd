@@ -52,6 +52,10 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .terminalResume, actor: actor,
             target: await resolvedTerminalTarget(params.terminalID))
+        if let held = await holdWakeIfDenied(
+            actuationID, actor: actor, terminalID: params.terminalID) {
+            return held
+        }
         let result = await hibernationCoordinator.wake(terminalID: params.terminalID)
         await finishActuation(
             actuationID, ActuationOutcome.classify(result),
@@ -155,16 +159,28 @@ extension RPCRouter {
         // stand, each with its own request and outcome row, and the error the
         // caller sees names a fan-out that stopped partway.
         let parked = terminals.filter { $0.isParked && $0.isClaudeResumable }
+        // Start admission asks before each terminal it would wake, until the
+        // first hold; every terminal after that is held for the same reason
+        // without asking again. A held terminal stays parked. The call then
+        // reports the first hold, so a caller that woke nothing is not told it
+        // succeeded.
+        var firstHold: RPCResponse?
         for terminal in parked {
             let actuationID = try await beginActuation(
                 .worktreeResume, actor: actor,
                 target: .local(worktree: params.worktreeID, terminal: terminal.id))
+            if let held = await holdWakeIfDenied(
+                actuationID, actor: actor, terminalID: terminal.id,
+                earlierHold: firstHold?.error) {
+                firstHold = firstHold ?? held
+                continue
+            }
             let result = await hibernationCoordinator.wake(terminalID: terminal.id)
             await finishActuation(
                 actuationID, ActuationOutcome.classify(result),
                 error: ActuationOutcome.detail(result))
         }
 
-        return .ok()
+        return firstHold ?? .ok()
     }
 }

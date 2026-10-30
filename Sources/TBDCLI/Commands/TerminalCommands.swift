@@ -43,10 +43,31 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Codex model for this terminal only, passed to Codex as -c model=<id> (requires --type codex). Codex's /model switches it later.")
     var model: String?
 
+    @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) to load in this terminal on every start. Repeatable. Relative paths resolve against the current folder.")
+    var pluginDirs: [String] = []
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
+    /// The params this invocation sends, with each `--plugin-dir` made
+    /// absolute against `cwd`, or none sent when the flag was not given.
+    func createParams(worktreeID: UUID, prompt: String?, cwd: String) -> TerminalCreateParams {
+        TerminalCreateParams(
+            worktreeID: worktreeID, cmd: cmd, type: type, prompt: prompt,
+            claudeSettingsOverlay: claudeSettings, model: model,
+            pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd))
+    }
+
     mutating func validate() throws {
+        if !pluginDirs.isEmpty {
+            // The daemon's rule: a Claude type, or any resume, is a Claude
+            // terminal. This command sends no resume id, so only `--type
+            // claude` qualifies; no type, with or without `--cmd`, is a shell.
+            guard type == .claude else {
+                throw ValidationError(TerminalCreateParams.pluginDirsRequireClaudeMessage)
+            }
+            try CLIPluginDirs.validateNotBlank(pluginDirs)
+        }
         guard let model else { return }
         guard type == .codex else {
             throw ValidationError(TerminalCreateParams.modelRequiresCodexMessage)
@@ -62,7 +83,10 @@ struct TerminalCreate: AsyncParsableCommand {
 
         let terminal: Terminal = try client.call(
             method: RPCMethod.terminalCreate,
-            params: TerminalCreateParams(worktreeID: worktreeID, cmd: cmd, type: type, prompt: try resolvePrompt(inline: prompt, file: promptFile), claudeSettingsOverlay: claudeSettings, model: model),
+            params: createParams(
+                worktreeID: worktreeID,
+                prompt: try resolvePrompt(inline: prompt, file: promptFile),
+                cwd: FileManager.default.currentDirectoryPath),
             resultType: Terminal.self
         )
 
@@ -153,7 +177,8 @@ struct TerminalSend: AsyncParsableCommand {
               --keys "Escape Enter"  whitespace-separated key names, sent one
                                   at a time. Interrupt is a keys payload
                                   (--keys "C-c"). Enter is itself a key, so
-                                  --submit does not apply here.
+                                  --submit does not apply here. One printable
+                                  character is its own key: --keys 4 presses 4.
 
             A non-empty text payload sent to an AGENT session is delivered
             behind a one-line attribution envelope carrying the send's record id
@@ -180,7 +205,7 @@ struct TerminalSend: AsyncParsableCommand {
     @Option(name: .long, help: "Text to send")
     var text: String?
 
-    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\" or \"C-c\"")
+    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\", \"C-c\" or \"4\"")
     var keys: String?
 
     @Flag(name: .long, help: "Press Enter after sending text")

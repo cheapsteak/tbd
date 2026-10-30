@@ -77,10 +77,6 @@ import Foundation
         #expect(prefixes[0] == layout.basePath(for: repo))
         #expect(prefixes[1] == "/tmp/myrepo/.tbd/worktrees")
     }
-
-    @Test func currentVersionIsOne() {
-        #expect(WorktreeLayout.currentVersion == 1)
-    }
 }
 
 // Nested under TBDHomeSerialized: mutates the process-global `TBD_HOME`.

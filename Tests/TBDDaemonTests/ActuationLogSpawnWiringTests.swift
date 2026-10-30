@@ -1,4 +1,5 @@
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -71,22 +72,6 @@ struct ActuationLogSpawnWiringTests {
             startTime: Date(),
             actuationLog: ActuationLog(path: logPath)
         )
-    }
-
-    /// The deadline is the shared saturated-pass budget rather than a literal:
-    /// what these wait for is produced by a detached task no test owns, which
-    /// SE-0417 leaves on the cooperative pool behind the whole fast pass — see
-    /// `gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`.
-    private func waitUntil(
-        timeout: TimeInterval = TestDeadlines.saturatedPassSeconds,
-        _ condition: @Sendable () async throws -> Bool
-    ) async throws -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if try await condition() { return true }
-            try await Task.sleep(nanoseconds: 50_000_000)
-        }
-        return try await condition()
     }
 
     // MARK: - scratch.create
@@ -169,8 +154,12 @@ struct ActuationLogSpawnWiringTests {
         #expect(written.last?["result"] as? String == "dispatched")
 
         // Let the background phase finish before the fixture repo goes away.
-        _ = try await waitUntil {
-            try await db.worktrees.get(id: pending.id)?.status != .creating
+        // It runs in a detached task no test owns, which SE-0417 leaves on the
+        // cooperative pool behind the whole fast pass, so the bound is the
+        // shared saturated-pass budget (`gateHoldingTask` in
+        // `Tests/TestSupport/BoundedGateSupport.swift`).
+        _ = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            (try? await db.worktrees.get(id: pending.id))?.status != .creating
         }
     }
 
@@ -262,8 +251,7 @@ struct ActuationLogSpawnWiringTests {
         let logPath = try makeLogPath()
         let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
 
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false)
+        let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         #expect(result == .ok)
 
         let written = try rows(at: logPath)
@@ -287,57 +275,9 @@ struct ActuationLogSpawnWiringTests {
         let logPath = try makeLogPath()
         let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
 
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false)
+        let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         #expect(result == .notEligible(reason: "Terminal is pinned keep-warm"))
         #expect(try rows(at: logPath).isEmpty)
-    }
-
-    /// The pending-input veto is a rail like any other on this path: it refuses
-    /// BEFORE the request row is written, so a session the rail saved leaves no
-    /// trace of an act that never happened.
-    @Test("the pending-input veto refuses the merge park, and writes no row")
-    func mergeParkRefusedByPendingInputWritesNothing() async throws {
-        let fixture = try await makeParkable()
-        let logPath = try makeLogPath()
-        let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
-
-        // The session came to rest, then was typed into a minute later — the
-        // keystrokes are still sitting unsent in its composer.
-        let atRest = Date(timeIntervalSince1970: 1_700_000_000)
-        try await fixture.db.terminals.setActivityState(
-            id: fixture.terminalID, activityState: .idle, source: .derived, observedAt: atRest)
-        let tracker = InputActivityTracker(now: { atRest.addingTimeInterval(60) })
-        tracker.recordInput(paneID: "%0")
-        await coordinator.setInputActivity(tracker)
-
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: true)
-        #expect(result == .notEligible(reason: "Terminal has unsent typed input"))
-        #expect(try rows(at: logPath).isEmpty)
-        #expect(try await fixture.db.terminals.get(id: fixture.terminalID)?.hibernatedAt == nil)
-    }
-
-    /// The same fixture with the flag OFF parks and records the act — today's
-    /// behavior, unchanged for every install that has not opted into the soak.
-    @Test("with the veto off the same pending input still parks")
-    func mergeParkWithVetoOffParksDespitePendingInput() async throws {
-        let fixture = try await makeParkable()
-        let logPath = try makeLogPath()
-        let coordinator = makeCoordinator(db: fixture.db, logPath: logPath)
-
-        let atRest = Date(timeIntervalSince1970: 1_700_000_000)
-        try await fixture.db.terminals.setActivityState(
-            id: fixture.terminalID, activityState: .idle, source: .derived, observedAt: atRest)
-        let tracker = InputActivityTracker(now: { atRest.addingTimeInterval(60) })
-        tracker.recordInput(paneID: "%0")
-        await coordinator.setInputActivity(tracker)
-
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false)
-        #expect(result == .ok)
-        #expect(try rows(at: logPath).count == 2)
-        #expect(try await fixture.db.terminals.get(id: fixture.terminalID)?.hibernatedAt != nil)
     }
 
     @Test("an unwritable record skips the merge park — the session stays live")
@@ -345,8 +285,7 @@ struct ActuationLogSpawnWiringTests {
         let fixture = try await makeParkable()
         let coordinator = makeCoordinator(db: fixture.db, logPath: try makeUnwritablePath())
 
-        let result = await coordinator.hibernateForMerge(
-            terminalID: fixture.terminalID, inputVetoEnabled: false)
+        let result = await coordinator.hibernateForMerge(terminalID: fixture.terminalID)
         guard case .notEligible(let reason) = result else {
             Issue.record("expected the park to be skipped, got \(result)")
             return

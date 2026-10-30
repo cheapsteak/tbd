@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Drafts are per terminal and survive a session rollover.
 ///
@@ -13,9 +14,9 @@ import TBDShared
 @Suite("ComposerDraft")
 struct ComposerDraftTests {
 
-    private func makeState() -> (AppState, String) {
-        let suiteName = "ComposerDraftTests-\(UUID().uuidString)"
-        return (AppState(userDefaults: UserDefaults(suiteName: suiteName)!), suiteName)
+    private func makeState() -> (AppState, TestDefaultsSuite) {
+        let suite = TestDefaultsSuite("ComposerDraftTests")
+        return (AppState(userDefaults: suite.defaults), suite)
     }
 
     @Test func stagingNumbersTokensFromOne() {
@@ -61,8 +62,8 @@ struct ComposerDraftTests {
     // MARK: - The registry
 
     @Test func oneDraftPerTerminal() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let a = UUID(), b = UUID()
 
         state.composerDraft(for: a).text = "for a"
@@ -75,15 +76,15 @@ struct ComposerDraftTests {
     /// The same instance comes back, which is what makes the draft survive a
     /// view teardown.
     @Test func theSameTerminalGetsTheSameInstance() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let id = UUID()
         #expect(state.composerDraft(for: id) === state.composerDraft(for: id))
     }
 
     @Test func discardingForgetsIt() {
-        let (state, suiteName) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let (state, suite) = makeState()
+        defer { suite.tearDown() }
         let id = UUID()
         state.composerDraft(for: id).text = "gone soon"
         state.discardComposerDraft(for: id)

@@ -2,59 +2,224 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TestSupport
 
 // MARK: - Test clock
 
-/// Virtual clock. `advance(by:)` moves wall time forward and resolves any
-/// in-flight `sleep(until:)` continuations whose deadlines have been crossed.
+/// Virtual `PollerClock`. `advance(by:)` moves wall time forward and resolves
+/// every in-flight `sleep(until:)` whose deadline it crossed.
+///
+/// **Arming is a signal, not a poll.**
+/// ``requireSleeperArmed(count:timeout:sourceLocation:)`` parks on a
+/// continuation that `sleep(until:)` claims inside the critical section that
+/// registers the sleeper, and resumes once the lock is released: the handshake
+/// `EventDrivenTestClock` gives a `Clock<Duration>` seam (`Tests/CLAUDE.md`,
+/// "The event-driven clock"), here for the Date-based `PollerClock` seam that
+/// clock cannot satisfy. The loops driven through this clock
+/// (`ClaudeUsagePoller`, `LimitResumeScheduler`) park on exactly one sleeper
+/// whenever they have future work and are not paused, and sleep nowhere else
+/// outside store-error retries, so "a sleeper is armed" means "the loop has
+/// finished everything the last advance made due".
+///
+/// **`advance(by:)` does no yielding.** It resolves due sleepers and returns,
+/// so a positive assertion about what a resumed loop did must first wait for
+/// the loop's next arming, or for the effect itself.
+///
+/// A sleep whose deadline has already passed returns at once without
+/// registering, as `SystemPollerClock` does. A sleep whose task was cancelled
+/// before it parked throws instead of registering, so a sleeper that `wake()`
+/// cancelled can never linger and satisfy a later arming wait.
 final class TestPollerClock: PollerClock, @unchecked Sendable {
-    private let queue = DispatchQueue(label: "TestPollerClock")
-    private var _now: Date
-    private var sleepers: [(deadline: Date, cont: CheckedContinuation<Void, Error>, id: UUID)] = []
-    private var cancellableSleepers: [UUID: CheckedContinuation<Void, Error>] = [:]
+    /// Per-sleep state shared by the continuation body and the cancellation
+    /// handler, which can run in either order. Guarded by `lock`.
+    private final class SleepBox: @unchecked Sendable {
+        var continuation: CheckedContinuation<Void, Error>?
+        var isSettled = false
+        var isCancelledEarly = false
+    }
+
+    private struct Sleeper {
+        let deadline: Date
+        let box: SleepBox
+    }
+
+    /// A parked arming waiter. Settled exactly once: by a registration that
+    /// satisfies it (`true`), or by its hang guard or a cancellation (`false`).
+    /// Guarded by `lock`.
+    private final class ArmingWait: @unchecked Sendable {
+        let count: Int
+        var continuation: CheckedContinuation<Bool, Never>?
+        var isSettled = false
+        init(count: Int) { self.count = count }
+    }
+
+    private let lock = NSLock()
+    private var currentNow: Date
+    private var sleepers: [Sleeper] = []
+    private var armingWaits: [ArmingWait] = []
 
     init(start: Date = Date(timeIntervalSince1970: 1_700_000_000)) {
-        self._now = start
+        self.currentNow = start
     }
 
     func now() -> Date {
-        queue.sync { _now }
+        lock.withLock { currentNow }
+    }
+
+    /// How many tasks are parked on this clock right now. A snapshot.
+    var sleeperCount: Int {
+        lock.withLock { sleepers.count }
     }
 
     func sleep(until deadline: Date) async throws {
-        // Use a unique id so we can drain on cancel.
-        let id = UUID()
+        if lock.withLock({ currentNow >= deadline }) { return }
+        let box = SleepBox()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                let resumeNow: Bool = queue.sync {
-                    if _now >= deadline { return true }
-                    cancellableSleepers[id] = cont
-                    sleepers.append((deadline, cont, id))
-                    return false
+                lock.lock()
+                if box.isCancelledEarly {
+                    // Cancellation beat the park: register nothing, signal nobody.
+                    box.isSettled = true
+                    lock.unlock()
+                    cont.resume(throwing: CancellationError())
+                    return
                 }
-                if resumeNow { cont.resume() }
+                box.continuation = cont
+                sleepers.append(Sleeper(deadline: deadline, box: box))
+                let registered = sleepers.count
+                let released = armingWaits.filter { $0.count <= registered }
+                armingWaits.removeAll { $0.count <= registered }
+                var waiters: [CheckedContinuation<Bool, Never>] = []
+                for wait in released {
+                    wait.isSettled = true
+                    if let waiter = wait.continuation { waiters.append(waiter) }
+                    wait.continuation = nil
+                }
+                lock.unlock()
+                // Outside the lock: a waiter resumes into arbitrary test code.
+                for waiter in waiters { waiter.resume(returning: true) }
             }
         } onCancel: {
-            let cont: CheckedContinuation<Void, Error>? = queue.sync {
-                let c = cancellableSleepers.removeValue(forKey: id)
-                sleepers.removeAll { $0.id == id }
-                return c
+            lock.lock()
+            guard !box.isSettled else {
+                lock.unlock()
+                return
             }
-            cont?.resume(throwing: CancellationError())
+            guard let cont = box.continuation else {
+                // Not parked yet: the body runs next and throws instead.
+                box.isCancelledEarly = true
+                lock.unlock()
+                return
+            }
+            box.isSettled = true
+            box.continuation = nil
+            sleepers.removeAll { $0.box === box }
+            lock.unlock()
+            cont.resume(throwing: CancellationError())
         }
     }
 
-    /// Advance virtual time. Resolves all sleepers whose deadlines have passed.
+    /// Advance virtual time, resolving every sleeper whose deadline passed.
     func advance(by interval: TimeInterval) async {
-        let due: [(deadline: Date, cont: CheckedContinuation<Void, Error>, id: UUID)] = queue.sync {
-            _now = _now.addingTimeInterval(interval)
-            let matched = sleepers.filter { $0.deadline <= _now }
-            sleepers.removeAll { $0.deadline <= _now }
-            for m in matched { cancellableSleepers.removeValue(forKey: m.id) }
-            return matched
+        let due: [CheckedContinuation<Void, Error>] = lock.withLock {
+            currentNow = currentNow.addingTimeInterval(interval)
+            let now = currentNow
+            let fired = sleepers.filter { $0.deadline <= now }
+            sleepers.removeAll { $0.deadline <= now }
+            var continuations: [CheckedContinuation<Void, Error>] = []
+            for sleeper in fired {
+                sleeper.box.isSettled = true
+                if let cont = sleeper.box.continuation { continuations.append(cont) }
+                sleeper.box.continuation = nil
+            }
+            return continuations
         }
-        for entry in due { entry.cont.resume() }
-        for _ in 0..<30 { await Task.yield() }
+        for cont in due { cont.resume() }
+    }
+
+    /// Waits until at least `count` tasks are parked on this clock, and throws
+    /// a named diagnostic if they are not within `timeout`.
+    ///
+    /// Returns at once if they already are; otherwise parks until the
+    /// registration that reaches `count` releases it. `timeout` is a hang guard
+    /// only: one real sleep that a passing run cancels unfired. It defaults to
+    /// `TestDeadlines.saturatedPass` because the arming is several hops from
+    /// the test body: the loop under test runs in its own unstructured task and
+    /// crosses GRDB's writer queue before it sleeps. On cancellation the wait
+    /// throws `CancellationError`, so attribution stays with whatever cancelled.
+    func requireSleeperArmed(
+        count: Int = 1,
+        timeout: Duration = TestDeadlines.saturatedPass,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        let wait = ArmingWait(count: count)
+        let hangGuard = Task { [self] in
+            try? await Task.sleep(for: timeout)
+            expire(wait)
+        }
+        defer { hangGuard.cancel() }
+        let armed: Bool = await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                lock.lock()
+                if wait.isSettled {
+                    // The hang guard or a cancellation beat the park.
+                    lock.unlock()
+                    cont.resume(returning: false)
+                    return
+                }
+                if sleepers.count >= count {
+                    wait.isSettled = true
+                    lock.unlock()
+                    cont.resume(returning: true)
+                    return
+                }
+                wait.continuation = cont
+                armingWaits.append(wait)
+                lock.unlock()
+            }
+        } onCancel: {
+            expire(wait)
+        }
+        if armed { return }
+        try Task.checkCancellation()
+        throw PollerClockNoSleeperArmed(
+            expected: count, observed: sleeperCount, timeout: timeout,
+            virtualNow: now(), sourceLocation: sourceLocation)
+    }
+
+    /// Settles `wait` as not armed, unless a registration settled it first.
+    private func expire(_ wait: ArmingWait) {
+        lock.lock()
+        guard !wait.isSettled else {
+            lock.unlock()
+            return
+        }
+        wait.isSettled = true
+        let cont = wait.continuation
+        wait.continuation = nil
+        armingWaits.removeAll { $0 === wait }
+        lock.unlock()
+        cont?.resume(returning: false)
+    }
+}
+
+/// Thrown by ``TestPollerClock/requireSleeperArmed(count:timeout:sourceLocation:)``.
+/// Observed state on the primary failure line, plus the call site, because a
+/// thrown error is attributed to the test function rather than to the wait.
+struct PollerClockNoSleeperArmed: Error, CustomStringConvertible {
+    let expected: Int
+    let observed: Int
+    let timeout: Duration
+    let virtualNow: Date
+    let sourceLocation: SourceLocation
+
+    var description: String {
+        """
+        TestPollerClock: expected at least \(expected) task(s) parked on the clock within \
+        \(timeout); observed \(observed), virtual now = \(virtualNow). The loop under test \
+        never re-armed: it went idle, is wedged, or is still working.
+        The wait that gave up: \(sourceLocation.fileID):\(sourceLocation.line).
+        """
     }
 }
 
@@ -135,19 +300,14 @@ private func makePoller(
     )
 }
 
-/// Pump the actor's loop several times so it can transition through
-/// refresh/sleep states between virtual-time advances. Uses tiny real-time
-/// sleeps because the loop awaits the GRDB executor (a separate thread), so
-/// pure `Task.yield()` is not sufficient to settle the actor between steps.
-private func pump() async {
-    for _ in 0..<20 {
-        try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
-        await Task.yield()
-    }
-}
-
 // MARK: - Tests
 
+/// Every step waits for the loop to re-arm on the clock instead of sleeping a
+/// fixed time: the poller sleeps on exactly one deadline whenever it has an
+/// eligible profile and is not paused, so once it is parked again, every tick
+/// the last advance (or poke) made due has finished. With stagger 0 the first
+/// deadline is "now", which the clock returns without parking, so the first
+/// arming after `start()` already follows the first tick.
 @Suite("ClaudeUsagePoller")
 struct ClaudeUsagePollerTests {
 
@@ -160,21 +320,21 @@ struct ClaudeUsagePollerTests {
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock, stagger: 30)
 
         await poller.start()
-        await pump()
+        try await clock.requireSleeperArmed()
 
-        // Before advancing, no calls have happened.
+        // Parked on the 30s stagger: no calls have happened.
         #expect(fetcher.totalCalls == 0)
 
         // Advance past the 30s stagger.
         await clock.advance(by: 31)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         #expect(fetcher.callCount(for: a.id.uuidString) == 1)
         #expect(fetcher.callCount(for: b.id.uuidString) == 1)
 
         // Advance another 30 minutes — second tick.
         await clock.advance(by: 30 * 60 + 1)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         #expect(fetcher.callCount(for: a.id.uuidString) == 2)
         #expect(fetcher.callCount(for: b.id.uuidString) == 2)
@@ -202,10 +362,9 @@ struct ClaudeUsagePollerTests {
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock)
 
+        // First tick fires immediately (stagger=0); the arming follows it.
         await poller.start()
-        await pump()
-        await clock.advance(by: 1) // first tick fires immediately (stagger=0)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         // Dedupe hit — no fetch.
         #expect(fetcher.callCount(for: a.id.uuidString) == 0)
@@ -222,27 +381,26 @@ struct ClaudeUsagePollerTests {
         fetcher.enqueue(token: a.id.uuidString, .http429)
 
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock)
-        await poller.start()
-        await pump()
 
-        // First tick → 429.
-        await clock.advance(by: 1)
-        await pump()
+        // First tick fires immediately (stagger=0) → 429.
+        await poller.start()
+        try await clock.requireSleeperArmed()
         #expect(fetcher.callCount(for: a.id.uuidString) == 1)
 
-        // After 30 minutes nothing should fire (backoff is 60 min).
+        // After 30 minutes nothing should fire (backoff is 60 min): the loop
+        // stays parked on the backoff deadline.
         await clock.advance(by: 30 * 60)
-        await pump()
+        #expect(clock.sleeperCount == 1)
         #expect(fetcher.callCount(for: a.id.uuidString) == 1)
 
         // After another 30 minutes (total 60 min) it fires again — this time .ok (default).
         await clock.advance(by: 30 * 60 + 1)
-        await pump()
+        try await clock.requireSleeperArmed()
         #expect(fetcher.callCount(for: a.id.uuidString) == 2)
 
         // After this success, backoff should be cleared. 30 more minutes should fire again.
         await clock.advance(by: 30 * 60 + 1)
-        await pump()
+        try await clock.requireSleeperArmed()
         #expect(fetcher.callCount(for: a.id.uuidString) == 3)
 
         await poller.stop()
@@ -251,20 +409,25 @@ struct ClaudeUsagePollerTests {
     @Test func http401PermanentExclusion() async throws {
         let db = try TBDDatabase(inMemory: true)
         let a = try await db.modelProfiles.create(name: "A", kind: .apiKey)
+        // A healthy profile keeps the loop parked on the clock after A drops
+        // out, so its arming is the barrier that the loop has been through the
+        // post-401 refresh. Without it the loop goes idle, which nothing can
+        // observe, and "no further calls" would be a guess about timing.
+        let healthy = try await db.modelProfiles.create(name: "Healthy", kind: .apiKey)
         let clock = TestPollerClock()
         let fetcher = MockUsageFetcher(default: .ok(sampleUsageOK()))
         fetcher.enqueue(token: a.id.uuidString, .http401)
 
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock)
         await poller.start()
-        await pump()
-        await clock.advance(by: 1)
-        await pump()
+        try await clock.requireSleeperArmed()
         #expect(fetcher.callCount(for: a.id.uuidString) == 1)
+        #expect(fetcher.callCount(for: healthy.id.uuidString) == 1)
 
         // Advance well past the cadence — no further calls because token excluded.
         await clock.advance(by: 60 * 60)
-        await pump()
+        try await clock.requireSleeperArmed()
+        #expect(fetcher.callCount(for: healthy.id.uuidString) == 2)
         #expect(fetcher.callCount(for: a.id.uuidString) == 1)
 
         await poller.stop()
@@ -279,9 +442,7 @@ struct ClaudeUsagePollerTests {
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock)
 
         await poller.start()
-        await pump()
-        await clock.advance(by: 5 * 60)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         // OAuth profiles don't store TBD-side secrets, so they are not polled
         #expect(fetcher.callCount(for: oauthProfile.id.uuidString) == 0)
@@ -300,9 +461,7 @@ struct ClaudeUsagePollerTests {
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock)
 
         await poller.start()
-        await pump()
-        await clock.advance(by: 1)
-        await pump()
+        try await clock.requireSleeperArmed()
         #expect(fetcher.callCount(for: a.id.uuidString) == 1)
         #expect(fetcher.callCount(for: b.id.uuidString) == 1)
 
@@ -310,17 +469,16 @@ struct ClaudeUsagePollerTests {
         await poller.onFocusChanged(isForeground: false)
         // Advance 11 minutes — past the 10-min focus pause threshold but not past the 30-min cadence.
         await clock.advance(by: 11 * 60)
-        await pump()
 
-        // Loop should be paused; no new fetches.
+        // No deadline passed, so the loop is still parked; no new fetches.
+        #expect(clock.sleeperCount == 1)
         #expect(fetcher.callCount(for: a.id.uuidString) == 1)
         #expect(fetcher.callCount(for: b.id.uuidString) == 1)
 
-        // Regain focus → immediate pokeAll.
+        // Regain focus → immediate pokeAll. Its wake cancels the parked sleep,
+        // so the next arming follows the poked ticks.
         await poller.onFocusChanged(isForeground: true)
-        await pump()
-        await clock.advance(by: 1)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         #expect(fetcher.callCount(for: a.id.uuidString) == 2)
         #expect(fetcher.callCount(for: b.id.uuidString) == 2)
@@ -338,14 +496,14 @@ struct ClaudeUsagePollerTests {
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock, stagger: 30 * 60)
 
         await poller.start()
-        await pump()
+        try await clock.requireSleeperArmed()
         // Verify nothing fired yet.
         #expect(fetcher.totalCalls == 0)
 
+        // The poke's wake cancels the parked sleep, so the next arming
+        // follows the poked ticks.
         await poller.pokeAll()
-        await pump()
-        await clock.advance(by: 1)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         #expect(fetcher.callCount(for: a.id.uuidString) == 1)
         #expect(fetcher.callCount(for: b.id.uuidString) == 1)
@@ -369,19 +527,17 @@ struct ClaudeUsagePollerTests {
         )
 
         await poller.start()
-        await pump()
-        await clock.advance(by: 1)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         #expect(collector.rows.count == 1)
-        #expect(collector.rows[0].lastStatus == "ok")
+        #expect(collector.rows.first?.lastStatus == "ok")
 
         // Trigger another tick.
         await clock.advance(by: 30 * 60 + 1)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         #expect(collector.rows.count == 2)
-        #expect(collector.rows[1].lastStatus == "http_429")
+        #expect(collector.rows.last?.lastStatus == "http_429")
 
         await poller.stop()
     }
@@ -403,9 +559,7 @@ struct ClaudeUsagePollerTests {
         let poller = makePoller(db: db, fetcher: fetcher, clock: clock)
 
         await poller.start()
-        await pump()
-        await clock.advance(by: 1)
-        await pump()
+        try await clock.requireSleeperArmed()
 
         // Only the direct (Claude-API) profile should be reached. The proxy
         // profile is filtered out before any keychain or fetch logic runs.

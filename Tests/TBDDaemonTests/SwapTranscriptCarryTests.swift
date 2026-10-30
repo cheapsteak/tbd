@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// Covers the account-swap transcript carry: when "Switch account" forks a new
@@ -53,7 +54,7 @@ struct SwapTranscriptCarryTests {
         defer { try? FileManager.default.removeItem(at: src); try? FileManager.default.removeItem(at: dst) }
 
         let sessionID = UUID().uuidString
-        let slug = "-Users-zionts-wt"
+        let slug = "-Users-octocat-wt"
         let sourceFile = try writeTranscript(configDir: src, slug: slug, sessionID: sessionID)
 
         RPCRouter.ensureTranscriptReachable(from: sourceFile, inConfigDir: dst)
@@ -77,7 +78,7 @@ struct SwapTranscriptCarryTests {
         defer { try? FileManager.default.removeItem(at: src); try? FileManager.default.removeItem(at: dst) }
 
         let sessionID = UUID().uuidString
-        let slug = "-Users-zionts-wt"
+        let slug = "-Users-octocat-wt"
         let sourceFile = try writeTranscript(
             configDir: src, slug: slug, sessionID: sessionID,
             content: #"{"type":"user","message":{"role":"user","content":"NEW source"}}"#
@@ -120,7 +121,7 @@ struct SwapTranscriptCarryTests {
         }
 
         let sessionID = UUID().uuidString
-        let slug = "-Users-zionts-wt"
+        let slug = "-Users-octocat-wt"
         // Real transcript lives under host/projects.
         let hostFile = try writeTranscript(configDir: host, slug: slug, sessionID: sessionID)
 
@@ -149,12 +150,12 @@ struct SwapTranscriptCarryTests {
         let src = makeTempDir()
         defer { try? FileManager.default.removeItem(at: src) }
         let sessionID = UUID().uuidString
-        let file = try writeTranscript(configDir: src, slug: "-Users-zionts-wt", sessionID: sessionID)
+        let file = try writeTranscript(configDir: src, slug: "-Users-octocat-wt", sessionID: sessionID)
 
         let resolved = RPCRouter.resolveSwapSourceTranscript(
             transcriptPath: file.path,
             sessionID: sessionID,
-            worktreePath: "/Users/zionts/wt",
+            worktreePath: "/Users/octocat/wt",
             sourceConfigDir: src
         )
         #expect(resolved?.path == file.path)

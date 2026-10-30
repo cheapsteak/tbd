@@ -14,10 +14,10 @@ It's still too coarse in one realistic shape: Claude Code's auto-memory
 system creates a `memory/` subdirectory inside each cwd-hash directory,
 alongside the session JSONLs. Encountered live:
 
-- Host: `~/.claude/projects/-Users-chang-projects-longeye-app/` contains
+- Host: `~/.claude/projects/-Users-chang-projects-acme-app/` contains
   many session JSONLs **plus** a `memory/` directory with ~22 markdown
   notes.
-- Profile 22222: `<profile>/.../projects/-Users-chang-projects-longeye-app/`
+- Profile 22222: `<profile>/.../projects/-Users-chang-projects-acme-app/`
   contains a `memory/` directory too — but **empty**, never populated.
 
 PR #179's check at this level sees `memory` in both → marks it as a

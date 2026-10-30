@@ -42,12 +42,9 @@ import Foundation
 /// cursor is shown) and says so on `cursorVisibleObserved`, which is the same
 /// provenance axis `modesObserved` carries for an emulator reporting a fresh
 /// terminal's defaults: the value is there, and the flag says to read it as a
-/// default rather than as an observation. Nothing is lost today — the only
-/// consumer of a screen's cursor is the hibernation pending-input rail, and
-/// that rail refuses a `.viewer` screen outright, because a live screen
-/// somebody is sitting at the keyboard of cannot prove the composer is empty.
-/// A producer that one day *can* observe it flips one line here rather than
-/// changing the wire.
+/// default rather than as an observation. Nothing is lost today: nothing in
+/// TBD decides anything from a `.viewer` screen's cursor. A producer that one
+/// day *can* observe it flips one line here rather than changing the wire.
 public struct ViewerScreenPayload: Codable, Sendable, Equatable {
     /// The requested tail of scrollback plus the viewport, one entry per row,
     /// right-trimmed, with trailing blank rows dropped — produced by
@@ -138,10 +135,9 @@ public struct ViewerScreenPayload: Codable, Sendable, Equatable {
     /// The cursor, in the shape `TerminalScreen` holds it.
     ///
     /// `TerminalScreen.Cursor` has no provenance field of its own, so
-    /// `cursorVisibleObserved` does not survive this conversion — which is
-    /// correct for the one screen a consumer can reach, because a `.viewer`
-    /// screen's cursor is refused by the only consumer that reads one. A
-    /// consumer that needs the flag reads it from the payload.
+    /// `cursorVisibleObserved` does not survive this conversion — which costs
+    /// nothing, because nothing in TBD decides anything from a screen's
+    /// cursor. A consumer that needs the flag reads it from the payload.
     public var cursor: TerminalScreen.Cursor {
         TerminalScreen.Cursor(row: cursorRow, column: cursorColumn, visible: cursorVisible)
     }

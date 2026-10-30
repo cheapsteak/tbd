@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Tests for `effectiveAutoHibernate(for:)` — the per-worktree auto-hibernate resolver.
 ///
@@ -17,9 +18,9 @@ import TBDShared
 struct EffectiveAutoHibernateTests {
 
     private func withAppState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.EffectiveAutoHibernate.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.EffectiveAutoHibernate")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

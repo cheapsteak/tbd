@@ -18,15 +18,93 @@ struct RepoAdd: AsyncParsableCommand {
         abstract: "Add a repository to TBD"
     )
 
-    @Argument(help: "Path to git repository (defaults to current directory)")
+    @Argument(help: "Path to a git repository, a git URL, or owner/repo (defaults to current directory)")
     var path: String = "."
+
+    @Argument(help: "Where to clone a remote repository (defaults to ./<name>)")
+    var destination: String?
 
     @Flag(name: .long, help: "Output JSON")
     var json = false
 
     mutating func run() async throws {
-        let resolved = resolvePath(path)
+        let action: RepoAddAction
+        do {
+            action = try planRepoAdd(
+                source: path,
+                destination: destination,
+                currentDirectory: FileManager.default.currentDirectoryPath,
+                pathExists: { FileManager.default.fileExists(atPath: $0) }
+            )
+        } catch let usage as RepoAddUsageError {
+            throw CLIError.invalidArgument(usage.description)
+        }
+
         let client = SocketClient()
+        switch action {
+        case .addLocal(let resolved):
+            try addRepo(client: client, at: resolved)
+        case .clone(let source, let destination):
+            // A stopped daemon should fail before any clone starts.
+            _ = try client.call(method: RPCMethod.daemonStatus, resultType: DaemonStatusResult.self)
+
+            let url: String
+            switch source {
+            case .remote(let remoteURL, _):
+                url = remoteURL
+            case .githubShortForm(let owner, let repo):
+                url = await RepoCloner.githubCloneURL(owner: owner, repo: repo)
+            case .local, .invalid:
+                throw ExitCode.failure  // unreachable: planRepoAdd only clones remote sources
+            }
+
+            writeStderr("Cloning \(url) into \(destination)…\n")
+            // Like system(3): ignore SIGINT/SIGQUIT in this process while git runs. git
+            // still gets Ctrl-C (default dispositions, same foreground group) and cleans
+            // up; the CLI must survive long enough for RepoCloner to remove the folder
+            // git emptied. To RepoCloner this is a failure, not a cancel, so a repository
+            // git kept (Ctrl-C during checkout) stays, as git's own warning says.
+            let previousInterrupt = signal(SIGINT, SIG_IGN)
+            let previousQuit = signal(SIGQUIT, SIG_IGN)
+            let outcome = await RepoCloner(url: url, destination: destination, mode: .attachedToTerminal)
+                .run { _ in }
+            signal(SIGINT, previousInterrupt)
+            signal(SIGQUIT, previousQuit)
+            switch outcome {
+            case .succeeded:
+                break
+            case .refusedDestinationExists:
+                writeStderr("Destination already exists: \(destination)\n")
+                throw ExitCode.failure
+            case .failed(let code, let lines):
+                // Attached, git wrote its own error to the terminal and `lines`
+                // is empty; it holds TBD's reason only when git never ran.
+                for line in lines {
+                    writeStderr(line + "\n")
+                }
+                throw ExitCode(code)
+            case .cancelled:
+                throw ExitCode.failure
+            }
+
+            do {
+                try addRepo(client: client, at: destination)
+            } catch {
+                let reason: String
+                if case CLIError.rpcError(let message) = error {
+                    reason = message
+                } else {
+                    reason = "\(error)"
+                }
+                writeStderr(
+                    "Cloned into \(destination), but TBD could not add it: \(reason). "
+                        + "Run `tbd repo add \(destination)` to retry.\n")
+                throw ExitCode.failure
+            }
+        }
+    }
+
+    private func addRepo(client: SocketClient, at resolved: String) throws {
         let repo: Repo = try client.call(
             method: RPCMethod.repoAdd,
             params: RepoAddParams(path: resolved),
@@ -40,6 +118,10 @@ struct RepoAdd: AsyncParsableCommand {
             print("  ID:   \(repo.id)")
             print("  Path: \(repo.path)")
         }
+    }
+
+    private func writeStderr(_ text: String) {
+        FileHandle.standardError.write(Data(text.utf8))
     }
 }
 

@@ -92,7 +92,7 @@ Rationale:
     tbd/
       20260407-negative-crane/
       20260321-fuzzy-penguin/
-    longeye-app/
+    acme-app/
       20260315-tame-otter/
 ```
 
@@ -105,7 +105,7 @@ See §4a for exactly how the per-repo directory name is chosen.
 **Scheme:** the per-repo directory is the **sanitized repo display name**, frozen at `tbd repo add` time. Collisions are refused.
 
 ```
-slot = sanitize(repo.displayName)                  # e.g. "tbd", "longeye-app"
+slot = sanitize(repo.displayName)                  # e.g. "tbd", "acme-app"
 if any existing repo has worktree_slot == slot:
     refuse `tbd repo add` with:
         "display name '<new.displayName>' sanitizes to slot '<slot>',

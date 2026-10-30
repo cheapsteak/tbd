@@ -93,19 +93,22 @@ struct RowActionMenuActions {
         }?.gone ?? false
     }
 
-    /// The sessions this row's "Hibernate now" would actually act on.
-    ///
-    /// `ManualParkAffordance` adds the app-only half of the question to
-    /// `isManuallyHibernatable`: a holder-backed session whose panel currently
-    /// owns the pty would be refused by the daemon, whose pending-input rail
-    /// cannot read a screen it no longer has. The fan-out and the menu item's
-    /// visibility read the SAME list, so the row can never offer a park that
-    /// would sweep nothing.
+    /// Is this row's provider retired: the roster has loaded and neither names
+    /// it nor reserves it as a built-in? An unloaded roster (launch, or the
+    /// remote feature off) reads as "not retired" so an empty list cannot make
+    /// every provider look gone; the daemon is the authority either way.
+    private var providerRetired: Bool {
+        guard let provider = worktree.providerBinding?.provider,
+              appState.remoteProvidersLoaded,
+              !RemoteProviderRegistry.isReserved(provider) else { return false }
+        return !appState.remoteProviders.contains { $0.config.name == provider }
+    }
+
+    /// The sessions this row's "Hibernate now" would actually act on. The
+    /// fan-out and the menu item's visibility read the SAME list, so the row
+    /// can never offer a park that would sweep nothing.
     private var manuallyParkableTerminals: [Terminal] {
-        terminals.filter {
-            ManualParkAffordance.isOfferable(
-                $0, panelHoldsPTY: appState.terminalInjections.holdsPTY(terminalID: $0.id))
-        }
+        terminals.filter { $0.isManuallyHibernatable() }
     }
 
     /// Build the pure model context from live `AppState`. Mirrors exactly the
@@ -128,7 +131,6 @@ struct RowActionMenuActions {
             hasRepoID: worktree.repoID != nil,
             isScratch: worktree.isScratch,
             isPinned: worktree.pinnedAt != nil,
-            isNightwatchDesk: worktree.isNightwatchDesk,
             status: worktree.status,
             isPromoted: worktree.promotedToRepoID != nil,
             branch: worktree.branch,
@@ -138,6 +140,7 @@ struct RowActionMenuActions {
             provider: worktree.providerBinding?.provider,
             providerCapabilities: providerCapabilities,
             isGone: isGone,
+            providerRetired: providerRetired,
             remoteDeleteEnabled: appState.remoteDeleteEnabled
         )
     }
@@ -189,11 +192,7 @@ struct RowActionMenuActions {
         case .hibernateNow:
             let wtID = worktree.id
             let ids = manuallyParkableTerminals.map { $0.id }
-            Task {
-                for id in ids {
-                    await appState.hibernateTerminal(terminalID: id, worktreeID: wtID)
-                }
-            }
+            Task { await appState.hibernateTerminals(ids, worktreeID: wtID) }
 
         case .wakeHibernated:
             let wtID = worktree.id

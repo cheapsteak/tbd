@@ -414,129 +414,102 @@ struct PanePlaceholder: View {
             // for real in the main area.
             pinnedInDockPlaceholder
         } else if let terminal = terminal(for: terminalID) {
-            if appState.suspendingTerminalIDs.contains(terminal.id) {
-                // Show screenshot (or black fallback) — no live tmux connection
-                Group {
-                    if let screenshot = appState.suspendingSnapshots[terminal.id] {
-                        Image(nsImage: screenshot)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Color.black
+            let switching = appState.switchingAccountTerminals[terminal.id]
+            TerminalPanelView(
+                terminalID: terminalID,
+                tmuxServer: worktree.tmuxServer,
+                tmuxWindowID: terminal.tmuxWindowID,
+                tmuxBridge: appState.tmuxBridge,
+                tabCloseContext: tabID.map { TabCloseContext(worktreeID: worktree.id, tabID: $0) },
+                worktreePath: worktree.path,
+                remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
+                onFilePathClicked: { path in
+                    let result = routeFileClick(into: layout, terminalID: terminalID, path: path)
+                    if let replaced = result.replaced {
+                        appState.recordPaneReplacement(replaced)
                     }
+                    layout = result.layout
+                },
+                onTerminalNotification: { title, body in
+                    debugLog("OSC 777: \(title) — \(body)")
+                },
+                onMissingWindow: {
+                    await appState.requestAutomaticTerminalRecreation(terminalID: terminalID)
+                },
+                initialSnapshot: terminal.suspendedSnapshot,
+                // Show the frozen snapshot backdrop while PARKED — hibernated
+                // (authoritative) or legacy-suspended. The unified park path
+                // captures a snapshot into `suspendedSnapshot`, so hibernated
+                // rows have one too.
+                isSuspendedSnapshot: terminal.isParked,
+                // Reason-phrased hibernate notice, composed INTO the
+                // frozen snapshot's last rows at feed time (in the
+                // terminal's own grid/font — see ParkedSnapshotComposer).
+                // nil for a live terminal so the wake/reconnect path
+                // feeds the snapshot untouched, and nil while an account
+                // switch has the row parked — the caption overlay below
+                // says what is happening instead.
+                parkedNoticeMessage: TerminalPanePresentation.parkedNoticeMessage(
+                    for: terminal, switching: switching),
+                shouldSuppressEvents: { [overlayCoordinator] in
+                    shouldSuppressEvents(in: overlayCoordinator, forTerminalID: terminalID)
                 }
-                .overlay(alignment: .topTrailing) {
-                    HStack(spacing: 4) {
-                        ProgressView()
-                            .controlSize(.mini)
-                        Text("Suspending...")
+            )
+            .id(TerminalPanePresentation.identity(
+                for: terminal, switching: switching,
+                attachEpoch: appState.terminalAttachEpochs[terminal.id] ?? 0,
+                attachRetry: appState.terminalAttachRetries[terminal.id] ?? 0))
+            .overlay {
+                // Full-surface click-to-wake for a PARKED pane: the whole
+                // frozen snapshot is the resume affordance (the old
+                // corner "Click to resume session" chip was easy to miss;
+                // the in-grid notice block composed into the snapshot's
+                // last rows carries the text). Gated
+                // by ParkedPaneWakeModel so a LIVE terminal never gets a
+                // click-catching layer over it. A transparent plain Button
+                // (not .onTapGesture, which blocks .contextMenu on macOS)
+                // — applied BEFORE the TranscriptOverlayView overlay below
+                // so that overlay stays on top in hit-testing. Every
+                // left-click reaches it: the terminal underneath takes
+                // clicks only through its own mouse overrides, which
+                // AppKit hit-testing never reaches past this layer.
+                if TerminalPanePresentation.showsWakeOverlay(
+                    for: terminal, switching: switching) {
+                    Button {
+                        Task { await appState.wakeParkedTerminalUserInitiated(terminalID: terminal.id, worktreeID: worktree.id) }
+                    } label: {
+                        Color.clear
+                            .contentShape(Rectangle())
                     }
-                    .font(.caption2)
-                    .fontWeight(.medium)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 4))
-                    .padding(8)
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
+                    .help("Click to resume session")
                 }
-            } else {
-                let switching = appState.switchingAccountTerminals[terminal.id]
-                TerminalPanelView(
-                    terminalID: terminalID,
-                    tmuxServer: worktree.tmuxServer,
-                    tmuxWindowID: terminal.tmuxWindowID,
-                    tmuxBridge: appState.tmuxBridge,
-                    tabCloseContext: tabID.map { TabCloseContext(worktreeID: worktree.id, tabID: $0) },
-                    worktreePath: worktree.path,
-                    remoteURL: appState.repos.first(where: { $0.id == worktree.repoID })?.remoteURL,
-                    onFilePathClicked: { path in
-                        let result = routeFileClick(into: layout, terminalID: terminalID, path: path)
-                        if let replaced = result.replaced {
-                            appState.recordPaneReplacement(replaced)
-                        }
-                        layout = result.layout
-                    },
-                    onTerminalNotification: { title, body in
-                        debugLog("OSC 777: \(title) — \(body)")
-                    },
-                    onMissingWindow: {
-                        await appState.requestAutomaticTerminalRecreation(terminalID: terminalID)
-                    },
-                    initialSnapshot: terminal.suspendedSnapshot,
-                    // Show the frozen snapshot backdrop while PARKED — hibernated
-                    // (authoritative) or legacy-suspended. The unified park path
-                    // captures a snapshot into `suspendedSnapshot`, so hibernated
-                    // rows have one too.
-                    isSuspendedSnapshot: terminal.isParked,
-                    // Reason-phrased hibernate notice, composed INTO the
-                    // frozen snapshot's last rows at feed time (in the
-                    // terminal's own grid/font — see ParkedSnapshotComposer).
-                    // nil for a live terminal so the wake/reconnect path
-                    // feeds the snapshot untouched, and nil while an account
-                    // switch has the row parked — the caption overlay below
-                    // says what is happening instead.
-                    parkedNoticeMessage: TerminalPanePresentation.parkedNoticeMessage(
-                        for: terminal, switching: switching),
-                    shouldSuppressEvents: { [overlayCoordinator] in
-                        shouldSuppressEvents(in: overlayCoordinator, forTerminalID: terminalID)
-                    }
-                )
-                .id(TerminalPanePresentation.identity(
-                    for: terminal, switching: switching,
-                    attachEpoch: appState.terminalAttachEpochs[terminal.id] ?? 0))
-                .overlay {
-                    // Full-surface click-to-wake for a PARKED pane: the whole
-                    // frozen snapshot is the resume affordance (the old
-                    // corner "Click to resume session" chip was easy to miss;
-                    // the in-grid notice block composed into the snapshot's
-                    // last rows carries the text). Gated
-                    // by ParkedPaneWakeModel so a LIVE terminal never gets a
-                    // click-catching layer over it. A transparent plain Button
-                    // (not .onTapGesture, which blocks .contextMenu on macOS)
-                    // — applied BEFORE the TranscriptOverlayView overlay below
-                    // so that overlay stays on top in hit-testing. Every
-                    // left-click reaches it: the terminal underneath takes
-                    // clicks only through its own mouse overrides, which
-                    // AppKit hit-testing never reaches past this layer.
-                    if TerminalPanePresentation.showsWakeOverlay(
-                        for: terminal, switching: switching) {
-                        Button {
-                            Task { await appState.wakeParkedTerminalUserInitiated(terminalID: terminal.id, worktreeID: worktree.id) }
-                        } label: {
-                            Color.clear
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .onHover { hovering in
-                            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                        }
-                        .help("Click to resume session")
-                    }
+            }
+            .overlay {
+                SwitchingAccountCaptionOverlay(terminal: terminal, switching: switching)
+            }
+            .overlay {
+                if let frame = overlayCoordinator.current,
+                   isOverlayItemFor(terminalID: terminalID, coordinator: overlayCoordinator) {
+                    TranscriptOverlayView(
+                        frame: frame,
+                        hasBack: overlayCoordinator.hasBack,
+                        onBack: { overlayCoordinator.pop() },
+                        onClose: { overlayCoordinator.close() }
+                    )
+                    .environment(\.openFilePreview, { path in
+                        let newContent = PaneContent.codeViewer(id: UUID(), path: path)
+                        layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
+                    })
+                    .padding(16)
                 }
-                .overlay {
-                    SwitchingAccountCaptionOverlay(terminal: terminal, switching: switching)
-                }
-                .overlay {
-                    if let frame = overlayCoordinator.current,
-                       isOverlayItemFor(terminalID: terminalID, coordinator: overlayCoordinator) {
-                        TranscriptOverlayView(
-                            frame: frame,
-                            hasBack: overlayCoordinator.hasBack,
-                            onBack: { overlayCoordinator.pop() },
-                            onClose: { overlayCoordinator.close() }
-                        )
-                        .environment(\.openFilePreview, { path in
-                            let newContent = PaneContent.codeViewer(id: UUID(), path: path)
-                            layout = layout.splitPane(id: content.paneID, direction: .horizontal, newContent: newContent)
-                        })
-                        .padding(16)
-                    }
-                }
-                .onDisappear {
-                    if isOverlayItemFor(terminalID: terminalID, coordinator: overlayCoordinator) {
-                        overlayCoordinator.close()
-                    }
-                    appState.snapshotProviders.removeValue(forKey: terminalID)
+            }
+            .onDisappear {
+                if isOverlayItemFor(terminalID: terminalID, coordinator: overlayCoordinator) {
+                    overlayCoordinator.close()
                 }
             }
         } else {

@@ -122,6 +122,19 @@ struct TranscriptItemTests {
         #expect(try JSONDecoder().decode(SystemKind.self, from: data) == .nestedMemory)
     }
 
+    @Test func roundtrip_systemReminder_compactSummary() throws {
+        let data = try JSONEncoder().encode(SystemKind.compactSummary)
+        #expect(String(bytes: data, encoding: .utf8) == #""compactSummary""#)
+        #expect(try JSONDecoder().decode(SystemKind.self, from: data) == .compactSummary)
+
+        let original: TranscriptItem = .systemReminder(
+            id: "c1", kind: .compactSummary,
+            text: "This session is being continued from a previous conversation.",
+            timestamp: nil)
+        let decoded = try JSONDecoder().decode(TranscriptItem.self, from: JSONEncoder().encode(original))
+        #expect(decoded == original)
+    }
+
     @Test func roundtrip_slashCommand() throws {
         let original: TranscriptItem = .slashCommand(id: "sc1", name: "rebase", args: "main", timestamp: nil)
         let data = try JSONEncoder().encode(original)

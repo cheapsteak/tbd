@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import TBDKernel
 
 /// One read of the kernel's process table: every live pid's parent, and when it
 /// started.

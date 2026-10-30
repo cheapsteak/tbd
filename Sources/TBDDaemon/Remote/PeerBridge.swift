@@ -1,6 +1,7 @@
 import Foundation
 import os
 import TBDShared
+import TBDKernel
 
 private let bridgeLogger = Logger(subsystem: "com.tbd.daemon", category: "shadowPeer")
 

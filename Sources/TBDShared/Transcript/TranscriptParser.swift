@@ -306,6 +306,9 @@ public enum TranscriptParser {
                 continue
             }
 
+            // A compaction summary lands here as `.compactSummary`. Like every
+            // user line its text is not truncated: the row it renders as is one
+            // line, and the overlay it opens shows the whole summary.
             if typeStr == "user", let kind = UserMessageClassifier.classify(json) {
                 items.append(promptItem(
                     id: lineUUID,

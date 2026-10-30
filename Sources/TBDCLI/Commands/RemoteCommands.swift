@@ -502,6 +502,50 @@ enum RemoteDeletePrecondition {
     }
 }
 
+/// What `delete` does about the transcript, decided by
+/// `RemoteDelete.retention` before any call.
+///
+/// More than a Bool because the two unspecified outcomes are TBD's choice
+/// rather than the caller's, and `run()` says something after each that an
+/// explicit `--retain` or `--no-retain` does not need.
+enum RemoteDeleteRetention: Equatable {
+    /// Refused before any call; the line to print.
+    case refused(String)
+    /// `--retain` or `--no-retain`, sent as given.
+    case requested(Bool)
+    /// Unspecified, and the provider declares `transcript.retain`: `--retain`
+    /// is sent, and a failed call gets `defaultRetainFailureHint`.
+    case retainedByDefault
+    /// Unspecified, and the provider does not declare it: the transcript goes
+    /// with the session, and `notRetainedNote` says so.
+    case notRetainable
+
+    /// The `--retain` sent to the provider.
+    var sendsRetain: Bool {
+        switch self {
+        case .requested(let retain): retain
+        case .retainedByDefault: true
+        case .refused, .notRetainable: false
+        }
+    }
+
+    /// The stderr line after a delete that went ahead without retaining. Help
+    /// says retention is the default, so a bare "deleted" would read as kept.
+    static func notRetainedNote(provider: String) -> String {
+        "transcript not retained: provider '\(provider)' has not declared the "
+            + "'\(RemoteCapability.transcriptRetain)' capability"
+    }
+
+    /// The stderr line ahead of the error from a failed delete that was
+    /// retaining by default. The error itself is rethrown unchanged; the delete
+    /// failing rather than destroying the transcript is the right outcome, and
+    /// this only names the way through if retaining is what failed.
+    static let defaultRetainFailureHint =
+        "hint: this delete was retaining the transcript by default. If the error "
+        + "below is from retaining it, re-run with --no-retain to delete the "
+        + "session without keeping its transcript."
+}
+
 /// What `--json` prints for a delete: the provider's own response shape with
 /// the provider name added, rather than a second shape a reader has to learn.
 ///
@@ -569,10 +613,14 @@ struct RemoteDelete: AsyncParsableCommand {
             Gated by the daemon's `remote_delete_enabled` flag, which ships off. \
             Turn it on with `tbd remote allow-delete on`.
 
-            With --retain the provider stores the transcript first and the key is \
-            printed, so the conversation survives the session. Without it, \
-            nothing survives. --retain needs the provider to declare \
-            `transcript.retain` as well as `delete`.
+            The transcript is retained by default wherever the provider \
+            supports it: the provider stores it first and the key is printed, \
+            so the conversation survives the session. Where it does not, the \
+            delete goes ahead and says the transcript was not retained. Pass \
+            --no-retain to destroy the transcript along with the session. \
+            Passing --retain explicitly against a provider that has not \
+            declared `transcript.retain` alongside `delete` is refused, \
+            naming the missing capability.
 
             Refuses without --force when the session is running or reports \
             uncommitted work, naming which.
@@ -584,8 +632,10 @@ struct RemoteDelete: AsyncParsableCommand {
     @Argument(help: "Worktree name, TBD UUID, or <provider>/<session-id>")
     var session: String
 
-    @Flag(name: .long, help: "Retain the transcript before destroying the session")
-    var retain = false
+    @Flag(
+        name: .long, inversion: .prefixedNo,
+        help: "Retain the transcript before destroying the session (default: on wherever the provider supports it; --no-retain destroys the transcript with the session)")
+    var retain: Bool?
 
     @Flag(name: .long, help: "Destroy a running session, or one with uncommitted work")
     var force = false
@@ -594,7 +644,7 @@ struct RemoteDelete: AsyncParsableCommand {
     var json = false
 
     /// The capability refusal `delete` gives before calling anything: `delete`
-    /// itself is required unconditionally, and `--retain` needs
+    /// itself is required unconditionally, and an explicit `--retain` needs
     /// `transcript.retain` as well — the contract makes --retain valid only
     /// where that capability is declared, so this is refused here rather than
     /// sent and hoped for: a provider that ignored the flag would destroy a
@@ -610,6 +660,25 @@ struct RemoteDelete: AsyncParsableCommand {
         return fleet.missingCapability(RemoteCapability.transcriptRetain, provider: provider)
     }
 
+    /// The whole transcript decision for the tri-state flag, pure so every
+    /// flag and capability combination is testable without a live daemon.
+    ///
+    /// Only an explicit `--retain` is a request the provider must be able to
+    /// honor. Unspecified retains exactly where `transcript.retain` is declared
+    /// and is never refused for its absence — that is "no receipt available",
+    /// not a caller mistake. The match is exact, so a bare pre-namespace
+    /// `retain` admits nothing here either.
+    static func retention(
+        fleet: RemoteFleetSnapshot, provider: String, requested: Bool?
+    ) -> RemoteDeleteRetention {
+        if let refusal = refusal(fleet: fleet, provider: provider, retain: requested == true) {
+            return .refused(refusal)
+        }
+        if let requested { return .requested(requested) }
+        return fleet.capabilities(of: provider).contains(RemoteCapability.transcriptRetain)
+            ? .retainedByDefault : .notRetainable
+    }
+
     mutating func run() async throws {
         let client = SocketClient()
         let fleet = try readRemoteFleet(client: client)
@@ -619,7 +688,9 @@ struct RemoteDelete: AsyncParsableCommand {
             throw ExitCode.failure
         }
         let address = "\(target.provider)/\(target.sessionID)"
-        if let refusal = RemoteDelete.refusal(fleet: fleet, provider: target.provider, retain: retain) {
+        let retention = RemoteDelete.retention(
+            fleet: fleet, provider: target.provider, requested: retain)
+        if case .refused(let refusal) = retention {
             remoteNote(refusal)
             throw ExitCode.failure
         }
@@ -633,20 +704,34 @@ struct RemoteDelete: AsyncParsableCommand {
             remoteNote(refusal)
             throw ExitCode.failure
         }
-        let result = try client.call(
-            method: RPCMethod.remoteDelete,
-            params: RemoteDeleteParams(
-                provider: target.provider, sessionID: target.sessionID, retain: retain),
-            resultType: RemoteDeleteResult.self)
+        let result: RemoteDeleteResult
+        do {
+            result = try client.call(
+                method: RPCMethod.remoteDelete,
+                params: RemoteDeleteParams(
+                    provider: target.provider, sessionID: target.sessionID,
+                    retain: retention.sendsRetain),
+                resultType: RemoteDeleteResult.self)
+        } catch let error as CLIError {
+            // Only an error the daemon answered with: a socket that never
+            // connected says nothing about retention.
+            if retention == .retainedByDefault {
+                remoteNote(RemoteDeleteRetention.defaultRetainFailureHint)
+            }
+            throw error
+        }
         if json {
             printJSON(RemoteDeleteOutput(provider: target.provider, result: result))
-            return
+        } else {
+            // The key goes to stdout on its own, as it does for `retain`, so
+            // `KEY=$(tbd remote delete my-lane --retain)` composes; everything
+            // else is stderr.
+            remoteNote(remoteDeleteConfirmation(address: address, result: result))
+            if let key = result.retained?.key { print(key) }
         }
-        // The key goes to stdout on its own, as it does for `retain`, so
-        // `KEY=$(tbd remote delete my-lane --retain)` composes; everything else
-        // is stderr.
-        remoteNote(remoteDeleteConfirmation(address: address, result: result))
-        if let key = result.retained?.key { print(key) }
+        if result.deleted, retention == .notRetainable {
+            remoteNote(RemoteDeleteRetention.notRetainedNote(provider: target.provider))
+        }
     }
 }
 

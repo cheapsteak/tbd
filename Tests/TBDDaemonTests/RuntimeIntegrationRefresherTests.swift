@@ -10,14 +10,13 @@ struct RuntimeIntegrationRefresherTests {
         var calls: [String] = []
         let refresher = RuntimeIntegrationRefresher(
             writeFallbackSkill: { calls.append("skill") },
-            writeClaudePlugin: { calls.append("claude-plugin") },
             ensureCodexProfilePlugin: { calls.append("codex-plugin") },
             writeClaudeHookOverlay: { calls.append("claude-hooks") }
         )
 
         refresher.refresh()
 
-        #expect(calls == ["skill", "claude-plugin", "codex-plugin", "claude-hooks"])
+        #expect(calls == ["skill", "codex-plugin", "claude-hooks"])
     }
 
     @Test("refresh keeps going when Codex plugin install fails")
@@ -25,7 +24,6 @@ struct RuntimeIntegrationRefresherTests {
         var calls: [String] = []
         let refresher = RuntimeIntegrationRefresher(
             writeFallbackSkill: { calls.append("skill") },
-            writeClaudePlugin: { calls.append("claude-plugin") },
             ensureCodexProfilePlugin: {
                 calls.append("codex-plugin")
                 struct Failure: Error {}
@@ -36,6 +34,6 @@ struct RuntimeIntegrationRefresherTests {
 
         refresher.refresh()
 
-        #expect(calls == ["skill", "claude-plugin", "codex-plugin", "claude-hooks"])
+        #expect(calls == ["skill", "codex-plugin", "claude-hooks"])
     }
 }

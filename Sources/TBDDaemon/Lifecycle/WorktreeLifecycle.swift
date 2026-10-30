@@ -94,11 +94,6 @@ public struct WorktreeLifecycle: Sendable {
     /// (`rollBackFailedCreate`). An actor reference for the same reason
     /// `conflictSweepCache` is one.
     public let createdCheckouts = CreatedCheckoutLedger()
-    /// Since when each worktree's commits have stood still — §13's third
-    /// runaway input, filled from the branch tips `refreshGitStatuses` already
-    /// resolves for the gate above, at no extra subprocess cost. An actor
-    /// reference for the same reason `conflictSweepCache` is one.
-    public let branchTipTracker = BranchTipTracker()
     /// Notices when a worktree's remote-tracking tip (`origin/<branch>`) moves,
     /// from the same tips map, and makes its PR check due now. An actor
     /// reference, so the copy `Daemon` wires and the copy the sweep runs on
@@ -199,16 +194,6 @@ public struct WorktreeLifecycle: Sendable {
     /// exactly as it did before dev servers existed.
     var devServerOperations: DevServerOperations?
 
-    /// The daemon's `ModelProxySupervisor`, wired post-construction by
-    /// `Daemon.swift` the way `holderRegistry` is. `nil` in mock mode and in
-    /// every test that does not exercise the proxy, where a holder spawn simply
-    /// gets no route and runs against the model API directly.
-    ///
-    /// Held as `any ModelProxyRouting` rather than as the actor so the spawn
-    /// decision can be pinned without a proxy process; the concrete supervisor
-    /// conforms, so `Daemon.swift` assigns it unchanged.
-    var modelProxySupervisor: (any ModelProxyRouting)?
-
     /// How the create path builds the scheduler that recaptures a resumed
     /// session's ID. `nil` in production, which builds the ordinary
     /// `SessionRecaptureScheduler(db:tmux:)`.
@@ -230,16 +215,21 @@ public struct WorktreeLifecycle: Sendable {
     }
 
     /// Date seam for stamps this type produces that are **persisted or
-    /// compared** — today, the observation instant the git sweep hands
-    /// `BranchTipTracker`, which is reported as `commitsUnchangedSince` and
-    /// compared against by whatever reads it. `Duration` is behavior and takes
-    /// a clock; `Date` is data and takes this. A bare `Date()` at the call site
-    /// would defeat the tracker's own seam and leave no way to pin the fact
-    /// end to end.
+    /// compared** — the holder child's start time on the terminal row, which
+    /// `ProcessIdentityCheck` later compares against a process start time, and
+    /// the stamp on an unsent-prompt file. `Duration` is behavior and takes a
+    /// clock; `Date` is data and takes this. A bare `Date()` at the call site
+    /// would leave no way to pin those facts end to end.
     let now: @Sendable () -> Date
     /// Behavior clock for the holder arm's phase budget. `Duration` is
     /// behavior and `Date` is data, so this is a separate seam from `now`.
     let clock: any Clock<Duration>
+    /// Root of the per-session directories a Claude spawn writes `spawn.json`
+    /// under when a session-mod feature is on. Defaults to
+    /// `TBDConstants.sessionsDir()` (which follows `TBD_HOME`); tests inject a
+    /// scratch directory. The router and the hibernation coordinator each hold
+    /// their own, defaulted the same way.
+    let sessionsDir: URL
 
     public init(
         db: TBDDatabase,
@@ -258,11 +248,13 @@ public struct WorktreeLifecycle: Sendable {
         reaperPollInterval: Duration = .milliseconds(100),
         codexExecutableResolver: (@Sendable () throws -> String)? = nil,
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
+        sessionsDir: URL = TBDConstants.sessionsDir(),
         now: @escaping @Sendable () -> Date = { Date() },
         clock: any Clock<Duration> = ContinuousClock()
     ) {
         self.now = now
         self.clock = clock
+        self.sessionsDir = sessionsDir
         self.db = db
         self.git = git
         self.tmux = tmux
@@ -318,6 +310,32 @@ public struct WorktreeLifecycle: Sendable {
     func killWindowAndReap(
         server: String, windowID: String, paneID: String
     ) async -> String? {
+        await tearDownWindow(server: server, windowID: windowID, paneID: paneID).killFailure
+    }
+
+    /// What `tearDownWindow` did to one window.
+    struct WindowTeardown: Equatable, Sendable {
+        /// The kill error's description, or nil when `kill-window` went through.
+        let killFailure: String?
+        /// The pane's process as tmux answered before the kill, or nil when it
+        /// could not be read. A tmux that cannot answer reports `0`.
+        let panePID: Int32?
+
+        /// Whether nothing the teardown aimed at can still be running: the kill
+        /// went through, or the pane's process was read and reaped. A failed
+        /// kill of a pane whose process could not be read may have left it
+        /// running.
+        var stoppedPane: Bool {
+            killFailure == nil || (panePID ?? 0) > 0
+        }
+    }
+
+    /// `killWindowAndReap`, reporting what it did: the pane's process is read,
+    /// the window killed, and the process escalated against even when the kill
+    /// threw, since it may still be alive.
+    func tearDownWindow(
+        server: String, windowID: String, paneID: String
+    ) async -> WindowTeardown {
         let panePID = Int32((try? await tmux.panePID(server: server, paneID: paneID)) ?? "")
         var killFailure: String?
         do {
@@ -328,7 +346,7 @@ public struct WorktreeLifecycle: Sendable {
         }
         // Escalate even if killWindow threw — the pane process may still be alive.
         if let panePID { await reaper.escalateAfterHangup(panePID) }
-        return killFailure
+        return WindowTeardown(killFailure: killFailure, panePID: panePID)
     }
 
     /// Capture a live terminal's scrollback into Closed Terminals history
@@ -340,7 +358,13 @@ public struct WorktreeLifecycle: Sendable {
     /// happen before the window dies; mirrors `closeHookTerminal`'s
     /// never-throws capture (failures are logged inside `captureOnClose` and
     /// never block the teardown).
-    func captureThenKillWindow(terminal: Terminal, server: String) async {
+    ///
+    /// Returns whether the pane's process can no longer be running: false when
+    /// it refused to touch the window, which leaves the process as it was, and
+    /// false when the kill failed and the pane's process could not be read to
+    /// reap (`WindowTeardown.stoppedPane`); true otherwise.
+    @discardableResult
+    func captureThenKillWindow(terminal: Terminal, server: String) async -> Bool {
         // Refuse to capture or kill a pane that belongs to a DIFFERENT
         // terminal — see `TmuxManager.paneOwnership`. Shared by both
         // callers of this function (explicit archive, and the vanished-
@@ -357,16 +381,75 @@ public struct WorktreeLifecycle: Sendable {
                 untouched for terminal \(terminal.id, privacy: .public) — \
                 \(ownership.refusalDetail ?? "", privacy: .public)
                 """)
-            return
+            return false
         }
         await db.terminalHistory.captureOnClose(terminal: terminal) {
             try await tmux.capturePaneScrollback(server: server, paneID: terminal.tmuxPaneID)
         }
-        await killWindowAndReap(
+        return await tearDownWindow(
             server: server,
             windowID: terminal.tmuxWindowID,
             paneID: terminal.tmuxPaneID
-        )
+        ).stoppedPane
+    }
+
+    /// Whether a terminal's session has no process left once a teardown of it
+    /// has run, so its session-mod directory may go. The mod writes the box
+    /// one last time when its process ends, and a removal ahead of that write
+    /// would be undone by it.
+    ///
+    /// A teardown that stopped the process settles it. What a teardown waits
+    /// on is the pane's process or the holder's job. When the login shell
+    /// execs Claude, as zsh does for the spawn command's `-c`, that process is
+    /// Claude and its final write lands before the removal. Otherwise Claude
+    /// can still be shutting down when the wait ends, its late `session.end`
+    /// write can recreate the directory, and `OrphanGC`'s session-directory
+    /// arm reclaims it once nothing names it and `gcGraceSeconds` has passed.
+    ///
+    /// Otherwise only a parked row qualifies, because a park already ended the
+    /// process — except while the park is still in flight:
+    /// `pendingSessionIncarnationID` is set from the moment the park is
+    /// recorded until the agent has been replaced, and the agent may still be
+    /// running in between. A session left running keeps its directory, and
+    /// `OrphanGC` reclaims it once nothing names it.
+    static func sessionHasEnded(_ terminal: Terminal, teardownStoppedIt: Bool) -> Bool {
+        if teardownStoppedIt { return true }
+        return terminal.isParked && terminal.pendingSessionIncarnationID == nil
+    }
+
+    /// The terminals a teardown handled, sorted by `sessionHasEnded` into
+    /// those whose session has no process left and those it may have left
+    /// running. `removeSessionDirectories` reads both.
+    struct SessionTeardownTally: Sendable {
+        private(set) var ended: [Terminal] = []
+        private(set) var leftRunning: [Terminal] = []
+
+        mutating func record(_ terminal: Terminal, teardownStoppedIt: Bool) {
+            if WorktreeLifecycle.sessionHasEnded(terminal, teardownStoppedIt: teardownStoppedIt) {
+                ended.append(terminal)
+            } else {
+                leftRunning.append(terminal)
+            }
+        }
+
+        /// The session IDs whose directories may go: every one an ended
+        /// terminal names, less every one a terminal left running names. Two
+        /// rows can carry one session ID, and its directory stays while either
+        /// may still write to it.
+        var removableSessionIDs: Set<String> {
+            Set(ended.compactMap(\.claudeSessionID))
+                .subtracting(leftRunning.compactMap(\.claudeSessionID))
+        }
+    }
+
+    /// Removes the session-mod directory of each session
+    /// `tally.removableSessionIDs` names, draft included. A failed removal is
+    /// logged inside `SessionModFiles` and never fails the archive.
+    func removeSessionDirectories(for tally: SessionTeardownTally) {
+        for sessionID in tally.removableSessionIDs {
+            SessionModFiles.removeSessionDirectory(
+                sessionsDir: sessionsDir, claudeSessionID: sessionID)
+        }
     }
 
     /// The holder-transport counterpart of `killWindowAndReap`, for the
@@ -388,39 +471,22 @@ public struct WorktreeLifecycle: Sendable {
     /// history call `recordHolderClosedTerminal` first, because the capture
     /// reads the daemon's reader and this disposal releases it.
     func disposeHolder(for terminal: Terminal) async -> String? {
-        await Self.disposeHolder(
-            for: terminal, registry: holderRegistry, config: db.config,
-            supervisor: modelProxySupervisor)
+        await Self.disposeHolder(for: terminal, registry: holderRegistry)
     }
 
     /// The teardown itself, once, for both owners of a holder-backed row.
     ///
     /// `RPCRouter+TerminalHandlers` tears down the same rows through the same
-    /// steps, and the two copies of this method were maintained by hand — both
-    /// gained the route retirement in the same change, which is precisely the
-    /// edit that could have reached only one of them. A teardown step added to
-    /// one and not the other leaks whatever that step reclaims, silently and
-    /// only on half the paths.
+    /// steps, so the two share this one copy: a teardown step added to one and
+    /// not the other would leak whatever that step reclaims, silently and only
+    /// on half the paths.
     ///
     /// Static, and given everything it needs, because the two callers share no
-    /// type: what they have in common is a row, a registry, a database and a
-    /// supervisor.
+    /// type: what they have in common is a row and a registry.
     static func disposeHolder(
         for terminal: Terminal,
-        registry: HolderRegistry?,
-        config: ConfigStore,
-        supervisor: (any ModelProxyRouting)?
+        registry: HolderRegistry?
     ) async -> String? {
-        // Before the registry check: the row is about to be deleted, so this is
-        // the last moment anything can name its route, and a daemon with no
-        // registry is exactly the one whose routes nothing else would ever
-        // find. The lookup itself is skipped only when the row was provably
-        // never routed — see `ModelProxyRouteAttachment.retire`.
-        await ModelProxyRouteAttachment.retire(
-            terminalID: terminal.id,
-            streamPath: terminal.transcriptStreamPath,
-            proxyEnabled: (try? await config.get())?.modelProxyEnabled ?? true,
-            supervisor: supervisor)
         guard let registry else {
             return "terminal \(terminal.id) runs on the holder transport but this daemon has "
                 + "no holder registry, so its holder and job were left running"
@@ -431,9 +497,9 @@ public struct WorktreeLifecycle: Sendable {
     /// The holder half of `captureThenKillWindow`'s capture: write a holder
     /// row's Closed Terminals entry. The one place every history-keeping holder
     /// teardown goes through — `terminal.delete`, worktree archive, reconcile's
-    /// auto-archive, the hook-tab close, scratch archive, and the Watch Desk
-    /// close — and never the hard-delete paths (forget, recovery, scratch
-    /// delete), which wipe the worktree's history right after.
+    /// auto-archive, the hook-tab close and scratch archive — and never the
+    /// hard-delete paths (forget, recovery, scratch delete), which wipe the
+    /// worktree's history right after.
     ///
     /// **Must run before the holder is disposed**: the capture comes from
     /// whichever store is still holding the session, and disposal releases the

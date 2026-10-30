@@ -33,9 +33,6 @@ enum SuffixRowIndicator: Equatable {
     case needsAuth
     /// The agent reported over OSC 7501 that its last turn ended in an error.
     case turnFailed
-    /// The agent reported over OSC 7501 that its work is finished. Quiet, and
-    /// distinct from idle (which shows nothing).
-    case finished
 
     /// SF Symbol for glyph-based suffixes. `.working` is `nil` because it is
     /// rendered as an animated `TypingDotsView`, not a static symbol.
@@ -48,7 +45,6 @@ enum SuffixRowIndicator: Equatable {
         case .hibernated: return "moon.zzz.fill"
         case .needsAuth:  return "person.crop.circle.badge.exclamationmark"
         case .turnFailed: return "exclamationmark.triangle.fill"
-        case .finished:   return "checkmark.circle"
         }
     }
 
@@ -79,9 +75,6 @@ enum SuffixRowIndicator: Equatable {
             return SuffixRowIndicator.attention.color
         case .turnFailed:
             return .orange
-        case .finished:
-            // Quiet — a finished session asks for review, not alarm.
-            return Color.secondary.opacity(0.7)
         }
     }
 }
@@ -153,7 +146,7 @@ enum RowStatusIndicator {
     }
 
     /// Suffix slot. Priority (highest first): error > needsAuth > attention >
-    /// turnFailed > working > turnFinished > suspended > hibernated.
+    /// turnFailed > working > suspended > hibernated.
     /// `taskComplete` produces no suffix;
     /// `responseComplete` is surfaced as a bold name in the view, not as a
     /// suffix. Hibernated is lowest — it's the calmest, safest state, so any
@@ -178,13 +171,14 @@ enum RowStatusIndicator {
     /// `AwaitingInputClass`, where an unknown class is never guessed into a
     /// neighbouring one.
     ///
-    /// `needsAuth`, `turnFailed` and `turnFinished` come only from
-    /// OSC-authoritative terminals (Program Status Protocol, flag on) and
-    /// default to false, so every other caller resolves exactly as before.
-    /// Needs-sign-in outranks attention because nothing else moves until the
-    /// user signs in; a failed turn sits below attention (a live prompt is
-    /// more urgent) and above working; finished sits below working, as the
-    /// quiet "ready for review" state.
+    /// `needsAuth` and `turnFailed` come only from OSC-authoritative
+    /// terminals (Program Status Protocol) and default to false, so
+    /// every other caller resolves exactly as before. Needs-sign-in outranks
+    /// attention because nothing else moves until the user signs in; a failed
+    /// turn sits below attention (a live prompt is more urgent) and above
+    /// working. An OSC `done` has no input here and shows like idle: the bold
+    /// name already marks a finished turn the user has not read, and a badge
+    /// that stayed until the next turn would sit on nearly every waiting row.
     static func suffix(
         notification: NotificationType?,
         isWorking: Bool,
@@ -192,8 +186,7 @@ enum RowStatusIndicator {
         isHibernated: Bool = false,
         hasPromptOnScreen: Bool = false,
         needsAuth: Bool = false,
-        turnFailed: Bool = false,
-        turnFinished: Bool = false
+        turnFailed: Bool = false
     ) -> SuffixRowIndicator? {
         if notification == .error {
             return .error
@@ -206,8 +199,6 @@ enum RowStatusIndicator {
             return .turnFailed
         } else if isWorking {
             return .working
-        } else if turnFinished {
-            return .finished
         } else if isSuspended {
             return .suspended
         } else if isHibernated {

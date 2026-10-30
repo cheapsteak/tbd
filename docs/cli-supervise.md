@@ -1,31 +1,13 @@
 # tbd supervise
 
+Status: **retired.** Fleet supervision is retired: its implementation has been
+removed from TBD, and this document is kept as the design record.
+
 Operate fleet supervision's surfaces: per-project coverage and the fleet
 brake, supervisors, and the sweep program's contract surfaces. Acting on a
 session is the public `tbd terminal send`, identity-attributed and always
 logged; a supervisor's narrative is its project's journal file (see "Acting
 and narrative" below).
-
-Status: documents the `tbd supervise` surface specified by
-[`docs/specs/2026-07-26-fleet-supervision-design.md`](specs/2026-07-26-fleet-supervision-design.md)
-(§10 is normative for names and shapes) and the
-[sweep-program sub-document](specs/2026-08-01-fleet-supervision-sweep-program-design.md).
-Part of that surface exists and part of it is specification the rest of this
-document describes ahead of the code:
-
-- **Built** – `on`, `off`, `status`, `mode`, `project`, `playbook`, and the
-  sweep program's three surfaces: `readout`, `brief`, `ledger`. These are what
-  `tbd supervise --help` lists, and their output is quoted here as it prints,
-  with long JSON values elided for the page.
-- **Specified, not yet built** – `appoint`, `relieve`, `sweep customize`.
-  Their sections below carry the same marker, and any output they show is the
-  specified shape rather than a transcript.
-
-Briefing *delivery* is a separate half from the `brief` surface itself, and it
-is the half that has not landed: `brief` accepts, attributes, paces, and
-refuses where it should today, and answers `no-live-supervisor` because no
-supervisor is ever resolved. Its section below says so plainly. The migration
-from the current implementation is planned separately.
 
 ## Synopsis
 
@@ -844,11 +826,10 @@ script of your own that declares no identity still delivers one, reading
 `from="anonymous"`.
 A keys payload carries no envelope, and neither does a send to a plain shell
 pane — nothing there reads the tag, and `--submit` would run it as a command
-line of its own, so a shell receives your text alone. Two of TBD's own
-in-daemon rails — the watch desk's nudges and the rate-limit auto-continue —
-type into a session without going through this verb; their sends are in the
-actuation log like any other, but they carry no envelope and cannot be
-verified.
+line of its own, so a shell receives your text alone. One of TBD's own
+in-daemon rails, the rate-limit auto-continue, types into a session without
+going through this verb; its sends are in the actuation log like any other,
+but they carry no envelope and cannot be verified.
 
 `--verify` opts into landing confirmation — a tail read of the target
 transcript's JSONL for that envelope, with the re-check deadline as its

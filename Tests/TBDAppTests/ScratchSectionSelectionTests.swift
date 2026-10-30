@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Tests for `AppState.selectScratchSection()` and its mutual exclusivity with
 /// `selectedRepoID` / `selectedWorktreeIDs`. Selecting the "Scratch" sidebar
@@ -19,9 +20,9 @@ import TBDShared
 struct ScratchSectionSelectionTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.ScratchSectionSelection.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.ScratchSectionSelection")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

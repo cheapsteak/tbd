@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// App-side tests for the queued prompt on worktree creation
 /// (`docs/specs/2026-08-10-queued-prompt-on-create-design.md`, task 3).
@@ -61,9 +62,9 @@ struct QueuedPromptOnCreateTests {
     private struct StubError: Error {}
 
     private func withAppState(_ body: (AppState) async throws -> Void) async rethrows {
-        let suiteName = "TBDAppTests.QueuedPromptOnCreate.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.QueuedPromptOnCreate")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults))
     }
 

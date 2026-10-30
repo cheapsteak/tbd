@@ -54,11 +54,6 @@ final class AppearanceSettings: ObservableObject {
     @Published var cursorStyle: CursorStyle { didSet { defaults.set(cursorStyle.rawString, forKey: Keys.cursorStyle) } }
     @Published var thinStrokes: Bool { didSet { defaults.set(thinStrokes, forKey: Keys.thinStrokes) } }
 
-    /// True if the user's tmux config sets a cell-painting style option that
-    /// would override the chosen color scheme's foreground/background. Best-
-    /// effort detection at init — see `TmuxConfigStyleDetector`.
-    @Published private(set) var hasTmuxStyleOverrides: Bool
-
     init(defaults: UserDefaults = .standard, userThemesDirectory: URL? = nil) {
         self.defaults = defaults
 
@@ -99,17 +94,6 @@ final class AppearanceSettings: ObservableObject {
             self.thinStrokes = defaults.bool(forKey: Keys.thinStrokes)
         } else {
             self.thinStrokes = Defaults.thinStrokes
-        }
-
-        // Detection reads tmux config files from disk. Defer to a detached task
-        // so app launch isn't blocked by synchronous I/O; the property updates
-        // asynchronously on the main actor once detection finishes.
-        self.hasTmuxStyleOverrides = false
-        Task { @MainActor [weak self] in
-            let detected = await Task.detached {
-                TmuxConfigStyleDetector.detectFromUserConfig()
-            }.value
-            self?.hasTmuxStyleOverrides = detected
         }
     }
 

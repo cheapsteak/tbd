@@ -5,7 +5,7 @@ import TBDShared
 import TestSupport
 
 /// Thread-safe collector for broadcast StateDeltas, mirroring the pattern in
-/// `SupervisionBrakeRPCTests` / `RPCRouterWorktreeCreateBroadcastTests`.
+/// `RPCRouterWorktreeCreateBroadcastTests`.
 private final class BroadcastDeltas: @unchecked Sendable {
     private let lock = NSLock()
     private var deltas: [StateDelta] = []

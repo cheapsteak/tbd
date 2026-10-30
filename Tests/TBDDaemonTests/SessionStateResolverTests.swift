@@ -492,7 +492,7 @@ struct SessionStateResolverTests {
     ///
     /// It resolves `.idle`, not `.awaitingInput`: nothing is on screen to
     /// answer, and reporting a prompt that does not exist would send a
-    /// supervisor looking for one.
+    /// caller looking for one.
     @Test func aDoneWaitingReasonNewerThanAStaleWorkingStampResolvesIdleNotWorking() {
         let reasonAt = t0.addingTimeInterval(400)
         let idlePrompt = AwaitingInputReason(
@@ -638,9 +638,9 @@ struct SessionStateResolverTests {
     /// completed tool call while the work runs out of band.
     ///
     /// Separating the two shapes would mean reading result prose — content
-    /// interpretation at a layer that may not interpret content. The design
-    /// sends the case to a desk instead, which is the tier allowed to read the
-    /// transcript. What compiled TBD owes is carrying the ambiguity honestly:
+    /// interpretation at a layer that may not interpret content. The case
+    /// belongs to a reader of the transcript, which is the tier allowed to
+    /// interpret text. What compiled TBD owes is carrying the ambiguity honestly:
     /// `idle` **with provenance**, never `idle` presented as "not working".
     @Test func aSessionWaitingOnABackgroundSubagentResolvesAsIdleWithProvenanceNotAsNotWorking() {
         let stopAt = t0.addingTimeInterval(60)

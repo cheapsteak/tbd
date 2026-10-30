@@ -14,6 +14,27 @@ extension RPCRouter {
         let params = try decoder.decode(WorktreeCreateParams.self, from: paramsData)
         let useExistingBranch = params.useExistingBranch ?? false
 
+        // The primary Claude terminal's own values, kept on its row so later
+        // starts of its session can reapply them. Plugin folders are checked
+        // here, before phase 1 inserts the row and so before phase 2 adds a git
+        // worktree or a branch, because the starter is there to see a bad path;
+        // a later start that finds one gone skips it instead. They are checked
+        // whatever the primary turns out to be: the lifecycle resolves that,
+        // and ignores these values for a Codex primary. Like the repo lookup
+        // below, this is validation, so it precedes the actuation row.
+        let claudeSpawnExtras: ClaudeSpawnExtras?
+        do {
+            let pluginDirs = try ClaudePluginDirs.validated(
+                params.pluginDirs ?? [],
+                homeDirectory: NSHomeDirectory(),
+                fileExists: { FileManager.default.fileExists(atPath: $0) })
+            claudeSpawnExtras = ClaudeSpawnExtras(
+                claudeSettingsOverlay: params.claudeSettingsOverlay,
+                pluginDirs: pluginDirs).nonEmpty
+        } catch {
+            return RPCResponse(error: "\(error)")
+        }
+
         // Phase 1: Fast — insert DB row with status = .creating, return immediately
         let pending = try await lifecycle.beginCreateWorktree(
             repoID: params.repoID,
@@ -25,7 +46,10 @@ extension RPCRouter {
             callerWorktreeID: params.callerWorktreeID,
             suppressAutoParent: params.suppressAutoParent ?? false,
             useExistingBranch: useExistingBranch,
-            prNumber: params.prNumber
+            prNumber: params.prNumber,
+            // The parent is disarmed below, once start admission has let the
+            // create through; a held create leaves the parent as it was.
+            disarmParent: false
         )
 
         // Reads precede the row; the row precedes the acts. This lookup is a
@@ -55,6 +79,29 @@ extension RPCRouter {
             // refused, so don't leave the `.creating` row orphaned forever.
             try? await db.worktrees.delete(id: pending.id)
             throw error
+        }
+
+        // Start admission: this create ends in the primary agent's spawn. The
+        // phase-1 `.creating` row is the only thing written so far, and a hold
+        // removes it so nothing of the create remains. The parent's
+        // auto-archive setting is not touched until the gate has passed.
+        let configuredPrimary = (try? await db.config.get())?.primaryAgentPreference
+        let primaryAgent = StartAdmissionAgent(
+            params.primaryAgentPreference ?? configuredPrimary ?? .defaultValue)
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: primaryAgent, worktreeID: pending.id) {
+            var leftovers: [String] = []
+            do {
+                try await db.worktrees.delete(id: pending.id)
+            } catch {
+                logger.error("held worktree.create left the creating row \(pending.id, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                leftovers.append("worktree row \(pending.id.uuidString)")
+            }
+            return Self.heldResponse(held.error ?? "", leftovers: leftovers)
+        }
+
+        if let parentID = pending.parentWorktreeID {
+            await lifecycle.disarmAutoArchive(parentID: parentID)
         }
 
         // Arm the per-worktree auto-archive-on-merge override when the spawn
@@ -105,9 +152,6 @@ extension RPCRouter {
         // Explicit primary agent for this creation. nil preserves the global
         // preference resolved by the lifecycle.
         let primaryAgentPreference = params.primaryAgentPreference
-        // General Claude settings passthrough, deep-merged into the per-session
-        // --settings overlay on the fresh-primary spawn (see ClaudeHookOverlay).
-        let claudeSettingsOverlay = params.claudeSettingsOverlay
         // handleWorktreeCreate is always repo-scoped (scratch creation uses a
         // separate RPC), so params.repoID is the reliable non-optional source
         // — pending.repoID mirrors it but is now UUID? on the shared model.
@@ -118,7 +162,7 @@ extension RPCRouter {
                 // fetch from phase 1.5, or is a no-op if cached within the 60s TTL.
                 await fetchCache.fetchIfNeeded(repoPath: repoPath, branch: defaultBranch)
 
-                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay, rollBackOnFailure: false)
+                let completion = try await lifecycle.completeCreateWorktree(worktreeID: pending.id, initialPrompt: initialPrompt, userSpecifiedFolder: userSpecifiedFolder, userSpecifiedBranch: userSpecifiedBranch, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, overrideProfileID: overrideProfileID, modelOverride: modelOverride, codexModelOverride: codexModelOverride, primaryAgentPreference: primaryAgentPreference, claudeSpawnExtras: claudeSpawnExtras, rollBackOnFailure: false)
                 switch completion {
                 case .ready:
                     // Re-read the row: a name-collision retry moves the
@@ -233,12 +277,14 @@ extension RPCRouter {
         // means the CLI, hooks, scripts, and every future client get it
         // without repeating the check.
         //
-        // `params.force` is deliberately not forwarded: the repo branch below
-        // does not forward it to `beginArchiveWorktree` either, so on this door
-        // it governs only phase 2's hook skip, and the scratch body runs no
-        // phase 2. Passing it through would have made one flag bypass the
-        // active-children refusal for a scratch row while leaving it in force
-        // for a repo worktree through the same door.
+        // `params.force` is deliberately not forwarded to the scratch body. On
+        // the repo branch below it lifts the uncommitted-changes guard and
+        // skips phase 2's hook, and it never reaches `beginArchiveWorktree`'s
+        // own `force`, so the active-children refusal holds for a repo
+        // worktree through this door. A scratch archive deletes no folder and
+        // runs no phase 2, so neither of the things `force` governs exists
+        // there, and passing it through would have made one flag bypass the
+        // active-children refusal for a scratch row alone.
         //
         // What the scratch body does not do, all pre-existing and all recorded
         // in the design doc: it runs no archive hook (only the highest-priority
@@ -266,12 +312,26 @@ extension RPCRouter {
             .worktreeArchive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
 
-        // Phase 1: Fast — update DB, kill tmux, return immediately
+        // Phase 1: Fast — update DB, kill tmux, return immediately.
+        //
+        // Both flags lift the uncommitted-changes guard; only `force` skips
+        // the hook in phase 2 below. A refusal from that guard is the daemon
+        // declining before it touched anything, so it confirms the row
+        // `refused`/`not-eligible` the way a remote lane's guard refusal
+        // does, and carries a code so the CLI can append its `--force` hint
+        // and the app can offer to archive anyway without reading the
+        // sentence. Every other throw is a failure inside the act.
         let worktree: Worktree
         let repo: Repo
         do {
             (worktree, repo) = try await lifecycle.beginArchiveWorktree(
-                worktreeID: params.worktreeID)
+                worktreeID: params.worktreeID,
+                discardUncommittedChanges: params.force || (params.discardUncommittedChanges ?? false))
+        } catch WorktreeArchiveError.uncommittedChanges(let refusal) {
+            let response = RPCResponse(
+                error: refusal.message, code: RPCErrorCode.worktreeArchiveUncommitted.rawValue)
+            await finishActuation(actuationID, response: response, refusedAs: .notEligible)
+            return response
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
             throw error
@@ -297,13 +357,22 @@ extension RPCRouter {
     /// Retires a remote lane
     /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Archive").
     ///
-    /// Two things about the shape are load bearing. **Every refusal returns
-    /// above `beginActuation`** — the capability refusal, the two guards, and
-    /// the subsystem gate alike — because nothing was attempted and the record
-    /// may claim solely acts that were attempted; this is the same pre-row
-    /// shape the local handler's not-found guard uses. And the `gone` path
-    /// *does* write a row: no provider call was made, but the row genuinely
-    /// changed status, and that is the act the record names.
+    /// Two things about the shape are load bearing. **The request row is
+    /// written before anything is decided**, and every refusal — remote
+    /// backends off, the cloud gate, the capability refusal, the stale
+    /// inventory and the two guards alike — confirms it `refused` with the
+    /// reason `not-eligible` and the refusal sentence as its detail. A refused
+    /// outcome claims no act, only that the daemon declined, so the record
+    /// still names solely what was attempted and can answer which archives the
+    /// guards stopped (§"The record"). And the `gone` path is confirmed
+    /// `dispatched`: no provider call was made, but the row genuinely changed
+    /// status, and that is the act the record names.
+    ///
+    /// The three guard refusals — the ones `force` lifts — carry
+    /// `RPCErrorCode.remoteLaneArchiveGuarded`, so the CLI can append its
+    /// `--force` hint and the app can offer Archive anyway without reading the
+    /// sentence. Every other refusal carries no code, because no retry would
+    /// get past it.
     ///
     /// `stop` is never reached from here. A provider declaring only `stop` is
     /// refused, because ending compute and retiring a record are different
@@ -312,32 +381,38 @@ extension RPCRouter {
     private func archiveRemoteLane(
         _ worktree: Worktree, force: Bool, actor: ActuationActor?
     ) async throws -> RPCResponse {
-        guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
-        }
-        // Same inner gate `remote.archive` goes through — this route reaches
-        // the identical provider verb, addressed by worktree row instead of
-        // by params, and must refuse the same way when cloud is off. Above
-        // `beginActuation` for the same reason every other refusal here is:
-        // nothing was attempted.
-        if case .remote(let provider, _) = worktree.location,
-           let refusal = try await cloudGate(provider: provider) {
-            return refusal
-        }
-        let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
-        let step: RemoteLaneLifecycle.ArchiveStep
-        switch try await lanes.archiveDecision(for: worktree, force: force) {
-        case .refused(let message):
-            logger.debug("worktree.archive refused: \(message, privacy: .public)")
-            return RPCResponse(error: message)
-        case .proceed(let decided):
-            step = decided
-        }
         let actuationID = try await beginActuation(
             .worktreeArchive, actor: actor,
             target: ActuationTarget(worktree: worktree.id.uuidString))
         let failure: String?
         do {
+            guard let manager = try await remoteGate() else {
+                return await declineRemoteLane(
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive,
+                    Self.remoteBackendsDisabledResponse)
+            }
+            // Same inner gate `remote.archive` goes through — this route
+            // reaches the identical provider verb, addressed by worktree row
+            // instead of by params, and must refuse the same way when cloud is
+            // off.
+            if case .remote(let provider, _) = worktree.location,
+               let refusal = try await cloudGate(provider: provider) {
+                return await declineRemoteLane(
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive, refusal)
+            }
+            let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
+            let step: RemoteLaneLifecycle.ArchiveStep
+            switch try await lanes.archiveDecision(for: worktree, force: force) {
+            case .refused(let message):
+                return await declineRemoteLane(
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive, RPCResponse(error: message))
+            case .guarded(let message):
+                return await declineRemoteLane(
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeArchive,
+                    RPCResponse(error: message, code: RPCErrorCode.remoteLaneArchiveGuarded.rawValue))
+            case .proceed(let decided):
+                step = decided
+            }
             failure = try await lanes.performArchive(step, worktree: worktree)
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
@@ -353,37 +428,42 @@ extension RPCRouter {
 
     /// Returns a remote lane to the working set
     /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Revive").
-    /// Same record shape as `archiveRemoteLane`: refusals above the row, acts
-    /// below it. Returns the refreshed worktree, exactly as the local path
-    /// does, so the caller sees the row it asked for rather than the archived
-    /// snapshot it passed in.
+    /// Same record shape as `archiveRemoteLane`: the request row first, every
+    /// refusal confirmed `refused`/`not-eligible` with its sentence, and an act
+    /// confirmed by its outcome. No refusal here carries an error code, because
+    /// revive has no `force` to lift one. Returns the refreshed worktree,
+    /// exactly as the local path does, so the caller sees the row it asked for
+    /// rather than the archived snapshot it passed in.
     private func reviveRemoteLane(
         _ worktree: Worktree, actor: ActuationActor?
     ) async throws -> RPCResponse {
-        guard let manager = try await remoteGate() else {
-            return Self.remoteBackendsDisabledResponse
-        }
-        // See `archiveRemoteLane`'s matching comment: same inner gate as
-        // `remote.unarchive`, same worktree-addressed route to the same
-        // provider verb, same pre-`beginActuation` placement.
-        if case .remote(let provider, _) = worktree.location,
-           let refusal = try await cloudGate(provider: provider) {
-            return refusal
-        }
-        let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
-        let step: RemoteLaneLifecycle.ReviveStep
-        switch try await lanes.reviveDecision(for: worktree) {
-        case .refused(let message):
-            logger.debug("worktree.revive refused: \(message, privacy: .public)")
-            return RPCResponse(error: message)
-        case .proceed(let decided):
-            step = decided
-        }
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: worktree.id.uuidString))
         let failure: String?
         do {
+            guard let manager = try await remoteGate() else {
+                return await declineRemoteLane(
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive,
+                    Self.remoteBackendsDisabledResponse)
+            }
+            // See `archiveRemoteLane`'s matching comment: same inner gate as
+            // `remote.unarchive`, same worktree-addressed route to the same
+            // provider verb.
+            if case .remote(let provider, _) = worktree.location,
+               let refusal = try await cloudGate(provider: provider) {
+                return await declineRemoteLane(
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive, refusal)
+            }
+            let lanes = RemoteLaneLifecycle(db: db, subscriptions: subscriptions, manager: manager)
+            let step: RemoteLaneLifecycle.ReviveStep
+            switch try await lanes.reviveDecision(for: worktree) {
+            case .refused(let message):
+                return await declineRemoteLane(
+                    actuationID, worktreeID: worktree.id, method: RPCMethod.worktreeRevive, RPCResponse(error: message))
+            case .proceed(let decided):
+                step = decided
+            }
             failure = try await lanes.performRevive(step, worktree: worktree)
         } catch {
             await finishActuation(actuationID, .transportFailed, error: "\(error)")
@@ -396,6 +476,19 @@ extension RPCRouter {
         await finishActuation(actuationID, .dispatched)
         let revived = try await db.worktrees.get(id: worktree.id) ?? worktree
         return try RPCResponse(result: revived)
+    }
+
+    /// Confirms a remote lane's request row as declined and hands the refusal
+    /// back for the handler to return. Logged at `.notice`, the lowest level
+    /// the unified log keeps on disk by default, so a refusal can be found in
+    /// Console after its alert is dismissed without a debug subscription.
+    private func declineRemoteLane(
+        _ actuationID: String, worktreeID: UUID, method: String, _ refusal: RPCResponse
+    ) async -> RPCResponse {
+        logger.notice(
+            "\(method, privacy: .public) refused for \(worktreeID, privacy: .public): \(refusal.error ?? "no reason given", privacy: .public)")
+        await finishActuation(actuationID, response: refusal, refusedAs: .notEligible)
+        return refusal
     }
 
     /// Re-run the worktree's `preSession` hook. Returns as soon as the hook's
@@ -560,6 +653,22 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .worktreeRevive, actor: actor,
             target: ActuationTarget(worktree: params.worktreeID.uuidString))
+        // Start admission: revive spawns the primary agent. Archived Claude
+        // sessions mean Claude; otherwise the configured preference decides,
+        // as the lifecycle's own resolution does.
+        let archivedSessions = (try? await db.worktrees.get(id: params.worktreeID))?
+            .archivedClaudeSessions ?? []
+        let reviveAgent: StartAdmissionAgent
+        if !archivedSessions.isEmpty || params.preferredSessionID != nil {
+            reviveAgent = .claude
+        } else {
+            reviveAgent = StartAdmissionAgent(
+                (try? await db.config.get())?.primaryAgentPreference ?? .defaultValue)
+        }
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: reviveAgent, worktreeID: params.worktreeID) {
+            return held
+        }
         // Non-blocking: when a preSession hook gates the primary terminals,
         // this returns promptly with the row in `.creating` (which is what
         // the app gates its pre-session UI on — beginReviveWorktree flips it
@@ -614,6 +723,12 @@ extension RPCRouter {
         let actuationID = try await beginActuation(
             .worktreeReviveConversationFresh, actor: actor,
             target: ActuationTarget(worktree: params.archivedWorktreeID.uuidString))
+
+        // Start admission: this brings a Claude conversation back.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude, worktreeID: params.archivedWorktreeID) {
+            return held
+        }
 
         let lifecycle = self.lifecycle
         let outcome: (
@@ -748,9 +863,20 @@ extension RPCRouter {
         return .ok()
     }
 
+    /// Set or clear a worktree's park-on-merge override. An override that is
+    /// true is automatic parking, which holds the composer-draft feature on,
+    /// so the write re-syncs the plugin when it changes the features on, and
+    /// tells the app when it changes what Settings shows for the feature.
     func handleWorktreeSetAutoHibernate(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(WorktreeSetAutoHibernateParams.self, from: paramsData)
-        try await db.worktrees.setAutoHibernateOnMerge(id: params.worktreeID, value: params.enabled)
+        let composerDraftChanged = try await writeAffectingAutomaticParking {
+            try await db.worktrees.setAutoHibernateOnMerge(
+                id: params.worktreeID, value: params.enabled)
+        }
+        if composerDraftChanged {
+            // The config-change channel, so the app reloads its capabilities.
+            subscriptions.broadcast(delta: .modelProfilesChanged)
+        }
         return .ok()
     }
 

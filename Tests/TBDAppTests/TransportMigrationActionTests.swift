@@ -9,10 +9,10 @@ import TestSupport
 @Suite("TransportMigrationAction")
 struct TransportMigrationActionTests {
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-transport-migration-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-transport-migration")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     private static func row(
@@ -25,28 +25,12 @@ struct TransportMigrationActionTests {
 
     @Test func theMenuItemIsOfferedOnlyForARowNotOnTheHolder() {
         func offered(_ terminal: Terminal?, holderSupported: Bool = true) -> Bool {
-            TransportMigrationMenu.isOffered(
-                for: terminal, holderSupported: holderSupported, watchMode: .off)
+            TransportMigrationMenu.isOffered(for: terminal, holderSupported: holderSupported)
         }
         #expect(offered(Self.row(transport: .tmux)))
         #expect(!offered(Self.row(transport: .holder)))
         #expect(!offered(nil))
         #expect(!offered(Self.row(transport: .tmux), holderSupported: false))
-    }
-
-    /// The app half of the Nightwatch/holder gate: nobody is offered a gesture
-    /// the daemon refuses. Both branches, because the offer is a conditional.
-    @Test func theMenuItemIsNotOfferedWhileAWatchModeIsLive() {
-        let row = Self.row(transport: .tmux)
-        #expect(TransportMigrationMenu.isOffered(
-            for: row, holderSupported: true, watchMode: .off))
-        for mode in [NightwatchMode.daywatch, .nightwatch] {
-            #expect(!TransportMigrationMenu.isOffered(
-                for: row, holderSupported: true, watchMode: mode),
-                    "the move was offered with \(mode) active")
-            #expect(TransportMigrationMenu.isBlockedByWatchMode(mode))
-        }
-        #expect(!TransportMigrationMenu.isBlockedByWatchMode(.off))
     }
 
     @Test func theActionSendsTheTerminalIDAndVeilsTheRowDuringTheCall() async {
@@ -404,9 +388,9 @@ struct TransportMigrationRaceTests {
     private static let mainActorHop = TestDeadlines.saturatedPass
 
     private func withAppState(_ body: (AppState) async throws -> Void) async rethrows {
-        let name = "tbd-transport-race-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("tbd-transport-race")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults))
     }
 
@@ -428,7 +412,8 @@ struct TransportMigrationRaceTests {
         let current = state.terminals[row.worktreeID]!.first { $0.id == row.id }!
         return TerminalPanePresentation.identity(
             for: current, switching: state.switchingAccountTerminals[row.id],
-            attachEpoch: state.terminalAttachEpochs[row.id] ?? 0)
+            attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
+            attachRetry: state.terminalAttachRetries[row.id] ?? 0)
     }
 
     @Test func theDeltasLandingAfterTheReplyCauseOneRebuildAndEndTheVeil() async throws {

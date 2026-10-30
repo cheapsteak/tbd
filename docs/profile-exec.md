@@ -33,8 +33,8 @@ profile**:
   override never replaces the account. Repo overrides do not apply; the command
   runs under a profile, not in a repo.
 
-What a session gets from its **terminal** is left out: the model-proxy route,
-the settings overlay with TBD's hooks, and the interactive-only variables
+What a session gets from its **terminal** is left out: the settings overlay
+with TBD's hooks, and the interactive-only variables
 (`DISABLE_AUTO_UPDATE`, and the Claude display settings in the Terminal
 settings pane, such as fullscreen rendering).
 
@@ -77,9 +77,7 @@ are its own. When the command never runs, the status follows `env(1)`:
 
 `tbd profile exec` prints nothing on success and never prints a credential. The
 daemon hands the credential over in the `modelProfile.execEnvironment` result,
-whose description lists variable names only. That method is served only on the
-daemon's Unix socket, which admits only its owner; the daemon's loopback HTTP
-transport refuses it.
+whose description lists variable names only.
 
 ## Stricter than a spawn
 

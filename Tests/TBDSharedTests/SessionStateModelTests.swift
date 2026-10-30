@@ -42,7 +42,7 @@ import Testing
 
     /// An unrecognized tag is ignorance, and stays ignorance: it must not throw
     /// (which would take the whole record with it) and must not become a
-    /// confident value (which would have a supervisor act on a session nobody
+    /// confident value (which would have a caller act on a session nobody
     /// could read).
     @Test func unrecognizedStateTagDecodesToUnknown() throws {
         let json = #"{"state":"compacting","detail":"whatever"}"#
@@ -318,7 +318,7 @@ import Testing
     @Test(arguments: [
         FactSource.hookEvent("Notification"),
         .transcriptTail,
-        .statuslineTee,
+        .sessionMod,
         .database,
         .processLiveness,
         .forge,
@@ -330,6 +330,27 @@ import Testing
     ])
     func everySourceRoundTrips(source: FactSource) throws {
         #expect(try roundTrip(source) == source)
+    }
+
+    /// A kind this build does not know — `statusline-tee`, say, which a build
+    /// with a statusline reader could write — decodes as unrecognized and
+    /// carries its name through rather than failing the record.
+    @Test func anUnknownKindDecodesAsUnrecognizedAndKeepsItsName() throws {
+        let decoded = try JSONDecoder().decode(
+            FactSource.self, from: Data(#"{"kind":"statusline-tee"}"#.utf8))
+        #expect(decoded == .unrecognized("statusline-tee"))
+        #expect(try roundTrip(decoded) == decoded)
+    }
+
+    @Test func sessionModSourceUsesItsKind() throws {
+        let data = try JSONEncoder().encode(FactSource.sessionMod)
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["kind"] as? String == "session-mod")
+        #expect(object.count == 1)
+        let json = #"{"kind":"session-mod"}"#
+        let decoded = try JSONDecoder().decode(FactSource.self, from: Data(json.utf8))
+        #expect(decoded == .sessionMod)
     }
 
     @Test func programStatusSourceUsesItsKind() throws {
@@ -418,7 +439,7 @@ import Testing
     // MARK: - Context load
 
     @Test func unknownWindowFallsBackToTheLabeledAssumption() {
-        let (tokens, assumed) = ContextWindow.unknown(why: "no statusline tee").effectiveTokens()
+        let (tokens, assumed) = ContextWindow.unknown(why: "nothing reported the window").effectiveTokens()
         #expect(tokens == 200_000)
         #expect(assumed)
         #expect(ContextWindow.assumedTokens == 200_000)
@@ -426,7 +447,7 @@ import Testing
 
     @Test func observedWindowIsNotAssumed() {
         let window = ContextWindow.observed(
-            ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: epoch))
+            ObservedFact(value: 1_000_000, source: .sessionMod, observedAt: epoch))
         let (tokens, assumed) = window.effectiveTokens()
         #expect(tokens == 1_000_000)
         #expect(assumed == false)
@@ -434,14 +455,14 @@ import Testing
 
     @Test func percentUsedIsNilWhenTheNumeratorIsUnknown() {
         let load = ContextLoad(used: nil, window: .observed(
-            ObservedFact(value: 200_000, source: .statuslineTee, observedAt: epoch)))
+            ObservedFact(value: 200_000, source: .sessionMod, observedAt: epoch)))
         #expect(load.percentUsed() == nil)
     }
 
     @Test func percentUsedFlagsTheAssumedWindow() throws {
         let load = ContextLoad(
             used: ObservedFact(value: 50_000, source: .transcriptTail, observedAt: epoch),
-            window: .unknown(why: "no statusline tee"))
+            window: .unknown(why: "nothing reported the window"))
         let result = try #require(load.percentUsed())
         #expect(result.percent == 25.0)
         #expect(result.assumedWindow)
@@ -451,7 +472,7 @@ import Testing
         let load = ContextLoad(
             used: ObservedFact(value: 50_000, source: .transcriptTail, observedAt: epoch),
             window: .observed(
-                ObservedFact(value: 1_000_000, source: .statuslineTee, observedAt: epoch)))
+                ObservedFact(value: 1_000_000, source: .sessionMod, observedAt: epoch)))
         let result = try #require(load.percentUsed())
         #expect(result.percent == 5.0)
         #expect(result.assumedWindow == false)
@@ -460,7 +481,7 @@ import Testing
     @Test func contextLoadRoundTrips() throws {
         let load = ContextLoad(
             used: ObservedFact(value: 50_000, source: .transcriptTail, observedAt: epoch),
-            window: .unknown(why: "no statusline tee"))
+            window: .unknown(why: "nothing reported the window"))
         #expect(try roundTrip(load) == load)
     }
 
@@ -520,17 +541,7 @@ import Testing
         #expect(decoded != PRObservation.Outcome.none)
     }
 
-    // MARK: - Counters and report
-
-    @Test func sessionCountersRoundTrip() throws {
-        let counters = SessionCounters(
-            turnsInWindow: 12,
-            hookEventsInWindow: 40,
-            windowStart: epoch,
-            observedAt: epoch.addingTimeInterval(600),
-            commitsUnchangedSince: epoch.addingTimeInterval(-3600))
-        #expect(try roundTrip(counters) == counters)
-    }
+    // MARK: - Report
 
     @Test func reportRoundTripsWithItsOptionalsEmpty() throws {
         let report = SessionStateReport(
@@ -541,7 +552,6 @@ import Testing
         let decoded = try roundTrip(report)
         #expect(decoded == report)
         #expect(decoded.contextLoad == nil)
-        #expect(decoded.counters == nil)
     }
 
     @Test func reportRoundTripsWithItsOptionalsFilled() throws {
@@ -552,10 +562,25 @@ import Testing
             contextLoad: ContextLoad(
                 used: ObservedFact(value: 90_000, source: .transcriptTail, observedAt: epoch),
                 window: .observed(
-                    ObservedFact(value: 200_000, source: .statuslineTee, observedAt: epoch))),
-            counters: SessionCounters(
-                turnsInWindow: 3, hookEventsInWindow: 9,
-                windowStart: epoch, observedAt: epoch))
+                    ObservedFact(value: 200_000, source: .sessionMod, observedAt: epoch))))
         #expect(try roundTrip(report) == report)
+    }
+
+    /// A daemon built before the runaway counters were dropped still sends a
+    /// `counters` object on every report. A newer reader ignores it rather than
+    /// failing the whole `session.states` result.
+    @Test func reportFromADaemonThatStillSendsCountersDecodes() throws {
+        let report = SessionStateReport(
+            terminalID: UUID(),
+            worktreeID: UUID(),
+            state: SessionState(value: .idle, source: .hookEvent("Stop"), observedAt: epoch))
+        var object = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Any])
+        object["counters"] = [
+            "turnsInWindow": 3, "hookEventsInWindow": 9,
+            "windowStart": 0, "observedAt": 0,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object)
+        #expect(try JSONDecoder().decode(SessionStateReport.self, from: data) == report)
     }
 }

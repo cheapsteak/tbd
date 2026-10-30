@@ -3,6 +3,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// The RPC surface for `gc_retained_transcripts_enabled` — the soak gate on the

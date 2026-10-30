@@ -1,10 +1,12 @@
 import Clocks
 import Darwin
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The gate that decides which transport a new session is born onto, and the
 /// read that renders it afterwards.
@@ -240,7 +242,6 @@ struct HolderSpawnGateTests {
         #expect(row.holderChildStartedAt != nil, "the identity anchor was not stamped at spawn")
         #expect(row.tmuxWindowID.isEmpty)
         #expect(row.tmuxPaneID.isEmpty)
-        #expect(row.transcriptStreamPath == nil, "a shell was routed through the model proxy")
 
         let socketPath = try HolderRendezvous.socketPath(
             sessionID: row.id, environment: fixture.environment)
@@ -258,16 +259,11 @@ struct HolderSpawnGateTests {
             "the holder path started a tmux server: \(issued)")
     }
 
-    /// An extra Claude terminal on the holder is routed through the model
-    /// proxy exactly as a primary session is: one route minted for this
-    /// terminal, its stream path stamped in the row's insert, and the pids
-    /// beside it.
-    @Test func terminalCreateRoutesAnExtraClaudeTerminalLikeAPrimary() async throws {
+    /// An extra Claude terminal takes the holder exactly as a primary session
+    /// does: a holder, a job, and a row naming both.
+    @Test func terminalCreateSpawnsAnExtraClaudeTerminalOntoTheHolder() async throws {
         let fixture = try await GateFixture.make(flagEnabled: true)
         defer { fixture.tearDown() }
-        try await fixture.db.config.setTranscriptStreamingEnabled(true)
-        let supervisor = RoutingRecorder()
-        fixture.router.modelProxySupervisor = supervisor
 
         let terminal = try await fixture.terminalCreate(
             TerminalCreateParams(worktreeID: fixture.worktree.id, type: .claude))
@@ -277,13 +273,6 @@ struct HolderSpawnGateTests {
         #expect(row.holderPID != nil)
         #expect(row.childPID != nil)
         #expect(row.kind == .claude)
-        let routed = supervisor.made
-        #expect(routed.map(\.terminalID) == [row.id])
-        #expect(routed.first?.streamingEnabled == true)
-        #expect(supervisor.retired.isEmpty, "the route was retired under a spawn that succeeded")
-        let streamPath = try #require(row.transcriptStreamPath)
-        #expect(streamPath == TBDConstants.streamFilePath(
-            terminalID: row.id, environment: fixture.environment))
     }
 
     /// A Codex extra terminal takes the holder too, as the primary path's
@@ -302,7 +291,6 @@ struct HolderSpawnGateTests {
         #expect(row.label == TerminalLabel.codex)
         #expect(row.holderPID != nil)
         #expect(row.childPID != nil)
-        #expect(row.transcriptStreamPath == nil, "Codex was routed through the model proxy")
         #expect(row.tmuxWindowID.isEmpty)
     }
 
@@ -632,7 +620,13 @@ struct HolderSpawnGateTests {
         defer { fixture.tearDown() }
         let profile = try await fixture.db.modelProfiles.create(name: "Login", kind: .oauth)
         // The daemon's only path for typing into a holder session. A login tab
-        // is left to the person, so nothing may come through it.
+        // is left to the person, so nothing may come through it while the tab
+        // is being created. No window watches for a later write: nothing in
+        // the daemon types into a login tab at all — the person runs `/login`
+        // from Claude's own footer hint — so there is no delayed writer to
+        // wait out. A pump restored on the shared spawn path would still meet
+        // the three-second window in `ModelProfileSpawnTests`, which watches a
+        // login tab for a pane read or a keystroke, in the parallel pass.
         let courierWrites = CourierWriteLog()
         fixture.router.holderInjectionCourier = HolderInjectionCourier(
             sendFrame: { courierWrites.record($0) },
@@ -669,13 +663,9 @@ struct HolderSpawnGateTests {
             !issued.contains(where: { $0.contains("new-session") }),
             "the login tab started a tmux server: \(issued)")
 
-        // Three seconds covers the settle-then-poll shape an auto-typing pump
-        // would take (a 2 s settle, then a 1 s cadence) before its first write.
-        let wrote = await pollUntilTrue(timeout: .seconds(3), pollInterval: .milliseconds(50)) {
-            !courierWrites.writes.isEmpty
-        }
-        #expect(wrote != .satisfied, "the daemon typed into a login tab: \(courierWrites.writes)")
-        #expect(courierWrites.writes.isEmpty)
+        #expect(
+            courierWrites.writes.isEmpty,
+            "the daemon typed into a login tab: \(courierWrites.writes)")
     }
 
     /// The other arm, unchanged: with the flag off a login tab is a tmux
@@ -1032,62 +1022,6 @@ private final class RecaptureProbe: @unchecked Sendable {
             },
             clock: ImmediateClock())
     }
-}
-
-// MARK: - A routing recorder
-
-/// A `ModelProxySupervisor` stand-in for the routed extra-terminal case: it
-/// records the routes it was asked to mint and drops, and names a port so the
-/// attachment produces a base URL. No proxy process is started — the job is the
-/// gate shell, and nothing here connects to the URL.
-private final class RoutingRecorder: ModelProxySupervising, @unchecked Sendable {
-    struct Made: Sendable, Equatable {
-        let terminalID: UUID
-        let upstream: String
-        let streamingEnabled: Bool
-    }
-
-    private let lock = NSLock()
-    private var madeStorage: [Made] = []
-    private var retiredStorage: [String] = []
-    let token = "0123456789abcdef0123456789abcdef"
-
-    var made: [Made] {
-        lock.lock(); defer { lock.unlock() }
-        return madeStorage
-    }
-
-    var retired: [String] {
-        lock.lock(); defer { lock.unlock() }
-        return retiredStorage
-    }
-
-    func makeRoute(
-        terminalID: UUID, upstream: String, streamingEnabled: Bool
-    ) async throws -> ModelProxyRoute {
-        // `withLock` rather than `lock()`/`unlock()`: this method is `async`,
-        // where the unscoped pair is unavailable.
-        lock.withLock {
-            madeStorage.append(Made(
-                terminalID: terminalID, upstream: upstream, streamingEnabled: streamingEnabled))
-        }
-        return ModelProxyRoute(
-            token: token, terminalID: terminalID,
-            upstream: upstream, streamingEnabled: streamingEnabled)
-    }
-
-    func baseURL(for route: ModelProxyRoute) async -> String? {
-        "http://127.0.0.1:51842/r/\(route.token)"
-    }
-
-    func retireRoute(token: String, terminalID: UUID) async {
-        lock.withLock { retiredStorage.append(token) }
-    }
-
-    func routeToken(forTerminal terminalID: UUID) async -> String? { nil }
-    func capabilitySnapshot() async -> ModelProxyCapabilitySnapshot { .none }
-    func startIfEnabled() async {}
-    func beginDraining() async {}
 }
 
 // MARK: - Fixture

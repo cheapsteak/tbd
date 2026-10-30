@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // MARK: - Fixtures
 
@@ -60,15 +61,6 @@ private let gmailSnapshot = snapshot(buckets: [
 private let legacyScopedSnapshot = snapshot(buckets: gmailSnapshot.buckets + [
     bucket(kind: "weekly_scoped", percent: 100, severity: "critical", family: "Fable"),
 ])
-
-private func claudeTerminal(profileID: UUID? = nil,
-                            createdAt: Date = Date(timeIntervalSince1970: 0),
-                            kind: TerminalKind? = .claude,
-                            claudeSessionID: String? = nil) -> Terminal {
-    Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
-             createdAt: createdAt, claudeSessionID: claudeSessionID,
-             profileID: profileID, kind: kind)
-}
 
 // MARK: - Usage suffix composition
 
@@ -766,92 +758,6 @@ struct SecondaryLineHonestyTests {
     }
 }
 
-// MARK: - Session tooltips
-
-@Suite("ProfileUsagePresentation — session tooltip")
-struct SessionTooltipTests {
-    @Test func pinnedLoggedInSessionShowsAccountUsageAndSpawnTime() {
-        let gmail = entry(name: "Gmail", loginIdentity: "g@x.co", usageSnapshot: gmailSnapshot)
-        let terminal = claudeTerminal(profileID: gmail.profile.id,
-                                      createdAt: resetDate)
-
-        let tooltip = ProfileUsagePresentation.sessionTooltip(
-            terminal: terminal, profiles: [gmail], timeZone: utc
-        )
-        #expect(tooltip == """
-        Account: g@x.co (Gmail)
-        Usage: 5h 0% ↺11:10pm · wk 76%
-        Spawned: 2026-07-03 23:10
-        """)
-    }
-
-    @Test func ambientSessionShowsDriftWarning() {
-        let terminal = claudeTerminal(profileID: nil, createdAt: resetDate,
-                                      kind: nil, claudeSessionID: "abc")
-        let tooltip = ProfileUsagePresentation.sessionTooltip(
-            terminal: terminal, profiles: [], timeZone: utc
-        )
-        #expect(tooltip == """
-        Account: ambient (terminal login)
-        May drift to a different account on token refresh
-        Spawned: 2026-07-03 23:10
-        """)
-    }
-
-    @Test func pinnedSessionWithoutSnapshotOmitsUsageLine() {
-        let work = entry(name: "Work", loginIdentity: "a@b.co")
-        let terminal = claudeTerminal(profileID: work.profile.id, createdAt: resetDate)
-        let tooltip = ProfileUsagePresentation.sessionTooltip(
-            terminal: terminal, profiles: [work], timeZone: utc
-        )
-        #expect(tooltip == "Account: a@b.co (Work)\nSpawned: 2026-07-03 23:10")
-    }
-
-    @Test func removedProfileIsCalledOut() {
-        let terminal = claudeTerminal(profileID: UUID())
-        let tooltip = ProfileUsagePresentation.sessionTooltip(terminal: terminal, profiles: [])
-        #expect(tooltip?.contains("profile removed — session keeps its spawn account") == true)
-    }
-
-    @Test func nonClaudeTerminalsHaveNoTooltip() {
-        let shell = claudeTerminal(kind: .shell)
-        let codex = claudeTerminal(kind: .codex, claudeSessionID: "x")
-        #expect(ProfileUsagePresentation.sessionTooltip(terminal: shell, profiles: []) == nil)
-        #expect(ProfileUsagePresentation.sessionTooltip(terminal: codex, profiles: []) == nil)
-    }
-
-    @Test func pinnedButNotLoggedInShowsProfileNameWithLoginState() {
-        let spare = entry(name: "Spare")   // oauth, nil identity
-        let terminal = claudeTerminal(profileID: spare.profile.id)
-        let tooltip = ProfileUsagePresentation.sessionTooltip(terminal: terminal, profiles: [spare])
-        #expect(tooltip?.contains("Account: Spare (not logged in)") == true)
-    }
-}
-
-// MARK: - Worktree row tooltip
-
-@Suite("ProfileUsagePresentation — worktree accounts tooltip")
-struct WorktreeAccountsTooltipTests {
-    @Test func aggregatesAndDedupesClaudeAccountsInOrder() {
-        let work = entry(name: "Work", loginIdentity: "a@b.co")
-        let terminals = [
-            claudeTerminal(profileID: work.profile.id),
-            claudeTerminal(profileID: nil, kind: nil, claudeSessionID: "legacy"),
-            claudeTerminal(profileID: work.profile.id),   // duplicate account
-            claudeTerminal(kind: .shell),                 // ignored
-        ]
-        let tooltip = ProfileUsagePresentation.worktreeAccountsTooltip(
-            terminals: terminals, profiles: [work]
-        )
-        #expect(tooltip == "Claude accounts: a@b.co (Work), ambient (terminal login)")
-    }
-
-    @Test func noClaudeSessionsMeansNoTooltip() {
-        let terminals = [claudeTerminal(kind: .shell)]
-        #expect(ProfileUsagePresentation.worktreeAccountsTooltip(terminals: terminals, profiles: []) == nil)
-    }
-}
-
 // MARK: - Snapshot merge (AppState)
 
 @Suite("AppState.mergingUsageSnapshots")
@@ -886,9 +792,9 @@ struct MergingUsageSnapshotsTests {
 @Suite("AppState skipAccountPicker persistence")
 struct SkipAccountPickerPersistenceTests {
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.SkipAccountPicker.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.SkipAccountPicker")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(defaults)
     }
 

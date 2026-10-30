@@ -5,6 +5,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 // MARK: - Fakes
 

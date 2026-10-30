@@ -733,9 +733,9 @@ public final class EventDrivenTestClock: Clock, @unchecked Sendable {
     /// ``advanceWhenArmed(by:sourceLocation:)`` is not the tool for that
     /// position: it records a missed re-arm and advances anyway, which is the
     /// desync itself. This is the rule the poller suites on this clock
-    /// (`GatedIntervalSleepTests`, `DaywatchRunnerLoopTests`) are built around,
-    /// where every advance after the first is a re-arm, and the one to carry
-    /// into any suite that joins them.
+    /// (`GatedIntervalSleepTests`, for one) are built around, where every
+    /// advance after the first is a re-arm, and the one to carry into any
+    /// suite that joins them.
     ///
     /// A deadline in the past is a no-op: virtual time never moves backwards.
     public func advance(to deadline: Instant) async {

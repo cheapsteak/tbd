@@ -48,10 +48,14 @@ struct OrphanGCRemoteTranscriptCacheTests: ~Copyable {
             hangStackBase: home.appendingPathComponent("hs", isDirectory: true),
             processSnapshotProvider: { [] },
             holdersBase: home.appendingPathComponent("h", isDirectory: true),
-            modelProxyBase: home.appendingPathComponent("mp", isDirectory: true),
-            streamsBase: home.appendingPathComponent("st", isDirectory: true),
             attachmentsBase: home.appendingPathComponent("a", isDirectory: true),
-            remoteTranscriptsEnvironment: environment)
+            remoteTranscriptsEnvironment: environment,
+            reposBase: TBDConstants.reposDir(environment: environment),
+            sessionsBase: TBDConstants.sessionsDir(environment: environment),
+            devServersBase: home.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: TBDConstants.retainedTranscriptsDir(environment: environment),
+            scratchSpacesBase: TBDConstants.scratchDir(environment: environment),
+            worktreesBase: TBDConstants.worktreesDir(environment: environment))
     }
 
     /// The grace window the sweep reads from `config.gcGraceSeconds`, at its

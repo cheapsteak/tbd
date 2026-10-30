@@ -62,6 +62,10 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     // `parentWorktreeID` on a row marked here is the user's un-nesting, and
     // adoption must not undo it.
     var remote_parent_assigned: Bool?
+    // JSON object mapping Claude session id to its `ClaudeSpawnExtras`,
+    // written beside `archivedClaudeSessions` at archive and cleared with it on
+    // revive. nil = no archived session carried any (an empty map stores nil).
+    var archivedClaudeSpawnExtras: String?
 
     init(from wt: Worktree) {
         self.id = wt.id.uuidString
@@ -104,6 +108,7 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         self.pending_prompt_submit = wt.pendingPromptSubmit
         self.prObservation = FactColumnJSON.encode(wt.prObservation)
         self.remote_parent_assigned = wt.remoteParentAssigned
+        self.archivedClaudeSpawnExtras = ClaudeSpawnExtrasColumn.encodeMap(wt.archivedClaudeSpawnExtras)
     }
 
     /// Failable decode: skips (returns nil after a logged warning) only when the
@@ -186,7 +191,9 @@ struct WorktreeRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             pendingPrompt: pending_prompt,
             pendingPromptSubmit: pending_prompt_submit,
             prObservation: Self.decodePRObservation(prObservation),
-            remoteParentAssigned: remote_parent_assigned ?? false
+            remoteParentAssigned: remote_parent_assigned ?? false,
+            archivedClaudeSpawnExtras: ClaudeSpawnExtrasColumn.decodeMap(
+                archivedClaudeSpawnExtras, table: Self.databaseTableName, rowID: id)
         )
     }
 
@@ -245,9 +252,18 @@ public enum WorktreeMoveError: LocalizedError, CustomStringConvertible {
 
 public enum WorktreeArchiveError: LocalizedError, CustomStringConvertible {
     case hasActiveChildren
+    /// The worktree's folder holds changes git has not committed, or
+    /// `git status` could not show it clean. Archiving deletes the folder and
+    /// a revive restores only the branch, so these are the files an archive
+    /// destroys for good. Thrown by `WorktreeLifecycle.beginArchiveWorktree`
+    /// before it changes anything; `discardUncommittedChanges` lifts it.
+    case uncommittedChanges(UncommittedArchiveRefusal)
 
     public var description: String {
-        "Archive nested worktrees first."
+        switch self {
+        case .hasActiveChildren: return "Archive nested worktrees first."
+        case .uncommittedChanges(let refusal): return refusal.message
+        }
     }
 
     public var errorDescription: String? { description }
@@ -697,9 +713,17 @@ public struct WorktreeStore: Sendable {
     /// Optionally saves Claude session IDs and the captured HEAD SHA in the
     /// same transaction so they survive terminal deletion and crashes.
     /// Refuses to archive worktrees with `.main` status.
+    ///
+    /// `claudeSpawnExtras` maps a Claude session id to the spawn values its
+    /// terminal carried. It is written whenever a session list is (an empty
+    /// map then stores NULL, so no entry from an earlier archive outlives the
+    /// list it described), and on its own when it is non-empty. When neither
+    /// is passed, both columns keep what they hold — the state a revive that
+    /// kept its sessions (`revive(clearSessions: false)`) leaves behind.
     public func archive(
         id: UUID,
         claudeSessionIDs: [String]? = nil,
+        claudeSpawnExtras: [String: ClaudeSpawnExtras] = [:],
         archivedHeadSHA: String? = nil
     ) async throws {
         try await writer.write { db in
@@ -714,9 +738,13 @@ public struct WorktreeStore: Sendable {
             }
             record.status = WorktreeStatus.archived.rawValue
             record.archivedAt = Date()
-            if let sessions = claudeSessionIDs, !sessions.isEmpty {
+            let writesSessions = !(claudeSessionIDs ?? []).isEmpty
+            if let sessions = claudeSessionIDs, writesSessions {
                 record.archivedClaudeSessions = try String(
                     data: JSONEncoder().encode(sessions), encoding: .utf8)
+            }
+            if writesSessions || !claudeSpawnExtras.isEmpty {
+                record.archivedClaudeSpawnExtras = ClaudeSpawnExtrasColumn.encodeMap(claudeSpawnExtras)
             }
             if let sha = archivedHeadSHA {
                 record.archivedHeadSHA = sha
@@ -758,8 +786,8 @@ public struct WorktreeStore: Sendable {
 
     /// Revive an archived worktree (set status back to active, clear archivedAt).
     /// When `clearSessions` is true (default), also clears archived Claude
-    /// sessions. Pass false to preserve them when the primary agent wasn't
-    /// restored (e.g. skipClaude).
+    /// sessions and their spawn values. Pass false to preserve both when the
+    /// primary agent wasn't restored (e.g. skipClaude).
     public func revive(id: UUID, clearSessions: Bool = true) async throws {
         try await writer.write { db in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
@@ -769,6 +797,7 @@ public struct WorktreeStore: Sendable {
             record.archivedAt = nil
             if clearSessions {
                 record.archivedClaudeSessions = nil
+                record.archivedClaudeSpawnExtras = nil
             }
             try record.update(db)
         }
@@ -777,8 +806,9 @@ public struct WorktreeStore: Sendable {
     /// Flip a recovered `.creating` row to `.active` and drop its parked first
     /// message in one write, so a crash between the two cannot leave an active
     /// row still holding a message that was meant for a create that never
-    /// spawned. `archivedAt` is cleared and `archivedClaudeSessions` is kept,
-    /// which for a mid-revive row is `revive(clearSessions: false)`, and for an
+    /// spawned. `archivedAt` is cleared and `archivedClaudeSessions` and
+    /// `archivedClaudeSpawnExtras` are kept, which for a mid-revive row is
+    /// `revive(clearSessions: false)`, and for an
     /// ordinary create changes nothing but the status and the prompt.
     public func activateRecoveredCreate(id: UUID) async throws {
         try await writer.write { db in

@@ -1,29 +1,27 @@
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")
 private let reconcileLogger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 private let peerScopeLogger = Logger(subsystem: "com.tbd.daemon", category: "peer-bridge")
 
+/// The agent runtime assets written at startup before the database opens.
+/// The TBD Claude plugin is not among them: which files it holds depends on
+/// feature flags in the database, so `Daemon.start()` writes it once the
+/// database is open (step 5b).
 struct RuntimeIntegrationRefresher {
     var writeFallbackSkill: () throws -> Void
-    var writeClaudePlugin: () throws -> Void
     var ensureCodexProfilePlugin: () throws -> Void
     var writeClaudeHookOverlay: () -> Void
 
     static func production() -> RuntimeIntegrationRefresher {
         RuntimeIntegrationRefresher(
             writeFallbackSkill: { try SkillFileWriter().writeFallback() },
-            writeClaudePlugin: { try PluginDirWriter().writePlugin() },
             ensureCodexProfilePlugin: { _ = try CodexHomeManager().ensureProfilePlugin() },
             writeClaudeHookOverlay: {
                 ClaudeHookOverlay.writeOverlay()
-                // The statusline tee ships beside the overlay and is rewritten
-                // on every startup for the same reason: a desk session's
-                // overlay points at it by path, so the file has to be current
-                // before the next spawn resolves that path.
-                StatuslineTee.writeScript()
             }
         )
     }
@@ -34,13 +32,6 @@ struct RuntimeIntegrationRefresher {
         } catch {
             Logger(subsystem: "com.tbd.daemon", category: "skill")
                 .error("Failed to write fallback skill file: \(String(describing: error), privacy: .public)")
-        }
-
-        do {
-            try writeClaudePlugin()
-        } catch {
-            Logger(subsystem: "com.tbd.daemon", category: "plugin")
-                .error("Failed to write TBD plugin: \(String(describing: error), privacy: .public)")
         }
 
         do {
@@ -219,15 +210,26 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var db: TBDDatabase?
     public nonisolated(unsafe) var router: RPCRouter?
     public nonisolated(unsafe) var socketServer: SocketServer?
-    public nonisolated(unsafe) var httpServer: HTTPServer?
     public nonisolated(unsafe) var subscriptions: StateSubscriptionManager?
     public nonisolated(unsafe) var sshRefreshTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitStatusTask: Task<Void, Never>?
     public nonisolated(unsafe) var reaperTask: Task<Void, Never>?
+    /// Owns the agent background priority lease and its 60 s sweep. Stopped at
+    /// shutdown without restoring: the lease file survives and the next daemon
+    /// start restores or resumes it.
+    nonisolated(unsafe) var agentBackgroundController: AgentBackgroundController?
     /// Timer that expires stranded `AskUserQuestion` captures (step
     /// 11a-questions). `nil` in mock mode.
     nonisolated(unsafe) var pendingPromptExpirySweep: PendingPromptExpirySweep?
+    /// The session-mod channel's listener on `~/tbd/mod.sock` (step
+    /// 11a-mod-channel). `nil` in mock mode, and when the channel key could
+    /// not be loaded or the socket could not be bound — the feature then
+    /// degrades to answering in the terminal.
+    nonisolated(unsafe) var modChannelServer: ModChannelServer?
+    /// Clears open prompts no wait request has held for a minute. `nil`
+    /// whenever `modChannelServer` is.
+    nonisolated(unsafe) var modDisconnectSweep: ModDisconnectSweep?
     public nonisolated(unsafe) var hibernationSweepTask: Task<Void, Never>?
     /// Hourly orphan-maintenance task (orphan GC + scratch terminal
     /// reconciliation). `nil` in mock mode. See `orphanGC` for the actor it
@@ -257,18 +259,6 @@ public final class Daemon: Sendable {
     /// because the count lives in daemon memory and signposts are a ring
     /// buffer. See `HolderRegistry.reportReaderCensusPeriodically`.
     nonisolated(unsafe) var holderReaderCensusTask: Task<Void, Never>?
-    /// The one `ModelProxySupervisor` for this TBD home. Owned here so
-    /// shutdown can take the watch away, and so the config RPC that flips
-    /// `model_proxy_enabled` can reach the same instance the lifecycle, the
-    /// hibernation coordinator and the router route sessions through — a
-    /// second supervisor on one home would be a second daemon as far as
-    /// `proxy.lock` is concerned.
-    ///
-    /// Constructed at every boot outside mock mode, whatever the flag says, and
-    /// **started** only when the flag is on: construction opens nothing and
-    /// spawns nothing, while the runtime flip needs something to call.
-    /// `nil` in mock mode, like every other rail.
-    nonisolated(unsafe) var modelProxySupervisor: ModelProxySupervisor?
     /// The registry a live `ShadowPeerManager` registers itself with, so
     /// `ShadowPeerReconciler` can tell a live shadow from an orphan. Owned here
     /// because the two have opposite lifetimes: the reconciler runs for the
@@ -309,14 +299,6 @@ public final class Daemon: Sendable {
     /// Session-limit auto-resume scheduler. Owned here so it can be stopped
     /// on shutdown; `nil` in mock mode.
     public nonisolated(unsafe) var limitResumeScheduler: LimitResumeScheduler?
-    public nonisolated(unsafe) var daywatchRunner: DaywatchRunner?
-    /// Fleet supervision's single writer of `~/tbd/supervision/`. Owned here so
-    /// the heartbeat below can read through it; also handed to the router.
-    public nonisolated(unsafe) var supervision: SupervisionStore?
-    /// The out-of-band `status.json` heartbeat (design §14). Owned here so it
-    /// can be stopped on shutdown; `nil` in mock mode, where the daemon must
-    /// not write into the real supervision directory.
-    public nonisolated(unsafe) var supervisionHeartbeat: SupervisionHeartbeat?
     /// Per-daemon tmux control-mode supervisor. Owned here so it can be stopped
     /// on shutdown; the gate (`ControlModeGate.shouldEnable`) keeps it dormant
     /// unless `TBD_TMUX_CONTROL_MODE` is opted in and tmux is ≥ 3.2.
@@ -437,7 +419,7 @@ public final class Daemon: Sendable {
 
     /// The DB-mutating startup reconciliation, gated on mock mode. Extracted
     /// from `start()` so the mock-mode branch is unit-testable without spawning
-    /// the socket/HTTP servers or background tasks. In mock mode this is a
+    /// the socket server or background tasks. In mock mode this is a
     /// no-op so hand-seeded fixtures render exactly as authored.
     func performStartupReconciliation(
         mockMode: MockMode?, database: TBDDatabase, git: GitManager,
@@ -575,11 +557,10 @@ public final class Daemon: Sendable {
     /// (step 9), never inside `performStartupReconciliation` (step 8d).** The
     /// pass spawns one `git` subprocess per archived row; measured on a box
     /// with 1,825 archived worktrees it ran for ~3 minutes, during which the
-    /// daemon had bound no socket, written no port file, and the app's connect
-    /// retries each spawned a daemon that exited "Another daemon is already
-    /// running". Nothing the backfill does needs to precede serving: it repairs
-    /// archived (inactive) rows, is idempotent, never deletes a row and never
-    /// throws.
+    /// daemon had bound no socket, and the app's connect retries each spawned
+    /// a daemon that exited "Another daemon is already running". Nothing the
+    /// backfill does needs to precede serving: it repairs archived (inactive)
+    /// rows, is idempotent, never deletes a row and never throws.
     ///
     /// Returns `nil` in mock mode, where the backfill is a total no-op like
     /// every other background rail.
@@ -788,6 +769,40 @@ public final class Daemon: Sendable {
             peerMessagingOn: { switches.setting(for: $0).enabled })
     }
 
+    /// Serializes writes of the TBD Claude plugin, so two flag changes served
+    /// at once cannot interleave their file operations.
+    private static let claudePluginWriteLock = NSLock()
+
+    /// The session-mod features the plugin is written with at daemon start:
+    /// those the resolved config turns on. The resolved config is what makes
+    /// an update reach the plugin without a migration: on an install with
+    /// automatic parking on, the composer-draft feature reads on at the first
+    /// start, so the mod is written then and every spawn after carries it. A
+    /// config that cannot be read yields the shipped defaults, logged.
+    static func startupSessionModFeatures(config: ConfigStore) async -> [SessionModFeature] {
+        do {
+            return SessionModFeature.enabled(in: try await config.get())
+        } catch {
+            daemonLogger.error("Could not read config for the TBD plugin, writing it with the shipped feature defaults: \(String(describing: error), privacy: .public)")
+            return SessionModFeature.enabled(in: Config())
+        }
+    }
+
+    /// Write the TBD Claude plugin with the session mod present for
+    /// `sessionModFeatures` (absent when empty). A failure is logged, never
+    /// thrown: the previous plugin stays in place, which is no reason to stop
+    /// the daemon or to fail the request that changed a flag.
+    static func writeClaudePlugin(sessionModFeatures: [SessionModFeature]) {
+        claudePluginWriteLock.withLock {
+            do {
+                try PluginDirWriter().writePlugin(sessionModFeatures: sessionModFeatures)
+            } catch {
+                Logger(subsystem: "com.tbd.daemon", category: "plugin")
+                    .error("Failed to write TBD plugin: \(String(describing: error), privacy: .public)")
+            }
+        }
+    }
+
     /// Recreate the base scratch directory if it's missing. Safe to call every startup.
     static func ensureScratchDir() {
         let fm = FileManager.default
@@ -909,13 +924,69 @@ public final class Daemon: Sendable {
         }
 
         // 5. Initialize database
-        let database = try TBDDatabase(path: TBDConstants.databasePath)
+        let databasePath = TBDConstants.databasePath
+        let database = try TBDDatabase(path: databasePath)
         self.db = database
+
+        // Then drop the retired columns the kept rollback bundle no longer
+        // uses. Here, straight after migrations, because nothing else holds
+        // the database yet: mock seeding, the RPC server, the sweeps and
+        // startup reconciliation all come later, so no write races a column
+        // on its way out. Runs in mock mode too, where the isolated TBD_HOME
+        // has no kept bundle, so a mock daemon serves the schema a real one
+        // does. Never throws: a held, failed or skipped drop is logged and
+        // startup continues.
+        await database.reconcileRetiredColumns(RetiredColumnReconciler(
+            databasePath: databasePath,
+            keptBundlePath: TBDConstants.keptAppBundle().path))
 
         // 5a. Mock seeding: populate the freshly-migrated DB before servers
         // accept traffic, so the app never sees an empty-then-populated flash.
         if case let .enabled(fixturePath) = mockMode {
             try await Self.seedMockDatabase(database, fixturePath: fixturePath)
+        }
+
+        // 5b. Write the TBD Claude plugin. It waits for the database, unlike
+        // the runtime assets refreshed at step 4, because the session mod's
+        // hooks belong in it only while a session-mod feature flag is on.
+        // Every Claude spawn loads the plugin through `--plugin-dir`, and no
+        // spawn path is reachable yet: the first are startup reconciliation
+        // (step 8d), which can wake a terminal, and the RPC socket (step 9).
+        // A config that cannot be read is written with the shipped defaults;
+        // a write failure is logged and startup continues.
+        //
+        // Skipped in mock mode: the plugin folder lives in Application
+        // Support, outside `TBD_HOME`, so a mock daemon writing it would add
+        // or remove the session mod in the developer's real sessions by a
+        // fixture's flag.
+        if mockMode == nil {
+            Self.writeClaudePlugin(
+                sessionModFeatures: await Self.startupSessionModFeatures(config: database.config))
+        }
+
+        // 5c. Remove files no current build writes, so copies an older build
+        // left don't accumulate: runtime files under `~/tbd/runtime`, and the
+        // `port` file in the config dir itself. Non-fatal: a runtime file that
+        // fails to go is logged and startup continues; the `port` removal is
+        // best-effort and unlogged. Skipped in mock mode, like the plugin write
+        // above: a mock daemon skips live reconciliation, and its isolated
+        // `TBD_HOME` holds no older build's files.
+        if mockMode == nil {
+            RetiredRuntimeFiles().removeAll()
+            // An older build published an RPC port in this file; nothing reads it now.
+            try? fm.removeItem(at: TBDConstants.configDir.appendingPathComponent("port"))
+        }
+
+        // 5d. Unload and remove the launch agent Nightwatch's scheduler
+        // installed (`RetiredLaunchAgent`), whose script the plugin write at
+        // step 5b has removed. Detached, because `launchctl bootout` waits for
+        // a running job to exit, bounded only by its runner's deadline, and
+        // nothing later in startup depends on it, so it never holds up the
+        // socket bind. Skipped in mock mode, like 5b and 5c: the LaunchAgents
+        // folder is the user's real one, outside `TBD_HOME`.
+        if mockMode == nil {
+            let retiredLaunchAgent = RetiredLaunchAgent()
+            Task.detached(priority: .utility) { await retiredLaunchAgent.removeIfPresent() }
         }
 
         // 6. Initialize state subscriptions (before lifecycle/router so they can broadcast)
@@ -956,10 +1027,6 @@ public final class Daemon: Sendable {
         // through a single supervisor. When the gate is off (the default),
         // `enableIfGated` is a no-op.
         let tmuxExecutableResolver = TmuxExecutableResolver()
-        // Input activity tracker: records the timestamp of the last keystroke
-        // routed to each pane so the idle sweep can veto a park if input arrived
-        // after the session went idle (pending-input detection).
-        let inputActivity = InputActivityTracker()
         // Input router with the health sink wired to the state-delta broadcast
         // (#318 polish): edge-triggered per-pane input-delivery transitions
         // ride the same subscription channel the app already listens on.
@@ -971,9 +1038,6 @@ public final class Daemon: Sendable {
                 subs.broadcast(delta: .controlModeInputHealthChanged(ControlModeInputHealthDelta(
                     worktreeID: worktreeID, paneID: paneID, healthy: healthy,
                     generation: generation)))
-            },
-            onInput: { [inputActivity] paneID in
-                inputActivity.recordInput(paneID: paneID)
             }
         )
         let controlModeBridge = TmuxControlModeBridge(
@@ -992,17 +1056,11 @@ public final class Daemon: Sendable {
         // The Program Status Protocol (OSC 7501) store, built first because the
         // registry's readers feed it and the RPC router serves it: both must
         // hold ONE store, or a report the daemon's reader accepts would be
-        // invisible to `terminal.programStatusList` and the flag's setter would
-        // drive a gate no reader consults. Its gate starts at the persisted
-        // flag, read fresh here; `config.setProgramStatusEnabled` moves it
-        // afterwards. Built in mock mode too — the router always has a store —
-        // where nothing feeds it. Memory only, so it has nothing to reconcile.
+        // invisible to `terminal.programStatusList`. Built in mock mode too —
+        // the router always has a store — where nothing feeds it. Memory only,
+        // so it has nothing to reconcile.
         // Design: docs/specs/2026-10-10-program-status-protocol-design.md.
-        let programStatusEnabledAtBoot: Bool =
-            (try? await database.config.get())?.programStatusEnabled
-            ?? Config.programStatusEnabledDefault
-        let programStatusStore = ProgramStatusStore.live(
-            db: database, subscriptions: subs, enabled: programStatusEnabledAtBoot)
+        let programStatusStore = ProgramStatusStore.live(db: database, subscriptions: subs)
         Task { await programStatusStore.run() }
 
         // The holder registry, constructed HERE rather than at step 8e where it
@@ -1026,46 +1084,11 @@ public final class Daemon: Sendable {
             : nil
         self.holderRegistry = holderRegistry
 
-        // The model proxy's supervisor, built beside the registry it routes
-        // for. Construction locates the sibling `TBDModelProxy` and computes
-        // its build identity, and does nothing else — no directory, no lock, no
-        // process — so it is safe on every boot regardless of the flag. It is
-        // started later (step 8c-proxy), after the database is migrated and
-        // before terminals are reconciled, and only when the flag is on.
-        //
-        // `nil` in mock mode, like every other rail: with no supervisor a spawn
-        // is never routed and `daemon.capabilities` answers "unsupported, no
-        // port, no version", which is the honest reading of a daemon that
-        // cannot route.
-        let modelProxySupervisor: ModelProxySupervisor? = mockMode == nil
-            ? ModelProxySupervisor.production(
-                config: database.config,
-                home: TBDConstants.configDir,
-                // The one question a boot with the flag off asks: is anything
-                // still routed? A session spawned while the flag was on keeps
-                // the proxy's port in its environment for life, so a daemon
-                // that restarts after the flag went off still has to keep that
-                // port answering — and an install that never turned the flag on
-                // must run nothing at all.
-                //
-                // The read is handed over **unfolded**. Its other caller is the
-                // supervisor's port wait, and the two want opposite answers to
-                // an unreadable terminal table: a drain-only boot must start
-                // nothing, while the wait must assume a session is routed and
-                // keep the port. Folding a failure to `false` here would pick
-                // the first for both, and the second is where that strands live
-                // sessions — see `routedSessionsAlive` on the supervisor.
-                routedSessionsAlive: { [database] in
-                    try await database.terminals.hasLiveRoutedSession()
-                })
-            : nil
-        self.modelProxySupervisor = modelProxySupervisor
-
         // Input for a holder-backed session, routed by who is reading its pty.
         // Built from the registry (which knows who owns each pty and holds the
         // daemon's own reader) and the fd sidecar (the one channel to the app),
         // so it exists exactly when a holder session can exist. Its ack sink is
-        // installed at step 9a, before the sidecar listens, for the same reason
+        // installed at step 8g, before the sidecar listens, for the same reason
         // `onInput`'s is: a connection captures its sinks at adopt time.
         let holderInjectionCourier: HolderInjectionCourier? = holderRegistry.map { registry in
             HolderInjectionCourier(
@@ -1082,17 +1105,6 @@ public final class Daemon: Sendable {
                     // every attached state. No reader means the session is gone
                     // or was never adopted, which is the one case with nothing
                     // to write to.
-                    //
-                    // Deliberately NOT recorded as input activity. The veto's
-                    // fact source is the app's keystroke stream, and a write
-                    // that starts here is the daemon's own — an auto-resume, a
-                    // peer's `terminal.send` — never something a person typed
-                    // and has not sent. Recording it would leave the merge
-                    // rail's `activityStateObservedAt` anchor behind a
-                    // "keystroke" that will never be consumed, vetoing every
-                    // park of that row forever. See `InputActivityTracker`'s
-                    // holder key for why the veto is vacuous on this transport
-                    // anyway.
                     guard let reader = await registry.reader(for: terminalID) else {
                         throw HolderInjectionCourier.Error.noDaemonDescriptor(
                             terminalID: terminalID)
@@ -1108,7 +1120,7 @@ public final class Daemon: Sendable {
         // the resolver above it. Gated on the registry for the same reason the
         // courier is: with no registry there is no holder transport in this
         // daemon, so there is nothing to pull from. Its reply and
-        // connection-lost sinks are installed at step 9a, before the sidecar
+        // connection-lost sinks are installed at step 8g, before the sidecar
         // listens, because a connection captures its sinks at adopt time.
         let holderScreenPull: HolderScreenPull? = holderRegistry.map { _ in
             HolderScreenPull(
@@ -1167,7 +1179,6 @@ public final class Daemon: Sendable {
                 }
             }
         }
-        lifecycle.modelProxySupervisor = modelProxySupervisor
         // Dev servers (docs/specs/2026-10-11-dev-servers-design.md). The
         // lifecycle gets its operations before it is copied into the router
         // below, so archive stops servers through the same collaborators
@@ -1203,17 +1214,9 @@ public final class Daemon: Sendable {
         // periodic sweep task itself is started later, alongside the reaper,
         // inside the main `if mockMode == nil` block.
         if mockMode == nil {
-            // The proxy's rendezvous and the stream files are named
-            // explicitly, out of the same `TBDConstants` the supervisor and the
-            // proxy compose their paths from, rather than left to the
-            // collector's own defaults: the two must sweep the home this daemon
-            // actually serves, and naming them here is what makes that
-            // agreement visible at the wiring site.
             let gc = OrphanGC(
                 db: database, git: git,
-                broadcast: { [subs] delta in subs.broadcast(delta: delta) },
-                modelProxyBase: TBDConstants.modelProxyDir(),
-                streamsBase: TBDConstants.streamsDir())
+                broadcast: { [subs] delta in subs.broadcast(delta: delta) })
             self.orphanGC = gc
             lifecycle.onWorktreeRemoved = { [gc] worktreeID, path, repoPath in
                 await gc.removedWorktreeCleanup(
@@ -1320,8 +1323,15 @@ public final class Daemon: Sendable {
             },
             actuationLog: actuationLog
         )
-        // Wire the shared input activity tracker to the coordinator
-        await rpcRouter.hibernationCoordinator.setInputActivity(inputActivity)
+        // A session-mod feature flag change rewrites the plugin, and hot
+        // reload carries it to every running session. Assigned here, before
+        // the socket serves (step 9), because a handler reads it unlocked.
+        // Not in mock mode, for the reason given at step 5b.
+        if mockMode == nil {
+            rpcRouter.sessionModPluginSync = { features in
+                Daemon.writeClaudePlugin(sessionModFeatures: features)
+            }
+        }
         // Provider-named PRs (`meta.prs`) bind through the router's
         // coordinator, which exists only now. Installed before
         // `remoteManager.start()`, so no snapshot is applied without it.
@@ -1354,13 +1364,7 @@ public final class Daemon: Sendable {
         rpcRouter.holderRegistry = holderRegistry
         rpcRouter.holderInjectionCourier = holderInjectionCourier
         rpcRouter.holderScreenResolver = holderScreenResolver
-        // One supervisor across the router, the lifecycle and the coordinator,
-        // for the registry's reason: two would each try to own one home's
-        // `proxy.lock`, and `daemon.capabilities` would report a proxy no
-        // spawn was routed through.
-        rpcRouter.modelProxySupervisor = modelProxySupervisor
         rpcRouter.devServerTabInspector = devServerTabInspector
-        await rpcRouter.hibernationCoordinator.setModelProxySupervisor(modelProxySupervisor)
         // The wake path recreates a terminal's tmux server/window when the
         // window is gone (e.g. post-reboot); give the recreated server the
         // same gated control-mode connection as every other ensureServer
@@ -1460,44 +1464,6 @@ public final class Daemon: Sendable {
         let appForeground = AppForegroundState()
         rpcRouter.appForegroundState = appForeground
 
-        // 8a-supervision. Fleet supervision's single writer of
-        // `~/tbd/supervision/` (design §7). Wired BEFORE the socket server
-        // starts serving (step 9): a `tbd supervise` call arriving on a router
-        // with no store is refused, and the boot window is exactly when the
-        // operator's first gesture of the day tends to land.
-        //
-        // Reading the two files at boot is deliberate and is only reading. It
-        // makes a malformed `supervision.json` loud here rather than at
-        // whichever gesture happens to hit it first, and it recovers each on
-        // project's coverage span from the ledger. **It writes no ledger line,
-        // sends nothing, and starts nothing** — a restart resumes coverage from
-        // the two files and never replays a decision.
-        // Skipped in mock mode like every other rail: a fixture render must not
-        // read the operator's real supervision file, and `supervise.*` refuses
-        // with a named condition there rather than answering from it.
-        let supervisionStore: SupervisionStore? = mockMode == nil
-            ? SupervisionStore(
-                files: SupervisionFileStore(),
-                ledger: SupervisionLedgerWriter(path: TBDConstants.supervisionLedgerPath),
-                fleet: DatabaseSupervisionFleetReader(db: database))
-            : nil
-        if let supervisionStore {
-            self.supervision = supervisionStore
-            rpcRouter.supervision = supervisionStore
-            do {
-                try await supervisionStore.load()
-            } catch {
-                // A file the operator can hand-edit into an unloadable state
-                // must not stop the daemon from booting, and everything else
-                // TBD does is unaffected. The store stays unloaded, so each
-                // later gesture retries the read and refuses with whatever the
-                // file says at that moment — which means fixing the file makes
-                // the next gesture work with no restart.
-                let detail = String(describing: error)
-                daemonLogger.error("Could not load supervision state: \(detail, privacy: .public)")
-            }
-        }
-
         // 8b. Migrate legacy per-repo claude_settings_overlay column values
         // (v53, PR #452) to their file-backed home under
         // `~/tbd/repos/<repoID>/claude-settings.json`. Idempotent; converges
@@ -1512,38 +1478,6 @@ public final class Daemon: Sendable {
         // file wins once it exists. Idempotent (file-exists guard), so no
         // migration or marker is needed. Best-effort, never blocks startup.
         await database.notes.exportContentColumnToFiles()
-
-        // 8c-proxy. Adopt or spawn this home's model proxy, gated on
-        // `model_proxy_enabled` — the supervisor re-reads the column itself, so
-        // the gate has one spelling rather than one per caller. With the flag
-        // off it starts only to drain, and only when a session spawned against
-        // the proxy is still alive.
-        //
-        // Here, and not later: a terminal reconciled or woken below can be
-        // spawned, and a spawn asks the supervisor for a route. With no proxy
-        // yet current those sessions would start unproxied and keep that for
-        // their life, because `ANTHROPIC_BASE_URL` is fixed in a session's
-        // environment at spawn. It never throws: a proxy that could not be
-        // started is a streaming nicety that is unavailable, not a daemon that
-        // failed to boot.
-        //
-        // Awaited, and this step precedes the RPC socket bind (step 9), so its
-        // cost is startup latency the CLI and the app can see. Bounded, and
-        // milliseconds in the normal case: the worst case is the control
-        // client's 2-second status probe plus the spawner's 10-second bind
-        // budget, on a machine where the proxy binds pathologically slowly. It
-        // is also flag-gated, so nobody running the shipped default pays any of
-        // it.
-        //
-        // One case costs more, deliberately. When a session is still routed
-        // against the persisted port and something transient holds it, the
-        // supervisor's port wait adds up to 30 seconds
-        // (`ModelProxySupervisor.defaultPortRetryAttempts` ×
-        // `defaultPortRetryInterval`) trying to keep that port. It is paid in
-        // exactly the case where minting a fresh one would strand a live
-        // session, and in no other.
-
-        await modelProxySupervisor?.startIfEnabled()
 
         // 8d. Reconcile parked state and durable tmux ownership before any
         // listener accepts an RPC. Full startup recovery may destructively
@@ -1594,20 +1528,20 @@ public final class Daemon: Sendable {
         // sessions have no readers — `terminal.output` fails a live session
         // with "its session is gone, was never adopted, or is mid-transition", a
         // sentence no caller
-        // can tell apart from the truth about a genuinely dead one, and the
-        // app's `attach.request` throws `noLiveReader` for the same session —
+        // can tell apart from the truth about a genuinely dead one, and every
+        // `attach.request` for such a session waits on an adoption of its own —
         // and it would not even make the daemon answerable, because steps 8b-8d
         // ahead of it are pre-bind too. The overflow, and only the overflow, is
-        // what moves past the bind: see step 9c.
+        // what moves past the bind: see step 9a.
         var deferredHolderAdoptions: [Terminal] = []
         if let holderRegistry {
             deferredHolderAdoptions = await holderRegistry.adoptAll()
         }
 
         // 8f. Build the dev-server monitor and install the router's hooks
-        // into it BEFORE the socket and HTTP servers serve (steps 9, 10): the
-        // hooks are plain `nonisolated(unsafe)` vars a request handler reads,
-        // so assigning them while requests run would race, and a
+        // into it BEFORE the socket server serves (step 9): the hooks are
+        // plain `nonisolated(unsafe)` vars a request handler reads, so
+        // assigning them while requests run would race, and a
         // `server.start`/`server.stop` served before the assignment would
         // skip its refresh. `refresh()` works before `start()` (step
         // 11a-dev-servers); until then the summary is empty.
@@ -1623,60 +1557,7 @@ public final class Daemon: Sendable {
             rpcRouter.devServerSummaryProvider = { [monitor] in await monitor.runningWorktreeIDs() }
         }
 
-        // 9. Start socket server
-        let sock = SocketServer(router: rpcRouter)
-        self.socketServer = sock
-        // Wire the live connected-client count into daemon.status (the router
-        // is built above, before the server exists, so it can't be an init dep).
-        rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
-        try await sock.start()
-
-        // Pending provider replacements recover only after the socket is live:
-        // Codex readiness arrives through the SessionStart hook RPC, so a
-        // pre-bind recovery would always time out despite a healthy process.
-        // The durable row remains Codex throughout the pass. It is NOT run
-        // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
-        // for that hook, serially, so awaiting it would hold every later boot
-        // step (the sidecar, the HTTP server) behind N × 15 s. The maintenance
-        // task in step 11a-gc runs the same pass immediately after boot, off the
-        // critical path, and then hourly.
-
-        // 9c. Finish the holder sessions the startup budget did not reach.
-        //
-        // `adoptAll` is the ONLY caller of `adopt` in the daemon, so a row it
-        // walked away from would never be adopted again: its pty master would
-        // go undrained for the process's whole life, and a job cannot finish
-        // exiting while anything it wrote is still queued on its terminal. The
-        // budget therefore bounds when the *socket* is bound, not whether these
-        // sessions are rescued. Detached because nobody is waiting on it: the
-        // socket is up, so no RPC caller waits on a slow holder here.
-        //
-        // **The rescue is serial, so a slow row delays the rows behind it**,
-        // and that is a deliberate trade rather than an oversight. Each row is
-        // bounded — `busyRetryBudget` plus one `adoptionReceiveTimeout`, the
-        // connect that opens it being refused in microseconds rather than
-        // queued — so the tail is delayed, never stranded. A `Task` per row
-        // would trade that head-of-line cost for a worse one: the client's I/O
-        // is deliberately blocking, so N rows in flight park N cooperative-pool
-        // threads.
-        //
-        // What that starves is not the socket. `SocketServer` runs on its own
-        // `MultiThreadedEventLoopGroup`, so accept, read and write keep their
-        // dedicated threads whatever the cooperative pool is doing. It is every
-        // RPC *handler* that stops: `SocketRPCHandler.channelRead` hands each
-        // request into a `Task { … }` on the cooperative pool, so a starved
-        // pool leaves a daemon that accepts connections, reads their bytes and
-        // produces no response — which is the same "answers nobody" failure the
-        // startup budget exists to prevent, reached from the other side. Serial
-        // parks at most one thread. `adoptRemaining` logs its start and its
-        // completion, so a stalled tail is visible as a rescue that began and
-        // never finished.
-        if let holderRegistry, !deferredHolderAdoptions.isEmpty {
-            let remaining = deferredHolderAdoptions
-            Task { await holderRegistry.adoptRemaining(remaining) }
-        }
-
-        // 9a. Install the app → daemon input sink BEFORE the sidecar listens:
+        // 8g. Install the app → daemon input sink BEFORE the sidecar listens:
         // each adopted connection captures `onInput` at adopt time (M2.1
         // contract), so wiring it after `listen` would miss the app's connect.
         // The router is the bridge's (built above with the health sink, wired
@@ -1719,33 +1600,116 @@ public final class Daemon: Sendable {
         // connection was adopted under — start time and executable included,
         // through the same `ProcessIdentityCheck` the reaper's holder leg uses
         // before it signals anything — and only a confirmed death reverts the
-        // sessions that app was holding to daemon-read.
+        // sessions that app was holding to daemon-read. Only *that* app's:
+        // each claim records the app its descriptor was vended to, so a death
+        // confirmed after a successor app has attached its own tabs leaves the
+        // successor's ptys alone. A verdict short of death starts a watch that
+        // re-checks, because an app that is exiting closes its socket before
+        // it is gone, and an app that stays alive and disconnected is watched
+        // until it quits. One watch per app: a repeat departure joins it.
         //
         // Installed with the other sinks, before the sidecar listens, because a
         // connection captures them at adopt time. Dispatched into a `Task`: the
-        // sink runs on the vending actor and the verdict shells out to `ps`.
+        // sink runs on the vending actor, the verdict shells out to `ps`, and a
+        // watch lasts until its app is confirmed gone, connects again, or holds
+        // nothing.
         if let holderRegistry {
             let arbiter = SidecarDisconnectArbiter(
                 liveness: AppLivenessArbiter(signaller: ProductionProcessSignaller()),
-                reclaim: { await holderRegistry.reclaimSessionsFromADeadApp() })
+                reclaim: { await holderRegistry.reclaimSessions(heldBy: $0) },
+                sessionsHeld: { await holderRegistry.sessionsHeld(by: $0) },
+                connectedApp: { [fdVendingServer] in
+                    await fdVendingServer.currentClientIdentity()
+                })
             await fdVendingServer.setOnClientDisconnect { identity in
                 Task { await arbiter.handleDisconnect(identity: identity) }
             }
         }
 
-        // 9b. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
+        // 8h. Start the FD-vending sidecar socket (SCM_RIGHTS channel to the
         // app). Failure is non-fatal: control-mode attaches will fail and the
         // app falls back to grouped sessions.
+        //
+        // **Before the RPC socket, never after it.** The app connects its
+        // sidecar exactly once, straight after its first RPC is answered
+        // (`DaemonClient.connect`), and does not try again until it reconnects
+        // to the daemon. A sidecar bound after the RPC socket leaves a window
+        // in which that one connect finds nothing listening — or a crashed
+        // predecessor's dead socket file — and every attach the app makes then
+        // fails at the vend. Nothing here needs the RPC socket: the sinks are
+        // installed above, and an idle sidecar connection carries nothing
+        // until an attach is requested over RPC.
         do {
             try await fdVendingServer.listen(on: TBDConstants.vendSocketPath)
         } catch {
             daemonLogger.error("failed to start FD vending sidecar: \(error.localizedDescription, privacy: .public)")
         }
 
-        // 10. Start HTTP server
-        let http = HTTPServer(router: rpcRouter)
-        self.httpServer = http
-        try await http.start()
+        // Every throw from here through step 9a leaves the sidecar bound
+        // (step 8h), and a failed start ends in `main.swift`'s `exit(1)`
+        // without `stop()`. One cleanup covers them all, so no failed start
+        // leaves a vend.sock nobody serves: stopping the sidecar removes the
+        // file, but only while it is still the one this daemon bound.
+        do {
+            // 9. Start socket server
+            let sock = SocketServer(router: rpcRouter)
+            self.socketServer = sock
+            // Wire the live connected-client count into daemon.status (the router
+            // is built above, before the server exists, so it can't be an init dep).
+            rpcRouter.connectedClientsProvider = { [weak sock] in sock?.connectedClients ?? 0 }
+            try await sock.start()
+
+            // Pending provider replacements recover only after the socket is live:
+            // Codex readiness arrives through the SessionStart hook RPC, so a
+            // pre-bind recovery would always time out despite a healthy process.
+            // The durable row remains Codex throughout the pass. It is NOT run
+            // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
+            // for that hook, serially, so awaiting it would hold every later boot
+            // step behind N × 15 s. The maintenance task in step 11a-gc runs the
+            // same pass immediately after boot, off the critical path, and then
+            // hourly.
+
+            // 9a. Finish the holder sessions the startup budget did not reach.
+            //
+            // Past startup a session is adopted only when something asks for it —
+            // an attach adopts the session it names, and a wake adopts a holder it
+            // finds already running — so a row the budget walked away from that
+            // nobody opens would go undrained for the process's whole life, and a
+            // job cannot finish exiting while anything it wrote is still queued on
+            // its terminal. The budget therefore bounds when the *socket* is bound,
+            // not whether these sessions are rescued. Detached because nobody is
+            // waiting on it: the socket is up, so no RPC caller waits on a slow
+            // holder here — an attach that reaches a row first adopts it itself,
+            // and this pass then finds the reader published.
+            //
+            // **The rescue is serial, so a slow row delays the rows behind it**,
+            // and that is a deliberate trade rather than an oversight. Each row is
+            // bounded — `busyRetryBudget` plus one `adoptionReceiveTimeout`, the
+            // connect that opens it being refused in microseconds rather than
+            // queued — so the tail is delayed, never stranded. A `Task` per row
+            // would trade that head-of-line cost for a worse one: the client's I/O
+            // is deliberately blocking, so N rows in flight park N cooperative-pool
+            // threads.
+            //
+            // What that starves is not the socket. `SocketServer` runs on its own
+            // `MultiThreadedEventLoopGroup`, so accept, read and write keep their
+            // dedicated threads whatever the cooperative pool is doing. It is every
+            // RPC *handler* that stops: `SocketRPCHandler.channelRead` hands each
+            // request into a `Task { … }` on the cooperative pool, so a starved
+            // pool leaves a daemon that accepts connections, reads their bytes and
+            // produces no response — which is the same "answers nobody" failure the
+            // startup budget exists to prevent, reached from the other side. Serial
+            // parks at most one thread. `adoptRemaining` logs its start and its
+            // completion, so a stalled tail is visible as a rescue that began and
+            // never finished.
+            if let holderRegistry, !deferredHolderAdoptions.isEmpty {
+                let remaining = deferredHolderAdoptions
+                Task { await holderRegistry.adoptRemaining(remaining) }
+            }
+        } catch {
+            await fdVendingServer.stop()
+            throw error
+        }
 
         // 11b. Delivery acknowledgement (design §12): wire the verifier and
         // replay the observations the last daemon's timers died owing.
@@ -1800,6 +1764,20 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-agent-background. Agent background priority: restore or resume a
+            // lease the last daemon left, then sweep every 60 s. Does nothing
+            // without a lease. The router gets the controller only after
+            // `start()` has restored that lease, so an `agents.background on`
+            // cannot overwrite the saved state first.
+            let backgroundPriority = ProductionProcessPriority()
+            let backgroundRoots = AgentBackgroundRoots(
+                database: database, tmux: tmux, priority: backgroundPriority)
+            let backgroundController = AgentBackgroundController(
+                priority: backgroundPriority, roots: { await backgroundRoots.resolve() })
+            self.agentBackgroundController = backgroundController
+            await backgroundController.start()
+            rpcRouter.agentBackground = backgroundController
+
             // 11a-dev-servers. Start the monitor step 8f built and wired: its
             // initial read, the running-file directory watch and the 10 s
             // liveness recheck. Reads only. Started after the bind rather
@@ -1820,6 +1798,13 @@ public final class Daemon: Sendable {
                 }
             }
 
+            // 11a-proxy-leftovers. Remove the `proxy` and `streams` directories
+            // the retired model proxy left in the TBD home. One-time, after the
+            // socket bind, and detached so its file removals never hold up
+            // the rest of startup.
+            let proxyLeftovers = ProxyLeftoverCleanup(baseDirectory: TBDConstants.configDir)
+            Task.detached(priority: .utility) { proxyLeftovers.run() }
+
             // 11a-questions. Expire stranded AskUserQuestion captures. This
             // ran as a side effect of `terminal.transcript` until the app
             // started reading transcripts itself; on that path the handler is
@@ -1836,6 +1821,15 @@ public final class Daemon: Sendable {
             )
             self.pendingPromptExpirySweep = questionSweep
             await questionSweep.start()
+
+            // 11a-mod-channel. Serve the session-mod channel on `mod.sock`:
+            // the session mods' polls and prompt reports, and the disconnect
+            // sweep that clears a terminal's prompts once its mod stops
+            // polling. After the RPC socket bind for the same reason as the
+            // sweep above. Neither a missing key nor a failed bind stops the
+            // daemon: without the channel, dialogs are answered in the
+            // terminal, as with the feature off.
+            await startModChannel(router: rpcRouter)
 
             // 11a-shadow. Reclaim the durable artifacts of shadow peers — a
             // helper process, the socket it bound, and the record it published
@@ -1959,9 +1953,14 @@ public final class Daemon: Sendable {
                     // Skip .missing repos so we don't spam errors against stale paths
                     // until the user relocates them.
                     for repo in allRepos where repo.status != .missing {
-                        do {
-                            try await git.fetch(repoPath: repo.path, branch: repo.defaultBranch)
-                        } catch {
+                        switch await Daemon.backgroundFetch(
+                            repoPath: repo.path, branch: repo.defaultBranch, git: git
+                        ) {
+                        case .fetched:
+                            break
+                        case .skippedNoOrigin:
+                            reconcileLogger.debug("Background fetch skipped for \(repo.displayName, privacy: .public): no origin remote, nothing to fetch")
+                        case .failed(let error):
                             reconcileLogger.warning("Background fetch failed for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                         }
                     }
@@ -2198,79 +2197,6 @@ public final class Daemon: Sendable {
             rpcRouter.limitResumeScheduler = resumeScheduler
             await resumeScheduler.start()
 
-            // 12e. Start daywatch runner (autonomous fleet babysitter loop).
-            let skillDir = PluginDirWriter.pluginDirPath + "/skills/nightwatch"
-            let executor = ProcessDaywatchExecutor(skillDir: skillDir)
-
-            // Phase A: Create desk session manager for visible worker
-            let deskSessionManager = DeskSessionManager(
-                db: database,
-                lifecycle: lifecycle,
-                tmux: tmux,
-                skillDir: skillDir,
-                subscriptions: subs,
-                actuationLog: actuationLog
-            )
-
-            let runner = DaywatchRunner(
-                executor: executor,
-                deskSessionManager: deskSessionManager,
-                interval: DaywatchRunner.defaultInterval
-            )
-            self.daywatchRunner = runner
-            rpcRouter.daywatchRunner = runner
-            // Boot-reconcile: if nightwatch mode was persisted, restart the loop —
-            // unless it is combined with the pty-holder transport, which the gate
-            // turns off once (see NightwatchHolderBootReconcile).
-            do {
-                try await NightwatchHolderBootReconcile.run(
-                    db: database, subscriptions: subs,
-                    holderSupported: holderRegistry?.canSpawn == true,
-                    applyMode: { await runner.apply(mode: $0) })
-            } catch {
-                reconcileLogger.error("Failed to restore daywatch mode on boot: \(String(describing: error), privacy: .public)")
-            }
-
-            // 12f. Out-of-band supervision heartbeat (design §14). Publishes
-            // `status.json` at every brake edge, and runs its periodic timer
-            // only while the brake is released — the brake is the one switch,
-            // and a braked daemon runs no background loop. See the type's own
-            // doc for why that costs the watchdog nothing.
-            //
-            // The snapshot closure reads the brake per tick rather than
-            // capturing it: the app's toggle and the CLI's bare `on`/`off`
-            // both write that column, and the file must not go on publishing a
-            // brake that moved a minute ago. A tick that cannot read the state
-            // publishes nothing and lets the file go stale — which, while the
-            // brake is released, is precisely the signal the watchdog exists
-            // to notice.
-            if let supervisionStore {
-                let heartbeat = SupervisionHeartbeat(
-                    path: TBDConstants.supervisionStatusPath,
-                    snapshot: { [database, supervisionStore] in
-                        // Errors propagate rather than collapsing to "no
-                        // snapshot": a heartbeat that goes quiet looks exactly
-                        // like a dead daemon to the watchdog, so the reason has
-                        // to reach the log even though the tick is skipped.
-                        let config = try await database.config.get()
-                        let brake: SupervisionBrakeState =
-                            config.supervisionEnabled ? .released : .engaged
-                        return try await supervisionStore.statusFileSnapshot(brake: brake)
-                    })
-                self.supervisionHeartbeat = heartbeat
-                rpcRouter.supervisionHeartbeat = heartbeat
-                // Publish once at boot and arm the timer only if the brake is
-                // already released. A braked daemon therefore starts no loop —
-                // the brake is the switch — and still leaves behind a file
-                // saying `engaged`, which the watchdog reads as "nothing is
-                // effectively on" and never alarms about.
-                let brakeReleased = (try? await database.config.get())?.supervisionEnabled
-                    ?? Config.supervisionEnabledDefault
-                // Sequence 0: boot orders against nothing, and every real
-                // transition the store hands out starts at 1.
-                await heartbeat.applyBrake(released: brakeReleased, sequence: 0)
-            }
-
             // 13. Periodic git status refresh (branch sync, conflict detection).
             // 10s foreground, 60s background (GitPollCadence.statusInterval);
             // per-worktree conflict checks are additionally dirty-gated inside
@@ -2393,21 +2319,22 @@ public final class Daemon: Sendable {
         // of the transport — but a reader that is merely dropped leaks its drain
         // thread and the pty descriptor it owns, because after end of file that
         // thread parks on its wake pipe rather than exiting.
+        //
+        // The sidecar and the RPC socket stay up well past this point, so an
+        // app can still ask to attach — an update's freshly launched app does,
+        // reaching this daemon before its successor binds. The registry marks
+        // itself shutting down as the release begins, and from then on every
+        // attach is refused as `daemonShuttingDown` and nothing is adopted.
         await holderRegistry?.releaseAll()
 
         // Stop the dev server running-file watch and its recheck loop.
         await devServerMonitor?.stop()
 
-        // Take the watch away, and leave the proxy running. That is deliberate
-        // and it is not the same gesture as turning the feature off: a proxy
-        // outliving its daemon is the point of a separate process, sessions
-        // already spawned still have its port in their environment, and the
-        // next daemon adopts it back through the port in the config row.
-        // `beginDraining` is what the flag's off-flip calls; shutdown must not.
-        await modelProxySupervisor?.stop()
-
         if let questionSweep = pendingPromptExpirySweep {
             await questionSweep.stop()
+        }
+        if let modSweep = modDisconnectSweep {
+            await modSweep.stop()
         }
 
         // Cancel the deferred remote-backends boot task BEFORE tearing down
@@ -2458,24 +2385,12 @@ public final class Daemon: Sendable {
             await remoteManager.shutdown()
         }
 
-        // Stop daywatch runner.
-        if let runner = daywatchRunner {
-            await runner.apply(mode: .off)
-        }
-
         // Stop the daemon-clock PR poll — whichever driver runs — through the
         // switch, which waits for a pass in flight and disarms, so a toggle
         // landing while the socket is still up cannot restart a loop that
         // would outlive shutdown. Stopping a never-started driver is a no-op.
         if let router = self.router {
             await router.prPollDriverSwitch.stopAll()
-        }
-
-        // Stop the supervision heartbeat. `status.json` is left exactly as the
-        // last tick wrote it: a stopped heartbeat says nothing, and its going
-        // stale is the fact a watchdog reads.
-        if let heartbeat = supervisionHeartbeat {
-            await heartbeat.stop()
         }
 
         // Stop any tmux control-mode connections (no-op when the gate is off).
@@ -2491,6 +2406,7 @@ public final class Daemon: Sendable {
         gitFetchTask?.cancel()
         gitStatusTask?.cancel()
         reaperTask?.cancel()
+        await agentBackgroundController?.stop()
         holderReaderCensusTask?.cancel()
         hibernationSweepTask?.cancel()
         gcTask?.cancel()
@@ -2500,17 +2416,17 @@ public final class Daemon: Sendable {
         if let sock = socketServer {
             await sock.stop()
         }
-        if let http = httpServer {
-            await http.stop()
+        if let modServer = modChannelServer {
+            await modServer.stop()
         }
 
-        // Settle the open transcript prompts only now, after the socket has
-        // closed every `prompt.await` connection. Resolving them first would
-        // tell each waiting hook "resolved elsewhere" and it would exit for
-        // good; a hook that instead sees its connection drop reconnects to the
-        // next daemon and registers again, keeping its prompt answerable.
-        // This releases whatever the closes did not reach — chiefly a
-        // `prompt.answer` still waiting for a delivery ack.
+        // Settle the open transcript prompts only now, after the servers have
+        // stopped. Resolving them first would answer each held wait request
+        // "resolved" and the session mod would stop waiting on that dialog;
+        // a mod that instead sees its connection drop re-posts its open
+        // dialogs to the next daemon, keeping them answerable. This releases
+        // whatever the closes did not reach — chiefly a `prompt.answer` still
+        // waiting for a receipt.
         if let router = self.router {
             await router.pendingQuestions.resolveAll()
         }
@@ -2519,22 +2435,7 @@ public final class Daemon: Sendable {
         // handover the successor has already written its own pid over it, and
         // deleting that claim would reopen the spawn race the successor-first
         // write exists to close.
-        let ownedPIDFile = pidFile.removeIfOwned()
-
-        // The port file holds a port, not a pid, so it cannot answer "is this
-        // mine?" on its own. The pid file is the proxy for it: one daemon
-        // writes both and one daemon removes both, so a pid file that was still
-        // ours means the port file beside it was ours too.
-        //
-        // When the pid file has already been claimed by a successor, this
-        // leaves a port file naming a port nobody is listening on — for the few
-        // moments until the successor binds and overwrites it. That stale
-        // window is the deliberately cheaper failure: deleting the file instead
-        // would race the successor's own write and could leave the app with no
-        // address at all for a daemon that is up and serving.
-        if ownedPIDFile {
-            try? FileManager.default.removeItem(atPath: TBDConstants.portFilePath)
-        }
+        pidFile.removeIfOwned()
 
         daemonLogger.info("Stopped.")
         Foundation.exit(0)

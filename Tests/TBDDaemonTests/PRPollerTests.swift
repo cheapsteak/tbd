@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -12,11 +13,10 @@ import TestSupport
 //
 // DEFECT UNDER TEST: PR facts are a side effect of an app being open. Before
 // `PRPoller`, `PRStatusManager.fetchAll` ran only inside the `pr.list` RPC
-// handler, so the moment the app stopped polling — overnight, which is exactly
-// when a fleet supervisor needs them — nothing learned anything about any pull
-// request. A regression here is silent: every existing test drives `fetchAll`
-// directly or through the RPC, so a poller that never fires would keep them all
-// green.
+// handler, so the moment the app stopped polling — overnight, when the daemon
+// is the only thing awake — nothing learned anything about any pull request.
+// A regression here is silent: every existing test drives `fetchAll` directly
+// or through the RPC, so a poller that never fires would keep them all green.
 //
 // The second thing these tests defend is that exactly ONE driver runs the
 // periodic fetch. The merged-PR transition is edge-triggered on a cache change,

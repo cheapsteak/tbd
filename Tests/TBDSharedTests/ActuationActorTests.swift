@@ -74,12 +74,11 @@ struct ActuationActorTests {
         #expect(ActuationActor.sessionFromEnvironment(["PATH": "/usr/bin"]) == nil)
     }
 
-    @Test("a kind reserved for later work still decodes")
-    func reservedKindDecodes() throws {
-        let json = #"{"kind":"supervisor","project":"acme-web"}"#
+    @Test("a kind this build does not know still decodes, fields it carries and all")
+    func unknownKindDecodes() throws {
+        let json = #"{"kind":"declared-by-a-newer-client","project":"acme-web"}"#
         let actor = try JSONDecoder().decode(ActuationActor.self, from: Data(json.utf8))
-        #expect(actor.kind == "supervisor")
-        #expect(actor.project == "acme-web")
+        #expect(actor.kind == "declared-by-a-newer-client")
     }
 
     @Test("an unknown key on a known kind is ignored rather than failing the decode")

@@ -2,83 +2,52 @@ import Foundation
 import Testing
 @testable import TBDApp
 
-// MARK: - isLiveTBDDaemon branches
+// MARK: - isLiveTBDDaemon forwarding
 
-@Test func isLiveTBDDaemon_deadPid_returnsFalse_withoutResolvingPath() {
+/// `isLiveTBDDaemon` forwards to `ProcessLiveness.isLiveNamedProcess`, whose
+/// branches `TBDSharedTests/ProcessLivenessTests` covers. What is left to pin
+/// here is the forward itself: the executable name it passes and that both
+/// seams arrive intact.
+///
+/// The first arm is the reboot failure #471 fixed: the pid file survives a
+/// reboot, an unrelated process is handed the recorded pid, and a bare
+/// `kill(pid, 0)` reports it alive. It must NOT read as a running daemon. The
+/// second arm keeps a forward that always answered `false` from passing.
+@Test func isLiveTBDDaemon_forwardsTheDaemonNameAndBothSeams() {
+    #expect(DaemonLiveness.isLiveTBDDaemon(
+        pid: 98251,
+        isAlive: { _ in true },
+        executablePath: { _ in "/usr/libexec/somethingelsed" }
+    ) == false)
+    #expect(DaemonLiveness.isLiveTBDDaemon(
+        pid: 123,
+        isAlive: { _ in true },
+        executablePath: { _ in "/some/worktree/.build/debug/TBDDaemon" }
+    ) == true)
+
+    // A dead pid short-circuits before its path is resolved...
     var resolverCalled = false
-    let result = DaemonLiveness.isLiveTBDDaemon(
+    #expect(DaemonLiveness.isLiveTBDDaemon(
         pid: 98251,
         isAlive: { _ in false },
         executablePath: { _ in
             resolverCalled = true
             return "/some/worktree/.build/debug/TBDDaemon"
         }
-    )
-    #expect(result == false)
+    ) == false)
     #expect(resolverCalled == false)
-}
 
-@Test func isLiveTBDDaemon_alivePidRunningTBDDaemon_returnsTrue() {
-    let result = DaemonLiveness.isLiveTBDDaemon(
-        pid: 123,
-        isAlive: { _ in true },
-        executablePath: { _ in "/some/worktree/.build/debug/TBDDaemon" }
-    )
-    #expect(result == true)
-}
-
-@Test func isLiveTBDDaemon_recycledPidRunningOtherBinary_returnsFalse() {
-    // The post-reboot failure mode: pid file survives, pid is reused by an
-    // unrelated process — must NOT be treated as a running daemon.
-    let result = DaemonLiveness.isLiveTBDDaemon(
-        pid: 98251,
-        isAlive: { _ in true },
-        executablePath: { _ in "/usr/libexec/somethingelsed" }
-    )
-    #expect(result == false)
-}
-
-@Test func isLiveTBDDaemon_pathResolutionFails_returnsFalse() {
-    // proc_pidpath can fail (e.g. another user's process). Unverifiable pids
-    // are treated as stale rather than trusted.
-    let result = DaemonLiveness.isLiveTBDDaemon(
-        pid: 123,
-        isAlive: { _ in true },
-        executablePath: { _ in nil }
-    )
-    #expect(result == false)
-}
-
-@Test func isLiveTBDDaemon_emptyResolvedPath_returnsFalse() {
-    let result = DaemonLiveness.isLiveTBDDaemon(
-        pid: 123,
-        isAlive: { _ in true },
-        executablePath: { _ in "" }
-    )
-    #expect(result == false)
-}
-
-@Test func isLiveTBDDaemon_similarButDifferentBinaryName_returnsFalse() {
-    let result = DaemonLiveness.isLiveTBDDaemon(
-        pid: 123,
-        isAlive: { _ in true },
-        executablePath: { _ in "/some/worktree/.build/debug/TBDDaemonHelper" }
-    )
-    #expect(result == false)
-}
-
-@Test func isLiveTBDDaemon_nonPositivePid_returnsFalse_withoutSignalling() {
-    // pid 0 would signal the caller's own process group; must short-circuit.
+    // ...and a non-positive pid before anything is signalled: pid 0 would
+    // address the caller's own process group.
     var aliveCalled = false
-    let result = DaemonLiveness.isLiveTBDDaemon(
+    #expect(DaemonLiveness.isLiveTBDDaemon(
         pid: 0,
         isAlive: { _ in
             aliveCalled = true
             return true
         },
         executablePath: { _ in "/x/TBDDaemon" }
-    )
-    #expect(result == false)
+    ) == false)
     #expect(aliveCalled == false)
 }
 

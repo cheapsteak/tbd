@@ -51,7 +51,7 @@ public actor RemoteTipTracker {
         }
     }
 
-    /// Scoped per repo, like `BranchTipTracker.retain`: a sweep over one repo
+    /// Scoped per repo, like `ConflictSweepCache.retain`: a sweep over one repo
     /// must not forget another repo's worktrees.
     public func retain(repoID: UUID, worktreeIDs: Set<UUID>) {
         byRepo[repoID] = worktreeIDs

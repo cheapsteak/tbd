@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 // Terminal-scoped RPC methods: terminal.create (shell + claude), terminal.list,

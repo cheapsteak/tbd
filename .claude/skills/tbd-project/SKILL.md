@@ -33,11 +33,11 @@ For a map of key files and what they do: consult `references/file-map.md`
 
 ### Config directory is `~/tbd`, not `~/.tbd`
 
-Every daemon-managed path lives under `~/tbd/` (no dot): `~/tbd/state.db`, `~/tbd/sock`, `~/tbd/tbdd.pid`, `~/tbd/port`, `~/tbd/repos/`, `~/tbd/runtime/`, `~/tbd/worktrees/`. `TBDConstants.configDir` honors `TBD_HOME` (and `TBD_SOCKET_PATH` for the socket alone) so tests never collide with the live daemon — see CLAUDE.md.
+Every daemon-managed path lives under `~/tbd/` (no dot): `~/tbd/state.db`, `~/tbd/sock`, `~/tbd/tbdd.pid`, `~/tbd/repos/`, `~/tbd/runtime/`, `~/tbd/worktrees/`. `TBDConstants.configDir` honors `TBD_HOME` (and `TBD_SOCKET_PATH` for the socket alone) so tests never collide with the live daemon — see CLAUDE.md.
 
 ### SPM Package Structure
 
-Five targets in one package — `TBDShared` (library), `TBDDaemonLib` (library), `TBDDaemon` (executable, just main.swift), `TBDCLI` (executable), `TBDApp` (executable). Tests import `TBDDaemonLib`, not `TBDDaemon`.
+Main targets in one package — `TBDKernel` (library, the helper programs' shared contract), `TBDShared` (library), `TBDDaemonLib` (library), `TBDDaemon` (executable, just main.swift), `TBDCLI`, `TBDApp`, `TBDPeerHelper` and `TBDHolder` (executables), plus small support targets. Tests import `TBDDaemonLib`, not `TBDDaemon`.
 
 The `TBDDaemon` and `TBDDaemonLib` targets share `Sources/TBDDaemon/` — `TBDDaemonLib` excludes `main.swift`, `TBDDaemon` only includes `main.swift` and excludes all subdirectories.
 
@@ -80,13 +80,13 @@ Auto-generated as `YYYYMMDD-adjective-animal` from curated word lists (sourced f
 
 TBD instruments every `claude` (and `codex`) session it spawns so the app can observe and drive them. Three mechanisms, all set up at daemon startup (`Daemon.start()`):
 
-- **TBD plugin** — `PluginDirWriter` writes a Claude Code plugin to `~/Library/Application Support/TBD/plugin/` (`.claude-plugin/plugin.json` + `skills/tbd/SKILL.md`). The bundled skill body is `TBDSkillContent.body` (single source of truth, also dropped to a failsafe path by `SkillFileWriter`). `ClaudeSpawnCommandBuilder` appends `--plugin-dir <path>` to every spawned `claude`, so the `tbd` skill is available *only* in TBD-spawned sessions, never globally.
+- **TBD plugin** — `PluginDirWriter` writes a Claude Code plugin to `~/Library/Application Support/TBD/plugin/` (`.claude-plugin/plugin.json` + `skills/tbd/SKILL.md`). The bundled skill body is `TBDSkillContent.body` (single source of truth, also dropped to a failsafe path by `SkillFileWriter`). `ClaudeSpawnCommandBuilder` appends `--plugin-dir <path>` to every spawned `claude`, so the `tbd` skill is available *only* in TBD-spawned sessions, never globally. While a session-mod feature flag is on (today only `composer_draft_enabled`), the plugin also carries the **session mod**: a hooks module in `hooks/` plus its `$.state` contract in `types/`, which the manifest then names. Its TypeScript source is `SessionMod/`; `scripts/gen-session-mod-content.py` embeds it into `Sources/TBDShared/SessionModContent.swift`, from which the writer copies it. The daemon side (per-session files under `~/tbd/sessions/`, liveness, spawn variables, draft status) is `Sources/TBDDaemon/SessionMod/`. Design: `docs/specs/2026-10-19-tbd-session-mod-design.md`.
 
 - **Settings overlay** — `ClaudeHookOverlay` writes `~/tbd/runtime/claude-overlay.json` and the spawn builder appends `--settings <path>`. Claude merges array settings (the `hooks` dict) with the user's `~/.claude/settings.json` rather than replacing it, so TBD ships hooks without touching user config. The overlay registers: `SessionStart` (`tbd session-event` → relays new session id + transcript path to the daemon, fixing the post-`/clear`/`/compact` transcript freeze), `Stop` (two entries — `tbd notify` for response-complete notifications, and `tbd hooks stop-rename-check` to prompt renaming a still-default worktree), and `PreToolUse`/`PostToolUse` matched on `AskUserQuestion` (bridge the question into the transcript pane before the JSONL flush).
 
 - **Codex sessions** — `CodexHomeManager` gives Codex a per-repo isolated `CODEX_HOME` with its own hooks + bundled `tbd` skill, so Codex is instrumented equivalently without polluting `~/.codex/`.
 
-The overlay and plugin are regenerated on every daemon startup; both writes are idempotent and non-fatal on failure (the session just loses instrumentation, it still runs).
+The overlay and plugin are regenerated on every daemon startup; both writes are idempotent and non-fatal on failure (the session just loses instrumentation, it still runs). The plugin is written after the database opens, because the session-mod flags live there, and before any spawn path is reachable; it is written only when a file's bytes differ, since every write hot-reloads the plugin in every running session, and a flag change rewrites it. A mock-mode daemon never writes it.
 
 Spawned Claude/Codex sessions also receive free-form `KEY=VALUE` env overrides merged across three scopes (`global < repo < profile`), with the Claude builder's auth/routing env layered last so it can't be clobbered. See `docs/env-overrides.md`.
 

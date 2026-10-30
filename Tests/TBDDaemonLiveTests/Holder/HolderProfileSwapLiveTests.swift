@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// "Switch account" on a holder-backed tab, against a **real** holder and a
 /// **real** job.
@@ -20,14 +21,13 @@ struct HolderProfileSwapLiveTests {
     /// a four-line stub first.
     static let sessionID = "sess-holder-profile-swap"
 
-    /// A job that ignores `/exit` — it never reads its terminal — and exits on
-    /// `SIGTERM`. The middle rung of the park's ladder is therefore what ends
-    /// it, which is the ordinary case for an agent that is busy.
+    /// A job that never reads its terminal and exits on `SIGTERM`. A swap's
+    /// park starts its ladder at that rung, so `SIGTERM` is what ends it.
     static let job = "while :; do sleep 0.2; done"
 
     /// The line the resume fixture's job appends to its transcript on the way
-    /// out, standing in for the tail Claude flushes when the park's polite
-    /// `/exit` reaches it. Everything about the re-carry hangs on this landing
+    /// out, standing in for the tail Claude flushes when the park's `SIGTERM`
+    /// reaches it. Everything about the re-carry hangs on this landing
     /// in the transcript AFTER the handler's pre-park copy was taken.
     static let flushMarker = "flushed as the job ended"
 
@@ -100,7 +100,7 @@ struct HolderProfileSwapLiveTests {
         // WHAT it has to resume FROM. The handler copies the transcript into
         // the destination profile before it parks anything, and that copy skips
         // a destination that already exists — so a turn written while the park
-        // is ending (which is exactly what the polite `/exit` asks Claude for)
+        // is ending (which is exactly what the park's `SIGTERM` asks Claude for)
         // reaches the source jsonl and nothing else. This job writes such a
         // turn from its `SIGTERM` trap; the copy the resume reads has to carry
         // it.
@@ -506,16 +506,6 @@ struct HolderProfileSwapLiveTests {
                 "a failed wake lost the conversation the next wake has to resume")
         #expect(after.holderPID == nil && after.childPID == nil,
                 "a failed wake recorded processes nothing started")
-        // Routing, as far as this fixture can see it. Its router carries no
-        // model proxy supervisor, so the arm's attachment is `.unproxied`: no
-        // route is minted and there is no route file to linger. The row's
-        // stream path is therefore nil on both paths and this assertion is a
-        // floor rather than a discriminator — it says only that a wake which
-        // started nothing left no stream file pointing at it. A test that
-        // watched a real route being retired would need a supervisor, which is
-        // the proxy suites' subject rather than this one's.
-        #expect(after.transcriptStreamPath == nil,
-                "a wake that started nothing stamped a transcript stream path")
 
         // The park is real, so the pre-swap generation is really gone.
         let goneSignal = kill(oldChild, 0)
@@ -849,10 +839,10 @@ private final class SwapFixture {
     ///
     /// `flushOnTerm: true` swaps the job for one that appends a turn to the
     /// row's transcript from its `SIGTERM` trap before exiting — the stand-in
-    /// for what a real Claude does when the park's polite `/exit` reaches it,
-    /// and the only way a test can tell a transcript carried before the park
-    /// from one re-taken after it. It still ends on the ladder's `SIGTERM`
-    /// rung, so the park it drives is the same park.
+    /// for what a real Claude does when the park's `SIGTERM` reaches it, and
+    /// the only way a test can tell a transcript carried before the park from
+    /// one re-taken after it. It ends on the same `SIGTERM` rung as the
+    /// default job, so the park it drives is the same park.
     func spawnHolderRow(blank: Bool, flushOnTerm: Bool = false) async throws -> Terminal {
         let terminalID = UUID()
         let arguments = flushOnTerm

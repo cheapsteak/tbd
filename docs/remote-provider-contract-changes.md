@@ -134,7 +134,9 @@ if you do:
 
 The caller, not the provider, decides what to display: active sessions by
 default, archived ones behind a filter. Your job is to report the fact
-truthfully, not to curate the list.
+truthfully, not to curate the list. The one exception is for a provider whose
+inventory only grows: it may declare an archive horizon (section 11) and leave
+out exactly what the horizon allows.
 
 **What you gain.** Your own notion of "done" or "archived" survives the trip
 instead of being flattened into `state: "exited"`, and shows up on the caller's
@@ -635,6 +637,56 @@ but the caller reads only your exit status.
 **If you ignore it.** Nothing changes. Callers keep sending raw keystrokes
 through `send`, or through `attach`, exactly as they do today.
 
+## 11. `archive_horizon_seconds` — leaving long-archived sessions out of `list`
+
+**What it is.** An optional `describe` field naming a number of seconds, at
+least one day:
+
+```json
+"archive_horizon_seconds": 172800
+```
+
+A provider that declares it may leave out of `list` and the `events` snapshot
+any session that is archived, has exited, and was archived at least that long
+ago. A listing that leaves sessions out this way says how many with
+`"hidden_archived": <count>`, and it is still `complete: true`. Every verb that
+takes an id keeps serving those sessions, and `unarchive` on one puts it back in
+the listing. The normative rules, including what a caller does with the
+absence, are under Archive horizon in the contract.
+
+**Required?** No. When it is absent you list every archived session, as section
+2 requires.
+
+**Not a v2 delta either.** Like sections 8 to 10, it was added after v2 was
+published. It is an optional `describe` field and an optional envelope field, so
+it is readable at contract major 1 and 2 alike, and declaring it obliges no
+change to `contract_versions`.
+
+**What you gain.** A listing whose size is bounded by recent activity rather
+than by everything the backend has ever run. That matters for a backend that
+keeps every session's record and never deletes one. There, each session adds a
+fixed cost to every `list` for as long as the backend exists, and a listing you
+cannot finish within the caller's timeout leaves you two options. You can
+report `complete: false` every time, so the caller can never retire anything
+and never sees a fresh inventory. Or you can be killed mid-walk, which the
+caller records as a failed poll.
+
+**What it costs.** You need a record of when each session was archived, or a
+stand-in that can only be later than the true time. A caller can browse only
+the archived sessions it already saw. A session archived from elsewhere while a
+caller saw no complete snapshot, which then passes the horizon, reads to that
+caller as `gone`. Choose a horizon well beyond how long your callers go without
+a complete snapshot.
+
+**What the caller does.** It stops applying the drift rule to any session whose
+last sighting was archived, so that session stays archived in its mirror. TBD's
+caller does not read the field yet. Until it does, a session beyond the
+horizon becomes a gone row in TBD, and a lane TBD had archived stays revivable
+through `unarchive`.
+
+**If you ignore it.** Nothing changes. You list every session, and a listing you
+cannot finish reports `complete: false`, as section 1 says.
+
 ## What to do if you maintain a v1 provider
 
 In order, most value per unit of effort:
@@ -669,9 +721,11 @@ In order, most value per unit of effort:
 
 5. **If you have any "done" or archive concept, model it as archiving.** Add
    `archived` to your Session objects, declare `archive` and `unarchive`, and
-   make sure archived sessions are still returned by `list`. If your existing
-   single operation both terminates and retires, declare both `stop` and
-   `archive` pointing at it, then consider whether they can become two
+   make sure archived sessions are still returned by `list`. If you keep every
+   record and your inventory has outgrown one listing, declare an archive
+   horizon (section 11) rather than leaving sessions out silently. If your
+   existing single operation both terminates and retires, declare both `stop`
+   and `archive` pointing at it, then consider whether they can become two
    operations (section 4).
 
 6. **If your work materializes as a pushed branch, declare `land`.** Usually a

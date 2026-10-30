@@ -7,7 +7,6 @@ import SwiftTerm
 // meaning the emulator.
 import struct TBDShared.TerminalModeReading
 import struct TBDShared.TerminalScreen
-import class TBDShared.ProgramStatusGate
 import enum TBDShared.ProgramStatusParser
 import enum TBDShared.ProgramStatusProtocol
 import TBDTerminalSerialization
@@ -119,11 +118,11 @@ actor HolderReader {
     /// behind both `TerminalScreen.modesObserved` and
     /// `TerminalScreen.contentObserved`.
     ///
-    /// Exposed beside the emulator's own copy because the idle sweep needs it
-    /// next to `modeReading().source` and must not pay for a whole-buffer walk
-    /// to get it: `screen(maxLines:)` holds the emulator lock a live session's
-    /// drain thread needs, and the sweep asks this of every idle holder row on
-    /// every pass. `nonisolated` for the same reason it is a `let` — it is
+    /// Exposed beside the emulator's own copy because the `HolderDaemonStore`
+    /// wiring hands it to `HolderScreenResolver`, which stamps it on a viewer's
+    /// screen and modes, and must not pay for a whole-buffer walk to get it:
+    /// `screen(maxLines:)` holds the emulator lock a live session's drain
+    /// thread needs. `nonisolated` for the same reason it is a `let` — it is
     /// fixed at construction, so reading it can never race the actor.
     nonisolated let observedChildFromStart: Bool
     private let descriptor: PTYDescriptor
@@ -182,10 +181,9 @@ actor HolderReader {
     ///   what lets a test hand back `base + .minutes(41)` and assert an exact
     ///   age rather than a tolerance window.
     /// - Parameter programStatus: the Program Status Protocol (OSC 7501) tap.
-    ///   With one, the emulator answers the `?` probe synchronously — while
-    ///   the gate is open — and hands every report's payload to the tap's
-    ///   `deliver`. nil leaves OSC 7501 unhandled, as it was before the
-    ///   protocol existed.
+    ///   With one, the emulator answers the `?` probe synchronously and hands
+    ///   every report's payload to the tap's `deliver`. nil leaves OSC 7501
+    ///   unhandled, as it was before the protocol existed.
     init(
         sessionID: UUID,
         ptyFD: Int32,
@@ -1421,8 +1419,7 @@ private final class HolderEmulator: @unchecked Sendable {
         // terminal, so a strong capture would be a cycle.
         if let programStatus {
             terminal.registerOscHandler(code: ProgramStatusProtocol.oscCode) { [weak self] data in
-                guard let self else { return }
-                guard programStatus.gate.isEnabled, !self.ingestingPreamble else { return }
+                guard let self, !self.ingestingPreamble else { return }
                 if ProgramStatusParser.isProbe(data) {
                     self.terminal.sendResponse(text: ProgramStatusProtocol.probeReply)
                     return

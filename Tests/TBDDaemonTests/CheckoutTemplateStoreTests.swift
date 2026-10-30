@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -30,33 +31,33 @@ struct CheckoutTemplateStoreTests {
         }
     }
 
-    private func makeFixture() throws -> Fixture {
+    private func makeFixture() async throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("clone-checkout-\(UUID().uuidString)")
         let repo = root.appendingPathComponent("repo")
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(
             at: root.appendingPathComponent("worktrees"), withIntermediateDirectories: true)
-        try git(["init", "-b", "main"], at: repo)
-        try git(["config", "commit.gpgSign", "false"], at: repo)
-        try git(["config", "user.name", "Test"], at: repo)
-        try git(["config", "user.email", "test@example.com"], at: repo)
+        try await git(["init", "-b", "main"], at: repo)
+        try await git(["config", "commit.gpgSign", "false"], at: repo)
+        try await git(["config", "user.name", "Test"], at: repo)
+        try await git(["config", "user.email", "test@example.com"], at: repo)
 
         try Data(repeating: 0x5A, count: 64 * 1024).write(to: repo.appendingPathComponent("keep.bin"))
         try write("first\n", to: repo.appendingPathComponent("edit.txt"))
         try write("bye\n", to: repo.appendingPathComponent("gone.txt"))
-        try git(["add", "-A"], at: repo)
-        try git(["commit", "-m", "older"], at: repo)
-        let older = try git(["rev-parse", "HEAD"], at: repo)
+        try await git(["add", "-A"], at: repo)
+        try await git(["commit", "-m", "older"], at: repo)
+        let older = try await git(["rev-parse", "HEAD"], at: repo)
 
         try write("second\n", to: repo.appendingPathComponent("edit.txt"))
         try FileManager.default.removeItem(at: repo.appendingPathComponent("gone.txt"))
         try FileManager.default.createDirectory(
             at: repo.appendingPathComponent("dir"), withIntermediateDirectories: true)
         try write("hello\n", to: repo.appendingPathComponent("dir/new.txt"))
-        try git(["add", "-A"], at: repo)
-        try git(["commit", "-m", "newer"], at: repo)
-        let newer = try git(["rev-parse", "HEAD"], at: repo)
+        try await git(["add", "-A"], at: repo)
+        try await git(["commit", "-m", "newer"], at: repo)
+        let newer = try await git(["rev-parse", "HEAD"], at: repo)
 
         return Fixture(
             root: root, repo: repo, reposDir: root.appendingPathComponent("repos"),
@@ -71,7 +72,7 @@ struct CheckoutTemplateStoreTests {
     // MARK: - Clone path
 
     @Test func clonedWorktreeMatchesAPlainCheckout() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
         await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.older)
@@ -85,23 +86,23 @@ struct CheckoutTemplateStoreTests {
             #expect(outcome == .cloned(templateCommit: f.older))
         }
         let wt = URL(fileURLWithPath: path)
-        #expect(try git(["rev-parse", "--abbrev-ref", "HEAD"], at: wt) == "tbd/cloned")
-        #expect(try git(["rev-parse", "HEAD"], at: wt) == f.newer)
-        #expect(try git(["status", "--porcelain", "--ignored"], at: wt).isEmpty)
-        #expect(try git(["rev-parse", "--git-path", "index"], at: wt).contains("worktrees/cloned"))
+        #expect(try await git(["rev-parse", "--abbrev-ref", "HEAD"], at: wt) == "tbd/cloned")
+        #expect(try await git(["rev-parse", "HEAD"], at: wt) == f.newer)
+        #expect(try await git(["status", "--porcelain", "--ignored"], at: wt).isEmpty)
+        #expect(try await git(["rev-parse", "--git-path", "index"], at: wt).contains("worktrees/cloned"))
         #expect(try String(contentsOf: wt.appendingPathComponent("edit.txt"), encoding: .utf8) == "second\n")
         #expect(!FileManager.default.fileExists(atPath: wt.appendingPathComponent("gone.txt").path))
         #expect(try String(contentsOf: wt.appendingPathComponent("dir/new.txt"), encoding: .utf8) == "hello\n")
         // No upstream, exactly as `worktreeAdd`'s `--no-track`.
-        #expect(throws: Error.self) {
-            try git(["rev-parse", "--abbrev-ref", "tbd/cloned@{upstream}"], at: wt)
+        await #expect(throws: Error.self) {
+            try await git(["rev-parse", "--abbrev-ref", "tbd/cloned@{upstream}"], at: wt)
         }
     }
 
     /// The point of the feature, measured the way the field report measured
     /// it: the unchanged file's first block is the template's block.
     @Test func unchangedFileSharesItsBlocksWithTheTemplate() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
@@ -124,7 +125,7 @@ struct CheckoutTemplateStoreTests {
     // MARK: - Fallbacks
 
     @Test func noTemplateWritesEveryFileAndRefreshBuildsOne() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
 
@@ -133,7 +134,7 @@ struct CheckoutTemplateStoreTests {
             git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
             worktreePath: path, branch: "tbd/first", baseBranch: f.newer)
         #expect(outcome == .materialized(reason: "no template"))
-        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
+        #expect(try await git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
 
         // The store never builds a template on a volume that cannot clone.
         guard volumeCanClone(f.root) else { return }
@@ -148,7 +149,7 @@ struct CheckoutTemplateStoreTests {
     /// a stray write) would leave that file untracked in the worktree. The
     /// status check catches it and the worktree is written in full instead.
     @Test func strayFileInTemplateFallsBackToAFullCheckout() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
@@ -164,9 +165,9 @@ struct CheckoutTemplateStoreTests {
             return
         }
         let wt = URL(fileURLWithPath: path)
-        #expect(try git(["status", "--porcelain", "--ignored"], at: wt).isEmpty)
+        #expect(try await git(["status", "--porcelain", "--ignored"], at: wt).isEmpty)
         #expect(!FileManager.default.fileExists(atPath: wt.appendingPathComponent("stray.txt").path))
-        #expect(try git(["rev-parse", "HEAD"], at: wt) == f.newer)
+        #expect(try await git(["rev-parse", "HEAD"], at: wt) == f.newer)
 
         // The bad template no longer reads as present, and the next refresh
         // rebuilds it without the stray file.
@@ -180,7 +181,7 @@ struct CheckoutTemplateStoreTests {
     /// A gitignored stray (`.DS_Store` and friends) must not ride along into
     /// worktrees either.
     @Test func ignoredStrayFileInTemplateAlsoFallsBack() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
         try write(".DS_Store\n", to: f.repo.appendingPathComponent(".git/info/exclude"))
@@ -201,14 +202,14 @@ struct CheckoutTemplateStoreTests {
 
     /// A tracked top-level symlink is cloned as a link, even when it dangles.
     @Test func topLevelSymlinkIsClonedAsALink() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
         try FileManager.default.createSymbolicLink(
             atPath: f.repo.appendingPathComponent("dangling").path, withDestinationPath: "nowhere")
-        try git(["add", "dangling"], at: f.repo)
-        try git(["commit", "-m", "link"], at: f.repo)
-        let head = try git(["rev-parse", "HEAD"], at: f.repo)
+        try await git(["add", "dangling"], at: f.repo)
+        try await git(["commit", "-m", "link"], at: f.repo)
+        let head = try await git(["rev-parse", "HEAD"], at: f.repo)
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
         await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: head)
 
@@ -225,7 +226,7 @@ struct CheckoutTemplateStoreTests {
     /// template rebuild plus a full worktree write on every create. After
     /// `notCleanLimit` in a row the store stops building its template.
     @Test func repeatedNotCleanClonesStopTheTemplate() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
@@ -250,7 +251,7 @@ struct CheckoutTemplateStoreTests {
             git: GitManager(), repoID: f.repoID, repoPath: f.repo.path,
             worktreePath: path, branch: "tbd/after", baseBranch: f.newer)
         #expect(outcome == .materialized(reason: "no template"))
-        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
+        #expect(try await git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
     }
 
     // MARK: - Old git
@@ -259,7 +260,7 @@ struct CheckoutTemplateStoreTests {
     /// a flagged create must be exactly the plain `git worktree add` — hook
     /// included — and no template is built.
     @Test func gitWithoutHookRunTakesThePlainAdd() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let log = f.root.appendingPathComponent("hook.log")
         try installHook(in: f.repo, body: "echo \"$1 $2 $3\" >> '\(log.path)'")
@@ -274,8 +275,8 @@ struct CheckoutTemplateStoreTests {
 
         #expect(outcome == .materialized(reason: "git older than 2.36"))
         let wt = URL(fileURLWithPath: path)
-        #expect(try git(["rev-parse", "HEAD"], at: wt) == f.newer)
-        #expect(try git(["status", "--porcelain", "--ignored"], at: wt).isEmpty)
+        #expect(try await git(["rev-parse", "HEAD"], at: wt) == f.newer)
+        #expect(try await git(["status", "--porcelain", "--ignored"], at: wt).isEmpty)
         let lines = try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init)
         #expect(lines == ["\(String(repeating: "0", count: 40)) \(f.newer) 1"])
     }
@@ -298,7 +299,7 @@ struct CheckoutTemplateStoreTests {
     // MARK: - Template refresh
 
     @Test func refreshRewritesOnlyChangedPaths() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
@@ -325,11 +326,11 @@ struct CheckoutTemplateStoreTests {
         ("*.txt ident", "ident.txt"),
     ])
     func baseWithNewAttributesWritesWhatAPlainAddWrites(rule: String, file: String) async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
-        let before = try commit(["ident.txt": "$Id$\n"], in: f.repo)
-        let after = try commit([".gitattributes": rule + "\n"], in: f.repo)
+        let before = try await commit(["ident.txt": "$Id$\n"], in: f.repo)
+        let after = try await commit([".gitattributes": rule + "\n"], in: f.repo)
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
         await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: before)
 
@@ -348,17 +349,17 @@ struct CheckoutTemplateStoreTests {
         // The rule changes the checkout of this blob, or the case proves nothing.
         #expect(plainBytes != templateBytes)
         #expect(try bytes(path, file) == plainBytes)
-        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
+        #expect(try await git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
     }
 
     /// The refresh's fast path is the same two-way move, so it would carry
     /// the old bytes into the template itself and every later clone. Across
     /// an attributes change it must rewrite the template in full.
     @Test func refreshAcrossAnAttributesChangeRewritesTheTemplate() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
-        let after = try commit([".gitattributes": "*.txt text eol=crlf\n"], in: f.repo)
+        let after = try await commit([".gitattributes": "*.txt text eol=crlf\n"], in: f.repo)
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
         await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.newer)
         await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: after)
@@ -371,7 +372,7 @@ struct CheckoutTemplateStoreTests {
             worktreePath: path, branch: "tbd/cloned", baseBranch: after)
         #expect(outcome == .cloned(templateCommit: after))
         #expect(try bytes(path, "edit.txt") == Data("second\r\n".utf8))
-        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
+        #expect(try await git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: path)).isEmpty)
     }
 
     /// A setting outside the tree that changes how blobs are written makes
@@ -380,14 +381,14 @@ struct CheckoutTemplateStoreTests {
     /// setting so clones resume.
     @Test(arguments: ["core.autocrlf", "info/attributes"])
     func changedConversionSettingRebuildsTheTemplate(setting: String) async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         guard volumeCanClone(f.root) else { return }
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
         let paths = store.paths(repoID: f.repoID)
         await store.refresh(git: GitManager(), repoID: f.repoID, repoPath: f.repo.path, toCommit: f.newer)
         if setting == "core.autocrlf" {
-            try git(["config", "core.autocrlf", "true"], at: f.repo)
+            try await git(["config", "core.autocrlf", "true"], at: f.repo)
         } else {
             try write("*.txt text eol=crlf\n", to: f.repo.appendingPathComponent(".git/info/attributes"))
         }
@@ -409,13 +410,13 @@ struct CheckoutTemplateStoreTests {
             worktreePath: second, branch: "tbd/second", baseBranch: f.newer)
         #expect(again == .cloned(templateCommit: f.newer))
         #expect(try bytes(second, "edit.txt") == Data("second\r\n".utf8))
-        #expect(try git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: second)).isEmpty)
+        #expect(try await git(["status", "--porcelain", "--ignored"], at: URL(fileURLWithPath: second)).isEmpty)
     }
 
     // MARK: - Hooks
 
     @Test func postCheckoutRunsOnceWithWorktreeAddArguments() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let log = f.root.appendingPathComponent("hook.log")
         try installHook(in: f.repo, body: "echo \"$1 $2 $3\" >> '\(log.path)'")
@@ -436,7 +437,7 @@ struct CheckoutTemplateStoreTests {
     }
 
     @Test func failingPostCheckoutFailsTheCreate() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         try installHook(in: f.repo, body: "exit 1")
         let store = CheckoutTemplateStore(reposDir: f.reposDir)
@@ -452,7 +453,7 @@ struct CheckoutTemplateStoreTests {
     // MARK: - The flag's two branches
 
     @Test func flagOffTakesThePlainPathAndBuildsNoTemplate() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: f.repo.path, displayName: "acme", defaultBranch: "main")
@@ -465,11 +466,11 @@ struct CheckoutTemplateStoreTests {
             repo: repo, worktreePath: f.worktreePath("off"), branch: "tbd/off", baseBranch: "main")
         #expect(outcome == nil)
         #expect(!FileManager.default.fileExists(atPath: store.paths(repoID: repo.id).root.path))
-        #expect(try git(["status", "--porcelain"], at: URL(fileURLWithPath: f.worktreePath("off"))).isEmpty)
+        #expect(try await git(["status", "--porcelain"], at: URL(fileURLWithPath: f.worktreePath("off"))).isEmpty)
     }
 
     @Test func flagOnRoutesThroughTheStore() async throws {
-        let f = try makeFixture()
+        let f = try await makeFixture()
         defer { try? FileManager.default.removeItem(at: f.root) }
         let db = try TBDDatabase(inMemory: true)
         try await db.config.setCloneCheckoutEnabled(true)
@@ -483,7 +484,7 @@ struct CheckoutTemplateStoreTests {
         // A repo created this test has no template yet, so the store reports
         // the full write; the point is that the store, not `worktreeAdd`, ran.
         #expect(outcome == .materialized(reason: "no template"))
-        #expect(try git(["status", "--porcelain"], at: URL(fileURLWithPath: f.worktreePath("on"))).isEmpty)
+        #expect(try await git(["status", "--porcelain"], at: URL(fileURLWithPath: f.worktreePath("on"))).isEmpty)
     }
 
     // MARK: - Helpers
@@ -499,13 +500,13 @@ struct CheckoutTemplateStoreTests {
     }
 
     /// Commits `files` on top of the repo's HEAD and returns the new SHA.
-    private func commit(_ files: [String: String], in repo: URL) throws -> String {
+    private func commit(_ files: [String: String], in repo: URL) async throws -> String {
         for (name, text) in files {
             try write(text, to: repo.appendingPathComponent(name))
         }
-        try git(["add", "-A"], at: repo)
-        try git(["commit", "-m", "update \(files.keys.sorted().joined(separator: ", "))"], at: repo)
-        return try git(["rev-parse", "HEAD"], at: repo)
+        try await git(["add", "-A"], at: repo)
+        try await git(["commit", "-m", "update \(files.keys.sorted().joined(separator: ", "))"], at: repo)
+        return try await git(["rev-parse", "HEAD"], at: repo)
     }
 
     private func bytes(_ directory: String, _ file: String) throws -> Data {
@@ -529,22 +530,21 @@ struct CheckoutTemplateStoreTests {
         return info.l2p_devoffset
     }
 
+    /// Runs `/usr/bin/git` and returns its trimmed stdout. Waits through
+    /// `collectOutput(of:)`, so none of the suite's git calls parks a
+    /// cooperative-pool thread, and stderr is drained rather than left to fill
+    /// its pipe.
     @discardableResult
-    private func git(_ arguments: [String], at directory: URL) throws -> String {
+    private func git(_ arguments: [String], at directory: URL) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         process.arguments = arguments
         process.currentDirectoryURL = directory
         process.environment = ProcessInfo.processInfo.environment.merging(["LC_ALL": "C"]) { _, new in new }
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = Pipe()
-        try process.run()
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw NSError(domain: "CheckoutTemplateStoreTests", code: Int(process.terminationStatus))
+        let output = try await collectOutput(of: process)
+        guard output.status == 0 else {
+            throw NSError(domain: "CheckoutTemplateStoreTests", code: Int(output.status))
         }
-        return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(decoding: output.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

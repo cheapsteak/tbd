@@ -165,8 +165,12 @@ a link count equal to the checkout count.
 **Stop pinning hardlink; let the tool choose, or pin clone explicitly on APFS.**
 For `uv`, remove the `UV_LINK_MODE=hardlink` export, or set
 `UV_LINK_MODE=clone`. Existing environments keep their old link counts until
-rebuilt, so converting them requires a reinstall (`uv sync --reinstall`, or
-deleting and re-provisioning the environment).
+something rewrites them, so the setting alone changes nothing on a machine that
+already has them. Convert them in place with the script under "Converting
+existing environments" below — no network and no lockfile, run while nothing is
+installing. Reinstalling (`uv sync --reinstall`, or deleting
+and re-provisioning) also works and is the right choice if you wanted a fresh
+resolve anyway, but it is an alternative, not a requirement.
 
 Two things to fix alongside it, or the change will be undone by its own guardrails:
 
@@ -202,56 +206,61 @@ Three approaches, because the differences matter more than they look:
 - **`clonefile(2)` per file from a single process, replaced atomically** — the
   one to use. It has the speed of the recursive copy (~855 files/sec measured)
   without the window: each file is swapped with `os.replace()`, so a reader
-  sees either the old inode or the new one and never a missing path. Safe to
-  run against checkouts with live sessions.
+  sees either the old inode or the new one and never a missing path. Running
+  processes that only read the tree are unaffected, which the directory swap
+  cannot offer. Anything *writing* into the tree is another matter; see below.
 
-The third, in full:
+That third approach is implemented in
+[`scripts/reclone-hardlinked-deps.py`](../../scripts/reclone-hardlinked-deps.py)
+in this repository:
 
-```python
-"""Convert hardlinked files to APFS clones in place. Content is byte-identical
-and blocks stay shared, so this costs no real disk -- it only breaks the link
-count that macOS `mds` fans out across."""
-import ctypes, ctypes.util, os, sys
-
-libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-libc.clonefile.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
-libc.clonefile.restype = ctypes.c_int
-
-def convert(root):
-    done = failed = 0
-    for dirpath, _dirs, files in os.walk(root):
-        for name in files:
-            p = os.path.join(dirpath, name)
-            try:
-                st = os.lstat(p)
-                if not os.path.isfile(p) or os.path.islink(p) or st.st_nlink <= 1:
-                    continue
-                tmp = os.path.join(dirpath, f".__cl{os.getpid()}_{name}")
-                try:
-                    if libc.clonefile(p.encode(), tmp.encode(), 0) != 0:
-                        raise OSError(ctypes.get_errno(), p)
-                    os.chmod(tmp, st.st_mode & 0o7777)
-                    os.utime(tmp, (st.st_atime, st.st_mtime))
-                    os.replace(tmp, p)          # atomic; p is never absent
-                    done += 1
-                except Exception:
-                    try: os.unlink(tmp)
-                    except OSError: pass
-                    failed += 1
-            except OSError:
-                failed += 1
-    return done, failed
-
-if __name__ == "__main__":
-    print("cloned=%d failed=%d" % convert(sys.argv[1]))
+```sh
+scripts/reclone-hardlinked-deps.py --dry-run          # every TBD worktree
+scripts/reclone-hardlinked-deps.py                    # convert them
+scripts/reclone-hardlinked-deps.py PATH [PATH ...]    # specific worktrees
+scripts/reclone-hardlinked-deps.py --base DIR         # another worktree root
 ```
 
-Two things to check before running it against a live checkout:
+It defaults to `$TBD_HOME/worktrees/<repo>/<worktree>`, but takes explicit paths
+or `--base`, so it is useful outside TBD too. A path may be a worktree or a
+dependency tree itself: `node_modules`, `vendor/bundle`, or a virtualenv, which
+is narrowed to its `lib/` exactly as the worktree scan does. Beyond the bare
+`clonefile` loop it carries the parts this investigation showed were necessary
+rather than decorative:
 
-- **No installer is mid-flight.** A running `uv sync` or `pip install` writing
-  into the tree is the one case that genuinely loses data. Everything else is
-  safe, including processes with open file descriptors — POSIX keeps the inode
-  alive across replace and unlink, so anything already executing is unaffected.
+- **An installer preflight** — it declines to start while an installer for any
+  tree kind it converts is visible in the process table running a subcommand
+  that writes: `uv`, `pip`, `pip-sync`, `poetry`, `pdm`, `npm`, `pnpm`, `yarn`,
+  `bun` or Bundler. It reads the process table once, at start, so it is a
+  preflight, not a lock.
+- **A changed-file check** — just before each replace the original is looked up
+  again, and a file whose inode, size or mtime moved during its clone is left
+  as found and reported. That narrows the race with a concurrent installer; it
+  does not close it.
+- **Progress for every tree, unbuffered** — clean trees are reported too, so a
+  long scan cannot be mistaken for a hang.
+- **Loud refusals** — a path that does not exist is an error instead of
+  "nothing to do", and an empty scan is a failure, because "found nothing" and
+  "everything is already converted" must not be indistinguishable.
+- **Orphan cleanup** — each swap goes through a short temp name,
+  `.__reclone<pid>_<n>`, beside the file. A run killed mid-swap leaves one
+  behind, and the next run removes any whose process is gone — including the
+  `.__cl<pid>_<name>` temps of a bare `clonefile` loop.
+- **Verification afterwards** — no hardlinks and no temp files remain, and each
+  converted virtualenv's interpreter still starts.
+
+Two things to check around running it:
+
+- **Run it while the fleet is idle.** An installer writing into a tree during
+  the conversion is the one case that genuinely loses data, and neither check
+  above excludes one that starts after the preflight. That includes `uv run`,
+  which syncs the virtualenv before it runs its command. The preflight
+  deliberately does not match `uv run`, nor any other run or exec command:
+  each lives as long as what it runs, so matching them would block the script
+  for as long as any agent or dev server is up. Processes that only read the
+  tree are safe, including ones with open file descriptors — POSIX keeps the
+  inode alive across replace and unlink, so anything already executing is
+  unaffected.
 - **Verify afterwards**, since a silent partial conversion looks like success:
   the interpreter still starts, a few third-party imports resolve, the
   site-packages count is unchanged, and `find <venv> -type f -links +1` is

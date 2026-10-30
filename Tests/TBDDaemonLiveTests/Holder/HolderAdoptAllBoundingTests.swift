@@ -4,6 +4,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// A holder that is **reachable but will not answer** — the only failure shape
 /// `adoptAll`'s bounding exists for.
@@ -113,15 +114,51 @@ private final class WedgedRendezvous: @unchecked Sendable {
 /// `adoptAll` runs before the socket bind, so its duration is the daemon's
 /// silence. These pin that the silence is bounded — per holder, and in total —
 /// rather than growing with however many holders happen to be wedged.
+///
+/// **Every registry here takes short stand-ins for both bounding knobs**, so a
+/// wedged row costs half a second rather than the production two, and
+/// the suite pays for the shape of the bounding rather than for its size. Each
+/// test states what it discriminates against the stand-ins; the one production
+/// number the suite depends on — that the adoption timeout sits far below a
+/// session connection's — is pinned directly in the first test.
 @Suite("HolderRegistry adoptAll bounding")
 struct HolderAdoptAllBoundingTests {
 
-    /// One wedged holder must cost the adoption budget, not the general-purpose
-    /// receive budget a long-lived connection gets.
+    /// The per-row receive timeout every registry here uses in place of
+    /// `HolderRegistry.defaultAdoptionReceiveTimeout`.
     ///
-    /// The discrimination is the gap between the two: `defaultReceiveTimeout` is
-    /// 10 s, so a per-row bound anywhere near it fails this outright.
+    /// It bounds the *healthy* rows too: the two tests that rescue a live
+    /// holder adopt it under this same timeout, so it has to cover a real
+    /// handshake with room to spare, not only stand in for a wedged one. A
+    /// holder answers from a poll that wakes on the connect, in single-digit
+    /// milliseconds on an idle machine; half a second leaves room for a
+    /// scheduling stall under load and still sits well under the production
+    /// two seconds the first test's upper bound must tell it apart from.
+    private static let receiveTimeout: Duration = .milliseconds(500)
+
+    /// The phase budget every registry here uses in place of
+    /// `HolderRegistry.defaultAdoptAllBudget`. Shorter than one receive timeout
+    /// on purpose: the loop checks the budget only *between* rows, and the
+    /// first row is always reached — nothing suspends between arming the timer
+    /// and the first check — so a budget under one row's cost makes "the walk
+    /// stopped after the first wedged row" deterministic rather than a race
+    /// between two clocks.
+    private static let budget: Duration = .milliseconds(100)
+
+    /// One wedged holder must cost the adoption receive timeout, not the
+    /// general-purpose one a long-lived connection gets.
+    ///
+    /// The discrimination is the gap between the two. This registry is handed
+    /// a 500 ms adoption timeout, so a registry that ignored it — falling back
+    /// to `HolderClient.defaultReceiveTimeout` (10 s), or to the production
+    /// default (2 s) — fails the upper bound outright.
     @Test func anUnresponsiveHolderCostsSecondsNotTens() async throws {
+        // The production numbers the stand-ins replace: an adoption is one
+        // handshake, so its bound sits well under a session connection's.
+        #expect(
+            HolderRegistry.defaultAdoptionReceiveTimeout < HolderClient.defaultReceiveTimeout / 2,
+            "the adoption receive timeout is no longer far below a session connection's")
+
         let home = HolderProcessFixture.scratchHome()
         defer { try? FileManager.default.removeItem(atPath: home) }
         let wedged = try #require(WedgedRendezvous(home: home))
@@ -134,7 +171,7 @@ struct HolderAdoptAllBoundingTests {
             _ = await registry.adoptAll()
         }
         #expect(
-            elapsed < .seconds(6),
+            elapsed < .milliseconds(1500),
             "one wedged holder held the daemon for \(elapsed) before it could bind its socket")
         // Two more assertions, because the upper bound alone passes vacuously:
         // if this fixture's path and the registry's ever diverged, `connect`
@@ -150,48 +187,11 @@ struct HolderAdoptAllBoundingTests {
         // therefore `nil` here whether the row was probed or skipped, and can
         // no longer discriminate.
         #expect(
-            elapsed > .seconds(1),
+            elapsed > Self.receiveTimeout / 2,
             "the wedged holder cost only \(elapsed), under one receive timeout: nothing waited")
         #expect(
             await registry.attachRoundTripsStarted == 1,
             "the wedged row was never probed at all")
-    }
-
-    /// The phase as a whole is bounded, not merely each holder in it.
-    ///
-    /// Four wedged holders at a two-second per-row bound is eight seconds of
-    /// silence if nothing stops the walk, so the budget has to leave at least
-    /// one row unprobed — counted by the round trips the registry opened,
-    /// which is the one instrument that separates a row it reached from a row
-    /// it never got to.
-    ///
-    /// **Not by the absence of a recorded status.** A wedged holder is a
-    /// holder that may well be alive, so `adoptOne` records nothing for a
-    /// probed one either; only nothing *bound* at the rendezvous is evidence
-    /// the session is over. So no row here is branded, and the branding cannot
-    /// tell reached from skipped.
-    @Test func aWedgedFleetStopsAtTheBudgetRatherThanProbingEveryRow() async throws {
-        let home = HolderProcessFixture.scratchHome()
-        defer { try? FileManager.default.removeItem(atPath: home) }
-        var wedged: [WedgedRendezvous] = []
-        for _ in 0..<4 { wedged.append(try #require(WedgedRendezvous(home: home))) }
-        defer { for holder in wedged { holder.tearDown() } }
-
-        let rows = wedged.map(\.terminal)
-        let registry = makeRegistry(home: home, terminals: rows)
-        defer { releaseInBackground(registry) }
-
-        let elapsed = await ContinuousClock().measure {
-            _ = await registry.adoptAll()
-        }
-        #expect(
-            elapsed < .seconds(12),
-            "four wedged holders held the daemon for \(elapsed); the phase is not bounded")
-
-        let probed = await registry.attachRoundTripsStarted
-        #expect(
-            probed < rows.count,
-            "all \(rows.count) wedged rows were probed; the budget never stopped the walk")
     }
 
     /// A live session is still rescued when it shares the fleet with wedged
@@ -215,10 +215,7 @@ struct HolderAdoptAllBoundingTests {
             id: fixture.sessionID, worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             transport: .holder)
         let rows = [healthy] + wedged.map(\.terminal)
-        let registry = HolderRegistry(
-            owner: fixture.owner,
-            environment: HolderProcessFixture.environment(home: fixture.home),
-            listTerminals: { rows })
+        let registry = makeRegistry(owner: fixture.owner, home: fixture.home, terminals: rows)
         defer { releaseInBackground(registry) }
 
         let elapsed = await ContinuousClock().measure {
@@ -227,40 +224,59 @@ struct HolderAdoptAllBoundingTests {
         let reader = await registry.reader(for: fixture.sessionID)
         #expect(reader != nil, "the healthy holder was not adopted")
         #expect(
-            elapsed < .seconds(12),
+            elapsed < .seconds(3),
             "three wedged holders held the daemon for \(elapsed) after the healthy one was adopted")
     }
 
-    /// The rows the budget skipped are handed back for the caller to finish,
-    /// and finishing them really adopts them.
+    /// The phase as a whole is bounded, not merely each row in it — and the
+    /// rows the budget skipped are handed back for the caller to finish, and
+    /// finishing them really adopts them.
     ///
-    /// This is the half that keeps the budget from being a leak. `adoptAll` is
-    /// the only caller of `adopt` in the daemon, so a row it walked away from
-    /// and did not report would stay undrained for the process's whole life —
-    /// and an undrained pty master stops the job on it from finishing its exit.
-    /// The healthy holder is listed **last**, behind enough wedged ones to
-    /// spend the budget, so it is a live session that the bounded pass provably
-    /// did not reach.
+    /// **The walk stops.** Two wedged rows ahead of a live one, at a budget
+    /// shorter than one row's receive timeout, must leave rows unprobed —
+    /// counted by the round trips the registry opened, which is the one
+    /// instrument that separates a row it reached from a row it never got to.
+    /// Not by the absence of a recorded status: a wedged holder may well be
+    /// alive, so `adoptOne` records nothing for a probed one either, and only
+    /// nothing *bound* at the rendezvous is evidence the session is over. So
+    /// no row here is branded, and the branding cannot tell reached from
+    /// skipped.
+    ///
+    /// **Nothing is dropped.** This is the half that keeps the budget from
+    /// being a leak. `adoptAll` is the only caller of `adopt` in the daemon, so
+    /// a row it walked away from and did not report would stay undrained for
+    /// the process's whole life — and an undrained pty master stops the job on
+    /// it from finishing its exit. The healthy holder is listed **last**,
+    /// behind the wedged ones, so it is a live session that the bounded pass
+    /// provably did not reach.
     @Test func theRowsTheBudgetSkippedAreHandedBackAndStillAdoptable() async throws {
         let fixture = try await HolderProcessFixture.start(command: "sleep 30")
         defer { fixture.tearDown() }
         await fixture.client.close()
 
         var wedged: [WedgedRendezvous] = []
-        for _ in 0..<4 { wedged.append(try #require(WedgedRendezvous(home: fixture.home))) }
+        for _ in 0..<2 { wedged.append(try #require(WedgedRendezvous(home: fixture.home))) }
         defer { for holder in wedged { holder.tearDown() } }
 
         let healthy = Terminal(
             id: fixture.sessionID, worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
             transport: .holder)
         let rows = wedged.map(\.terminal) + [healthy]
-        let registry = HolderRegistry(
-            owner: fixture.owner,
-            environment: HolderProcessFixture.environment(home: fixture.home),
-            listTerminals: { rows })
+        let registry = makeRegistry(owner: fixture.owner, home: fixture.home, terminals: rows)
         defer { releaseInBackground(registry) }
 
+        let clock = ContinuousClock()
+        let started = clock.now
         let unreached = await registry.adoptAll()
+        let elapsed = started.duration(to: clock.now)
+
+        let probed = await registry.attachRoundTripsStarted
+        #expect(
+            probed < rows.count,
+            "all \(rows.count) rows were probed; the budget never stopped the walk")
+        #expect(
+            elapsed < .seconds(3),
+            "two wedged holders held the daemon for \(elapsed); the phase is not bounded")
         #expect(
             unreached.contains(where: { $0.id == fixture.sessionID }),
             "the live session the budget skipped was not handed back")
@@ -275,13 +291,20 @@ struct HolderAdoptAllBoundingTests {
     // MARK: - Support
 
     /// A registry whose rendezvous paths come from an explicit environment, so
-    /// nothing here can reach the developer's real `~/tbd` even for an instant.
-    /// The owner is irrelevant to a wedged holder, which never names one.
-    private func makeRegistry(home: String, terminals: [Terminal]) -> HolderRegistry {
+    /// nothing here can reach the developer's real `~/tbd` even for an instant,
+    /// built with the suite's stand-ins for both bounding knobs. The default
+    /// owner suits a wedged holder, which never names one.
+    private func makeRegistry(
+        owner: HolderOwnerToken = HolderOwnerToken(rawValue: "acme-installation"),
+        home: String,
+        terminals: [Terminal]
+    ) -> HolderRegistry {
         HolderRegistry(
-            owner: HolderOwnerToken(rawValue: "acme-installation"),
+            owner: owner,
             environment: HolderProcessFixture.environment(home: home),
-            listTerminals: { terminals })
+            listTerminals: { terminals },
+            adoptAllBudget: Self.budget,
+            adoptionReceiveTimeout: Self.receiveTimeout)
     }
 }
 

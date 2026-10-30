@@ -7,7 +7,7 @@ of everything else.
 Related: [`2026-08-11-event-driven-test-clock-design.md`](2026-08-11-event-driven-test-clock-design.md)
 (the clock itself), [`2026-10-07-flake-autofix-design.md`](2026-10-07-flake-autofix-design.md)
 (the ledger whose records are the evidence here), and `Tests/CLAUDE.md`,
-"Clock and date seams" and "The event-driven alternative".
+"Clock and date seams" and "The event-driven clock".
 
 ## 1. Why
 

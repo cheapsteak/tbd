@@ -105,9 +105,9 @@ enum NotificationHookPlan {
             // guessing text for it would be worse than carrying none.
             message: payload.message ?? "",
             title: payload.title,
-            // Verbatim, byte for byte as it arrived — this is what rides into a
-            // briefing, and what lets a later consumer read a field this build
-            // does not model.
+            // Verbatim, byte for byte as it arrived — this is what the daemon
+            // keeps as `AwaitingInputReason.raw`, and what lets a later
+            // consumer read a field this build does not model.
             rawPayload: String(data: stdin, encoding: .utf8),
             cwd: payload.cwd
         ))

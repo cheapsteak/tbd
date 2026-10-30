@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 import TBDShared
 
-/// Overlay body for a `.systemReminder` item (non-skillBody kinds).
+/// Overlay body for a `.systemReminder` item (kinds other than `.skillBody`
+/// and `.compactSummary`, which have their own).
 ///
 /// Injected-context rows (CLAUDE.md bodies, hook output) are capped at
 /// `TranscriptParser.bodyCharCap` like any other body, so this offers the same

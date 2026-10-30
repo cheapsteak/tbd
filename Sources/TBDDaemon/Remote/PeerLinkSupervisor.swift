@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import os
 import TBDShared
+import TBDKernel
 
 private let peerBridgeLogger = Logger(subsystem: "com.tbd.daemon", category: "peer-bridge")
 

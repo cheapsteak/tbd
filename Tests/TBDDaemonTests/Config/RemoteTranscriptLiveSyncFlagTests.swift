@@ -4,6 +4,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// Schema and resolution guards for `config.remote_transcript_live_sync_enabled`,

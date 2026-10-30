@@ -1,0 +1,3 @@
+# Session mod
+
+This folder is the source of the session mod: the hooks module TBD writes into its `tbd` Claude Code plugin while a session-mod feature flag is on, with a test-harness manifest that is never shipped. `scripts/gen-session-mod-content.py` embeds `hooks/` and `types/index.d.ts` into `Sources/TBDShared/SessionModContent.swift`, from which the daemon writes them, so rerun it after every change here (`--check` reports a stale copy). Validate with `claude plugin validate --strict SessionMod` and run the tests with `claude plugin test SessionMod`; the `session-mod` CI job runs all three.

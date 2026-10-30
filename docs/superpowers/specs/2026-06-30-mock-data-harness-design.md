@@ -95,7 +95,7 @@ Tests/Fixtures/mock-state/
 ```
 
 - Scenario JSON is a Codable document decoded by `MockSeeder` into the existing model types and inserted via the existing stores, so it can never drift from the live schema.
-- Placeholder repos only: `acme` / `acme-prod` (never real/Longeye names, per project rule).
+- Placeholder repos only: `acme` / `acme-prod` (never real names, per project rule).
 - `Terminal.transcriptPath` entries point at the committed `transcripts/*.jsonl` fixtures (resolved relative to the fixture file).
 - Scenarios are additive — the library grows over time (default, conflict/dirty git states, suspended terminals, deep worktree trees, PR-badge matrix, etc.).
 

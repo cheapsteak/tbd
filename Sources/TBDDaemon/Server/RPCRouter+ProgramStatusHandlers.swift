@@ -17,14 +17,9 @@ extension RPCRouter {
         return .ok()
     }
 
-    /// Every terminal's current snapshot; empty while the flag is off.
+    /// Every terminal's current snapshot.
     func handleTerminalProgramStatusList() async throws -> RPCResponse {
-        let snapshots: [ProgramStatusSnapshot]
-        if programStatus.gate.isEnabled {
-            snapshots = await programStatus.allSnapshots()
-        } else {
-            snapshots = []
-        }
+        let snapshots = await programStatus.allSnapshots()
         return try RPCResponse(result: TerminalProgramStatusListResult(snapshots: snapshots))
     }
 }

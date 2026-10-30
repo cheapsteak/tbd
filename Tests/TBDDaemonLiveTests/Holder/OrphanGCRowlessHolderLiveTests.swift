@@ -47,8 +47,20 @@ struct OrphanGCRowlessHolderLiveTests {
             scratchpadBase: URL(fileURLWithPath: home + "/s", isDirectory: true),
             now: { horizon },
             profileDirBase: URL(fileURLWithPath: home + "/p", isDirectory: true),
+            hangStackBase: URL(fileURLWithPath: home + "/hs", isDirectory: true),
             holdersBase: TBDConstants.holdersDir(
-                environment: HolderProcessFixture.environment(home: home)))
+                environment: HolderProcessFixture.environment(home: home)),
+            // Every other base the sweep walks stays inside the fixture's home
+            // too, so the day-ahead `now` reads nothing another suite left
+            // under the process-global `TBD_HOME`.
+            attachmentsBase: URL(fileURLWithPath: home + "/a", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": home],
+            reposBase: URL(fileURLWithPath: home + "/repos", isDirectory: true),
+            sessionsBase: URL(fileURLWithPath: home + "/se", isDirectory: true),
+            devServersBase: URL(fileURLWithPath: home + "/ds", isDirectory: true),
+            retainedTranscriptsBase: URL(fileURLWithPath: home + "/rt", isDirectory: true),
+            scratchSpacesBase: URL(fileURLWithPath: home + "/sc", isDirectory: true),
+            worktreesBase: URL(fileURLWithPath: home + "/wt", isDirectory: true))
     }
 
     private func armedDatabase(owner: String) async throws -> TBDDatabase {

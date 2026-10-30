@@ -41,7 +41,7 @@ func nonEmptyPeerField(_ value: String?) -> String? {
 /// round-trip as an integer, so the filename is the authority.
 ///
 /// This deliberately duplicates the daemon's `LocalPeerRegistryRecord` rather
-/// than sharing it. `TBDCLI` links `TBDShared` and nothing else — it reaches
+/// than sharing it. `TBDCLI` links no daemon code — it reaches
 /// the daemon over a socket, never by linking it — and the daemon's reader
 /// carries roster-admission concerns (announced names, handle minting) that
 /// have no meaning here. Both are readers of the same third-party format, and

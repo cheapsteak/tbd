@@ -110,9 +110,10 @@ public enum TerminalKind: String, Codable, Sendable {
     ///
     /// A plain shell has none of those, so a surface that describes agent
     /// sessions must not describe it: a report explaining that a shell's
-    /// context window is unknown because no statusline tee fired is a true
+    /// context window is unknown because nothing reported it is a true
     /// sentence about a session that was never going to have one, and the stat
-    /// and transcript-tail attempt behind it are paid every cycle for nothing.
+    /// and transcript-tail attempt behind it are paid on every call for
+    /// nothing.
     public var isAgentBearing: Bool { self != .shell }
 }
 
@@ -128,12 +129,6 @@ public enum PrimaryAgentPreference: String, Codable, Sendable, Equatable, CaseIt
         case .codex: return .codex
         }
     }
-}
-
-public enum NightwatchMode: String, Codable, Sendable, CaseIterable {
-    case off
-    case daywatch
-    case nightwatch
 }
 
 /// The compiled provider's reserved name. Reserved **unconditionally** and not
@@ -239,6 +234,12 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     public var archivedAt: Date?
     public var tmuxServer: String
     public var archivedClaudeSessions: [String]?
+    /// The Claude spawn values each archived session's terminal carried, keyed
+    /// by Claude session id. Written in the archive transaction beside
+    /// `archivedClaudeSessions` and cleared with it on revive, so a revived
+    /// session starts with the values it had. Nil when no archived session
+    /// carried any, and on rows written before the column.
+    public var archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]?
     public var sortOrder: Int = 0
     /// HEAD SHA captured at archive time. Used as a fallback when reviving a
     /// worktree whose branch was renamed or deleted before archive ran.
@@ -369,14 +370,6 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
     /// A scratch space is a repo-less worktree. Derived — no separate column.
     public var isScratch: Bool { repoID == nil }
 
-    /// The mode-managed Watch Desk scratch worktree, identified by its fixed
-    /// display name. Not user-pinnable — the sidebar's Day/Night toggle controls
-    /// whether it is shown. Single definition shared by the dock's desk slot and
-    /// the row-action menu's pin suppression, so the two cannot drift.
-    public var isNightwatchDesk: Bool {
-        isScratch && displayName == NightwatchDeskPrompts.deskDisplayName
-    }
-
     /// True when `displayName` has never been customized away from the
     /// auto-generated `name`. Single source of truth for "still default"
     /// shared by the `stop-rename-check` hook (skip firing when already
@@ -404,7 +397,8 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
                 pendingPrompt: String? = nil,
                 pendingPromptSubmit: Bool? = nil,
                 prObservation: PRObservation? = nil,
-                remoteParentAssigned: Bool = false) {
+                remoteParentAssigned: Bool = false,
+                archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil) {
         self.id = id
         self.repoID = repoID
         self.name = name
@@ -438,6 +432,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         self.pendingPromptSubmit = pendingPromptSubmit
         self.prObservation = prObservation
         self.remoteParentAssigned = remoteParentAssigned
+        self.archivedClaudeSpawnExtras = archivedClaudeSpawnExtras
     }
 
     enum CodingKeys: String, CodingKey {
@@ -449,6 +444,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         case promotedToRepoID, prStatus, prNumber, foreignHead, pinnedAt, pinSortOrder
         case locationKind, providerName, providerSessionID, pendingPrompt, pendingPromptSubmit
         case prObservation, remoteParentAssigned
+        case archivedClaudeSpawnExtras
     }
 
     public init(from decoder: Decoder) throws {
@@ -514,6 +510,9 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         // nothing recorded that adoption placed them; `false` is what the
         // column's own backfill then corrects for the rows it can.
         remoteParentAssigned = try c.decodeIfPresent(Bool.self, forKey: .remoteParentAssigned) ?? false
+        // Absent in JSON from a daemon that predates the column.
+        archivedClaudeSpawnExtras = try c.decodeIfPresent(
+            [String: ClaudeSpawnExtras].self, forKey: .archivedClaudeSpawnExtras)
     }
 
     /// Hand-written because `location` is an enum with an associated value that
@@ -558,6 +557,7 @@ public struct Worktree: Codable, Sendable, Identifiable, Equatable {
         try c.encodeIfPresent(pendingPromptSubmit, forKey: .pendingPromptSubmit)
         try c.encodeIfPresent(prObservation, forKey: .prObservation)
         try c.encode(remoteParentAssigned, forKey: .remoteParentAssigned)
+        try c.encodeIfPresent(archivedClaudeSpawnExtras, forKey: .archivedClaudeSpawnExtras)
     }
 }
 
@@ -609,23 +609,6 @@ public enum HibernateReason: String, Codable, Sendable {
         self = HibernateReason(rawValue: raw) ?? .auto
     }
 }
-public enum WatchDeskRole: String, Codable, Sendable, Equatable {
-    case judge
-    case readOnlyCoordinator = "read_only_coordinator"
-
-    public init(from decoder: any Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
-        // A role introduced by a newer daemon must never acquire mutable
-        // semantics in an older app. Render it as read-only and keep decoding.
-        self = Self(rawValue: raw) ?? .readOnlyCoordinator
-    }
-
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
-}
-
 /// Which mechanism carries a terminal's session.
 ///
 /// Recorded at creation and never changed for the life of the session: the
@@ -640,6 +623,42 @@ public enum TerminalTransport: String, Codable, Sendable, Equatable {
     /// relaxed, so such a row carries empty strings there and must be
     /// discriminated by this value alone — never by those columns.
     case holder
+}
+
+/// The Claude spawn values a terminal's starter passed — a settings overlay
+/// and plugin folders — stored unchanged so TBD can apply them to the starts
+/// the starter does not make: wake, account switch, reopen, revive
+/// (docs/specs/2026-10-24-terminal-plugin-dirs-design.md, "What TBD stores").
+///
+/// Stored as the JSON object
+/// `{"claudeSettingsOverlay": <string>, "pluginDirs": [<path>, ...]}`, with a
+/// key omitted when it is nil — on the terminal row, on its history entry, and
+/// as the values of an archived worktree's session-id-keyed map. Unknown keys
+/// are ignored on decode, so later keys can join the object without a
+/// migration. The overlay is stored as plain text and must not hold secrets.
+public struct ClaudeSpawnExtras: Codable, Sendable, Equatable {
+    /// JSON object text merged into the session's settings file.
+    public var claudeSettingsOverlay: String?
+    /// Absolute plugin folder paths, each passed as `--plugin-dir`.
+    public var pluginDirs: [String]?
+
+    public init(claudeSettingsOverlay: String? = nil, pluginDirs: [String]? = nil) {
+        self.claudeSettingsOverlay = claudeSettingsOverlay
+        self.pluginDirs = pluginDirs
+    }
+
+    /// These values with an empty field normalized to nil — an overlay that is
+    /// nil or whitespace only, a `pluginDirs` that is nil or empty — or nil
+    /// when both fields are empty, so "nothing passed" has one spelling. A
+    /// non-blank overlay is kept verbatim, not trimmed.
+    public var nonEmpty: ClaudeSpawnExtras? {
+        let overlay = claudeSettingsOverlay.flatMap {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        }
+        let dirs = pluginDirs.flatMap { $0.isEmpty ? nil : $0 }
+        guard overlay != nil || dirs != nil else { return nil }
+        return ClaudeSpawnExtras(claudeSettingsOverlay: overlay, pluginDirs: dirs)
+    }
 }
 
 public struct Terminal: Codable, Sendable, Identifiable, Equatable {
@@ -668,8 +687,12 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// begin. Nil means no durable boundary is known for this session.
     public var codexTranscriptBoundaryOffset: Int64?
     /// Durable process-incarnation nonce used to reject delayed SessionStart
-    /// hooks after a terminal is recreated. Nil identifies legacy and newly
-    /// created rows until their first process replacement.
+    /// hooks after a terminal is recreated. A Claude spawn made with a
+    /// session-mod feature on carries one from creation, unless it forks a new
+    /// session (`--fork-session`: a carryover, a forked profile swap), which
+    /// learns its session ID only after it starts. Nil identifies legacy rows,
+    /// those forks, and rows created with every feature off, until their first
+    /// process replacement.
     public var sessionIncarnationID: UUID?
     /// Replacement token staged while the current process is being made
     /// inert. Process-bound hooks are rejected while this is non-nil; tmux
@@ -704,9 +727,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// row). Drives the "⏳ resumes 1:01pm" tab badge. Optional for
     /// decode-compat with pre-v43 rows/JSON.
     public var pendingResumeAt: Date?
-    /// Explicit Watch Desk authority. Nil means an ordinary terminal.
-    /// The lease row, not this display marker, is authoritative for mutation.
-    public var watchDeskRole: WatchDeskRole?
     /// Where `activityState` came from. `nil` on rows written before the
     /// provenance columns existed, and on rows a future writer forgets to
     /// stamp — which is why `observedActivity` refuses to build a fact out of
@@ -746,19 +766,23 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
     /// session was parked, which is exactly the case `createdAt` alone cannot
     /// describe. Cleared with the two pid columns when a row parks.
     public var holderChildStartedAt: Date?
-    /// Absolute path of the model proxy's transcript stream file for this
-    /// session, or nil when the session was never routed through the proxy.
-    ///
-    /// Stamped at spawn and never changed afterwards: a session's base URL is
-    /// fixed in the environment it starts with, so a terminal either has a
-    /// stream file for its whole life or never gets one, and flipping the
-    /// flags later changes neither. A nil here means "register no stream" —
-    /// the app renders exactly what it renders today.
-    public var transcriptStreamPath: String?
 
     /// The declared dev server this tab runs, or nil for every other tab.
     /// Stamped at spawn and never changed.
     public var serverName: String?
+
+    /// Why the last automatic wake of this parked tab was held by the user's
+    /// start-admission command, and when. Both are set together on a held wake
+    /// and cleared together by the next successful one. The parked pane's
+    /// notice shows them. Nil on a tab no hold has touched.
+    public var startHeldReason: String?
+    public var startHeldAt: Date?
+
+    /// The Claude spawn values this terminal's starter passed, reapplied on
+    /// every later start of its session. Nil when nothing was passed, on rows
+    /// written before the column existed, and when the stored object does not
+    /// decode.
+    public var claudeSpawnExtras: ClaudeSpawnExtras?
 
     /// `activityState` as a fact — value, source, observed-at — or nil.
     ///
@@ -821,7 +845,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 hibernateReason: HibernateReason? = nil,
                 keepWarm: Bool = false,
                 pendingResumeAt: Date? = nil,
-                watchDeskRole: WatchDeskRole? = nil,
                 activityStateSource: FactSource? = nil,
                 activityStateObservedAt: Date? = nil,
                 activityStateOrderObservedAt: Date? = nil,
@@ -831,7 +854,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
                 holderPID: Int32? = nil,
                 childPID: Int32? = nil,
                 holderChildStartedAt: Date? = nil,
-                transcriptStreamPath: String? = nil) {
+                claudeSpawnExtras: ClaudeSpawnExtras? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.tmuxWindowID = tmuxWindowID
@@ -856,7 +879,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.hibernateReason = hibernateReason
         self.keepWarm = keepWarm
         self.pendingResumeAt = pendingResumeAt
-        self.watchDeskRole = watchDeskRole
         self.activityStateSource = activityStateSource
         self.activityStateObservedAt = activityStateObservedAt
         self.activityStateOrderObservedAt = activityStateOrderObservedAt
@@ -866,7 +888,7 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         self.holderPID = holderPID
         self.childPID = childPID
         self.holderChildStartedAt = holderChildStartedAt
-        self.transcriptStreamPath = transcriptStreamPath
+        self.claudeSpawnExtras = claudeSpawnExtras
     }
 
     enum CodingKeys: String, CodingKey {
@@ -875,11 +897,13 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         case sessionOrderObservedAt, codexTranscriptBoundaryOffset, sessionIncarnationID
         case pendingSessionIncarnationID, kind
         case activityState, presentationActivityState, presentationActivityObservedAt
-        case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt, watchDeskRole
+        case hibernatedAt, hibernateReason, keepWarm, pendingResumeAt
         case activityStateSource, activityStateObservedAt, activityStateOrderObservedAt
         case awaitingInputReason, awaitingInputObservedAt
         case transport, holderPID, childPID, holderChildStartedAt
-        case transcriptStreamPath, serverName
+        case serverName
+        case startHeldReason, startHeldAt
+        case claudeSpawnExtras
     }
 
     public init(from decoder: Decoder) throws {
@@ -912,7 +936,6 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         hibernateReason = try c.decodeIfPresent(HibernateReason.self, forKey: .hibernateReason)
         keepWarm = try c.decodeIfPresent(Bool.self, forKey: .keepWarm) ?? false
         pendingResumeAt = try c.decodeIfPresent(Date.self, forKey: .pendingResumeAt)
-        watchDeskRole = try c.decodeIfPresent(WatchDeskRole.self, forKey: .watchDeskRole)
         // Absent in JSON written before the state model's provenance columns.
         // Such a row carries a value with no source and no age, and
         // `observedActivity` reports exactly that by returning nil.
@@ -934,8 +957,11 @@ public struct Terminal: Codable, Sendable, Identifiable, Equatable {
         holderPID = try c.decodeIfPresent(Int32.self, forKey: .holderPID)
         childPID = try c.decodeIfPresent(Int32.self, forKey: .childPID)
         holderChildStartedAt = try c.decodeIfPresent(Date.self, forKey: .holderChildStartedAt)
-        transcriptStreamPath = try c.decodeIfPresent(String.self, forKey: .transcriptStreamPath)
         serverName = try c.decodeIfPresent(String.self, forKey: .serverName)
+        startHeldReason = try c.decodeIfPresent(String.self, forKey: .startHeldReason)
+        startHeldAt = try c.decodeIfPresent(Date.self, forKey: .startHeldAt)
+        // Absent in JSON from a daemon that predates the column.
+        claudeSpawnExtras = try c.decodeIfPresent(ClaudeSpawnExtras.self, forKey: .claudeSpawnExtras)
     }
 }
 
@@ -1042,13 +1068,13 @@ public extension Terminal {
     /// explicitly. Still refuses to hibernate an in-flight turn or a raised
     /// permission hand.
     ///
-    ///
     /// The rails are the same on every transport. Park and wake on the holder
-    /// transport do not go through tmux at all — the park writes `/exit` to the
-    /// holder's pty, confirms the child is gone, and clears the row's pids, and
-    /// the wake spawns a fresh holder running `claude --resume`. A holder row's
-    /// `tmuxWindowID`/`tmuxPaneID` are empty strings by construction and
-    /// neither path reads them.
+    /// transport do not go through tmux at all — the park ends the child by
+    /// SIGTERM (abandoning the holder if that does not end it), confirms the
+    /// child is gone, and clears the row's pids, and the wake spawns a fresh
+    /// holder running `claude --resume`. A holder row's `tmuxWindowID`/
+    /// `tmuxPaneID` are empty strings by construction and neither path reads
+    /// them.
     func isManuallyHibernatable() -> Bool {
         guard isClaudeResumable else { return false }
         guard hibernatedAt == nil, suspendedAt == nil else { return false }
@@ -1439,16 +1465,11 @@ public struct Config: Codable, Sendable, Equatable {
     /// spawns. `nil` means "fall back to the global default profile"
     /// (`defaultProfileID`).
     public var scratchProfileOverrideID: UUID?
-    /// Nightwatch mode flag: off, daywatch, or nightwatch.
-    public var nightwatchMode: NightwatchMode
     /// Master switch for the daemon-side auto-hibernate idle timer. Default
-    /// OFF: the idle sweep drives a sanctioned TUI screen-scrape
-    /// (`HibernationSafetyChecks.hasPendingInput`) whose failure direction is
-    /// asymmetric — a composer-rendering change in Claude Code could let the
-    /// park eat typed-but-unsent input — so it is opt-in. When true, idle
-    /// Claude sessions are auto-hibernated to reclaim memory (their prompt
-    /// cache has already expired, so resume is cheap). When false, only manual
-    /// "Hibernate now" hibernates.
+    /// OFF. When true, idle Claude sessions are auto-hibernated to reclaim
+    /// memory (their prompt cache has already expired, so resume is cheap),
+    /// and the composer-draft feature is on for as long as it stays true (see
+    /// `composerDraftEnabled`). When false, the idle sweep parks nothing.
     public var autoHibernateEnabled: Bool
     /// Minutes a Claude session must sit idle-at-rest before the auto-hibernate
     /// timer terminates its process. Clamped to a sane floor by the daemon.
@@ -1462,14 +1483,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// classified as `ScheduledResume.apiErrorLimitType` rather than a hard
     /// usage-limit hit. Default OFF.
     public var autoResumeOnApiError: Bool
-    /// Soak flag for the input-pipeline pending-input veto (design spec
-    /// 2026-07-09). When true, the auto-hibernate idle sweep includes a
-    /// machine-interface guard against parking a pane with typed-but-unsent
-    /// input: if any keystroke arrived at or after the session went idle, the
-    /// park is vetoed. When false (the default), only the TUI scrape veto
-    /// applies. The input veto is opt-in until it soaks and the v50 master
-    /// default is reverted.
-    public var hibernateInputVetoEnabled: Bool
     /// Soak flag for auto-closing the setup-hook tab after a clean run.
     /// When true AND a setup hook resolves, the hook's exit code is written
     /// to a marker file; exit 0 closes the tab (kills the pane, deletes the
@@ -1559,20 +1572,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// `auto_create_notes_enabled ?? Config.autoCreateNotesDefault`. NULL
     /// follows the shipped default; `0`/`1` remains an explicit choice.
     public var autoCreateNotesEnabled: Bool
-    /// The fleet brake for supervision
-    /// (`docs/specs/2026-07-26-fleet-supervision-design.md` §3, §8): one bit,
-    /// fleet-wide, ANDed over every project's mark and writing none of them.
-    /// Released (`true`) means TBD may act where a mark stands; engaged
-    /// (`false`, the shipped state) means TBD's authority is paused everywhere,
-    /// with the marks left exactly as they were.
-    ///
-    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
-    /// carries no SQL default and stays NULL until somebody touches the toggle,
-    /// so this property is
-    /// `supervision_enabled ?? Config.supervisionEnabledDefault`. NULL means
-    /// "never chose" and follows the shipped default wherever it goes; `0`/`1`
-    /// is an explicit gesture and is honored forever.
-    public var supervisionEnabled: Bool
     /// Gate for the orphan-GC phase that reclaims per-profile config
     /// directories under `~/tbd/profiles/`
     /// (`docs/specs/2026-08-15-profile-dir-gc-design.md`). Read on top of
@@ -1581,7 +1580,7 @@ public struct Config: Codable, Sendable, Equatable {
     /// other copy, so a brand-new orphan classifier over them soaks behind its
     /// own switch rather than riding the default-ON master switch.
     ///
-    /// **Resolved, not stored**, like `supervisionEnabled`: the backing column
+    /// **Resolved, not stored**, like `queuedPromptEnabled`: the backing column
     /// carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
     /// `gc_profile_dirs_enabled ?? Config.gcProfileDirsEnabledDefault`. NULL
@@ -1699,59 +1698,17 @@ public struct Config: Codable, Sendable, Equatable {
     /// follows the shipped default wherever it goes; a stored name is an
     /// explicit gesture and is honored forever.
     public var updateMode: UpdateMode
-    /// Whether new pty-holder sessions are routed through the TBD model proxy
-    /// (`docs/specs/2026-09-05-transcript-streaming-model-proxy-design.md`,
-    /// "Flags and migrations"): a loopback process the daemon owns, named by
-    /// the session's `ANTHROPIC_BASE_URL`, which forwards the Messages API and
-    /// tees each conversation stream's text into a per-session file.
+    /// Whether Claude sessions spawn with the session mod's
+    /// `transcript-stream` feature, and the transcript shows the provisional
+    /// rows it writes until the JSONL rows with the same `uuid`s land.
     ///
-    /// It ships OFF because it puts a second process in the path of every API
-    /// call a routed session makes, and that process outlives the daemon.
+    /// It ships OFF, and it depends on no other flag.
     ///
-    /// It is a switch of its own rather than half of one: the proxy is useful
-    /// without the transcript's provisional row, so `transcriptStreamingEnabled`
-    /// is a second flag. The two are coupled only in the direction that keeps
-    /// them coherent — turning streaming on turns this on, turning this off
-    /// turns streaming off — and the coupling lives in the `ConfigStore`
-    /// setters, not here.
-    ///
-    /// The gate covers *spawning* only, like `ptyHolderEnabled`: a session's
-    /// base URL is read once at start, so flipping this never reroutes a
-    /// running session.
-    ///
-    /// **Resolved, not stored**, like `ptyHolderEnabled`: the backing
-    /// column carries no SQL default and stays NULL until somebody touches the
+    /// **Resolved, not stored**, like `ptyHolderEnabled`: the backing column
+    /// carries no SQL default and stays NULL until somebody touches the
     /// toggle, so this property is
-    /// `model_proxy_enabled ?? Config.modelProxyDefault`. NULL means "never
-    /// chose" and follows the shipped default wherever it goes; `0`/`1` is an
-    /// explicit gesture and is honored forever.
-    public var modelProxyEnabled: Bool
-    /// Whether the transcript renders a provisional assistant row that grows
-    /// with the model proxy's stream file and is retired when the JSONL line
-    /// for that message lands.
-    ///
-    /// It ships OFF, and it is meaningful only with `modelProxyEnabled`: the
-    /// stream file it reads is written by the proxy. Read
-    /// `transcriptStreamingEffective` rather than this property — a
-    /// hand-edited row with streaming on and the proxy off records two
-    /// choices, and streams nothing.
-    ///
-    /// **Resolved, not stored**, same shape as `modelProxyEnabled`:
     /// `transcript_streaming_enabled ?? Config.transcriptStreamingDefault`.
     public var transcriptStreamingEnabled: Bool
-    /// The loopback port this TBD home's model proxy binds, or nil if none has
-    /// been minted.
-    ///
-    /// **Identity, not a preference**, which is why it has no shipped default,
-    /// for the same reason as `holderOwnerToken`: nil genuinely means "not yet
-    /// minted", and any literal the code could fall back to would be a port
-    /// some unrelated process may already hold. The kernel picks the first one
-    /// — the proxy binds port zero and reports what it got — and
-    /// `ConfigStore.ensureModelProxyPort(minting:)` persists it with the
-    /// conditional UPDATE that keeps two daemons starting at once from minting
-    /// two. `setModelProxyPort(_:)` overwrites it, which is what the
-    /// address-in-use re-mint needs.
-    public var modelProxyPort: Int?
     /// Gate for profile balancing across multiple Claude accounts (design
     /// 2026-09-05 §6). When enabled, new sessions land on the eligible profile
     /// with the most room, adjusted for live session count.
@@ -1766,15 +1723,48 @@ public struct Config: Codable, Sendable, Equatable {
     /// Schedule-based PR polling. Read once at daemon start. Resolved as
     /// `pr_poll_schedule_enabled ?? Config.prPollScheduleDefault`.
     public var prPollScheduleEnabled: Bool
-    /// Program Status Protocol (OSC 7501) on pty-holder sessions: whether TBD
-    /// answers Claude Code's probe and accepts its status reports. Resolved as
-    /// `program_status_enabled ?? Config.programStatusEnabledDefault`.
-    public var programStatusEnabled: Bool
     /// Answering question and permission prompts from the transcript. Resolved
     /// as `transcript_prompt_answer_enabled ?? Config.transcriptPromptAnswerDefault`.
     /// Assigned after construction by the daemon, so it is a stored property
     /// with a default rather than a required initializer argument.
     public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
+    /// Composer draft save-and-restore through the session mod: the effective
+    /// value, which every reader acts on. On when
+    /// `composer_draft_enabled ?? Config.composerDraftDefault` is, and also
+    /// whenever automatic parking is on (`composerDraftRequiredByAutoPark`),
+    /// because the mod is the only guard a park has for an unsent draft.
+    /// Resolved by the daemon where it builds `Config`; the stored column is
+    /// never written on automatic parking's behalf, so an explicit off holds
+    /// again once automatic parking is off. Assigned after construction, like
+    /// `transcriptPromptAnswerEnabled`.
+    /// Design: docs/specs/2026-10-24-mod-only-park-guard-design.md.
+    public var composerDraftEnabled: Bool = Config.composerDraftDefault
+    /// Whether automatic parking is on, and so holds `composerDraftEnabled` on
+    /// whatever the stored flag says: the idle sweep (`autoHibernateEnabled`),
+    /// the global park-on-merge default (`autoHibernateOnMergeDefault`), or a
+    /// worktree that is not archived whose park-on-merge override is true.
+    /// Settings shows the composer-draft toggle on and greyed while it holds.
+    public var composerDraftRequiredByAutoPark: Bool = false
+    /// The agent background priority command (`agent_background_enabled`). Resolved as
+    /// `agent_background_enabled ?? Config.agentBackgroundDefault`. Assigned after construction by
+    /// the daemon, like `composerDraftEnabled`.
+    public var agentBackgroundEnabled: Bool = Config.agentBackgroundDefault
+    /// The start admission gate (`start_admission_enabled`). Resolved as
+    /// `start_admission_enabled ?? Config.startAdmissionDefault`. Assigned after construction by
+    /// the daemon, like `composerDraftEnabled`.
+    public var startAdmissionEnabled: Bool = Config.startAdmissionDefault
+    /// The holder viewer-claim reconcile (`holder_claim_reconcile_enabled`):
+    /// whether `holder.reconcileClaims` takes back the claims an app no longer
+    /// holds, or only reports them. Resolved as
+    /// `holder_claim_reconcile_enabled ?? Config.holderClaimReconcileEnabledDefault`.
+    /// Assigned after construction by the daemon, like `composerDraftEnabled`.
+    /// Design: docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+    public var holderClaimReconcileEnabled: Bool = Config.holderClaimReconcileEnabledDefault
+    /// Session usage recorded through the session mod: each Claude session's
+    /// context window, rate limits and cost, written to its session folder.
+    /// Resolved as `session_mod_usage_enabled ?? Config.sessionModUsageDefault`.
+    /// Assigned after construction by the daemon, like `composerDraftEnabled`.
+    public var sessionModUsageEnabled: Bool = Config.sessionModUsageDefault
     /// Clone-backed worktree checkout: populate a fresh worktree by APFS-cloning
     /// a per-repo template checkout instead of writing every tracked file.
     /// Resolved as `clone_checkout_enabled ?? Config.cloneCheckoutDefault`.
@@ -1834,11 +1824,6 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `autoCreateNotesEnabled`. Existing behavior is
     /// preserved until a user explicitly turns automatic Notes tabs off.
     public static let autoCreateNotesDefault = true
-    /// The shipped default for `supervisionEnabled`, and the single place it
-    /// lives. Supervision ships with the brake engaged; graduating it is a
-    /// change to this constant — no forcing `UPDATE` migration, and an explicit
-    /// opt-out is left alone.
-    public static let supervisionEnabledDefault = false
     /// The shipped default for `gcProfileDirsEnabled`, and the single place it
     /// lives. The profile-dir collector ships off; graduating it is a change to
     /// this constant — no forcing `UPDATE` migration, and an explicit opt-out
@@ -1886,18 +1871,10 @@ public struct Config: Codable, Sendable, Equatable {
     /// chose is NULL and follows this constant, and every stored mode is an
     /// explicit choice that a default change leaves alone.
     public static let updateModeDefault: UpdateMode = .off
-    /// The shipped default for `modelProxyEnabled`, and the single place it
-    /// lives. The proxy ships off; graduation — after a soak in which no routed
-    /// session lost a turn to the proxy, and no proxy outlived the daemon that
-    /// spawned it without being adopted or reaped — is a change to this
+    /// The shipped default for `transcriptStreamingEnabled`, and the single
+    /// place it lives. Streaming ships off. Graduation is a change to this
     /// constant, with no forcing `UPDATE` migration and every explicit opt-out
     /// left alone.
-    public static let modelProxyDefault = false
-    /// The shipped default for `transcriptStreamingEnabled`, and the single
-    /// place it lives. Streaming ships off and graduates *after* the proxy: a
-    /// provisional row is worth nothing until the thing that feeds it is
-    /// trusted. Graduation is a change to this constant, with no forcing
-    /// `UPDATE` migration and every explicit opt-out left alone.
     public static let transcriptStreamingDefault = false
     /// The shipped default for `profileBalancingEnabled`, and the single place
     /// it lives. Profile balancing ships off; graduation — after a soak in which
@@ -1908,12 +1885,29 @@ public struct Config: Codable, Sendable, Equatable {
     /// The shipped default for `prPollScheduleEnabled`, and the single place it
     /// lives. Ships off; graduation is a change to this constant.
     public static let prPollScheduleDefault = false
-    /// The shipped default for `programStatusEnabled`, and the single place it
-    /// lives. Ships off; graduation is a change to this constant.
-    public static let programStatusEnabledDefault = false
     /// The shipped default for `transcriptPromptAnswerEnabled`, and the single
     /// place it lives. Graduation flips this constant.
     public static let transcriptPromptAnswerDefault = false
+    /// The shipped default for `composerDraftEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let composerDraftDefault = false
+    /// The shipped default for `agentBackgroundEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let agentBackgroundDefault = false
+    /// The shipped default for `startAdmissionEnabled`, and the single place it
+    /// lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let startAdmissionDefault = false
+    /// The shipped default for `holderClaimReconcileEnabled`, and the single
+    /// place it lives. Ships off; graduation is a change to this constant, with
+    /// no forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let holderClaimReconcileEnabledDefault = false
+    /// The shipped default for `sessionModUsageEnabled`, and the single place
+    /// it lives. Ships off; graduation is a change to this constant, with no
+    /// forcing `UPDATE` migration and every explicit opt-out left alone.
+    public static let sessionModUsageDefault = false
     /// The shipped default for `remoteTranscriptLiveSyncEnabled`, and the
     /// single place it lives. Ships off; graduation is a change to this
     /// constant, with no forcing `UPDATE` migration and every explicit opt-out
@@ -1933,12 +1927,10 @@ public struct Config: Codable, Sendable, Equatable {
                 scratchInstructions: String? = nil,
                 scratchRenamePrompt: String? = nil,
                 scratchProfileOverrideID: UUID? = nil,
-                nightwatchMode: NightwatchMode = .off,
                 autoHibernateEnabled: Bool = false,
                 hibernateIdleMinutes: Int = Config.defaultHibernateIdleMinutes,
                 controlModeEnabled: Bool = false,
                 autoResumeOnApiError: Bool = false,
-                hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
                 autoTrustWorktrees: Bool = true,
                 gcEnabled: Bool = true,
@@ -1950,7 +1942,6 @@ public struct Config: Codable, Sendable, Equatable {
                 deliveryVerificationEnabled: Bool = false,
                 queuedPromptEnabled: Bool = Config.queuedPromptDefault,
                 autoCreateNotesEnabled: Bool = Config.autoCreateNotesDefault,
-                supervisionEnabled: Bool = Config.supervisionEnabledDefault,
                 gcProfileDirsEnabled: Bool = Config.gcProfileDirsEnabledDefault,
                 claudeCloudEnabled: Bool = Config.claudeCloudEnabledDefault,
                 gcOrphanProcessesEnabled: Bool = Config.gcOrphanProcessesEnabledDefault,
@@ -1960,12 +1951,9 @@ public struct Config: Codable, Sendable, Equatable {
                 gcRetainedTranscriptsEnabled: Bool =
                     Config.gcRetainedTranscriptsEnabledDefault,
                 updateMode: UpdateMode = Config.updateModeDefault,
-                modelProxyEnabled: Bool = Config.modelProxyDefault,
                 transcriptStreamingEnabled: Bool = Config.transcriptStreamingDefault,
-                modelProxyPort: Int? = nil,
                 profileBalancingEnabled: Bool = Config.profileBalancingEnabledDefault,
                 prPollScheduleEnabled: Bool = Config.prPollScheduleDefault,
-                programStatusEnabled: Bool = Config.programStatusEnabledDefault,
                 remoteCreateDefaults: [String: String] = [:],
                 holderOwnerToken: String? = nil) {
         self.defaultProfileID = defaultProfileID
@@ -1978,12 +1966,10 @@ public struct Config: Codable, Sendable, Equatable {
         self.scratchInstructions = scratchInstructions
         self.scratchRenamePrompt = scratchRenamePrompt
         self.scratchProfileOverrideID = scratchProfileOverrideID
-        self.nightwatchMode = nightwatchMode
         self.autoHibernateEnabled = autoHibernateEnabled
         self.hibernateIdleMinutes = hibernateIdleMinutes
         self.controlModeEnabled = controlModeEnabled
         self.autoResumeOnApiError = autoResumeOnApiError
-        self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.autoTrustWorktrees = autoTrustWorktrees
         self.gcEnabled = gcEnabled
@@ -1995,7 +1981,6 @@ public struct Config: Codable, Sendable, Equatable {
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.queuedPromptEnabled = queuedPromptEnabled
         self.autoCreateNotesEnabled = autoCreateNotesEnabled
-        self.supervisionEnabled = supervisionEnabled
         self.gcProfileDirsEnabled = gcProfileDirsEnabled
         self.claudeCloudEnabled = claudeCloudEnabled
         self.gcOrphanProcessesEnabled = gcOrphanProcessesEnabled
@@ -2004,12 +1989,9 @@ public struct Config: Codable, Sendable, Equatable {
         self.remoteDeleteEnabled = remoteDeleteEnabled
         self.gcRetainedTranscriptsEnabled = gcRetainedTranscriptsEnabled
         self.updateMode = updateMode
-        self.modelProxyEnabled = modelProxyEnabled
         self.transcriptStreamingEnabled = transcriptStreamingEnabled
-        self.modelProxyPort = modelProxyPort
         self.profileBalancingEnabled = profileBalancingEnabled
         self.prPollScheduleEnabled = prPollScheduleEnabled
-        self.programStatusEnabled = programStatusEnabled
         self.remoteCreateDefaults = remoteCreateDefaults
         self.holderOwnerToken = holderOwnerToken
     }
@@ -2034,8 +2016,6 @@ public struct Config: Codable, Sendable, Equatable {
         scratchInstructions = try c.decodeIfPresent(String.self, forKey: .scratchInstructions) ?? nil
         scratchRenamePrompt = try c.decodeIfPresent(String.self, forKey: .scratchRenamePrompt) ?? nil
         scratchProfileOverrideID = try c.decodeIfPresent(UUID.self, forKey: .scratchProfileOverrideID)
-        nightwatchMode = try c.decodeIfPresent(
-            NightwatchMode.self, forKey: .nightwatchMode) ?? .off
         autoHibernateEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoHibernateEnabled) ?? false
         hibernateIdleMinutes = try c.decodeIfPresent(Int.self, forKey: .hibernateIdleMinutes)
             ?? Config.defaultHibernateIdleMinutes
@@ -2043,8 +2023,6 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .controlModeEnabled) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnApiError) ?? false
-        hibernateInputVetoEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         autoCloseSetupEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .autoCloseSetupEnabled) ?? false
         // Absent (older daemon / older persisted JSON) defaults to ON, matching
@@ -2072,12 +2050,7 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .queuedPromptEnabled) ?? Config.queuedPromptDefault
         autoCreateNotesEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .autoCreateNotesEnabled) ?? Config.autoCreateNotesDefault
-        // Same tri-state as above: absent means the sender knew nothing about
-        // the flag, which is the NULL column's situation — follow the shipped
-        // default rather than hardcoding `false` here as well.
-        supervisionEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .supervisionEnabled) ?? Config.supervisionEnabledDefault
-        // Same tri-state again: absent means the sender knew nothing about the
+        // Same tri-state as above: absent means the sender knew nothing about the
         // flag, which is the NULL column's situation — follow the shipped
         // default rather than hardcoding `false`.
         gcProfileDirsEnabled = try c.decodeIfPresent(
@@ -2117,20 +2090,12 @@ public struct Config: Codable, Sendable, Equatable {
         // whole decode and losing every other field.
         updateMode = (try? c.decode(UpdateMode.self, forKey: .updateMode))
             ?? Config.updateModeDefault
-        // And once more, for the model proxy's gate and the provisional row's:
-        // absent means the sender knew nothing about the flag, which is the
-        // NULL column's situation — follow the shipped default, never a
-        // hardcoded `false`.
-        modelProxyEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .modelProxyEnabled)
-            ?? Config.modelProxyDefault
+        // And once more, for the provisional row's flag: absent means the
+        // sender knew nothing about the flag, which is the NULL column's
+        // situation — follow the shipped default, never a hardcoded `false`.
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault
-        // Absent means the sender knew nothing about the port — the same state
-        // as an unminted column. Like `holderOwnerToken` there is no shipped
-        // default to fall through to; see the property's note.
-        modelProxyPort = try c.decodeIfPresent(Int.self, forKey: .modelProxyPort)
         // Same tri-state for profile balancing: absent means the sender knew
         // nothing about the flag, which is the NULL column's situation — follow
         // the shipped default rather than hardcoding `false`.
@@ -2138,10 +2103,23 @@ public struct Config: Codable, Sendable, Equatable {
             Bool.self, forKey: .profileBalancingEnabled) ?? Config.profileBalancingEnabledDefault
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
-        programStatusEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
+        composerDraftEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
+        // Absent means the sender knew nothing about automatic parking holding
+        // the feature on, so nothing holds it.
+        composerDraftRequiredByAutoPark = try c.decodeIfPresent(
+            Bool.self, forKey: .composerDraftRequiredByAutoPark) ?? false
+        agentBackgroundEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .agentBackgroundEnabled) ?? Config.agentBackgroundDefault
+        startAdmissionEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .startAdmissionEnabled) ?? Config.startAdmissionDefault
+        holderClaimReconcileEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .holderClaimReconcileEnabled)
+            ?? Config.holderClaimReconcileEnabledDefault
+        sessionModUsageEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         cloneCheckoutEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .cloneCheckoutEnabled) ?? Config.cloneCheckoutDefault
         // Absent means never set, the NULL column's situation; the policy
@@ -2174,19 +2152,6 @@ public extension Config {
         ProfilePoolPolicy.resolved(
             usageCeilingPercent: profileBalancingUsageCeilingPercent,
             maxReadingAgeSeconds: profileBalancingMaxReadingAgeSeconds)
-    }
-
-    /// Whether transcript streaming is actually on: the conjunction of the two
-    /// flags, and the only form any caller should act on.
-    ///
-    /// Streaming reads a file the proxy writes, so streaming without the proxy
-    /// is not a state that can do anything. The setters keep the pair coherent
-    /// for anyone using the toggles, but a hand-edited row — or a row written
-    /// by a build that had only one of the flags — can still hold streaming on
-    /// with the proxy off, and that row must stream nothing rather than tail a
-    /// file nobody is writing.
-    var transcriptStreamingEffective: Bool {
-        modelProxyEnabled && transcriptStreamingEnabled
     }
 
     /// Which auto-resume gate governs a `scheduled_resumes` row: the
@@ -2350,11 +2315,16 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     public var serverName: String?
     /// That server's exit status; nil when the transport could not observe it.
     public var exitCode: Int32?
+    /// The closed terminal's `claudeSpawnExtras`, copied when it closed, so a
+    /// reopen from Closed Terminals starts with the same values. Absent in
+    /// JSON and rows written before the column, which read as nil.
+    public var claudeSpawnExtras: ClaudeSpawnExtras?
 
     public init(id: UUID, worktreeID: UUID, label: String? = nil,
                 kind: TerminalKind? = nil, closedAt: Date = Date(),
                 claudeSessionID: String? = nil, lineCount: Int = 0,
-                serverName: String? = nil, exitCode: Int32? = nil) {
+                serverName: String? = nil, exitCode: Int32? = nil,
+                claudeSpawnExtras: ClaudeSpawnExtras? = nil) {
         self.id = id
         self.worktreeID = worktreeID
         self.label = label
@@ -2364,6 +2334,7 @@ public struct TerminalHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         self.lineCount = lineCount
         self.serverName = serverName
         self.exitCode = exitCode
+        self.claudeSpawnExtras = claudeSpawnExtras
     }
 }
 
@@ -2565,12 +2536,6 @@ public struct PRStatus: Codable, Sendable, Equatable {
     public let url: String
     public let state: PRMergeableState
     public let reason: String?
-    /// List of files changed in the PR (lazy-fetched on demand by the merge gate).
-    public let files: [String]?
-    /// Number of commits in the PR (lazy-fetched on demand by the merge gate).
-    public let commits: Int?
-    /// UUID of the worktree that authored this PR, if known.
-    public let authorWorktreeID: UUID?
     /// 1-indexed position in GitHub's merge queue (front of queue == 1), or nil
     /// when the PR is not in a merge queue. Sourced from
     /// `PullRequest.mergeQueueEntry.position` — not expressible via
@@ -2595,15 +2560,11 @@ public struct PRStatus: Codable, Sendable, Equatable {
     public var observedAt: Date?
 
     public init(number: Int, url: String, state: PRMergeableState, reason: String? = nil,
-                files: [String]? = nil, commits: Int? = nil, authorWorktreeID: UUID? = nil,
                 mergeQueuePosition: Int? = nil, observedAt: Date? = nil) {
         self.number = number
         self.url = url
         self.state = state
         self.reason = reason
-        self.files = files
-        self.commits = commits
-        self.authorWorktreeID = authorWorktreeID
         self.mergeQueuePosition = mergeQueuePosition
         self.observedAt = observedAt
     }
@@ -2625,7 +2586,7 @@ public struct PRStatus: Codable, Sendable, Equatable {
     /// round trip has to be able to prove the stamp survived.
     ///
     /// **Structural, not a hand-written field list**, and that is the whole
-    /// point of the shape. A list has to be remembered: a ninth property added
+    /// point of the shape. A list has to be remembered: a new property added
     /// to this type and forgotten here would silently stop persisting on change,
     /// with nothing red to say so. Stamping both sides to the same `observedAt`
     /// and deferring to synthesized `Equatable` covers every field this type
@@ -2706,6 +2667,10 @@ public enum SystemKind: String, Codable, Sendable, Equatable, Hashable {
     case skillBody
     case taskNotification
     case nestedMemory
+    /// The summary Claude Code writes into the user role when it compacts a
+    /// conversation (`/compact` or auto-compact), marked `isCompactSummary` on
+    /// its JSONL line. System-generated, so it is never the user's prompt.
+    case compactSummary
     case other
 
     /// Lenient decode: an unrecognized raw value degrades to `.other` rather

@@ -65,57 +65,6 @@ struct TranscriptPollSchedulerTests {
         #expect(await scheduler.registeredSessionIDs.isEmpty)
     }
 
-    /// The provisional retire alarm's lifetime is the *registration's*, not any
-    /// pane's, and this is the seam that makes it so.
-    ///
-    /// Two claims, and each one fails a different wrong implementation. A pane
-    /// that is not the last holder must not take the alarm down — the survivor
-    /// is still showing the row it belongs to and a deadline rule is announced
-    /// by nothing, so nothing would ever re-arm it. And the last one leaving
-    /// must, because `deregister` forgets the session immediately afterwards
-    /// and an alarm that outlived that would publish an empty transcript for a
-    /// session nobody is watching.
-    @Test("the last holder leaving disarms the session's retire alarm; an earlier one does not")
-    func onlyTheLastHolderDisarmsTheRetireAlarm() async {
-        let scheduler = TranscriptPollScheduler(source: TranscriptSource(), clock: EventDrivenTestClock())
-        let first = TranscriptPaneToken()
-        let second = TranscriptPaneToken()
-        await scheduler.register(
-            sessionID: "s1", path: "/nonexistent", tier: .background, token: first)
-        await scheduler.register(
-            sessionID: "s1", path: "/nonexistent", tier: .background, token: second)
-
-        await scheduler.provisionalRetire.arm(
-            sessionID: "s1", messageID: "msg_a",
-            deadline: Date(timeIntervalSince1970: 1_700_000_060),
-            after: .seconds(60)) {}
-        #expect(await scheduler.provisionalRetire.armedMessage(sessionID: "s1") == "msg_a")
-
-        await scheduler.disarmProvisional(sessionID: "s1")
-        #expect(await scheduler.provisionalRetire.armedMessage(sessionID: "s1") == "msg_a",
-                "asked for while two panes hold the session, the disarm is refused")
-
-        await scheduler.deregister(sessionID: "s1", token: first)
-        #expect(await scheduler.provisionalRetire.armedMessage(sessionID: "s1") == "msg_a",
-                "one pane leaving must not strand the pane that stayed")
-
-        await scheduler.deregister(sessionID: "s1", token: second)
-        #expect(await scheduler.provisionalRetire.armedMessage(sessionID: "s1") == nil,
-                "the last holder leaving takes the alarm with it")
-        #expect(await scheduler.provisionalRetire.armedSessionCount == 0)
-    }
-
-    /// Two schedulers are two apps; one scheduler is one timer, however many
-    /// panes ask it for one. The property the pane relies on when it takes the
-    /// timer instead of building one.
-    @Test("every pane asking one scheduler for a retire timer gets the same instance")
-    func oneSchedulerOwnsOneRetireTimer() {
-        let scheduler = TranscriptPollScheduler(source: TranscriptSource())
-        let other = TranscriptPollScheduler(source: TranscriptSource())
-        #expect(scheduler.provisionalRetire === scheduler.provisionalRetire)
-        #expect(scheduler.provisionalRetire !== other.provisionalRetire)
-    }
-
     /// The slot holds one closure for the whole app and the closures are
     /// interchangeable, so the habit of re-seating it per mount buys nothing —
     /// and that habit is what let a per-pane object ride into it.
@@ -454,8 +403,7 @@ struct TranscriptPollSchedulerTests {
 }
 
 /// The scheduler's stream leg: the one tick that reads a second file and
-/// stamps what it reads with an instant the provisional row's retire deadlines
-/// are later measured against.
+/// measures the mod's heartbeat against the injected date.
 ///
 /// Its own suite because it drives a real poll task on an `EventDrivenTestClock`, which
 /// wants the clock-driven traits the registration tests above have no use for.
@@ -464,34 +412,25 @@ struct TranscriptPollSchedulerStreamTests {
 
     private static let transcriptLine = #"{"type":"user","uuid":"a","timestamp":"2026-08-26T10:00:00.000Z","message":{"role":"user","content":"hello"}}"#
 
-    /// A transcript and a stream file in one fenced directory. The stream file
-    /// carries a single text line and no terminal line, so what the tick reads
-    /// is a `.streaming` message whose deadline is measured from this stamp.
-    private static func files() throws -> (transcript: String, stream: String) {
-        let dir = fencedScratchRoot(prefix: "tbdsched")
-        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        let transcript = dir + "/transcript.jsonl"
-        try (transcriptLine + "\n").write(toFile: transcript, atomically: true, encoding: .utf8)
-        let stream = dir + "/stream.jsonl"
-        let line = try ModelProxyStreamLine
-            .text(message: "msg_a", index: 0, text: "Hel").encodedLine()
-        try (line + "\n").write(toFile: stream, atomically: true, encoding: .utf8)
+    /// A transcript, and a stream file with one streaming block whose heartbeat
+    /// was written `heartbeatAge` before `stamp`.
+    private static func files(stamp: Date, heartbeatAge: TimeInterval) throws -> (transcript: String, stream: String) {
+        let transcript = try TranscriptStreamFixtures.transcript([transcriptLine])
+        let stream = try TranscriptStreamFixtures.streamPath()
+        try TranscriptStreamFixtures.write(
+            TranscriptStreamFixtures.snapshot([TranscriptStreamFixtures.step(0, [TranscriptStreamFixtures.text("Hel")])]),
+            to: stream)
+        try TranscriptStreamFixtures.writeHeartbeat(beside: stream, at: stamp.addingTimeInterval(-heartbeatAge))
         return (transcript, stream)
     }
 
-    /// What discriminates: the injected date is deliberately years away from
-    /// any wall clock a test machine can be set to, so a bare `Date()` at the
-    /// refresh site cannot produce it. The value is not decoration — it is what
-    /// the silent-stream deadline is measured from, so a scheduler that stamps
-    /// its own `Date()` puts that deadline somewhere no test clock can reach.
-    @Test("a stream tick stamps its lines with the injected date, not the wall clock")
-    func streamTickUsesTheInjectedDate() async throws {
-        let files = try Self.files()
-        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
+    private static func tick(
+        stamp: Date, heartbeatAge: TimeInterval
+    ) async throws -> StreamPublishSnapshot {
+        let files = try Self.files(stamp: stamp, heartbeatAge: heartbeatAge)
         let source = TranscriptSource()
         let clock = EventDrivenTestClock()
-        let scheduler = TranscriptPollScheduler(
-            source: source, now: { stamp }, clock: clock)
+        let scheduler = TranscriptPollScheduler(source: source, now: { stamp }, clock: clock)
 
         let pane = TranscriptPaneToken()
         await scheduler.register(
@@ -499,15 +438,31 @@ struct TranscriptPollSchedulerStreamTests {
             tier: .foreground, token: pane)
         try await clock.requireAdvanceWhenArmed(by: .milliseconds(100))
 
-        let tailed = await pollUntilTrue(timeout: .seconds(10)) {
-            await source.provisional(sessionID: "s1") != nil
+        let read = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            await source.streamSnapshot(sessionID: "s1") != nil
         }
-        #expect(tailed == .satisfied, "the tick must have read the stream file")
-        let provisional = await source.provisional(sessionID: "s1")
-        #expect(provisional?.messageID == "msg_a")
-        #expect(provisional?.lastLineAt == stamp,
-                "the instant the retire deadline is measured from came from the seam")
-
+        #expect(read == .satisfied, "the tick must have read the stream file")
+        let snapshot = await source.snapshot(sessionID: "s1")
         await scheduler.deregister(sessionID: "s1", token: pane)
+        return snapshot
+    }
+
+    /// What discriminates: the injected date is years away from any wall clock
+    /// a test machine can be set to. A heartbeat 10 s before it is fresh only
+    /// if the scheduler measured against the seam; against a bare `Date()` it
+    /// would be years old and stale.
+    @Test("a stream tick measures the heartbeat against the injected date")
+    func streamTickUsesTheInjectedDate() async throws {
+        let snapshot = try await Self.tick(
+            stamp: Date(timeIntervalSince1970: 1_700_000_000), heartbeatAge: 10)
+        #expect(snapshot.stream?.steps.first?.blocks.first?.text == "Hel")
+        #expect(snapshot.heartbeatStale == false)
+    }
+
+    @Test("a heartbeat older than 90 s by the injected date reads stale")
+    func staleByTheInjectedDate() async throws {
+        let snapshot = try await Self.tick(
+            stamp: Date(timeIntervalSince1970: 1_700_000_000), heartbeatAge: 120)
+        #expect(snapshot.heartbeatStale)
     }
 }

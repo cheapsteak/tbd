@@ -1,18 +1,18 @@
 # Capacity facts
 
 TBD's machine-readable surface for **how much quota an account has left**, and
-for **which account a session is running on**. It exists so a supervision
-program that TBD does not run — a wake program, a sweep program, an operator's
-cron script — can decide for itself whether to hold: not nudging agents that
-are rate-capped, not piling interventions onto a saturated account.
+for **which account a session is running on**. It exists so a program that TBD
+does not run — an operator's cron script, an agent driving other agents — can
+decide for itself whether to hold: not nudging agents that are rate-capped, not
+piling interventions onto a saturated account.
 
-This is the Enabled half of P1-1 in
-[`specs/2026-07-26-fleet-supervision-requirements.md`](specs/2026-07-26-fleet-supervision-requirements.md).
 The daemon enforces nothing here — there is no capacity choke point every wake
-must pass through, deliberately (see
-[`specs/2026-07-26-fleet-supervision-wake-program.md`](specs/2026-07-26-fleet-supervision-wake-program.md)).
-What TBD owes a program author is that the facts are public, documented, and
-stable. That is what this document states.
+must pass through, deliberately. The surface was first specified as P1-1 of
+the fleet-supervision requirements
+([`specs/2026-07-26-fleet-supervision-requirements.md`](specs/2026-07-26-fleet-supervision-requirements.md)),
+which are retired and kept as the design record; the commands below do not
+depend on fleet supervision. What TBD owes a program author is that the facts
+are public, documented, and stable. That is what this document states.
 
 ## The commands
 
@@ -66,8 +66,7 @@ nonzero with the refusing condition named on stderr.
   a consumer that branches on `schemaVersion == 1` will not be surprised
   silently.
 
-This is the convention newly versioned JSON surfaces in TBD adopt, stated for
-the planned supervision surfaces in [`cli-supervise.md`](cli-supervise.md).
+This is the convention newly versioned JSON surfaces in TBD adopt.
 `tbd profile list --json` is its first shipped instance; TBD's older JSON
 output predates the convention and carries no version, so do not expect a
 `schemaVersion` from a command not documented as having one.

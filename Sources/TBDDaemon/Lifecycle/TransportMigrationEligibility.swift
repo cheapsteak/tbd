@@ -15,7 +15,8 @@ import TBDShared
 /// about it.
 ///
 /// It also makes no judgement a later rail will make. The park's own rails
-/// refuse typed input; repeating them here would give one question two answers.
+/// decide — a turn in flight, a permission prompt, a transcript mid-write;
+/// repeating them here would give one question two answers.
 /// And it judges only what the ROW says: a shell's busy-ness lives in the
 /// process table, which this cannot read, so the coordinator's own rail asks
 /// that question (`HibernationCoordinator.moveRunningShellToHolder`).

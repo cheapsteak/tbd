@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "tmuxControlMode")
@@ -23,10 +24,30 @@ extension RPCRouter {
         // transport is the whole gate: a row can only be `.holder` because the
         // holder flag was on when it was created, and flipping that flag off
         // afterwards must never strand a live session.
-        if let terminalID = params.terminalID,
-           let terminal = try? await db.terminals.get(id: terminalID),
-           terminal.transport == .holder {
-            return try await handleHolderAttachRequest(params: params, terminal: terminal)
+        //
+        // A read that throws is answered as an error, not swallowed into the
+        // control-mode path: that path answers "unavailable" with its gate
+        // off, which the app takes as permanent — no retry, no Retry button —
+        // for what is usually a moment of `SQLITE_BUSY` under a write. An
+        // error is what the app retries. A row that is simply absent still
+        // falls through, as before.
+        if let terminalID = params.terminalID {
+            let terminal: Terminal?
+            do {
+                terminal = try await db.terminals.get(id: terminalID)
+            } catch {
+                logger.error("""
+                    attach.request could not read terminal \
+                    \(terminalID.uuidString, privacy: .public): \
+                    \(error.localizedDescription, privacy: .public)
+                    """)
+                return RPCResponse(
+                    error: "attach failed: the terminal could not be read: "
+                        + error.localizedDescription)
+            }
+            if let terminal, terminal.transport == .holder {
+                return try await handleHolderAttachRequest(params: params, terminal: terminal)
+            }
         }
         // Gate evaluated per attach (env || persisted flag): a Settings
         // toggle affects the next attach without a daemon restart.
@@ -175,6 +196,16 @@ extension RPCRouter {
     /// Failure is reported to the caller rather than degraded into a fallback:
     /// there is no second way to render a holder-backed session, so an attach
     /// that could not happen must say so.
+    ///
+    /// **A session the registry is not reading is adopted first, on demand.**
+    /// Startup adoption can leave a live session unadopted — a holder busy or
+    /// silent past its budget, a row deferred past the startup budget and not
+    /// yet reached, a take-back whose hand-over failed — and nothing else
+    /// would adopt it until somebody asked. An attach is that ask. The
+    /// registry rules out what it can see (`HolderRegistry.adoptForAttach`),
+    /// `mayAdoptForAttach` refuses early what only the row and the hibernation
+    /// coordinator can, and the wait is bounded, so the request cannot hang
+    /// on a holder that will not answer.
     private func handleHolderAttachRequest(
         params: AttachRequestParams, terminal: Terminal
     ) async throws -> RPCResponse {
@@ -198,13 +229,26 @@ extension RPCRouter {
                 FDVendHeader(
                     worktreeID: params.worktreeID, paneID: params.paneID,
                     attachID: params.attachID))
-            vend = try await registry.beginAttach(terminalID: terminal.id)
+            // One hop for a session already adopted, the common case: the
+            // registry answers that synchronously and asks the row-level gate
+            // only when an adoption could follow. When the adoption cannot
+            // happen, `beginAttach` below is what reports it: `noLiveReader`,
+            // read as "ended" when the holder is gone.
+            try await registry.adoptForAttach(
+                terminal: terminal,
+                holderIsLive: holderProcessIsLive,
+                rowPermits: { await self.mayAdoptForAttach(terminal) })
+            // The app's number for this request rides onto the pending attach
+            // and the claim it becomes, which is what lets a claim sweep order
+            // the app's statement of what it holds against this attach.
+            vend = try await registry.beginAttach(
+                terminalID: terminal.id, attachSeq: params.attachSeq)
         } catch let error as HolderRegistry.Error
             where attachRefusalMeansSessionEnded(error, terminal: terminal) {
             // Refused, and the holder the row records is not running: the
             // session is over, not merely unattachable. Answered as a status
-            // rather than an error so the app does not tell the user the
-            // session "keeps running" and to reopen the tab to retry.
+            // rather than an error so the app neither retries it nor tells the
+            // user the session "keeps running" and to retry the attach.
             logger.warning("""
                 holder attach.request for terminal \(terminal.id.uuidString, privacy: .public): \
                 its holder (pid \(terminal.holderPID ?? 0, privacy: .public)) is no longer \
@@ -221,8 +265,9 @@ extension RPCRouter {
             return RPCResponse(error: "attach failed: \(error.localizedDescription)")
         }
 
+        let recipient: ProcessIdentity?
         do {
-            try await vending.send(fd: vend.ptyFD, header: header)
+            recipient = try await vending.sendReportingRecipient(fd: vend.ptyFD, header: header)
         } catch {
             Darwin.close(vend.ptyFD)
             await registry.cancelPendingAttach(
@@ -236,6 +281,16 @@ extension RPCRouter {
         }
         // The kernel duplicated the fd into the app's table; drop ours.
         Darwin.close(vend.ptyFD)
+        // Whose table, recorded against the attach before the response that
+        // lets the app acknowledge it: the claim this attach becomes is then
+        // owned by that app, and only that app's confirmed death takes it back.
+        // The identity is the one the send itself read for the connection it
+        // wrote on — see `sendReportingRecipient` for why no earlier lookup
+        // would do. Only the record is awaited: a delivery to an app already
+        // confirmed gone is taken back in a task the registry starts and owns,
+        // so this reply never waits on a holder.
+        await registry.recordAttachRecipient(
+            recipient, terminalID: terminal.id, generation: vend.generation)
 
         // Same ready-timeout as control mode, pointed at this registry's own
         // cancel. It is generation-scoped, so a timer outliving the attach it
@@ -257,6 +312,33 @@ extension RPCRouter {
                 status: "pending",
                 generation: vend.generation,
                 snapshotPreamble: vend.snapshotPreamble))
+    }
+
+    /// Whether an attach may adopt this session itself when the registry is
+    /// not reading it: the row, as the attach read it, is awake, and no park,
+    /// wake or in-place profile swap holds it right now.
+    ///
+    /// **A best-effort early refusal, not an exclusion.** It runs outside the
+    /// registry, on a row read at the top of the request, and takes no claim,
+    /// so a park, wake or swap that claims the row after it answers does not
+    /// stop the adoption that follows. Nothing locks across the two actors to
+    /// close that, because nothing needs to: the registry's own gates — a
+    /// reader being released, a holder it told to let go, an ended job, a
+    /// shutdown — are re-asked in the stretch that adopts, and a transition
+    /// that claims late meets an adopted session like any other. A park (and
+    /// so a swap, which starts with one) ends the job behind the reader it
+    /// finds, and refuses when there is none yet. A wake reaches the holder
+    /// only through the registry, which joins an adoption in flight and
+    /// refuses to spawn over an occupied slot, so it never stacks a second
+    /// reader beside this one.
+    ///
+    /// What the early refusal buys is not opening a hand-over at all for a
+    /// row that reads parked — its job was ended by its park — or while a
+    /// transition already owns the session's holder.
+    func mayAdoptForAttach(_ terminal: Terminal) async -> Bool {
+        guard !terminal.isParked else { return false }
+        let moving = await hibernationCoordinator.transitionInFlight(terminalID: terminal.id)
+        return !moving
     }
 
     /// Whether `beginAttach` refusing with `error` means the session has
@@ -516,6 +598,75 @@ extension RPCRouter {
                 """)
         }
         return .ok()
+    }
+
+    /// Handle `holder.reconcileClaims`: the app's statement, sent on every poll
+    /// tick, of which holder sessions it holds a descriptor for or has an
+    /// attach in flight for. While `holder_claim_reconcile_enabled` is on, the
+    /// registry takes back that app's claims on every other session
+    /// (`HolderRegistry.reconcileClaims`); while it is off, it only names them
+    /// (`HolderRegistry.reportClaims`). Design:
+    /// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+    ///
+    /// **The registry's cheap gate runs first.** In the steady state every
+    /// live panel's session is in `held`, so the gate answers false and the
+    /// sweep costs one actor hop: no database read, no `ps`.
+    ///
+    /// **The flag is read next, before the pid is resolved, and while it is
+    /// off the pid is never resolved.** Resolving it spawns `ps` twice and
+    /// blocks. With the flag off a candidate is never taken back, so after
+    /// one truly lost handback it would pass the gate on every 2 s tick until
+    /// the app quits, and each tick would pay for the resolve. The report
+    /// matches by pid alone instead, as the gate does; that can name a claim
+    /// whose owner merely reused the app's pid, and naming it changes
+    /// nothing. With the flag on, the pid is resolved and its start time
+    /// tells the app apart from a reused pid, and every candidate the sweep
+    /// selects is taken back, or dropped by a failed take-back, so it stops
+    /// passing the gate.
+    ///
+    /// **Nothing here is an error.** A daemon with no holder transport, a pid
+    /// that does not resolve, and a sweep with nothing to take back all answer
+    /// an empty result: the app ignores a failed sweep and sends the next one
+    /// a tick later, so an error would carry nothing it could act on. A flag
+    /// that cannot be read is taken at its shipped default, as an unset one is.
+    func handleHolderReconcileClaims(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(HolderReconcileClaimsParams.self, from: paramsData)
+        let held = Set(params.held)
+        guard let registry = holderRegistry,
+              await registry.hasCandidates(
+                ownedByPID: params.appPID, held: held, throughSeq: params.throughSeq)
+        else {
+            return try RPCResponse(result: HolderReconcileClaimsResult())
+        }
+        let act: Bool
+        do {
+            act = try await db.config.get().holderClaimReconcileEnabled
+        } catch {
+            logger.error("""
+                holder.reconcileClaims could not read holder_claim_reconcile_enabled, so the \
+                sweep takes the shipped default: \(error.localizedDescription, privacy: .public)
+                """)
+            act = Config.holderClaimReconcileEnabledDefault
+        }
+        guard act else {
+            let report = await registry.reportClaims(
+                ownedByPID: params.appPID, held: held, throughSeq: params.throughSeq)
+            return try RPCResponse(
+                result: HolderReconcileClaimsResult(
+                    takenBack: report.takenBack, wouldTakeBack: report.wouldTakeBack))
+        }
+        guard let app = appIdentityResolver(params.appPID) else {
+            logger.info("""
+                holder.reconcileClaims from pid \(params.appPID, privacy: .public) swept \
+                nothing: that pid could not be resolved to a process identity
+                """)
+            return try RPCResponse(result: HolderReconcileClaimsResult())
+        }
+        let sweep = await registry.reconcileClaims(
+            heldBy: app, held: held, throughSeq: params.throughSeq)
+        return try RPCResponse(
+            result: HolderReconcileClaimsResult(
+                takenBack: sweep.takenBack, wouldTakeBack: sweep.wouldTakeBack))
     }
 
     /// Handle `pane.resize`: the app's debounced desired size for one window.

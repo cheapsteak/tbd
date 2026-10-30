@@ -1,6 +1,6 @@
 # Brainstorming gate: qualifying work starts with a checked-in spec
 
-**Status:** implemented on `tbd/brainstorm-gate` (2459991f, 163900c5, cf497a94, f4bb0859, c14d4ee4, 31b3e4b7); nightwatch desk-prompt follow-up still outstanding, see Sequencing
+**Status:** implemented on `tbd/brainstorm-gate` (2459991f, 163900c5, cf497a94, f4bb0859, c14d4ee4, 31b3e4b7)
 **Date:** 2026-07-26
 
 ## Why
@@ -31,8 +31,8 @@ wholesale-replaces a load-bearing path (rendering, input routing, persistence) r
 needs a flag, it needs a spec.
 
 **A human answers the brainstorming questions.** An agent may not answer its own. If no human is
-available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may
-not originate feature work; file it for a human instead.
+available, stop — do not proceed on assumed answers. Agents may not originate feature work; file
+it for a human instead.
 
 Not required for bug fixes, small additive UI, or refactors. If a trigger fires but a brainstorm is
 genuinely unnecessary, say so in the PR description. This is convention, not a gate: there is no
@@ -166,34 +166,6 @@ addition short. `CLAUDE.md` is currently 13 KB.
 
 **This change:** the skills, the CLAUDE.md and docs/CLAUDE.md edits, the guardrail rule and tests,
 and `.codex/config.toml`.
-
-**Follow-up, after PR #506 merges** — the nightwatch desk prompt. #506 owns
-`NightwatchDeskPrompts.swift` and its siblings. The sentence, decided now so it is not re-derived:
-
-> Dispatch bug fixes freely. Never create features — not even as incident remediation. If fixing
-> something properly would need a new subsystem, a flag or `config` column, a migration, or a
-> change to a load-bearing path, file it for a human instead of dispatching it. Feature decisions
-> happen only in a dedicated 1:1 brainstorming session between a human and one agent; you are not a
-> participant in that session and do not answer its questions, weigh its options, or act on it
-> until a spec is committed to `docs/specs/`.
-
-- **Trigger reuse (decided).** The desk judge uses the same four blast-radius triggers as the rest
-  of the repo to tell a dispatchable fix from a feature: it may dispatch work that trips none of
-  them, and must file rather than dispatch anything that trips one. This is deliberate — a second,
-  desk-private definition of "feature" would drift from the repo's.
-- **The non-participation clause is prompt-only.** Nothing mechanically prevents nightwatch from
-  spawning a brainstorming session and answering its questions itself. The `Skill` guardrail
-  catches the wrong *skill*, not the wrong *answerer*. Closing that mechanically is a separate
-  design and is explicitly not in scope here.
-- **Still verify first.** Before writing the prohibition, confirm how much latitude the desk judge
-  actually has to originate work today — the hole may already be closed, in which case the sentence
-  documents an invariant rather than changing behavior.
-
-It goes in the Swift string constant, not the generated on-disk plugin file — `PluginDirWriter`
-rewrites the installed plugin dir on every daemon start, so on-disk edits are silently reverted.
-Its test should assert on composed output and whitelist the permitted context rather than asserting
-absence of a forbidden phrase: a `!contains(...)` guard fails from both sides once the prohibition
-itself contains the phrase.
 
 ## Rejected alternatives
 

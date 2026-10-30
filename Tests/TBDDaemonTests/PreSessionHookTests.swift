@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -222,7 +223,7 @@ struct PreSessionHookTests {
             repoID: repo.id, folder: "first", branch: "feat/clash", skipClaude: true
         )
         let pending = try await lifecycle.beginCreateWorktree(
-            repoID: repo.id, folder: "second", branch: "feat/clash", skipClaude: true
+            repoID: repo.id, folder: "second", branch: "feat/clash"
         )
         await #expect(throws: WorktreeLifecycleError.self) {
             try await lifecycle.completeCreateWorktree(
@@ -376,7 +377,10 @@ struct PreSessionHookTests {
         // Short injected timeout; the marker is never written. (The killed-pane
         // short-circuit can't fire under dryRun tmux — windowExists is always
         // true — so the timeout path covers the no-completion case here.)
-        let lifecycle = makeLifecycle(db: db, timeout: 0.3)
+        // 0.1 s leaves room for two polls at `makeLifecycle`'s 0.05 s interval,
+        // and the outcome is `.timedOut` however many run, since nothing ever
+        // writes the marker.
+        let lifecycle = makeLifecycle(db: db, timeout: 0.1)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
@@ -797,7 +801,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, timeout: 0.3)
+        let lifecycle = makeLifecycle(db: db, timeout: 0.1)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
@@ -817,7 +821,7 @@ struct PreSessionHookTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeLifecycle(db: db, timeout: 0.3)
+        let lifecycle = makeLifecycle(db: db, timeout: 0.1)
         let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
         try await installPreSessionHook(repoDir: repoDir)
 
@@ -838,7 +842,7 @@ struct PreSessionHookTests {
     private func makeArchivedWorktree(
         lifecycle: WorktreeLifecycle, db: TBDDatabase, repo: Repo
     ) async throws -> Worktree {
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
         let completion = try await lifecycle.completeCreateWorktree(
             worktreeID: pending.id, skipClaude: true
         )
@@ -1081,6 +1085,118 @@ struct PreSessionHookTests {
         let claude = terminals.first { $0.label == "Claude Code" }
         #expect(claude?.claudeSessionID == sessionID,
                 "the primary Claude terminal must resume the archived transcript, not start fresh")
+    }
+
+    // MARK: - A create's Claude values ride the hook's row
+
+    /// A plugin folder and a settings overlay for the create's primary Claude,
+    /// with the folder made under `tempDir`, never under `~`.
+    private func makeSpawnExtras(tempDir: URL) throws -> (extras: ClaudeSpawnExtras, pluginDir: String) {
+        let plug = tempDir.appendingPathComponent("plugins/plug", isDirectory: true)
+        try FileManager.default.createDirectory(at: plug, withIntermediateDirectories: true)
+        return (
+            ClaudeSpawnExtras(claudeSettingsOverlay: #"{"acmeSetting":"on"}"#, pluginDirs: [plug.path]),
+            plug.path
+        )
+    }
+
+    /// The primary Claude row keeps `extras`, its command passes the plugin
+    /// folder, and its settings file carries the overlay beside TBD's hooks.
+    private func expectPrimaryStarted(
+        with extras: ClaudeSpawnExtras, pluginDir: String,
+        worktreeID: UUID, db: TBDDatabase, recorder: PreSessionRecordedCommands
+    ) async throws {
+        let terminals = try await db.terminals.list(worktreeID: worktreeID)
+        let primary = try #require(terminals.first { $0.kind == .claude })
+        #expect(primary.claudeSpawnExtras == extras)
+        #expect(terminals.filter { $0.id != primary.id }.allSatisfy { $0.claudeSpawnExtras == nil })
+
+        let command = try #require(recorder.snapshot()
+            .filter { $0.contains("new-window") }
+            .compactMap(\.last)
+            .first { $0.contains("claude --session-id") })
+        #expect(command.contains(" --plugin-dir \(SystemPromptBuilder.shellEscape(pluginDir))"),
+                "\(command)")
+
+        let settingsPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: primary.id.uuidString)
+        let data = try Data(contentsOf: URL(fileURLWithPath: settingsPath))
+        let settings = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(settings["acmeSetting"] as? String == "on")
+        #expect(settings["hooks"] != nil)
+    }
+
+    @Test func preSessionPhase3PrimaryGetsExtras() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let (extras, pluginDir) = try makeSpawnExtras(tempDir: tempDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        try await installPreSessionHook(repoDir: repoDir)
+
+        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id)
+        let completion = try await lifecycle.completeCreateWorktree(
+            worktreeID: pending.id, claudeSpawnExtras: extras)
+        guard case .preSessionPending(let phase3) = completion else {
+            Issue.record("expected .preSessionPending when a preSession hook resolves")
+            return
+        }
+
+        // Until phase 3 starts the primary, the hook's row carries the values.
+        let hook = try #require(try await db.terminals.list(worktreeID: pending.id).first)
+        #expect(hook.label == TerminalLabel.preSession)
+        #expect(hook.claudeSpawnExtras == extras)
+
+        try writeMarker(worktreeID: pending.id, exitCode: 0)
+        await phase3.value
+
+        #expect(try await db.worktrees.get(id: pending.id)?.status == .active)
+        try await expectPrimaryStarted(
+            with: extras, pluginDir: pluginDir, worktreeID: pending.id, db: db, recorder: recorder)
+    }
+
+    /// Recovery after a daemon restart resumes the wait from rows alone and
+    /// passes no values to `runPreSessionPhase3`; the primary still gets the
+    /// ones stored on the hook's row.
+    @Test func recoveredPhase3ReadsPreSessionRowExtras() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let (extras, pluginDir) = try makeSpawnExtras(tempDir: tempDir)
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeLifecycle(db: db, recorder: recorder)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+
+        // A daemon that died mid-wait: a .creating row whose checkout exists
+        // and whose only terminal is the hook's, carrying the create's values.
+        let checkout = tempDir.appendingPathComponent("orphan-checkout")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        let wt = try await db.worktrees.create(
+            repoID: repo.id, name: "orphan", branch: "tbd/orphan",
+            path: checkout.path, tmuxServer: "tbd-test", status: .creating
+        )
+        _ = try await db.terminals.create(
+            id: UUID(), worktreeID: wt.id,
+            tmuxWindowID: "@mock-98", tmuxPaneID: "%mock-98",
+            label: TerminalLabel.preSession, kind: .shell,
+            claudeSpawnExtras: extras
+        )
+
+        let resumed = await lifecycle.recoverCreatingWorktrees()
+        #expect(resumed.count == 1, "the stranded wait must be resumed")
+        try writeMarker(worktreeID: wt.id, exitCode: 0)
+        for task in resumed { await task.value }
+
+        #expect(try await db.worktrees.get(id: wt.id)?.status == .active)
+        try await expectPrimaryStarted(
+            with: extras, pluginDir: pluginDir, worktreeID: wt.id, db: db, recorder: recorder)
     }
 
     // MARK: - Reconcile must not kill live `.creating` windows
