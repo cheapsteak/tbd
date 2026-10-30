@@ -246,34 +246,41 @@ A new RPC, `panel.syncTabs`, replaces the one-shot `panel.importLegacy`:
 struct PanelSyncTabsParams {
     let worktreeID: UUID
     let tabs: [LegacyTabPayload]   // every workspace tab, in order
-    let activeTabID: UUID?
     let paneHistories: [UUID: MRUHistory<PaneContent>]
 }
 ```
 
 While the flag is on, the app sends it when it connects and whenever a workspace
-tab is created, closed, reordered, relabelled or selected. In one transaction
-the daemon:
+tab is created, closed, reordered or relabelled. In one transaction the daemon:
 
 - **imports each listed tab that has no surface,** converting its legacy layout
   (see "Legacy import");
 - **never overwrites a tab that has a surface,** so the daemon stays the
   authority for what is inside a tab;
-- **updates `position` and `label`** on existing surfaces to match the list;
-- **deletes surfaces for tabs not in the list,** with their histories, and
-  names them in the delta's `removedTabIDs`;
-- **records `activeTabID`** in `worktree.activeTabID`, so `tbd panel` commands
-  without `--tab` act on the tab the user is looking at.
+- **re-parents a listed tab's surface that sits under another worktree.** Tab
+  IDs are global, and promoting a scratch worktree moves its tabs to the main
+  worktree; the tab's panels move with it;
+- **updates `position`, `label` and `primary`** on existing surfaces to match
+  the list. No operation changes a primary, so the primary is app-owned like
+  the tab itself; the file viewer, for one, points a file tab's primary at a
+  new file in place;
+- **deletes this worktree's surfaces for tabs not in the list,** with their
+  histories, and names them in the delta's `removedTabIDs`.
 
 It broadcasts one `panelSurfaceChanged` for whatever changed. The worktree's
 existing cascade still removes every surface when the worktree row is deleted.
+
+The sync does not carry the selected tab. The app already records it in
+`worktree.activeTabID` through `worktree.setActiveTab` on every switch, flag or
+no flag, and `tbd panel` commands without `--tab` read that column, so they act
+on the tab the user is looking at.
 
 ### Wire
 
 `PanelGetResult`, `PanelApplyResult` and `PanelSurfaceDelta` keep their shapes
 and carry the v2 `WorkspaceTabSurface`, histories included. The app ignores a
 delta's `activeTabID`, because workspace-tab selection is the app's: the field
-reports the daemon's record, which only the app's own sync writes.
+only reports back what the app itself recorded.
 
 App and daemon ship in one build. A daemon left running an older binary sends
 surfaces the app cannot decode; the app treats an undecodable surface as absent
@@ -291,7 +298,9 @@ The converter in `TBDShared` maps one legacy tab to one surface:
   deleted by the next sync. Terminal splits cannot be created since spec C's
   phase 1, so only layouts older than that carry one.
 - Each viewer pane in the legacy layout becomes one `ViewerPanel`, in pre-order,
-  keeping the legacy pane ID as the panel ID.
+  with a freshly minted panel ID. Legacy pane IDs cannot be reused: a note
+  pane's ID is the note's own ID, so one note open in two tabs would collide,
+  and panel IDs are a table-wide key.
 - A pane's legacy history is kept, filtered to entries of the pane's current
   kind. A pane with no history starts with a one-entry history of its content.
 - The first panel becomes active, and `recency` follows panel order.
@@ -305,12 +314,14 @@ One new `config` column, `panel_tabs_enabled`, added in a `.sql` migration with
 no SQL default, so NULL stays distinct from an explicit choice. The shipped
 default lives only in `?? Config.panelTabsDefault` (false) in
 `ConfigRecord.toModel()`, so graduation is a one-line change that preserves every
-explicit opt-out. The daemon reports the flag in its capabilities result, which
-the app already reads.
+explicit opt-out. The daemon reports the flag in its capabilities result as
+`panelTabsEnabled`, which the app already reads; the result's
+`panelSurfaceEnabled` field goes with its column.
 
 One Settings toggle sets it, with the working label "Side panel with tabs,
-shared with agents (experimental)". It turns on the store, the tab sync, app
-rendering and agent control together.
+shared with agents (experimental)", through a new `config.setPanelTabsEnabled`
+RPC; `tbd config` gains the matching key. It turns on the store, the tab sync,
+app rendering and agent control together.
 
 Retired in the same change, through the column-retire checklist in
 `Sources/TBDDaemon/Database/CLAUDE.md` (one epoch bump): `config.daemon_panel_surface_enabled`,
@@ -329,6 +340,7 @@ split tree.
 - `close --panel <id> [--tab]`
 - `select --panel <id> [--tab]`
 - `back` / `forward --panel <id> [--tab]`
+- `jump --panel <id> --index <n> [--tab]`
 - `collapse` / `expand [--tab]`
 - `resize --width <share> [--tab]`
 
@@ -344,23 +356,32 @@ match: an agent opens content and lets the reuse rule place it.
 property of the `@Observable` `AppState`. It is filled by `panel.get` when the
 flag is on, kept current by a `panelSurfaceChanged` case in `handleDelta`, and
 cleared when the daemon reports the flag off. A delta or fetch while the flag is
-off leaves it untouched.
+off leaves it untouched. It is also cleared and refetched whenever the app
+(re)subscribes to the daemon: a new daemon may have reset revisions, and the
+revision guard would otherwise refuse every lower one.
 
 One chokepoint, `applyPanelOperation`, builds the envelope (a fresh operation
 ID, origin `.appUser`, the copy's revision as `baseRevision`), sends it, and
 adopts the returned tab under the revision guard. On failure it logs, shows a
 toast naming the error, and refetches the worktree's surfaces.
 
-The tab-sync calls hook the points in `AppState+Tabs.swift` where workspace tabs
-are created, closed, reordered, relabelled and selected.
+Workspace tabs are created, closed, reordered, relabelled and re-pointed from
+many places (notes, terminal reconciliation, the setup tab's auto-close, the
+PR tab, terminal revival, the file viewer). So the sync is not hooked at each
+one: a single observer of the app's tab list marks a worktree dirty when its
+tab IDs, order, labels or primaries change, and one sync per dirty worktree is
+sent on the next main-actor turn.
 
 ### The leaf seam
 
 `PanePlaceholder` performs no layout mutation itself. It drops its
 `@Binding var layout` and calls an injected `PaneActions` set covering:
-history steps, in-panel navigation (a link inside rendered markdown), close, the
-transcript toggle and its on-state, file links from a transcript, the history
-it displays, and whether close is allowed.
+history steps, in-panel navigation (a link inside rendered markdown), a
+command-clicked file path in a terminal, a file preview opened from a
+transcript, file links from a transcript, close, the transcript toggle and its
+on-state, the history it displays, and whether close is allowed. On the daemon
+set, every file-opening action becomes `open(.file(...))` and the reuse rule
+places it.
 
 - **`PaneActions.legacy`** closes over the legacy layout binding and does
   exactly what `PanePlaceholder` does today. The rollback guarantee is checked
@@ -394,7 +415,7 @@ and is not collapsed.
 `workspaceRenderPath(worktreeID:tabID:)`, which returns the daemon path only when
 the daemon reports `panel_tabs_enabled` on **and** the app's copy holds a
 surface for that tab. Every other case renders the legacy `SplitLayoutView`,
-unchanged.
+unchanged. The multi-worktree grid builds its own panes and stays legacy.
 
 ## Testing
 
@@ -408,15 +429,20 @@ Each gated branch is tested both ways, asserting opposite outcomes.
 - **Daemon:** the gate under NULL, false and true; a pre-migration config row
   reads NULL, and an explicit false survives a change to the default constant;
   the migration empties the three v1 tables; tab sync imports missing tabs,
-  never overwrites, updates order and labels, deletes absent tabs with their
-  histories, records the active tab, and broadcasts once; receipt replay returns
-  the stored v2 result; `get` returns histories.
+  never overwrites a tab's panels, updates order, labels and primaries,
+  re-parents a surface from another worktree, deletes absent tabs with their
+  histories, and broadcasts once; receipt replay returns the stored v2 result;
+  `get` returns histories.
 - **CLI:** parsing for each new and changed command, and rejection of the
   removed options.
 - **App:**
   - The copy: flag off leaves it untouched; a delta upserts; an older revision
     is refused; a removal is applied whatever the revision; a full `get` drops
-    absent tabs; a delta's `activeTabID` does not move the selected tab.
+    absent tabs; a delta's `activeTabID` does not move the selected tab;
+    resubscribing clears and refetches it.
+  - The tab-sync observer: a change to tab IDs, order, labels or a primary sends
+    one sync per worktree; an unrelated `AppState` change sends none; flag off
+    sends none.
   - The render branch: flag off renders legacy; flag on with no surface renders
     legacy; flag on with a surface renders the daemon path; daemon flag off
     renders legacy.
