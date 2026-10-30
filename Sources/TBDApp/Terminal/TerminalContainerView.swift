@@ -272,12 +272,12 @@ struct SingleWorktreeView: View {
                 await appState.fetchSessions(worktreeID: worktreeID)
             }
             .task(id: PanelSurfaceLoadKey(
-                worktreeID: worktreeID, tabID: activeTab?.id, active: appState.panelTabsActive
+                worktreeID: worktreeID, active: appState.panelTabsActive
             )) {
-                // Fill the app's copy of this worktree's panel surfaces, so the
-                // active tab can render from the daemon. Deltas keep it current
-                // after that; this load is the backstop for a tab the copy
-                // does not hold yet. Inert while `panel_tabs_enabled` is off.
+                // Fill the app's copy of this worktree's panel surfaces, once
+                // per worktree, so its tabs can render from the daemon. Deltas
+                // keep it current after that, a sync's imports included.
+                // Inert while `panel_tabs_enabled` is off.
                 guard appState.panelTabsActive else { return }
                 await appState.loadPanelSurfaces(worktreeID: worktreeID)
             }
