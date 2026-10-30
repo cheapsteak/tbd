@@ -202,7 +202,8 @@ public final class RPCRouter: Sendable {
     /// enumeration helpers are shared with `pr.refresh` — and are installed at
     /// the end of `init`.
     public let prPollScheduler: PRPollScheduler
-    /// In-memory hook and selection stamps the schedule reads activity from.
+    /// In-memory agent-event and selection stamps the schedule reads activity
+    /// from. The same ledger the program status store stamps.
     public let activityLedger: WorktreeActivityLedger
     /// Starts the one PR driver at daemon start (`Daemon.start()`, step 12f)
     /// and swaps it live when `config.setPRPollScheduleEnabled` changes the
@@ -475,6 +476,7 @@ public final class RPCRouter: Sendable {
         profilePoolCandidateSource: ProfilePoolCandidateSource? = nil,
         pendingQuestions: PendingPromptStore = PendingPromptStore(),
         programStatus: ProgramStatusStore? = nil,
+        activityLedger: WorktreeActivityLedger? = nil,
         repoSerializer: RepoSerializer = RepoSerializer(),
         configDirManager: ClaudeProfileConfigDirManager = ClaudeProfileConfigDirManager(),
         claudeCredentialsKeychain: ClaudeCredentialsKeychainDeleting = SecItemClaudeCredentialsKeychain(),
@@ -523,7 +525,9 @@ public final class RPCRouter: Sendable {
         self.branchTrackingCache = branchCache
         let poller = PRPoller()
         self.prPoller = poller
-        let ledger = WorktreeActivityLedger()
+        // The daemon passes the ledger its program status store stamps; a
+        // router built without one (tests) gets its own.
+        let ledger = activityLedger ?? WorktreeActivityLedger()
         self.activityLedger = ledger
         // Placeholder handlers: the real ones need the fully formed router and
         // are installed at the end of `init`, beside `prPoller.installPass`.
@@ -576,7 +580,7 @@ public final class RPCRouter: Sendable {
         // run loop, in mock mode too; a router built without one (tests) gets
         // its own.
         let resolvedProgramStatus = programStatus ?? ProgramStatusStore.live(
-            db: db, subscriptions: subscriptions, now: now)
+            db: db, subscriptions: subscriptions, ledger: ledger, now: now)
         self.programStatus = resolvedProgramStatus
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,

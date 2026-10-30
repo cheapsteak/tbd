@@ -43,7 +43,7 @@ struct WorktreeActivityTests {
         let box = UUIDBox()
         await ledger.setOnPossibleActivation { await box.add($0) }
         let wt = UUID()
-        await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0)
+        await ledger.recordAgentEvent(terminalID: a, worktreeID: wt, at: t0)
         await ledger.recordSelection(worktreeID: wt, at: t0)
         let snap = await ledger.snapshot()
         #expect(snap.hooks.isEmpty && snap.selections.isEmpty)
@@ -54,7 +54,7 @@ struct WorktreeActivityTests {
         let ledger = WorktreeActivityLedger()
         await ledger.setEnabled(true)
         let wt = UUID()
-        await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0)
+        await ledger.recordAgentEvent(terminalID: a, worktreeID: wt, at: t0)
         await ledger.recordSelection(worktreeID: wt, at: t0)
         let snap = await ledger.snapshot()
         #expect(snap.hooks == [a: t0])
@@ -67,9 +67,9 @@ struct WorktreeActivityTests {
         let box = UUIDBox()
         await ledger.setOnPossibleActivation { await box.add($0) }
         let wt = UUID()
-        await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0)
-        await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0.addingTimeInterval(60))   // still inside window
-        await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0.addingTimeInterval(1900)) // window lapsed
+        await ledger.recordAgentEvent(terminalID: a, worktreeID: wt, at: t0)
+        await ledger.recordAgentEvent(terminalID: a, worktreeID: wt, at: t0.addingTimeInterval(60))   // still inside window
+        await ledger.recordAgentEvent(terminalID: a, worktreeID: wt, at: t0.addingTimeInterval(1900)) // window lapsed
         await ledger.recordSelection(worktreeID: wt, at: t0.addingTimeInterval(1910))                 // inside again
         #expect(await box.items == [wt, wt])
     }
@@ -78,7 +78,7 @@ struct WorktreeActivityTests {
         let ledger = WorktreeActivityLedger()
         await ledger.setEnabled(true)
         let wt = UUID()
-        await ledger.recordHookEvent(terminalID: a, worktreeID: wt, at: t0)
+        await ledger.recordAgentEvent(terminalID: a, worktreeID: wt, at: t0)
         await ledger.recordSelection(worktreeID: wt, at: t0)
         await ledger.retain(terminalIDs: [], worktreeIDs: [])
         let snap = await ledger.snapshot()

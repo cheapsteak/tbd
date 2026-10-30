@@ -12,8 +12,8 @@ public struct SessionActivityFact: Sendable, Equatable {
     }
 }
 
-/// "Is anyone working here?" from hook-fed session rows and in-memory stamps.
-/// Never from terminal text.
+/// "Is anyone working here?" from session rows and in-memory agent-event
+/// stamps. Never from terminal text.
 public enum WorktreeActivity {
     public static func facts(from terminals: [Terminal]) -> [SessionActivityFact] {
         terminals.map {
@@ -36,7 +36,10 @@ public enum WorktreeActivity {
 
 /// In-memory recency stamps. Empty after a restart, by design (see the spec, "The scheduler").
 ///
-/// Off until `setEnabled(true)`. Every hook handler stamps it unconditionally,
+/// Agent events — every report `ProgramStatusStore` accepts, and the hooks
+/// that remain — stamp a terminal; a selection stamps a worktree.
+///
+/// Off until `setEnabled(true)`. Every agent event stamps it unconditionally,
 /// but only the schedule ever reads or prunes it (`RPCRouter.pollScheduleFacts`),
 /// so with `pr_poll_schedule_enabled` off an always-on ledger would grow an
 /// entry per terminal and worktree for the life of the daemon. `Daemon` enables
@@ -60,7 +63,8 @@ public actor WorktreeActivityLedger {
         isEnabled = enabled
     }
 
-    public func recordHookEvent(terminalID: UUID, worktreeID: UUID, at date: Date) async {
+    /// Stamp `terminalID` with an agent event observed at `date`.
+    public func recordAgentEvent(terminalID: UUID, worktreeID: UUID, at date: Date) async {
         guard isEnabled else { return }
         lastHookAt[terminalID] = date
         await signalIfLapsed(worktreeID, at: date)
@@ -72,7 +76,7 @@ public actor WorktreeActivityLedger {
         await signalIfLapsed(worktreeID, at: date)
     }
 
-    /// Hooks arrive many times a minute; only the first after a lapsed window
+    /// Agent events arrive many times a minute; only the first after a lapsed window
     /// can be an idle-to-active change, so only that one wakes the scheduler.
     private func signalIfLapsed(_ worktreeID: UUID, at date: Date) async {
         if let last = lastSignalAt[worktreeID], date.timeIntervalSince(last) < window { return }

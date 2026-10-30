@@ -1,0 +1,502 @@
+import Testing
+import Foundation
+import os
+import TBDShared
+import TestSupport
+@testable import TBDDaemonLib
+
+/// The production store end to end: `ProgramStatusStore.live` over an
+/// in-memory database, with every delta it broadcasts recorded and an enabled
+/// PR-poll ledger. Reports in, columns, banners and ledger stamps out.
+@Suite struct ProgramStatusColumnWriterTests {
+    private static let t0 = Date(timeIntervalSince1970: 6_000_000)
+
+    private static func at(_ seconds: TimeInterval) -> Date { t0.addingTimeInterval(seconds) }
+
+    /// Every drop is stamped well after every report a test sends.
+    private static let dropInstant = at(1000)
+
+    private static let secret = "acme secret"
+    private static let encodedSecret = Data(secret.utf8).base64EncodedString()
+
+    private final class Harness: Sendable {
+        let db: TBDDatabase
+        let subscriptions: StateSubscriptionManager
+        let ledger: WorktreeActivityLedger
+        let store: ProgramStatusStore
+        let worktreeID: UUID
+        private let deltas: OSAllocatedUnfairLock<[StateDelta]>
+
+        private init(
+            db: TBDDatabase, subscriptions: StateSubscriptionManager,
+            ledger: WorktreeActivityLedger, worktreeID: UUID,
+            deltas: OSAllocatedUnfairLock<[StateDelta]>
+        ) {
+            self.db = db
+            self.subscriptions = subscriptions
+            self.ledger = ledger
+            self.worktreeID = worktreeID
+            self.deltas = deltas
+            self.store = ProgramStatusStore.live(
+                db: db, subscriptions: subscriptions, ledger: ledger,
+                now: { ProgramStatusColumnWriterTests.dropInstant })
+        }
+
+        static func make() async throws -> Harness {
+            let db = try TBDDatabase(inMemory: true)
+            let deltas = OSAllocatedUnfairLock<[StateDelta]>(initialState: [])
+            let subscriptions = StateSubscriptionManager()
+            subscriptions.addSubscriber { data in
+                if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                    deltas.withLock { $0.append(delta) }
+                }
+                return true
+            }
+            let ledger = WorktreeActivityLedger()
+            await ledger.setEnabled(true)
+            let repo = try await db.repos.create(
+                path: "/tmp/pscw-repo-\(UUID().uuidString)", displayName: "acme",
+                defaultBranch: "main")
+            let worktree = try await db.worktrees.create(
+                repoID: repo.id, name: "wt", branch: "main",
+                path: "/tmp/pscw-wt-\(UUID().uuidString)", tmuxServer: "tbd-pscw")
+            return Harness(
+                db: db, subscriptions: subscriptions, ledger: ledger,
+                worktreeID: worktree.id, deltas: deltas)
+        }
+
+        func terminal(kind: TerminalKind = .claude) async throws -> Terminal {
+            try await db.terminals.create(
+                worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+                kind: kind, transport: .holder, sessionIncarnationID: UUID())
+        }
+
+        func row(_ terminal: Terminal) async throws -> Terminal {
+            try #require(try await db.terminals.get(id: terminal.id))
+        }
+
+        func activityDeltas(_ terminal: Terminal) -> [TerminalActivityDelta] {
+            deltas.withLock { $0 }.compactMap {
+                if case .terminalActivityUpdated(let delta) = $0, delta.terminalID == terminal.id {
+                    return delta
+                }
+                return nil
+            }
+        }
+
+        func awaitingInputDeltas(_ terminal: Terminal) -> [TerminalAwaitingInputDelta] {
+            deltas.withLock { $0 }.compactMap {
+                if case .terminalAwaitingInputChanged(let delta) = $0, delta.terminalID == terminal.id {
+                    return delta
+                }
+                return nil
+            }
+        }
+
+        func attentionNotifications() async throws -> [TBDNotification] {
+            try await db.notifications.unread(worktreeID: worktreeID)
+                .filter { $0.type == .attentionNeeded }
+        }
+    }
+
+    private static func inbound(
+        _ terminal: Terminal, _ text: String, at seconds: TimeInterval,
+        incarnation: ProgramStatusStore.Incarnation = .currentRow
+    ) -> ProgramStatusStore.Inbound {
+        ProgramStatusStore.Inbound(
+            terminalID: terminal.id, incarnation: incarnation,
+            payload: Array(text.utf8), observedAt: at(seconds))
+    }
+
+    @discardableResult
+    private func ingest(
+        _ h: Harness, _ terminal: Terminal, _ text: String, at seconds: TimeInterval,
+        incarnation: ProgramStatusStore.Incarnation = .currentRow
+    ) async -> ProgramStatusStore.Outcome {
+        await h.store.ingest(Self.inbound(terminal, text, at: seconds, incarnation: incarnation))
+    }
+
+    // MARK: - The mapping, through the store
+
+    @Test func workingWritesWorking() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        #expect(await ingest(h, terminal, "state=working:app=claude-code", at: 1) == .accepted)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .working)
+        #expect(row.activityStateSource == .programStatus)
+        #expect(row.activityStateObservedAt == Self.at(1))
+    }
+
+    @Test func blockedPermissionWritesWaitingWithTheKindOnly() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(
+            h, terminal,
+            "state=blocked:app=claude-code:kind=permission:msg=\(Self.encodedSecret)", at: 1)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .waitingForUser)
+        let reason = try #require(row.awaitingInputReason)
+        #expect(reason.programStatusBlock?.kind == .permission)
+        #expect(reason.message == "")
+        #expect(row.awaitingInputObservedAt == Self.at(1))
+        #expect(!(FactColumnJSON.encode(reason) ?? "").contains(Self.secret))
+    }
+
+    @Test func blockedQuestionAndBareBlockedWriteWaiting() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=blocked:app=claude-code:kind=question", at: 1)
+        var row = try await h.row(terminal)
+        #expect(row.activityState == .waitingForUser)
+        #expect(row.awaitingInputReason?.programStatusBlock?.kind == .question)
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 2)
+        await ingest(h, terminal, "state=blocked:app=claude-code", at: 3)
+        row = try await h.row(terminal)
+        #expect(row.activityState == .waitingForUser)
+        #expect(row.awaitingInputReason?.programStatusBlock == ProgramStatusBlock(kind: nil, taskID: nil))
+    }
+
+    @Test func doneIdleErrorAndAuthWriteIdle() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+        let endings = [
+            "state=done:app=claude-code",
+            "state=idle:app=claude-code",
+            "state=error:app=claude-code",
+            "state=blocked:app=claude-code:kind=auth",
+        ]
+        var seconds: TimeInterval = 0
+        for ending in endings {
+            seconds += 1
+            await ingest(h, terminal, "state=working:app=claude-code", at: seconds)
+            #expect(try await h.row(terminal).activityState == .working)
+            seconds += 1
+            await ingest(h, terminal, ending, at: seconds)
+            let row = try await h.row(terminal)
+            #expect(row.activityState == .idle, "\(ending)")
+            #expect(row.awaitingInputReason == nil, "\(ending)")
+        }
+    }
+
+    @Test func aWorkingTaskUnderAnIdleMainWritesWorking() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=idle:app=claude-code", at: 1)
+        #expect(try await h.row(terminal).activityState == .idle)
+        await ingest(h, terminal, "state=working:app=claude-code:id=t1", at: 2)
+        #expect(try await h.row(terminal).activityState == .working)
+    }
+
+    @Test func aBlockedTaskUnderAnIdleMainWritesWaiting() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=idle:app=claude-code", at: 1)
+        await ingest(h, terminal, "state=blocked:app=claude-code:id=t1:kind=question", at: 2)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .waitingForUser)
+        #expect(row.awaitingInputReason?.programStatusBlock?.taskID == "t1")
+    }
+
+    @Test func anUnchangedValueWritesNothing() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        await ingest(h, terminal, "state=working:app=claude-code", at: 2)
+        #expect(try await h.row(terminal).activityStateObservedAt == Self.at(1))
+        #expect(h.activityDeltas(terminal).count == 1)
+    }
+
+    // MARK: - Unknown: clear, child exit, incarnation change
+
+    @Test func aBareClearWritesUnknown() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        #expect(try await h.row(terminal).activityState == .working)
+        await ingest(h, terminal, "state=clear", at: 2)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .unknown)
+        #expect(row.activityStateSource == .programStatus)
+    }
+
+    @Test func childExitWritesUnknown() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=blocked:app=claude-code:kind=permission", at: 1)
+        #expect(try await h.row(terminal).activityState == .waitingForUser)
+        await h.store.drop(terminalID: terminal.id, reason: .childExited)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .unknown)
+        #expect(row.awaitingInputReason == nil)
+        #expect(row.activityStateObservedAt == Self.dropInstant)
+    }
+
+    @Test func anIncarnationChangeResetsTheColumnAndTheMemo() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+        let incarnationA = try #require(terminal.sessionIncarnationID)
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        #expect(try await h.row(terminal).activityState == .working)
+
+        // An in-place replacement starts incarnation B on the live row.
+        let beforeReplacement = try await h.row(terminal)
+        let incarnationB = try #require(try await h.db.terminals.prepareProfileAgentRespawn(
+            id: terminal.id,
+            expectedState: TerminalReplacementSnapshot(terminal: beforeReplacement),
+            sessionID: "acme-session-b", transcriptPath: nil, profileID: nil,
+            at: Self.at(2)))
+        #expect(try await h.row(terminal).activityState == .unknown)
+
+        // A late report from A is refused and changes nothing.
+        let late = await ingest(
+            h, terminal, "state=idle:app=claude-code", at: 3, incarnation: .claimed(incarnationA))
+        #expect(late != .accepted)
+        #expect(try await h.row(terminal).activityState == .unknown)
+
+        // B's first `working` is written although A's was the last value
+        // written: the memo is per incarnation.
+        await ingest(
+            h, terminal, "state=working:app=claude-code", at: 4, incarnation: .claimed(incarnationB))
+        #expect(try await h.row(terminal).activityState == .working)
+    }
+
+    // MARK: - Parks
+
+    @Test func aParkStillWritesIdle() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        #expect(try await h.row(terminal).activityState == .working)
+        try await h.db.terminals.setHibernated(
+            id: terminal.id, sessionID: "acme-session", at: Self.at(2))
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .idle)
+        #expect(row.activityStateSource == .database)
+    }
+
+    /// Holder park SIGTERMs the child, so the child-exit drop can land after
+    /// the park's `.idle`; it must not overwrite it.
+    @Test func childExitAfterParkLeavesIdle() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        #expect(try await h.row(terminal).activityState == .working)
+        try await h.db.terminals.setHibernated(
+            id: terminal.id, sessionID: "acme-session", at: Self.at(2))
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+        await h.store.drop(terminalID: terminal.id, reason: .childExited)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .idle)
+        #expect(row.activityStateSource == .database)
+    }
+
+    // MARK: - Reentrancy
+
+    /// Suspends the first caller until `release()`; every later caller passes.
+    private final class FirstCallGate: Sendable {
+        private struct State: Sendable {
+            var calls = 0
+            var arrived = false
+            var released = false
+            var waiting: CheckedContinuation<Void, Never>?
+        }
+
+        private let state = OSAllocatedUnfairLock<State>(initialState: State())
+
+        var hasArrived: Bool { state.withLock { $0.arrived } }
+
+        func pass() async {
+            let isFirst: Bool = state.withLock { current in
+                current.calls += 1
+                return current.calls == 1
+            }
+            guard isFirst else { return }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let resumeNow: Bool = state.withLock { current in
+                    current.arrived = true
+                    if current.released { return true }
+                    current.waiting = continuation
+                    return false
+                }
+                if resumeNow { continuation.resume() }
+            }
+        }
+
+        func release() {
+            let waiting: CheckedContinuation<Void, Never>? = state.withLock { current in
+                current.released = true
+                let held = current.waiting
+                current.waiting = nil
+                return held
+            }
+            waiting?.resume()
+        }
+    }
+
+    /// The store suspends on the column write, so a second ingest can run to
+    /// completion while the first is still on its way to the database. The
+    /// older report must not land last.
+    @Test func interleavedIngestsLeaveTheNewerValue() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+        let real = ProgramStatusEffects.live(
+            db: h.db, subscriptions: h.subscriptions, ledger: h.ledger)
+        let gate = FirstCallGate()
+        let gated = ProgramStatusEffects(
+            writeColumns: { write in
+                await gate.pass()
+                return await real.writeColumns(write)
+            },
+            raiseAttention: real.raiseAttention,
+            recordAgentEvent: real.recordAgentEvent)
+        let db = h.db
+        let store = ProgramStatusStore(
+            terminalLookup: { id in try? await db.terminals.get(id: id) },
+            publish: { _ in },
+            effects: gated)
+
+        let older = Self.inbound(terminal, "state=working:app=claude-code", at: 1)
+        let first = Task { await store.ingest(older) }
+        let reached = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in
+            gate.hasArrived
+        }
+        if reached == .timedOut {
+            Issue.record("the first ingest never reached its column write")
+        }
+        #expect(await store.ingest(
+            Self.inbound(terminal, "state=idle:app=claude-code", at: 2)) == .accepted)
+        gate.release()
+        #expect(await first.value == .accepted)
+
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .idle)
+        #expect(row.activityStateObservedAt == Self.at(2))
+    }
+
+    // MARK: - Deltas
+
+    @Test func deltasCarryProgramStatusProvenance() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        let activity = try #require(h.activityDeltas(terminal).last)
+        #expect(activity.activityState == .working)
+        #expect(activity.worktreeID == h.worktreeID)
+        #expect(activity.activityStateSource == .programStatus)
+        #expect(activity.activityStateObservedAt == Self.at(1))
+        #expect(activity.activityStateOrderObservedAt == Self.at(1))
+        #expect(h.awaitingInputDeltas(terminal).isEmpty)
+
+        await ingest(h, terminal, "state=blocked:app=claude-code:kind=permission", at: 2)
+        let raised = try #require(h.awaitingInputDeltas(terminal).last)
+        #expect(raised.reason?.programStatusBlock?.kind == .permission)
+        #expect(raised.observedAt == Self.at(2))
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 3)
+        let deltas = h.awaitingInputDeltas(terminal)
+        #expect(deltas.count == 2)
+        let retracted = try #require(deltas.last)
+        #expect(retracted.reason == nil)
+        #expect(retracted.observedAt == nil)
+    }
+
+    // MARK: - Banner
+
+    @Test func bannerOnEnteringBlockedOnlyOnce() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(
+            h, terminal,
+            "state=blocked:app=claude-code:kind=permission:msg=\(Self.encodedSecret)", at: 1)
+        await ingest(
+            h, terminal,
+            "state=blocked:app=claude-code:kind=permission:msg=\(Self.encodedSecret)", at: 2)
+        await ingest(
+            h, terminal,
+            "state=blocked:app=claude-code:kind=question:msg=\(Self.encodedSecret)", at: 3)
+
+        let notifications = try await h.attentionNotifications()
+        #expect(notifications.count == 1)
+        #expect(notifications.first?.message == "Claude needs your permission")
+        #expect(!(notifications.first?.message ?? "").contains(Self.secret))
+    }
+
+    @Test func bannerTextFollowsTheAgent() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal(kind: .codex)
+
+        #expect(await ingest(h, terminal, "state=blocked:app=codex:kind=question", at: 1) == .accepted)
+        let notifications = try await h.attentionNotifications()
+        #expect(notifications.count == 1)
+        #expect(notifications.first?.message == "Codex has a question")
+        #expect(!(notifications.first?.message ?? "").contains(Self.secret))
+    }
+
+    /// A sign-in block maps to idle and raises nothing. A blocked task entry
+    /// still does once the main entry moves on (a main-entry auth block
+    /// outranks every task entry in the roll-up).
+    @Test func authRaisesNoBanner() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(
+            h, terminal, "state=blocked:app=claude-code:kind=auth:msg=\(Self.encodedSecret)", at: 1)
+        #expect(try await h.attentionNotifications().isEmpty)
+
+        await ingest(h, terminal, "state=idle:app=claude-code", at: 2)
+        await ingest(
+            h, terminal,
+            "state=blocked:app=claude-code:id=t1:kind=permission:msg=\(Self.encodedSecret)", at: 3)
+        let notifications = try await h.attentionNotifications()
+        #expect(notifications.count == 1)
+        #expect(notifications.first?.message == "Claude needs your input")
+        #expect(!(notifications.first?.message ?? "").contains(Self.secret))
+    }
+
+    /// After a daemon restart the store's memory is empty, but the row still
+    /// says the session is waiting: the banner it raised before must not be
+    /// raised again.
+    @Test func aFreshStoreOnAnAlreadyWaitingRowRaisesNoBanner() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+        let block = ProgramStatusBlock(kind: .permission, taskID: nil)
+        _ = try await h.db.terminals.applyProgramStatusActivity(
+            id: terminal.id, scope: .incarnation(terminal.sessionIncarnationID),
+            activityState: .waitingForUser,
+            awaitingInputReason: AwaitingInputReason(message: "", programStatusBlock: block),
+            observedAt: Self.at(1))
+
+        #expect(await ingest(
+            h, terminal, "state=blocked:app=claude-code:kind=permission", at: 2) == .accepted)
+        #expect(try await h.row(terminal).activityState == .waitingForUser)
+        #expect(try await h.attentionNotifications().isEmpty)
+    }
+
+    // MARK: - Ledger
+
+    @Test func anAcceptedReportStampsTheLedger() async throws {
+        let h = try await Harness.make()
+        let shell = try await h.terminal(kind: .shell)
+        let claude = try await h.terminal()
+
+        #expect(await ingest(h, shell, "state=working:app=claude-code", at: 2) != .accepted)
+        #expect(await ingest(h, claude, "state=working:app=claude-code", at: 1) == .accepted)
+        #expect(await h.ledger.snapshot().hooks == [claude.id: Self.at(1)])
+    }
+}

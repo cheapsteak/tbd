@@ -7,12 +7,17 @@ private let programStatusLog = Logger(subsystem: "com.tbd.daemon", category: "pr
 /// Owns every Program Status Protocol (OSC 7501) report the daemon accepts:
 /// per terminal, the main entry and up to 32 task entries.
 ///
-/// Memory only. Nothing here is written to `state.db` — `title` and `msg` can
-/// carry content from the user's work — and a daemon restart starts empty.
-/// Reports drive display and resolution only; nothing here acts on a session.
+/// The entries are memory only — `title` and `msg` can carry content from the
+/// user's work — and a daemon restart starts empty. What reaches `state.db` is
+/// the rolled-up state mapped onto the activity columns every consumer reads
+/// (`ProgramStatusColumnValue`), written through `effects` when the mapped
+/// value changes. It also raises the attention banner when a session becomes
+/// blocked, and stamps the PR-poll activity ledger for every accepted report.
 ///
 /// Design: docs/specs/2026-10-10-program-status-protocol-design.md ("Trust",
-/// "Liveness", "Rolling up task entries").
+/// "Liveness", "Rolling up task entries");
+/// docs/specs/2026-10-30-osc-only-agent-status-design.md ("The store writes
+/// the activity columns", "Attention banner", "PR poll pacing").
 public actor ProgramStatusStore {
     /// Which incarnation a report belongs to.
     public enum Incarnation: Sendable, Equatable {
@@ -56,6 +61,7 @@ public actor ProgramStatusStore {
     public nonisolated let now: @Sendable () -> Date
     private let terminalLookup: @Sendable (UUID) async -> Terminal?
     private let publish: @Sendable (ProgramStatusSnapshot) -> Void
+    private let effects: ProgramStatusEffects
     private let inbox: AsyncStream<Inbound>
     private nonisolated let inboxContinuation: AsyncStream<Inbound>.Continuation
 
@@ -81,14 +87,34 @@ public actor ProgramStatusStore {
     /// late — and is refused.
     private var droppedAt: [UUID: Date] = [:]
 
+    /// The column value the row is known to hold for one incarnation.
+    private struct WrittenColumn {
+        var incarnationID: UUID?
+        var value: ProgramStatusColumnValue
+    }
+
+    /// Per terminal, the column value the last write found or left standing,
+    /// so a report that maps to the same value writes nothing. Set only from a
+    /// write's outcome; cleared by every drop and while a write is in flight.
+    private var written: [UUID: WrittenColumn] = [:]
+    /// Per-terminal count of column writes started and memo resets, never
+    /// reset. A write records its outcome in `written` only if this did not
+    /// move while it was suspended: a later write, or a drop, then describes
+    /// the row better than it does.
+    private var columnGenerations: [UUID: UInt64] = [:]
+
+    /// `effects` defaults to `.inert`: entries are held and published, and
+    /// nothing is written, raised or stamped.
     public init(
         terminalLookup: @escaping @Sendable (UUID) async -> Terminal?,
         publish: @escaping @Sendable (ProgramStatusSnapshot) -> Void,
+        effects: ProgramStatusEffects = .inert,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.now = now
         self.terminalLookup = terminalLookup
         self.publish = publish
+        self.effects = effects
         let made = AsyncStream.makeStream(
             of: Inbound.self, bufferingPolicy: .bufferingNewest(4096))
         self.inbox = made.stream
@@ -96,10 +122,12 @@ public actor ProgramStatusStore {
     }
 
     /// The production store: terminals from `db`, snapshots broadcast as
-    /// `.terminalProgramStatusChanged`.
+    /// `.terminalProgramStatusChanged`, and `ProgramStatusEffects.live` for
+    /// the columns, the banner and `ledger`.
     public static func live(
         db: TBDDatabase,
         subscriptions: StateSubscriptionManager,
+        ledger: WorktreeActivityLedger,
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> ProgramStatusStore {
         ProgramStatusStore(
@@ -113,6 +141,7 @@ public actor ProgramStatusStore {
             publish: { snapshot in
                 subscriptions.broadcast(delta: .terminalProgramStatusChanged(snapshot))
             },
+            effects: .live(db: db, subscriptions: subscriptions, ledger: ledger),
             now: now)
     }
 
@@ -249,6 +278,43 @@ public actor ProgramStatusStore {
             held[terminalID] = current
             publishCurrent(terminalID: terminalID)
         }
+
+        // 7. The activity columns. A bare `clear` ends the agent's reporting:
+        // `.unknown`. Otherwise the roll-up's mapped value; nil (task entries
+        // with no main entry, as after a restart, or a main entry this build
+        // does not recognize) writes nothing.
+        let columnValue: ProgramStatusColumnValue?
+        if report.id == nil && report.state == .clear {
+            columnValue = .unknown
+        } else {
+            columnValue = snapshot(for: terminalID)
+                .flatMap { ProgramStatusRollup.resolve($0) }
+                .flatMap { ProgramStatusColumnValue.mapping($0.value) }
+        }
+        if let columnValue {
+            let alreadyStanding = written[terminalID].map {
+                $0.incarnationID == incarnationID && $0.value == columnValue
+            } ?? false
+            if !alreadyStanding {
+                let outcome = await writeColumn(ProgramStatusColumnWrite(
+                    terminalID: terminalID, value: columnValue,
+                    scope: .incarnation(incarnationID), observedAt: inbound.observedAt))
+                // The banner keys on the committed transition into a wait,
+                // not on this store's memory, so a store that restarted empty
+                // never raises one for a session already waiting.
+                if case .written(let previous) = outcome,
+                   previous != .waitingForUser,
+                   let block = columnValue.block {
+                    await effects.raiseAttention(
+                        terminal.worktreeID,
+                        ProgramStatusAttention.message(app: expectedApp, block: block))
+                }
+            }
+        }
+
+        // 8. Every accepted report marks the worktree active for the PR poll
+        // schedule, whether or not it moved the column.
+        await effects.recordAgentEvent(terminalID, terminal.worktreeID, inbound.observedAt)
         return .accepted
     }
 
@@ -292,10 +358,23 @@ public actor ProgramStatusStore {
     /// when anything was held.
     ///
     /// For an end that is unconditional: the child exited or the row parked.
-    public func drop(terminalID: UUID, reason: DropReason) {
+    ///
+    /// A child exit also writes `.unknown` to the columns, for whichever
+    /// incarnation is live, whatever this store holds: the column may carry a
+    /// value written before a daemon restart that the store never saw. A park
+    /// writes nothing here — the park itself wrote `.idle`, and the writer
+    /// refuses a parked row — and neither does a wake: its lifecycle reset
+    /// already wrote `.unknown` for the new incarnation, which the woken agent
+    /// may have overwritten by now.
+    public func drop(terminalID: UUID, reason: DropReason) async {
+        let droppedNow = now()
         dropGenerations[terminalID] = (dropGenerations[terminalID] ?? 0) + 1
-        droppedAt[terminalID] = now()
+        droppedAt[terminalID] = droppedNow
         removeHeld(terminalID: terminalID, reason: reason)
+        guard reason == .childExited else { return }
+        _ = await writeColumn(ProgramStatusColumnWrite(
+            terminalID: terminalID, value: .unknown,
+            scope: .anyLiveIncarnation, observedAt: droppedNow))
     }
 
     /// Drop the terminal's entries only if they belong to an incarnation other
@@ -314,11 +393,46 @@ public actor ProgramStatusStore {
 
     // MARK: - Private
 
+    /// Also forgets the terminal's column memo, whether or not anything was
+    /// held: every drop ends what the memo described.
     private func removeHeld(terminalID: UUID, reason: DropReason) {
+        forgetColumn(terminalID)
         guard let removed = held.removeValue(forKey: terminalID) else { return }
         programStatusLog.debug(
             "drop terminal=\(terminalID.uuidString, privacy: .public) reason=\(reason.rawValue, privacy: .public)")
         publishEmpty(terminalID: terminalID, incarnationID: removed.incarnationID)
+    }
+
+    /// Write the columns through `effects`, and remember what the row holds
+    /// afterwards when nothing raced the write.
+    ///
+    /// While the write is suspended the memo says nothing: a report arriving
+    /// meanwhile must reach the writer, whose order guard decides between the
+    /// two. A write scoped to any live incarnation (a child exit) leaves no
+    /// memo, since it cannot name the incarnation it landed on.
+    private func writeColumn(_ write: ProgramStatusColumnWrite) async -> ProgramStatusColumnOutcome {
+        let generation = forgetColumn(write.terminalID)
+        let outcome = await effects.writeColumns(write)
+        // Re-read after the await (actor reentrancy).
+        guard columnGenerations[write.terminalID] == generation,
+              case .incarnation(let incarnationID) = write.scope else { return outcome }
+        switch outcome {
+        case .unchanged, .written:
+            written[write.terminalID] = WrittenColumn(incarnationID: incarnationID, value: write.value)
+        case .refused:
+            break
+        }
+        return outcome
+    }
+
+    /// Clear the terminal's memo and bump its column generation, so a write
+    /// in flight records nothing when it resumes. Returns the new generation.
+    @discardableResult
+    private func forgetColumn(_ terminalID: UUID) -> UInt64 {
+        written.removeValue(forKey: terminalID)
+        let next = (columnGenerations[terminalID] ?? 0) + 1
+        columnGenerations[terminalID] = next
+        return next
     }
 
     private func reject(_ terminalID: UUID, _ reason: String) -> Outcome {
@@ -364,5 +478,78 @@ public actor ProgramStatusStore {
             oldestIndex = index
         }
         tasks.remove(at: oldestIndex)
+    }
+}
+
+extension ProgramStatusEffects {
+    /// The production effects.
+    ///
+    /// - `writeColumns` writes through `TerminalStore.applyProgramStatusActivity`
+    ///   (a failed write is a refusal) and broadcasts the
+    ///   `terminalActivityUpdated` and `terminalAwaitingInputChanged` deltas the
+    ///   app reads, each only when its half changed. A cancelled scheduled
+    ///   resume needs no wake of the resume scheduler: its loop re-reads
+    ///   pending rows, and its eligibility check refuses a cancelled one.
+    /// - `raiseAttention` creates an `.attentionNeeded` notification and
+    ///   broadcasts it; a failed insert is logged and dropped.
+    /// - `recordAgentEvent` stamps `ledger`.
+    public static func live(
+        db: TBDDatabase,
+        subscriptions: StateSubscriptionManager,
+        ledger: WorktreeActivityLedger
+    ) -> ProgramStatusEffects {
+        ProgramStatusEffects(
+            writeColumns: { write in
+                let applied: ProgramStatusActivityWrite?
+                do {
+                    applied = try await db.terminals.applyProgramStatusActivity(
+                        id: write.terminalID, scope: write.scope,
+                        activityState: write.value.activityState,
+                        awaitingInputReason: write.value.awaitingInputReason,
+                        observedAt: write.observedAt)
+                } catch {
+                    programStatusLog.debug(
+                        "column write failed terminal=\(write.terminalID.uuidString, privacy: .public) error=\(String(describing: error), privacy: .public)")
+                    return .refused
+                }
+                guard let applied else { return .refused }
+                if applied.stateChanged {
+                    subscriptions.broadcast(delta: .terminalActivityUpdated(TerminalActivityDelta(
+                        terminalID: write.terminalID,
+                        worktreeID: applied.worktreeID,
+                        activityState: write.value.activityState,
+                        activityStateSource: .programStatus,
+                        activityStateObservedAt: write.observedAt,
+                        activityStateOrderObservedAt: write.observedAt)))
+                }
+                if applied.reasonChanged {
+                    let reason = write.value.awaitingInputReason
+                    subscriptions.broadcast(delta: .terminalAwaitingInputChanged(
+                        TerminalAwaitingInputDelta(
+                            terminalID: write.terminalID,
+                            worktreeID: applied.worktreeID,
+                            reason: reason,
+                            observedAt: reason == nil ? nil : write.observedAt)))
+                }
+                guard applied.stateChanged || applied.reasonChanged else { return .unchanged }
+                return .written(previous: applied.previousActivityState)
+            },
+            raiseAttention: { worktreeID, message in
+                do {
+                    let notification = try await db.notifications.create(
+                        worktreeID: worktreeID, type: .attentionNeeded, message: message)
+                    subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
+                        notificationID: notification.id,
+                        worktreeID: notification.worktreeID,
+                        type: notification.type,
+                        message: notification.message)))
+                } catch {
+                    programStatusLog.debug(
+                        "attention notification failed worktree=\(worktreeID.uuidString, privacy: .public) error=\(String(describing: error), privacy: .public)")
+                }
+            },
+            recordAgentEvent: { terminalID, worktreeID, date in
+                await ledger.recordAgentEvent(terminalID: terminalID, worktreeID: worktreeID, at: date)
+            })
     }
 }

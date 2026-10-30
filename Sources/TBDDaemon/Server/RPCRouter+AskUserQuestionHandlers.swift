@@ -52,7 +52,7 @@ extension RPCRouter {
         if let terminal = try? await db.terminals.get(id: p.terminalID) {
             // The PR schedule's activity is per worktree, so it needs the row
             // this handler already resolves; a missing row has no worktree.
-            await activityLedger.recordHookEvent(
+            await activityLedger.recordAgentEvent(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
             let message = Self.askUserQuestionMessage(fromInputJSON: p.inputJSON)
             do {
@@ -97,7 +97,7 @@ extension RPCRouter {
         askUserQuestionLog.debug("cleared received terminalID=\(p.terminalID.uuidString, privacy: .public) toolUseID=\(p.toolUseID, privacy: .public)")
 
         if let terminal = try? await db.terminals.get(id: p.terminalID) {
-            await activityLedger.recordHookEvent(
+            await activityLedger.recordAgentEvent(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
             do {
                 try await db.notifications.markRead(worktreeID: terminal.worktreeID)

@@ -5848,7 +5848,7 @@ extension RPCRouter {
         }
         let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
         // Any hook event marks the worktree active for the PR schedule.
-        await activityLedger.recordHookEvent(
+        await activityLedger.recordAgentEvent(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
         // `cwd` is optional for backward compatibility — when absent we cannot
@@ -6058,7 +6058,7 @@ extension RPCRouter {
             logger.debug("notificationEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
-        await activityLedger.recordHookEvent(
+        await activityLedger.recordAgentEvent(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
         if let cwd = params.cwd, !cwd.isEmpty {
@@ -6294,7 +6294,7 @@ extension RPCRouter {
         // app-originated interrupt shares this RPC but is a user action, not
         // agent activity, so it does not count.
         if params.origin == nil {
-            await activityLedger.recordHookEvent(
+            await activityLedger.recordAgentEvent(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
         }
 
