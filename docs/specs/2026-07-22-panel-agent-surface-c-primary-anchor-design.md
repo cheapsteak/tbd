@@ -8,6 +8,12 @@
 `2026-07-20-panel-agent-surface-a-mirror-design.md` and
 `2026-07-20-panel-agent-surface-b-daemon-owned-design.md`
 
+**Superseded in part by:**
+[`2026-10-30-panel-tabs-design.md`](2026-10-30-panel-tabs-design.md), which
+replaces the layout tree (§5.2–§5.4), the default file-routing policy (§6.1),
+placement (§7.3), the agent feature gate (§10.2) and the CLI (§10.3) with a
+fixed primary-plus-tabbed-side-region layout.
+
 ## 1. Summary
 
 TBD will expose side-panel layout to agents through a daemon-owned surface model.
