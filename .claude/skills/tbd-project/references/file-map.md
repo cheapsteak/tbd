@@ -110,6 +110,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ConfigStore.swift` — global config
 - `ModelProfileRecord.swift` / `ModelProfileUsageRecord.swift` — model profile GRDB records
 - `PRUndeterminedCause.swift` — the closed vocabulary of reasons a PR lookup produced no answer; PR's status manager reports them, and `WorktreeStore` names one for a record it cannot read
+- `UncommittedArchiveRefusal.swift` — the stored shape of an archive refused for uncommitted work, which `WorktreeArchiveError` carries; Lifecycle's extension (`WorktreeLifecycle+Archive.swift`) evaluates it
 
 ### ModelProfile/
 - `ModelProfileResolver.swift` — picks a profile per spawn (terminal → repo → global default)
