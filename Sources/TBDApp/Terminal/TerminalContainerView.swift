@@ -739,11 +739,12 @@ private struct MultiWorktreeCell: View {
                     appState.gridLayouts[worktreeID] = newLayout
                 }
             )
+            let tabID = activeTab?.id
             PanePlaceholder(
                 content: .terminal(terminalID: terminal.id),
                 worktree: worktree,
-                tabID: activeTab?.id,
-                layout: layoutBinding
+                tabID: tabID,
+                actions: .legacy(layout: layoutBinding, appState: appState, worktree: worktree, tabID: tabID)
             )
         } else {
             ZStack {

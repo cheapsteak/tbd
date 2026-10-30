@@ -8,6 +8,7 @@ struct SplitLayoutView: View {
     let worktree: LocalWorktree
     let tabID: UUID?
     @Binding var layout: LayoutNode
+    @Environment(AppState.self) var appState
 
     var body: some View {
         switch node {
@@ -16,7 +17,7 @@ struct SplitLayoutView: View {
                 content: content,
                 worktree: worktree,
                 tabID: tabID,
-                layout: $layout
+                actions: .legacy(layout: $layout, appState: appState, worktree: worktree, tabID: tabID)
             )
         case .split(let id, let direction, let children, let ratios):
             SplitContainer(
