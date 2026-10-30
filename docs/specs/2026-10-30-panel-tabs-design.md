@@ -391,7 +391,9 @@ tab has no surface in the copy — when that tab is shown, or when the flag turn
 on — after sending any tab sync still pending. So a tab left without a surface
 by a failed `panel.get`, or by an import delta missed while the subscription
 was down, loads again when it is shown, and a shown tab with a surface asks for
-no load.
+no load. Neither does a tab the last sync named in `skippedTabIDs`: no load
+would find a surface for it, and it is offered to the daemon again when its
+layout changes (see the second observer below).
 
 A full `panel.get` is merged into the copy rather than assigned, because deltas
 keep arriving during its flight. A tab the copy held when the get was issued,

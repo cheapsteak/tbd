@@ -187,20 +187,27 @@ struct PanelSurfaceCopyTests {
             let surfaced = Fixture.terminalTab(label: "surfaced")
             let alsoSurfaced = Fixture.terminalTab(label: "also surfaced")
             let bare = Fixture.terminalTab(label: "no surface")
+            let skipped = Fixture.terminalTab(label: "skipped by the sync")
             state.panelSurfaces = [worktreeID: [
                 surfaced.id: Fixture.surface(tabID: surfaced.id, worktreeID: worktreeID, revision: 1),
                 alsoSurfaced.id: Fixture.surface(tabID: alsoSurfaced.id, worktreeID: worktreeID, revision: 2),
             ]]
+            // The daemon could not import this tab's legacy layout, so it has
+            // no surface and renders legacy.
+            state.panelSyncSkippedTabIDs = [skipped.id]
 
             let onSurfaced = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: surfaced.id)
             let onAlsoSurfaced = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: alsoSurfaced.id)
             let onBare = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: bare.id)
+            let onSkipped = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: skipped.id)
             let onNoTab = state.panelSurfaceLoadKey(worktreeID: worktreeID, activeTabID: nil)
 
             #expect(onBare.loads, "a failed load or a missed import is retried when the tab is shown")
             #expect(!onSurfaced.loads, "deltas keep a tab with a surface current")
+            #expect(!onSkipped.loads, "no load would find a surface for a tab the sync skipped")
             #expect(!onNoTab.loads)
             #expect(onSurfaced == onAlsoSurfaced, "switching between tabs with surfaces reruns nothing")
+            #expect(onSkipped == onSurfaced, "switching to or from a skipped tab reruns nothing")
             #expect(onSurfaced != onBare, "switching to a tab without one reruns the load task")
 
             state.daemonCapabilities = Fixture.capabilities(panelTabs: false)

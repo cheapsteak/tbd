@@ -10,19 +10,24 @@ import TBDShared
 /// surface: it loads again when it is shown, instead of rendering legacy
 /// until the user picks another worktree. A shown tab with a surface asks for
 /// no load: one load fills every tab of the worktree and deltas keep the copy
-/// current, so switching between such tabs costs no `panel.get`. Not the
-/// resubscribe either: it refetches the worktrees the copy holds itself. A
-/// struct rather than an interpolated string, so a new dimension is a compile
-/// error at the call site instead of a key that silently stays equal.
+/// current, so switching between such tabs costs no `panel.get`. Neither does
+/// a tab the last tab sync skipped (`panelSyncSkippedTabIDs`): the daemon
+/// could not import its legacy layout, so no load would find a surface for
+/// it, and it renders legacy until a change to its layout offers it again.
+/// Not the resubscribe either: it refetches the worktrees the copy holds
+/// itself. A struct rather than an interpolated string, so a new dimension is
+/// a compile error at the call site instead of a key that silently stays
+/// equal.
 struct PanelSurfaceLoadKey: Equatable {
     let worktreeID: UUID
     /// The daemon reports `panel_tabs_enabled` on.
     let active: Bool
-    /// A tab is shown, and the copy holds no surface for it.
-    let activeTabLacksSurface: Bool
+    /// A tab is shown, the copy holds no surface for it, and the last tab
+    /// sync did not skip it.
+    let activeTabAwaitsSurface: Bool
 
     /// Whether the task this key starts loads the worktree's surfaces.
-    var loads: Bool { active && activeTabLacksSurface }
+    var loads: Bool { active && activeTabAwaitsSurface }
 }
 
 // MARK: - PanelSurfaceWorkspaceView

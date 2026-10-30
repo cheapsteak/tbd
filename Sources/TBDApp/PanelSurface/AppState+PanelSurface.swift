@@ -123,8 +123,9 @@ extension AppState {
         PanelSurfaceLoadKey(
             worktreeID: worktreeID,
             active: panelTabsActive,
-            activeTabLacksSurface: activeTabID.map {
+            activeTabAwaitsSurface: activeTabID.map {
                 panelSurface(worktreeID: worktreeID, tabID: $0) == nil
+                    && !panelSyncSkippedTabIDs.contains($0)
             } ?? false)
     }
 
