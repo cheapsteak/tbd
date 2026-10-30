@@ -52,7 +52,6 @@ Claude -> Tmux
 Codex -> Base
 Codex -> Process
 Database -> Base
-Database -> Remote
 DevServers -> Base
 DevServers -> Database
 DevServers -> Holder
@@ -111,7 +110,6 @@ Remote -> Actuation
 Remote -> Base
 Remote -> Claude
 Remote -> Database
-Remote -> PR
 Remote -> Process
 Server -> Actuation
 Server -> AskUserQuestion
@@ -142,4 +140,3 @@ SessionMod -> Base
 StartAdmission -> Process
 Tmux -> Process
 Tmux -> SSH
-Tmux -> Server
