@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Env-gated benchmark of what a sidebar refresh costs when many remote
 /// sessions have ended, with the "Collapse ended remote sessions" option off
@@ -53,11 +54,10 @@ struct SidebarListUpdateBench {
     }
 
     private func runCase(n: Int, collapse: Bool) async {
-        let suite = "SidebarListUpdateBench.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarListUpdateBench")
+        defer { suite.tearDown() }
+        let defaults = suite.defaults
         defaults.set(true, forKey: AppState.showScratchSectionKey)
-        defaults.set(false, forKey: AppState.nightwatchExperimentalKey)
         defaults.set(false, forKey: AppState.sidebarWorkflowGroupsKey)
         defaults.set(collapse, forKey: AppState.sidebarCollapseEndedSessionsKey)
         let state = AppState(userDefaults: defaults)

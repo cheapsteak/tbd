@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The default-off "Collapse ended remote sessions" sidebar option:
 /// `AppState.sidebarCollapseEndedSessionsKey`, the pure ended/live partition,
@@ -10,10 +11,9 @@ import TBDShared
 @Suite("Sidebar collapse ended sessions")
 struct SidebarEndedSessionsTests {
     private func withState(_ body: (AppState) -> Void) {
-        let suite = "SidebarEndedSessionsTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        body(AppState(userDefaults: defaults))
+        withTestDefaults("SidebarEndedSessionsTests") { defaults in
+            body(AppState(userDefaults: defaults))
+        }
     }
 
     private func key(_ id: String) -> RemoteSessionSelection {
@@ -31,9 +31,9 @@ struct SidebarEndedSessionsTests {
         #expect(AppState.sidebarCollapseEndedSessionsEnabled(stored: nil, shippedDefault: true) == true)
         #expect(AppState.sidebarCollapseEndedSessionsEnabled(stored: false, shippedDefault: true) == false)
         #expect(AppState.sidebarCollapseEndedSessionsEnabled(stored: true, shippedDefault: false) == true)
-        let suite = "SidebarEndedSessionsTests.defaults.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarEndedSessionsTests.defaults")
+        defer { suite.tearDown() }
+        let defaults = suite.defaults
         #expect(AppState.sidebarCollapseEndedSessionsEnabled(defaults: defaults)
                 == AppState.sidebarCollapseEndedSessionsDefault)
         defaults.set(true, forKey: AppState.sidebarCollapseEndedSessionsKey)
