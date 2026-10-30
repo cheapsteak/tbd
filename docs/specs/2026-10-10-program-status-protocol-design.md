@@ -4,7 +4,7 @@ Status: design. On for every pty-holder session; there is no flag.
 
 ## Summary
 
-Claude Code (from v2.1.295) and Codex (from 0.164.0) report their own state
+Claude Code (from v2.1.295) and Codex (from 0.163.0) report their own state
 to the terminal over a private OSC sequence, the Program Status Protocol,
 OSC 7501 — Claude Code once the terminal says it supports it, Codex without
 asking. On the pty-holder transport TBD's SwiftTerm *is* the terminal, so TBD
@@ -23,7 +23,7 @@ design only promises not to break it.
 ## The protocol as the agents implement it
 
 Claude Code's behavior was read from its shipped bundle (v2.1.295), and
-Codex's from its source (0.164.0). No published specification was found; the
+Codex's from its source (0.164.0, which added `done`, `error` and `kind` to the reports of 0.163.0). No published specification was found; the
 behaviors below are what the clients do, and the parser must tolerate drift
 from them.
 
@@ -76,8 +76,9 @@ output is a terminal, unless that terminal is VTE older than 0.54. A report is
 `:kind=<permission|question|auth>` added when blocked, and its clear is
 `ESC ] 7501 ; state=clear ESC \`, with no `app`. Codex sends no `id`,
 `title`, `msg` or `progress`, so a Codex terminal has a main entry and never a
-task entry. It refreshes its status on every draw and its cache starts empty,
-so its first draw reports `idle`. Codex 0.163.0 sends `working`, `idle` and
+task entry. It computes its status on every draw but writes it only when it
+changes (its own cache suppresses repeats), and the cache starts empty, so its
+first draw reports `idle`. Codex 0.163.0 sends `working`, `idle` and
 `blocked` without `kind`; TBD accepts that form, which lacks only the richer
 states.
 
