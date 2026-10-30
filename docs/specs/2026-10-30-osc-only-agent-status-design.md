@@ -196,17 +196,33 @@ The mark's tooltip names the cause from the terminal's transport:
 The mark clears on the first accepted report. Shell terminals never show it.
 It is new UI beside the existing badges and needs no flag.
 
+Every other consumer of the column sees the same `.unknown`. The delivery
+verifier reports a send to such a session as undetermined rather than
+confirmed, and the PR poll schedule sees no activity from it.
+
+### Continue in Claude
+
+Continue in Claude replaces a Codex process with Claude, and runs only on the
+tmux transport, where a Codex row now stays `.unknown`. Its preflight therefore
+no longer requires a persisted `idle`. It relies on the check it already
+treated as authoritative: a bounded re-read of the Codex rollout through
+`CodexTranscriptActivityTracker`, which must report the last turn closed. The
+tracker stays for that reader and for the action's pending recovery; it no
+longer feeds `terminal.list` or the sidebar.
+
 ### Upgrading
 
 A session started before this design never had its probe answered (Claude
 Code), or had its reports dropped (Codex), and its column holds a value a hook
 wrote. No hook will write it again, so a `working` would stand forever and
-block every auto-park. A `.sql` migration therefore sets `activity_state` to
-`unknown`, and clears the wait reason, on every terminal row that is not
-parked (`hibernated_at IS NULL`) and whose `activity_state_source` — the JSON
-encoding of a `FactSource` — is not `programStatus`. Rows the store wrote, and
-parked rows, keep their value. The
-reset sessions show the no-status mark until they are relaunched or woken.
+block every auto-park. A `.sql` migration therefore sets `activityState` to
+`unknown`, and clears its source, its observed-at stamps and the wait-reason
+columns (`awaitingInputReason`, `awaitingInputObservedAt`), on every terminal
+row that is neither parked nor suspended (`hibernatedAt IS NULL AND
+suspendedAt IS NULL`) and whose `activityStateSource` — the JSON encoding of a
+`FactSource` — is not `programStatus`. Rows the store wrote, and parked or
+suspended rows, keep their value. The reset sessions show the no-status mark
+until they are relaunched or woken.
 
 ### Hooks that stay
 
@@ -223,7 +239,9 @@ each loses its `tbd terminal-activity` call:
 
 `UserPromptSubmit` on Claude stays for one job, the session title, through a
 new `tbd hooks session-title` command. That job used to ride on
-`tbd terminal-activity working --session-title`.
+`tbd terminal-activity working --session-title`. Likewise the `Stop` hook's
+transcript sync, which rode `tbd terminal-activity idle`, moves to the
+`tbd notify` call the same hook already makes.
 
 ### What is removed
 
@@ -237,11 +255,13 @@ new `tbd hooks session-title` command. That job used to ride on
   rewrites both overlays at startup.
 - **RPC** – `terminal.activityEvent` and `terminal.notificationEvent`, their
   params, and the activity write in the session-event handler.
+- **App** – the interrupt write the app sent through `terminal.activityEvent`
+  when the user stopped a turn. The agent reports `idle` itself.
 - **Inference** – `ClaudeDelegationTracker`, `ClaudeDelegationSample`, the
-  delegation-claim clear in `SessionEnd`, `CodexTranscriptActivityTracker`,
-  `AwaitingInputSupersession`, and `AwaitingInputClass`'s notification-type
-  classification. A type that keeps a reader outside this list stays for that
-  reader.
+  delegation-claim clear in `SessionEnd`, `CodexTranscriptActivityTracker`'s
+  sidebar wiring (see "Continue in Claude"), `AwaitingInputSupersession`, and
+  `AwaitingInputClass`'s notification-type classification. A type that keeps a
+  reader outside this list stays for that reader.
 - **The flag** – see "Flag".
 
 ## Placement
@@ -311,7 +331,10 @@ Each branch of each new conditional gets a test.
   by transport; cleared by a report; restarted by a new incarnation; never on a
   shell terminal.
 - **Upgrade migration** – a hook-written live row becomes `unknown` with no
-  wait reason; a store-written row and a parked row keep their values.
+  wait reason; a store-written row, a parked row and a suspended row keep
+  their values.
+- **Continue in Claude** – proceeds from a tmux Codex row at `.unknown` when
+  the rollout re-read reports the turn closed; refuses when it does not.
 - **Overlays** – neither overlay contains `terminal-activity`; Claude's has no
   `Notification` entry and calls `tbd hooks session-title` from
   `UserPromptSubmit`; Codex's has only `SessionStart` and `Stop`.
