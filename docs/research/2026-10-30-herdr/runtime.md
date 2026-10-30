@@ -362,9 +362,8 @@ libghostty-vt and draws with GPUI from the `render_state` dirty-row API
 
 - **TBD now.** "A daemon restart starts the emulator empty"
   (`docs/specs/2026-08-30-pty-holder-session-transport-design.md:506`), and
-  the emulator "is **not persisted** to disk" (`:471`). The recorded
-  measurement (memory `project_holder_readoption_repaint_measurement`) is that
-  re-adoption issues no jiggle, a blank emulator recovers nothing, and
+  the emulator "is **not persisted** to disk" (`:471`). A TBD field
+  measurement of holder re-adoption found that re-adoption issues no jiggle, a blank emulator recovers nothing, and
   `contentObserved` stays false. Every `tbd update` and `scripts/restart.sh`
   goes through `DaemonHandover`, so this is the most common restart there is,
   and each one blanks every detached session's screen and scrollback until
@@ -532,15 +531,15 @@ libghostty-vt and draws with GPUI from the `render_state` dirty-row API
   - The test comment reads "Not macOS's own `sleep`: it hides its environment"
     (`:189`).
 - **TBD now.** The escaped-process problem is documented
-  (`docs/specs/2026-08-18-orphan-process-gc-design.md`; memory
-  `project_escaped_descendant_processes`: `& disown` and `nohup` survive).
-  Memory `project_macos_pane_env_unreadable` concludes "you cannot read a pane
-  process's environment on macOS". **That was measured with `/bin/sleep`, an
-  Apple platform binary** — the one class herdr-core says hides its
-  environment.
-- **Next step.** Re-measure with a non-Apple binary such as Homebrew
-  `python3` or `node`. If it holds, a per-session token is a stronger identity
-  than cwd or pgid closure for `AgentReaper`. The stated limit: a process that
+  (`docs/specs/2026-08-18-orphan-process-gc-design.md`: `& disown` and
+  `nohup` survive). Several TBD docs and comments conclude that a pane
+  process's environment cannot be read on macOS. **That was measured with
+  `/bin/sleep`, an Apple platform binary** — the one class herdr-core says
+  hides its environment.
+- **Re-measured.** [`identity.md`](identity.md) section (b) shows `claude`,
+  `node` and `pnpm` are readable, while Apple binaries and a few non-Apple
+  apps are not. So a per-session token can be a stronger identity than cwd or
+  pgid closure for `AgentReaper`. The stated limit: a process that
   both leaves the session and drops its environment escapes.
 
 ### 7. Use the host-shutdown signal to tell "lost to reboot" from "exited"
@@ -556,9 +555,9 @@ libghostty-vt and draws with GPUI from the `render_state` dirty-row API
 ### 8. Jiggle by shrinking rows
 
 - **TBD now.** `HolderReader.jiggle()` grows by one column
-  (`Sources/TBDDaemon/Holder/HolderReader.swift:755`). TBD's own measurement
-  (memory `project_holder_readoption_repaint_measurement`) found grow-by-one
-  "transiently corrupt" and recommended shrinking.
+  (`Sources/TBDDaemon/Holder/HolderReader.swift:755`). A TBD field
+  measurement of holder re-adoption found grow-by-one "transiently corrupt"
+  and recommended shrinking.
 - **herdr.** Both products shrink: herdr by rows − 1 with a 30 ms sleep
   (`pty/actor/unix.rs:983-1025`), herdr-core by rows − 1 with 50 ms
   (`runtime.rs:448-457`). herdr-core nudges only when the screen is inexact,

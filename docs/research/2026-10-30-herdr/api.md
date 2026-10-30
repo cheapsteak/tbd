@@ -171,7 +171,7 @@ From `herdr-core/schema/README.md` and `crates/herdr-core/src/server.rs`:
 
 ## (b) Ideas for TBD, ranked
 
-Each entry gives what TBD does now, what herdr does, and whether it would help. Two places where TBD is already ahead of herdr come at the end.
+Each entry gives what TBD does now, what herdr does, and whether it would help. The places where TBD is already ahead of herdr come at the end.
 
 ### 1. Advertise the daemon's method list, and give "unknown method" a code plus restart guidance
 
