@@ -167,6 +167,13 @@ enum RowActionMenu {
         /// gesture the daemon will still perform. Always `false` for a local
         /// row.
         var isGone: Bool
+        /// The lane's provider is no longer configured at all: absent from the
+        /// loaded provider roster and not a reserved built-in name. Nothing
+        /// enumerates such a lane and nothing can be invoked for it, so it is
+        /// exempt from the capability gate exactly like `isGone`, and the
+        /// daemon files it row-only. A configured provider whose `describe`
+        /// failed is not retired. Always `false` for a local row.
+        var providerRetired: Bool
         /// The daemon's `remote_delete_enabled` gate, read from
         /// `DaemonCapabilitiesResult`. Off — the shipped default — Delete is
         /// not composed at all, so a destructive action is never offered that
@@ -192,6 +199,7 @@ enum RowActionMenu {
              provider: String? = nil,
              providerCapabilities: Set<String> = [],
              isGone: Bool = false,
+             providerRetired: Bool = false,
              remoteDeleteEnabled: Bool = false) {
             self.hasHibernatableClaude = hasHibernatableClaude
             self.hasHibernatedClaude = hasHibernatedClaude
@@ -212,6 +220,7 @@ enum RowActionMenu {
             self.provider = provider
             self.providerCapabilities = providerCapabilities
             self.isGone = isGone
+            self.providerRetired = providerRetired
             self.remoteDeleteEnabled = remoteDeleteEnabled
         }
     }
@@ -462,10 +471,13 @@ enum RowActionMenu {
         // returns `.rowOnlyGone` for exactly this shape and files the row
         // without invoking any verb. Disabling Archive here would leave the
         // surface blocking the one gesture the daemon will still perform, with
-        // no other way out. The exemption is narrow: a lane the provider still
-        // enumerates stays disabled, and active children still win above it.
+        // no other way out. A lane whose provider is retired (no longer
+        // configured) is exempt on the same grounds: the daemon files it
+        // row-only too. The exemption is narrow: a lane a configured provider
+        // still enumerates stays disabled, and active children still win above it.
         let missingArchiveCapability = !context.location.isLocal
             && !context.isGone
+            && !context.providerRetired
             && !context.providerCapabilities.contains("archive")
         let archiveBlocked = context.hasActiveChildren || missingArchiveCapability
         let archiveTitle: String

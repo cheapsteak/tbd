@@ -113,6 +113,7 @@ final class AppStateEmissionTracker {
         _ = state.isLoadingMoreArchivedSearch
         _ = state.reapRecords
         _ = state.remoteProviders
+        _ = state.remoteProvidersLoaded
         _ = state.remoteSessions
         _ = state.retainedTranscripts
         _ = state.remoteSessionDisplayNames
@@ -238,6 +239,7 @@ final class AppStateEmissionTracker {
         "isLoadingMoreArchivedSearch",
         "reapRecords",
         "remoteProviders",
+        "remoteProvidersLoaded",
         "remoteSessions",
         "retainedTranscripts",
         "remoteSessionDisplayNames",

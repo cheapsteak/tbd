@@ -198,8 +198,10 @@ struct RPCRouterRemoteAnswerTests: ~Copyable {
             describeDeclaring([RemoteCapability.answer]),
             listing(),
             ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
         ])
         let m = await manager(invoker)
+        await poll(m)
         await poll(m)
         await poll(m)
         let response = try await answer(router(m))

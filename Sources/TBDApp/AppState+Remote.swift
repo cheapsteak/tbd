@@ -44,6 +44,7 @@ extension AppState {
             let providers = try await remoteProvidersFetcher()
             let sessions = try await remoteSessionsFetcher()
             remoteProviders = providers.providers
+            remoteProvidersLoaded = true
             remoteSessions = sessions.sessions
             updateNavigationFlags()
             pruneExpandedSidebarGroups(providerNames: Set(providers.providers.map(\.config.name)))
@@ -71,6 +72,7 @@ extension AppState {
                 // transient disabled state must not delete the user's
                 // rename overrides or unread bookkeeping.
                 remoteProviders = []
+                remoteProvidersLoaded = false
                 remoteSessions = []
                 updateNavigationFlags()
                 // Safe to clear outright, unlike the two maps above: this is a

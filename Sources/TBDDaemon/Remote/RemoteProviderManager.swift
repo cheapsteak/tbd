@@ -90,6 +90,37 @@ public actor RemoteProviderManager {
     /// theory and it needs one.
     static let maxEnrollmentAttempts = 3
 
+    /// How many consecutive missed `list` polls it takes to mark a provider's
+    /// inventory stale. A miss is a timeout or a `.transient` failure; the
+    /// first one is tolerated and the second consecutive one marks stale.
+    ///
+    /// Field measurement: on one provider, 33 `list` timeouts at the
+    /// contract's 30 s limit landed in about five hours. Grouped into runs of
+    /// consecutive failures (under 100 s apart), 24 runs were a single miss
+    /// whose next poll succeeded, with one run each of two, three and four.
+    /// Live sampling of three polls took 14 s, 29 s and 14 s, so the contract's
+    /// limit sits right on the provider's ordinary latency. Reading every
+    /// isolated timeout as an untrustworthy inventory refused archives roughly
+    /// one poll in seven, for a mirror that was fine.
+    ///
+    /// Why two: a mirror one missed poll older (about 2.5 minutes instead of
+    /// about 1.5 at the 60 s cadence) is not materially less trustworthy for
+    /// the guards that read it, while a second consecutive miss is the first
+    /// evidence the slowness is not a one-off. The timeout itself is the
+    /// contract's and is not changed here.
+    ///
+    /// Auth, permanent and contract-bug failures and undecodable output keep
+    /// their immediate effect: they do not clear by themselves on the next poll.
+    ///
+    /// No spec accompanies this: it tunes failure tolerance inside the
+    /// existing staleness theory rather than revising it (root `CLAUDE.md`,
+    /// "Work starts with a brainstormed spec").
+    static let missedPollsBeforeStale = 2
+
+    /// Consecutive missed polls per provider. Reset whenever a snapshot is
+    /// applied, whichever path delivered it.
+    private var consecutiveMissedPolls: [String: Int] = [:]
+
     private var providers: [String: RemoteProviderConfig] = [:]
     private var describes: [String: ProviderDescribe] = [:]
     /// The contract major negotiated per provider — the highest version both
@@ -543,6 +574,11 @@ public actor RemoteProviderManager {
                 provider, verb: ["list"], stdin: nil, timeout: 30,
                 contractVersion: contractMajor(for: provider.name))
             if let failure = result.failureClass {
+                if failure == .transient, toleratesMissedPoll(provider: provider.name) {
+                    remoteLogger.error(
+                        "poll \(provider.name, privacy: .public) missed (transient failure); tolerated, inventory not yet marked stale")
+                    return
+                }
                 await recordPollFailure(provider: provider.name, class: failure, result: result)
                 return
             }
@@ -554,6 +590,11 @@ public actor RemoteProviderManager {
                 complete: envelope.complete, now: snapshotAt,
                 requestStartedAt: requestStartedAt)
         } catch {
+            if error is ProviderRunError, toleratesMissedPoll(provider: provider.name) {
+                remoteLogger.error(
+                    "poll \(provider.name, privacy: .public) missed (\(String(describing: error), privacy: .public)); tolerated, inventory not yet marked stale")
+                return
+            }
             // `.error`, not `.debug`: this is not a trace of one session going
             // quiet, it is the whole provider's inventory freezing at whatever
             // it last said. The sidebar does say so — `setHealth(.stale)` below
@@ -570,6 +611,15 @@ public actor RemoteProviderManager {
             await recoverLastSuccessfulSnapshotAtIfNeeded(provider: provider.name)
             setHealth(provider: provider.name, to: (.stale, String(describing: error), nil))
         }
+    }
+
+    /// Counts one missed poll and says whether it is still within tolerance
+    /// (`missedPollsBeforeStale`). Returns false once the miss reaches the
+    /// threshold, leaving the caller to mark the inventory stale.
+    private func toleratesMissedPoll(provider: String) -> Bool {
+        let misses = (consecutiveMissedPolls[provider] ?? 0) + 1
+        consecutiveMissedPolls[provider] = misses
+        return misses < Self.missedPollsBeforeStale
     }
 
     /// Shared by the poll path and the events snapshot path.
@@ -643,6 +693,7 @@ public actor RemoteProviderManager {
             // persisted row — so the unreadable flag is left where it stands.
             snapshotFreshnessUnreadable.remove(provider)
         }
+        consecutiveMissedPolls[provider] = 0
         markHealthy(provider: provider)
         if outcome.changed {
             subscriptions.broadcast(delta: .remoteSessionsChanged)
@@ -1525,6 +1576,25 @@ public actor RemoteProviderManager {
     /// permission to try the verb and see.
     func declaredCapabilities(provider: String) -> Set<String> {
         Set(describes[provider]?.capabilities ?? [])
+    }
+
+    /// Whether `provider` is retired: configured neither in this actor nor in
+    /// the registry file, and not a reserved built-in name (which can be
+    /// absent merely because its feature flag is off). Read-only: unlike
+    /// `loadAdHoc`, it registers nothing. A provider that is configured but
+    /// whose `describe` failed is not retired, and neither is anything when the
+    /// registry file exists but cannot be loaded (fail closed on unknowns; a
+    /// missing file loads as no providers).
+    func isRetired(provider: String) -> Bool {
+        if providers[provider] != nil || RemoteProviderRegistry.isReserved(provider) {
+            return false
+        }
+        do {
+            let configs = try RemoteProviderRegistry.load(from: registryURL)
+            return !configs.contains { $0.name == provider }
+        } catch {
+            return false
+        }
     }
 
     /// The contract major to announce for one provider: the negotiated value
