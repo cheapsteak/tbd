@@ -252,6 +252,10 @@ public enum RPCMethod {
     public static let terminalSessionEvent = "terminal.sessionEvent"
     public static let terminalActivityEvent = "terminal.activityEvent"
     public static let terminalSessionEnded = "terminal.sessionEnded"
+    /// Sent by `tbd hooks session-title` from Claude's `UserPromptSubmit`
+    /// hook: asks for the title the session should take, when it has changed
+    /// since the session was last given one.
+    public static let terminalSessionTitle = "terminal.sessionTitle"
     public static let terminalNotificationEvent = "terminal.notificationEvent"
     public static let terminalAskUserQuestionPending = "terminal.askUserQuestionPending"
     public static let terminalAskUserQuestionCleared = "terminal.askUserQuestionCleared"
@@ -4780,6 +4784,32 @@ public struct TerminalSessionEndedParams: Codable, Sendable, Equatable {
         self.terminalID = terminalID
         self.sessionIncarnationID = sessionIncarnationID
         self.reason = reason
+    }
+}
+
+/// Params for `terminal.sessionTitle` — sent by `tbd hooks session-title` from
+/// Claude Code's `UserPromptSubmit` hook. Carries identity only.
+public struct TerminalSessionTitleParams: Codable, Sendable, Equatable {
+    public let terminalID: UUID
+    /// Process incarnation planted by TBD before a managed replacement starts.
+    /// A hook from a replaced process names an incarnation the row no longer
+    /// carries and gets no title.
+    public let sessionIncarnationID: UUID?
+    public init(terminalID: UUID, sessionIncarnationID: UUID? = nil) {
+        self.terminalID = terminalID
+        self.sessionIncarnationID = sessionIncarnationID
+    }
+}
+
+/// Result of `terminal.sessionTitle`.
+public struct TerminalSessionTitleResult: Codable, Sendable, Equatable {
+    /// The title the session should take, via the hook's
+    /// `hookSpecificOutput.sessionTitle`. Nil when the session already carries
+    /// the title TBD wants for it, or when the hook's process is not the
+    /// row's current one.
+    public let sessionTitle: String?
+    public init(sessionTitle: String?) {
+        self.sessionTitle = sessionTitle
     }
 }
 

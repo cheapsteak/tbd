@@ -5553,6 +5553,14 @@ extension RPCRouter {
             terminalID: notification.terminalID
         )))
 
+        // The Stop and StopFailure hooks end a turn with exactly these two
+        // types, so the turn-end transcript sync rides the call they make.
+        if params.type == .responseComplete || params.type == .error,
+           let terminalID = params.terminalID,
+           let terminal = try? await db.terminals.get(id: terminalID) {
+            await syncTranscriptIntoCurrentProjectDir(terminal)
+        }
+
         return try RPCResponse(result: notification)
     }
 
@@ -6273,6 +6281,60 @@ extension RPCRouter {
         )))
     }
 
+    /// Stop-hook transcript sync. When a Claude session finishes a turn and
+    /// its recorded transcript lives OUTSIDE the project dir derived from the
+    /// worktree's CURRENT path — the worktree moved or was promoted after the
+    /// session started — mirror the jsonl and its subagents into the derived
+    /// dir, so a later cwd-scoped `claude --resume` finds the conversation.
+    /// Never rewrites `terminal.transcriptPath`: the live session keeps
+    /// appending to the original file; this only copies.
+    ///
+    /// Claude only: a Codex row's transcript is its rollout, which no
+    /// `claude --resume` reads.
+    func syncTranscriptIntoCurrentProjectDir(_ terminal: Terminal) async {
+        guard terminal.isClaudeTab,
+              let storedPath = terminal.transcriptPath, !storedPath.isEmpty,
+              FileManager.default.fileExists(atPath: storedPath),
+              let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID)
+        else { return }
+        let derivedDir = TranscriptProjectDirSync.derivedProjectDir(
+            worktreePath: worktree.path,
+            projectsRoot: claudeProjectsRoot(forProfileID: terminal.profileID)
+        )
+        let source = URL(fileURLWithPath: storedPath)
+        let sourceDirReal = source.deletingLastPathComponent()
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let derivedReal = derivedDir.resolvingSymlinksInPath().standardizedFileURL.path
+        guard sourceDirReal != derivedReal else { return }
+        await TranscriptProjectDirSync.syncSessionDetached(
+            jsonl: source, intoProjectDir: derivedDir)
+    }
+
+    /// `terminal.sessionTitle` — the title Claude's `UserPromptSubmit` hook
+    /// hands its session, through `tbd hooks session-title`.
+    ///
+    /// The identity check is the one a hook's state write used to make: a
+    /// delayed hook from a replaced process, or one that fires while a
+    /// managed replacement is staged, is never handed a title and never moves
+    /// the record of what the live session carries.
+    func handleTerminalSessionTitle(_ paramsData: Data) async throws -> RPCResponse {
+        let params = try decoder.decode(TerminalSessionTitleParams.self, from: paramsData)
+        guard let terminal = try await db.terminals.get(id: params.terminalID) else {
+            logger.debug("sessionTitle: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
+            return .ok()
+        }
+        guard terminal.pendingSessionIncarnationID == nil,
+              terminal.sessionIncarnationID == params.sessionIncarnationID else {
+            return try RPCResponse(result: TerminalSessionTitleResult(sessionTitle: nil))
+        }
+        // A prompt is agent activity for the PR schedule.
+        await activityLedger.recordAgentEvent(
+            terminalID: terminal.id, worktreeID: terminal.worktreeID, at: now())
+        let sessionTitle = await ClaudeSessionTitle.forPrompt(
+            db: db, store: lifecycle.sessionTitles, terminal: terminal)
+        return try RPCResponse(result: TerminalSessionTitleResult(sessionTitle: sessionTitle))
+    }
+
     func handleTerminalActivityEvent(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalActivityEventParams.self, from: paramsData)
         guard params.origin != .userInterrupt || params.activityState == .idle else {
@@ -6298,31 +6360,10 @@ extension RPCRouter {
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
         }
 
-        // Stop-hook transcript sync (Stop/StopFailure reach the daemon as
-        // activity=idle): when a session finishes a turn and its recorded
-        // transcript lives OUTSIDE the project dir derived from the worktree's
-        // CURRENT path — the worktree moved/was promoted after the session
-        // started — mirror the jsonl + its subagents into the derived dir so
-        // a later cwd-scoped `claude --resume` finds the conversation. Runs
-        // BEFORE the unchanged-state guard so repeated Stops keep converging.
-        // Never rewrites terminal.transcriptPath: the live session keeps
-        // appending to the original file; we only copy.
-        if params.origin == nil, params.activityState == .idle,
-           let storedPath = terminal.transcriptPath, !storedPath.isEmpty,
-           FileManager.default.fileExists(atPath: storedPath),
-           let worktree = try? await db.worktrees.getLocal(id: terminal.worktreeID) {
-            let derivedDir = TranscriptProjectDirSync.derivedProjectDir(
-                worktreePath: worktree.path,
-                projectsRoot: claudeProjectsRoot(forProfileID: terminal.profileID)
-            )
-            let source = URL(fileURLWithPath: storedPath)
-            let sourceDirReal = source.deletingLastPathComponent()
-                .resolvingSymlinksInPath().standardizedFileURL.path
-            let derivedReal = derivedDir.resolvingSymlinksInPath().standardizedFileURL.path
-            if sourceDirReal != derivedReal {
-                await TranscriptProjectDirSync.syncSessionDetached(
-                    jsonl: source, intoProjectDir: derivedDir)
-            }
+        // Runs BEFORE the unchanged-state guard so repeated Stops keep
+        // converging.
+        if params.origin == nil, params.activityState == .idle {
+            await syncTranscriptIntoCurrentProjectDir(terminal)
         }
 
         // Hook callers are bridged through `tbd terminal-activity`; the params
