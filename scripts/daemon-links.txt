@@ -97,7 +97,6 @@ Mock -> Database
 Mock -> Tmux
 ModChannel -> AskUserQuestion
 ModChannel -> Base
-ModChannel -> Server
 ModelProfile -> Base
 ModelProfile -> Database
 ModelProfile -> Keychain

@@ -57,6 +57,8 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
 - `ModChannelToken.swift` — the HMAC token a session mod presents to the daemon's channel socket
 - `ContinuationGuard.swift` — one-shot claim that keeps a shared `CheckedContinuation` resumed exactly once
+- `SocketFileIdentity.swift` — a socket file's `(st_dev, st_ino)`, so a server unlinks only the socket it bound
+- `ListeningSocket.swift` — `bindListeningSocket(at:)`, which creates and binds an owner-only `AF_UNIX` socket, and `SocketServerStartError`; the RPC and mod-channel servers share both
 
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
