@@ -15,20 +15,16 @@ import TBDShared
 /// is being waited on, and the second is the agent waiting for its next
 /// instruction, which is the state the composer exists to answer.
 ///
-/// **Pure.** The supersession question — has the session's own transcript shown
-/// it moved on since the prompt was recorded — is answered by
-/// `AwaitingInputSupersession`, the mechanism `terminal.list` already applies,
-/// and handed in as a Bool. Reimplementing it here would give TBD two answers to
-/// one question.
+/// **Pure.** The reason stands until the agent reports it moved on; nothing
+/// here infers that from the transcript.
 enum AwaitingInputSendGate {
     enum Decision: Equatable, Sendable {
         case allow
         case refuse(message: String)
     }
 
-    static func decide(reason: AwaitingInputReason?, superseded: Bool) -> Decision {
+    static func decide(reason: AwaitingInputReason?) -> Decision {
         guard let reason else { return .allow }
-        guard !superseded else { return .allow }
         switch reason.classification {
         case .promptOnScreen, .unrecognized:
             return .refuse(message: refusalMessage(reason))

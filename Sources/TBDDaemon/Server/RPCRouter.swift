@@ -254,12 +254,10 @@ public final class RPCRouter: Sendable {
     /// installs. Built over `remoteTranscriptSync`, so it is `nil` exactly
     /// when that is.
     let remoteTranscriptBackgroundSync: RemoteTranscriptBackgroundSync?
-    /// Daemon-lifetime incremental transcript baselines used only to enrich
-    /// terminal-list responses for Codex presentation state.
+    /// Daemon-lifetime incremental Codex rollout baselines. Continue in
+    /// Claude's preflight and its pending recovery read them to tell whether
+    /// the last Codex turn closed; `terminal.list` only prunes them.
     let codexActivityTracker = CodexTranscriptActivityTracker()
-    /// Which Claude terminals owe a delegation sample, and what their last
-    /// sample claimed. Marked at every idle report; read during `terminal.list`.
-    let claudeDelegationTracker = ClaudeDelegationTracker()
     /// Answers `terminal.completions`. Holds the per-session inventory cache for
     /// the daemon's lifetime, which is why it is a stored collaborator rather
     /// than something the handler builds per request.
@@ -411,15 +409,6 @@ public final class RPCRouter: Sendable {
     /// it is not a general-purpose "what time is it".
     let now: @Sendable () -> Date
 
-    /// How a session transcript is measured when a prompt is recorded against
-    /// it. A seam, not a clock: a file's modification time is data, so it
-    /// follows the same rule as `now` rather than the `Clock` rule.
-    let transcriptFingerprinter: TranscriptFingerprinter
-    /// How the records a transcript gained since a stored fingerprint are read
-    /// and attributed. Paired with the fingerprinter: the stat says the file
-    /// moved, this says whether the session itself did.
-    let transcriptDeltaInspector: TranscriptDeltaInspector
-
     /// How the daemon asks whether Claude owns a pane's foreground process
     /// group. The same seam the limit-resume actuator uses, held here so the
     /// send path can refuse a pane whose agent has left, and the tmux in-place
@@ -487,9 +476,6 @@ public final class RPCRouter: Sendable {
         codexHomeEnsurer: (@Sendable () throws -> URL)? = nil,
         prBindingRepoResolver: (@Sendable (UUID) async -> (owner: String, name: String, host: String)?)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
-        transcriptFingerprinter: @escaping TranscriptFingerprinter = TranscriptFingerprinting.live,
-        transcriptDeltaInspector: @escaping TranscriptDeltaInspector
-            = TranscriptDeltaInspection.live,
         paneProcessInspector: any PaneProcessInspecting = ProductionPaneProcessInspector(),
         completionInventory: CompletionInventoryService = CompletionInventoryService(),
         recordedAppIdentity: @escaping @Sendable () async -> ProcessIdentity? = { nil },
@@ -506,8 +492,6 @@ public final class RPCRouter: Sendable {
         self.processSignaller = processSignaller
         self.clock = clock
         self.now = now
-        self.transcriptFingerprinter = transcriptFingerprinter
-        self.transcriptDeltaInspector = transcriptDeltaInspector
         self.paneProcessInspector = paneProcessInspector
         self.completionInventory = completionInventory
         self.actuationLog = actuationLog

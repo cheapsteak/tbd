@@ -34,13 +34,6 @@ private struct TranscriptParseCacheEntry {
     let result: [TranscriptItem]
 }
 
-private struct CodexPresentationIdentity: Equatable {
-    let sessionID: String?
-    let transcriptPath: String?
-    let sessionOrderObservedAt: Date?
-    let transcriptBoundaryOffset: Int64?
-}
-
 /// Caches the last `TranscriptParser.parse` result per session file path.
 /// The fingerprint is the parent JSONL's mtime+size. Subagent files are
 /// re-read on cache miss, so the cache is invalidated whenever the parent
@@ -131,13 +124,6 @@ enum RecreateReparkOutcome: Sendable {
 extension RPCRouter {
 
     // MARK: - Terminal Handlers
-
-    /// A pending-agent count becomes a working presentation; its absence
-    /// makes no claim at all. Split out so the mapping is assertable without
-    /// standing up a router.
-    static func delegationPresentation(pendingCount: Int?) -> TerminalActivityState? {
-        pendingCount == nil ? nil : .working
-    }
 
     func handleTerminalCreate(
         _ paramsData: Data, actor: ActuationActor? = nil,
@@ -740,119 +726,16 @@ extension RPCRouter {
     func handleTerminalList(_ paramsData: Data) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalListParams.self, from: paramsData)
         var terminals = try await db.terminals.list(worktreeID: params.worktreeID)
-        // Transcript supersession, on the pass that is about to report these
-        // rows. A prompt reason describes a stopped session; a transcript the
-        // session itself wrote to since the prompt was raised is proof it is
-        // not, and no hook will ever say so — Claude Code fires none when a
-        // human answers. Corrected in the response as well as in the database,
-        // so this pass does not report a prompt it just retracted.
-        // See docs/specs/2026-08-27-awaiting-input-transcript-supersession-design.md.
-        let supersession = AwaitingInputSupersession(
-            db: db, fingerprint: transcriptFingerprinter, delta: transcriptDeltaInspector)
-        for index in terminals.indices {
-            guard await supersession.reconcile(terminal: terminals[index]) else { continue }
-            terminals[index].awaitingInputReason = nil
-            terminals[index].awaitingInputObservedAt = nil
-            broadcastAwaitingInputRetraction(terminal: terminals[index])
-        }
-        var codexTargets: [CodexTranscriptActivityTracker.Target] = []
-        let observedIdentities = Dictionary(uniqueKeysWithValues: terminals
+        // The rows' activity is reported as stored: the agent's own reports
+        // are its only source. The Codex rollout tracker serves Continue in
+        // Claude alone, so this pass only prunes its baselines to the
+        // rollouts still listed.
+        let codexTranscriptPaths = Set(terminals
             .filter(\.isCodexTerminal)
-            .map {
-                ($0.id, CodexPresentationIdentity(
-                    sessionID: $0.claudeSessionID,
-                    transcriptPath: $0.transcriptPath,
-                    sessionOrderObservedAt: $0.sessionOrderObservedAt,
-                    transcriptBoundaryOffset: $0.codexTranscriptBoundaryOffset))
-            })
-
-        for index in terminals.indices where terminals[index].isCodexTerminal {
-            guard let transcriptPath = terminals[index].transcriptPath,
-                  !transcriptPath.isEmpty else { continue }
-            let target = CodexTranscriptActivityTracker.Target(
-                transcriptPath: transcriptPath,
-                worktreeID: terminals[index].worktreeID,
-                terminalID: terminals[index].id,
-                sessionGeneration: terminals[index].sessionOrderObservedAt,
-                transcriptBoundaryOffset: terminals[index].codexTranscriptBoundaryOffset)
-            codexTargets.append(target)
-        }
-
-        // The persisted generation and transcript offset form the restart-safe
-        // recovery target. The tracker prepares or retries that boundary in the
-        // same actor turn as observation, so a temporarily missing file cannot
-        // bootstrap between the two operations.
-        let codexObservation = await codexActivityTracker.observeStamped(
-            transcripts: codexTargets,
-            now: now)
-        // SessionStart can retarget a terminal while transcript observation is
-        // suspended on the tracker actor. Re-read as close to response encoding
-        // as possible, and only bind evidence to the exact session/path that
-        // was observed. A mismatch carries authoritative unknown at the
-        // actor-ordered observation stamp: old-path evidence cannot describe
-        // the new transcript, and leaving the stamp absent would let clients
-        // preserve stale working from the old path as a legacy observation.
-        terminals = try await db.terminals.list(worktreeID: params.worktreeID)
-        var codexTranscriptPaths: Set<String> = []
-        for index in terminals.indices where terminals[index].isCodexTerminal {
-            let transcriptPath = terminals[index].transcriptPath
-            if let transcriptPath, !transcriptPath.isEmpty {
-                codexTranscriptPaths.insert(transcriptPath)
-            }
-            let currentIdentity = CodexPresentationIdentity(
-                sessionID: terminals[index].claudeSessionID,
-                transcriptPath: transcriptPath,
-                sessionOrderObservedAt: terminals[index].sessionOrderObservedAt,
-                transcriptBoundaryOffset: terminals[index].codexTranscriptBoundaryOffset)
-            guard observedIdentities[terminals[index].id] == currentIdentity else {
-                terminals[index].presentationActivityState = nil
-                terminals[index].presentationActivityObservedAt = codexObservation.observedAt
-                continue
-            }
-            terminals[index].presentationActivityState = transcriptPath.flatMap {
-                codexObservation.states[$0]
-            }
-            terminals[index].presentationActivityObservedAt = codexObservation.observedAt
-        }
-
+            .compactMap(\.transcriptPath)
+            .filter { !$0.isEmpty })
         await codexActivityTracker.retain(
             transcriptPaths: codexTranscriptPaths, scope: params.worktreeID)
-
-        // Claude delegation rail. Only terminals that just ended a turn were
-        // marked, so a session at rest costs neither a stat nor a read. The
-        // claim is stamped with the same instant the Codex observation above
-        // took, so one response never carries two different "now"s.
-        let delegationTargets = terminals.indices
-            .filter { !terminals[$0].isCodexTerminal }
-            .map { ClaudeDelegationTarget(
-                terminalID: terminals[$0].id,
-                transcriptPath: terminals[$0].transcriptPath,
-                sessionIncarnationID: terminals[$0].sessionIncarnationID) }
-        let delegationClaims = await claudeDelegationTracker.sample(
-            targets: delegationTargets)
-        for index in terminals.indices where !terminals[index].isCodexTerminal {
-            // A parked session runs nothing, so its last count speaks for work
-            // that is already gone. The row's indicator ranks working above
-            // hibernated, so publishing here would replace the moon with
-            // animated dots that nothing can ever retract.
-            guard terminals[index].hibernatedAt == nil,
-                  terminals[index].suspendedAt == nil else { continue }
-            // Only a live claim writes. Absence must leave the field alone
-            // rather than publish nil, which is a statement of its own.
-            guard let count = delegationClaims[terminals[index].id] else { continue }
-            terminals[index].presentationActivityState =
-                Self.delegationPresentation(pendingCount: count)
-            terminals[index].presentationActivityObservedAt = codexObservation.observedAt
-        }
-        // Pruning may only follow a FLEET-WIDE listing. `terminals` is filtered
-        // by `params.worktreeID` when one is given, so retaining against a
-        // scoped list would read every other worktree's terminals as gone and
-        // drop marks that were never sampled. The unscoped listing is the
-        // app's recurring refresh, so pruning still happens regularly.
-        if params.worktreeID == nil {
-            await claudeDelegationTracker.retain(
-                terminalIDs: Set(terminals.map(\.id)))
-        }
         for index in terminals.indices {
             terminals[index].hasComposerDraft = composerDrafts.hasDraft(terminalID: terminals[index].id)
         }
@@ -4111,19 +3994,12 @@ extension RPCRouter {
         // Opt-in, never daemon-wide: agents use this verb to answer permission
         // dialogs deliberately, and a blanket gate would refuse exactly those
         // sends. The composer always opts in; existing CLI callers do not.
+        //
+        // The reason is the block the agent reported, standing until the agent
+        // reports it moved on.
         if params.gateOnAwaitingInput == true {
-            // The supersession check `terminal.list` already applies, through the
-            // same type and the same two injected seams — never a second
-            // implementation of "did the session move on".
-            let superseded = await AwaitingInputSupersession(
-                db: db,
-                fingerprint: transcriptFingerprinter,
-                delta: transcriptDeltaInspector
-            ).reconcile(terminal: terminal)
-
             if case .refuse(let message) = AwaitingInputSendGate.decide(
-                reason: superseded ? nil : terminal.awaitingInputReason,
-                superseded: superseded
+                reason: terminal.awaitingInputReason
             ) {
                 await finishActuation(actuationID, .refused(.notEligible), error: message)
                 return RPCResponse(error: message)
@@ -6005,9 +5881,7 @@ extension RPCRouter {
     /// A Claude session ended. Two effects, both retractions of something the
     /// session can no longer be reporting.
     ///
-    /// Drops any standing delegation claim: a session that exits while background
-    /// subagents are live leaves a final `turn_duration` record still reporting
-    /// them, and no later turn ever arrives to retract it.
+    /// Resolves the session's open prompts: its dialogs ended with it.
     ///
     /// And, when the reason means the PROCESS is leaving, parks the row with
     /// `HibernateReason.exited`. That stamp is what makes "Claude is not running
@@ -6026,9 +5900,6 @@ extension RPCRouter {
         let resolvedPrompts = await pendingQuestions.resolvePrompts(
             terminalID: params.terminalID, .sessionEnded)
         await broadcastPendingPrompts(terminals: resolvedPrompts)
-        await claudeDelegationTracker.clear(
-            terminalID: params.terminalID,
-            sessionIncarnationID: params.sessionIncarnationID)
 
         guard SessionEndReason.parksTheTerminal(params.reason) else {
             logger.debug("""

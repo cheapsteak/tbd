@@ -294,31 +294,12 @@ public enum AwaitingInputClass: String, Sendable, Equatable, Codable {
     }
 }
 
-/// A session transcript as it stood when a prompt was recorded against it.
-///
-/// Identity is the file, its size, and its modification time. Comparing a
-/// stored fingerprint against a fresh one asks whether the file CHANGED since
-/// the prompt was raised — a different and more durable question than whether
-/// the file is newer than some timestamp. It depends on no ordering between
-/// Claude Code's debounced notification timer and its own transcript flush,
-/// and on no clock agreeing with another clock.
-public struct TranscriptFingerprint: Codable, Sendable, Equatable {
-    /// The transcript this was taken from. A terminal whose `transcriptPath`
-    /// no longer matches has been retargeted — a `/clear`, a compaction, a
-    /// resume — and a fingerprint cannot describe a file it was not taken from.
-    public let path: String
-    public let modifiedAt: Date
-    public let size: Int64
-
-    public init(path: String, modifiedAt: Date, size: Int64) {
-        self.path = path
-        self.modifiedAt = modifiedAt
-        self.size = size
-    }
-}
-
-/// The structured reason an agent is waiting, carried verbatim from Claude
-/// Code's `Notification` hook.
+/// The structured reason an agent is waiting. The program status store writes
+/// it from the block the agent reported over OSC 7501 (`programStatusBlock`),
+/// with an empty `message`: a stored row never holds the agent's text. The
+/// hook-shaped fields — `hookEventName`, `raw`, `notificationType` — are what a
+/// reason recorded from Claude Code's `Notification` hook carries, and such
+/// rows still decode.
 ///
 /// **TBD never branches on `message`.** It is carried to a caller of
 /// `session.states` and to the app — and read by a human or by a caller's own
@@ -332,7 +313,7 @@ public struct TranscriptFingerprint: Codable, Sendable, Equatable {
 public struct AwaitingInputReason: Codable, Sendable, Equatable {
     /// The prompt text, verbatim. Carried, never parsed.
     public let message: String
-    /// The hook event that delivered it, when known — `Notification` today.
+    /// The hook event that delivered it, when a hook did.
     public let hookEventName: String?
     /// The verbatim payload JSON, when it was captured.
     public let raw: String?
@@ -340,11 +321,6 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
     /// carried none (an older Claude Code). Stored unmodified even when this
     /// build does not recognize it.
     public let notificationType: String?
-    /// The transcript as it stood when this reason was recorded, for a
-    /// `.promptOnScreen` class only. Absent on every other class — there is no
-    /// raised hand to take down — and absent on rows written before this
-    /// existed, which `AwaitingInputSupersession` adopts rather than acts on.
-    public let transcriptFingerprint: TranscriptFingerprint?
     /// Which class `notificationType` falls under.
     ///
     /// Derived from `notificationType` at construction and **re-derived on
@@ -369,14 +345,12 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
         hookEventName: String? = nil,
         raw: String? = nil,
         notificationType: String? = nil,
-        transcriptFingerprint: TranscriptFingerprint? = nil,
         programStatusBlock: ProgramStatusBlock? = nil
     ) {
         self.message = message
         self.hookEventName = hookEventName
         self.raw = raw
         self.notificationType = notificationType
-        self.transcriptFingerprint = transcriptFingerprint
         self.programStatusBlock = programStatusBlock
         if programStatusBlock != nil {
             self.classification = .promptOnScreen
@@ -390,7 +364,6 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
         case hookEventName
         case raw
         case notificationType
-        case transcriptFingerprint
         case classification
         case programStatusBlock
     }
@@ -405,8 +378,6 @@ public struct AwaitingInputReason: Codable, Sendable, Equatable {
             hookEventName: try c.decodeIfPresent(String.self, forKey: .hookEventName),
             raw: try c.decodeIfPresent(String.self, forKey: .raw),
             notificationType: try c.decodeIfPresent(String.self, forKey: .notificationType),
-            transcriptFingerprint: try c.decodeIfPresent(
-                TranscriptFingerprint.self, forKey: .transcriptFingerprint),
             programStatusBlock: try c.decodeIfPresent(
                 ProgramStatusBlock.self, forKey: .programStatusBlock)
         )

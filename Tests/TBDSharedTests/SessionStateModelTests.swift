@@ -206,34 +206,17 @@ import Testing
         #expect(summary.contains(FactTimestamp.string(from: epoch)))
     }
 
-    // MARK: - Transcript fingerprint
+    // MARK: - Stored reasons
 
-    @Test func awaitingInputReasonCarriesATranscriptFingerprint() throws {
-        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
-        let reason = AwaitingInputReason(
-            message: "Claude needs your permission",
-            hookEventName: "Notification",
-            raw: "{}",
-            notificationType: "permission_prompt",
-            transcriptFingerprint: TranscriptFingerprint(
-                path: "/tmp/a.jsonl", modifiedAt: stamp, size: 42))
-        let round = try JSONDecoder().decode(
-            AwaitingInputReason.self, from: JSONEncoder().encode(reason))
-        #expect(round.transcriptFingerprint?.path == "/tmp/a.jsonl")
-        #expect(round.transcriptFingerprint?.modifiedAt == stamp)
-        #expect(round.transcriptFingerprint?.size == 42)
-        #expect(round.classification == .promptOnScreen)
-    }
-
-    /// A row written before fingerprints existed must still decode. This is what
-    /// makes the field migration-free: the column is JSON and the key is absent.
-    @Test func aReasonWithoutAFingerprintDecodesAsAbsent() throws {
-        let legacy = #"{"message":"m","notificationType":"permission_prompt","classification":"prompt_on_screen"}"#
+    /// A row written while reasons carried a transcript fingerprint still
+    /// decodes: the key is ignored rather than failing the whole reason.
+    @Test func aReasonWrittenWithAFingerprintStillDecodes() throws {
+        let stored = #"{"message":"m","notificationType":"permission_prompt","classification":"prompt_on_screen","transcriptFingerprint":{"path":"/tmp/a.jsonl","modifiedAt":0,"size":42}}"#
         let reason = try JSONDecoder().decode(
-            AwaitingInputReason.self, from: Data(legacy.utf8))
-        #expect(reason.transcriptFingerprint == nil)
+            AwaitingInputReason.self, from: Data(stored.utf8))
         #expect(reason.classification == .promptOnScreen)
         #expect(reason.message == "m")
+        #expect(reason.notificationType == "permission_prompt")
     }
 
     /// Every program-status block is a prompt a human must answer, whatever
@@ -268,16 +251,6 @@ import Testing
             AwaitingInputReason.self, from: Data(legacy.utf8))
         #expect(reason.programStatusBlock == nil)
         #expect(reason.classification == AwaitingInputClass(notificationType: "idle_prompt"))
-    }
-
-    @Test func fingerprintsDifferOnPathMtimeOrSize() {
-        let stamp = Date(timeIntervalSince1970: 1_700_000_000)
-        let base = TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 10)
-        #expect(base == TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 10))
-        #expect(base != TranscriptFingerprint(path: "/tmp/b.jsonl", modifiedAt: stamp, size: 10))
-        #expect(base != TranscriptFingerprint(
-            path: "/tmp/a.jsonl", modifiedAt: stamp.addingTimeInterval(1), size: 10))
-        #expect(base != TranscriptFingerprint(path: "/tmp/a.jsonl", modifiedAt: stamp, size: 11))
     }
 
     // MARK: - FactSource
