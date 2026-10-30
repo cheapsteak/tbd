@@ -456,6 +456,64 @@ import TestSupport
         #expect(row.activityStateSource == .programStatus)
     }
 
+    /// A rolled-back park un-parks the row without a wake, so what the agent
+    /// reported while the park's intent read parked is discarded: a later
+    /// un-park must not replay it for whatever session is then running.
+    @Test func aRolledBackParkReplaysNothingAtTheNextWake() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        let live = try await h.row(terminal)
+        _ = try #require(try await h.db.terminals.beginHibernatedShellRespawn(
+            id: terminal.id, expectedState: TerminalHibernationSnapshot(terminal: live),
+            at: Self.at(2)))
+        #expect(await ingest(h, terminal, "state=blocked:app=claude-code:kind=permission", at: 3)
+            == .rejected("terminal is parked"))
+        try await h.db.terminals.clearHibernated(id: terminal.id)
+        await h.store.discardParkedBacklog(terminalID: terminal.id)
+
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .idle)
+        #expect(row.activityStateSource == .database)
+        #expect(try await h.attentionNotifications().isEmpty)
+    }
+
+    // MARK: - Deletion
+
+    /// The production store forgets a terminal when its row is deleted, by
+    /// either deletion path, and keeps what it holds for the others.
+    @Test func deletingARowForgetsItsTerminal() async throws {
+        let h = try await Harness.make()
+        let closed = try await h.terminal()
+        let archived = try await h.terminal()
+        let repo = try await h.db.repos.create(
+            path: "/tmp/pscw-repo-\(UUID().uuidString)", displayName: "acme",
+            defaultBranch: "main")
+        let otherWorktree = try await h.db.worktrees.create(
+            repoID: repo.id, name: "wt2", branch: "main",
+            path: "/tmp/pscw-wt-\(UUID().uuidString)", tmuxServer: "tbd-pscw")
+        let kept = try await h.db.terminals.create(
+            worktreeID: otherWorktree.id, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder, sessionIncarnationID: UUID())
+        for terminal in [closed, archived] {
+            #expect(await ingest(h, terminal, "state=working:app=claude-code", at: 1) == .accepted)
+            await h.store.drop(terminalID: terminal.id, reason: .childExited)
+        }
+        #expect(await ingest(h, kept, "state=working:app=claude-code", at: 1) == .accepted)
+        #expect(await h.store.keepsState(for: closed.id))
+        #expect(await h.store.keepsState(for: archived.id))
+
+        try await h.db.terminals.delete(id: closed.id)
+        #expect(await h.store.keepsState(for: closed.id) == false)
+        #expect(await h.store.keepsState(for: archived.id))
+
+        try await h.db.terminals.deleteForWorktree(worktreeID: h.worktreeID)
+        #expect(await h.store.keepsState(for: archived.id) == false)
+        #expect(await h.store.snapshot(for: kept.id)?.main?.state == .working)
+    }
+
     // MARK: - Reentrancy
 
     /// Suspends the first caller until `release()`; every later caller passes.

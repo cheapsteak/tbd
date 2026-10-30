@@ -588,6 +588,44 @@ public final class TerminalActivityTransitionNotifier: @unchecked Sendable {
     }
 }
 
+/// Fan-out for terminal-row deletions, so memory a daemon component keys by
+/// terminal ID is released on every path that deletes a row — a closed tab, a
+/// hook tab, an archived, forgotten or recovered worktree — without each of
+/// those paths having to know who keeps what.
+///
+/// A reference type for the reason `TerminalActivityTransitionNotifier` is
+/// one: `TerminalStore` is a value type built inside `TBDDatabase.init`,
+/// before any component that keeps per-terminal memory exists. Unlike that
+/// notifier it takes several observers, each installed once by its owner.
+public final class TerminalDeletionNotifier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var observers: [@Sendable ([UUID]) async -> Void] = []
+
+    public init() {}
+
+    /// Add an observer, called with the IDs of every batch of deleted rows.
+    public func onTerminalsDeleted(_ observer: @escaping @Sendable ([UUID]) async -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        observers.append(observer)
+    }
+
+    /// Called by the store after a deletion commits, never from inside its
+    /// transaction.
+    func notifyDeleted(_ terminalIDs: [UUID]) async {
+        guard !terminalIDs.isEmpty else { return }
+        for observer in currentObservers() {
+            await observer(terminalIDs)
+        }
+    }
+
+    private func currentObservers() -> [@Sendable ([UUID]) async -> Void] {
+        lock.lock()
+        defer { lock.unlock() }
+        return observers
+    }
+}
+
 /// Provides CRUD operations for terminals.
 public struct TerminalStore: Sendable {
     let writer: any DatabaseWriter
@@ -628,6 +666,9 @@ public struct TerminalStore: Sendable {
     /// `⋯` menu offers a manual refresh. Paying a billed request per park to
     /// shave that latency is the wrong trade.
     public let activityTransitions = TerminalActivityTransitionNotifier()
+
+    /// Every row this store deletes, reported after the deletion commits.
+    public let deletions = TerminalDeletionNotifier()
 
     init(writer: any DatabaseWriter) {
         self.writer = writer
@@ -770,18 +811,26 @@ public struct TerminalStore: Sendable {
 
     /// Delete a terminal by ID.
     public func delete(id: UUID) async throws {
-        _ = try await writer.write { db in
+        let deleted = try await writer.write { db in
             try TerminalRecord.deleteOne(db, key: id.uuidString)
+        }
+        if deleted {
+            await deletions.notifyDeleted([id])
         }
     }
 
     /// Delete all terminals for a worktree.
     public func deleteForWorktree(worktreeID: UUID) async throws {
-        _ = try await writer.write { db in
+        let deleted = try await writer.write { db -> [UUID] in
+            let ids = try String.fetchAll(
+                db, sql: "SELECT id FROM terminal WHERE worktreeID = ?",
+                arguments: [worktreeID.uuidString])
             try TerminalRecord
                 .filter(Column("worktreeID") == worktreeID.uuidString)
                 .deleteAll(db)
+            return ids.compactMap(UUID.init(uuidString:))
         }
+        await deletions.notifyDeleted(deleted)
     }
 
     /// Set or clear the pinned timestamp for a terminal.

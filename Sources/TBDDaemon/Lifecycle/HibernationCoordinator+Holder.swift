@@ -465,6 +465,10 @@ extension HibernationCoordinator {
             } catch {
                 logger.error("hibernate: the job for \(terminal.id, privacy: .public) survived and the park intent could not be rolled back: \(error.localizedDescription, privacy: .public)")
             }
+            // What the agent reported while the intent read parked was kept
+            // for a wake; this un-park is none, and a later wake must not
+            // replay it for the session it launches.
+            await programStatus?.discardParkedBacklog(terminalID: terminal.id)
             idleSince[terminal.id] = nil
             pendingKillSince[terminal.id] = nil
             logger.error("hibernate: holder child \(childPID, privacy: .public) for terminal \(terminal.id, privacy: .public) survived the escalation; its holder was torn down and the row is left awake for reconciliation to judge")
@@ -644,6 +648,8 @@ extension HibernationCoordinator {
         } catch {
             logger.error("hibernate: could not verify the child of \(terminal.id, privacy: .public) and could not roll the park intent back either: \(error.localizedDescription, privacy: .public)")
         }
+        // As for the survived-child rollback: this un-park is no wake.
+        await programStatus?.discardParkedBacklog(terminalID: terminal.id)
         idleSince[terminal.id] = nil
         pendingKillSince[terminal.id] = nil
         logger.warning("hibernate: refusing to signal child \(childPID, privacy: .public) for terminal \(terminal.id, privacy: .public) — its identity is \(String(describing: verdict), privacy: .public); the row is left awake with its pids intact")

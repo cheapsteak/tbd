@@ -118,7 +118,9 @@ public actor ProgramStatusStore {
     /// between is refused — and an agent reports on change only, so it never
     /// says it again. The wake's drop (`dropIfIncarnationChanged`) replays
     /// these through `ingest`; every unconditional drop discards them, since a
-    /// report from before a park's drop belongs to the session the park ended.
+    /// report from before a park's drop belongs to the session the park ended,
+    /// and so does a park that rolls back (`discardParkedBacklog`), whose
+    /// un-park is no wake.
     private var parkedBacklog: [UUID: [Inbound]] = [:]
     private static let maxParkedBacklog = ProgramStatusProtocol.maxTaskEntries + 1
 
@@ -141,15 +143,16 @@ public actor ProgramStatusStore {
     }
 
     /// The production store: terminals from `db`, snapshots broadcast as
-    /// `.terminalProgramStatusChanged`, and `ProgramStatusEffects.live` for
-    /// the columns, the banner and `ledger`.
+    /// `.terminalProgramStatusChanged`, `ProgramStatusEffects.live` for the
+    /// columns, the banner and `ledger`, and what it keeps for a terminal
+    /// forgotten when `db` deletes the terminal's row.
     public static func live(
         db: TBDDatabase,
         subscriptions: StateSubscriptionManager,
         ledger: WorktreeActivityLedger,
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> ProgramStatusStore {
-        ProgramStatusStore(
+        let store = ProgramStatusStore(
             terminalLookup: { id in
                 do {
                     return try await db.terminals.get(id: id)
@@ -162,6 +165,10 @@ public actor ProgramStatusStore {
             },
             effects: .live(db: db, subscriptions: subscriptions, ledger: ledger),
             now: now)
+        db.terminals.deletions.onTerminalsDeleted { [weak store] terminalIDs in
+            await store?.forget(terminalIDs: terminalIDs)
+        }
+        return store
     }
 
     /// Thread-safe and non-blocking: the daemon reader's path. Reports are
@@ -460,6 +467,44 @@ public actor ProgramStatusStore {
                 terminalID: inbound.terminalID, incarnation: .currentRow,
                 payload: inbound.payload, observedAt: inbound.observedAt))
         }
+    }
+
+    /// Discard the reports kept while the row read parked, because something
+    /// other than the wake that replays them un-parked it: a park that rolled
+    /// back. What they report belongs to the session that park was ending, and
+    /// replayed at a later wake they would speak for its replacement.
+    public func discardParkedBacklog(terminalID: UUID) {
+        parkedBacklog.removeValue(forKey: terminalID)
+    }
+
+    /// Forget everything kept for terminals whose rows were deleted: entries,
+    /// counters, watermarks, the parked backlog and the column memo. A deleted
+    /// row takes no further report — its lookup finds nothing — so none of it
+    /// would ever be read again. `live` calls this for every row
+    /// `TerminalStore` deletes.
+    public func forget(terminalIDs: [UUID]) {
+        for terminalID in terminalIDs {
+            held.removeValue(forKey: terminalID)
+            revisions.removeValue(forKey: terminalID)
+            dropGenerations.removeValue(forKey: terminalID)
+            droppedAt.removeValue(forKey: terminalID)
+            endedIncarnations.removeValue(forKey: terminalID)
+            written.removeValue(forKey: terminalID)
+            columnGenerations.removeValue(forKey: terminalID)
+            parkedBacklog.removeValue(forKey: terminalID)
+        }
+    }
+
+    /// Whether the store keeps anything at all for `terminalID`. Tests only.
+    func keepsState(for terminalID: UUID) -> Bool {
+        held[terminalID] != nil
+            || revisions[terminalID] != nil
+            || dropGenerations[terminalID] != nil
+            || droppedAt[terminalID] != nil
+            || endedIncarnations[terminalID] != nil
+            || written[terminalID] != nil
+            || columnGenerations[terminalID] != nil
+            || parkedBacklog[terminalID] != nil
     }
 
     // MARK: - Private

@@ -406,9 +406,10 @@ public actor HibernationCoordinator {
 
     /// The Program Status Protocol (OSC 7501) store. A park or a wake drops the
     /// terminal's entries (spec "Liveness"): a parked session's program is
-    /// gone, and a SIGKILLed one never sent `state=clear`. Nil in tests that
+    /// gone, and a SIGKILLed one never sent `state=clear`. A holder park that
+    /// rolls back discards what the store kept for a wake. Nil in tests that
     /// do not exercise it.
-    private let programStatus: ProgramStatusStore?
+    let programStatus: ProgramStatusStore?
 
     /// What a person is told when a tmux-backed session cannot be woken because
     /// tmux cannot serve. Names the gesture that moves the session, **and the

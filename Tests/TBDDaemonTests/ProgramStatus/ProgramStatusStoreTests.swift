@@ -520,6 +520,32 @@ import TestSupport
         #expect(await h.store.snapshot(for: terminal.id) == nil)
     }
 
+    /// A deleted row takes no further report, so nothing kept for it — entries,
+    /// counters, watermarks, the parked backlog, the column memo — may outlive
+    /// it. Another terminal's state is untouched.
+    @Test func forgetLeavesNothingForTheTerminal() async {
+        let dropInstant = t0.addingTimeInterval(10)
+        let h = Harness(now: { dropInstant })
+        var terminal = holderClaude(incarnation: UUID())
+        let other = holderClaude(incarnation: UUID())
+        h.add(terminal)
+        h.add(other)
+        #expect(await h.store.ingest(inbound(terminal, "state=working:app=claude-code", at: 1)) == .accepted)
+        #expect(await h.store.ingest(inbound(other, "state=working:app=claude-code", at: 1)) == .accepted)
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+        terminal.hibernatedAt = dropInstant
+        h.add(terminal)
+        #expect(await h.store.ingest(inbound(terminal, "state=idle:app=claude-code", at: 20))
+            == .rejected("terminal is parked"))
+        #expect(await h.store.ingest(inbound(terminal, "state=done:app=claude-code", at: 21))
+            == .rejected("terminal is parked"))
+        #expect(await h.store.keepsState(for: terminal.id))
+
+        await h.store.forget(terminalIDs: [terminal.id])
+        #expect(await h.store.keepsState(for: terminal.id) == false)
+        #expect(await h.store.snapshot(for: other.id)?.main?.state == .working)
+    }
+
     @Test func revisionIsMonotonicAcrossClears() async {
         let h = Harness()
         let terminal = holderClaude()

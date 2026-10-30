@@ -249,7 +249,11 @@ reports against the un-parked row, under its current incarnation: each was
 observed after the drop that ended the previous process, so it is the
 replacement's whatever incarnation the app claimed for it. A park's or a
 child exit's drop discards them, since anything reported before it belongs to
-the session it ended.
+the session it ended, and so does a park that rolls back: its un-park is no
+wake, and what it kept belongs to the session it was ending.
+
+The store forgets everything it keeps for a terminal when the terminal's row
+is deleted, on every path that deletes one.
 
 ### State model
 
