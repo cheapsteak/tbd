@@ -498,9 +498,9 @@ struct TerminalLatencyTapTests {
 
     @Test("with no tap installed, feed reaches the view exactly as withView did")
     func feedWithNoTapReachesTheView() {
-        let suiteName = "TBDAppTests.LatencySeam.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.LatencySeam")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -516,9 +516,9 @@ struct TerminalLatencyTapTests {
 
     @Test("with a tap installed, feed both reaches the view and records the chunk")
     func feedWithTapReachesTheViewAndRecords() throws {
-        let suiteName = "TBDAppTests.LatencySeam.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.LatencySeam")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,

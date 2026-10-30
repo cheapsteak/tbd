@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The transcript table coordinator's prompt-rail tracking, driven headlessly in
 /// `TableTranscriptScene`: the outline follows the nodes, the active prompt
@@ -51,9 +52,9 @@ struct PromptRailCoordinatorTests {
 
     @Test("the outline follows an appended prompt and the presenter hears it once")
     func outlineFollowsAppends() throws {
-        let suiteName = "prompt-rail-append-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-append")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 5, replySentences: Self.tallReplies)
@@ -87,9 +88,9 @@ struct PromptRailCoordinatorTests {
     /// it has not seen.
     @Test("an append projects only the prompts it brings, and the outline matches the uncached builder")
     func appendProjectsOnlyNewPrompts() throws {
-        let suiteName = "prompt-rail-projection-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-projection")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
@@ -122,9 +123,9 @@ struct PromptRailCoordinatorTests {
     /// rebuilds it only when the last row is a prompt.
     @Test("a streamed reply leaves the outline alone; a re-rendered trailing prompt rebuilds it")
     func updateLastRebuildsOutlineOnlyForAPrompt() throws {
-        let suiteName = "prompt-rail-updatelast-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-updatelast")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 5, replySentences: Self.tallReplies)
@@ -184,9 +185,9 @@ struct PromptRailCoordinatorTests {
 
     @Test("the active prompt follows the scroll position")
     func activeFollowsScroll() throws {
-        let suiteName = "prompt-rail-scroll-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-scroll")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
@@ -207,9 +208,9 @@ struct PromptRailCoordinatorTests {
 
     @Test("scrolling inside one exchange tells the presenter nothing new")
     func scrollWithinOneExchangeNotifiesOnce() throws {
-        let suiteName = "prompt-rail-steady-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-steady")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
@@ -248,9 +249,9 @@ struct PromptRailCoordinatorTests {
 
     @Test("rebuilding the outline and the active prompt builds and measures no cells")
     func outlineAndActiveBuildNoCells() throws {
-        let suiteName = "prompt-rail-cells-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-cells")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // More rows than the bottom window measures, so the rule's binary search
@@ -280,9 +281,9 @@ struct PromptRailCoordinatorTests {
 
     @Test("a transcript with no prompts has no entries and no active prompt")
     func zeroPromptsIsEmptyAndNil() throws {
-        let suiteName = "prompt-rail-empty-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-empty")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items: [TranscriptItem] = (0..<6).map { index in
@@ -311,9 +312,9 @@ struct PromptRailCoordinatorTests {
 
     @Test("when every prompt fits on the last screen, the last one is active")
     func allPromptsOnLastScreenPicksLast() throws {
-        let suiteName = "prompt-rail-onescreen-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-onescreen")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 3, replySentences: { _ in 3 })
@@ -347,9 +348,9 @@ struct PromptRailCoordinatorTests {
     /// the last prompt to the one before it for that turn.
     @Test("streaming at the bottom never moves the active prompt off the last one")
     func streamingAtBottomKeepsLastActive() async throws {
-        let suiteName = "prompt-rail-streaming-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-streaming")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // Tall exchanges, then a short last one, so at the bottom the last
@@ -406,9 +407,9 @@ struct PromptRailCoordinatorTests {
 
     @Test("attaching a presenter pushes the current outline and active prompt")
     func attachingPresenterPushesCurrentState() throws {
-        let suiteName = "prompt-rail-attach-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-attach")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 5, replySentences: Self.tallReplies)
@@ -429,9 +430,9 @@ struct PromptRailCoordinatorTests {
 
     @Test("a held jump target stays active; an unknown or cleared one falls back to the rule")
     func heldJumpTargetWins() throws {
-        let suiteName = "prompt-rail-held-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-held")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
@@ -465,9 +466,9 @@ struct PromptRailCoordinatorTests {
     /// entries no longer name, so it must wait for the rebuild.
     @Test("an outline that no longer names its rows waits for the rebuild")
     func staleOutlineWaitsForRebuild() throws {
-        let suiteName = "prompt-rail-stale-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-stale")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
@@ -514,9 +515,9 @@ struct PromptRailCoordinatorTests {
     /// the counts must be redone on that path too.
     @Test("a turn's count grows as tool calls arrive, and the presenter hears only changes")
     func workCountGrowsAsToolCallsArrive() throws {
-        let suiteName = "prompt-rail-work-tools-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-work-tools")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let memo = TranscriptPresentationMemo()

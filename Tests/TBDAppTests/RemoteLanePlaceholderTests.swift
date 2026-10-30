@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The optimistic sidebar row for a remote lane: `remote.create` is an SSM-shaped
 /// round trip with a 60s timeout and a retry, and before this the row appeared
@@ -27,9 +28,9 @@ private final class CallCounter {
 struct RemoteLanePlaceholderTests {
 
     private func withStateAsync(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.RemoteLane.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteLane")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         await body(AppState(userDefaults: defaults))
     }
 

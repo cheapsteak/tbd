@@ -4,6 +4,7 @@ import Foundation
 import SwiftTerm
 import TBDShared
 import Testing
+import TestSupport
 
 @testable import TBDApp
 
@@ -161,7 +162,7 @@ struct TerminalLatencyPanelTests {
         let sessionEnd: Int32
         let view: TBDTerminalView
         let defaults: UserDefaults
-        let suiteName: String
+        let suite: TestDefaultsSuite
         /// Non-nil only for a panel whose attach was left in flight, so the
         /// test can release the gate and then join it.
         let attaching: Task<Void, Never>?
@@ -188,7 +189,7 @@ struct TerminalLatencyPanelTests {
         func tearDown() {
             coordinator.cleanup()
             Darwin.close(sessionEnd)
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 
@@ -222,8 +223,8 @@ struct TerminalLatencyPanelTests {
             transport: .holder
         )]
 
-        let suiteName = "TBDAppTests.TerminalLatencyPanel.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let suite = TestDefaultsSuite("TBDAppTests.TerminalLatencyPanel")
+        let defaults = suite.defaults
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -263,7 +264,7 @@ struct TerminalLatencyPanelTests {
         return Panel(
             state: state, coordinator: coordinator, diagnostic: diagnostic, lines: lines,
             worktreeID: worktreeID, terminalID: terminalID, sessionEnd: sessionEnd, view: view,
-            defaults: defaults, suiteName: suiteName, attaching: attaching)
+            defaults: defaults, suite: suite, attaching: attaching)
     }
 
     // MARK: - The write the panel could not place

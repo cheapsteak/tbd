@@ -1,6 +1,7 @@
 import XCTest
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 final class ArchiveTombstoneTests: XCTestCase {
     let testRepoID = UUID()
@@ -182,9 +183,9 @@ final class ArchiveTombstoneTests: XCTestCase {
 
     @MainActor
     func testHandleDeltaWorktreeArchivedRemovesRowAndTombstones() {
-        let suite = "test-\(UUID().uuidString)"
-        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("test")
+        let state = AppState(userDefaults: suite.defaults)
+        defer { suite.tearDown() }
 
         let wtID = UUID()
         let wt = makeWorktree(id: wtID)
@@ -210,9 +211,9 @@ final class ArchiveTombstoneTests: XCTestCase {
 
     @MainActor
     func testHandleDeltaWorktreeRevivedClearsTombstone() {
-        let suite = "test-\(UUID().uuidString)"
-        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("test")
+        let state = AppState(userDefaults: suite.defaults)
+        defer { suite.tearDown() }
 
         let wtID = UUID()
 
@@ -333,9 +334,9 @@ final class ArchiveTombstoneTests: XCTestCase {
 
     @MainActor
     func testArchivingCreatingWorktreeShowsErrorAlertWhenCreationFailed() {
-        let suite = "test-\(UUID().uuidString)"
-        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("test")
+        let state = AppState(userDefaults: suite.defaults)
+        defer { suite.tearDown() }
 
         let wtID = UUID()
         let creatingWt = makeWorktree(id: wtID, status: .creating, displayName: "MyNewWorktree")
@@ -361,9 +362,9 @@ final class ArchiveTombstoneTests: XCTestCase {
     /// still-`.creating` row removes it without claiming creation failed.
     @MainActor
     func testCLIArchiveOfCreatingWorktreeShowsNoAlert() {
-        let suite = "test-\(UUID().uuidString)"
-        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("test")
+        let state = AppState(userDefaults: suite.defaults)
+        defer { suite.tearDown() }
 
         let wtID = UUID()
         let creatingWt = makeWorktree(id: wtID, status: .creating, displayName: "MyNewWorktree")
@@ -378,9 +379,9 @@ final class ArchiveTombstoneTests: XCTestCase {
 
     @MainActor
     func testArchivingActiveWorktreeDoesNotShowAlert() {
-        let suite = "test-\(UUID().uuidString)"
-        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("test")
+        let state = AppState(userDefaults: suite.defaults)
+        defer { suite.tearDown() }
 
         let wtID = UUID()
         let activeWt = makeWorktree(id: wtID, status: .active)
@@ -398,9 +399,9 @@ final class ArchiveTombstoneTests: XCTestCase {
 
     @MainActor
     func testArchivingUnknownWorktreeHandledGracefully() {
-        let suite = "test-\(UUID().uuidString)"
-        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("test")
+        let state = AppState(userDefaults: suite.defaults)
+        defer { suite.tearDown() }
 
         let unknownWtID = UUID()
 

@@ -3,6 +3,7 @@ import Testing
 import TBDShared
 
 @testable import TBDApp
+import TestSupport
 
 // MARK: - AppState integration
 //
@@ -15,9 +16,9 @@ import TBDShared
 @Suite("PaneHistory AppState integration")
 struct PaneHistoryAppStateTests {
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.PaneHistory.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PaneHistory")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(defaults)
     }
 

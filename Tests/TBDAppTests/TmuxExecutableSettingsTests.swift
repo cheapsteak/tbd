@@ -2,6 +2,7 @@ import Foundation
 import TBDShared
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Tier 2: exercises only isolated filesystem configuration and executable fixtures.
 @MainActor
@@ -137,9 +138,9 @@ struct TmuxExecutableSettingsTests {
         path: String,
         _ body: (AppState) throws -> Void
     ) throws {
-        let suiteName = "TmuxExecutableSettingsTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TmuxExecutableSettingsTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(
             userDefaults: defaults,
             tmuxExecutableResolver: fixture.resolver(path: path)

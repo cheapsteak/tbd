@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// REGRESSION GUARD on `TableTranscriptView.Coordinator.estimate(for:width:)`.
 ///
@@ -669,9 +670,9 @@ struct TranscriptEstimatorAccuracyTests {
 
         var measurements: [Measurement] = []
         for width in widths {
-            let suiteName = "estimator-accuracy-\(UUID().uuidString)"
-            let defaults = try #require(UserDefaults(suiteName: suiteName))
-            defer { defaults.removePersistentDomain(forName: suiteName) }
+            let suite = TestDefaultsSuite("estimator-accuracy")
+            let defaults = suite.defaults
+            defer { suite.tearDown() }
             let appState = AppState(userDefaults: defaults)
 
             let nodes = characterizationNodes(imagePath: imagePath)

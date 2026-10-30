@@ -287,9 +287,9 @@ struct ProvisionalRowPublishTests {
 
     @MainActor
     private static func makeState(
-        streaming: Bool, suite: String, sessionID: String = "s1", exited: Bool = false
+        streaming: Bool, suite: TestDefaultsSuite, sessionID: String = "s1", exited: Bool = false
     ) -> AppState {
-        let state = AppState(userDefaults: UserDefaults(suiteName: suite)!)
+        let state = AppState(userDefaults: suite.defaults)
         state.daemonCapabilities = DaemonCapabilitiesResult(
             controlModeEnabled: false, transcriptStreamingEnabled: streaming)
         state.terminals = [worktreeID: [
@@ -299,10 +299,6 @@ struct ProvisionalRowPublishTests {
                      hibernateReason: exited ? .exited : nil),
         ]]
         return state
-    }
-
-    private static func removeSuite(_ suite: String) {
-        UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
     }
 
     private static func publishedIDs(_ state: AppState) async -> [String] {
@@ -327,8 +323,8 @@ struct ProvisionalRowPublishTests {
 
     @Test("flag on: the confirmed block leaves and the streaming one is published last")
     func publishComposesTheUnconfirmedBlock() async throws {
-        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
-        defer { Self.removeSuite(suite) }
+        let suite = TestDefaultsSuite("tbd-provisional-publish")
+        defer { suite.tearDown() }
         let source = try await Self.source()
         let state = await Self.makeState(streaming: true, suite: suite)
 
@@ -340,8 +336,8 @@ struct ProvisionalRowPublishTests {
 
     @Test("flag off: the publish is the transcript alone")
     func publishWithTheFlagOffIsTheTranscript() async throws {
-        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
-        defer { Self.removeSuite(suite) }
+        let suite = TestDefaultsSuite("tbd-provisional-publish")
+        defer { suite.tearDown() }
         let source = try await Self.source()
         let state = await Self.makeState(streaming: false, suite: suite)
 
@@ -352,8 +348,8 @@ struct ProvisionalRowPublishTests {
     /// Retire rule 2.
     @Test("an exited terminal's blocks are retired")
     func anExitedTerminalPublishesNoBlocks() async throws {
-        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
-        defer { Self.removeSuite(suite) }
+        let suite = TestDefaultsSuite("tbd-provisional-publish")
+        defer { suite.tearDown() }
         let source = try await Self.source()
         let state = await Self.makeState(streaming: true, suite: suite, exited: true)
 
@@ -363,8 +359,8 @@ struct ProvisionalRowPublishTests {
 
     @Test("a session no terminal runs any more publishes no blocks")
     func aSessionWithNoTerminalPublishesNoBlocks() async throws {
-        let suite = "tbd-provisional-publish-\(UUID().uuidString)"
-        defer { Self.removeSuite(suite) }
+        let suite = TestDefaultsSuite("tbd-provisional-publish")
+        defer { suite.tearDown() }
         let source = try await Self.source()
         let state = await Self.makeState(streaming: true, suite: suite, sessionID: "other")
 

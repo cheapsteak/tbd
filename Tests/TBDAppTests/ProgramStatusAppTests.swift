@@ -26,10 +26,10 @@ struct ProgramStatusAppTests {
     private static var replyBytes: [UInt8] { Array(ProgramStatusProtocol.probeReply.utf8) }
 
     private func makeAppState() -> (AppState, () -> Void) {
-        let suiteName = "TBDAppTests.ProgramStatus.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.ProgramStatus")
+        let defaults = suite.defaults
         let state = AppState(userDefaults: defaults)
-        return (state, { defaults.removePersistentDomain(forName: suiteName) })
+        return (state, { suite.tearDown() })
     }
 
     private func capabilities(programStatus: Bool) -> DaemonCapabilitiesResult {

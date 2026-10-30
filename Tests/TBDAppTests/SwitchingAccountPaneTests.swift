@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// "Switch account" on a holder-backed tab, as the pane sees it: the daemon
 /// parks the row, re-homes it and wakes it, and the pane must ride those flips
@@ -18,9 +19,9 @@ import TBDShared
 struct SwitchingAccountPaneTests {
 
     private func withAppState(_ body: (AppState) async throws -> Void) async rethrows {
-        let name = "tbd-switching-account-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("tbd-switching-account")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults))
     }
 

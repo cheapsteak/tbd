@@ -2,14 +2,15 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 @MainActor
 @Suite("Dev servers in AppState")
 struct DevServersAppStateTests {
     private func withState(_ body: (AppState) async throws -> Void) async rethrows {
-        let suiteName = "TBDAppTests.DevServers.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.DevServers")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults))
     }
 

@@ -3,6 +3,7 @@ import Foundation
 import SwiftTerm
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// R6-H3: file URLs dropped onto the terminal synthesize shell-quoted path
 /// text that used to bypass `PasteInterception` and ride `send()` — while
@@ -39,9 +40,9 @@ struct DragDropPasteRoutingTests {
         // Isolated defaults: AppearanceSettings must never read/write the
         // developer's real TBDApp.plist (Tests-must-not-touch-~/tbd rule's
         // UserDefaults twin).
-        let suiteName = "TBDAppTests.DragDropRouting.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.DragDropRouting")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 400, height: 200),
             font: TBDTerminalView.defaultMonospaceFont,

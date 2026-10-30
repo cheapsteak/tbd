@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Tests for the orphan-GC app plumbing: the `ReclaimedSummary` pure
 /// view-model helpers, and the `AppState.reapRecords` / `gcEnabled` mirror.
@@ -15,9 +16,9 @@ import TBDShared
 struct ReapRecordsStateTests {
 
     private func withAppState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.ReapRecordsState.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.ReapRecordsState")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

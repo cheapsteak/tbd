@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 1: pure functions and in-memory AppState mutation; no daemon, no sleeps.
 
@@ -239,10 +240,10 @@ struct ProgramStatusRowPresentationTests {
 @Suite("AppState program-status mirror")
 struct ProgramStatusMirrorTests {
     private func makeAppState() -> (AppState, () -> Void) {
-        let suiteName = "TBDAppTests.ProgramStatusMirror.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.ProgramStatusMirror")
+        let defaults = suite.defaults
         let state = AppState(userDefaults: defaults)
-        return (state, { defaults.removePersistentDomain(forName: suiteName) })
+        return (state, { suite.tearDown() })
     }
 
     private func capabilities(programStatus: Bool) -> DaemonCapabilitiesResult {

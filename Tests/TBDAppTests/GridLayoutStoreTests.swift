@@ -2,14 +2,15 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 @Suite("GridLayoutStore")
 @MainActor
 struct GridLayoutStoreTests {
     @Test func gridLayoutsAreNeverPersisted() throws {
-        let suiteName = "GridLayoutStoreTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("GridLayoutStoreTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         let appState = AppState(userDefaults: defaults)
         let worktreeID = UUID()
@@ -27,9 +28,9 @@ struct GridLayoutStoreTests {
     /// their terminals look "visible" — visibleTerminalIDs only consults the
     /// selected worktrees' active-tab layouts, keyed by tab ID.
     @Test func staleNonTabLayoutEntryDoesNotLeakIntoVisibleTerminalIDs() {
-        let suiteName = "GridLayoutStoreTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("GridLayoutStoreTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         let appState = AppState(userDefaults: defaults)
         let worktreeID = UUID()

@@ -245,19 +245,18 @@ struct HolderHandbackResendTests {
         let state: AppState
         let terminalID: UUID
         private let defaults: UserDefaults
-        private let suiteName: String
+        private let suite: TestDefaultsSuite
 
         init() {
-            let name = "TBDAppTests.HolderHandbackResend.\(UUID().uuidString)"
-            let suite = UserDefaults(suiteName: name)!
+            let suite = TestDefaultsSuite("TBDAppTests.HolderHandbackResend")
             let terminalID = UUID()
             let worktreeID = UUID()
-            let state = AppState(userDefaults: suite)
+            let state = AppState(userDefaults: suite.defaults)
             state.terminals[worktreeID] = [TBDShared.Terminal(
                 id: terminalID, worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
                 label: "Shell", kind: .shell, transport: .holder)]
-            self.suiteName = name
-            self.defaults = suite
+            self.suite = suite
+            self.defaults = suite.defaults
             self.terminalID = terminalID
             self.state = state
         }
@@ -280,7 +279,7 @@ struct HolderHandbackResendTests {
             return (coordinator, view)
         }
 
-        func tearDown() { defaults.removePersistentDomain(forName: suiteName) }
+        func tearDown() { suite.tearDown() }
     }
 
     /// Counts on the main actor, where the panel's callbacks run.

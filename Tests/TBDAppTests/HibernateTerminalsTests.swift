@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// A manual park sends one request per terminal and asks nothing first: the
 /// daemon parks a session whose session mod cannot vouch for its draft
@@ -16,14 +17,14 @@ struct HibernateTerminalsTests {
         func record(_ id: UUID) { all.append(id) }
     }
 
-    private func makeState() -> (AppState, String) {
-        let suite = "HibernateTerminalsTests-\(UUID().uuidString)"
-        return (AppState(userDefaults: UserDefaults(suiteName: suite)!), suite)
+    private func makeState() -> (AppState, TestDefaultsSuite) {
+        let suite = TestDefaultsSuite("HibernateTerminalsTests")
+        return (AppState(userDefaults: suite.defaults), suite)
     }
 
     @Test func eachTerminalIsSentOnce() async {
         let (state, suite) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        defer { suite.tearDown() }
         let first = UUID(), second = UUID()
         let calls = Calls()
         state.terminalHibernateSender = { tid in await calls.record(tid) }
@@ -36,7 +37,7 @@ struct HibernateTerminalsTests {
 
     @Test func aRefusalAlertsAndTheBatchGoesOn() async {
         let (state, suite) = makeState()
-        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        defer { suite.tearDown() }
         let refused = UUID(), fine = UUID()
         let calls = Calls()
         state.terminalHibernateSender = { tid in

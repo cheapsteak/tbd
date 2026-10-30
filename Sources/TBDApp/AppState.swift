@@ -2500,8 +2500,9 @@ final class AppState {
     @ObservationIgnored private var focusObservers: [NSObjectProtocol] = []
 
     /// UserDefaults domain this AppState reads instance-level preferences from.
-    /// Production uses `.standard`; tests inject a per-suite `UserDefaults(suiteName:)`
-    /// so they never clobber the developer's running app preferences.
+    /// Production uses `.standard`; tests inject the defaults of a per-test
+    /// `TestDefaultsSuite` so they never clobber the developer's running app
+    /// preferences.
     let userDefaults: UserDefaults
 
     init(

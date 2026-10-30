@@ -152,11 +152,27 @@ that turned the decoy loop into `chmod 000` on the developer's real `~/tbd` and
 owns them and can chmod them back.
 
 Two things the fence does *not* cover, so the existing disciplines stay
-load-bearing: `UserDefaults` (resolved by `cfprefsd` over XPC, hence the
-`AppState(userDefaults:)` rule in the root `CLAUDE.md`) and the Keychain, which
-breaks rather than redirects under `CFFIXED_USER_HOME` — Keychain-touching code
-must be reached through an injection seam such as
-`ClaudeCredentialsKeychainDeleting`. Account-database home lookups
+load-bearing: `UserDefaults` and the Keychain, which breaks rather than
+redirects under `CFFIXED_USER_HOME` — Keychain-touching code must be reached
+through an injection seam such as `ClaudeCredentialsKeychainDeleting`.
+
+`cfprefsd` resolves preferences over XPC, so a suite's backing plist is written
+to the **real** `~/Library/Preferences` whatever the wrapper exports, and
+`removePersistentDomain(forName:)` leaves it there as a 42-byte husk. No
+in-process teardown fixes that: six unlink orderings were measured, ten trials
+each, and all 60 files reappeared after the process exited (whether CF's
+exit-time sync or `cfprefsd` writes them back was not established). So mint
+every suite through `TestDefaultsSuite` / `withTestDefaults`
+(`Tests/TestSupport/UserDefaultsTestSupport.swift`), which names it
+`TBDTests.suites/<label>.<uuid>`; the `/` puts every file in one container that
+`scripts/test.sh` removes once the process is gone. With detection on it then
+watches the path briefly, because a sweeper started the instant the process
+exited still lost 1 in 10 to a trailing write; without detection a late write
+is left for the next run's pre-run reclaim. To check for leftovers, stat that one path or list the
+container — never enumerate `~/Library/Preferences`, which can hold hundreds of
+thousands of entries.
+
+Account-database home lookups
 (`getpwuid`/`getpwnam`/`getpwent`, `NSHomeDirectoryForUser(_:)`,
 `FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
 escape both variables outright and are rejected mechanically by the
@@ -184,8 +200,8 @@ before trusting it: the home value has to be visible near the append, so a path
 built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
-The wrapper's last layer, a before/after fingerprint of the five real
-directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
+The wrapper's detection layer, a before/after fingerprint of six real roots,
+is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
 rather than contradicting it: a live daemon and sibling worktrees write to
 `~/tbd` legitimately for the whole duration of a local run, and any concurrent
@@ -194,12 +210,19 @@ agent session starting in a new directory mints a fresh
 not the primary guard: it compares directory *listings*, so a leak that writes
 to a fixed path — or one that cleans up after itself in a `defer` — is invisible
 to it, while the tripwire fails on the permission check every run regardless.
-Full rationale is in the wrapper's header.
+The sixth root, `~/Library/Preferences`, has no fence half. What guards it is
+the SwiftLint rule `no_raw_userdefaults_suite`, which keeps every suite on the
+helper, and the helper's own test asserting that the backing file lands at the
+exact path inside `TBDTests.suites`; the fingerprint's count of plists in that
+container is the run-level backstop, and the container is reclaimed before and
+after every run whether or not detection is on. Full rationale is in the
+wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
-fake home, the post-run mode-000 recheck, the fingerprint's seven arms (five
-roots, two of which are read twice), the tmux socket fence (its `sun_path`
+fake home, the post-run mode-000 recheck, the fingerprint's eight arms (six
+roots, two of which are read twice), the preferences reclaim, its three
+refusals and its post-run settle, the tmux socket fence (its `sun_path`
 budget and its kill-server sweep), the holder sweep and the abandoned-run-root
 reconciler, and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes
@@ -444,13 +467,15 @@ code that hands its work to `Task.detached`, where `gateHoldingTask` cannot
 follow and only the bound is yours (see "Thread-blocking gates" below) — takes
 the shared constant.
 
-One more thing a reader should not have to mine a log for: the **"71 known
-issues" pass 1 reports on every run, and the 11 in pass 2, are deliberate
+One more thing a reader should not have to mine a log for: the **"72 known
+issues" pass 1 reports on every run, and the 12 in pass 2, are deliberate
 self-tests wrapped in `withKnownIssue`, not hidden failures** — almost all of
 them `EventDrivenTestClockSelfTests` driving its own hang guards to their
 diagnostics, plus `BoundedGateWaitTests`' unsignalled gate,
 `FlakyQuarantineSelfTests.retriesUntilPass`, and pass 2's
-`AppStatePublishFrequencyTests` excess-publish records.
+`AppStatePublishFrequencyTests` excess-publish records and
+`UserDefaultsTestSupportTests`' "teardown records a refused name as a failure
+and leaves the suite alone".
 
 Three remedies are already refuted; don't re-litigate them.
 

@@ -52,7 +52,7 @@ struct NotePaneModelTests {
 
     @MainActor
     private final class Harness {
-        let suiteName: String
+        let suite: TestDefaultsSuite
         let defaults: UserDefaults
         let dir: URL
         let state: AppState
@@ -61,8 +61,8 @@ struct NotePaneModelTests {
         let worktreeID = UUID()
 
         init() {
-            suiteName = "TBDAppTests.NotePaneModel.\(UUID().uuidString)"
-            defaults = UserDefaults(suiteName: suiteName)!
+            suite = TestDefaultsSuite("TBDAppTests.NotePaneModel")
+            defaults = suite.defaults
             let contentDir = FileManager.default.temporaryDirectory
                 .appendingPathComponent("tbd-note-pane-\(UUID().uuidString)")
             dir = contentDir
@@ -108,7 +108,7 @@ struct NotePaneModelTests {
         }
 
         func tearDown() {
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
             try? FileManager.default.removeItem(at: dir)
         }
     }

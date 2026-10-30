@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Tests for remote-session back/forward navigation — `NavigationEntry
 /// .remoteSession`, recording on `selectRemoteSession`, and stale-entry
@@ -20,9 +21,9 @@ import TBDShared
 @Suite("Remote session navigation")
 struct RemoteSessionNavigationTests {
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RemoteSessionNavigation.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteSessionNavigation")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

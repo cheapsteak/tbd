@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Env-gated, HEADLESS visual harness for the NSTableView transcript pane (#129).
 ///
@@ -66,9 +67,9 @@ struct TableTranscriptHarness {
         let items = try loadSession()
         #expect(!items.isEmpty, "session produced no items")
 
-        let suiteName = "table-harness-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let scene = makeScene(items: items, appState: appState, fixedSize: true)
@@ -215,9 +216,9 @@ struct TableTranscriptHarness {
         let fm = FileManager.default
         try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
 
-        let suiteName = "table-harness-kinds-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-kinds")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = TableTranscriptScene.allKindsFixture()
@@ -298,9 +299,9 @@ struct TableTranscriptHarness {
         let nodes = transcriptRenderNodes(from: items)
         #expect(!nodes.isEmpty)
 
-        let suiteName = "table-harness-region-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-region")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // Region anchors.
@@ -535,9 +536,9 @@ struct TableTranscriptHarness {
         let fm = FileManager.default
         try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
 
-        let suiteName = "table-harness-bubble-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-bubble")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = TableTranscriptScene.bubbleFixture()
@@ -654,9 +655,9 @@ struct TableTranscriptHarness {
         }
         let fm = FileManager.default
         try fm.createDirectory(atPath: Self.outputDir, withIntermediateDirectories: true)
-        let suiteName = "table-harness-spot-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-spot")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // Real session + a synthesized 347k-token badge bubble (the capture

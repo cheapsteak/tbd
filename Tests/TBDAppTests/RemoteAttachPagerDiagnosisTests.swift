@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 1: deterministic, in-process state and bare AppKit objects. No
 // subprocess, no network, no clock, no suspension point — every call here is
@@ -161,9 +162,9 @@ struct RemoteAttachPagerDiagnosisTests {
     }
 
     private func withHarness(_ body: (Harness) -> Void) {
-        let suiteName = "TBDAppTests.RemoteAttachPagerDiagnosis.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachPagerDiagnosis")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(Harness(state: AppState(userDefaults: defaults)))
     }
 

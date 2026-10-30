@@ -43,7 +43,7 @@ struct RemoteAttachFocusTests {
         let window: NSWindow
         let ground: NSView
         private let defaults: UserDefaults
-        private let suiteName: String
+        private let suite: TestDefaultsSuite
 
         /// - Parameters:
         ///   - mounted: whether the pane starts in the window. A pane the
@@ -55,8 +55,8 @@ struct RemoteAttachFocusTests {
         ///     opacity.
         init(mounted: Bool, slotShown: Bool = true) {
             _ = NSApplication.shared
-            suiteName = "TBDAppTests.RemoteAttachFocus.\(UUID().uuidString)"
-            defaults = UserDefaults(suiteName: suiteName)!
+            suite = TestDefaultsSuite("TBDAppTests.RemoteAttachFocus")
+            defaults = suite.defaults
             state = AppState(userDefaults: defaults)
 
             view = TBDTerminalView(
@@ -101,7 +101,7 @@ struct RemoteAttachFocusTests {
             state.unregisterRemoteTerminalView(view, for: RemoteAttachFocusTests.selected)
             window.contentView = nil
             window.close()
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 
@@ -294,9 +294,9 @@ struct RemoteAttachFocusTests {
     @MainActor
     @Test("the pager registers each generation's view and a superseded dismantle keeps the replacement")
     func thePagerRegistrationSurvivesAReconnectSwap() {
-        let suiteName = "TBDAppTests.RemoteAttachFocus.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachFocus")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let appearance = AppearanceSettings(defaults: defaults)
         let config = RemoteProviderConfig(name: Self.selected.provider, exec: "/usr/bin/true")
