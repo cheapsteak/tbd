@@ -599,6 +599,24 @@ struct WorktreeRowView: View {
         }
     }
 
+    /// The no-status mark, beside the status badge rather than in place of it:
+    /// one of this row's agent sessions has reported no state for the whole
+    /// grace period. The tooltip names why, from the session's transport.
+    @ViewBuilder
+    private func noStatusMark() -> some View {
+        if let help = NoStatusMark.rowHelp(
+            terminals: appState.terminals[worktree.id] ?? [],
+            sightings: appState.noStatusSightings
+        ) {
+            Image(systemName: NoStatusMark.systemImage)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .frame(width: 12, height: 12)
+                .help(help)
+                .accessibilityLabel(NoStatusMark.accessibilityLabel)
+        }
+    }
+
     private static func suffixHelp(_ indicator: SuffixRowIndicator) -> String {
         switch indicator {
         case .error:     return "Error"
@@ -667,6 +685,7 @@ struct WorktreeRowView: View {
                 }
             }
             suffixIcon(resolutions: resolutions)
+            noStatusMark()
             if Self.showsServerDot(worktreeID: worktree.id, running: appState.devServerRunningWorktreeIDs) {
                 Circle()
                     .fill(Color.green)

@@ -232,7 +232,10 @@ final class AppState {
         return index
     }
     var terminals: [UUID: [Terminal]] = [:] {
-        didSet { sidebarHibernationCache.removeAll() }
+        didSet {
+            sidebarHibernationCache.removeAll()
+            reconcileNoStatusSightings()
+        }
     }
     /// Per-terminal limit-hit state (app-local, not persisted). Maps terminal
     /// ID to the limit hit information. Cleared when the terminal starts working,
@@ -1845,6 +1848,15 @@ final class AppState {
     /// the mirror without a daemon.
     @ObservationIgnored lazy var programStatusListFetcher: @MainActor () async throws -> [ProgramStatusSnapshot] =
         { [daemonClient] in try await daemonClient.terminalProgramStatusList() }
+    /// Agent terminals seen sitting at `.unknown`, by terminal id, for the
+    /// sidebar's no-status mark. App memory only, kept in line with
+    /// `terminals` by `reconcileNoStatusSightings()`; see `NoStatusMark`.
+    var noStatusSightings: [UUID: NoStatusSighting] = [:]
+    /// The grace timer of each sighting still waiting out
+    /// `NoStatusMark.grace`. Bookkeeping, not UI state.
+    @ObservationIgnored var noStatusGraceTasks: [UUID: Task<Void, Never>] = [:]
+    /// Clock for the no-status grace period.
+    @ObservationIgnored var noStatusClock: any Clock<Duration> = ContinuousClock()
     /// Open Claude Code dialogs (`AskUserQuestion` pickers and tool permission
     /// prompts) by terminal, mirrored from the daemon's store over
     /// `.terminalPendingPromptsChanged`. Mirrored, never derived: the daemon
