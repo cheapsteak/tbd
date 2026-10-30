@@ -15,14 +15,14 @@ extension AppState {
     /// reader owns the pty when Claude asks. Deliberately blind to the agent
     /// kind: answering for a non-Claude session is harmless, because the
     /// store accepts reports only from Claude sessions.
-    func answersProgramStatusProbe(transport: TerminalTransport?) -> Bool {
+    nonisolated static func answersProgramStatusProbe(transport: TerminalTransport?) -> Bool {
         transport == .holder
     }
 
     /// `answersProgramStatusProbe(transport:)` for the cached row of
     /// `terminalID`; false for a row the app has not loaded.
     func answersProgramStatusProbe(terminalID: UUID) -> Bool {
-        answersProgramStatusProbe(transport: programStatusTerminal(terminalID)?.transport)
+        Self.answersProgramStatusProbe(transport: programStatusTerminal(terminalID)?.transport)
     }
 
     /// Forward one raw OSC 7501 report (the data after `7501;`) read off this

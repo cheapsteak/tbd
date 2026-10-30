@@ -62,7 +62,7 @@ struct ProgramStatusAppTests {
         defer { cleanup() }
         let id = seed(state, kind: .claude, transport: .holder)
         #expect(state.answersProgramStatusProbe(terminalID: id))
-        #expect(state.answersProgramStatusProbe(transport: .holder))
+        #expect(AppState.answersProgramStatusProbe(transport: .holder))
     }
 
     @Test("a tmux-transport panel answers nothing")
@@ -71,8 +71,8 @@ struct ProgramStatusAppTests {
         defer { cleanup() }
         let id = seed(state, kind: .claude, transport: .tmux)
         #expect(!state.answersProgramStatusProbe(terminalID: id))
-        #expect(!state.answersProgramStatusProbe(transport: .tmux))
-        #expect(!state.answersProgramStatusProbe(transport: nil))
+        #expect(!AppState.answersProgramStatusProbe(transport: .tmux))
+        #expect(!AppState.answersProgramStatusProbe(transport: nil))
     }
 
     /// The probe rule is the daemon reader's: holder transport, blind to the
@@ -177,7 +177,6 @@ struct ProgramStatusAppTests {
         #expect(gate.isEnabled == true)
         gate.set(false)
         #expect(gate.isEnabled == false)
-        #expect(ProgramStatusGate(enabled: true).isEnabled == true)
     }
 
     // MARK: - The view: probe answer

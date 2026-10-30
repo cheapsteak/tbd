@@ -1197,8 +1197,8 @@ final class OscReplayMute: Sendable {
 final class ProgramStatusGate: Sendable {
     private let state: OSAllocatedUnfairLock<Bool>
 
-    init(enabled: Bool = false) {
-        state = OSAllocatedUnfairLock(initialState: enabled)
+    init() {
+        state = OSAllocatedUnfairLock(initialState: false)
     }
 
     var isEnabled: Bool {

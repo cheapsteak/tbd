@@ -522,7 +522,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
         // the daemon's reader answers — so a tmux panel never answers. Set
         // before any byte is fed; re-evaluated in `updateNSView`.
         tv.programStatusGate.set(
-            appState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
+            AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
 
         // Feed snapshot before tmux connects so the user sees the last state
         let snapshot = initialSnapshot
@@ -612,7 +612,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             .first(where: { $0.id == terminalID })?
             .isCodexTerminal == true
         nsView.programStatusGate.set(
-            appState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
+            AppState.answersProgramStatusProbe(transport: context.coordinator.panelTransport()))
         Self.applyMouseRouting(to: nsView, transport: context.coordinator.panelTransport())
         context.coordinator.syncTabCloseContext(tabCloseContext, for: terminalID)
         context.coordinator.onRecoveryGuidance = onRecoveryGuidance
