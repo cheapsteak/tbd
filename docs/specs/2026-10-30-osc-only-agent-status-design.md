@@ -294,8 +294,9 @@ a write to an existing pty, and the upgrade reset is a one-time data change.
 Three stacked pull requests, each safe to merge alone:
 
 1. **Retire the flag.** OSC 7501 is always on for Claude Code on holder
-   sessions. Hooks still write the columns; the resolver's snapshot rung
-   governs display, as it does with the flag on today. This spec lands here.
+   sessions. In this pull request the hooks still write the columns, and the
+   resolver's snapshot rung governs the sidebar and `session.states` for
+   OSC-authoritative terminals. This spec lands here.
 2. **Accept Codex reports.** The trust rule above, and a tooltip that handles a
    terminal with no task entries. Hooks still write the columns.
 3. **OSC becomes the only state source.** The column writer, the attention
