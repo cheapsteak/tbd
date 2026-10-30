@@ -33,7 +33,11 @@ public enum WorktreeReviveCompletion: Sendable {
 /// revive rebuilds the folder from the branch, so modified tracked files and
 /// untracked files that are not ignored are the one thing an archive destroys
 /// for good. Committed work survives on the branch, pushed or not, which is
-/// why unpushed commits are not checked.
+/// why unpushed commits are not checked. The exception is commits made inside
+/// a submodule of a linked worktree: they live in
+/// `<repo>/.git/worktrees/<wt>/modules/<name>`, which phase 2's
+/// `git worktree prune` deletes, so they are lost unless pushed, and this
+/// guard does not check for that.
 ///
 /// `message` states the fact alone and names no remedy, because the remedy
 /// differs by surface: the CLI appends its `--force` hint, and the app offers

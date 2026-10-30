@@ -14,6 +14,26 @@ import TBDShared
 @Suite("Archive anyway decision")
 struct ArchiveAnywayDecisionTests {
 
+    /// Accepting Archive anyway resends with `force` and nothing else.
+    @Test func archiveAnywayRetriesForced() throws {
+        let flags = try #require(AppState.archiveRetryFlags(after: .offerArchiveAnyway, force: false))
+        #expect(flags.force == true)
+        #expect(flags.discardUncommittedChanges == false)
+    }
+
+    /// Accepting the discard offer never sends `force`, so the archive hook
+    /// still runs.
+    @Test func discardOfferRetriesWithoutForce() throws {
+        let flags = try #require(AppState.archiveRetryFlags(after: .offerDiscardUncommitted, force: false))
+        #expect(flags.force == false)
+        #expect(flags.discardUncommittedChanges == true)
+    }
+
+    /// A plain failure offers nothing to resend.
+    @Test func plainFailureHasNoRetry() {
+        #expect(AppState.archiveRetryFlags(after: .plainFailure, force: false) == nil)
+    }
+
     /// The guard code on an unforced archive: offer to send it again with
     /// `force`.
     @Test func guardCodeOnAnUnforcedArchiveOffersArchiveAnyway() {

@@ -725,13 +725,21 @@ extension AppState {
                     alreadyDiscardingUncommitted: discardUncommittedChanges) {
                 case .offerArchiveAnyway:
                     if confirmArchiveAnyway(refusal: refusal) {
-                        await archiveWorktree(id: id, force: true)
+                        if let flags = Self.archiveRetryFlags(after: .offerArchiveAnyway, force: force) {
+                            await archiveWorktree(
+                                id: id, force: flags.force,
+                                discardUncommittedChanges: flags.discardUncommittedChanges)
+                        }
                     }
                     return
                 case .offerDiscardUncommitted:
                     if confirmDiscardUncommitted(refusal: refusal) {
-                        await archiveWorktree(
-                            id: id, force: force, discardUncommittedChanges: true)
+                        if let flags = Self.archiveRetryFlags(
+                            after: .offerDiscardUncommitted, force: force) {
+                            await archiveWorktree(
+                                id: id, force: flags.force,
+                                discardUncommittedChanges: flags.discardUncommittedChanges)
+                        }
                     }
                     return
                 case .plainFailure:
@@ -774,6 +782,20 @@ extension AppState {
             return .offerDiscardUncommitted
         }
         return .plainFailure
+    }
+
+    /// The flags an accepted offer resends the archive with, or nil for a
+    /// plain failure, which offers nothing. The discard offer never sends
+    /// `force`: that would also skip the worktree's archive hook, which the
+    /// user did not agree to.
+    static func archiveRetryFlags(
+        after surface: ArchiveFailureSurface, force: Bool
+    ) -> (force: Bool, discardUncommittedChanges: Bool)? {
+        switch surface {
+        case .offerArchiveAnyway: return (force: true, discardUncommittedChanges: false)
+        case .offerDiscardUncommitted: return (force: force, discardUncommittedChanges: true)
+        case .plainFailure: return nil
+        }
     }
 
     /// Copy for the Archive anyway confirm: the daemon's refusal sentence is
