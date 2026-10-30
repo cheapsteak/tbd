@@ -513,6 +513,78 @@ test_malformed_list_cannot_check() {
   assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot scan Sources/TBDDaemon: not found"
 }
 
+# A unit name is one word. A space in one is a format error at its line, and
+# a folder with a space in its name stops the scan, since its links could not
+# be listed.
+test_unit_name_with_a_space_cannot_check() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let w = Widget()'
+  list "$d" 'Top Level -> Base'
+  run_check "$d"
+  assert_rc "a listed unit with a space" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" \
+    'lint-daemon-layers: cannot read scripts/daemon-links.txt:2: "Top Level -> Base": a unit name has no spaces in it'
+  list "$d" 'Top -> Base'
+  run_check "$d"
+  assert_rc "without the space, the check passes" 0 "$RUN_RC" "$RUN_OUT"
+
+  mkdir -p "$d/$DAEMON_REL/Top Level"
+  mv "$d/$DAEMON_REL/Top/User.swift" "$d/$DAEMON_REL/Top Level/User.swift"
+  run_check "$d"
+  assert_rc "a folder with a space in its name" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" \
+    'lint-daemon-layers: cannot scan Sources/TBDDaemon/Top Level/User.swift: the folder "Top Level" has a space in its name'
+}
+
+# The list is UTF-8 like the Swift: a byte that is not stops the check at its
+# line. A byte order mark is not text, in the list or in a Swift file.
+test_list_encoding() {
+  local d bom; d="$(mkfix)"; bom="$(printf '\357\273\277')"
+  put "$d" Top/User.swift 'let w = Widget()'
+  printf '# fixture\nTop -> Base\n\351\n' > "$d/scripts/daemon-links.txt"
+  run_check "$d"
+  assert_rc "a list byte that is not UTF-8" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read scripts/daemon-links.txt:3: not valid UTF-8"
+  printf '\357\273\277# fixture\nTop -> Base\n' > "$d/scripts/daemon-links.txt"
+  run_check "$d"
+  assert_rc "a list that starts with a byte order mark passes" 0 "$RUN_RC" "$RUN_OUT"
+  both_ways "a Swift file that starts with a byte order mark" 1 Widget \
+    "${bom}Widget.pattern.firstMatch(in: s)" "${bom}/Widget/.firstMatch(in: s)"
+}
+
+# A file or folder the check cannot open stops it with exit 2 and the path,
+# never a traceback: skipping it would drop its links.
+test_unreadable_cannot_check() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let w = Widget()'
+  list "$d" 'Top -> Base'
+  chmod 000 "$d/$DAEMON_REL/Top/User.swift"
+  if [ -r "$d/$DAEMON_REL/Top/User.swift" ]; then
+    chmod 644 "$d/$DAEMON_REL/Top/User.swift"
+    echo "ok   - unreadable files: skipped, this user reads a mode 000 file"
+    return
+  fi
+  run_check "$d"
+  chmod 644 "$d/$DAEMON_REL/Top/User.swift"
+  assert_rc "an unreadable Swift file" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read Sources/TBDDaemon/Top/User.swift: Permission denied"
+
+  chmod 000 "$d/$DAEMON_REL/Top"
+  run_check "$d"
+  chmod 755 "$d/$DAEMON_REL/Top"
+  assert_rc "an unreadable folder" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read Sources/TBDDaemon/Top: Permission denied"
+
+  chmod 000 "$d/scripts/daemon-links.txt"
+  run_check "$d"
+  chmod 644 "$d/scripts/daemon-links.txt"
+  assert_rc "an unreadable list" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "is named" "$RUN_OUT" "lint-daemon-layers: cannot read scripts/daemon-links.txt: Permission denied"
+
+  run_check "$d"
+  assert_rc "readable again, the check passes" 0 "$RUN_RC" "$RUN_OUT"
+}
+
 # ---------------------------------------------------------------------------
 # The cycle report
 # ---------------------------------------------------------------------------

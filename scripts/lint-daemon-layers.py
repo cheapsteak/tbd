@@ -23,9 +23,10 @@ literal, after a `.`, or as an argument label is not a reference, and neither
 is a name the file declares for itself: a member, a nested type, a private
 declaration, or a lowercase local or parameter.
 
-It fails closed: Swift it cannot read -- an unbalanced brace, a literal or
-comment that never closes, bytes that are not UTF-8 -- stops it with exit 2,
-rather than let it report a link set that is silently wrong.
+It fails closed: a file or folder it cannot open, and Swift it cannot read
+-- an unbalanced brace, a literal or comment that never closes, bytes that
+are not UTF-8 -- stop it with exit 2, rather than let it report a link set
+that is silently wrong.
 
 Exit codes: 0 every link is listed and every listed link is made; 1 a new or
 stale link; 2 the tree or the list cannot be read. A pass also reports the
@@ -39,6 +40,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import codecs
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -726,26 +729,56 @@ def file_references(source: SourceFile, index: dict[str, set[str]]) -> list[Refe
     return references
 
 
+def read_text(path: Path, shown: str, undecodable: str) -> str:
+    """The file's text, less a UTF-8 byte order mark. A file that cannot be
+    opened raises CannotCheck as `cannot read <shown>`; bytes that are not
+    UTF-8 raise it as `<undecodable> <shown>:<line>`."""
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise CannotCheck(f"cannot read {shown}: {error.strerror or error}") from None
+    if raw.startswith(codecs.BOM_UTF8):
+        raw = raw[len(codecs.BOM_UTF8):]
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        line = raw[:error.start].count(b"\n") + 1
+        raise CannotCheck(f"{undecodable} {shown}:{line}: not valid UTF-8") from None
+
+
+def swift_files(daemon: Path) -> list[PurePosixPath]:
+    """Every Swift file under `daemon`, relative to it, in path order. A folder
+    that cannot be listed raises CannotCheck: skipping it would drop its links."""
+
+    def cannot_list(error: OSError) -> None:
+        shown = (DAEMON_DIR / Path(error.filename or daemon).relative_to(daemon)).as_posix()
+        raise CannotCheck(f"cannot read {shown}: {error.strerror or error}")
+
+    found: list[PurePosixPath] = []
+    for folder, _, names in os.walk(daemon, onerror=cannot_list):
+        for name in names:
+            path = Path(folder, name)
+            if name.endswith(".swift") and path.is_file():
+                found.append(PurePosixPath(path.relative_to(daemon).as_posix()))
+    return sorted(found)
+
+
 def scan_daemon(repo_root: Path) -> Scan:
     daemon = repo_root / DAEMON_DIR
     if not daemon.is_dir():
         raise CannotCheck(f"cannot scan {DAEMON_DIR}: not found")
     files: list[SourceFile] = []
-    for path in sorted(daemon.rglob("*.swift")):
-        if not path.is_file():
-            continue
-        rel = PurePosixPath(path.relative_to(daemon).as_posix())
+    for rel in swift_files(daemon):
         if rel == PurePosixPath(EXECUTABLE_ONLY):
             continue
         repo_path = (DAEMON_DIR / rel).as_posix()
-        raw = path.read_bytes()
-        try:
-            source = raw.decode("utf-8")
-        except UnicodeDecodeError as error:
-            line = raw[:error.start].count(b"\n") + 1
-            raise CannotCheck(f"cannot scan {repo_path}:{line}: not valid UTF-8") from None
+        unit = unit_of(rel)
+        if any(char.isspace() for char in unit):
+            # The list could not hold its links: a unit name is one word.
+            raise CannotCheck(f'cannot scan {repo_path}: the folder "{unit}" has a space in its name')
+        source = read_text(daemon / rel, repo_path, "cannot scan")
         tokens = tokenize(blank_literals_and_comments(source, repo_path))
-        files.append(SourceFile(repo_path, unit_of(rel), tokens, parse_declarations(tokens, repo_path)))
+        files.append(SourceFile(repo_path, unit, tokens, parse_declarations(tokens, repo_path)))
     index = build_index(files)
     references: list[Reference] = []
     for source in files:
@@ -758,14 +791,16 @@ def scan_daemon(repo_root: Path) -> Scan:
 # --------------------------------------------------------------------------
 
 _LIST_LINE = re.compile(r"(\S+) -> (\S+)\Z")
+# A line that would be a link but for a space in a unit's name.
+_LIST_LINE_WITH_SPACES = re.compile(r"(.+?) -> (.+)\Z")
 
 
 def read_list(repo_root: Path) -> dict[Link, int]:
     """Each listed link, mapped to its line in the list."""
-    try:
-        text = (repo_root / LINKS_FILE).read_bytes().decode("utf-8")
-    except FileNotFoundError:
-        raise CannotCheck(f"cannot read {LINKS_FILE}: not found") from None
+    path = repo_root / LINKS_FILE
+    if not path.exists():
+        raise CannotCheck(f"cannot read {LINKS_FILE}: not found")
+    text = read_text(path, str(LINKS_FILE), "cannot read")
     listed: dict[Link, int] = {}
     previous = ""
     for number, raw in enumerate(text.split("\n"), start=1):
@@ -777,6 +812,8 @@ def read_list(repo_root: Path) -> dict[Link, int]:
         where = f"cannot read {LINKS_FILE}:{number}"
         match = _LIST_LINE.match(line)
         if match is None:
+            if _LIST_LINE_WITH_SPACES.match(line):
+                raise CannotCheck(f'{where}: "{line}": a unit name has no spaces in it')
             raise CannotCheck(f'{where}: expected "A -> B", got "{line}"')
         link = (match.group(1), match.group(2))
         if link[0] == link[1]:
@@ -928,6 +965,10 @@ def main(argv: list[str]) -> int:
         listed = read_list(args.repo_root)
     except CannotCheck as error:
         print(f"lint-daemon-layers: {error}", file=sys.stderr)
+        return 2
+    except OSError as error:
+        # A read the handlers above do not expect: still exit 2, not a traceback.
+        print(f"lint-daemon-layers: cannot read {error.filename or 'a file'}: {error.strerror or error}", file=sys.stderr)
         return 2
 
     links = scan.links()
