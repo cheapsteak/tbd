@@ -51,23 +51,28 @@ The check ships with `scripts/daemon-links.txt`, which lists every link the daem
 
 ### Stage 2: break the cycle
 
-A few PRs, each grouped by the kind of change, remove links until the check finds no cycle among those left. Each PR deletes its links from `scripts/daemon-links.txt`. The check reports any cycle left in the list, and stage 2 ends when it reports none.
+A few PRs, each grouped by the kind of change, remove links until the check finds no cycle among those left. The check reports any cycle left in the list, and stage 2 ends when it reports none.
 
-A simulation of these moves on the scanned commit left no cycle and 130 links. It is the starting plan. The plan re-runs the scan, and a link that resists comes back as a design question.
+Each PR deletes the links it breaks from `scripts/daemon-links.txt`. Moving code down also creates links, because its users now point at its new home. So a PR that moves a helper into `Base`, or into a lower folder, adds those links to the list, and its description names each one. It adds no other link.
 
-- **Files in the wrong folder move with `git mv`.** Every folder is in one module, so a move changes no code. About 18 files move in all. These 12 go to the folder that uses them:
+A simulation of these moves on commit `da3a45011` leaves no cycle and 126 links. It is the starting plan. The plan re-runs the scan, and a link that resists comes back as a design question.
+
+- **Files in the wrong folder move with `git mv`.** Every folder is in one module, so a move changes no code. About 17 files move in all. These go to the folder that uses them:
   - into **Server**: `RPCRouter+Actuation.swift`, `RPCRouter+StartAdmission.swift`;
   - into **Actuation**: `DeliveryVerificationArming.swift`, which joins its only conformer;
   - into **Lifecycle**: `ActuationOutcome+Park.swift`, `ActuationOutcome+TransportMigration.swift`, `RemoteTipTracker.swift`;
   - into **Claude**: `ClaudeStateDetector.swift`, `ClaudeExecutableResolver.swift`;
   - into **PR**: `GitPollingPolicy.swift`;
   - into **Process**: `BoundedProcessRunner.swift`;
-  - into the **root**: `Daemon+ModChannel.swift` and `AgentBackgroundRoots.swift`, which are wiring that only the root uses.
+  - into the **root**: `Daemon+ModChannel.swift`, `Daemon+BackgroundFetch.swift` and `AgentBackgroundRoots.swift`, which are wiring that only the root uses.
 - **A new bottom folder, `Base`.** It takes the other moved files, and some single declarations. All of it is code that several folders use, and that uses no other daemon folder:
   - `StateSubscriptionManager`, `ShutdownLatch` and `WorktreeLayout`;
   - `ContinuationGuard`, `SocketFileIdentity` and the socket-binding helper that `SocketServer` and the mod channel share;
-  - `ShadowPeerPermissionClass`, the mod-channel token, `RepoTOML` and `SessionModSpawn`;
-  - `shellEscape` and `sleepThroughGatedInterval`.
+  - `ShadowPeerPermissionClass`, the mod-channel token and `RepoTOML`;
+  - the predicate that says whether a Claude usage bucket is model-scoped, which Database and Claude both need;
+  - `shellEscape` and `sleepThroughGatedInterval`. The latter's poll-tick default points up into PR, so it goes, and its two callers pass the value.
+
+  `SessionModSpawn` stays in SessionMod, because it uses SessionMod's own types.
 
   The rule for `Base` is in its name: nothing in it may use another daemon folder. It holds only code that two or more folders use.
 - **Declarations in the wrong file move** to the folder that owns them:
@@ -75,11 +80,11 @@ A simulation of these moves on the scanned commit left no cycle and 130 links. I
   - `PRUndeterminedCause` goes to Database.
   - `withWorktreeServerLock(db:)` goes to Lifecycle, because it throws Lifecycle's error.
   - The `TmuxManager: TmuxProcessQuerying` conformance goes to Tmux.
+  - `UncommittedArchiveRefusal` splits in two. Its stored fields go to Database, which records them, and its evaluation stays in Lifecycle as an extension. So Database never needs Git.
 - **Seams.** Where a lower folder must call a higher one, the higher one passes in a closure or a protocol:
-  - Tmux's control-mode bridge stops naming `FDVendingServer`.
+  - Tmux's control-mode bridge stops naming `FDVendingServer`, and takes a protocol that the server meets.
   - Remote stops naming PR's `ProviderPRBinder`, which it already receives through a setter.
   - Database gets its own logger instead of Remote's `claudeCloudLogger`.
-  - Database stops calling Claude's `ClaudeUsagePayloadParser`; the predicate it needs moves lower.
 
 None of these changes behaviour. The existing tests cover the code they touch.
 
@@ -92,14 +97,15 @@ The last PR replaces `scripts/daemon-links.txt` with `scripts/daemon-layers.txt`
 
 The simulated order, from the bottom:
 1. Base, Diagnostics, Keychain, SSH, Update
-2. AskUserQuestion, Database, Process, SessionMod
-3. Actuation, Codex, Git, ModChannel, ModelProfile, PanelSurface, ProgramStatus, StartAdmission, Tmux
-4. Claude, Holder, Mock
-5. DevServers, Hooks, Remote
-6. Lifecycle
-7. GC, PR
-8. Server
-9. the root
+2. AskUserQuestion, Database, SessionMod
+3. Actuation, ModChannel, ModelProfile, PanelSurface, Process, ProgramStatus
+4. Codex, Git, Holder, StartAdmission, Tmux
+5. Claude, DevServers, Mock
+6. Hooks, Remote
+7. Lifecycle
+8. GC, PR
+9. Server
+10. the root
 
 Stage 2's PRs may shift a unit by a layer. The file holds whatever order the code has when stage 2 ends.
 
@@ -128,7 +134,7 @@ A related change would move `Sources/TBDDaemon/Holder` into a module of its own,
   - Removing a link's last reference without removing its line from the list fails the check as stale.
 - **Stage 2.**
   - Each PR passes the check, the required `test` job and the `lint` job.
-  - Each PR's diff of `scripts/daemon-links.txt` only removes lines.
+  - Each PR's diff of `scripts/daemon-links.txt` removes the links it breaks. Any line it adds is a link into `Base` or into the folder a moved helper joined, and the PR names it.
   - After the last PR, the check reports no cycle.
 - **Stage 3.**
   - The check passes with `scripts/daemon-layers.txt`.
