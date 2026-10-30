@@ -24,7 +24,7 @@ The daemon stays one module. A lint check gives the folders a direction, in thre
 
 ### The check
 
-`scripts/lint-daemon-layers.py` runs in the `lint` CI job and in the pre-push hook, like `scripts/lint-migrations.py`. It needs no build, and it scans the whole daemon in about 2 s.
+`scripts/lint-daemon-layers.py` runs in the `lint` CI job and in the pre-push hook, like `scripts/lint-migrations.py`. It needs no build, and it scans the whole daemon in about 1 s.
 
 - **The index.** It reads every Swift file in the library and indexes each unit's top-level declarations that are not `private` or `fileprivate`: types, typealiases, top-level functions and globals. Names declared in an extension count as the extended type's.
 - **A reference.** A file in unit A references unit B when it names a declaration from B's index. It does not count a name that follows a `.`, an argument label, or a name in a comment or a string. It does count code inside a string's interpolation, an extension on B's type, and a conformance to B's protocol.
@@ -106,7 +106,7 @@ Stage 2's PRs may shift a unit by a layer. The file holds whatever order the cod
 ### Documentation
 
 `Sources/TBDDaemon/CLAUDE.md` gains a section on the layers. Each stage writes the part it introduces, so the section always describes the check as it runs:
-- **Stage 1:** what a unit is, the frozen list, stale entries, and how to read a failure and fix it: move the declaration lower, or pass in a closure.
+- **Stage 1:** what a unit is, the frozen list, stale entries, and how to read a failure and fix it: move the declaration lower, or pass in a closure. It also says how to repair `main` when two changes that each passed alone leave it failing: a one-line PR that adds or deletes the line.
 - **Stage 2:** the rule for `Base`.
 - **Stage 3:** the layer rule, and where the order lives.
 

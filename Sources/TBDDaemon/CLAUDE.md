@@ -32,17 +32,26 @@ The check indexes each unit's top-level declarations that are not `private` or `
 - in an extension of the type, or a conformance to the protocol;
 - in code inside a string's interpolation.
 
-It ignores a name after a `.`, an argument label, and every name in a comment, a string or a regex literal.
+It ignores a name after a `.` (though not after `...`), an argument label in parentheses, and every name in a comment, a string, a regex literal or a raw identifier such as `` `checks that Widget parses` ``.
 
-### Blind spots
+### Links the check can miss
 
 The check matches names, not types. It misses:
 
 - **an inferred type's member**, as in `db.terminals.setStartHeld()`;
 - **a member another folder's extension adds**;
 - **an implicit `.case` or `.init(...)`** whose type comes from context;
-- **a name the file declares for itself**: a local, a parameter, a member, a nested type or a private declaration with the same name as another unit's declaration. The check reads every use of that name in the file as the file's own;
+- **a name the file declares for itself**: a local, a parameter, a generic parameter, a member, a nested type, a type or function declared in a body, or a private declaration with the same name as another unit's declaration. The check reads every use of that name in the file as the file's own;
 - **an overloaded top-level function** that the calling folder also declares under the same name.
+
+A missed reference makes no link, so the list can understate how two folders depend on each other. Nothing needs fixing for it.
+
+### Links the check can report falsely
+
+- **A member used without `self.`, declared in another file.** A type's member declared in one file and used bare in the type's extension in another file reads as a reference to any other unit's top-level declaration of the same name. The check sees a member only in the file that declares it.
+- **A subscript's argument label**, as in `cache[widgetLimit: 2]`, reads as a dictionary key.
+
+A false link is a bug in the check. For a bare member, write `self.` before it; for anything else, fix the check and add the case to `scripts/lint-daemon-layers.test.sh`. Never add a false link to the list: the name that makes it never goes away, so the line can never go stale, and from then on it admits every real reference between the two folders.
 
 ### Reading a failure
 
@@ -72,12 +81,17 @@ The list holds `PR -> (root)`, but no file in PR names anything the root files d
 
 Delete its line from `scripts/daemon-links.txt`. The failure names the line.
 
+### When `main` fails
+
+Branch protection does not require a branch to be up to date with `main` before it merges, so two pull requests that each pass alone can together leave `main` failing. If one removes the last reference behind `A -> B` and deletes its line while the other adds a new reference to it, `main` makes a link the list lacks. If each removes one of the last two references, neither deletes the line, and it goes stale. Every branch then fails on a link its change never touched. The repair is a one-line pull request that adds the line, or deletes it; the failure output names it.
+
 ### "cannot scan" and "cannot read"
 
 Exit 2 means the check could not run. It stops rather than report links it may have read wrong.
 
-- **`cannot scan <file>:<line>`**: the check could not read that Swift. The reason is an unbalanced brace, a comment or literal that never closes, or bytes that are not UTF-8. The usual cause is an `#if` whose branches open different braces, such as two signatures sharing one body. Make each branch balance its own braces.
-- **`cannot read scripts/daemon-links.txt:<line>`**: a line is not `A -> B`, is listed twice, links a unit to itself, or is out of order. `LC_ALL=C sort` gives the order the check expects.
+- **`cannot scan <file>:<line>`**: the check could not read that Swift. The reason is an unbalanced brace, a comment or literal that never closes, or bytes that are not UTF-8. The usual cause is an `#if` whose branches open different braces, such as two signatures sharing one body. Make each branch balance its own braces. Without a line, the file is in a folder with a space in its name, whose links the list could not hold.
+- **`cannot read <path>`**: the check could not open that file or list that folder, for the reason that follows.
+- **`cannot read scripts/daemon-links.txt:<line>`**: a line is not `A -> B`, has a space in a unit name, is listed twice, links a unit to itself, is out of order, or holds bytes that are not UTF-8. `LC_ALL=C sort` gives the order the check expects.
 
 ### The cycle report
 
@@ -95,4 +109,6 @@ Within a group, every unit reaches every other by following links. The report is
 - **`python3 scripts/lint-daemon-layers.py`** checks the tree.
 - **`bash scripts/lint-daemon-layers.test.sh`** runs the check's harness on sample trees.
 
-CI runs the check in the Lint job and the harness in the Script harnesses job. The pre-push hook runs the check on every push, even with `TBD_SKIP_PREPUSH_TESTS=1`.
+CI runs the check in the Lint job and the harness in the Script harnesses job. The Lint job runs the check under macOS's own `/usr/bin/python3`, Python 3.9, which is the `python3` the pre-push hook finds on a Mac without Homebrew; so the check must not use newer syntax.
+
+The pre-push hook runs the check on every push, even with `TBD_SKIP_PREPUSH_TESTS=1`. It checks the working tree, not the commits being pushed, so an untracked, half-written Swift file can block a push that does not include it. `git push --no-verify` skips the hook for that push.
