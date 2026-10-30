@@ -1,6 +1,6 @@
 # Panel tabs — a side region with tabs, rendered from the daemon
 
-Status: design, in review
+Status: design, approved for implementation planning
 Date: 2026-10-30
 Builds on: [`2026-07-22-panel-agent-surface-c-primary-anchor-design.md`](2026-07-22-panel-agent-surface-c-primary-anchor-design.md) (spec C)
 
