@@ -21,6 +21,7 @@ struct ProgramStatusRowPresentationTests {
         id: UUID = UUID(),
         label: String? = nil,
         incarnation: UUID?,
+        kind: TerminalKind? = .claude,
         parked: Bool = false
     ) -> TBDShared.Terminal {
         TBDShared.Terminal(
@@ -30,7 +31,7 @@ struct ProgramStatusRowPresentationTests {
             tmuxPaneID: "%1",
             label: label,
             sessionIncarnationID: incarnation,
-            kind: .claude,
+            kind: kind,
             hibernatedAt: parked ? observedAt : nil,
             transport: .holder
         )
@@ -176,6 +177,28 @@ struct ProgramStatusRowPresentationTests {
         #expect(ProgramStatusRowPresentation.tooltipLabel(for: Self.terminal(incarnation: nil)) == "Claude")
         #expect(ProgramStatusRowPresentation.tooltipLabel(
             for: Self.terminal(label: "Reviewer", incarnation: nil)) == "Reviewer")
+    }
+
+    @Test func unlabeledCodexFallsBackToCodex() {
+        #expect(ProgramStatusRowPresentation.tooltipLabel(
+            for: Self.terminal(incarnation: nil, kind: .codex)) == "Codex")
+        // A legacy no-kind row is Claude unless its label says Codex, and a
+        // label of its own wins either way.
+        #expect(ProgramStatusRowPresentation.tooltipLabel(
+            for: Self.terminal(incarnation: nil, kind: nil)) == "Claude")
+        #expect(ProgramStatusRowPresentation.tooltipLabel(
+            for: Self.terminal(label: "Reviewer", incarnation: nil, kind: .codex)) == "Reviewer")
+    }
+
+    /// A Codex snapshot has a main entry and nothing else — no task entries,
+    /// no title, msg or progress — so its tooltip is the one head line.
+    @Test func codexTooltipIsOneLine() {
+        let t = Self.terminal(incarnation: nil, kind: .codex)
+        let s = Self.snapshot(terminalID: t.id, incarnation: nil, main: Self.entry(.done))
+        let text = ProgramStatusRowPresentation.tooltip(terminals: [
+            (label: ProgramStatusRowPresentation.tooltipLabel(for: t), snapshot: s),
+        ])
+        #expect(text == "Codex: done")
     }
 
     // MARK: - Badge help

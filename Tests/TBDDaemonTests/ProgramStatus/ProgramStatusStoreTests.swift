@@ -114,18 +114,28 @@ import TestSupport
 
     // MARK: - Trust
 
-    @Test func nonClaudeOrNonHolderOrParkedTerminalsReject() async {
+    @Test func shellNonHolderAndParkedTerminalsReject() async {
         let h = Harness()
-        let codex = holderClaude(kind: .codex)
-        let codexByLabel = holderClaude(kind: nil, label: TerminalLabel.codex)
-        let shell = holderClaude(kind: .shell)
-        let tmux = holderClaude(transport: .tmux)
-        let hibernated = holderClaude(hibernatedAt: t0)
-        for terminal in [codex, codexByLabel, shell, tmux, hibernated] {
+        let cases: [(Terminal, String)] = [
+            (holderClaude(kind: .shell), "not an agent session"),
+            (holderClaude(transport: .tmux), "not a holder session"),
+            (holderClaude(hibernatedAt: t0), "terminal is parked"),
+        ]
+        for (terminal, reason) in cases {
             h.add(terminal)
             let outcome = await h.store.ingest(inbound(terminal, "state=working:app=claude-code"))
-            #expect(isRejected(outcome))
+            #expect(outcome == .rejected(reason))
         }
+        #expect(h.publishedSnapshots.isEmpty)
+    }
+
+    /// A state report with no `app` is refused as missing, before the lookup;
+    /// only a clear may omit it.
+    @Test func aStateReportWithNoAppIsRefusedAsMissing() async {
+        let h = Harness()
+        let codex = holderClaude(kind: .codex)
+        h.add(codex)
+        #expect(await h.store.ingest(inbound(codex, "state=working")) == .rejected("missing app"))
         #expect(h.publishedSnapshots.isEmpty)
     }
 
@@ -134,6 +144,80 @@ import TestSupport
         let terminal = holderClaude(kind: nil)
         h.add(terminal)
         #expect(await h.store.ingest(inbound(terminal, "state=working:app=claude-code")) == .accepted)
+    }
+
+    /// Codex's own reports are accepted on a Codex terminal, and its app-less
+    /// bare clear ends the main entry rather than leaving it standing.
+    @Test func codexReportsAndAppLessClearAcceptOnACodexTerminal() async throws {
+        let h = Harness()
+        let codex = holderClaude(kind: .codex)
+        h.add(codex)
+        #expect(await h.store.ingest(inbound(codex, "state=working:app=codex", at: 1)) == .accepted)
+        #expect(await h.store.snapshot(for: codex.id)?.main?.state == .working)
+        #expect(await h.store.ingest(
+            inbound(codex, "state=blocked:app=codex:kind=permission", at: 2)) == .accepted)
+        #expect(await h.store.snapshot(for: codex.id)?.main?.kind == .permission)
+
+        #expect(await h.store.ingest(inbound(codex, "state=clear", at: 3)) == .accepted)
+        #expect(await h.store.snapshot(for: codex.id) == nil)
+        let last = try #require(h.publishedSnapshots.last)
+        #expect(last.isEmpty)
+        #expect(last.terminalID == codex.id)
+    }
+
+    /// A row written before kinds were recorded is Codex when its label says
+    /// so, and takes Codex's reports.
+    @Test func legacyNilKindCodexAccepts() async {
+        let h = Harness()
+        let terminal = holderClaude(kind: nil, label: TerminalLabel.codex)
+        h.add(terminal)
+        #expect(await h.store.ingest(inbound(terminal, "state=working:app=codex")) == .accepted)
+    }
+
+    /// Both apps are known, but each is accepted only from its own agent's
+    /// terminal: a Claude report on a Codex terminal, or the reverse, is
+    /// refused after the lookup.
+    @Test func appMustMatchTheTerminalsAgent() async {
+        let h = Harness()
+        let codex = holderClaude(kind: .codex)
+        let codexByLabel = holderClaude(kind: nil, label: TerminalLabel.codex)
+        let claude = holderClaude(kind: .claude)
+        let legacyClaude = holderClaude(kind: nil)
+        for terminal in [codex, codexByLabel, claude, legacyClaude] {
+            h.add(terminal)
+        }
+        let mismatch = ProgramStatusStore.Outcome.rejected("app does not match the terminal's agent")
+        #expect(await h.store.ingest(inbound(codex, "state=working:app=claude-code")) == mismatch)
+        #expect(await h.store.ingest(inbound(codexByLabel, "state=working:app=claude-code")) == mismatch)
+        #expect(await h.store.ingest(inbound(claude, "state=working:app=codex")) == mismatch)
+        #expect(await h.store.ingest(inbound(legacyClaude, "state=working:app=codex")) == mismatch)
+        // A clear that names the other agent is a mismatch too.
+        #expect(await h.store.ingest(inbound(claude, "state=clear:app=codex")) == mismatch)
+        #expect(h.publishedSnapshots.isEmpty)
+    }
+
+    /// A shell runs no agent that reports, whichever app a report names.
+    @Test func shellTerminalRejectsEveryApp() async {
+        let h = Harness()
+        let shell = holderClaude(kind: .shell)
+        h.add(shell)
+        let notAnAgent = ProgramStatusStore.Outcome.rejected("not an agent session")
+        #expect(await h.store.ingest(inbound(shell, "state=working:app=claude-code")) == notAnAgent)
+        #expect(await h.store.ingest(inbound(shell, "state=working:app=codex")) == notAnAgent)
+        #expect(await h.store.ingest(inbound(shell, "state=clear")) == notAnAgent)
+        #expect(h.publishedSnapshots.isEmpty)
+    }
+
+    /// An app TBD does not know is refused before the lookup, on any terminal.
+    @Test func unknownAppRejectsOnEveryAgent() async {
+        let h = Harness()
+        for kind in [TerminalKind.claude, .codex] {
+            let terminal = holderClaude(kind: kind)
+            h.add(terminal)
+            #expect(await h.store.ingest(inbound(terminal, "state=working:app=foo")) == .rejected("unknown app"))
+            #expect(await h.store.ingest(inbound(terminal, "state=clear:app=foo")) == .rejected("unknown app"))
+        }
+        #expect(h.publishedSnapshots.isEmpty)
     }
 
     @Test func unknownTerminalRejects() async {

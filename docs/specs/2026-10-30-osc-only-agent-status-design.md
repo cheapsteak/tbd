@@ -21,7 +21,7 @@ session's activity state:
 - `program_status_enabled` is retired. OSC 7501 is always on.
 
 Sessions that cannot report — any agent on the tmux transport, Claude Code
-before 2.1.295, Codex before 0.164.0 — still run. Their state is `unknown`,
+before 2.1.295, Codex before 0.163.0 — still run. Their state is `unknown`,
 the sidebar says why, and the idle sweep leaves them alone.
 
 The protocol, the parser, the store's trust and liveness rules, and the
@@ -37,14 +37,15 @@ This document covers what changes around them.
   with `title`, `msg` and `progress`. Claude Code writes its main entry as
   soon as the probe settles, so a capable session reports within moments of
   starting.
-- **Codex 0.164.0 and later** – sends without probing whenever its output is a
+- **Codex 0.163.0 and later** – sends without probing whenever its output is a
   terminal (except VTE older than 0.54). Reports are
   `state=<idle|working|blocked|done|error>:app=codex`, with `:kind=` when
   blocked, terminated by ST, and `state=clear` with no `app`. Codex sends no
-  task entries, `title`, `msg` or `progress`. It refreshes its status on every
-  draw and its cache starts empty, so its first draw reports `idle`. Codex
-  0.163.0 sends `working`, `idle` and `blocked` without `kind`; TBD accepts
-  that form, and it lacks only the richer states.
+  task entries, `title`, `msg` or `progress`. It computes its status on every
+  draw but writes it only when it changes (its own cache suppresses repeats),
+  and the cache starts empty, so its first draw reports `idle`. Codex 0.163.0
+  sends `working`, `idle` and `blocked` without `kind`; 0.164.0 added `done`,
+  `error` and `kind`. TBD accepts both forms.
 - **The tmux transport** – tmux is the terminal there. It does not answer the
   probe and drops the sequence, so no agent on tmux reports.
 
@@ -192,7 +193,7 @@ The mark's tooltip names the cause from the terminal's transport:
 - tmux – "The tmux transport doesn't carry agent status. Status needs the
   pty-holder transport."
 - holder – "This session isn't reporting status. Status needs Claude Code
-  2.1.295 or later, or Codex 0.164.0 or later. A session started before this
+  2.1.295 or later, or Codex 0.163.0 or later. A session started before this
   version of TBD reports after it is relaunched."
 
 The mark clears on the first accepted report. Shell terminals never show it.
@@ -293,8 +294,9 @@ a write to an existing pty, and the upgrade reset is a one-time data change.
 Three stacked pull requests, each safe to merge alone:
 
 1. **Retire the flag.** OSC 7501 is always on for Claude Code on holder
-   sessions. Hooks still write the columns; the resolver's snapshot rung
-   governs display, as it does with the flag on today. This spec lands here.
+   sessions. In this pull request the hooks still write the columns, and the
+   resolver's snapshot rung governs the sidebar and `session.states` for
+   OSC-authoritative terminals. This spec lands here.
 2. **Accept Codex reports.** The trust rule above, and a tooltip that handles a
    terminal with no task entries. Hooks still write the columns.
 3. **OSC becomes the only state source.** The column writer, the attention

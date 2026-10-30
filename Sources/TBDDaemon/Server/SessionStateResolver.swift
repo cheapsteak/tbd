@@ -99,11 +99,11 @@ struct SessionStateFacts: Sendable, Equatable {
 ///    end — and reporting `idle` invites a caller to send work the session
 ///    cannot do until the limit resets.
 /// 3½. **Program status (OSC 7501)** — from the first accepted main-entry
-///    report for the terminal's current incarnation, Claude Code's own report
-///    is the session's state (rolled up with its task entries by
-///    `ProgramStatusRollup`, source `.programStatus`), and the hook rail below
-///    is not consulted. Claude Code computes that state from its own
-///    internals, so once it reports it is the better source; latest-wins
+///    report for the terminal's current incarnation, the agent's own report —
+///    Claude Code's or Codex's — is the session's state (rolled up with its
+///    task entries by `ProgramStatusRollup`, source `.programStatus`), and the
+///    hook rail below is not consulted. The agent computes that state from its
+///    own internals, so once it reports it is the better source; latest-wins
 ///    against hooks would flicker, because the two arrive over different
 ///    channels with no reliable order between them. Below `.gone`, `.parked`
 ///    and `.rateLimited` because those are states TBD owns. A snapshot for
@@ -346,7 +346,7 @@ struct SessionStateResolver: Sendable {
 
         // 3½. Program status (OSC 7501). While this incarnation's main entry
         //     carries a recognized state, or stands over task entries that
-        //     decide the state, Claude Code's own report is the session's
+        //     decide the state, the agent's own report is the session's
         //     state; the hook rail below is not consulted. Gone, parked and
         //     rate-limited still outrank it — they are states TBD owns.
         if let snapshot = facts.programStatus,
