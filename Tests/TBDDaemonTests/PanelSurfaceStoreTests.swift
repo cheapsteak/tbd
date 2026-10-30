@@ -778,13 +778,37 @@ struct PanelSurfaceStoreTests {
         #expect(try await receiptCount(db, worktreeID: archivedID) == 1)
         let keptBefore = try await db.panelSurface.surfaces(worktreeID: keptID)
 
-        try await db.worktrees.archive(id: archivedID)
+        let removed = try await db.worktrees.archive(id: archivedID)
 
+        #expect(removed == [archivedTab.id], "the archive names the tabs it deleted, for the delta")
         #expect(try await db.panelSurface.surfaces(worktreeID: archivedID).isEmpty)
         #expect(try await historyRowCount(db, tabID: archivedTab.id) == 0)
         #expect(try await receiptCount(db, worktreeID: archivedID) == 0)
         #expect(try await db.panelSurface.surfaces(worktreeID: keptID) == keptBefore)
         #expect(try await historyRowCount(db, tabID: keptTab.id) == 1)
         #expect(try await receiptCount(db, worktreeID: keptID) == 1)
+    }
+
+    /// A sync that lands after the archive must not import the archived
+    /// worktree's tabs again, nor move a tab it lists from another worktree:
+    /// it changes nothing and reports nothing.
+    @Test func syncTabsIgnoresArchivedWorktree() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let archivedID = try await makeWorktree(db, name: "archived")
+        let otherID = try await makeWorktree(db, name: "other")
+        let archivedTab = makeSurface(worktreeID: archivedID)
+        try await seed(db, worktreeID: archivedID, [archivedTab])
+        let elsewhere = try await seed(db, worktreeID: otherID, [makeSurface(worktreeID: otherID)])[0]
+        try await db.worktrees.archive(id: archivedID)
+
+        let outcome = try await db.panelSurface.syncTabs(
+            worktreeID: archivedID,
+            entries: [entry(for: archivedTab, position: 0), entry(for: elsewhere, position: 1)],
+            now: Date())
+
+        #expect(outcome == SyncOutcome())
+        #expect(try await db.panelSurface.surfaces(worktreeID: archivedID).isEmpty)
+        #expect(try await historyRowCount(db, tabID: archivedTab.id) == 0)
+        #expect(try await db.panelSurface.surface(tabID: elsewhere.id) == elsewhere)
     }
 }

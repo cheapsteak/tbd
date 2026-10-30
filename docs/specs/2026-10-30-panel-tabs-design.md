@@ -285,9 +285,15 @@ It broadcasts one `panelSurfaceChanged` for whatever changed. The worktree's
 existing cascade still removes every surface when the worktree row is deleted.
 Archiving keeps the row, so the cascade never fires: `WorktreeStore.archive`,
 which every archive path goes through, deletes the worktree's surfaces, their
-histories and its operation receipts in the same transaction, and the app drops
-the worktree from its copy. A revive needs nothing back, because the next sync
-re-imports its tabs from the legacy layout.
+histories and its operation receipts in the same transaction and returns the
+deleted tabs' IDs. Whichever path drove the archive then broadcasts a
+`panelSurfaceChanged` naming them in `removedTabIDs`, beside its
+`worktreeArchived`, and the app drops the worktree from its copy, along with
+its pending sync and its readiness to sync. A sync for an archived worktree
+changes nothing and reports nothing, so one that lands after the archive
+cannot import its tabs again. A revive needs nothing back, because the next
+sync re-imports its tabs from the legacy layout, at revisions above any they
+had.
 
 The sync does not carry the selected tab. The app already records it in
 `worktree.activeTabID` through `worktree.setActiveTab` on every switch, flag or

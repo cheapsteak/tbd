@@ -369,6 +369,29 @@ struct PanelSurfaceCopyTests {
         }
     }
 
+    @Test("archiving a worktree forgets its pending tab sync and its readiness")
+    func forgetClearsDirtyAndReadiness() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let syncs = Fixture.collectSyncs(state)
+            let archivedID = await Fixture.readyWorktree(
+                state, tabs: [Fixture.terminalTab(label: "archived")], syncs: syncs)
+            let keptID = await Fixture.readyWorktree(
+                state, tabs: [Fixture.terminalTab(label: "kept")], syncs: syncs)
+            // A change whose sync has not gone out when the archive lands.
+            state.tabs[archivedID]?[0].label = "renamed"
+            #expect(state.panelSyncDirty.contains(archivedID), "precondition: a sync is pending")
+
+            state.removeArchivedWorktreeFromState(id: archivedID)
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.isEmpty, "an archived worktree's tab list is not synced")
+            #expect(!state.panelSyncDirty.contains(archivedID))
+            #expect(!state.panelSyncReadyWorktrees.contains(archivedID),
+                    "a revive marks it ready again from fresh fetches")
+            #expect(state.panelSyncReadyWorktrees.contains(keptID), "other worktrees stay ready")
+        }
+    }
+
     // MARK: - Resubscribe
 
     @Test("a resubscribe keeps rendering the copy and refetches only the worktrees it holds")

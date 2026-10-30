@@ -8,7 +8,8 @@ import TestSupport
 /// `panel.syncTabs` over RPC (panel tabs spec, "Tab sync"): the gate, legacy
 /// conversion of tabs without a surface, skip reasons, deletion of unlisted
 /// tabs, re-parenting, and exactly one broadcast per sync that changed
-/// something. The conversion itself is covered by `LegacyTabConverterTests`
+/// something; and the removal an archive broadcasts for the surfaces it
+/// deletes. The conversion itself is covered by `LegacyTabConverterTests`
 /// and the transaction by `PanelSurfaceStoreTests`.
 @Suite("Panel syncTabs tests")
 struct PanelSyncTabsTests {
@@ -328,6 +329,43 @@ struct PanelSyncTabsTests {
         let delta = try #require(panelSurfaceDeltas(deltas).last)
         #expect(delta.worktreeID == mainID)
         #expect(delta.tabs.map(\.id) == [tab.tabID])
+    }
+
+    // MARK: - Archive
+
+    @Test("archiving a worktree broadcasts the removal of every panel surface it deleted")
+    func archiveBroadcastsRemovalOfItsSurfaces() async throws {
+        let deltas = SyncBroadcastDeltas()
+        let subs = StateSubscriptionManager()
+        subs.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        let harness = try await ArchiveHarness.make(subscriptions: subs)
+        defer { harness.cleanUp() }
+        let worktreeID = harness.worktreeID
+        let tabIDs = [UUID(), UUID()]
+        let entries = tabIDs.enumerated().map { position, tabID in
+            SyncTabEntry(
+                tabID: tabID, position: position, label: nil, primary: nil,
+                importCandidate: WorkspaceTabSurface(
+                    id: tabID, worktreeID: worktreeID, primary: .terminal(terminalID: UUID())))
+        }
+        let imported = try await harness.db.panelSurface.syncTabs(
+            worktreeID: worktreeID, entries: entries, now: Date())
+        #expect(imported.imported == tabIDs, "precondition: the worktree has surfaces")
+
+        try await harness.lifecycle.archiveWorktree(worktreeID: worktreeID)
+
+        let removals = panelSurfaceDeltas(deltas).filter { $0.worktreeID == worktreeID }
+        try #require(removals.count == 1, "one removal per archive, observed \(removals)")
+        let removal = removals[0]
+        #expect(removal.removedTabIDs == tabIDs)
+        #expect(removal.tabs.isEmpty)
+        #expect(removal.originOperationID == nil)
+        #expect(try await harness.db.panelSurface.surfaces(worktreeID: worktreeID).isEmpty)
     }
 }
 

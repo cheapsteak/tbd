@@ -247,8 +247,9 @@ extension RemoteLaneLifecycle {
                 mirrored = session.map { ($0, provider) }
             }
         }
+        let removedPanelTabIDs: [UUID]
         do {
-            try await db.worktrees.archive(id: worktree.id)
+            removedPanelTabIDs = try await db.worktrees.archive(id: worktree.id)
         } catch {
             // The row write is as capable of failing as the verb was, and the
             // watermark recorded for it is as wrong afterwards. Same treatment.
@@ -270,6 +271,7 @@ extension RemoteLaneLifecycle {
             await manager.applyUpsert(
                 mirrored.session, provider: mirrored.provider, date: now())
         }
+        subscriptions.broadcastPanelSurfacesRemoved(worktreeID: worktree.id, tabIDs: removedPanelTabIDs)
         subscriptions.broadcast(delta: .worktreeArchived(WorktreeIDDelta(worktreeID: worktree.id)))
         return nil
     }

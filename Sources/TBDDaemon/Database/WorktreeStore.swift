@@ -709,13 +709,19 @@ public struct WorktreeStore: Sendable {
     /// list it described), and on its own when it is non-empty. When neither
     /// is passed, both columns keep what they hold — the state a revive that
     /// kept its sessions (`revive(clearSessions: false)`) leaves behind.
+    ///
+    /// Returns the IDs of the workspace tabs whose panel surfaces the archive
+    /// deleted. The caller that drives the archive broadcasts them
+    /// (`StateSubscriptionManager.broadcastPanelSurfacesRemoved`), so the app
+    /// drops them from its copy.
+    @discardableResult
     public func archive(
         id: UUID,
         claudeSessionIDs: [String]? = nil,
         claudeSpawnExtras: [String: ClaudeSpawnExtras] = [:],
         archivedHeadSHA: String? = nil
-    ) async throws {
-        try await writer.write { db in
+    ) async throws -> [UUID] {
+        try await writer.write { db -> [UUID] in
             guard var record = try WorktreeRecord.fetchOne(db, key: id.uuidString) else {
                 throw DatabaseError(message: "Worktree not found")
             }
@@ -743,7 +749,7 @@ public struct WorktreeStore: Sendable {
             // surfaces, their histories or their receipts: this is what
             // reclaims them, for every archive path. A revive needs nothing
             // back — the next tab sync re-imports from the legacy layout.
-            try PanelSurfaceStore.deleteSurfaces(worktreeID: id, in: db)
+            return try PanelSurfaceStore.deleteSurfaces(worktreeID: id, in: db)
         }
     }
 

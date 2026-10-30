@@ -349,7 +349,8 @@ extension RPCRouter {
         // teardown above has run, unless another row naming the same session
         // may still be running.
         lifecycle.removeSessionDirectories(for: sessions)
-        try await db.worktrees.archive(id: wt.id)
+        let removedPanelTabIDs = try await db.worktrees.archive(id: wt.id)
+        subscriptions.broadcastPanelSurfacesRemoved(worktreeID: wt.id, tabIDs: removedPanelTabIDs)
 
         // Same delta `scratch.delete` broadcasts — deliberate: from the
         // client's perspective the row leaves the active section identically

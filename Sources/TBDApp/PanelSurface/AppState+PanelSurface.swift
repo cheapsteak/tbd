@@ -357,12 +357,17 @@ extension AppState {
     }
 
     /// Drops one worktree from the copy: it left `tabs`, or it was archived.
-    /// Archiving deletes its surfaces on the daemon (`WorktreeStore.archive`)
-    /// without a delta, so an entry kept here would never be corrected.
+    /// Archiving deletes its surfaces on the daemon (`WorktreeStore.archive`),
+    /// which broadcasts their removal; the entry goes here without waiting
+    /// for that delta. Its sync state goes too: a pending sync would send the
+    /// archived tab list, which the daemon ignores, and a revive marks the
+    /// worktree ready again from fresh fetches before its tabs are synced.
     func forgetPanelSurfaces(worktreeID: UUID) {
         if panelSurfaces[worktreeID] != nil {
             panelSurfaces.removeValue(forKey: worktreeID)
         }
+        panelSyncDirty.remove(worktreeID)
+        panelSyncReadyWorktrees.remove(worktreeID)
     }
 
     /// The observer on `layouts`, for the one tab whose legacy layout still

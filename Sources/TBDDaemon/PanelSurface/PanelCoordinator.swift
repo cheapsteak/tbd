@@ -269,3 +269,20 @@ public actor PanelCoordinator {
         }
     }
 }
+
+extension StateSubscriptionManager {
+    /// Tells the app that an archive deleted these workspace tabs' panel
+    /// surfaces (`WorktreeStore.archive` returns their IDs), as one
+    /// `panelSurfaceChanged` naming them in `removedTabIDs`. Every site that
+    /// archives a worktree sends it after the archive commits, beside its
+    /// `.worktreeArchived`; nothing is sent when no surface was deleted.
+    func broadcastPanelSurfacesRemoved(worktreeID: UUID, tabIDs: [UUID]) {
+        guard !tabIDs.isEmpty else { return }
+        broadcast(delta: .panelSurfaceChanged(PanelSurfaceDelta(
+            worktreeID: worktreeID,
+            tabs: [],
+            removedTabIDs: tabIDs,
+            activeTabID: nil,
+            originOperationID: nil)))
+    }
+}

@@ -517,11 +517,20 @@ public struct PanelSurfaceStore: Sendable {
     /// This worktree's rows for tabs not listed are deleted first; their
     /// histories cascade. Other worktrees' rows and every receipt are left
     /// alone.
+    ///
+    /// An archived worktree changes nothing and gets an empty outcome:
+    /// archiving deleted its surfaces (`WorktreeStore.archive`), and a sync
+    /// that lands after it must not import them again. A revive makes the
+    /// worktree syncable again.
     public func syncTabs(
         worktreeID: UUID, entries: [SyncTabEntry], now: Date
     ) async throws -> SyncOutcome {
         try await writer.write { db -> SyncOutcome in
             var outcome = SyncOutcome()
+
+            let status = try String.fetchOne(
+                db, sql: "SELECT status FROM worktree WHERE id = ?", arguments: [worktreeID.uuidString])
+            guard status != WorktreeStatus.archived.rawValue else { return outcome }
 
             let listedKeys = entries.map(\.tabID.uuidString)
             let unlisted = try WorkspaceTabSurfaceRecord
@@ -643,16 +652,23 @@ public struct PanelSurfaceStore: Sendable {
         }
     }
 
-    /// `deleteSurfaces(worktreeID:)` inside a caller's write transaction.
-    /// `WorktreeStore.archive` runs it in the transaction that archives the
-    /// worktree: an archived worktree keeps its row, so the cascade from that
-    /// row never fires, and this is what reclaims its panel rows.
-    static func deleteSurfaces(worktreeID: UUID, in db: Database) throws {
+    /// `deleteSurfaces(worktreeID:)` inside a caller's write transaction,
+    /// returning the IDs of the tabs whose surfaces it deleted, so the caller
+    /// can name them in a delta's `removedTabIDs`. `WorktreeStore.archive`
+    /// runs it in the transaction that archives the worktree: an archived
+    /// worktree keeps its row, so the cascade from that row never fires, and
+    /// this is what reclaims its panel rows.
+    @discardableResult
+    static func deleteSurfaces(worktreeID: UUID, in db: Database) throws -> [UUID] {
+        let tabKeys = try String.fetchAll(
+            db, sql: "SELECT id FROM workspace_tab_surface WHERE worktreeID = ? ORDER BY position",
+            arguments: [worktreeID.uuidString])
         try WorkspaceTabSurfaceRecord
             .filter(Column("worktreeID") == worktreeID.uuidString)
             .deleteAll(db)
         try PanelOperationReceiptRecord
             .filter(Column("worktreeID") == worktreeID.uuidString)
             .deleteAll(db)
+        return tabKeys.compactMap(UUID.init(uuidString:))
     }
 }

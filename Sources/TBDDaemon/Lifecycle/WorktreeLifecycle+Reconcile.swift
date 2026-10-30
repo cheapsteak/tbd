@@ -406,7 +406,9 @@ extension WorktreeLifecycle {
                 }
                 // After the rows are gone, as in `beginArchiveWorktree`.
                 await detachDevServerOutputsForArchive(worktreeID: current.id)
-                try await db.worktrees.archive(id: current.id)
+                let removedPanelTabIDs = try await db.worktrees.archive(id: current.id)
+                subscriptions?.broadcastPanelSurfacesRemoved(
+                    worktreeID: current.id, tabIDs: removedPanelTabIDs)
             }
         }
 
