@@ -117,6 +117,10 @@ struct ProgramStatusParserTests {
         // says Codex.
         #expect(ProgramStatusProtocol.expectedApp(for: row(nil, nil)) == "claude-code")
         #expect(ProgramStatusProtocol.expectedApp(for: row(nil, TerminalLabel.codex)) == "codex")
+        // Mixed rows follow the agent predicates: a Codex label wins over a
+        // Claude kind, and an explicit shell kind wins over a Codex label.
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.claude, TerminalLabel.codex)) == "codex")
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.shell, TerminalLabel.codex)) == nil)
         #expect(ProgramStatusProtocol.knownApps == ["claude-code", "codex"])
     }
 

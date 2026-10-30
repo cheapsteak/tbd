@@ -19,17 +19,16 @@ public enum ProgramStatusProtocol {
     public static let maxTaskIDLength: Int = 32
 
     /// The `app` value a report from `terminal`'s agent must carry, or nil
-    /// when the terminal runs no agent that reports: `claude-code` for a
-    /// Claude terminal, `codex` for a Codex one. A legacy row with no recorded
-    /// kind is Codex when its label says so (`isCodexTerminal`), and Claude
-    /// otherwise.
+    /// when the terminal runs no agent that reports. Built on the same
+    /// predicates the rest of TBD uses, so a mixed row cannot disagree with
+    /// them: an explicit `.shell` kind is nil; otherwise `codex` when
+    /// `isCodexTerminal` (kind or label), else `claude-code` when
+    /// `isClaudeTab`, else nil.
     public static func expectedApp(for terminal: Terminal) -> String? {
-        switch terminal.kind {
-        case .claude: return claudeCodeApp
-        case .codex: return codexApp
-        case .shell: return nil
-        case nil: return terminal.isCodexTerminal ? codexApp : claudeCodeApp
-        }
+        if terminal.kind == .shell { return nil }
+        if terminal.isCodexTerminal { return codexApp }
+        if terminal.isClaudeTab { return claudeCodeApp }
+        return nil
     }
 }
 
