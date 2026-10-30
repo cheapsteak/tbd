@@ -182,11 +182,40 @@ struct PanelSyncTabsTests {
         #expect(response.success)
         let result = try response.decodeResult(PanelSyncTabsResult.self)
         #expect(result.importedTabIDs == [plainTabID])
+        #expect(result.skippedTabIDs == [splitTabID])
         #expect(result.skipped.count == 1)
         #expect(result.skipped.first?.contains(splitTabID.uuidString) == true)
         #expect(try await db.panelSurface.surface(tabID: splitTabID) == nil)
         #expect(try await db.panelSurface.surfaces(worktreeID: wtID).map(\.id) == [plainTabID])
         #expect(panelSurfaceDeltas(deltas).count == 1)
+    }
+
+    @Test("a tab that already has a surface is never reported skipped, whatever its legacy layout holds")
+    func skippedNamesOnlyTabsLeftWithoutASurface() async throws {
+        let (router, db, _) = try makeRouterAndDB()
+        try await db.config.setPanelTabsEnabled(true)
+        let wtID = try await makeWorktree(db)
+        let tabID = UUID()
+        let mainTerminal = UUID()
+        _ = try await sync(router, worktreeID: wtID, [
+            LegacyTabPayload(tabID: tabID, label: nil, content: .terminal(terminalID: mainTerminal), layout: nil),
+        ])
+        let before = try #require(try await db.panelSurface.surface(tabID: tabID))
+
+        // Its legacy layout now holds a terminal the converter cannot place.
+        let split = LayoutNode.split(
+            id: UUID(), direction: .horizontal,
+            children: [.pane(.terminal(terminalID: mainTerminal)), .pane(.terminal(terminalID: UUID()))],
+            ratios: [0.5, 0.5])
+        let response = try await sync(router, worktreeID: wtID, [
+            LegacyTabPayload(tabID: tabID, label: nil, content: .terminal(terminalID: mainTerminal), layout: split),
+        ])
+
+        #expect(response.success)
+        let result = try response.decodeResult(PanelSyncTabsResult.self)
+        #expect(result.skippedTabIDs.isEmpty)
+        #expect(result.skipped.isEmpty)
+        #expect(try await db.panelSurface.surface(tabID: tabID) == before)
     }
 
     // MARK: - Delete

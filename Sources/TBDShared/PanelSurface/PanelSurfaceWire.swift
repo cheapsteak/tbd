@@ -80,13 +80,18 @@ public struct PanelSyncTabsResult: Codable, Sendable, Equatable {
     public let reparentedTabIDs: [UUID]
     /// This worktree's surfaces deleted because their tab was not listed.
     public let removedTabIDs: [UUID]
-    /// One reason per listed tab that could not be imported; it renders legacy.
+    /// Listed tabs the daemon could not import, which the sync left without a
+    /// surface: they render legacy. A tab that already has a surface is never
+    /// named, whatever its legacy layout holds.
+    public let skippedTabIDs: [UUID]
+    /// The reason for each of `skippedTabIDs`, in the same order.
     public let skipped: [String]
     public init(importedTabIDs: [UUID], reparentedTabIDs: [UUID],
-                removedTabIDs: [UUID], skipped: [String]) {
+                removedTabIDs: [UUID], skippedTabIDs: [UUID], skipped: [String]) {
         self.importedTabIDs = importedTabIDs
         self.reparentedTabIDs = reparentedTabIDs
         self.removedTabIDs = removedTabIDs
+        self.skippedTabIDs = skippedTabIDs
         self.skipped = skipped
     }
 }

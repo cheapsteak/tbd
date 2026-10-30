@@ -317,8 +317,9 @@ The converter in `TBDShared` maps one legacy tab to one surface:
 
 - The tab's `content` becomes the primary.
 - A tab whose layout holds a terminal anywhere but its primary is not
-  converted. It gets no surface, renders legacy, and the sync result names it
-  in `skipped`. Spec C's importer promoted such terminals to new workspace
+  converted. If it has no surface it gets none, renders legacy, and the sync
+  result names it in `skippedTabIDs`, with its reason in `skipped`; a tab that
+  already has a surface keeps it and is not named. Spec C's importer promoted such terminals to new workspace
   tabs, but workspace tabs are app-owned here, so a daemon-made tab would be
   deleted by the next sync. Terminal splits cannot be created since spec C's
   phase 1, so only layouts older than that carry one.
@@ -414,10 +415,11 @@ PR tab, terminal revival, the file viewer). So the sync is not hooked at each
 one: a single observer of the app's tab list marks a worktree dirty when its
 tab IDs, order, labels or primaries change, and one sync per dirty worktree is
 sent on the next main-actor turn. A second observer, on the legacy layout
-store, marks dirty the worktree of a tab that has no surface when that tab's
-layout changes, so a tab the sync skipped is offered again once its extra
-terminal closes. A tab with a surface is never marked this way: its legacy
-layout is not read.
+store, marks dirty the worktree of a tab the last sync named in
+`skippedTabIDs` when that tab's layout changes, so it is offered again once its
+extra terminal closes. No other tab is marked this way: a tab with a surface
+has its legacy layout unread, and a tab the copy has merely not loaded would
+otherwise send a sync on every ordinary legacy layout write.
 
 ### The leaf seam
 

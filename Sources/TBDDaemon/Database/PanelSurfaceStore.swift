@@ -238,13 +238,17 @@ public struct SyncOutcome: Sendable, Equatable {
     /// This worktree's tabs whose rows were deleted because they were not
     /// listed.
     public var removed: [UUID]
+    /// Listed tabs with no row and no import candidate, because the converter
+    /// skipped them: the sync left them without a surface.
+    public var skipped: [UUID]
 
     public init(changed: [WorkspaceTabSurface] = [], imported: [UUID] = [],
-                reparented: [UUID] = [], removed: [UUID] = []) {
+                reparented: [UUID] = [], removed: [UUID] = [], skipped: [UUID] = []) {
         self.changed = changed
         self.imported = imported
         self.reparented = reparented
         self.removed = removed
+        self.skipped = skipped
     }
 }
 
@@ -505,7 +509,7 @@ public struct PanelSurfaceStore: Sendable {
     /// - **No row** – inserts `importCandidate` under this worktree with the
     ///   entry's position, label and (when given) primary, at the revision
     ///   counter's next value; nothing when the candidate is nil, because the
-    ///   converter skipped the tab.
+    ///   converter skipped the tab, which is then reported in `skipped`.
     /// - **Unreadable row** – left exactly as it is. The store never replaces
     ///   data it could not read.
     /// - **Readable row** – re-points it to this worktree when it sits under
@@ -550,7 +554,10 @@ public struct PanelSurfaceStore: Sendable {
                 guard seen.insert(entry.tabID).inserted else { continue }
 
                 guard let record = try WorkspaceTabSurfaceRecord.fetchOne(db, key: entry.tabID.uuidString) else {
-                    guard let candidate = entry.importCandidate else { continue }
+                    guard let candidate = entry.importCandidate else {
+                        outcome.skipped.append(entry.tabID)
+                        continue
+                    }
                     let imported = WorkspaceTabSurface(
                         id: entry.tabID, worktreeID: worktreeID, label: entry.label,
                         primary: entry.primary ?? candidate.primary, side: candidate.side,

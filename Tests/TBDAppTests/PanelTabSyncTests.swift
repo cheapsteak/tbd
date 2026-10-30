@@ -144,7 +144,7 @@ struct PanelTabSyncTests {
             state.panelSurfaces = [worktreeID: [
                 tab.id: Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 1),
             ]]
-            // After the surface: a surfaceless tab's layout does resync.
+            // No sync skipped the tab, so its layout is not offered again.
             state.layouts[tab.id] = .pane(tab.content)
             await Fixture.drainMainActor()
 
@@ -181,14 +181,22 @@ struct PanelTabSyncTests {
         return (tab, layout)
     }
 
-    @Test("a layout change of a tab with no surface sends a sync carrying the new layout")
+    @Test("a layout change of a tab the sync skipped sends a sync carrying the new layout")
     func layoutChangeOfSurfacelessTabSendsSync() async throws {
         try await Fixture.withState(panelTabs: true) { state in
-            let syncs = Fixture.collectSyncs(state)
             let (tab, split) = Self.skippedTab()
+            // The daemon skips the tab while its layout holds the second
+            // terminal, and imports it once that terminal is gone.
+            let syncs = PanelSyncCollector()
+            state.panelSyncTrigger = { @MainActor params in
+                syncs.record(params)
+                let stillSplit = params.tabs.contains { $0.tabID == tab.id && $0.layout == split }
+                return Fixture.syncResult(skipping: stillSplit ? [tab.id] : [])
+            }
             // Not yet in `tabs`, so this marks nothing.
             state.layouts[tab.id] = split
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+            #expect(state.panelSyncSkippedTabIDs == [tab.id], "precondition: the first sync skipped it")
 
             // The user closes the extra terminal: `layouts` changes, `tabs`
             // does not.
@@ -200,6 +208,29 @@ struct PanelTabSyncTests {
             #expect(sent.worktreeID == worktreeID)
             #expect(sent.tabs.map(\.tabID) == [tab.id])
             #expect(sent.tabs.first?.layout == closed)
+            #expect(state.panelSyncSkippedTabIDs.isEmpty, "the sync that imported it replaced the verdict")
+        }
+    }
+
+    @Test("a layout change of a tab no sync skipped sends no sync, though the copy holds no surface for it")
+    func layoutChangeOfUnloadedTabSendsNoSync() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let syncs = Fixture.collectSyncs(state)
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+            #expect(state.panelSurfaces[worktreeID] == nil, "precondition: the copy has not loaded it")
+
+            // Ordinary legacy layout writes: a viewer opened beside the
+            // terminal, then closed.
+            state.layouts[tab.id] = .split(
+                id: UUID(), direction: .horizontal,
+                children: [.pane(tab.content), .pane(.codeViewer(id: UUID(), path: "/repo/a.swift"))],
+                ratios: [0.5, 0.5])
+            state.layouts[tab.id] = .pane(tab.content)
+            await Fixture.drainMainActor()
+
+            #expect(syncs.sent.isEmpty, "observed \(syncs.sent.map(\.worktreeID))")
+            #expect(!state.panelSyncDirty.contains(worktreeID))
         }
     }
 

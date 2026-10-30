@@ -154,8 +154,9 @@ public actor PanelCoordinator {
     /// transaction. Each listed tab is converted from its legacy layout; the
     /// conversion is used only when the tab has no surface yet, so the daemon
     /// stays the authority for what is inside a tab. A tab the converter
-    /// skips gets no surface, keeps rendering legacy, and its reason is
-    /// returned in `skipped`.
+    /// skips and that has no surface gets none, keeps rendering legacy, and
+    /// is returned in `skippedTabIDs` with its reason in `skipped`. A tab
+    /// that already has a surface keeps it and is never reported skipped.
     ///
     /// An empty `tabs` list is legal and deletes every surface of the
     /// worktree; the app syncs a worktree only once its tabs are loaded.
@@ -175,7 +176,7 @@ public actor PanelCoordinator {
         let paneHistories = params.paneHistories.filter { liveLegacyPaneIDs.contains($0.key) }
 
         var entries: [SyncTabEntry] = []
-        var skipped: [String] = []
+        var skipReasons: [UUID: String] = [:]
         for (position, tab) in params.tabs.enumerated() {
             let importCandidate: WorkspaceTabSurface?
             switch LegacyTabConverter.convert(
@@ -184,7 +185,9 @@ public actor PanelCoordinator {
                 importCandidate = surface
             case .skipped(let reason):
                 importCandidate = nil
-                skipped.append(reason)
+                if skipReasons[tab.tabID] == nil {
+                    skipReasons[tab.tabID] = reason
+                }
             }
             entries.append(SyncTabEntry(
                 tabID: tab.tabID, position: position, label: tab.label,
@@ -206,7 +209,11 @@ public actor PanelCoordinator {
             throw error
         }
 
-        let skippedCount = skipped.count
+        // Only a tab the sync left without a surface is skipped: one that
+        // already had a surface keeps it, whatever its legacy layout holds.
+        let skippedTabIDs = outcome.skipped
+        let skipped = skippedTabIDs.compactMap { skipReasons[$0] }
+        let skippedCount = skippedTabIDs.count
         panelCoordinatorLog.info("""
             panel.syncTabs worktree=\(params.worktreeID, privacy: .public) \
             tabs=\(params.tabs.count, privacy: .public) \
@@ -231,6 +238,7 @@ public actor PanelCoordinator {
             importedTabIDs: outcome.imported,
             reparentedTabIDs: outcome.reparented,
             removedTabIDs: outcome.removed,
+            skippedTabIDs: skippedTabIDs,
             skipped: skipped)
     }
 

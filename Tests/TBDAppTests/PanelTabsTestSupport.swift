@@ -85,8 +85,14 @@ enum PanelTabsFixture {
         return TBDShared.Tab(id: id, content: .terminal(terminalID: id), label: label)
     }
 
-    static var emptySyncResult: PanelSyncTabsResult {
-        PanelSyncTabsResult(importedTabIDs: [], reparentedTabIDs: [], removedTabIDs: [], skipped: [])
+    static var emptySyncResult: PanelSyncTabsResult { syncResult() }
+
+    /// A sync result that names `skippedTabIDs` as left without a surface.
+    static func syncResult(skipping skippedTabIDs: [UUID] = []) -> PanelSyncTabsResult {
+        PanelSyncTabsResult(
+            importedTabIDs: [], reparentedTabIDs: [], removedTabIDs: [],
+            skippedTabIDs: skippedTabIDs,
+            skipped: skippedTabIDs.map { "tab \($0.uuidString): skipped by the test" })
     }
 
     // MARK: - Collectors

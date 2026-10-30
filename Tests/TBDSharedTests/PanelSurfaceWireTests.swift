@@ -62,11 +62,16 @@ struct PanelSurfaceWireTests {
     }
 
     @Test func syncTabsResultRoundTrips() throws {
+        let skippedID = UUID()
         let result = PanelSyncTabsResult(
             importedTabIDs: [UUID(), UUID()], reparentedTabIDs: [UUID()], removedTabIDs: [UUID()],
-            skipped: ["tab 00000000-0000-0000-0000-000000000001: terminal outside the primary"])
-        #expect(try roundTrip(result) == result)
-        let empty = PanelSyncTabsResult(importedTabIDs: [], reparentedTabIDs: [], removedTabIDs: [], skipped: [])
+            skippedTabIDs: [skippedID],
+            skipped: ["tab \(skippedID.uuidString): terminal outside the primary"])
+        let decoded = try roundTrip(result)
+        #expect(decoded == result)
+        #expect(decoded.skippedTabIDs == [skippedID])
+        let empty = PanelSyncTabsResult(
+            importedTabIDs: [], reparentedTabIDs: [], removedTabIDs: [], skippedTabIDs: [], skipped: [])
         #expect(try roundTrip(empty) == empty)
     }
 

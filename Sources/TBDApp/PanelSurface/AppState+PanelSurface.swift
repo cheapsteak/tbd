@@ -368,6 +368,9 @@ extension AppState {
         }
         panelSyncDirty.remove(worktreeID)
         panelSyncReadyWorktrees.remove(worktreeID)
+        if let tabList = tabs[worktreeID] {
+            panelSyncSkippedTabIDs.subtract(tabList.map(\.id))
+        }
     }
 
     /// The observer on `layouts`, for the one tab whose legacy layout still
@@ -376,20 +379,18 @@ extension AppState {
     /// renders legacy, and closing that extra terminal edits `layouts`, not
     /// `tabs`, so without this nothing would offer it to the daemon again.
     ///
-    /// Marks dirty the worktree of each changed tab that has no surface in
-    /// the copy. A tab with a surface is never marked: the daemon owns what
-    /// is inside it, and its legacy layout is no longer read. Free while the
-    /// flag is off.
+    /// Marks dirty the worktree of each changed tab the last sync skipped
+    /// (`panelSyncSkippedTabIDs`), and no other. A tab with a surface is the
+    /// daemon's, and its legacy layout is no longer read; a tab the copy has
+    /// merely not loaded would otherwise send a sync on every ordinary legacy
+    /// layout write. Free while the flag is off or nothing is skipped.
     func notePanelLayoutsChanged(old: [UUID: LayoutNode], new: [UUID: LayoutNode]) {
-        guard panelTabsActive else { return }
-        let changedTabIDs = Set(old.keys).union(new.keys).filter { old[$0] != new[$0] }
+        guard panelTabsActive, !panelSyncSkippedTabIDs.isEmpty else { return }
+        let changedTabIDs = panelSyncSkippedTabIDs.filter { old[$0] != new[$0] }
         guard !changedTabIDs.isEmpty else { return }
         var dirty = Set<UUID>()
-        for (worktreeID, tabList) in tabs {
-            let resyncs = tabList.contains { tab in
-                changedTabIDs.contains(tab.id) && panelSurface(worktreeID: worktreeID, tabID: tab.id) == nil
-            }
-            if resyncs { dirty.insert(worktreeID) }
+        for (worktreeID, tabList) in tabs where tabList.contains(where: { changedTabIDs.contains($0.id) }) {
+            dirty.insert(worktreeID)
         }
         markPanelSyncDirty(dirty)
     }
@@ -464,6 +465,9 @@ extension AppState {
             guard let params = buildPanelSyncParams(worktreeID: worktreeID) else { continue }
             do {
                 let result = try await panelSyncTrigger(params)
+                // This sync's verdict on the tabs it listed replaces the last.
+                panelSyncSkippedTabIDs.subtract(params.tabs.map(\.tabID))
+                panelSyncSkippedTabIDs.formUnion(result.skippedTabIDs)
                 if !result.skipped.isEmpty {
                     logger.debug("""
                         panel.syncTabs skipped \(result.skipped.count, privacy: .public) \
@@ -483,9 +487,9 @@ extension AppState {
     // MARK: - Capability transitions and resubscribe
 
     /// Keeps the copy and the sync in step with the daemon's flag after a
-    /// capabilities fetch. Off clears the copy and forgets pending syncs, so
-    /// a daemon-rendered tab falls back to legacy at once and nothing further
-    /// is sent. Off to on marks every worktree with tabs dirty, syncs the
+    /// capabilities fetch. Off clears the copy and forgets pending syncs and
+    /// skipped tabs, so a daemon-rendered tab falls back to legacy at once and
+    /// nothing further is sent. Off to on marks every worktree with tabs dirty, syncs the
     /// ready ones, then loads every worktree's surfaces — loading after the
     /// sync, so a fetch taken before the sync's imports cannot drop them. A
     /// flush still sending from before the flag went off is waited out
@@ -496,6 +500,7 @@ extension AppState {
                 panelSurfaces = [:]
             }
             panelSyncDirty.removeAll()
+            panelSyncSkippedTabIDs.removeAll()
             return
         }
         guard !wasEnabled else { return }

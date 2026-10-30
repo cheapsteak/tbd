@@ -446,6 +446,7 @@ struct PanelSurfaceStoreTests {
         #expect(Self.strictlyIncreasing([0] + revisions), "each import takes the counter's next value")
         #expect(outcome.reparented.isEmpty)
         #expect(outcome.removed.isEmpty)
+        #expect(outcome.skipped == [skippedID], "a tab left without a surface is reported")
         #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == outcome.changed)
         #expect(try await db.panelSurface.surface(tabID: skippedID) == nil)
         #expect(try await historyRowCount(db, tabID: a.id) == 2)

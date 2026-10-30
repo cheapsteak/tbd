@@ -877,6 +877,12 @@ final class AppState {
     /// every tab it does not list, so a list holding only one of the two
     /// would delete the other's panels. Cleared on resubscribe.
     @ObservationIgnored var panelSyncReadyWorktrees: Set<UUID> = []
+    /// Workspace tabs the last `panel.syncTabs` of their worktree left without
+    /// a surface (`PanelSyncTabsResult.skippedTabIDs`): the daemon could not
+    /// import their legacy layout. A change to one of these tabs' layouts is
+    /// the only layout change that sends a sync. Each sync result replaces the
+    /// members among the tabs it listed.
+    @ObservationIgnored var panelSyncSkippedTabIDs: Set<UUID> = []
     /// `panel.get` calls awaiting their reply. While any is, every delta and
     /// adopted apply reply records the tab IDs it touched in
     /// `panelTabsTouchedInFlight`, so a reply can tell what changed under it.
