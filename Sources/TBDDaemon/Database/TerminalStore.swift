@@ -288,6 +288,21 @@ public enum AwaitingInputWrite: Sendable, Equatable {
     case written(displacedPromptOnScreen: Bool)
 }
 
+/// What `applyProgramStatusActivity` did to an accepted row.
+public struct ProgramStatusActivityWrite: Sendable, Equatable {
+    /// The row's worktree, for the deltas and the banner.
+    public let worktreeID: UUID
+    /// The `activityState` the row held before this write.
+    public let previousActivityState: TerminalActivityState
+    /// Whether `activityState` took a new value.
+    public let stateChanged: Bool
+    /// Whether the stored wait reason took a new value (including a
+    /// retraction to none).
+    public let reasonChanged: Bool
+    /// Whether a `.working` write cancelled a pending scheduled resume.
+    public let cancelledPendingResume: Bool
+}
+
 public struct AppliedTerminalActivityObservation: Sendable {
     public let activityState: TerminalActivityState
     public let source: FactSource
@@ -699,6 +714,9 @@ private struct ActivityWriteOutcome<Result: Sendable>: Sendable {
 private typealias AppliedActivityWriteOutcome =
     ActivityWriteOutcome<AppliedTerminalActivityObservation?>
 
+/// The same, for `applyProgramStatusActivity`.
+private typealias ProgramStatusWriteOutcome = ActivityWriteOutcome<ProgramStatusActivityWrite?>
+
 /// Fan-out for `working -> idle` activity transitions.
 ///
 /// A reference type because `TerminalStore` is a value type constructed inside
@@ -745,8 +763,9 @@ public struct TerminalStore: Sendable {
     /// profile's utilization moved*. It is not "the `activity_state` column
     /// changed value".
     ///
-    /// **Two writers fire it**, and they are the two that carry an outside
-    /// observation of what the agent did: `applyActivityObservation` (the path
+    /// **Three writers fire it**, and they are the ones that carry an outside
+    /// observation of what the agent did: `applyProgramStatusActivity` (the
+    /// agent's own OSC 7501 report), `applyActivityObservation` (the path
     /// every Claude and Codex hook takes) and `setActivityState`. The edge is
     /// detected inside the store rather than at their call sites because a
     /// caller-side check would have to be written twice, kept in sync, and
@@ -1655,7 +1674,11 @@ public struct TerminalStore: Sendable {
         }
     }
 
-    /// Record an observation of a terminal's activity state.
+    /// Record an observation of a terminal's activity state, unconditionally.
+    ///
+    /// The seeding writer for mock mode (`MockSeeder`) and for tests. A live
+    /// agent's state reaches the columns through `applyProgramStatusActivity`,
+    /// which validates incarnation, park state and report order first.
     ///
     /// `source` has no default, and that is the whole point of the signature:
     /// there is no way to write an activity state without saying where it came
@@ -1713,6 +1736,111 @@ public struct TerminalStore: Sendable {
             return ActivityWriteOutcome(
                 result: hadReason && awaitingInputReason == nil,
                 becameIdleProfileID: becameIdle ? rowProfileID : nil)
+        }
+        if let profileID = outcome.becameIdleProfileID {
+            activityTransitions.notifySessionBecameIdle(profileID: profileID)
+        }
+        return outcome.result
+    }
+
+    /// Write the activity columns from an agent's own OSC 7501 report — the
+    /// one writer `ProgramStatusStore` uses.
+    ///
+    /// Every guard runs inside the write transaction, against the row as it
+    /// stands at commit. The store suspends on this call and can ingest the
+    /// next report meanwhile, so the order two calls commit in is not the
+    /// order their reports were observed in; checking here is what keeps an
+    /// older report from landing last.
+    ///
+    /// Returns nil, writing nothing, when the row:
+    /// - is gone (no throw: the session ended under the report);
+    /// - is parked or suspended: a park wrote `.idle` with `.database`, and no
+    ///   agent runs to contradict it;
+    /// - has a staged replacement (`pendingSessionIncarnationID`), so no
+    ///   process is entitled to write;
+    /// - belongs to another incarnation than `scope` names;
+    /// - holds a program-status value whose ordering watermark
+    ///   (`activityStateOrderObservedAt`) is strictly later than this report.
+    ///
+    /// When the row already holds `activityState` and `awaitingInputReason`,
+    /// the value and `activityStateObservedAt` stay as they are, so the
+    /// at-rest clock hibernation reads keeps the moment the value was first
+    /// reported; only the ordering watermark advances. Otherwise the state,
+    /// its source (`.programStatus`), both observation stamps and the
+    /// wait-reason columns are written together, so the stored reason always
+    /// describes the state beside it.
+    ///
+    /// A `.working` report cancels a pending scheduled resume — the session is
+    /// already running a turn — and `working -> idle` notifies
+    /// `activityTransitions` after the commit.
+    public func applyProgramStatusActivity(
+        id: UUID,
+        scope: ProgramStatusWriteScope,
+        activityState: TerminalActivityState,
+        awaitingInputReason: AwaitingInputReason?,
+        observedAt: Date
+    ) async throws -> ProgramStatusActivityWrite? {
+        let outcome = try await writer.write { db -> ProgramStatusWriteOutcome in
+            guard var record = try TerminalRecord.fetchOne(db, key: id.uuidString),
+                  let worktreeID = UUID(uuidString: record.worktreeID) else {
+                return ProgramStatusWriteOutcome(result: nil)
+            }
+            guard record.hibernatedAt == nil, record.suspendedAt == nil,
+                  record.pendingSessionIncarnationID == nil else {
+                return ProgramStatusWriteOutcome(result: nil)
+            }
+            if case .incarnation(let incarnationID) = scope,
+               record.sessionIncarnationID != incarnationID?.uuidString {
+                return ProgramStatusWriteOutcome(result: nil)
+            }
+            let storedIsReport = FactColumnJSON.decode(
+                FactSource.self, from: record.activityStateSource) == .programStatus
+            let storedOrder = record.activityStateOrderObservedAt ?? record.activityStateObservedAt
+            if storedIsReport, let storedOrder, storedOrder > observedAt {
+                return ProgramStatusWriteOutcome(result: nil)
+            }
+
+            let previousState = record.activityState
+                .flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown
+            let storedReason = FactColumnJSON.decode(
+                AwaitingInputReason.self, from: record.awaitingInputReason)
+            let stateChanged = previousState != activityState
+            let reasonChanged = storedReason != awaitingInputReason
+            if !stateChanged && !reasonChanged {
+                // The report repeats the stored value: only the ordering
+                // watermark moves, so a write of an older report still in
+                // flight is refused when it commits after this one.
+                if storedIsReport, storedOrder.map({ $0 < observedAt }) ?? true {
+                    record.activityStateOrderObservedAt = observedAt
+                    try record.update(db)
+                }
+            } else {
+                record.activityState = activityState.rawValue
+                record.activityStateSource = FactColumnJSON.encode(FactSource.programStatus)
+                record.activityStateObservedAt = observedAt
+                record.activityStateOrderObservedAt = observedAt
+                record.awaitingInputReason = FactColumnJSON.encode(awaitingInputReason)
+                record.awaitingInputObservedAt = awaitingInputReason == nil ? nil : observedAt
+                try record.update(db)
+            }
+            // AFTER record.update: the routine nils `pendingResumeAt` via raw
+            // SQL, and an update of the record fetched above would write the
+            // old value back (the `persistHibernatedState` ordering).
+            var cancelledPendingResume = false
+            if activityState == .working {
+                cancelledPendingResume = try ScheduledResumeStore.cancelPendingInTransaction(
+                    db, terminalID: id.uuidString)
+            }
+            let becameIdle = previousState == .working && activityState == .idle
+            return ProgramStatusWriteOutcome(
+                result: ProgramStatusActivityWrite(
+                    worktreeID: worktreeID,
+                    previousActivityState: previousState,
+                    stateChanged: stateChanged,
+                    reasonChanged: reasonChanged,
+                    cancelledPendingResume: cancelledPendingResume),
+                becameIdleProfileID: becameIdle
+                    ? record.profile_id.flatMap(UUID.init(uuidString:)) : nil)
         }
         if let profileID = outcome.becameIdleProfileID {
             activityTransitions.notifySessionBecameIdle(profileID: profileID)
