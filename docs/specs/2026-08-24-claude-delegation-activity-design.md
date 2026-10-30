@@ -1,5 +1,9 @@
 # Claude Delegation Activity Design
 
+Status: **retired.** The delegation activity rail is retired: its
+implementation has been removed from TBD, and this document is kept as the
+design record.
+
 ## Purpose
 
 A Claude session that delegates to a background subagent presents as idle while

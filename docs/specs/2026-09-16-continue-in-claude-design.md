@@ -33,12 +33,10 @@ submenu contains:
 - Every configured Claude profile — in the same order and with the same compact usage
   labels as the existing **Swap profile** and **Fork Session** menus.
 
-The app enables the choices only when the transcript-derived presentation state is
-positively `idle`. A presentation state of `working` or no presentation observation disables
-them. A durable `waitingForUser` or `unknown` state also disables them; a stale durable
-`working` value does not override a newer transcript-derived idle presentation. Disabled
-choices explain that the current turn must finish first. The daemon performs its own stricter
-activity checks and every other eligibility check; menu state is never authority.
+Every choice is enabled whenever the submenu is shown. A tmux Codex row carries no agent
+status, so its activity reads `unknown` and the app cannot tell whether a turn is open; it
+does not try. The daemon reads the rollout itself, refuses with `terminalBusy` while a turn
+is open, and performs every other eligibility check; menu state is never authority.
 
 After success, the active tab does not move. Its terminal keeps the same ID and window,
 but its provider label, account chip, session identity, and transcript target change to
@@ -182,15 +180,15 @@ All fallible work that can finish while Codex remains live happens before interr
 1. Load the source row and require a tmux-backed Codex terminal with a session/thread ID,
    an absolute readable regular rollout file, and an active or main worktree whose directory
    exists.
-2. Require the durable observed activity to be `idle` with an ordering watermark. Then read
-   the rollout through the existing bounded `CodexTranscriptActivityTracker`, using the
-   terminal's session generation and transcript boundary. Only an exact authoritative
-   `.idle` result proceeds. A `working` or `waitingForUser` result, or no result because the
-   observation became unavailable or remains behind its one-MiB budget, returns
-   `terminalBusy`. The earlier fingerprint check rejects a rollout that is already missing
-   or unreadable. The tracker does not publish an intermediate state, and Continue does not
-   fall back to the cached row when the authoritative observation is unavailable. There is
-   no force option.
+2. Read the rollout through the bounded `CodexTranscriptActivityTracker`, using the
+   terminal's session generation and transcript boundary. This read is the idle gate: the
+   row's activity is not consulted, because a tmux Codex row carries no agent status and
+   reads `unknown`. Only an exact authoritative `.idle` result proceeds. A `working` or
+   `waitingForUser` result, or no result because the observation became unavailable or
+   remains behind its one-MiB budget, returns `terminalBusy`. The earlier fingerprint check
+   rejects a rollout that is already missing or unreadable. The tracker does not publish an
+   intermediate state, and Continue does not fall back to the cached row when the
+   authoritative observation is unavailable. There is no force option.
 3. Capture a continuation-specific source snapshot containing
    `TerminalReplacementSnapshot`; activity value, source, observation time, and ordering
    watermark; awaiting-input reason and observation time; and a rollout fingerprint
@@ -223,7 +221,7 @@ with wake, recreation, profile replacement, and reconciliation.
 Inside the lock, the handler reloads the row and accepts the prepared action only if:
 
 - the complete source snapshot still matches;
-- the row is still Codex, awake, and positively idle;
+- the row is still Codex and awake;
 - the rollout fingerprint is unchanged;
 - the recorded pane still belongs to the terminal and its window still exists; and
 - no other replacement is pending.
@@ -350,7 +348,8 @@ The result is the updated `Terminal`, not a new-terminal wrapper. A second reque
 successful continuation finds a Claude row, returns `terminalWrongProvider`, and spawns
 nothing. Other machine-readable failures reuse or add these codes:
 
-- `terminalBusy` — the source is working, waiting, or lacks a trustworthy idle fact.
+- `terminalBusy` — the rollout shows a turn in flight or cannot be read within its budget,
+  the source changed after that read, or a replacement is already pending.
 - `profileMissing` — an explicit profile no longer resolves.
 - `terminalSessionGone` — the row's source window or pane identity is gone.
 - `terminalWrongProvider` — the source is not Codex, including an already-continued row.
@@ -410,11 +409,14 @@ existing alert path.
   one `respawn-window`, no `send-keys`, and a full `terminalReplaced` delta; and leaves the
   row named Codex until the exact destination readiness hook arrives.
 - An unstamped pane and a throwing ownership probe both retract the staged fence without a
-  respawn. Persisted `working`, wrong-provider, unreadable-rollout, and missing-profile
+  respawn. An open rollout turn, wrong-provider, unreadable-rollout, and missing-profile
   fixtures also refuse before respawn and preserve the tested source rows.
-- A rollout `task_started` record overrides a stale persisted idle fact. A scan that remains
-  behind its bounded observation budget also refuses with `terminalBusy`; neither case
-  stages a pending incarnation or respawns the window.
+- A rollout `task_started` record refuses with `terminalBusy` whatever the row's activity
+  reads, and a row at `unknown` proceeds when the rollout shows its last turn closed. A scan
+  that remains behind its bounded observation budget also refuses with `terminalBusy`;
+  neither refusal stages a pending incarnation or respawns the window.
+- A rollout turn started, or a write to the row's activity, after preparation's read
+  refuses at the final fence with `terminalBusy` and leaves the source untouched.
 - Destination launch failure and destination-readiness timeout restore the source Codex
   thread and rollout under a rotated token. A delayed destination hook cannot mutate the
   restored row. Repeated respawn failure leaves a durable pending Codex recovery candidate.
@@ -433,8 +435,8 @@ existing alert path.
 - CLI parsing requires named `--terminal`, accepts ambient omission, profile name or UUID,
   and `--json`, and plain output reports the unchanged terminal ID and account label.
 - Menu policy tests cover visibility for tmux-backed Codex rows with non-empty rollout
-  paths, transcript-derived idle/working state, missing presentation state, durable waiting
-  and unknown states, and the busy caption. Readability remains a daemon check.
+  paths, and every visible choice enabled for a row whose activity reads `unknown`.
+  Readability and the idle check remain daemon checks.
 - `terminalReplaced` replaces the cached row without moving the selected tab or layout,
   does not append an unknown terminal, preserves a custom tab label while clearing a
   generated provider label, and fences an overlapping pre-replacement list snapshot while
@@ -457,8 +459,8 @@ two things:
   refuses to touch a live pane it cannot attribute to that terminal. A live pane that is
   attributed to the terminal is also left alone, with the row still pending, while the
   immutable rollout shows a turn in flight or cannot be read: a daemon that died before the
-  respawn leaves the original Codex running, and persisted activity cannot answer this
-  because hook writes are refused for a pending row. Dead and absent panes are recovered
+  respawn leaves the original Codex running, and the row's activity cannot answer this,
+  because a tmux Codex row carries no agent status. Dead and absent panes are recovered
   regardless, and the next pass looks again. It adds no new timer:
   it is the first iteration of the existing hourly maintenance task, which runs after
   the socket is bound and off the boot path, so a slow readiness wait never delays the

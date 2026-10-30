@@ -25,16 +25,16 @@ Out of scope: Codex sessions, TBD remote (cloud) sessions, and renaming a sessio
 
 ## Design
 
-### Delivery: the existing `UserPromptSubmit` hook
+### Delivery: the `UserPromptSubmit` hook
 
-TBD's hook overlay (`ClaudeHookOverlay`) already runs `tbd terminal-activity working` on every `UserPromptSubmit`, which sends one `terminal.activityEvent` RPC to the daemon. The title rides that existing round trip:
+The Claude hook overlay (`ClaudeHookOverlay`) runs `tbd hooks session-title 2>/dev/null || true` on every `UserPromptSubmit`. Setting the title is that hook's only job; Codex's overlay has no `UserPromptSubmit` entry, so a Codex session never receives a title.
 
-- The Claude overlay's `UserPromptSubmit` command gains a flag: `tbd terminal-activity working --session-title 2>/dev/null || tbd terminal-activity working 2>/dev/null || true`. A `tbd` older than the flag rejects it with a usage error on stderr, and the plain command after it keeps the working indicator alive; such a CLI simply never sets a title. Codex hooks share `terminal-activity` and do not pass the flag, so they never receive a title.
-- With the flag, the RPC request asks for a title. The response carries an optional `sessionTitle`.
-- When the response has a title, the CLI prints `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","sessionTitle":"<title>"}}` to stdout. Otherwise it prints nothing, exactly as today.
-- Every failure path (daemon down, RPC error, no `TBD_TERMINAL_ID`) prints nothing and exits 0, as the command does today. A failed title lookup must never block or fail the user's prompt.
+- The command sends one `terminal.sessionTitle` RPC carrying the terminal ID and session incarnation from its environment (`TBD_TERMINAL_ID`, `TBD_TERMINAL_INCARNATION_ID`). The response carries an optional `sessionTitle`.
+- The daemon returns no title to a prompt from a process that is not the row's current one: while a replacement incarnation is pending, or when the incarnation the hook sends is not the row's. A late hook from a process the row has moved past cannot spend the title its successor should receive.
+- When the response has a title, the command prints `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","sessionTitle":"<title>"}}` to stdout. Otherwise it prints nothing. `UserPromptSubmit`'s stdout becomes model context, so the hook JSON is the only thing it ever prints.
+- Every failure path (daemon down, RPC error, no `TBD_TERMINAL_ID`) prints nothing and exits 0. A failed title lookup must never block or fail the user's prompt.
 
-There is no new process, no new RPC and no input sent to the session.
+No input is sent to the session.
 
 Placement: the hook and the CLI are user-land, but the title has to be computed where terminal rows, tab names and display names live, which is the daemon. The daemon exposes the fact (the wanted title), and the hook acts on it.
 
@@ -57,7 +57,7 @@ The suffix also gives each Claude tab in a worktree its own peer address, which 
 The daemon keeps, per terminal, the last title it gave that session (`lastAppliedTitle`), in memory.
 
 - **Reserve, confirm, release.** A spawn (or wake, swap, revive, or Continue in Claude) reserves its `--name` in the store at the moment it computes it, in the same actor call, so a concurrent spawn into the same worktree sees the reservation and takes the next number. Once the session has really launched, the spawn site confirms the reservation and it becomes that terminal's `lastAppliedTitle`. A wake whose replacement process launched but whose row could not then be un-parked also confirms, because the running session carries the name. On every other outcome — a spawn that throws, a respawn that fails, or a holder wake (including the holder arm of an in-place profile swap) that adopts a session already running and so launches nothing — the spawn site releases it, which puts back the entry the reservation displaced. On the holder transport the wake itself confirms or releases, since only it knows whether a session launched; a confirm or release after the first is a no-op. A title that never reached a session can therefore neither suppress a later send nor block another tab's title, and the next prompt of a session that kept its old name delivers the wanted title. A release touches only its own reservation, so it never erases a newer entry. A newer reservation of the same terminal supersedes an older one: the older's confirm or release does nothing, and the newer's release puts back the entry from before both.
-- On a `UserPromptSubmit` that asks for a title, the daemon computes the wanted title. If it equals `lastAppliedTitle`, the response carries no title. If it differs, the response carries it and `lastAppliedTitle` is updated. The title counts as sent once the hook returns it; a Claude Code too old to honour `sessionTitle` keeps its launch name until the wanted title changes again.
+- On a `UserPromptSubmit`, the daemon computes the wanted title. If it equals `lastAppliedTitle`, the response carries no title. If it differs, the response carries it and `lastAppliedTitle` is updated. The title counts as sent once the hook returns it; a Claude Code too old to honour `sessionTitle` keeps its launch name until the wanted title changes again.
 - A user's own `/rename` therefore survives until the wanted title next changes, through a worktree rename, a tab rename or a suffix shift. TBD does not fight a manual rename.
 - Because every entry blocks its title, the entry is dropped on every path that deletes terminal rows: `terminal.delete`, a hook tab's teardown, reconcile's removal of a dead terminal with no session to preserve, and the per-worktree bulk deletes (archive, forget, reconcile, creation recovery, scratch removal). A row removed by a cascade from a deleted worktree or repo leaves its entry behind; nothing reads it, because a deleted worktree gets no further spawns or prompts. A reservation lasts only until its spawn confirms or releases it. The prompt path never prunes entries.
 
@@ -79,9 +79,9 @@ This adds no autonomous action, sends no input, kills nothing and moves no UI. I
 - **Spawn uses it:** the second Claude terminal in a worktree spawns with the suffixed `--name`; a spawn after the first tab closed skips the ` · 2` the surviving tab still carries; the spawn helper holds its title as a reservation, a `terminal.create` made while another spawn holds ` · 2` takes ` · 3`, and a successful `terminal.create` confirms the name it used.
 - **Change rule:** the first prompt after spawn returns no title; a prompt after `worktree.rename` returns the new title once and the following prompt returns none; a prompt after `tab.setLabel` returns the tab-named title once; with no `lastAppliedTitle` (daemon restart) the first prompt returns the title; a prompt leaves the reservation of a spawn whose row is not written yet.
 - **Login terminals:** a login spawn passes the bare display name and reserves nothing, whether flagged by its caller or recognized by its row's label; a prompt from a login tab gets no title and records none; an open login tab takes no number.
-- **Request gate:** an activity event without the title request returns no title, even after a rename, so Codex hooks are unaffected.
-- **CLI:** with a title in the response it prints valid hook JSON naming `UserPromptSubmit`; with none, or on any failure, it prints nothing and exits 0.
-- **Overlay:** the generated overlay's `UserPromptSubmit` command asks with `--session-title` and falls back to the plain command.
+- **Incarnation gate:** a prompt from a stale incarnation, or while a replacement is pending, returns no title.
+- **CLI:** with a title in the response it prints valid hook JSON naming `UserPromptSubmit`, quotes in the title included; with none, or on any failure, it prints nothing and exits 0; `tbd hooks session-title` parses.
+- **Overlay:** the generated overlay's only `UserPromptSubmit` command is `tbd hooks session-title`.
 
 ## Rejected alternatives
 

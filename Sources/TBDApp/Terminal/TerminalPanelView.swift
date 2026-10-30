@@ -979,7 +979,7 @@ struct TerminalPanelRepresentable: NSViewRepresentable {
             // the parse returns before SwiftTerm has delivered a single one of
             // the callbacks it queued, so a synchronous restore lowers the flag
             // while every reply is still in flight. Measured against the
-            // `defer` shape, 5 of the 7 tests in `QuietIngestTests` go red —
+            // `defer` shape, most of the tests in `QuietIngestTests` go red —
             // including the replies escaping into the child's stdin, which is
             // the hazard this whole method exists to prevent.
             DispatchQueue.main.async { [weak self] in
