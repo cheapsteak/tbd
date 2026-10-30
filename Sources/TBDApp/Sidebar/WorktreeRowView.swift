@@ -630,6 +630,7 @@ struct WorktreeRowView: View {
 
     var body: some View {
         let resolutions = programStatusResolutions
+        let isNameBold = hasBoldNotification(resolutions)
         HStack(spacing: 6) {
             leadingIcon()
             RenameableLabel(
@@ -647,15 +648,20 @@ struct WorktreeRowView: View {
                 VStack(alignment: .leading, spacing: -2) {
                     Text(worktree.displayName)
                         .font(.system(size: 13))
-                        .fontWeight(hasBoldNotification(resolutions) ? .bold : .regular)
+                        .fontWeight(isNameBold ? .bold : .regular)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .background(
+                            // The weight is an input to the measurement, so a
+                            // bold flip — an unread notification, or a prompt
+                            // coming on or off screen — re-measures like a
+                            // width change.
                             GeometryReader { proxy in
                                 Color.clear
-                                    .onAppear { updateNameTruncation(availableWidth: proxy.size.width) }
-                                    .onChange(of: proxy.size.width) { _, w in updateNameTruncation(availableWidth: w) }
-                                    .onChange(of: worktree.displayName) { _, _ in updateNameTruncation(availableWidth: proxy.size.width) }
+                                    .onAppear { updateNameTruncation(availableWidth: proxy.size.width, isBold: isNameBold) }
+                                    .onChange(of: proxy.size.width) { _, w in updateNameTruncation(availableWidth: w, isBold: isNameBold) }
+                                    .onChange(of: worktree.displayName) { _, _ in updateNameTruncation(availableWidth: proxy.size.width, isBold: isNameBold) }
+                                    .onChange(of: isNameBold) { _, bold in updateNameTruncation(availableWidth: proxy.size.width, isBold: bold) }
                             }
                         )
                         .anchorPreference(key: RowTooltipPreferenceKey.self, value: .bounds) { anchor in
@@ -841,8 +847,8 @@ struct WorktreeRowView: View {
         NSWorkspace.shared.open(url)
     }
 
-    private func updateNameTruncation(availableWidth: CGFloat) {
-        let font = NSFont.systemFont(ofSize: 13, weight: hasBoldNotification(programStatusResolutions) ? .bold : .regular)
+    private func updateNameTruncation(availableWidth: CGFloat, isBold: Bool) {
+        let font = NSFont.systemFont(ofSize: 13, weight: isBold ? .bold : .regular)
         let ideal = (worktree.displayName as NSString).size(withAttributes: [.font: font]).width
         let truncated = ideal > availableWidth + 0.5
         if truncated != isNameTruncated { isNameTruncated = truncated }
