@@ -90,8 +90,11 @@ When the rolled-up state of a terminal — its main entry together with its task
 entries, by the roll-up rules of the protocol spec — maps to a column value
 different from the last one written, the store writes `activityState`,
 `activityStateSource = .programStatus`, `activityStateObservedAt` (the report's
-observed-at), and the wait-reason columns, through `TerminalStore`. It writes
-nothing when the mapped value is unchanged.
+observed-at), and the wait-reason columns, through `TerminalStore`. A column
+value is the activity state together with the wait reason, so a block that
+changes kind — a permission prompt followed by a question — rewrites the
+reason although the state stays `.waitingForUser`. The store writes nothing
+when both are unchanged.
 
 The mapping:
 
