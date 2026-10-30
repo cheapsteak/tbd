@@ -1102,6 +1102,15 @@ struct CodexActivityReconciliationTests {
 
     /// A second router over the same database, with its `now` pinned.
     ///
+    private func makeTranscript(_ contents: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tbd-codex-activity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let path = directory.appendingPathComponent("session.jsonl")
+        try contents.write(to: path, atomically: true, encoding: .utf8)
+        return path
+    }
+
     /// `setActivityState` defaults `observedAt` to a bare `Date()` **at the
     /// store**, so a handler that omits the argument mints a timestamp nothing
     /// outside the store can name. That is not a cosmetic difference: the stamp
