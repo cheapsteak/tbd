@@ -155,9 +155,9 @@ public final class TBDDatabase: Sendable {
     /// without the other and leave an undiscoverable metadata row behind.
     func deleteTerminalAndTab(id: UUID) async throws {
         let deleted = try await writer.write { db -> Bool in
-            let deleted = try TerminalRecord.deleteOne(db, key: id.uuidString)
+            let removed = try TerminalRecord.deleteOne(db, key: id.uuidString)
             _ = try TabRecord.deleteOne(db, key: id.uuidString)
-            return deleted
+            return removed
         }
         if deleted {
             await terminals.deletions.notifyDeleted([id])
