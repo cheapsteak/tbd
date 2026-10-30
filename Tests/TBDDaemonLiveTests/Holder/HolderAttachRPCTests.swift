@@ -5,6 +5,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// `attach.request` and `attach.ready` for a holder-backed row, driven through
 /// the router rather than the registry.

@@ -66,9 +66,9 @@ struct PRBindingRefreshTests {
 
     @MainActor
     private func withStateAsync(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.PRBindingRefresh.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PRBindingRefresh")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         await body(AppState(userDefaults: defaults))
     }
 

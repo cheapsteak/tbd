@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// What a holder's command line may contain, and where its launch request
 /// travels instead.

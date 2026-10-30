@@ -15,7 +15,7 @@ import Foundation
 /// `SIGKILL`, by anything — so a crash can leak the empty file but never the
 /// lock itself.
 ///
-/// Lives in `TBDShared`, not `TBDHolder`, because a SwiftPM library target
+/// Lives in `TBDKernel`, not `TBDHolder`, because a SwiftPM library target
 /// cannot import an executable target and the daemon-side spawner takes this
 /// lock before spawning. Same reasoning as `HolderRendezvous`.
 public struct HolderLock {

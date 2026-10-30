@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import Testing
-@testable import TBDShared
+import TBDKernel
 
 @Suite("Holder protocol")
 struct HolderProtocolTests {

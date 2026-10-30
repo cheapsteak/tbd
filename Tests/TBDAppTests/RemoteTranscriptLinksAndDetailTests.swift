@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The remote transcript pane's link and "Show full output" rules: file paths
 /// never act (they name files on another machine), and a card with no
@@ -62,9 +63,9 @@ struct RemoteTranscriptLinksAndDetailTests {
         // The footer's condition and the fetch's route are the same value.
         #expect(card.fullBodySource == .file(path: path))
 
-        let suiteName = "TBDAppTests.RemoteGrepCard.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteGrepCard")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let full = await card.fullBodySource?.fetch(
             itemID: card.id, appState: AppState(userDefaults: defaults))
         #expect(full?.text.contains("let fixtureMarker = 1") == true)

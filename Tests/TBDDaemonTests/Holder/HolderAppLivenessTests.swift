@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// **A sidecar disconnect is not death.**
 ///

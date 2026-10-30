@@ -31,5 +31,9 @@ enum RetiredColumns {
         RetiredColumn(table: "config", column: "hibernate_input_veto_enabled", epoch: 2),
         // Fleet supervision's brake, added by `v77_config_supervision_enabled` as `BOOLEAN`.
         RetiredColumn(table: "config", column: "supervision_enabled", epoch: 3),
+        // The Program Status Protocol's soak flag, added by
+        // `20261010043448_config_program_status` as `INTEGER` with no default.
+        // OSC 7501 is always on.
+        RetiredColumn(table: "config", column: "program_status_enabled", epoch: 4),
     ]
 }

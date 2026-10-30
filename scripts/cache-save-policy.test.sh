@@ -139,8 +139,9 @@ trap cleanup EXIT
 mkrepo() {
   local root="$1"
   git init -q -b main "$root"
-  mkdir -p "$root/Sources/TBDShared" "$root/Sources/TBDDaemon/Server" \
+  mkdir -p "$root/Sources/TBDKernel" "$root/Sources/TBDShared" "$root/Sources/TBDDaemon/Server" \
            "$root/Sources/TBDTerminalSerialization" "$root/Sources/TBDApp" "$root/docs"
+  echo base > "$root/Sources/TBDKernel/Base.swift"
   echo base > "$root/Sources/TBDShared/Base.swift"
   # TBDDaemonLib's sources, under the directory Package.swift gives that target.
   echo base > "$root/Sources/TBDDaemon/Server/Router.swift"
@@ -210,7 +211,7 @@ with_repo() {
 test_the_extraction_found_the_real_step() {
   local script; script="$(cat "$SCRIPT")"
   assert_contains "extracted the step's shell" "$script" 'library_touched'
-  assert_contains "and the paths it gates on" "$script" 'Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved'
+  assert_contains "and the paths it gates on" "$script" 'Sources/TBDKernel Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved'
   assert_contains "and the three-dot diff" "$script" 'origin/$BASE_REF...HEAD'
 }
 
@@ -285,6 +286,15 @@ case_push() {
 test_a_dispatch_run_answers_false() { with_repo case_dispatch; }
 case_dispatch() {
   assert_eq "a workflow_dispatch run writes library_touched=false" "false" "$(decision "$1" workflow_dispatch "")"
+}
+
+# TBDKernel is the library TBDShared depends on, so a change confined to it
+# re-emits its module, recompiles TBDShared and everything above it, and earns
+# the entry too.
+test_a_pr_touching_tbdkernel_answers_true() { with_repo case_kernel; }
+case_kernel() {
+  change_file "$1" Sources/TBDKernel/Base.swift
+  assert_eq "TBDKernel -> true" "true" "$(decision "$1" pull_request main)"
 }
 
 test_a_pr_touching_tbdshared_answers_true() { with_repo case_shared; }

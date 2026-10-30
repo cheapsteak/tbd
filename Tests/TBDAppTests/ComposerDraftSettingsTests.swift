@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The Settings toggle for `composer_draft_enabled`: the setter writes
 /// through the injected closure and reads the daemon back, and a failed write
@@ -14,10 +15,10 @@ import TBDShared
 @Suite("Composer draft settings")
 struct ComposerDraftSettingsTests {
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-composer-draft-settings-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-composer-draft-settings")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     private static func capabilities(composerDraft: Bool) -> DaemonCapabilitiesResult {

@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Tier 1: `attach.request` for a holder row the registry holds no reader for.
 /// No holder is spawned — the registry simply never adopted the session, which

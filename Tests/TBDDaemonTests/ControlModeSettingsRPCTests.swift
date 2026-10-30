@@ -5,6 +5,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// M5: persisted settings toggle for control mode. Covers the
 /// `config.setControlMode` RPC, the extended `daemon.capabilities` response

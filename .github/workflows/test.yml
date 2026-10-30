@@ -144,7 +144,7 @@ jobs:
           bash scripts/sweep-scratchpads.test.sh
 
       # The three installer harnesses, which cannot join the Linux collection
-      # in `plans-guard`: the plist writer drives `plutil`, and the bundle
+      # in `script-harnesses`: the plist writer drives `plutil`, and the bundle
       # assembly hard-links into a `.app` and installs it with `cp -cR`. The
       # update harness could run on Linux for its argument, lock, re-exec and
       # wake cases, but then its install-and-handover cases — the ones that
@@ -164,7 +164,7 @@ jobs:
       # bash 5 on the runner, and `tbd update` has to work on a machine whose
       # only bash is 3.2. Each harness pins every nested `bash` to its own
       # interpreter, so the whole run stays on 3.2. The build-library harness
-      # lives here rather than in `plans-guard` for the same reason — Linux
+      # lives here rather than in `script-harnesses` for the same reason — Linux
       # has no bash 3.2 — and because its SDK cases model an Apple toolchain.
       - name: Test the restart, bundle and update helpers
         run: |
@@ -206,7 +206,7 @@ jobs:
 
       # The stall watchdog's own harness: fixture directories, a stub
       # `scripts/test.sh` and a stub `sample`, no build, no SwiftPM, no real
-      # store touched. It cannot join the Linux collection in `plans-guard`
+      # store touched. It cannot join the Linux collection in `script-harnesses`
       # because everything it drives is BSD — `script(1)` takes different
       # arguments on Linux, `ps` there is GNU, and `sample` does not exist at
       # all — the same reason the fence and installer harnesses above it sit
@@ -232,59 +232,131 @@ jobs:
   plans-guard:
     name: No committed implementation plans
     runs-on: ubuntu-latest
-    # 10: a shell guard plus harnesses that build fixture repos in temp dirs and
-    # touch no network — 0.2 min median, 0.6 min worst. Linux runners are not
-    # rationed against the macOS cap, but an unbounded wedge still occupies one
-    # for six hours and leaves this check unreported for the whole of it.
-    timeout-minutes: 10
+    # 5: a shallow checkout and one scan of the tracked tree. The scan takes
+    # well under a second and the checkout about 3 s, so this is the `changes`
+    # job's bound for the same shape of work. Linux runners are not rationed
+    # against the macOS cap, but an unbounded wedge still occupies one for six
+    # hours and leaves this check unreported for the whole of it.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
       - name: Check for committed implementation plans
         run: scripts/check-no-committed-plans.sh
 
-      # Every script harness that needs nothing but bash, git and python lives
-      # here — a test file no workflow runs is worth nothing, and three of
-      # these shipped that way before this step collected them. They are on
-      # `ubuntu-latest` because none of them reads a BSD-only tool. The
-      # exceptions stay in the macOS `lint` job: the fence harness
-      # (`scripts/test.test.sh`), whose guards read BSD `stat -f`, the three
-      # installer harnesses, the build-library harness
-      # (`scripts/restart-build-lib.test.sh`), which must run under bash 3.2,
-      # the flake fixer's bash 3.2 harness (`scripts/flake-bash32.test.sh`),
-      # the Swift suite gate's harness (`scripts/ci/swift-suite-needed.test.sh`),
-      # which runs under bash 3.2, and the stall-watchdog harness
-      # (`scripts/ci/watched-test-pass.test.sh`), which drives BSD `ps`,
-      # `script(1)` and `sample`.
-      #
-      # Nothing here touches the network, a real remote, `~/tbd`, or a real
-      # `gh`: each harness builds a fixture repo in a temp dir and puts a stub
-      # `gh` first on PATH. `test-claude-stub.py` does bind a loopback socket,
-      # and where a `claude` binary is on PATH it runs the real CLI against
-      # that socket — still no egress, and it self-skips on runners, which
-      # have no `claude` installed.
-      #
-      # The flake bot's harnesses (`flake-*.test.sh`) are the same shape: pure
-      # Python and bash over fixtures cut from real CI artifacts, with a stub
-      # `gh` supplied through `FLAKE_GH_CMD`.
-      #
-      # `cache-save-policy.test.sh` is the odd one out in what it reads: it
-      # extracts two pieces of THIS file — the cache-save decision step's shell
-      # and the save step's `if:` — and drives the first against fixture repos.
-      # It is here rather than in the `test` job because a wrong answer there
-      # has no red symptom anywhere else: too few saves leaves every later run
-      # paying a cold build, too many churns main's entry out of a 10 GB store,
-      # and neither shows up in a suite.
-      #
-      # `sweep-foreign-worktrees.test.sh` also needs `jq` (preinstalled on the
-      # runner). Its fixtures are real repos with real linked worktrees in a
-      # temp dir, and every tool it would otherwise reach — `tbd`, `gh`, `lsof`
-      # — is a fake behind a seam, with failing shims first on PATH.
-      #
-      # The `pr-user-story` check script's tests run here too: the script is
-      # stdlib-only and shared with the `pr-user-story` guardrail, whose own
-      # tests the self-test above runs against the same file.
-      #
+  # Every script harness that needs nothing but bash, git and python runs
+  # here or in `flake-harnesses` below — a test file no workflow runs is worth
+  # nothing, and three of these have shipped that way. They are on
+  # `ubuntu-latest` because none of them reads a BSD-only tool. The exceptions
+  # stay in the macOS `lint` job: the fence harness (`scripts/test.test.sh`),
+  # whose guards read BSD `stat -f`, the three installer harnesses, the
+  # build-library harness (`scripts/restart-build-lib.test.sh`), which must run
+  # under bash 3.2, the flake fixer's bash 3.2 harness
+  # (`scripts/flake-bash32.test.sh`), the Swift suite gate's harness
+  # (`scripts/ci/swift-suite-needed.test.sh`), which runs under bash 3.2, and
+  # the stall-watchdog harness (`scripts/ci/watched-test-pass.test.sh`), which
+  # drives BSD `ps`, `script(1)` and `sample`.
+  #
+  # Nothing here touches the network, a real remote, `~/tbd`, or a real `gh`:
+  # each harness builds a fixture repo in a temp dir and puts a stub `gh` first
+  # on PATH.
+  #
+  # One step per harness, so a red check names the harness that failed. Every
+  # harness step carries `!cancelled()` rather than the implicit `success()`,
+  # for the reason the `lint` job's last two steps do: one harness going red
+  # must not cost the others their verdicts, and the author fixing it wants
+  # every verdict at once.
+  script-harnesses:
+    name: Script harnesses
+    runs-on: ubuntu-latest
+    # 10: the harness steps below took about 73 s in all on a green `main` run
+    # (job 123819217683, timed from its log timestamps). That run is a slow
+    # one: its harnesses, these and the flake bot's together, took about
+    # 360 s, the top of the 220 to 364 s range they have taken on `main`. The
+    # slowest are `nightly-flake-stress.test.sh` at about 26 s,
+    # `test-claude-stub.py` at 14 s and `test-swift-safe.py` at 12 s;
+    # `remote-verify.test.sh` and the two sweep harnesses take 5 to 6 s each,
+    # and every other step under 2 s. The bound leaves room for a runner
+    # several times slower than that one; an unbounded wedge would occupy a
+    # Linux runner for six hours and leave this check unreported for the
+    # whole of it.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test the agent guardrails
+        if: ${{ !cancelled() }}
+        run: python3 .claude/hooks/guardrails/dispatch.py --self-test
+
+      # The `pr-user-story` check script is stdlib-only and shared with the
+      # `pr-user-story` guardrail, whose own tests the self-test above runs
+      # against the same file.
+      - name: Test the pr-user-story check script
+        if: ${{ !cancelled() }}
+        run: python3 -m unittest discover -s .github/workflows/pr-user-story/tests
+
+      - name: Test scripts/swift-safe
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test-swift-safe.py
+
+      # It binds a loopback socket, and where a `claude` binary is on PATH it
+      # runs the real CLI against that socket — still no egress, and it
+      # self-skips on runners, which have no `claude` installed.
+      - name: Test scripts/claude-stub.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test-claude-stub.py
+
+      - name: Test scripts/remote_verify.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/test-remote-verify.py
+
+      - name: Test scripts/remote-verify.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/remote-verify.test.sh
+
+      - name: Test scripts/sweep-preflight-refs.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/sweep-preflight-refs.test.sh
+
+      # This one also needs `jq` (preinstalled on the runner). Its fixtures are
+      # real repos with real linked worktrees in a temp dir, and every tool it
+      # would otherwise reach — `tbd`, `gh`, `lsof` — is a fake behind a seam,
+      # with failing shims first on PATH.
+      - name: Test scripts/sweep-foreign-worktrees.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/sweep-foreign-worktrees.test.sh
+
+      # It extracts two pieces of THIS file — the cache-save decision step's
+      # shell and the save step's `if:` — and drives the first against fixture
+      # repos. It is here rather than in the `test` job because a wrong answer
+      # there has no red symptom anywhere else: too few saves leaves every later
+      # run paying a cold build, too many churns main's entry out of a 10 GB
+      # store, and neither shows up in a suite.
+      - name: Test the SwiftPM cache-save policy
+        if: ${{ !cancelled() }}
+        run: bash scripts/cache-save-policy.test.sh
+
+      # It reads THIS file too: it checks its own table of CI passes against
+      # the `test` job's four pass invocations, that every step forwarding
+      # `--skip-build` is gated on the build step's success, and that every
+      # command in the `test` job that reaches SwiftPM carries the CI build
+      # flags.
+      - name: Test scripts/nightly-flake-stress.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/nightly-flake-stress.test.sh
+
+      - name: Test scripts/restart-guard-lib.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/restart-guard-lib.test.sh
+
+      - name: Test scripts/dsym-prune-lib.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/dsym-prune-lib.test.sh
+
+      - name: Test scripts/ci/first-party-wipe-needed.sh
+        if: ${{ !cancelled() }}
+        run: bash scripts/ci/first-party-wipe-needed.test.sh
+
       # `daemon-footprint-watch.py` is a macOS instrument, but its `--self-test`
       # drives the spike detector, the report and the run-directory sweep over
       # synthetic series and temp directories: it touches no kernel counter, no
@@ -292,27 +364,55 @@ jobs:
       # the `ctypes.CDLL` loads behind the process-identity seam, which fail
       # closed on Linux and are caught there, and the libproc leg skips itself
       # off macOS. So it runs here rather than costing a rationed macOS runner.
-      - name: Test agent guardrails and the script harnesses
-        run: |
-          python3 .claude/hooks/guardrails/dispatch.py --self-test
-          python3 -m unittest discover -s .github/workflows/pr-user-story/tests
-          python3 scripts/test-swift-safe.py
-          python3 scripts/test-claude-stub.py
-          python3 scripts/test-remote-verify.py
-          bash scripts/remote-verify.test.sh
-          bash scripts/sweep-preflight-refs.test.sh
-          bash scripts/sweep-foreign-worktrees.test.sh
-          bash scripts/cache-save-policy.test.sh
-          bash scripts/nightly-flake-stress.test.sh
-          bash scripts/flake-ledger.test.sh
-          bash scripts/flake-pick.test.sh
-          bash scripts/flake-verify.test.sh
-          bash scripts/flake-pr.test.sh
-          bash scripts/restart-guard-lib.test.sh
-          bash scripts/dsym-prune-lib.test.sh
-          bash scripts/ci/first-party-wipe-needed.test.sh
-          python3 scripts/diag/daemon-footprint-watch.py --self-test
-          python3 scripts/diag/terminal-latency-report.py --self-test
+      - name: Self-test scripts/diag/daemon-footprint-watch.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/diag/daemon-footprint-watch.py --self-test
+
+      - name: Self-test scripts/diag/terminal-latency-report.py
+        if: ${{ !cancelled() }}
+        run: python3 scripts/diag/terminal-latency-report.py --self-test
+
+  # The flake bot's four Linux harnesses, one matrix leg each. They are the
+  # same shape as the harnesses in `script-harnesses`: pure Python and bash
+  # over fixtures cut from real CI artifacts, with a stub `gh` supplied through
+  # `FLAKE_GH_CMD`, and nothing reaching the network, a real remote or `~/tbd`.
+  # The fifth, `scripts/flake-bash32.test.sh`, is in the macOS `lint` job
+  # because Linux has no bash 3.2.
+  #
+  # They are the slow ones. On the same green `main` run (job 123819217683)
+  # `flake-ledger.test.sh` took about 111 s for its 123 cases — 29 s of it in
+  # one case, the big watchlist split across comments — `flake-pr.test.sh`
+  # about 103 s, `flake-verify.test.sh` about 62 s and `flake-pick.test.sh`
+  # about 9 s: 4.7 minutes in sequence. As parallel legs the slowest check is
+  # `flake-ledger`'s at about 2 minutes. Linux runners are not rationed
+  # against the macOS cap, so the three extra runners cost nothing scarce.
+  # `fail-fast: false` keeps one red leg from cancelling the other three, and
+  # each leg's check name says which harness it ran.
+  flake-harnesses:
+    name: Flake bot harness (${{ matrix.harness }})
+    runs-on: ubuntu-latest
+    # 10: the slowest leg, `flake-ledger`, took about 111 s on that slow run,
+    # so the bound is about five times the slowest measured leg. An unbounded
+    # wedge would occupy a Linux runner for six hours and leave its check
+    # unreported for the whole of it.
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - harness: flake-ledger
+            command: bash scripts/flake-ledger.test.sh
+          - harness: flake-pick
+            command: bash scripts/flake-pick.test.sh
+          - harness: flake-verify
+            command: bash scripts/flake-verify.test.sh
+          - harness: flake-pr
+            command: bash scripts/flake-pr.test.sh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test ${{ matrix.harness }}
+        run: ${{ matrix.command }}
 
   review-scripts-tests:
     name: Review scripts tests
@@ -496,7 +596,7 @@ jobs:
       # leaving a wrapper to supply it. The passes carry the flags although
       # they compile nothing; see "THE PASSES CARRY THE BUILD'S FLAGS" at the
       # build step.
-      # `scripts/nightly-flake-stress.test.sh`, which `plans-guard` runs, fails
+      # `scripts/nightly-flake-stress.test.sh`, which `script-harnesses` runs, fails
       # when a command in this job runs `scripts/swift-safe`, `scripts/test.sh`
       # or `scripts/ci/watched-test-pass.sh` without them, so a new pass or a
       # retry cannot drop them silently.
@@ -562,16 +662,21 @@ jobs:
           # would be silent: a pathspec absent from both sides of a `git diff`
           # exits 0, so every PR touching the library would score as not touching
           # it and never save the cache this decision exists to grant it.
+          # `Sources/TBDKernel` is the library TBDShared depends on, so a symbol
+          # added to it is the change #7715 breaks on, and a change confined to
+          # it re-emits its own module and recompiles TBDShared and everything
+          # above it.
           # `Sources/TBDTerminalSerialization` is a first-party library the #7715
           # wipe removes in its own right, and TBDDaemonLib's one first-party
-          # dependency beyond TBDShared, so a change confined to it re-emits its
-          # own module, recompiles TBDDaemonLib and cascades downstream.
+          # dependency beyond TBDShared and TBDKernel, so a change confined to it
+          # re-emits its own module, recompiles TBDDaemonLib and cascades
+          # downstream.
           #
           # Three-dot: what this PR changed since it forked, not everything that
           # has landed on the base since.
           status=0
           git diff --quiet "origin/$BASE_REF...HEAD" -- \
-            Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved || status=$?
+            Sources/TBDKernel Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved || status=$?
           case "$status" in
             0) decide false "no first-party library or package-manifest change" ;;
             1) decide true "touched a first-party library or the package manifest" ;;
@@ -705,7 +810,7 @@ jobs:
       # library build artifacts forces SPM to re-emit them while keeping the
       # rest of `.build/` warm.
       #
-      # The libraries wiped are TBDShared, TBDDaemonLib and
+      # The libraries wiped are TBDKernel, TBDShared, TBDDaemonLib and
       # TBDTerminalSerialization: every first-party library target whose
       # sources the decision below compares. TBDTerminalSerialization is
       # exposed in its own right, not only as something TBDDaemonLib imports —
@@ -724,7 +829,9 @@ jobs:
       # files, and every module that imports it already depends on TBDShared,
       # so its wipe brings no new module into the rebuild — only its own files
       # and the few downstream files that import it but not TBDShared or
-      # TBDDaemonLib.
+      # TBDDaemonLib. TBDKernel is ten files, and the modules that import it
+      # without TBDShared are the two helpers, their tests and TBDKernelTests,
+      # so its wipe can add those to a run's rebuild.
       #
       # The bug's precondition is that a library's SOURCES differ from the
       # sources its cached artifacts were built from, so the wipe is conditional
@@ -767,7 +874,7 @@ jobs:
           # that every source directory on the list is one library target's.
           # It does not check dependencies: that a module's first-party
           # dependencies are on the list is for review to hold.
-          for module in TBDShared TBDDaemonLib TBDTerminalSerialization; do
+          for module in TBDKernel TBDShared TBDDaemonLib TBDTerminalSerialization; do
             echo "=== $module artifacts before wipe ==="
             ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"
             ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
@@ -878,10 +985,13 @@ jobs:
       # any other target that reaches SwiftTerm. What keeps both TBDAppTests and
       # TestSupport off TBDDaemonLib is the SwiftLint rule
       # no_daemon_import_in_app_tests, in the lint job and the pre-push hook;
-      # for TestSupport this check is a second guard. The option changes
-      # nothing that is compiled, so it stays out of CI_SWIFTPM_FLAGS, and so
-      # out of the cache key that carries that value, and the passes, which run
-      # with `--skip-build`, do not spell it. It is best-effort: SwiftPM skips
+      # for TestSupport this check is a second guard. The check also keeps the
+      # holder and the peer helper, their tests and TestSupport off TBDShared
+      # (docs/specs/2026-10-30-helper-kernel-design.md), since none of them
+      # reaches SwiftTerm's plugin. The option changes nothing that is
+      # compiled, so it stays out of CI_SWIFTPM_FLAGS, and so out of the cache
+      # key that carries that value, and the passes, which run with
+      # `--skip-build`, do not spell it. It is best-effort: SwiftPM skips
       # the check without a message when the compiler offers no import
       # pre-scan, stops checking when one target's pre-scan fails, and visits
       # targets in an order that changes from run to run, so a green build does
@@ -1010,7 +1120,7 @@ jobs:
       #    package manifest. The primary key hashes every source file, so a PR's
       #    own entry is restorable by that same PR's later pushes and by nothing
       #    else; it earns 1.5 GB of a 10 GB store only when the next push would
-      #    otherwise rebuild nearly everything. Touching TBDShared,
+      #    otherwise rebuild nearly everything. Touching TBDKernel, TBDShared,
       #    TBDDaemonLib or TBDTerminalSerialization is exactly that case — an
       #    interface change cascades into every downstream module, and this job
       #    wipes and re-emits the libraries on such a run regardless. Touching
@@ -1219,8 +1329,10 @@ jobs:
       # second one whose `tbd`, `.claude` and `.codex` entries are mode 000 (so
       # code that assembles a path out of the home directory rather than asking
       # fails with EACCES at its own call site) and, as a backstop, fingerprints
-      # the real `~/tbd`, `~/.claude`, `~/.codex` and tmux socket directory on
-      # either side and fails the step if anything appeared or vanished.
+      # the real `~/tbd`, `~/.claude`, `~/.codex`,
+      # `~/Library/Logs/TBD/hang-stacks`, tmux socket directory and test-suite
+      # plists in `~/Library/Preferences` on either side and fails the step if
+      # anything appeared or vanished.
       # `CLAUDE.md` has said "Tests must not touch ~/tbd" all along, and the
       # suite quietly violated it anyway: 18k orphan profile dirs, ~2.9k fake
       # worktrees and ~7,100 dead tmux sockets accumulated on a developer box

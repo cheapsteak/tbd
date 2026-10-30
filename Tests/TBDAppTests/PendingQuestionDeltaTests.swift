@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 @testable import TBDShared
+import TestSupport
 
 /// The app half of the pending-`AskUserQuestion` hand-off: the pure merge the
 /// daemon's `terminal.transcript` handler used to run, and the mirror
@@ -51,9 +52,9 @@ struct PendingQuestionMergeTests {
 struct PendingQuestionDeltaTests {
 
     private func withAppState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.PendingQuestionDelta.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PendingQuestionDelta")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 
@@ -155,9 +156,9 @@ struct PendingQuestionDeltaTests {
 struct PendingQuestionDeltaOrderingTests {
 
     private func withAppState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.PendingQuestionOrdering.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PendingQuestionOrdering")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 
@@ -437,9 +438,9 @@ struct PendingQuestionCaptureLookupTests {
 
     @Test("the capture lookup returns the owning terminal alongside its entries")
     func lookupCarriesTerminalID() {
-        let suiteName = "TBDAppTests.PendingQuestionCapture.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PendingQuestionCapture")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
 
         let worktreeID = UUID()

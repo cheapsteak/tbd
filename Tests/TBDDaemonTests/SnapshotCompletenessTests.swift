@@ -192,12 +192,14 @@ struct SnapshotCompletenessTests {
             .write(to: registryURL, atomically: true, encoding: .utf8)
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
             providerOK(#"{"complete": false, "sessions": []}"#),
         ])
         let m = RemoteProviderManager(
             db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
 
+        await m.pollOnce(provider: provider)
         await m.pollOnce(provider: provider)
         #expect(await m.providerStatuses().first?.health == .stale)
 
@@ -268,7 +270,8 @@ struct SnapshotCompletenessTests {
         let m = RemoteProviderManager(
             db: db, subscriptions: subs,
             runner: FakeProviderInvoker(script: [
-                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
             ]),
             registryURL: registryURL)
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
@@ -276,6 +279,7 @@ struct SnapshotCompletenessTests {
         // Establish the unreadable state: the read that recovers
         // `lastSuccessfulSnapshotAt` from the (now-dropped) `tbd_meta` table
         // fails, so `hasStaleSnapshot` sets `snapshotFreshnessUnreadable`.
+        await m.pollOnce(provider: provider)
         await m.pollOnce(provider: provider)
         #expect(await m.freshnessUnreadableForTests(provider: "fake") == true)
 

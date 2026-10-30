@@ -4,6 +4,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The handle every fixture below publishes under, so an error's payload is
 /// assertable without reaching into the fixture.

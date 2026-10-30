@@ -52,9 +52,9 @@ import TBDShared
 @Suite("Remote attach pager wiring", .fastPassBounded)
 struct RemoteAttachPagerWiringTests {
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RemoteAttachPagerWiring.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachPagerWiring")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 
@@ -62,9 +62,9 @@ struct RemoteAttachPagerWiringTests {
     /// `withState` rather than overloaded on `async`, so which one a call site
     /// gets is never a question of inference.
     private func withStateAsync(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.RemoteAttachPagerWiring.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachPagerWiring")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         await body(AppState(userDefaults: defaults))
     }
 

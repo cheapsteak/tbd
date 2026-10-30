@@ -899,7 +899,11 @@ struct ClaudeSpawnExtrasSpawnPathTests {
                 label: TerminalLabel.preSession, claudeSessionID: shellSession, kind: .shell,
                 claudeSpawnExtras: ClaudeSpawnExtras(claudeSettingsOverlay: Self.overlay))
 
-            _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktree.id)
+            // The fixture's worktree folder is a plain directory, not a git
+            // checkout, so the uncommitted-changes guard could not read it and
+            // would refuse; it is not what this test is about.
+            _ = try await f.lifecycle.beginArchiveWorktree(
+                worktreeID: f.worktree.id, discardUncommittedChanges: true)
 
             let archived = try #require(try await f.db.worktrees.get(id: f.worktree.id))
             #expect(archived.status == .archived)

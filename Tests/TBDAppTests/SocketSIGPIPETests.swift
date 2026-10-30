@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Testing
 import TBDShared
+import TBDKernel
 @testable import TBDApp
 
 /// The app writes to sockets whose peer (the daemon) can vanish mid-write.

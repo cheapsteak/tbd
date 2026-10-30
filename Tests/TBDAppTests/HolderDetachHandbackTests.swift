@@ -165,7 +165,7 @@ struct HolderDetachHandbackTests {
         /// attach set on it; the panel's reader still owns the close.
         let vendedEnd: Int32
         private let defaults: UserDefaults
-        private let suiteName: String
+        private let suite: TestDefaultsSuite
 
         init(preamble: String = "", readyFails: Bool = false) throws {
             var pair: [Int32] = [-1, -1]
@@ -200,8 +200,8 @@ struct HolderDetachHandbackTests {
                 id: terminalID, worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
                 label: "Shell", kind: .shell, transport: .holder)]
 
-            suiteName = "TBDAppTests.HolderDetachHandback.\(UUID().uuidString)"
-            defaults = UserDefaults(suiteName: suiteName)!
+            suite = TestDefaultsSuite("TBDAppTests.HolderDetachHandback")
+            defaults = suite.defaults
             view = TBDTerminalView(
                 frame: CGRect(x: 0, y: 0, width: 600, height: 300),
                 font: TBDTerminalView.defaultMonospaceFont,
@@ -274,7 +274,7 @@ struct HolderDetachHandbackTests {
         func tearDown() {
             coordinator.cleanup()
             if sessionEnd >= 0 { Darwin.close(sessionEnd) }
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 

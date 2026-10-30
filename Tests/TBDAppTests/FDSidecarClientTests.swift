@@ -3,6 +3,7 @@ import Foundation
 import Testing
 import TestSupport
 import TBDShared
+import TBDKernel
 @testable import TBDApp
 
 /// Tests for the app-side sidecar client's header demux — the mechanism that

@@ -97,8 +97,19 @@ let package = Package(
         .package(url: "https://github.com/pointfreeco/swift-clocks", from: "1.0.0"),
     ],
     targets: [
+        // The helper programs' contract: the holder's wire protocol, framing,
+        // rendezvous paths and lock, the descriptor channel, and the peer
+        // helper's frame codec and shadow peer record. A module with no
+        // dependencies, so a change elsewhere in `TBDShared` recompiles
+        // neither helper. What may go in: `Sources/TBDKernel/CLAUDE.md`.
+        .target(
+            name: "TBDKernel",
+            path: "Sources/TBDKernel",
+            exclude: ["CLAUDE.md"]
+        ),
         .target(
             name: "TBDShared",
+            dependencies: ["TBDKernel"],
             path: "Sources/TBDShared"
         ),
         // Per-worktree icon generation (AppKit + CoreGraphics + CoreText).
@@ -117,7 +128,8 @@ let package = Package(
         // here: the projection fills `TerminalScreen`'s own `Size` and
         // `ChildModes` and renders against its `isDisallowed` whitelist, rather
         // than keeping a third copy of a rule that must not drift. Acyclic by
-        // construction: `TBDShared` has no dependencies at all.
+        // construction: `TBDShared` depends only on `TBDKernel`, which depends
+        // on nothing.
         .target(
             name: "TBDTerminalSerialization",
             dependencies: [
@@ -137,6 +149,7 @@ let package = Package(
             name: "TBDDaemonLib",
             dependencies: [
                 "TBDShared",
+                "TBDKernel",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -173,6 +186,7 @@ let package = Package(
             name: "TBDCLI",
             dependencies: [
                 "TBDShared",
+                "TBDKernel",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -189,14 +203,18 @@ let package = Package(
         // cleanup signal the kernel delivers even to a SIGKILLed daemon's
         // children.
         //
-        // Deliberately NOT linked against TBDDaemonLib: the helper needs the
-        // record shape and the frame codec, both of which live in TBDShared, and
-        // nothing else. Its output is os.Logger, not stdout — stdout is the
-        // frame channel back to the daemon.
+        // Depends on `TBDKernel` alone, not on `TBDShared` or `TBDDaemonLib`:
+        // what the helper needs, the record shape and the frame codec, lives
+        // in the kernel, so a change elsewhere in `TBDShared` does not
+        // recompile it. SwiftPM's import check in the CI build fails a helper
+        // file that imports `TBDShared`; see
+        // docs/specs/2026-10-30-helper-kernel-design.md. Its output is
+        // os.Logger, not stdout — stdout is the frame channel back to the
+        // daemon.
         .executableTarget(
             name: "TBDPeerHelper",
             dependencies: [
-                "TBDShared",
+                "TBDKernel",
             ],
             path: "Sources/TBDPeerHelper"
         ),
@@ -210,13 +228,16 @@ let package = Package(
         // whole point of the design: the pty master must survive a daemon
         // restart, and a descriptor cannot outlive the process that holds it.
         //
-        // Deliberately NOT linked against TBDDaemonLib. It needs the rendezvous
-        // paths, the creation lock and the wire protocol, all of which live in
-        // TBDShared, and nothing else.
+        // Depends on `TBDKernel` alone, not on `TBDShared` or `TBDDaemonLib`:
+        // what the holder needs, the rendezvous paths, the creation lock and
+        // the wire protocol, lives in the kernel, so a change elsewhere in
+        // `TBDShared` does not recompile it. SwiftPM's import check in the CI
+        // build fails a helper file that imports `TBDShared`; see
+        // docs/specs/2026-10-30-helper-kernel-design.md.
         .executableTarget(
             name: "TBDHolder",
             dependencies: [
-                "TBDShared",
+                "TBDKernel",
             ],
             path: "Sources/TBDHolder"
         ),
@@ -228,6 +249,7 @@ let package = Package(
             name: "TBDApp",
             dependencies: [
                 "TBDShared",
+                "TBDKernel",
                 "TBDAppIcon",
                 "CComrakFFI",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
@@ -259,21 +281,24 @@ let package = Package(
         .target(
             name: "TestSupport",
             dependencies: [
-                "TBDShared",
                 .product(name: "Clocks", package: "swift-clocks"),
             ],
             path: "Tests/TestSupport"
         ),
-        // The test helpers that need the daemon library. They live apart from
-        // `TestSupport` so that the app and holder tests, which use only the
-        // generic helpers, neither compile against `TBDDaemonLib` nor recompile
-        // when it changes. The CI build's import check holds that line; see
+        // The test helpers only the daemon and live tests use: the ones that
+        // need the daemon library, and the sidecar-frame and tmux-executable
+        // fixtures, which need `TBDShared` and `TBDKernel`. They live apart
+        // from `TestSupport` so that the app and holder tests, which use only
+        // the generic helpers, compile against neither `TBDDaemonLib` nor
+        // `TBDShared` through it, nor recompile when either changes. The CI
+        // build's import check holds that line; see
         // docs/specs/2026-10-26-daemon-test-support-design.md.
         .target(
             name: "DaemonTestSupport",
             dependencies: [
                 "TBDDaemonLib",
                 "TBDShared",
+                "TBDKernel",
             ],
             path: "Tests/DaemonTestSupport"
         ),
@@ -290,7 +315,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TBDSharedTests",
-            dependencies: ["TBDShared"],
+            dependencies: ["TBDShared", "TBDKernel"],
             // `.process`, not `.copy`: process flattens the directory's files
             // into the bundle root, which is where
             // `Bundle.module.url(forResource:withExtension:)` looks. `.copy`
@@ -298,11 +323,17 @@ let package = Package(
             // would return nil.
             resources: [.process("Fixtures")]
         ),
+        // The kernel's own suites, depending on the kernel alone like the helpers.
+        .testTarget(
+            name: "TBDKernelTests",
+            dependencies: ["TBDKernel"]
+        ),
         .testTarget(
             name: "TBDDaemonTests",
             dependencies: [
                 "TBDDaemonLib",
                 "TBDShared",
+                "TBDKernel",
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
@@ -325,6 +356,7 @@ let package = Package(
             dependencies: [
                 "TBDDaemonLib",
                 "TBDShared",
+                "TBDKernel",
                 "TestSupport",
                 "DaemonTestSupport",
                 // TmuxBridge (app side) drives a real tmux server in
@@ -353,6 +385,7 @@ let package = Package(
             name: "TBDAppTests",
             dependencies: [
                 "TBDApp",
+                "TBDKernel",
                 "TestSupport",
                 // Turns off NSTableView's row-height estimation for the whole
                 // test process before any table exists; see the target.
@@ -388,7 +421,7 @@ let package = Package(
             name: "TBDPeerHelperTests",
             dependencies: [
                 "TBDPeerHelper",
-                "TBDShared",
+                "TBDKernel",
             ]
         ),
         // The holder's own suite. Like `TBDPeerHelperTests` above, its
@@ -401,14 +434,14 @@ let package = Package(
             name: "TBDHolderTests",
             dependencies: [
                 "TBDHolder",
-                "TBDShared",
+                "TBDKernel",
                 // `collectOutput(of:)`, which runs a spawned binary to
                 // completion without parking a cooperative-pool thread on
                 // `waitUntilExit()`. The alternative is a second hand-rolled
                 // blocking wait in a target that spawns children, which is the
                 // thing that helper exists to end. `TestSupport` holds only the
-                // generic helpers, so this target doesn't depend on the daemon
-                // library.
+                // generic helpers, so this target depends on neither the daemon
+                // library nor `TBDShared` through it.
                 "TestSupport",
             ]
         ),

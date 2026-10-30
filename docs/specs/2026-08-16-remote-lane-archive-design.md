@@ -56,9 +56,18 @@ exemption.
 - **The provider declares `archive`** — guard, invoke `archive <id>`, then mark
   the row archived. The retirement is a fact on the backend rather than TBD's
   private bookkeeping, so every other client of that backend sees it.
-- **The session is `gone`** — mark the row archived and call nothing. A `gone`
-  session is one the provider has stopped enumerating, so there is no live
-  session to misdescribe and no verb that could reach it.
+- **The session is `gone`, or its provider is retired** — mark the row archived
+  and call nothing. A `gone` session is one the provider has stopped
+  enumerating, so there is no live session to misdescribe and no verb that could
+  reach it. A *retired* provider is one that is no longer configured at all: it
+  is in neither the running provider set nor the registry file, and it is not a
+  reserved built-in name (those can be absent merely because a feature flag is
+  off). Nothing enumerates its lanes, nothing can be invoked for them, and no
+  mirror row will ever be marked `gone` for them, so they are gone in substance.
+  If the provider is configured again and lists the session unarchived, the
+  ordinary filing sync returns the lane to the working set. A provider that is
+  configured but whose `describe` failed is not retired: it may be temporarily
+  broken with a live session, so it is refused as below.
 - **Neither** — refused, naming `archive` as the capability the provider needs
   to implement.
 
@@ -79,9 +88,11 @@ that a kill is a good enough synonym for a filing decision. `stop` remains
 available as its own gesture on the Provider Desk, where the user asks for it by
 name.
 
-The `gone` exemption is the only route out for a lane whose provider cannot
-archive, and it is deliberately narrow. A lane whose session is still enumerated
-stays in the active list until its provider implements the capability.
+The `gone` exemption (including the retired-provider case) is the only route out
+for a lane whose provider cannot archive, and it is deliberately narrow. A lane
+whose session is still enumerated by a configured provider stays in the active
+list until that provider implements the capability. The exemption needs no
+`--force`: it touches nothing on a provider, so there is nothing to override.
 
 A declared `archive` wins over the exemption, so a `gone` lane on a capable
 provider still takes the verb path — and a `not_found` response there degrades
@@ -326,13 +337,14 @@ it on location; the local path beneath `getLocal` is untouched, and the boundary
 `LocalWorktree` draws stays exactly where it is.
 
 Capability routing is a pure function over the declared capability set and the
-row's `gone` flag, so the decision is testable without a provider process:
+row's `gone` flag and whether its provider is retired, so the decision is testable without a provider process:
 
 ```swift
 enum RemoteLaneArchivePlan { case invokeVerb, rowOnlyGone, refused(String) }
 enum RemoteLaneRevivePlan  { case invokeUnarchive, rowOnly, refusedNoUnarchive(String) }
 
-static func archivePlan(capabilities: Set<String>, isGone: Bool) -> RemoteLaneArchivePlan
+static func archivePlan(capabilities: Set<String>, isGone: Bool, providerRetired: Bool)
+    -> RemoteLaneArchivePlan
 static func revivePlan(capabilities: Set<String>, providerReportsArchived: Bool)
     -> RemoteLaneRevivePlan
 ```
@@ -487,7 +499,11 @@ Archive:
 
 - Each plan is taken against the capabilities declared: a provider declaring
   `archive` is archived through the verb, a `gone` lane is filed with no provider
-  call, and a provider declaring neither is refused with the row untouched.
+  call, a lane whose provider is retired is filed the same way without
+  `--force`, and a configured provider declaring neither is refused with the row
+  untouched, including one whose `describe` failed.
+- A lane archived because its provider is retired is revived by a row-only flip
+  when no retained transcript receipt exists.
 - A provider declaring only `stop` is refused, and `stop` is never invoked.
 - The guards refuse on `working` and on a provider-reported dirty checkout for
   the verb path, refuse on neither for the `gone` path, and both yield to

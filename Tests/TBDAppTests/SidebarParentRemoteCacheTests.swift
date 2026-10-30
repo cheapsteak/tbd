@@ -3,6 +3,7 @@ import Observation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 enum ParentGroupCacheInput: CaseIterable {
     case worktrees, scratch, sessions, providers, worktreeUnread, remoteUnread
@@ -10,7 +11,7 @@ enum ParentGroupCacheInput: CaseIterable {
 
 @MainActor
 struct ParentGroupCacheFixture {
-    let suite: String
+    let suite: TestDefaultsSuite
     let state: AppState
     let parent: Worktree
     let worker: Worktree
@@ -19,9 +20,8 @@ struct ParentGroupCacheFixture {
     /// `workflowGroups` is the sidebar-groups toggle; the parent projection
     /// renders only when it is on, so that is the fixture's default.
     init(workflowGroups: Bool = true) {
-        let suiteName = "SidebarParentRemoteCacheTests.\(UUID().uuidString)"
-        suite = suiteName
-        let defaults = UserDefaults(suiteName: suiteName)!
+        suite = TestDefaultsSuite("SidebarParentRemoteCacheTests")
+        let defaults = suite.defaults
         defaults.set(workflowGroups, forKey: AppState.sidebarWorkflowGroupsKey)
         state = AppState(userDefaults: defaults)
         let repo = UUID()
@@ -34,7 +34,7 @@ struct ParentGroupCacheFixture {
     }
 
     func cleanUp() {
-        state.userDefaults.removePersistentDomain(forName: suite)
+        suite.tearDown()
     }
 
     func mutate(_ input: ParentGroupCacheInput) {

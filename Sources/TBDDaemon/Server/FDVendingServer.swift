@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 enum FDVendingServerError: LocalizedError, Equatable {

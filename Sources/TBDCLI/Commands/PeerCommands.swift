@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import TBDShared
+import TBDKernel
 
 struct PeerCommand: ParsableCommand {
     static let configuration = CommandConfiguration(

@@ -37,12 +37,22 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
     }
 
     /// Returns `true` ONLY when it actually began archiving the worktree (i.e.
-    /// `beginArchiveWorktree` succeeded). Every early return — not active,
-    /// remote, not effective, active children, or the outer catch — returns
-    /// `false`. The
-    /// `MergedTransitionDispatcher` keys the archive-supersedes-hibernate
-    /// precedence off this Bool: an armed-but-blocked archive returns `false`, so
-    /// the worktree survives and its idle sessions are still eligible for merge-park.
+    /// `beginArchiveWorktree` succeeded, or a remote lane's archive went
+    /// through `archiveRemoteLane`). Every early return — not active, not
+    /// effective, active children, an unwritable record, uncommitted changes
+    /// in the folder, or the outer catch — returns `false`. The
+    /// `MergedTransitionDispatcher` keys the
+    /// archive-supersedes-hibernate precedence off this Bool: an
+    /// armed-but-blocked archive returns `false`, so the worktree survives and
+    /// its idle sessions are still eligible for merge-park.
+    ///
+    /// Uncommitted changes are the one refusal the user hears about. The
+    /// worktree's folder holds work an archive would delete, so the request
+    /// row is confirmed `refused`/`not-eligible` with the refusal sentence and
+    /// an attention notification says the worktree was kept and why: the
+    /// merged edge that triggered this is not seen again this daemon run, and
+    /// without the notification a user expecting the archive would find the
+    /// worktree still active with no reason given.
     @discardableResult
     public func handleMergedTransition(worktreeID: UUID, prNumber: Int) async -> Bool {
         do {
@@ -91,10 +101,20 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
                 return false
             }
 
+            // The uncommitted-changes guard stays on: the user armed a rail,
+            // not a decision about files they have not committed, and this
+            // archive happens with nobody at the keyboard to ask.
             let worktree: Worktree
             let repo: Repo
             do {
                 (worktree, repo) = try await lifecycle.beginArchiveWorktree(worktreeID: worktreeID)
+            } catch WorktreeArchiveError.uncommittedChanges(let refusal) {
+                await actuationLog.appendOutcome(
+                    confirms: actuationID, result: .refused(.notEligible), error: refusal.message)
+                logger.notice(
+                    "auto-archive declined for \(worktreeID, privacy: .public): \(refusal.message, privacy: .public)")
+                await notifyKept(wt, prNumber: prNumber, refusal: refusal)
+                return false
             } catch {
                 await actuationLog.appendOutcome(
                     confirms: actuationID, result: .transportFailed, error: "\(error)")
@@ -124,6 +144,37 @@ public struct AutoArchiveOnMergeCoordinator: Sendable {
         } catch {
             logger.error("auto-archive failed for \(worktreeID, privacy: .public): \(error, privacy: .public)")
             return false
+        }
+    }
+
+    /// Persists and broadcasts the notification for a worktree the rail kept
+    /// because its folder holds uncommitted changes, or because its status
+    /// could not be read. Non-activating, like the archive notification: it
+    /// asks for attention without taking focus. The worktree is kept whether
+    /// or not this lands, so a failed write is logged and changes nothing.
+    private func notifyKept(
+        _ wt: Worktree, prNumber: Int, refusal: UncommittedArchiveRefusal
+    ) async {
+        let message: String
+        switch refusal.kind {
+        case .dirty:
+            message = "Kept \(wt.displayName): PR #\(prNumber) merged, but it has uncommitted changes that archiving would delete."
+        case .unverifiable:
+            message = "Kept \(wt.displayName): PR #\(prNumber) merged, but TBD could not check it for uncommitted changes."
+        }
+        do {
+            let notification = try await db.notifications.create(
+                worktreeID: wt.id,
+                type: .attentionNeeded,
+                message: message,
+                terminalID: nil)
+            subscriptions.broadcast(delta: .notificationReceived(NotificationDelta(
+                notificationID: notification.id, worktreeID: notification.worktreeID,
+                type: notification.type, message: notification.message,
+                terminalID: notification.terminalID, activate: false)))
+        } catch {
+            logger.error(
+                "auto-archive kept \(wt.id, privacy: .public) but could not record a notification: \(error, privacy: .public)")
         }
     }
 

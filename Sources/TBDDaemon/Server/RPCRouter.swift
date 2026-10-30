@@ -571,11 +571,9 @@ public final class RPCRouter: Sendable {
         self.modelProfileResolver = resolvedModelProfileResolver
         // The daemon passes the store its holder readers feed and starts its
         // run loop, in mock mode too; a router built without one (tests) gets
-        // its own, gated by the shipped default until
-        // `config.setProgramStatusEnabled`.
+        // its own.
         let resolvedProgramStatus = programStatus ?? ProgramStatusStore.live(
-            db: db, subscriptions: subscriptions,
-            enabled: Config.programStatusEnabledDefault, now: now)
+            db: db, subscriptions: subscriptions, now: now)
         self.programStatus = resolvedProgramStatus
         self.hibernationCoordinator = HibernationCoordinator(
             db: db, tmux: tmux, modelProfileResolver: resolvedModelProfileResolver,
@@ -1062,8 +1060,6 @@ public final class RPCRouter: Sendable {
                 return try await handleConfigSetProfileBalancingMaxReadingAge(request.paramsData)
             case RPCMethod.configSetPRPollScheduleEnabled:
                 return try await handleConfigSetPRPollScheduleEnabled(request.paramsData)
-            case RPCMethod.configSetProgramStatusEnabled:
-                return try await handleConfigSetProgramStatusEnabled(request.paramsData)
             case RPCMethod.configSetTranscriptPromptAnswerEnabled:
                 return try await handleConfigSetTranscriptPromptAnswerEnabled(request.paramsData)
             case RPCMethod.configSetComposerDraftEnabled:
@@ -1211,7 +1207,6 @@ public final class RPCRouter: Sendable {
         // load-balancing soak gate.
         result.profileBalancingEnabled = config.profileBalancingEnabled
         result.prPollScheduleEnabled = config.prPollScheduleEnabled
-        result.programStatusEnabled = config.programStatusEnabled
         result.transcriptPromptAnswerEnabled = config.transcriptPromptAnswerEnabled
         result.composerDraftEnabled = config.composerDraftEnabled
         result.composerDraftRequiredByAutoPark = config.composerDraftRequiredByAutoPark

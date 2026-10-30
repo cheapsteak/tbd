@@ -433,18 +433,6 @@ struct WorktreeArchive: AsyncParsableCommand {
         let client = SocketClient()
         let worktreeID = try resolveWorktreeNameOrID(nameOrID, client: client)
 
-        if !force {
-            let worktrees: [Worktree] = try client.call(
-                method: RPCMethod.worktreeList,
-                params: WorktreeListParams(excludeArchived: true, includeSessionCounts: false),
-                resultType: [Worktree].self
-            )
-            if let worktree = worktrees.first(where: { $0.id == worktreeID }),
-               let refusal = ArchiveUncommittedCheck.refusal(for: worktree) {
-                throw CLIError.invalidArgument(refusal)
-            }
-        }
-
         let response = try client.send(try RPCRequest(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: worktreeID, force: force)
@@ -464,94 +452,34 @@ struct WorktreeArchive: AsyncParsableCommand {
     /// The remedy this surface names for a remote lane's guard refusal.
     static let forceHint = "Re-run with --force to retire it anyway."
 
-    /// The message for a remote lane's archive that one of the guards `force`
-    /// lifts refused — a working agent, a provider-reported dirty checkout, a
-    /// stale inventory. The daemon's sentence states the fact alone, so this
-    /// appends the flag that gets past it. `nil` for every other response,
-    /// every other response keeps its plain error. Branches on the code, never
-    /// the prose.
+    /// The remedy this surface names for a local worktree's uncommitted-changes
+    /// refusal.
+    static let uncommittedForceHint = "Pass --force to archive anyway."
+
+    /// The message for an archive refused by a guard `--force` lifts, with
+    /// the flag that gets past it appended to the daemon's sentence, which
+    /// states the fact alone:
+    ///
+    /// - `remoteLaneArchiveGuarded` – a remote lane with a working agent, a
+    ///   provider-reported dirty checkout or a stale inventory.
+    /// - `worktreeArchiveUncommitted` – a local worktree whose folder holds
+    ///   uncommitted changes, or whose `git status` could not be read. The
+    ///   daemon checks this for every client, so the CLI runs no check of its
+    ///   own.
+    ///
+    /// `nil` for a success and for every other refusal, which keeps its plain
+    /// error. Branches on the code, never the prose.
     static func guardedRefusalMessage(for response: RPCResponse) -> String? {
-        guard !response.success,
-              response.errorCode == RPCErrorCode.remoteLaneArchiveGuarded.rawValue
-        else { return nil }
-        return "\(response.error ?? "The archive was refused.") \(forceHint)"
-    }
-}
-
-/// What `tbd worktree archive` refuses without `--force`, as its help text
-/// says: a worktree whose directory holds changes git has not committed.
-///
-/// Archiving renames the directory into the deletion queue and unlinks it,
-/// and revive rebuilds from the branch, so uncommitted and untracked files are
-/// the one thing an archive destroys for good. Scripted sweeps are the callers
-/// this protects: one that archives every worktree it judges idle deletes the
-/// work of anyone still editing there, and the daemon does not check.
-enum ArchiveUncommittedCheck {
-    struct StatusResult {
-        var exitCode: Int32
-        var output: String
-    }
-
-    /// The refusal message, or `nil` when there is nothing archiving would
-    /// lose. A status that cannot be read refuses: it is not evidence of a
-    /// clean tree.
-    static func refusal(
-        for worktree: Worktree,
-        status: (String) -> StatusResult = ArchiveUncommittedCheck.gitStatusPorcelain
-    ) -> String? {
-        // A remote lane's files are on another machine, and a scratch space's
-        // archive keeps its folder; neither deletes anything here.
-        guard worktree.location.isLocal, !worktree.isScratch else { return nil }
-        let path = worktree.localPath
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
-
-        let result = status(path)
-        guard result.exitCode == 0 else {
-            let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            return """
-            Could not check \(path) for uncommitted changes \
-            (git status exited \(result.exitCode)\(detail.isEmpty ? "" : ": \(detail)")). \
-            Archiving deletes the directory; pass --force to archive anyway.
-            """
+        guard !response.success else { return nil }
+        let hint: String
+        if response.errorCode == RPCErrorCode.remoteLaneArchiveGuarded.rawValue {
+            hint = forceHint
+        } else if response.errorCode == RPCErrorCode.worktreeArchiveUncommitted.rawValue {
+            hint = uncommittedForceHint
+        } else {
+            return nil
         }
-        let changes = result.output.split(separator: "\n").filter {
-            !$0.trimmingCharacters(in: .whitespaces).isEmpty
-        }
-        guard !changes.isEmpty else { return nil }
-        let shown = changes.prefix(5).map { "  \($0)" }.joined(separator: "\n")
-        let more = changes.count > 5 ? "\n  … and \(changes.count - 5) more" : ""
-        return """
-        \(worktree.displayName) has \(changes.count) uncommitted change(s) that archiving \
-        would delete:
-        \(shown)\(more)
-        Commit or remove them, or pass --force to archive anyway.
-        """
-    }
-
-    /// `git status --porcelain` in `path`: tracked changes and untracked,
-    /// non-ignored files.
-    static func gitStatusPorcelain(_ path: String) -> StatusResult {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git", "-C", path, "status", "--porcelain"]
-        // Separate pipes: a warning git prints on stderr is not a change.
-        let out = Pipe()
-        let err = Pipe()
-        process.standardOutput = out
-        process.standardError = err
-        do {
-            try process.run()
-        } catch {
-            return StatusResult(exitCode: -1, output: "\(error)")
-        }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let errData = err.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let code = process.terminationStatus
-        return StatusResult(
-            exitCode: code,
-            output: String(data: code == 0 ? data : errData, encoding: .utf8) ?? ""
-        )
+        return "\(response.error ?? "The archive was refused.") \(hint)"
     }
 }
 

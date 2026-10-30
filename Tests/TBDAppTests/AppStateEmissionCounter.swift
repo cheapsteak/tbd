@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 // Tier 1: deterministic, in-process state only. No sleeps, no subprocesses,
 // no `~/tbd`.
@@ -112,6 +113,7 @@ final class AppStateEmissionTracker {
         _ = state.isLoadingMoreArchivedSearch
         _ = state.reapRecords
         _ = state.remoteProviders
+        _ = state.remoteProvidersLoaded
         _ = state.remoteSessions
         _ = state.retainedTranscripts
         _ = state.remoteSessionDisplayNames
@@ -237,6 +239,7 @@ final class AppStateEmissionTracker {
         "isLoadingMoreArchivedSearch",
         "reapRecords",
         "remoteProviders",
+        "remoteProvidersLoaded",
         "remoteSessions",
         "retainedTranscripts",
         "remoteSessionDisplayNames",
@@ -368,8 +371,8 @@ func countEmissions(of state: AppState, duringAsync body: () async -> Void) asyn
 /// the root `CLAUDE.md`. Mirrors `AppStateDerivedCacheTests.withState`.
 @MainActor
 func withEmissionState(_ body: (AppState) -> Void) {
-    let suiteName = "TBDAppTests.AppStateEmissions.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let suite = TestDefaultsSuite("TBDAppTests.AppStateEmissions")
+    let defaults = suite.defaults
+    defer { suite.tearDown() }
     body(AppState(userDefaults: defaults))
 }

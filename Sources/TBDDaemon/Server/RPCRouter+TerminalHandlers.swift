@@ -1,6 +1,7 @@
 import Foundation
 import os
 import TBDShared
+import TBDKernel
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "terminalHandlers")
 private let perfTranscriptLog = Logger(subsystem: "com.tbd.daemon", category: "perf-transcript")

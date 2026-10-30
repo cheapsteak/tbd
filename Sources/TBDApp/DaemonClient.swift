@@ -718,11 +718,17 @@ actor DaemonClient {
         )
     }
 
-    /// Archive a worktree.
-    func archiveWorktree(id: UUID, force: Bool = false) async throws {
+    /// Archive a worktree. `force` and `discardUncommittedChanges` carry
+    /// `WorktreeArchiveParams`' meanings; the app sends the second once the
+    /// user confirms deleting a local worktree's uncommitted changes.
+    func archiveWorktree(
+        id: UUID, force: Bool = false, discardUncommittedChanges: Bool = false
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.worktreeArchive,
-            params: WorktreeArchiveParams(worktreeID: id, force: force)
+            params: WorktreeArchiveParams(
+                worktreeID: id, force: force,
+                discardUncommittedChanges: discardUncommittedChanges)
         )
     }
 
@@ -1269,15 +1275,6 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.configSetPRPollScheduleEnabled,
             params: ConfigSetPRPollScheduleEnabledParams(enabled: enabled)
-        )
-    }
-
-    /// Persist the Program Status Protocol gate (default OFF, soaking). Applies
-    /// to Claude sessions started after the change.
-    func setProgramStatus(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetProgramStatusEnabled,
-            params: ConfigSetProgramStatusEnabledParams(enabled: enabled)
         )
     }
 
@@ -2409,8 +2406,7 @@ actor DaemonClient {
         )
     }
 
-    /// Every terminal's current program-status snapshot. Empty while
-    /// `program_status_enabled` is off.
+    /// Every terminal's current program-status snapshot.
     func terminalProgramStatusList() async throws -> [ProgramStatusSnapshot] {
         let result = try await callNoParamsAsync(
             method: RPCMethod.terminalProgramStatusList,

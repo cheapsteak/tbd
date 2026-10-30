@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import SwiftTerm
 @testable import TBDApp
+import TestSupport
 
 @MainActor
 @Suite("AppearanceSettings")
@@ -10,9 +11,9 @@ struct AppearanceSettingsTests {
     /// the live `TBDApp.plist`: this unbundled executable's
     /// `UserDefaults.standard` is the developer's real app domain.
     private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-        let suiteName = "TBDAppTests.Appearance.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.Appearance")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(defaults)
     }
 
@@ -180,9 +181,9 @@ struct AppearanceSettingsTests {
 
     @Test("currentColorFgBg uses user-theme bg luminance when a user theme is active")
     func currentColorFgBgForUserTheme() throws {
-        let suiteName = "tbd.test.fgbg-user.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("tbd.test.fgbg-user")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         let store = ThemeStore()
         let lightUser = TerminalColorScheme(

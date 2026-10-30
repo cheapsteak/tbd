@@ -3,7 +3,20 @@
 Key source files and what they do. Not exhaustive — see the directory listing for the rest.
 
 ## Package
-- `Package.swift` — SPM manifest. Targets: TBDShared, TBDAppIcon, IconBaker, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
+- `Package.swift` — SPM manifest. Targets: TBDKernel, TBDShared, TBDAppIcon, IconBaker, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
+
+## Sources/TBDKernel/
+The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelper` depend on it alone. What may go in is in its `CLAUDE.md`.
+- `HolderProtocol.swift` — holder wire messages and protocol version
+- `HolderFraming.swift` — length-prefixed JSON framing
+- `HolderRendezvous.swift` — socket, lock and log paths per session
+- `HolderLock.swift` — per-session creation lock
+- `FDChannel.swift` — descriptor passing over `SCM_RIGHTS`
+- `PeerBridgeFrame.swift` — peer helper frame codec
+- `ShadowPeerRecord.swift` — shadow peer registry record and store
+- `ProcessStartTime.swift` — kernel process start time, `procStart` format
+- `CloseOnExecPipe.swift` — `Pipe.closeOnExec()`
+- `KernelPaths.swift` — config, holders and host Claude store paths
 
 ## Sources/TBDShared/
 - `Constants.swift` — paths under `~/tbd/` (configDir, socket, db, pid, port, repos), version; honors `TBD_HOME`/`TBD_SOCKET_PATH`
@@ -22,6 +35,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `ClaudeEnvRegistry.swift` — registry of user-configurable spawn-time Claude env settings (`ClaudeEnvValue`: bool/int/string, frozen JSON format; `ClaudeEnvRegistry.all` is the single source of truth)
 - `EnvOverridesCoding.swift` — JSON encode/decode for the free-form env-override `[String: String]` maps (config/repo/profile scopes)
 - `NewlineFrameScanner.swift` — incremental newline-delimited frame scanner for socket recv buffers
+- `FDVendHeader.swift` — sidecar vend header: the routing identity for each descriptor the daemon vends to the app
 - `TerminalLabel.swift` — canonical terminal display-label derivation shared by daemon + app
 - `HookResolver.swift` — worktree lifecycle hook resolution (`.worktree-hooks/` etc.) + async execution
 
@@ -93,7 +107,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
 - `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
-- `SocketServer.swift` / `HTTPServer.swift` — NIO Unix-socket + HTTP RPC servers
+- `SocketServer.swift` — NIO Unix-socket RPC server
 - `StateSubscription.swift` — `StateDelta` broadcasting to subscribed clients
 - `RepoSerializer.swift` — repo serialization for RPC results
 
@@ -132,13 +146,13 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `FileViewer/FileViewerPanel.swift` — git status file viewer
 
 ## Tests/
-Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDAppTests/` (layout, pane content).
+Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDKernelTests/` (holder protocol, framing, rendezvous and lock; peer frames and records; process start time), `TBDAppTests/` (layout, pane content).
 
 ## SessionMod/
 The session mod's TypeScript source: `hooks/register.ts` (entry point), `hooks/shared/session.ts` (environment, per-session directory, heartbeat), `hooks/features/composer-draft.tsx`, `types/index.d.ts` (the `$.state` contract) and `tests/` (`claude plugin test SessionMod`). Validate with `claude plugin validate --strict SessionMod`; regenerate `Sources/TBDShared/SessionModContent.swift` after every change.
 
 ## Scripts & Docs
 - `scripts/gen-session-mod-content.py` — embeds `SessionMod/` into `Sources/TBDShared/SessionModContent.swift`; `--check` (CI) fails when it is stale
-- `scripts/restart.sh` — rebuild + restart; `install-hooks.sh` — git hooks; `import-conductor.sh` / `import-claude-code-desktop.sh` — one-script migrations into TBD; `move-home-dir.sh`; `recipe-check.sh`; `git-hooks/`; `mock.sh` — isolated seeded daemon+app for UI work; `claude-stub.py` — runs the real `claude` against the fake model API (zero tokens); `dev/dummy-remote-provider.sh` — file-backed fake remote provider
+- `scripts/restart.sh` — rebuild + restart; `install-hooks.sh` — git hooks; `import-conductor.sh` / `import-claude-code-desktop.sh` — one-script migrations into TBD; `move-home-dir.sh`; `git-hooks/`; `mock.sh` — isolated seeded daemon+app for UI work; `claude-stub.py` — runs the real `claude` against the fake model API (zero tokens); `dev/dummy-remote-provider.sh` — file-backed fake remote provider
 - `.github/workflows/claude-review-v2/tests/e2e/stub_server.py` — the fake model API itself (stdlib `POST /v1/messages`, SSE, canned turns); shared by the review-gate e2e tests and `scripts/claude-stub.py`
 - `docs/` — `tmux-integration.md`, `diagnostics-strategy.md`, `worktree-hooks.md`, `worktree-location-design.md`, `transcript-context-usage.md`, `env-overrides.md`, `tcc-signing.md`, `test-doubles.md` (index of the fakes), `fake-model-api.md`, `mock-harness.md`, plus `specs/`, `plans/` & `perf/`

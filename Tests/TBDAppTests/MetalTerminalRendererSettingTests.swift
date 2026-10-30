@@ -5,6 +5,7 @@ import SwiftTerm
 import Testing
 
 @testable import TBDApp
+import TestSupport
 
 /// Storage contract for the experimental Metal renderer flag. Three states,
 /// and the one that matters is `nil`: graduation is meant to be a one-line
@@ -22,9 +23,9 @@ struct MetalTerminalRendererSettingTests {
 
     @Test("an unset key reads the shipped default")
     func unsetReadsShippedDefault() {
-        let suiteName = "metal-renderer-unset-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("metal-renderer-unset")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         #expect(defaults.object(forKey: AppState.useMetalTerminalRendererKey) == nil)
         #expect(
@@ -34,9 +35,9 @@ struct MetalTerminalRendererSettingTests {
 
     @Test("both explicit values round-trip through the read")
     func explicitValuesRoundTrip() {
-        let suiteName = "metal-renderer-explicit-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("metal-renderer-explicit")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         defaults.set(true, forKey: AppState.useMetalTerminalRendererKey)
         #expect(AppState.metalTerminalRendererEnabled(defaults: defaults))
@@ -62,9 +63,9 @@ struct MetalTerminalRendererSettingTests {
     /// reader has to resolve there or the toggle silently stops taking effect.
     @Test("the gate reads the suite it is handed, not a store of its own")
     func readerFollowsInjectedDefaults() {
-        let suiteName = "metal-renderer-injected-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("metal-renderer-injected")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
 
         #expect(
             AppState.metalTerminalRendererEnabled(defaults: defaults)
@@ -103,9 +104,9 @@ struct MetalTerminalRendererViewTests {
     private func withView(_ body: (TBDTerminalView) -> Void) {
         // AppearanceSettings must never read or write the developer's real
         // TBDApp.plist (the UserDefaults twin of the ~/tbd fence).
-        let suiteName = "TBDAppTests.MetalRenderer.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.MetalRenderer")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let frame = CGRect(x: 0, y: 0, width: 400, height: 200)
         let view = TBDTerminalView(
             frame: frame,
@@ -264,9 +265,9 @@ struct MetalTerminalRendererViewTests {
     ) {
         // Same reason as `withView`: AppearanceSettings must never reach the
         // developer's real TBDApp.plist.
-        let suiteName = "TBDAppTests.MetalRendererDeferral.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.MetalRendererDeferral")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let frame = CGRect(x: 0, y: 0, width: 400, height: 200)
         let view = TBDTerminalView(
             frame: frame,

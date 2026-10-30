@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import TBDShared
+import TBDKernel
 
 /// `ProcessStartTime.format` renders a peer registry record's `procStart`, and
 /// every consumer of that value — `RosterWatcher.admit`, the recycled-pid ghost

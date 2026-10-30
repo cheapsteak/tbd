@@ -1,6 +1,7 @@
 import AppKit
 import Testing
 @testable import TBDApp
+import TestSupport
 
 @Suite("Terminal key equivalents")
 struct TerminalKeyEquivalentTests {
@@ -49,7 +50,9 @@ struct TerminalKeyEquivalentTests {
     @MainActor
     @Test("close tab action invokes external tab cleanup")
     func closeTabActionInvokesExternalTabCleanup() {
-        let view = makeTerminalView()
+        let suite = TestDefaultsSuite("TerminalKeyEquivalentTests.clearAction")
+        defer { suite.tearDown() }
+        let view = makeTerminalView(defaults: suite.defaults)
         var closeCount = 0
         view.onCloseTab = { closeCount += 1 }
 
@@ -59,11 +62,11 @@ struct TerminalKeyEquivalentTests {
     }
 
     @MainActor
-    private func makeTerminalView() -> TBDTerminalView {
+    private func makeTerminalView(defaults: UserDefaults) -> TBDTerminalView {
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 640, height: 480),
             font: TBDTerminalView.defaultMonospaceFont,
-            appearance: AppearanceSettings(defaults: UserDefaults(suiteName: "TerminalKeyEquivalentTests.clearAction")!)
+            appearance: AppearanceSettings(defaults: defaults)
         )
         view.resize(cols: 10, rows: 5)
         return view

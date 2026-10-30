@@ -22,7 +22,7 @@
 # Downstream files compile happily against the new module interface and then the
 # linker cannot resolve the new symbol — an "Undefined symbols" flake that
 # disappears on retry. `.github/workflows/test.yml` defends against it by
-# removing the build artifacts of TBDShared, TBDDaemonLib and
+# removing the build artifacts of TBDKernel, TBDShared, TBDDaemonLib and
 # TBDTerminalSerialization before any compile, forcing SPM to re-emit them.
 #
 # That defence is not free. Measured on a run whose commit touched only
@@ -120,11 +120,16 @@ set -uo pipefail
 # the `TBDDaemon` executable target beside it being `main.swift` alone. A list
 # naming a `Sources/TBDDaemonLib` directory would match nothing.
 #
+# `Sources/TBDKernel` is here because it is the library TBDShared depends on,
+# so a symbol added to it is the change #7715 breaks on, and a commit touching
+# only that target re-emits its module and recompiles TBDShared and everything
+# above it.
+#
 # `Sources/TBDTerminalSerialization` is here for two reasons. It is a library
 # the wipe step removes in its own right — TBDDaemonLib and TBDApp both import
 # it, so a symbol added to it is the change #7715 breaks on. And it is
-# TBDDaemonLib's one first-party dependency beyond TBDShared, so a commit
-# touching only that target recompiles TBDDaemonLib as well.
+# TBDDaemonLib's one first-party dependency beyond TBDShared and TBDKernel, so a
+# commit touching only that target recompiles TBDDaemonLib as well.
 #
 # `Package.swift` and `Package.resolved` are here because a manifest or
 # dependency change can move a library's module boundary without touching a
@@ -136,6 +141,7 @@ set -uo pipefail
 # identical — they are one question asked twice — and
 # `scripts/cache-save-policy.test.sh` reddens if they drift.
 WIPE_PATHS=(
+  Sources/TBDKernel
   Sources/TBDShared
   Sources/TBDDaemon
   Sources/TBDTerminalSerialization

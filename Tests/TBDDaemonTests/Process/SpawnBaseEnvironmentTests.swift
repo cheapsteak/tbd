@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// What a process the daemon spawns — a holder job, or the tmux server — starts
 /// from, and what it must not.

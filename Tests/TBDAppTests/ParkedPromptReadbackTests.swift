@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The recovery surface for a prompt the agent never received
 /// (`docs/specs/2026-08-10-queued-prompt-on-create-design.md`, "Undeliverable
@@ -52,9 +53,9 @@ struct ParkedPromptReadbackTests {
     }
 
     private func withAppState(_ body: (AppState, Harness) async throws -> Void) async rethrows {
-        let suiteName = "TBDAppTests.ParkedPromptReadback.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.ParkedPromptReadback")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let harness = Harness()
         state.pendingPromptSetter = { @MainActor worktreeID, text, submit in

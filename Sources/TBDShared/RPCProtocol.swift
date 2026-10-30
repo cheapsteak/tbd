@@ -136,6 +136,15 @@ public enum RPCErrorCode: String, Sendable {
     /// the fact alone; the CLI appends the `--force` hint and the app offers
     /// "Archive anyway". A refusal no retry gets past carries no code.
     case remoteLaneArchiveGuarded
+    /// A local worktree's `worktree.archive` was refused because its folder
+    /// holds uncommitted changes (tracked edits, or untracked files that are
+    /// not ignored), or because `git status` could not show it clean. The
+    /// daemon refused before changing anything, because archiving deletes the
+    /// folder and a revive restores only what is committed on the branch. The
+    /// message states the fact alone; the CLI appends its `--force` hint and
+    /// the app offers to archive anyway with
+    /// `WorktreeArchiveParams.discardUncommittedChanges`.
+    case worktreeArchiveUncommitted
 }
 
 // MARK: - RPC Method Names
@@ -230,12 +239,6 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let modelProfileExecEnvironment = "modelProfile.execEnvironment"
-
-    /// Methods served only on the daemon's Unix socket, never on its loopback
-    /// HTTP transport. The socket's mode admits only its owner; a loopback port
-    /// answers any local process, under any user. A method whose result carries
-    /// a secret belongs here.
-    public static let socketOnly: Set<String> = [modelProfileExecEnvironment]
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalMigrateTransport = "terminal.migrateTransport"
     public static let terminalSessionEvent = "terminal.sessionEvent"
@@ -250,7 +253,7 @@ public enum RPCMethod {
     /// daemon rejects is debug-logged and the app must not retry.
     public static let terminalProgramStatusReport = "terminal.programStatusReport"
     /// Every terminal's current program-status snapshot (main entry and task
-    /// entries). Empty while `program_status_enabled` is off.
+    /// entries).
     public static let terminalProgramStatusList = "terminal.programStatusList"
     /// `prompt.answer` – the app answers a local prompt
     /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`).
@@ -345,12 +348,6 @@ public enum RPCMethod {
     /// other. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
-    /// The Program Status Protocol gate (`program_status_enabled`): whether
-    /// TBD answers Claude Code's OSC 7501 probe on pty-holder sessions and
-    /// accepts its status reports. Applies to Claude processes started after
-    /// the change. Reading needs no method of its own: `config.get` and
-    /// `daemon.capabilities` carry the resolved value.
-    public static let configSetProgramStatusEnabled = "config.setProgramStatusEnabled"
     /// The transcript prompt-answer gate (`transcript_prompt_answer_enabled`).
     /// Hook changes reach a session on its next start. Reading needs no method
     /// of its own: `config.get` and `daemon.capabilities` carry the resolved value.
@@ -1122,9 +1119,8 @@ public struct ModelProfileExecEnvironmentParams: Codable, Sendable {
 /// a token profile is shown only by its masked tail. This result exists so
 /// `tbd profile exec` can put the credential into a child process's
 /// environment, which is where a spawned session's credential goes too. It is
-/// served only on the daemon's Unix socket (`RPCMethod.socketOnly`), whose mode
-/// admits only its owner: the same boundary as the 0600 file the daemon reads
-/// it from. The loopback HTTP transport refuses it. `description`,
+/// served on the daemon's Unix socket, whose mode admits only its owner: the
+/// same boundary as the 0600 file the daemon reads it from. `description`,
 /// `debugDescription` and `customMirror` name the keys only, so printing,
 /// interpolating or dumping the value cannot reveal the secret.
 public struct ModelProfileExecEnvironmentResult: Codable, Sendable,
@@ -1644,9 +1640,22 @@ public struct WorktreeListParams: Codable, Sendable {
 
 public struct WorktreeArchiveParams: Codable, Sendable {
     public let worktreeID: UUID
+    /// On a local worktree, lifts the uncommitted-changes guard
+    /// (`RPCErrorCode.worktreeArchiveUncommitted`) AND skips the archive hook;
+    /// this is what `tbd worktree archive --force` sends. On a remote lane, it
+    /// lifts the three guards `RPCErrorCode.remoteLaneArchiveGuarded` names.
+    /// A scratch space's archive deletes nothing and runs no hook, so it
+    /// changes nothing there.
     public let force: Bool
-    public init(worktreeID: UUID, force: Bool = false) {
+    /// On a local worktree, lifts only the uncommitted-changes guard, so the
+    /// archive hook still runs: what the app sends once the user confirms
+    /// deleting the changes. Ignored on a remote lane and a scratch space.
+    /// Optional so a payload from a client that predates it still decodes,
+    /// and `nil` reads as `false`.
+    public let discardUncommittedChanges: Bool?
+    public init(worktreeID: UUID, force: Bool = false, discardUncommittedChanges: Bool? = nil) {
         self.worktreeID = worktreeID; self.force = force
+        self.discardUncommittedChanges = discardUncommittedChanges
     }
 }
 
@@ -3550,14 +3559,6 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setProgramStatusEnabled` — the gate for the Program
-/// Status Protocol (OSC 7501) on pty-holder sessions (default OFF during soak).
-/// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
-public struct ConfigSetProgramStatusEnabledParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setTranscriptPromptAnswerEnabled` — the gate for
 /// answering Claude's question and permission dialogs from the transcript
 /// (default OFF during soak). Design:
@@ -4077,13 +4078,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `profileBalancingEnabled` gives.
     public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
-    /// Whether the Program Status Protocol is on (`program_status_enabled`).
-    /// Default OFF while it soaks. Resolved through
-    /// `Config.programStatusEnabledDefault`.
-    ///
-    /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `profileBalancingEnabled` gives.
-    public var programStatusEnabled: Bool = Config.programStatusEnabledDefault
     /// Whether answering prompts from the transcript is on
     /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
     /// Resolved through `Config.transcriptPromptAnswerDefault`.
@@ -4237,11 +4231,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // it has no schedule either, so fall through to the shipped default.
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
-        // New field for the Program Status Protocol gate. A daemon that does
-        // not send it does not speak the protocol, so fall through to the
-        // shipped default.
-        programStatusEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(

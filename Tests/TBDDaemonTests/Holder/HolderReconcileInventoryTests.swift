@@ -5,6 +5,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The **inventory direction** of the holder reconciler: the holder is gone and
 /// the session row is still there
