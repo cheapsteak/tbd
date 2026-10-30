@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Attach generations do not repeat across daemon processes, and say on their
 /// face that they do not.

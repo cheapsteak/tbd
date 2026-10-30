@@ -149,6 +149,7 @@ let package = Package(
             name: "TBDDaemonLib",
             dependencies: [
                 "TBDShared",
+                "TBDKernel",
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -185,6 +186,7 @@ let package = Package(
             name: "TBDCLI",
             dependencies: [
                 "TBDShared",
+                "TBDKernel",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -247,6 +249,7 @@ let package = Package(
             name: "TBDApp",
             dependencies: [
                 "TBDShared",
+                "TBDKernel",
                 "TBDAppIcon",
                 "CComrakFFI",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
@@ -312,7 +315,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TBDSharedTests",
-            dependencies: ["TBDShared"],
+            dependencies: ["TBDShared", "TBDKernel"],
             // `.process`, not `.copy`: process flattens the directory's files
             // into the bundle root, which is where
             // `Bundle.module.url(forResource:withExtension:)` looks. `.copy`
@@ -330,6 +333,7 @@ let package = Package(
             dependencies: [
                 "TBDDaemonLib",
                 "TBDShared",
+                "TBDKernel",
                 "TestSupport",
                 "DaemonTestSupport",
                 "TBDTerminalSerialization",
@@ -352,6 +356,7 @@ let package = Package(
             dependencies: [
                 "TBDDaemonLib",
                 "TBDShared",
+                "TBDKernel",
                 "TestSupport",
                 "DaemonTestSupport",
                 // TmuxBridge (app side) drives a real tmux server in
@@ -380,6 +385,7 @@ let package = Package(
             name: "TBDAppTests",
             dependencies: [
                 "TBDApp",
+                "TBDKernel",
                 "TestSupport",
                 // Turns off NSTableView's row-height estimation for the whole
                 // test process before any table exists; see the target.

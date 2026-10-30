@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import SwiftTerm
 import TBDShared
+import TBDKernel
 import Testing
 import TestSupport
 

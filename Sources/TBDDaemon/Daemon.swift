@@ -1,5 +1,6 @@
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 private let daemonLogger = Logger(subsystem: "com.tbd.daemon", category: "startup")

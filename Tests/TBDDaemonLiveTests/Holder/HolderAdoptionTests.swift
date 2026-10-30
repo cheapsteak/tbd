@@ -4,6 +4,7 @@ import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Re-adopting live holders after the daemon that spawned them has gone.
 ///

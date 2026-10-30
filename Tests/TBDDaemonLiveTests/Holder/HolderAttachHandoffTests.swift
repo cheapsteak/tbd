@@ -4,6 +4,7 @@ import SwiftTerm
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Handing one session's pty from the daemon to a viewer, and the rule that
 /// decides every failure on that path.

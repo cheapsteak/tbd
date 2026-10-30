@@ -5,6 +5,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// `.clockDriven` bounds the classic virtual-time hang (a test-clock sleep
 /// nobody advances); `.serialized` keeps the retry-window tests out of each

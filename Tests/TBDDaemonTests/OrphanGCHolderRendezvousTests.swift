@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 import TestSupport
 
 /// Tier 2: a real rendezvous directory with real unix sockets plus an in-memory

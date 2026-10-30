@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// A daemon that has begun shutting down attaches nothing and adopts nothing,
 /// and says why.
