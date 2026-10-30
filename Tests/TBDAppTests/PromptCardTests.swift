@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 1: the prompt cards' routing and their one measured height. The table
 // measures a hosted row ONCE (`TableTranscriptView.measuredHeight`), so a card
@@ -23,9 +24,9 @@ struct PromptCardTests {
         #"[{"type":"addDirectories","directories":["/x"],"destination":"localSettings"}]"#
 
     private func withAppState<T>(_ body: (AppState) throws -> T) throws -> T {
-        let suiteName = "prompt-card-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-card")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
         appState.promptAnswers = PromptAnswerController(
             local: { _, _, _ in PromptAnswerResult(outcome: .delivered) },

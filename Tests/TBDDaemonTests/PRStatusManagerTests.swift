@@ -6,260 +6,124 @@ import Foundation
 @Suite("PRStatusManager Tests")
 struct PRStatusManagerTests {
 
-    // MARK: - State mapping
+    // MARK: - State and reason mapping
 
-    @Test("maps OPEN + CLEAN to .mergeable")
-    func mapsMergeableState() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN")
-        #expect(status == .mergeable)
+    /// One GitHub input to `mapStateAndReason` and the state and reason it must
+    /// produce. Defaults are the function's own: no review decision, not a
+    /// draft, no required check failing or pending.
+    struct MappingCase: Sendable, CustomTestStringConvertible {
+        let label: String
+        let ghState: String
+        let merge: String
+        var review: String = ""
+        var isDraft = false
+        var failing = false
+        var pending = false
+        let state: PRMergeableState
+        let reason: String
+
+        var testDescription: String { label }
     }
 
-    @Test("maps OPEN + BLOCKED to .blocked")
-    func mapsBlocked() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BLOCKED")
-        #expect(status == .blocked)
-    }
+    static let mappingCases: [MappingCase] = [
+        // Terminal states win over everything else.
+        MappingCase(label: "MERGED", ghState: "MERGED", merge: "UNKNOWN",
+                    state: .merged, reason: "Merged"),
+        MappingCase(label: "CLOSED over a BLOCKED verdict", ghState: "CLOSED", merge: "BLOCKED",
+                    state: .closed, reason: "Closed"),
+        MappingCase(label: "CLOSED over an UNKNOWN verdict", ghState: "CLOSED", merge: "UNKNOWN",
+                    state: .closed, reason: "Closed"),
 
-    @Test("maps OPEN + DIRTY to .blocked")
-    func mapsDirty() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "DIRTY")
-        #expect(status == .blocked)
-    }
+        // Draft, then an explicit change request, outrank the checks.
+        MappingCase(label: "draft", ghState: "OPEN", merge: "CLEAN", isDraft: true,
+                    state: .draft, reason: "Draft"),
+        MappingCase(label: "draft wins over a failing required check", ghState: "OPEN", merge: "CLEAN",
+                    isDraft: true, failing: true,
+                    state: .draft, reason: "Draft"),
+        MappingCase(label: "CHANGES_REQUESTED", ghState: "OPEN", merge: "BLOCKED",
+                    review: "CHANGES_REQUESTED",
+                    state: .changesRequested, reason: "Changes requested"),
+        MappingCase(label: "CHANGES_REQUESTED wins over CLEAN", ghState: "OPEN", merge: "CLEAN",
+                    review: "CHANGES_REQUESTED",
+                    state: .changesRequested, reason: "Changes requested"),
 
-    @Test("maps OPEN + BEHIND to .blocked")
-    func mapsBehind() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BEHIND")
-        #expect(status == .blocked)
-    }
+        // Merge verdicts with no required-check signal.
+        MappingCase(label: "CLEAN, including with only a non-required check failing",
+                    ghState: "OPEN", merge: "CLEAN",
+                    state: .mergeable, reason: "Ready to merge"),
+        MappingCase(label: "HAS_HOOKS", ghState: "OPEN", merge: "HAS_HOOKS",
+                    state: .mergeable, reason: "Ready to merge"),
+        MappingCase(label: "UNSTABLE: only non-required checks failing", ghState: "OPEN", merge: "UNSTABLE",
+                    state: .mergeable, reason: "Ready to merge"),
+        MappingCase(label: "BLOCKED with no review decision", ghState: "OPEN", merge: "BLOCKED",
+                    state: .blocked, reason: "Blocked"),
+        // REVIEW_REQUIRED with checks settled and passing is green: the only
+        // blocker is a review nobody has given yet, never a red/yellow warning.
+        MappingCase(label: "BLOCKED + REVIEW_REQUIRED, required checks passing",
+                    ghState: "OPEN", merge: "BLOCKED", review: "REVIEW_REQUIRED",
+                    state: .mergeable, reason: "Ready to merge"),
+        MappingCase(label: "DIRTY", ghState: "OPEN", merge: "DIRTY",
+                    state: .blocked, reason: "Merge conflicts"),
+        MappingCase(label: "BEHIND", ghState: "OPEN", merge: "BEHIND",
+                    state: .blocked, reason: "Behind base branch"),
+        MappingCase(label: "UNKNOWN", ghState: "OPEN", merge: "UNKNOWN",
+                    state: .pending, reason: "Checks pending"),
+        MappingCase(label: "an unknown future verdict", ghState: "OPEN", merge: "SOME_FUTURE_STATE",
+                    state: .blocked, reason: "Blocked"),
 
-    @Test("maps OPEN + UNKNOWN to .pending")
-    func mapsPendingUnknown() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "UNKNOWN")
-        #expect(status == .pending)
-    }
+        // A pending required check is yellow whatever the verdict says.
+        MappingCase(label: "UNKNOWN + required pending", ghState: "OPEN", merge: "UNKNOWN", pending: true,
+                    state: .pending, reason: "Checks pending"),
+        MappingCase(label: "CLEAN + required pending", ghState: "OPEN", merge: "CLEAN", pending: true,
+                    state: .pending, reason: "Checks pending"),
+        MappingCase(label: "BLOCKED + required pending", ghState: "OPEN", merge: "BLOCKED", pending: true,
+                    state: .pending, reason: "Checks pending"),
+        MappingCase(label: "BLOCKED + REVIEW_REQUIRED + required pending: pending wins",
+                    ghState: "OPEN", merge: "BLOCKED", review: "REVIEW_REQUIRED", pending: true,
+                    state: .pending, reason: "Checks pending"),
+        MappingCase(label: "UNSTABLE + required pending", ghState: "OPEN", merge: "UNSTABLE", pending: true,
+                    state: .pending, reason: "Checks pending"),
+        MappingCase(label: "unknown future verdict + required pending", ghState: "OPEN",
+                    merge: "SOME_FUTURE_STATE", pending: true,
+                    state: .pending, reason: "Checks pending"),
 
-    @Test("maps required pending checks to .pending")
-    func mapsPendingChecks() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "UNKNOWN",
-            requiredChecksPending: true
+        // A failing required check is red whatever the verdict says, and
+        // outranks a pending one.
+        MappingCase(label: "CLEAN + required failing", ghState: "OPEN", merge: "CLEAN", failing: true,
+                    state: .checksFailed, reason: "Checks failing"),
+        MappingCase(label: "BLOCKED + required failing", ghState: "OPEN", merge: "BLOCKED", failing: true,
+                    state: .checksFailed, reason: "Checks failing"),
+        MappingCase(label: "UNSTABLE + required failing", ghState: "OPEN", merge: "UNSTABLE", failing: true,
+                    state: .checksFailed, reason: "Checks failing"),
+        MappingCase(label: "DIRTY + required failing", ghState: "OPEN", merge: "DIRTY", failing: true,
+                    state: .checksFailed, reason: "Checks failing"),
+        MappingCase(label: "BEHIND + required failing", ghState: "OPEN", merge: "BEHIND", failing: true,
+                    state: .checksFailed, reason: "Checks failing"),
+        MappingCase(label: "unknown future verdict + required failing", ghState: "OPEN",
+                    merge: "SOME_FUTURE_STATE", failing: true,
+                    state: .checksFailed, reason: "Checks failing"),
+        MappingCase(label: "failing wins over pending (BLOCKED)", ghState: "OPEN", merge: "BLOCKED",
+                    failing: true, pending: true,
+                    state: .checksFailed, reason: "Checks failing"),
+        MappingCase(label: "failing wins over pending (CLEAN)", ghState: "OPEN", merge: "CLEAN",
+                    failing: true, pending: true,
+                    state: .checksFailed, reason: "Checks failing"),
+    ]
+
+    /// State and reason come from one function, so each row asserts both:
+    /// the icon and the words under it cannot disagree.
+    @Test("maps GitHub PR state to a mergeable state and reason", arguments: mappingCases)
+    func mapsStateAndReason(row: MappingCase) {
+        let (state, reason) = PRStatusManager.mapStateAndReason(
+            ghState: row.ghState,
+            mergeVerdictRaw: row.merge,
+            reviewVerdictRaw: row.review,
+            isDraft: row.isDraft,
+            requiredChecksFailing: row.failing,
+            requiredChecksPending: row.pending
         )
-        #expect(status == .pending)
-    }
-
-    @Test("maps OPEN + CLEAN + required pending checks to .pending")
-    func mapsPendingChecksOverClean() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN",
-            requiredChecksPending: true
-        )
-        #expect(status == .pending)
-    }
-
-    @Test("maps OPEN + BLOCKED + required pending checks to .pending")
-    func mapsPendingChecksOverBlocked() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            requiredChecksPending: true
-        )
-        #expect(status == .pending)
-    }
-
-    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + passing required checks to .mergeable")
-    func mapsReviewRequiredWithPassingChecksToMergeable() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            reviewVerdictRaw: "REVIEW_REQUIRED",
-            requiredChecksFailing: false,
-            requiredChecksPending: false
-        )
-        #expect(status == .mergeable)
-    }
-
-    @Test("maps OPEN + BLOCKED + REVIEW_REQUIRED + required pending checks to .pending (pending wins)")
-    func mapsReviewRequiredWithPendingChecksToPending() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            reviewVerdictRaw: "REVIEW_REQUIRED",
-            requiredChecksPending: true
-        )
-        #expect(status == .pending)
-    }
-
-    @Test("maps OPEN + BLOCKED + empty reviewDecision to .blocked (review-required branch off)")
-    func mapsBlockedWithEmptyReviewDecisionToBlocked() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            reviewVerdictRaw: ""
-        )
-        #expect(status == .blocked)
-    }
-
-    @Test("maps HAS_HOOKS to .mergeable")
-    func mapsHasHooks() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "HAS_HOOKS")
-        #expect(status == .mergeable)
-    }
-
-    @Test("maps UNSTABLE (non-required checks failing) to .mergeable")
-    func mapsUnstable() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "UNSTABLE")
-        #expect(status == .mergeable)
-    }
-
-    @Test("maps UNSTABLE + required pending checks to .pending (a required check still running)")
-    func mapsUnstablePendingChecks() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "UNSTABLE",
-            requiredChecksPending: true
-        )
-        #expect(status == .pending)
-    }
-
-    @Test("maps unknown future merge state to .blocked")
-    func mapsUnknownFutureMergeState() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "SOME_FUTURE_STATE")
-        #expect(status == .blocked)
-    }
-
-    @Test("maps unknown future merge state with required pending checks to .pending")
-    func mapsPendingUnknownFutureMergeState() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "SOME_FUTURE_STATE",
-            requiredChecksPending: true
-        )
-        #expect(status == .pending)
-    }
-
-    @Test("maps MERGED to .merged")
-    func mapsMerged() {
-        let status = PRStatusManager.mapState(ghState: "MERGED", mergeVerdictRaw: "UNKNOWN")
-        #expect(status == .merged)
-    }
-
-    @Test("maps CLOSED to .closed")
-    func mapsClosed() {
-        let status = PRStatusManager.mapState(ghState: "CLOSED", mergeVerdictRaw: "BLOCKED")
-        #expect(status == .closed)
-    }
-
-    @Test("maps OPEN + CHANGES_REQUESTED to .changesRequested")
-    func mapsChangesRequested() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "BLOCKED", reviewVerdictRaw: "CHANGES_REQUESTED")
-        #expect(status == .changesRequested)
-    }
-
-    @Test("maps OPEN + CLEAN + CHANGES_REQUESTED to .changesRequested (review wins)")
-    func mapsChangesRequestedOverClean() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN", reviewVerdictRaw: "CHANGES_REQUESTED")
-        #expect(status == .changesRequested)
-    }
-
-    @Test("maps draft PRs to .draft")
-    func mapsDraft() {
-        let status = PRStatusManager.mapState(ghState: "OPEN", mergeVerdictRaw: "CLEAN", isDraft: true)
-        #expect(status == .draft)
-    }
-
-    @Test("maps CLEAN + failing (non-required) status check to .mergeable")
-    func mapsNonRequiredFailingCheckStaysMergeable() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN",
-            requiredChecksFailing: false
-        )
-        #expect(status == .mergeable)
-    }
-
-    @Test("maps BLOCKED + failing (required) status check to .checksFailed")
-    func mapsRequiredFailingCheckToChecksFailed() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            requiredChecksFailing: true
-        )
-        #expect(status == .checksFailed)
-    }
-
-    @Test("draft wins over failing status checks")
-    func mapsDraftOverFailingChecks() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN",
-            isDraft: true,
-            requiredChecksFailing: true
-        )
-        #expect(status == .draft)
-    }
-
-    @Test("failing wins over pending when both signals are set (BLOCKED)")
-    func mapsFailingOverPendingBlocked() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            requiredChecksFailing: true,
-            requiredChecksPending: true
-        )
-        #expect(status == .checksFailed)
-    }
-
-    @Test("failing wins over pending when both signals are set (CLEAN)")
-    func mapsFailingOverPendingClean() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN",
-            requiredChecksFailing: true,
-            requiredChecksPending: true
-        )
-        #expect(status == .checksFailed)
-    }
-
-    @Test("maps UNSTABLE + failing required check to .checksFailed")
-    func mapsUnstableRequiredFailingToChecksFailed() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "UNSTABLE",
-            requiredChecksFailing: true
-        )
-        #expect(status == .checksFailed)
-    }
-
-    @Test("maps DIRTY + failing required check to .checksFailed")
-    func mapsDirtyRequiredFailingToChecksFailed() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "DIRTY",
-            requiredChecksFailing: true
-        )
-        #expect(status == .checksFailed)
-    }
-
-    @Test("maps BEHIND + failing required check to .checksFailed")
-    func mapsBehindRequiredFailingToChecksFailed() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BEHIND",
-            requiredChecksFailing: true
-        )
-        #expect(status == .checksFailed)
-    }
-
-    @Test("maps unknown future merge state + failing required check to .checksFailed")
-    func mapsUnknownFutureMergeStateRequiredFailingToChecksFailed() {
-        let status = PRStatusManager.mapState(
-            ghState: "OPEN",
-            mergeVerdictRaw: "SOME_FUTURE_STATE",
-            requiredChecksFailing: true
-        )
-        #expect(status == .checksFailed)
+        #expect(state == row.state)
+        #expect(reason == row.reason)
     }
 
     // MARK: - JSON parsing
@@ -1042,195 +906,6 @@ struct PRStatusManagerTests {
                 "the dropped status was never written through to the row")
     }
 
-    // MARK: - Reason computation
-
-    @Test("computeReason returns 'Merged' for merged state")
-    func reasonForMerged() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "MERGED",
-            mergeVerdictRaw: "UNKNOWN",
-            reviewVerdictRaw: "",
-            isDraft: false
-        )
-        #expect(reason == "Merged")
-    }
-
-    @Test("computeReason returns 'Closed' for closed state")
-    func reasonForClosed() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "CLOSED",
-            mergeVerdictRaw: "UNKNOWN",
-            reviewVerdictRaw: "",
-            isDraft: false
-        )
-        #expect(reason == "Closed")
-    }
-
-    @Test("computeReason returns 'Draft' for draft PRs")
-    func reasonForDraft() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN",
-            reviewVerdictRaw: "",
-            isDraft: true
-        )
-        #expect(reason == "Draft")
-    }
-
-    @Test("computeReason returns 'Ready to merge' for mergeable state")
-    func reasonForMergeable() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN",
-            reviewVerdictRaw: "",
-            isDraft: false
-        )
-        #expect(reason == "Ready to merge")
-    }
-
-    @Test("computeReason returns 'Merge conflicts' for DIRTY merge state")
-    func reasonForConflicts() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "DIRTY",
-            reviewVerdictRaw: "",
-            isDraft: false
-        )
-        #expect(reason == "Merge conflicts")
-    }
-
-    @Test("computeReason returns 'Behind base branch' for BEHIND merge state")
-    func reasonForBehind() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BEHIND",
-            reviewVerdictRaw: "",
-            isDraft: false
-        )
-        #expect(reason == "Behind base branch")
-    }
-
-    @Test("computeReason returns 'Checks failing' for failed status checks")
-    func reasonForFailingChecks() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN",
-            reviewVerdictRaw: "",
-            isDraft: false,
-            requiredChecksFailing: true
-        )
-        #expect(reason == "Checks failing")
-    }
-
-    @Test("computeReason returns 'Checks pending' for pending status checks")
-    func reasonForPendingChecks() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN",
-            reviewVerdictRaw: "",
-            isDraft: false,
-            requiredChecksPending: true
-        )
-        #expect(reason == "Checks pending")
-    }
-
-    @Test("computeReason returns 'Checks failing' for a failing required check under UNSTABLE")
-    func reasonForRequiredFailingUnderUnstable() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "UNSTABLE",
-            requiredChecksFailing: true
-        )
-        #expect(reason == "Checks failing")
-    }
-
-    @Test("computeReason returns 'Checks pending' for a pending required check under BLOCKED")
-    func reasonForRequiredPendingUnderBlocked() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            reviewVerdictRaw: "REVIEW_REQUIRED",
-            requiredChecksPending: true
-        )
-        #expect(reason == "Checks pending")
-    }
-
-    @Test("computeReason returns 'Changes requested' for CHANGES_REQUESTED review decision")
-    func reasonForChangesRequested() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            reviewVerdictRaw: "CHANGES_REQUESTED",
-            isDraft: false
-        )
-        #expect(reason == "Changes requested")
-    }
-
-    @Test("computeReason returns 'Ready to merge' for REVIEW_REQUIRED with no other blocker (green state)")
-    func reasonForReviewRequired() {
-        let reason = PRStatusManager.computeReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            reviewVerdictRaw: "REVIEW_REQUIRED",
-            isDraft: false
-        )
-        // REVIEW_REQUIRED with passing checks is actually mergeable (green), never shows a red/yellow warning
-        #expect(reason == "Ready to merge")
-    }
-
-    // MARK: - Unified state+reason pairs (critical consistency tests)
-
-    @Test("BLOCKED + REVIEW_REQUIRED + passing checks → (.mergeable, 'Ready to merge')")
-    func stateAndReasonBlockedReviewRequiredMergeable() {
-        let (state, reason) = PRStatusManager.mapStateAndReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BLOCKED",
-            reviewVerdictRaw: "REVIEW_REQUIRED"
-        )
-        #expect(state == .mergeable)
-        #expect(reason == "Ready to merge")
-    }
-
-    @Test("UNSTABLE + no required signals → (.mergeable, 'Ready to merge')")
-    func stateAndReasonUnstableNilChecksMergeable() {
-        let (state, reason) = PRStatusManager.mapStateAndReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "UNSTABLE"
-        )
-        #expect(state == .mergeable)
-        #expect(reason == "Ready to merge")
-    }
-
-    @Test("CLEAN + no pending checks → (.mergeable, 'Ready to merge')")
-    func stateAndReasonCleanMergeable() {
-        let (state, reason) = PRStatusManager.mapStateAndReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "CLEAN"
-        )
-        #expect(state == .mergeable)
-        #expect(reason == "Ready to merge")
-    }
-
-    @Test("DIRTY → (.blocked, 'Merge conflicts')")
-    func stateAndReasonDirtyConflicts() {
-        let (state, reason) = PRStatusManager.mapStateAndReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "DIRTY"
-        )
-        #expect(state == .blocked)
-        #expect(reason == "Merge conflicts")
-    }
-
-    @Test("BEHIND → (.blocked, 'Behind base branch')")
-    func stateAndReasonBehind() {
-        let (state, reason) = PRStatusManager.mapStateAndReason(
-            ghState: "OPEN",
-            mergeVerdictRaw: "BEHIND"
-        )
-        #expect(state == .blocked)
-        #expect(reason == "Behind base branch")
-    }
-
     // MARK: - Hydration & persistence
 
     /// Thread-safe fire counter for `@Sendable` callbacks.
@@ -1336,7 +1011,7 @@ struct PRStatusManagerTests {
                     "headRefName": "show-weekly-reset",
                     "isDraft": false,
                     "isCrossRepository": true,
-                    "headRepositoryOwner": { "login": "zionts" }
+                    "headRepositoryOwner": { "login": "octocat" }
                   },
                   {
                     "number": 12,
@@ -1358,7 +1033,7 @@ struct PRStatusManagerTests {
         #expect(prs[0].number == 454)
         #expect(prs[0].title == "Weekly reset job")
         #expect(prs[0].headRefName == "show-weekly-reset")
-        #expect(prs[0].headOwner == "zionts")
+        #expect(prs[0].headOwner == "octocat")
         #expect(prs[0].isCrossRepository == true)
         #expect(prs[0].isDraft == false)
         #expect(prs[1].number == 12)
@@ -2239,7 +1914,7 @@ struct PRStatusManagerTests {
                     "headRefName": "show-weekly-reset",
                     "isDraft": false,
                     "isCrossRepository": true,
-                    "headRepositoryOwner": { "login": "zionts" }
+                    "headRepositoryOwner": { "login": "octocat" }
                   }
                 ]
               }

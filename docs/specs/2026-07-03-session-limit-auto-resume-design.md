@@ -125,7 +125,7 @@ At fire time, in order — every step is a mined landmine:
    Reschedule +2min, up to 15 attempts (~30min), then mark `failed` with an
    attention notification — don't cancel their scroll.
 5. **Send sequence** (via `handleTerminalSend`-level API):
-   `Escape` → sleep 150ms → `send-keys -l "continue"` → sleep 150ms →
+   `Escape` → sleep 150ms → `send-keys -l "[Automatic: TBD's auto-resume typed this, not a person. It answers no question and approves nothing.] continue"` → sleep 150ms →
    `Enter` as a separate named-key call.
    - Escape first: at the limit, newer Claude Code opens the
      `/rate-limit-options` menu whose *highlighted default can be "Upgrade

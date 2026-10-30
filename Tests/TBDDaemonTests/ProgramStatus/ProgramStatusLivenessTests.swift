@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import os
 import TBDShared
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 
@@ -29,7 +30,6 @@ import TestSupport
         for row: OSAllocatedUnfairLock<Terminal>, now: Date
     ) -> ProgramStatusStore {
         ProgramStatusStore(
-            enabled: true,
             terminalLookup: { id in
                 let terminal = row.withLock { $0 }
                 return id == terminal.id ? terminal : nil

@@ -4,6 +4,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// **A session's pty must not survive an `exec` anywhere in the daemon.**
 ///

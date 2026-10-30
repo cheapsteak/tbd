@@ -1,4 +1,5 @@
 import Testing
+import DaemonTestSupport
 import TestSupport
 import Foundation
 @testable import TBDDaemonLib

@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 1, except the "Hydration gap" section, which is tier 2: those tests
 // observe an unstructured `Task` (`reconcileTabs` schedules `loadTabStates` in
@@ -29,16 +30,16 @@ struct ActiveTabResolutionTests {
     /// Runs `body` against a fresh `AppState` backed by a throwaway defaults
     /// suite (never the developer's real `TBDApp.plist`), torn down afterwards.
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "ActiveTabResolutionTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("ActiveTabResolutionTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(makeState(defaults))
     }
 
     private func withState(_ body: (AppState) async -> Void) async {
-        let suiteName = "ActiveTabResolutionTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("ActiveTabResolutionTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         await body(makeState(defaults))
     }
 

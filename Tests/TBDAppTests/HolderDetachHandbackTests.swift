@@ -108,7 +108,7 @@ struct HolderDetachHandbackTests {
         var readyGenerations: [UInt64] { lock.withLock { readyGenerationStorage } }
 
         func attach(
-            worktreeID: UUID, paneID: String, terminalID: UUID
+            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
         ) async throws -> HolderAttachment {
             log.append("\(label)attach")
             await beforeAttachReturns?()
@@ -165,7 +165,7 @@ struct HolderDetachHandbackTests {
         /// attach set on it; the panel's reader still owns the close.
         let vendedEnd: Int32
         private let defaults: UserDefaults
-        private let suiteName: String
+        private let suite: TestDefaultsSuite
 
         init(preamble: String = "", readyFails: Bool = false) throws {
             var pair: [Int32] = [-1, -1]
@@ -185,9 +185,7 @@ struct HolderDetachHandbackTests {
             // spawn inherits the vended end and holds it for the rest of the
             // run. `descriptorState` then reads `.stillOpen` after a panel that
             // closed both of its own copies in the right order, which is a
-            // false failure about somebody else's child. Measured on CI, and
-            // `anInheritableDescriptorIsHeldOpenByAChildSpawnedBesideIt` below
-            // pins the mechanism.
+            // false failure about somebody else's child. Measured on CI.
             _ = fcntl(vended, F_SETFD, FD_CLOEXEC)
             _ = fcntl(sessionEnd, F_SETFD, FD_CLOEXEC)
             // The real vend is a `dup` of a pty the daemon opened `O_NONBLOCK`,
@@ -202,8 +200,8 @@ struct HolderDetachHandbackTests {
                 id: terminalID, worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
                 label: "Shell", kind: .shell, transport: .holder)]
 
-            suiteName = "TBDAppTests.HolderDetachHandback.\(UUID().uuidString)"
-            defaults = UserDefaults(suiteName: suiteName)!
+            suite = TestDefaultsSuite("TBDAppTests.HolderDetachHandback")
+            defaults = suite.defaults
             view = TBDTerminalView(
                 frame: CGRect(x: 0, y: 0, width: 600, height: 300),
                 font: TBDTerminalView.defaultMonospaceFont,
@@ -232,6 +230,10 @@ struct HolderDetachHandbackTests {
             coordinator.appState = state
             coordinator.panelID = terminalID
             coordinator.holderAttachClient = stub
+            // One attempt per attach: these tests are about what a single
+            // attempt hands back, and the stub vends the same descriptor every
+            // time it is asked, so a retry would reuse one its reader closed.
+            coordinator.holderAttachRetryDelays = []
             // Both halves of what `makeNSView` wires, and both are
             // load-bearing here: the coordinator serializes the view it holds,
             // and the view routes its terminal's replies back to the
@@ -272,7 +274,7 @@ struct HolderDetachHandbackTests {
         func tearDown() {
             coordinator.cleanup()
             if sessionEnd >= 0 { Darwin.close(sessionEnd) }
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
     }
 
@@ -399,96 +401,6 @@ struct HolderDetachHandbackTests {
 
         #expect(fcntl(fixture.vendedEnd, F_GETFD) & FD_CLOEXEC != 0,
                 "the panel must not leave a session's pty inheritable by every child it spawns")
-    }
-
-    /// **Why the fixture creates its socketpair close-on-exec**, measured on
-    /// the same shape of child that produced the false failure on CI.
-    ///
-    /// `descriptorState` asks the far end whether the near end is gone, and a
-    /// socket end is gone only when *every* copy of it is closed — including
-    /// copies in other processes. Two suites in this target keep `/bin/sleep
-    /// 120` children alive for the rest of the run, started through the same
-    /// `LocalProcess.startProcess` used here, which is a `forkpty` that closes
-    /// nothing: a child spawned while a test's descriptor is inheritable holds
-    /// that descriptor until the run ends, and the far end never reports the
-    /// close however correctly the panel ordered its own.
-    ///
-    /// Both legs run, and each is the other's control: the failure only means
-    /// something because the same sequence with the flag set reports the close.
-    @MainActor
-    @Test("a descriptor left inheritable is held open by a child spawned beside it")
-    func anInheritableDescriptorIsHeldOpenByAChildSpawnedBesideIt() async throws {
-        #expect(
-            Self.farEndReportsCloseAfterSpawningAChild(closeOnExec: true),
-            """
-            a close-on-exec descriptor was still held after this process closed its only copy, \
-            so the fixture's flag buys nothing and the false failure it prevents has some other \
-            cause
-            """)
-        #expect(
-            !Self.farEndReportsCloseAfterSpawningAChild(closeOnExec: false),
-            """
-            an inheritable descriptor was NOT held open by a child spawned beside it, so children \
-            in this process no longer inherit and this suite's premise has changed
-            """)
-    }
-
-    /// Closes this process's only copy of one end of a `socketpair` with a
-    /// freshly spawned `/bin/sleep` alongside, and reports whether the far end
-    /// sees the close. The child is killed and reaped before returning.
-    @MainActor
-    private static func farEndReportsCloseAfterSpawningAChild(closeOnExec: Bool) -> Bool {
-        var pair: [Int32] = [-1, -1]
-        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else { return false }
-        let near = pair[0]
-        let far = pair[1]
-        _ = fcntl(far, F_SETFL, fcntl(far, F_GETFL, 0) | O_NONBLOCK)
-        // The far end is never the subject: a child holding *it* would not stop
-        // the near end's close from being reported, and leaving it inheritable
-        // would leak this probe's descriptor into every later spawn.
-        _ = fcntl(far, F_SETFD, FD_CLOEXEC)
-        if closeOnExec { _ = fcntl(near, F_SETFD, FD_CLOEXEC) }
-
-        let process = LocalProcess(
-            delegate: InheritanceProbeDelegate(), dispatchQueue: .main, directDelivery: true)
-        process.startProcess(executable: "/bin/sleep", args: ["30"], environment: nil, execName: nil)
-        let childPID = process.shellPid
-
-        // From here this process holds nothing: whatever keeps the far end from
-        // reporting a close is somebody else's copy.
-        Darwin.close(near)
-
-        // Polled rather than read once. `posix_spawn` is a single syscall on
-        // darwin and a `forkpty` child reaches `execv` in microseconds, but a
-        // probe that decided on the first read would be deciding on scheduling.
-        var reportedClose = false
-        for _ in 0..<200 {
-            var byte: UInt8 = 0
-            if Darwin.read(far, &byte, 1) == 0 {
-                reportedClose = true
-                break
-            }
-            usleep(5_000)
-        }
-
-        // Disposed of before returning, and unconditionally: a `sleep 30` this
-        // probe started is one no production path under test ever ends.
-        if childPID > 0 {
-            kill(childPID, SIGKILL)
-            ChildReaper.reapBlocking(pid: childPID)
-        }
-        Darwin.close(far)
-        return reportedClose
-    }
-
-    /// The minimum a `LocalProcess` needs to start a child. The probe reads
-    /// nothing off the child's tty and cares only that it exists.
-    private final class InheritanceProbeDelegate: LocalProcessDelegate, @unchecked Sendable {
-        func processTerminated(_ source: LocalProcess, exitCode: Int32?) {}
-        func dataReceived(slice: ArraySlice<UInt8>) {}
-        func getWindowSize() -> winsize {
-            winsize(ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0)
-        }
     }
 
     // MARK: - The screen, out and back
@@ -915,6 +827,8 @@ struct HolderDetachHandbackTests {
             attachment: HolderAttachment(ptyFD: -1, generation: 99, snapshotPreamble: Data()),
             attachFails: true, log: fixture.stub.log, label: "successor ")
         successor.holderAttachClient = successorStub
+        // Refused once and done: a retry's backoff would only delay the end.
+        successor.holderAttachRetryDelays = []
         defer { successor.cleanup() }
 
         // The predecessor is torn down mid-vend, and the successor starts

@@ -27,13 +27,13 @@ struct ClickedPathResolverTests {
     }
 
     @Test func relativePath_resolvesAgainstWorktree() {
-        #expect(resolve("docs/nightwatch.md", existing: ["/work/tree/docs/nightwatch.md"])
-                == "/work/tree/docs/nightwatch.md")
+        #expect(resolve("docs/guide.md", existing: ["/work/tree/docs/guide.md"])
+                == "/work/tree/docs/guide.md")
     }
 
     @Test func relativePath_withEmptyWorktree_returnsNil() {
-        #expect(resolve("docs/nightwatch.md",
-                        existing: ["/work/tree/docs/nightwatch.md"],
+        #expect(resolve("docs/guide.md",
+                        existing: ["/work/tree/docs/guide.md"],
                         worktreePath: "") == nil)
     }
 

@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -26,8 +27,8 @@ private enum StartupReconcileProbeError: Error {
 }
 
 /// Tests that `Daemon.performStartupReconciliation` correctly gates the
-/// DB-mutating startup work on `mockMode`. Avoids real socket/HTTP servers
-/// by testing the extracted seam directly.
+/// DB-mutating startup work on `mockMode`. Avoids a real socket server by
+/// testing the extracted seam directly.
 @Suite("DaemonMockGateTests")
 struct DaemonMockGateTests {
 

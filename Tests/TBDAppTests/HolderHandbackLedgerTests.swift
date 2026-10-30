@@ -198,4 +198,149 @@ struct HolderHandbackLedgerTests {
         await ledger.awaitSettled(terminalID: id)
         #expect(!ledger.isInFlight(terminalID: id))
     }
+
+    @MainActor
+    @Test("awaitResends waits for a background resend, and only resends are its business")
+    func awaitResendsWaitsForTheResend() async {
+        let ledger = HolderHandbackLedger()
+        let id = UUID()
+        let gate = Gate()
+        ledger.registerResend(terminalID: id, task: Task { await gate.wait() })
+        #expect(ledger.isResending(terminalID: id))
+        #expect(!ledger.isInFlight(terminalID: id), "a resend must not hold a successor's first attempt")
+
+        let returned = Returned()
+        let waiter = Task { @MainActor in
+            let waited = await ledger.awaitResends(terminalID: id)
+            returned.raised = true
+            return waited
+        }
+        // The waiter is queued on the main actor this test holds; yielding is
+        // what lets it run and park.
+        for _ in 0..<1_000 where ledger.resendWaiters == 0 { await Task.yield() }
+        #expect(ledger.resendWaiters == 1, "the waiter never parked")
+        #expect(!returned.raised, "the waiter returned while the resend was still going")
+
+        await gate.open()
+        #expect(await waiter.value, "the waiter must report that it waited")
+        #expect(!ledger.isResending(terminalID: id))
+    }
+
+    /// A torn-down panel can be parked here; cancelling it must end the wait
+    /// at once rather than hold the panel for the rest of somebody's resend
+    /// schedule. The resend itself is not the waiter's to stop.
+    @MainActor
+    @Test("awaitResends ends when its caller is cancelled, with the resend still going")
+    func awaitResendsEndsOnCancellation() async {
+        let ledger = HolderHandbackLedger()
+        let id = UUID()
+        let gate = Gate()
+        ledger.registerResend(terminalID: id, task: Task { await gate.wait() })
+
+        let waiter = Task { @MainActor in await ledger.awaitResends(terminalID: id) }
+        for _ in 0..<1_000 where ledger.resendWaiters == 0 { await Task.yield() }
+        #expect(ledger.resendWaiters == 1, "the waiter never parked")
+        waiter.cancel()
+        _ = await waiter.value
+
+        #expect(ledger.resendWaiters == 0, "a cancelled waiter stayed parked")
+        #expect(ledger.isResending(terminalID: id), "cancelling a waiter must not drop the resend")
+        await gate.open()
+    }
+
+    // MARK: - The held set
+
+    @MainActor
+    @Test("holds mint increasing seqs, and the snapshot reports the highest")
+    func holdsMintIncreasingSeqs() {
+        let ledger = HolderHandbackLedger()
+        #expect(ledger.reconcileSnapshot().throughSeq == 0, "no seq is minted before the first hold")
+        #expect(ledger.reconcileSnapshot().held.isEmpty)
+
+        let first = ledger.beginHold(terminalID: UUID())
+        let second = ledger.beginHold(terminalID: UUID())
+
+        #expect(first.attachSeq == 1)
+        #expect(second.attachSeq == 2)
+        let snapshot = ledger.reconcileSnapshot()
+        #expect(snapshot.throughSeq == 2)
+        #expect(Set(snapshot.held) == [first.terminalID, second.terminalID])
+        #expect(snapshot.held.count == 2, "held lists each terminal once: \(snapshot.held)")
+    }
+
+    /// When SwiftUI swaps the view hosting a terminal, the closing panel's
+    /// handback and its successor's attach are both open on one terminal.
+    /// Ending either alone must leave the terminal held.
+    @MainActor
+    @Test("a terminal stays held until every hold on it ends")
+    func aTerminalStaysHeldUntilEveryHoldEnds() {
+        let ledger = HolderHandbackLedger()
+        let id = UUID()
+        let closing = ledger.beginHold(terminalID: id)
+        let successor = ledger.beginHold(terminalID: id)
+        #expect(ledger.reconcileSnapshot().held == [id], "one terminal is listed once")
+
+        ledger.endHold(closing)
+        #expect(ledger.isHeld(id), "the successor's hold still stands")
+
+        ledger.endHold(successor)
+        #expect(!ledger.isHeld(id))
+        #expect(ledger.reconcileSnapshot().throughSeq == 2, "ending holds unmints nothing")
+    }
+
+    @MainActor
+    @Test("endHold is idempotent and ends only the hold it names")
+    func endHoldIsIdempotent() {
+        let ledger = HolderHandbackLedger()
+        let id = UUID()
+        let first = ledger.beginHold(terminalID: id)
+        let second = ledger.beginHold(terminalID: id)
+
+        ledger.endHold(first)
+        ledger.endHold(first)
+        #expect(ledger.isHeld(id), "ending one hold twice ended another")
+
+        ledger.endHold(second)
+        ledger.endHold(second)
+        #expect(!ledger.isHeld(id))
+        #expect(ledger.reconcileSnapshot().held.isEmpty)
+    }
+
+    /// The ordering `throughSeq` exists for: the daemon may receive a sweep
+    /// and an attach in either order, so a sweep may take back only attaches
+    /// numbered at or below the seq it was built with.
+    @MainActor
+    @Test("an attach started after a snapshot is numbered above it")
+    func anAttachStartedAfterASnapshotIsAboveIt() {
+        let ledger = HolderHandbackLedger()
+        _ = ledger.beginHold(terminalID: UUID())
+        let snapshot = ledger.reconcileSnapshot()
+
+        let later = ledger.beginHold(terminalID: UUID())
+
+        #expect(later.attachSeq > snapshot.throughSeq,
+                "seq \(later.attachSeq) is not above the snapshot's \(snapshot.throughSeq)")
+        #expect(!snapshot.held.contains(later.terminalID))
+    }
+
+    @MainActor
+    @Test("a hold handed to a resend ends when the resend finishes, not before")
+    func aResendEndsItsHoldWhenItFinishes() async {
+        let ledger = HolderHandbackLedger()
+        let id = UUID()
+        let gate = Gate()
+        let hold = ledger.beginHold(terminalID: id)
+        let resend = Task { await gate.wait() }
+        ledger.registerResend(terminalID: id, task: resend, endingHold: hold)
+
+        for _ in 0..<20 { await Task.yield() }
+        #expect(ledger.isHeld(id), "the hold ended while its resend was still going")
+
+        await gate.open()
+        await resend.value
+        // The hold ends on the completion hop, one main-actor turn behind the
+        // resend. Bounded, so a missing end fails rather than spins.
+        for _ in 0..<1_000 where ledger.isHeld(id) { await Task.yield() }
+        #expect(!ledger.isHeld(id), "the hold outlived its resend")
+    }
 }

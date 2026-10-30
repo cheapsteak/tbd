@@ -1,3 +1,4 @@
+#if TBD_HARNESSES
 import AppKit
 import SwiftUI
 import Testing
@@ -23,10 +24,15 @@ import TBDShared
 /// alignment guides) seen in real hover/activation spindumps, so this bench is
 /// a lower bound on a flattening's real-world benefit, not the whole story.
 ///
-/// Inert during normal `swift test`: the test early-returns unless
-/// `TBD_PERF_BENCH=1`, so it never slows the regular suite. Run explicitly:
+/// Compiled only when the `TBD_HARNESSES` condition is set (see
+/// `Tests/CLAUDE.md`), so a normal run neither builds nor schedules it, and
+/// even then the test early-returns unless `TBD_PERF_BENCH=1`. Run explicitly:
 ///
-///     TBD_PERF_BENCH=1 swift test --filter TranscriptEagerMeasureBench
+///     TBD_PERF_BENCH=1 scripts/test.sh -Xswiftc -DTBD_HARNESSES \
+///         --filter TranscriptEagerMeasureBench
+///
+/// Nothing in CI compiles this file, so a refactor elsewhere can leave it
+/// failing to build; fix it when you next enable it.
 ///
 /// ## Why chunked + autoreleasepool, not one giant VStack
 ///
@@ -169,3 +175,4 @@ struct TranscriptEagerMeasureBench {
         return sorted[mid]
     }
 }
+#endif

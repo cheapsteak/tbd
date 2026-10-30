@@ -18,9 +18,9 @@ import TBDShared
 @Suite("Remote attach reconnect")
 struct RemoteAttachReconnectTests {
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RemoteAttachReconnect.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachReconnect")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

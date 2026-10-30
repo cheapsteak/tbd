@@ -256,8 +256,7 @@ final class QuietIngestHarness {
 
     private let process: LocalProcess
     private let outgoing: OutgoingRecorder
-    private let defaults: UserDefaults
-    private let defaultsSuiteName: String
+    private let defaultsSuite: TestDefaultsSuite
     private let notifications = MainCounter()
     private let beeps = MainCounter()
 
@@ -269,8 +268,7 @@ final class QuietIngestHarness {
         outgoing: OutgoingRecorder,
         worktreeID: UUID,
         terminalID: UUID,
-        defaults: UserDefaults,
-        defaultsSuiteName: String
+        defaultsSuite: TestDefaultsSuite
     ) {
         self.appState = appState
         self.coordinator = coordinator
@@ -279,8 +277,7 @@ final class QuietIngestHarness {
         self.outgoing = outgoing
         self.worktreeID = worktreeID
         self.terminalID = terminalID
-        self.defaults = defaults
-        self.defaultsSuiteName = defaultsSuiteName
+        self.defaultsSuite = defaultsSuite
         self.childPID = process.shellPid
         let counter = notifications
         terminalView.onNotification = { _, _ in counter.increment() }
@@ -358,7 +355,7 @@ final class QuietIngestHarness {
         // The child never exits on its own; end it now. `LocalProcess`'s own
         // exit monitor does the `waitpid`.
         if childPID > 0 { kill(childPID, SIGKILL) }
-        defaults.removePersistentDomain(forName: defaultsSuiteName)
+        defaultsSuite.tearDown()
     }
 }
 
@@ -368,8 +365,8 @@ final class QuietIngestHarness {
 func makeCoordinatorHarness() -> QuietIngestHarness {
     // Isolated defaults: `UserDefaults.standard` on this unbundled executable is
     // the developer's real TBDApp.plist.
-    let suiteName = "TBDAppTests.QuietIngest.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
+    let suite = TestDefaultsSuite("TBDAppTests.QuietIngest")
+    let defaults = suite.defaults
     let appState = AppState(userDefaults: defaults)
 
     let worktreeID = UUID()
@@ -426,8 +423,7 @@ func makeCoordinatorHarness() -> QuietIngestHarness {
         outgoing: outgoing,
         worktreeID: worktreeID,
         terminalID: terminalID,
-        defaults: defaults,
-        defaultsSuiteName: suiteName
+        defaultsSuite: suite
     )
 }
 

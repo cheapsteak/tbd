@@ -284,15 +284,10 @@ actor TerminalTransportMigrator {
         case .notFound:
             return .skipped(reason: Self.notFoundSkip)
         case .notEligible(let reason):
-            // The park's own rails, surfaced verbatim. A migration discards
-            // typed-but-unsent input, so a rail that refuses is protecting the
-            // session and its reason is the one a person should read.
-            logger.debug("transport migration: skipping \(terminalID, privacy: .public) — the park refused: \(reason, privacy: .public)")
-            return .skipped(reason: reason)
-        case .draftUnconfirmed(let unconfirmed):
-            // The park is a manual one with no override, so a session whose
-            // draft TBD cannot confirm is skipped like any other refusal.
-            let reason = ComposerDraftParkGate.unconfirmedRefusal(reason: unconfirmed)
+            // The park's own rails, surfaced verbatim. A rail that refuses is
+            // protecting the session — a turn in flight, a permission prompt,
+            // a transcript mid-write — and its reason is the one a person
+            // should read.
             logger.debug("transport migration: skipping \(terminalID, privacy: .public) — the park refused: \(reason, privacy: .public)")
             return .skipped(reason: reason)
         }

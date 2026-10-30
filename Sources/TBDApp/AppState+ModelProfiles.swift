@@ -44,9 +44,6 @@ extension AppState {
             if result.autoCreateNotesEnabled != autoCreateNotesEnabled {
                 autoCreateNotesEnabled = result.autoCreateNotesEnabled
             }
-            if result.nightwatchMode != nightwatchMode {
-                nightwatchMode = result.nightwatchMode
-            }
             if result.autoResumeOnLimitReset != autoResumeOnLimitReset {
                 autoResumeOnLimitReset = result.autoResumeOnLimitReset
             }
@@ -241,34 +238,6 @@ extension AppState {
         }
     }
 
-    /// Load supervision's fleet-wide authority switch (`true` == enabled ==
-    /// the fleet brake released) from the daemon `Config`. Called on launch
-    /// and whenever a config-change delta arrives — same two call sites as
-    /// `loadHibernationConfig()`, kept as its own function rather than
-    /// folded into that one so this feature's wiring stays legible on its
-    /// own diff. Silent on failure — the toggle just shows a stale value
-    /// until the next successful load.
-    func loadSupervisionConfig() async {
-        guard let config = await fetchConfig() else { return }
-        if config.supervisionEnabled != supervisionEnabled {
-            supervisionEnabled = config.supervisionEnabled
-        }
-    }
-
-    /// Persist supervision's fleet-wide authority switch (design 2026-07-26
-    /// §3, §7). `enabled: true` releases the fleet brake; `false` engages it.
-    /// Shipped OFF (braked); for now inert, since the rest of the supervision
-    /// subsystem is landing in the same series of changes.
-    func setSupervisionEnabled(_ enabled: Bool) async {
-        do {
-            try await daemonClient.setSupervisionEnabled(enabled)
-            supervisionEnabled = enabled
-        } catch {
-            logger.error("Failed to set supervisionEnabled: \(error, privacy: .public)")
-            showAlert("Failed to update supervision setting: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Set the global session-limit auto-resume gate. Turning it OFF also
     /// cancels all pending scheduled resumes daemon-side.
     func setAutoResumeOnLimitReset(_ enabled: Bool) async {
@@ -342,19 +311,6 @@ extension AppState {
         }
     }
 
-    /// Persist the pending-input veto for auto-hibernate, then re-fetch
-    /// capabilities so the Settings toggle reflects the daemon's EFFECTIVE
-    /// state. Applies on the next hibernation sweep.
-    func setHibernateInputVetoEnabled(_ enabled: Bool) async {
-        do {
-            try await hibernateInputVetoSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set pending-input veto: \(error, privacy: .public)")
-            showAlert("Failed to set pending-input veto: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     /// Persist the auto-close-setup-tab soak flag, then re-fetch capabilities
     /// so the Settings toggle reflects the daemon's persisted state. Applies
     /// to the next worktree creation.
@@ -407,19 +363,19 @@ extension AppState {
         "Requires the TBDHolder helper beside the daemon binary; this daemon could not find it."
 
     /// Whether the pty-holder toggle is interactive, from what
-    /// `daemon.capabilities` reports.
+    /// `daemon.capabilities` reports: exactly when the daemon can start a
+    /// holder, whichever way the flag sits.
     ///
-    /// A daemon with no `TBDHolder` helper honors the flag by falling back to
-    /// tmux on every spawn, so flipping it ON there changes nothing and the
-    /// control is greyed. Flipping it OFF is a different matter: the *effective*
-    /// flag is what `NightwatchHolderGate` reads, so an install that left it at
-    /// the shipped ON has its watch modes refused and turned off at boot even
-    /// on a daemon that cannot start a holder — and the only way to get them
-    /// back is to turn the transport off. Greying the toggle out there would
-    /// name a remedy and withhold the control for it. So the toggle goes inert
-    /// only where neither direction does anything.
-    static func ptyHolderToggleIsInteractive(supported: Bool, flagOn: Bool) -> Bool {
-        supported || flagOn
+    /// A daemon with no `TBDHolder` helper runs every new session in tmux in
+    /// either position of the flag, so the control is greyed in both.
+    /// Unfetched capabilities read as unsupported, so the toggle is never
+    /// offered on a claim the daemon has not made.
+    ///
+    /// Takes the whole capability result rather than the one field it reads,
+    /// so a test can supply the flag in both positions and pin that it plays
+    /// no part.
+    static func ptyHolderToggleIsInteractive(_ capabilities: DaemonCapabilitiesResult?) -> Bool {
+        capabilities?.ptyHolderSupported ?? false
     }
 
     /// Persist the pty-holder transport gate, then re-fetch capabilities so the
@@ -437,8 +393,8 @@ extension AppState {
             logger.error("Failed to set pty holder transport: \(error, privacy: .public)")
             showAlert(
                 "Failed to set the session transport: \(error.localizedDescription)", isError: true)
-            // A refusal (e.g. a watch mode is active) leaves the daemon's value
-            // unchanged; re-fetch so the toggle snaps back to it.
+            // A failed write leaves the daemon's value unchanged; re-fetch so
+            // the toggle snaps back to it.
             await refreshDaemonCapabilities()
         }
     }
@@ -878,55 +834,6 @@ extension AppState {
         }
     }
 
-    // MARK: - Nightwatch Mode
-
-    /// Whether the pty-holder transport blocks the watch modes, as the controls
-    /// read it — the same three terms the daemon's own refusal asks, so the
-    /// control and the RPC cannot disagree: the effective flag, this daemon's
-    /// ability to start a holder, and whether one is already alive.
-    ///
-    /// Unfetched capabilities read as not blocking, so the controls are never
-    /// disabled on a claim the daemon has not made. That direction is
-    /// deliberate and it is the app's only divergence from the daemon: the
-    /// daemon refuses authoritatively, so the worst case is a click that comes
-    /// back with the refusal text, where the opposite default would grey out a
-    /// mode the daemon would have accepted.
-    var holderBlocksWatchModes: Bool {
-        guard let capabilities = daemonCapabilities else { return false }
-        return NightwatchHolderGate.watchModesBlocked(
-            holderEnabled: capabilities.ptyHolderEnabled,
-            holderSupported: capabilities.ptyHolderSupported,
-            holderSessionsLive: capabilities.ptyHolderSessionsLive)
-    }
-
-    /// Help text for the Settings "Nightwatch / Daywatch" toggle. A stored
-    /// constant so it is assertable; it ends with the deprecation sentence,
-    /// shown regardless of the holder flag.
-    static let nightwatchSettingsHelp = """
-        An autonomous fleet babysitter. It sweeps your \
-        worktrees, keeps stuck agents unblocked, and gates open PRs, using \
-        cheap local scripts and only paging a model for genuine judgment \
-        calls. Daywatch (◐) is a lighter pass for when you're at the \
-        keyboard; Nightwatch (🌙) is the fuller autonomous mode for when \
-        you're away. It acts on your live fleet — nudging stuck \
-        sessions and dispatching work — and its behavior and safety \
-        rules are still changing. Turning this \
-        on reveals the mode controls (sidebar footer and menu bar); \
-        off hides both. You still merge PRs and make prod/access \
-        calls yourself.
-        """ + " " + NightwatchHolderGate.deprecationNotice
-
-    /// Set the nightwatch mode (off, daywatch, or nightwatch).
-    func setNightwatchMode(_ mode: NightwatchMode) async {
-        do {
-            try await daemonClient.setNightwatchMode(mode)
-            nightwatchMode = mode
-        } catch {
-            logger.error("Failed to set nightwatch mode: \(error, privacy: .public)")
-            showAlert("Failed to set nightwatch mode: \(error.localizedDescription)", isError: true)
-        }
-    }
-
     // MARK: - Account Load Balancing
 
     /// Persist the profile-balancing soak flag and refresh daemon capabilities.
@@ -953,21 +860,6 @@ extension AppState {
         } catch {
             logger.error("Failed to set PR poll schedule: \(error, privacy: .public)")
             showAlert("Failed to set PR polling: \(error.localizedDescription)", isError: true)
-        }
-    }
-
-    // MARK: - Program Status Protocol
-
-    /// Persist the Program Status Protocol gate and refresh daemon
-    /// capabilities, so the toggle shows what the daemon holds. Applies to
-    /// Claude sessions started after the change.
-    func setProgramStatusEnabled(_ enabled: Bool) async {
-        do {
-            try await programStatusFlagSetter(enabled)
-            await refreshDaemonCapabilities()
-        } catch {
-            logger.error("Failed to set program status: \(error, privacy: .public)")
-            showAlert("Failed to set Claude session status: \(error.localizedDescription)", isError: true)
         }
     }
 
@@ -998,6 +890,22 @@ extension AppState {
         } catch {
             logger.error("Failed to set composer draft: \(error, privacy: .public)")
             showAlert("Failed to set composer drafts: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // MARK: - Holder claim reconcile
+
+    /// Persist the holder claim-reconcile gate and refresh daemon
+    /// capabilities, so the toggle shows what the daemon holds. The daemon
+    /// reads the flag on every sweep, so it applies from the next poll tick.
+    /// The app sweeps either way; the flag decides whether the daemon acts.
+    func setHolderClaimReconcileEnabled(_ enabled: Bool) async {
+        do {
+            try await holderClaimReconcileFlagSetter(enabled)
+            await refreshDaemonCapabilities()
+        } catch {
+            logger.error("Failed to set holder claim reconcile: \(error, privacy: .public)")
+            showAlert("Failed to set session reclaiming: \(error.localizedDescription)", isError: true)
         }
     }
 

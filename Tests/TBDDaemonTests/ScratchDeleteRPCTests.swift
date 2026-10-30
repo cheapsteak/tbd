@@ -1,8 +1,10 @@
 import Testing
+import DaemonTestSupport
 import TestSupport
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 extension TBDHomeSerialized {
 @Suite("scratch.delete RPC")

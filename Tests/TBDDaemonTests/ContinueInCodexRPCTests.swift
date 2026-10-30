@@ -2,6 +2,8 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
+import DaemonTestSupport
 import TestSupport
 
 @Suite("terminal.continueInCodex RPC")
@@ -156,6 +158,36 @@ struct ContinueInCodexRPCTests {
         #expect(!launch.contains("continue this"))
         #expect(!fixture.recorder.commands.contains { $0.contains("send-keys") })
         #expect(!fixture.recorder.commands.contains { $0.contains("paste-buffer") })
+    }
+
+    @Test("start admission holds the continuation before any Codex window opens",
+          arguments: [true, false])
+    func startAdmissionGatesTheContinuation(flagOn: Bool) async throws {
+        let fixture = try await makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let source = try await createClaudeSource(in: fixture)
+        let stub = StubAdmission(.hold(reason: "camera in use"))
+        fixture.router.startAdmission = stub
+        try await fixture.db.config.setStartAdmissionEnabled(flagOn)
+
+        let response = await fixture.router.handle(try RPCRequest(
+            method: RPCMethod.terminalContinueInCodex,
+            params: TerminalContinueInCodexParams(terminalID: source.id)))
+
+        if flagOn {
+            #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
+            #expect(response.error == "camera in use")
+            #expect(stub.requests.map(\.kind) == [.create])
+            #expect(stub.requests.first?.agent == .codex)
+            #expect(!fixture.recorder.commands.contains { $0.contains("new-window") })
+            // Neither the Codex launch preparation nor the import ran.
+            #expect(fixture.recorder.events.isEmpty)
+            #expect(try await fixture.db.terminals.list(
+                worktreeID: fixture.worktree.id) == [source])
+        } else {
+            #expect(response.success)
+            #expect(stub.requests.isEmpty)
+        }
     }
 
     @Test("non-Claude source fails before every launch and import seam")

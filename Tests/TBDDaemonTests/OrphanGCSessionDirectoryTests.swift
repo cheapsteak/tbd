@@ -44,7 +44,10 @@ struct OrphanGCSessionDirectoryTests: ~Copyable {
             remoteTranscriptsEnvironment: ["TBD_HOME": home.path],
             reposBase: home.appendingPathComponent("repos", isDirectory: true),
             sessionsBase: sessionsBase,
-            devServersBase: home.appendingPathComponent("ds", isDirectory: true))
+            devServersBase: home.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: home.appendingPathComponent("rt", isDirectory: true),
+            scratchSpacesBase: home.appendingPathComponent("sc", isDirectory: true),
+            worktreesBase: home.appendingPathComponent("wt", isDirectory: true))
     }
 
     private var grace: TimeInterval { TimeInterval(Config.defaultGCGraceSeconds) }

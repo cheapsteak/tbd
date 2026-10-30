@@ -104,12 +104,13 @@ public enum HandoverDecision: Equatable, Sendable {
 public struct DaemonHandover: Sendable {
     /// How long to wait for a polite exit before escalating.
     ///
-    /// **30 s is sized to `stop()`, and the alternative is what went wrong.**
-    /// `restart.sh` sends the daemon `SIGTERM`, sleeps **0.5 s**, and then
-    /// deletes the pid, socket and port files and starts the new daemon
-    /// regardless of whether the old one has finished — so a shutdown that
-    /// takes longer than half a second overlaps its successor and loses its own
-    /// files out from under it. Half a second is not a budget, it is a hope.
+    /// **30 s is sized to `stop()`, not to a guess at how long it takes.** A
+    /// successor that starts before its predecessor's shutdown has finished
+    /// overlaps it: the predecessor goes on answering on its socket after it
+    /// has let go of its sessions, and its teardown removes files the
+    /// successor has just created. So the wait is for the shutdown to end.
+    /// `scripts/update.sh` and `scripts/restart.sh` both replace the daemon
+    /// through this handover, so these are the budgets every replacement gets.
     ///
     /// The real shutdown is a sequence of awaits: the usage pollers and the
     /// limit-resume scheduler stop, every holder reader is released one at a
@@ -277,8 +278,8 @@ public struct HandoverClaim: Sendable {
     public func takeOver(from predecessor: pid_t) async throws -> Result {
         // Claim first. With our pid in the file from this instant, every
         // spurious spawn during the retirement — the app's two-second poller,
-        // a stray `restart.sh` — meets a file naming a live daemon and exits at
-        // the same gate we just came through.
+        // a daemon started by hand — meets a file naming a live daemon and
+        // exits at the same gate we just came through.
         try writeClaim(ownPID)
         handoverLogger.info("handover: claimed the pid file from predecessor daemon \(predecessor, privacy: .public); retiring it now")
 

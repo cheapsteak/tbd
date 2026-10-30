@@ -159,8 +159,8 @@ public struct TmuxManager: Sendable {
     /// Optional test hook consulted by `paneCurrentCommand` in dryRun mode:
     /// `(server, paneID)` → the command string to report. Without it, dryRun
     /// always reports "zsh" (no claude), which makes the park path's verify-exit
-    /// poll always see an immediate polite `/exit` — untestable for the
-    /// SIGTERM-fallback branch where claude is still running after the poll.
+    /// poll always see Claude leave at once — untestable for the branch where
+    /// claude is still running after the poll.
     public let dryRunPaneCurrentCommand: (@Sendable (String, String) -> String)?
     /// Optional test hook consulted by `createWindow` in dryRun mode: return a
     /// non-nil error for a server name to simulate window creation failing
@@ -980,9 +980,12 @@ public struct TmuxManager: Sendable {
     /// of `#{pane_start_command}`, because TBD plants `TBD_TERMINAL_ID` through
     /// the `env` map and `newWindowCommand` inlines that map as an
     /// `export KEY='value'; ` prefix on the command string — so every pane
-    /// spawned before the option existed still carries its own id. macOS forbids
-    /// reading another process's environment (SIP), so the start command, not
-    /// `ps eww`, is where the planted value remains legible.
+    /// spawned before the option existed still carries its own id. The start
+    /// command, not `ps eww`, is where the planted value remains legible: the
+    /// pane's own process is its shell, usually `/bin/zsh`, and macOS returns no
+    /// environment for an Apple platform binary. Where it does return one, it is
+    /// only the environment the process had at exec, and the export prefix sets
+    /// the id after the shell has started.
     ///
     /// The fallback is deliberately narrow, because the start command also
     /// carries *user-authored free text*: the env map is inlined sorted by key,
@@ -1102,11 +1105,6 @@ public struct TmuxManager: Sendable {
 
     public static func listAllPanePIDsCommand(server: String) -> [String] {
         ["-L", server, "list-panes", "-a", "-F", "#{pane_pid}"]
-    }
-
-    /// send-keys without -l so "Enter" is interpreted as a key name, not literal text.
-    public static func sendCommandArgs(server: String, paneID: String, command: String) -> [String] {
-        ["-L", server, "send-keys", "-t", paneID, command, "Enter"]
     }
 
     // MARK: - Instance Execution Methods
@@ -1703,15 +1701,6 @@ public struct TmuxManager: Sendable {
             if let pid = Int32(line.trimmingCharacters(in: .whitespaces)) { pids.insert(pid) }
         }
         return pids
-    }
-
-    public func sendCommand(server: String, paneID: String, command: String) async throws {
-        let args = Self.sendCommandArgs(server: server, paneID: paneID, command: command)
-        if dryRun {
-            dryRunRecorder?(args)
-            return
-        }
-        try await runTmux(args)
     }
 
     public func listWindows(server: String, session: String) async throws -> [(windowID: String, paneID: String)] {

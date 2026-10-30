@@ -551,9 +551,8 @@ when a composer is shown.
 The daemon's not-running refusal, with its exit stamp and inspector rail, and
 the app passing a wake prompt, are corrections to existing paths rather than
 new ways for input to reach a session. The wake prompt is an existing parameter
-that the CLI's wake command already passes and that the nightwatch skill
-already uses to resume a parked session with a composed prompt; the composer is
-one more caller of it.
+that the CLI's wake command already passes to resume a parked session with a
+composed prompt; the composer is one more caller of it.
 
 The exit stamp is safe to record unconditionally on its own terms. It
 transcribes a fact the agent's own `SessionEnd` hook reported — that the

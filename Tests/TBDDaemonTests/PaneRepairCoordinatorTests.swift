@@ -105,23 +105,26 @@ struct PaneRepairCoordinatorTests {
     }
 
     /// Poll-read `fd` (nonblocking) until `condition` holds on the
-    /// accumulated text or the deadline passes.
+    /// accumulated text, EOF, or the deadline passes. Delegates to
+    /// `pollUntilTrue`, so the pipe is read once more after the deadline: a
+    /// poll sleep that resumes late under load cannot return a stale sample
+    /// missing bytes that landed while it slept.
     private func readUntil(
         fd: Int32, deadline: Duration = ciSafeDeadline,
         _ condition: @Sendable (String) -> Bool
     ) async -> String {
         var out = Data()
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        let end = ContinuousClock.now + deadline
-        while ContinuousClock.now < end {
-            let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
-            if n > 0 {
-                out.append(contentsOf: buffer[0..<n])
-                if condition(String(decoding: out, as: UTF8.self)) { break }
-                continue
+        _ = await pollUntilTrue(timeout: deadline, pollInterval: .milliseconds(10)) {
+            while true {
+                let n = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+                if n > 0 {
+                    out.append(contentsOf: buffer[0..<n])
+                    if condition(String(decoding: out, as: UTF8.self)) { return true }
+                    continue
+                }
+                return n == 0  // EOF ends the wait; EAGAIN keeps polling
             }
-            if n == 0 { break }  // EOF
-            try? await Task.sleep(for: .milliseconds(10))
         }
         return String(decoding: out, as: UTF8.self)
     }

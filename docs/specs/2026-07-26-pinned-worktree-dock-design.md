@@ -9,18 +9,25 @@ Reaching a worktree you use constantly means finding it in the scrolling repo li
 time. Repos collapse, sections reorder, the list grows — the row moves. There is no surface
 that keeps a chosen worktree in the same place on screen.
 
-The Watch Desk has the same problem in a sharper form. When daywatch or nightwatch is on,
-the desk is the session you most want one click away, and today the only shortcut to it is a
-text label in the app's bottom status bar (`NightwatchDeskStatusLabel`, PR #507). That label
-is a one-off: it is not a worktree row, so it carries none of a row's status, PR, or
-context-menu affordances, and it lives nowhere near the other worktrees.
-
 ## Solution
 
 A **pinned dock**: a fixed region at the bottom of the sidebar, directly above the
-`NightwatchModeToggle` and the "Add Repository" bar, holding worktree rows that never scroll
-away. Pinning is a per-worktree toggle in the row's right-click menu. When a watch mode is
-on, the Watch Desk occupies a fixed slot of its own at the bottom of that region.
+"Add Repository" bar, holding worktree rows that never scroll away. Pinning is a per-worktree
+toggle in the row's right-click menu.
+
+```
+┌──────────────────────┐
+│ ▾ tbd                │
+│    main              │   scrolling repo list
+│    daemon-storm      │
+├──────────────────────┤
+│ ● sidebar-polish   ▕│▖
+│ ○ deeplink         ▕│█  pinned area — scrolls, capped
+│ ● testing-slice-e  ▕│▌
+├──────────────────────┤
+│ + Add Repository   ⌄ │
+└──────────────────────┘
+```
 
 ### Pinning is a mirror, not a move
 
@@ -41,78 +48,15 @@ right-click menu all behave exactly as they do in the list. **The only differenc
 dock row and a section row is where it sits.** No compact variant, no second row
 implementation to drift out of sync.
 
-### The Watch Desk has its own fixed slot
-
-When `nightwatchExperimental` is on and `nightwatchMode != .off`, the desk worktree renders in
-a dedicated slot **below** the scrollable pinned area and **directly above** the Day/Night
-toggle. It is not a member of the pinned list, so no amount of scrolling in that list can move
-it off screen — the desk and its toggle stay adjacent and always visible.
-
-```
-┌──────────────────────┐
-│ ▾ tbd                │
-│    main              │   scrolling repo list
-│    daemon-storm      │
-├──────────────────────┤
-│ ● nightwatch-tint  ▕│▖
-│ ○ deeplink         ▕│█  pinned area — scrolls, capped
-│ ● testing-slice-e  ▕│▌
-├──────────────────────┤
-│ ◐ Watch Desk         │  fixed slot — never scrolls
-├──────────────────────┤
-│ Off │ ◐ Day │🌙 Night│
-├──────────────────────┤
-│ + Add Repository   ⌄ │
-└──────────────────────┘
-```
-
-The desk is not stored as a pin — its `pinnedAt` stays `nil` — and its right-click menu offers
-**neither** Pin nor Unpin. The Day/Night toggle immediately below is its control: turn mode
-off and the slot disappears.
-
-The slot is **exactly one row** and does not expand children, unlike pinned rows. That is what
-makes "always directly above the toggle" a guarantee rather than a usual case. It costs
-nothing in practice: the desk is a scratch worktree, and `children(of:)` only ever returns
-repo worktrees, so a desk with children is hypothetical. If one ever has them, they remain
-reachable in the Scratch section.
-
-The desk row shows the worktree's real display name, `"◐ Watch Desk"`, in every mode. The ◐
-is baked into `NightwatchDeskPrompts.deskDisplayName`, and swapping it to 🌙 in the dock would
-make the row disagree with its own mirror in the Scratch section. Mode is already legible
-from the toggle immediately below, so the glyph carries no load.
-
 ### Growth is capped
 
 The **pinned area** grows one row per visible row — pins plus any expanded children — up to
 `min(5 rows, 40% of sidebar height)`, then scrolls internally. The repo list above therefore
-never loses more than 40% of its height plus the one-row desk slot, however many worktrees are
-pinned or expanded. With no pins and mode off, the whole footer addition is absent and the
-sidebar looks exactly as it does today.
+never loses more than 40% of its height, however many worktrees are pinned or expanded. With
+no pins, the whole footer addition is absent and the sidebar looks exactly as it does today.
 
 Because an expansion can push the pinned area past its cap, that area scrolls the selected row
-into view whenever selection changes to a row it contains. The desk slot never scrolls, so it
-is exempt.
-
-## Removals
-
-The status-bar mode tint and desk label from PR #507 both go. Mode indication lives in the
-sidebar footer: the Day/Night toggle shows and sets the mode, and the desk row appears
-alongside it. The menu-bar `Nightwatch ◐/🌙` CommandMenu title stays — it is the only mode
-readout visible when TBD is unfocused.
-
-Delete:
-
-| File / symbol | Why |
-|---|---|
-| `StatusBarView.statusBarTint`, `.tintOpacity`, its `ZStack` background | Bar returns to plain `.background(.bar)` |
-| `Sources/TBDApp/Helpers/NightwatchDeskStatusLabel.swift` | Superseded by the dock row |
-| `Sources/TBDApp/Theme/NightwatchModeTheme.swift` | Contains only `tintColor(for:)`; with no tint anywhere it is dead |
-| `Tests/TBDAppTests/StatusBarViewTintTests.swift` | Tests deleted code |
-| `Tests/TBDAppTests/NightwatchDeskStatusLabelTests.swift` | Tests deleted code |
-| `Tests/TBDAppTests/NightwatchModeThemeTests.swift` | Tests deleted code |
-
-`NightwatchDeskStatusLabel()` was the first element of `StatusBarView`'s `HStack`. Removing it
-leaves the `Spacer()` as the first child, which is what the bar looked like before PR #507.
+into view whenever selection changes to a row it contains.
 
 ## Architecture
 
@@ -148,25 +92,6 @@ the path every other row action already uses.
 No CLI command in this change. The RPC makes `tbd worktree pin` trivial to add later if it
 turns out to be wanted; adding it now is speculative.
 
-### Shared desk predicate
-
-`NightwatchDeskStatusLabel` currently resolves the desk with
-`displayName == NightwatchDeskPrompts.deskDisplayName && isScratch`, written inline. That
-predicate is about to have two more callers (dock content, menu suppression), so it moves to
-`TBDShared`:
-
-```swift
-extension Worktree {
-    /// The mode-managed Watch Desk scratch worktree, identified by its fixed
-    /// display name. Not user-pinnable: the Day/Night toggle controls it.
-    public var isNightwatchDesk: Bool {
-        isScratch && displayName == NightwatchDeskPrompts.deskDisplayName
-    }
-}
-```
-
-One definition instead of three copies.
-
 ### Selected dock rows expand their children
 
 A dock row whose subtree is selected expands to show its descendants, indented, exactly as
@@ -192,43 +117,27 @@ struct PinnedDockRow: Identifiable, Equatable {
 }
 
 enum PinnedDockContent {
-    /// Scrollable pinned area. Never contains the desk.
+    /// Scrollable pinned area.
     static func rows(allWorktrees: [Worktree],
                      selectedIDs: Set<UUID>,
                      children: (UUID) -> [Worktree]) -> [PinnedDockRow]
-
-    /// The fixed desk slot, or nil when it should not render.
-    static func deskRow(allWorktrees: [Worktree],
-                        mode: NightwatchMode,
-                        experimentalEnabled: Bool) -> Worktree?
 }
 ```
-
-The two are separate functions because they render into separate containers with different
-scroll behaviour. `rows` no longer takes `mode` or `experimentalEnabled` at all — the pinned
-area is entirely mode-independent, which is a nice simplification of the original design.
 
 `children` is injected rather than recomputed so the dock and the list agree on what a child
 is: the view passes `appState.children(of:)`, which already filters to `.active`/`.creating`
 and sorts by `sortOrder`. Tests pass a stub. Duplicating that predicate here would let the two
 surfaces drift.
 
-`deskRow` returns the worktree satisfying `isNightwatchDesk` when
-`experimentalEnabled && mode != .off`, and `nil` otherwise. It also returns `nil` when mode is
-on but no such worktree exists — mode was just turned on and the daemon has not created the
-desk yet. That is not an error and gets no placeholder row.
-
 `rows` rules, in order:
 
 1. Every worktree with `pinnedAt != nil`, sorted ascending by `pinnedAt`. Oldest pin first, so
    new pins append and existing rows never move.
-2. The desk is excluded even if something set its `pinnedAt`, so it can never appear both in
-   the pinned area and in its own slot.
-3. Archived worktrees are excluded as top-level rows. Their `pinnedAt` is left untouched, so
+2. Archived worktrees are excluded as top-level rows. Their `pinnedAt` is left untouched, so
    reviving one restores its pin. (`children` already excludes them from expansions.)
-4. Each top-level row expands its descendants, depth-first at `depth + 1`, **iff** its own id
+3. Each top-level row expands its descendants, depth-first at `depth + 1`, **iff** its own id
    or any descendant id is in `selectedIDs`. Otherwise it contributes one row.
-5. A worktree already emitted is never emitted again. A pinned worktree that is also a
+4. A worktree already emitted is never emitted again. A pinned worktree that is also a
    descendant of another pinned worktree keeps its own top-level position and does not repeat
    inside the expansion. This also makes a cyclic `parentWorktreeID` chain terminate, so the
    dock needs no depth cap of its own — unlike `WorktreeSubtreeView`, whose recursion is
@@ -333,59 +242,25 @@ Known cost: two `List`s means two keyboard-navigation islands. Arrow keys move w
 whichever list has focus rather than crossing between them. Accepted — the dock is a
 click target, and full row fidelity was the stated requirement.
 
-The desk slot is a sibling view, `PinnedDockDeskSlot`, built the same way — a single-row
-`List(selection:)` at a fixed `PinnedDockMetrics.rowHeight`:
-
-```swift
-struct PinnedDockDeskSlot: View {
-    let desk: Worktree?           // from PinnedDockContent.deskRow(...)
-    @EnvironmentObject var appState: AppState
-
-    var body: some View {
-        if let desk {
-            List(selection: $appState.selectedWorktreeIDs) {
-                WorktreeRowView(worktree: desk)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 0))
-                    .listRowSeparator(.hidden)
-                    .listRowBackground(Color.clear)
-                    .tag(desk.id)
-            }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .scrollDisabled(true)
-            .frame(height: PinnedDockMetrics.rowHeight)
-        }
-    }
-}
-```
-
-A `List` for a single row looks like ceremony, but it is what makes the desk row clickable:
-`WorktreeRowView` carries no tap gesture, so without a `List` the row would render correctly
-and simply not respond to clicks. Adding `.onTapGesture` instead would kill its
-`.contextMenu` — the same trap described above.
-
-Both slot into `SidebarView`'s existing `.safeAreaInset(edge: .bottom)`, in this order:
+It slots into `SidebarView`'s existing `.safeAreaInset(edge: .bottom)`, in this order:
 
 ```
 Divider               ← the ONLY divider; marks the top of the whole footer group
 PinnedDockView        ← scrolls, capped, absent when empty
-PinnedDockDeskSlot    ← fixed one row, absent when mode off
-NightwatchModeToggle  ← existing
 Add Repository + filter bar  ← existing
 ```
 
-**One divider, at the very top.** An earlier build put a second `Divider()` between the dock and
-the toggle, and it made the dock read as belonging to the scrolling list above rather than to
-the footer. Removing it merged dock, desk, toggle, and Add Repository into a single visual
-group, which is the intent.
+**One divider, at the very top.** A second `Divider()` below the dock was verified live to make
+the dock read as belonging to the scrolling list above rather than to the footer. With one, the
+dock and Add Repository read as a single visual group, which is the intent.
 
-Worth knowing for anyone tempted to "fix" the footer's color: `.bar` renders **white** (255,255,255)
-in this window, not gray — measured. The sidebar list above is (234,234,234), and `.bar`
-composited over it lands at white. The dock, the toggle, and the Add Repository row all share
-that background and always did. `.scrollContentBackground(.hidden)` on the inner `List` is
-load-bearing and already correct (verified both directions: removing it makes the List paint
-opaque white over the material). If the footer should read gray, that is a background-material
-decision affecting the whole group — not something the dock's `List` can or should fix.
+Worth knowing for anyone tempted to "fix" the footer's color: `.bar` renders **white**
+(255,255,255) in this window, not gray — measured. The sidebar list above is (234,234,234), and
+`.bar` composited over it lands at white. The dock and the Add Repository row share that
+background. `.scrollContentBackground(.hidden)` on the inner `List` is load-bearing and already
+correct (verified both directions: removing it makes the List paint opaque white over the
+material). If the footer should read gray, that is a background-material decision affecting the
+whole group — not something the dock's `List` can or should fix.
 
 `availableHeight` comes from a `GeometryReader` wrapping the sidebar's `List`, read once and
 passed down — the dock must not read geometry from inside its own frame, which would feed its
@@ -395,11 +270,10 @@ height back into itself.
 
 `RowActionMenu` gains `.pin` and `.unpin`. `RowActionMenuActions` emits:
 
-- nothing, when `worktree.isNightwatchDesk`
 - `.unpin`, when `pinnedAt != nil`
 - `.pin`, otherwise
 
-That enum already has unit tests, so all three cases are covered without instantiating a view.
+That enum already has unit tests, so both cases are covered without instantiating a view.
 
 ### Data flow
 
@@ -425,7 +299,7 @@ consuming layout width. The pin button is the same construction at `.leading`:
 
 ```swift
 .overlay(alignment: .leading) {
-    if isRowHovered, !isMain, !worktree.isNightwatchDesk {
+    if isRowHovered, !isMain {
         SectionHeaderPlusButton(...)-shaped 20×20 button
             .offset(x: CGFloat(indentLevel) * 16)
     }
@@ -469,8 +343,7 @@ apply and pinned rows become identifiable at a glance without hovering each one.
 Whatever gates the button must also gate the hierarchy-guide-line break that keeps the thread
 from striking through it — the two conditions are the same condition.
 
-The Watch Desk gets no pin button, matching its suppressed menu items. Neither does a repo's
-main row.
+A repo's main row gets no pin button.
 
 ## Feature flag
 
@@ -480,25 +353,14 @@ path. This is additive UI plus a mirror render, driven entirely by an explicit u
 and it replaces nothing that carries load. It falls under the rule's "small additive UI"
 exemption. The dock is invisible until a user pins something.
 
-The desk row remains gated by the existing `nightwatchExperimental` opt-in, fail-closed —
-same gate as every other nightwatch surface.
-
 ## Testing
 
 Per the `CLAUDE.md` rule that every gating conditional gets a test per branch:
-
-**`PinnedDockContentTests` — `deskRow`**
-- Present / absent across all six combinations of `mode ∈ {off, daywatch, nightwatch}` ×
-  `experimentalEnabled ∈ {true, false}` — the desk resolves only when the flag is on and mode
-  is not off. This is the `CLAUDE.md` branch-coverage requirement for the gate.
-- Mode on but no desk worktree exists → `nil`, no crash.
 
 **`PinnedDockContentTests` — `rows`**
 - Pins sort ascending by `pinnedAt`; a new pin appends rather than reordering.
 - `pinnedAt == nil` excluded.
 - Archived worktree with a non-nil `pinnedAt` excluded.
-- Desk carrying a stray `pinnedAt` is excluded from `rows` — it must never appear both in the
-  scrolling area and in its fixed slot.
 
 **`PinnedDockContentTests` — expansion**
 - Nothing selected → every top-level row contributes exactly one row, no children.
@@ -522,14 +384,11 @@ Per the `CLAUDE.md` rule that every gating conditional gets a test per branch:
 **`RowActionMenuTests`** (extend existing)
 - Unpinned worktree offers `.pin`, not `.unpin`.
 - Pinned worktree offers `.unpin`, not `.pin`.
-- Desk worktree offers neither.
 
 **Daemon**
 - Migration `v63` adds the column; pre-existing rows read back `nil`.
 - `WorktreeStore` round-trips a non-nil `pinnedAt` and a nil one.
 - `worktree.setPin` sets a timestamp on `pinned: true` and clears to `NULL` on `false`.
-
-**Deletions:** the three test files listed under Removals.
 
 ## Out of scope
 
@@ -538,5 +397,3 @@ Per the `CLAUDE.md` rule that every gating conditional gets a test per branch:
 - A user-toggled disclosure triangle on dock rows. Expansion is derived from selection and
   nothing else — there is no expanded/collapsed state to persist.
 - Pinning repos or whole sections. Worktrees and scratch worktrees only.
-- Any mode tint. The window-wide wash was rejected in PR #507 and the status-bar tint is
-  removed here; mode is text and glyphs, not color.

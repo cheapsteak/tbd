@@ -21,8 +21,12 @@ import Testing
 /// on either side of a mutator's window, and in the fast parallel pass a test
 /// spends most of its wall time suspended, so that window is seconds wide.
 /// Prefer an injection seam; nest here when the code under test reaches the
-/// environment through static members that have none (`ModelProfileRPCTests`
-/// and `ModelProfileKeychain` are the standing example).
+/// environment through static members that have none. Leaving takes a seam for
+/// every such reader on the suite's paths, not only the one it was nested for:
+/// `ModelProfileRPCTests` left once `RPCRouter` took a
+/// `ModelProfileKeychain.Store` and the suite also passed its own config-dir
+/// manager, hooks dir and sessions dir, each of which otherwise defaults to a
+/// `TBD_HOME`-derived path.
 ///
 /// **Important — this domain only serializes suites WITHIN TBDDaemonTests.**
 /// All test targets (TBDSharedTests, TBDDaemonTests, TBDAppTests, …) compile

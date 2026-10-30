@@ -4,7 +4,7 @@ import Foundation
 @testable import TBDShared
 
 // `terminal.programStatusReport` and `terminal.programStatusList`, end to end
-// through the router, plus the flag setter reaching the store's gate.
+// through the router.
 extension RPCRouterTests {
 
     private func makeProgramStatusTerminal(
@@ -44,10 +44,9 @@ extension RPCRouterTests {
         return try response.decodeResult(TerminalProgramStatusListResult.self).snapshots
     }
 
-    @Test("programStatusReport is accepted and listed when the flag is on")
+    @Test("programStatusReport is accepted and listed")
     func programStatusReportAcceptedAndListed() async throws {
         let terminal = try await makeProgramStatusTerminal()
-        await router.programStatus.setEnabled(true)
 
         let response = try await sendProgramStatusReport(
             terminalID: terminal.id, incarnationID: nil,
@@ -62,25 +61,9 @@ extension RPCRouterTests {
         #expect(snapshot.main?.kind == .permission)
     }
 
-    @Test("programStatusReport is rejected and the list is empty with the flag off")
-    func programStatusReportRejectedWhenFlagOff() async throws {
-        let terminal = try await makeProgramStatusTerminal()
-        // The router's own store starts on the shipped default, which is off.
-        #expect(!router.programStatus.gate.isEnabled)
-
-        let response = try await sendProgramStatusReport(
-            terminalID: terminal.id, incarnationID: nil,
-            payload: "state=working:app=claude-code")
-        // Always ok: the app must not retry a rejection.
-        #expect(response.success)
-        #expect(await router.programStatus.snapshot(for: terminal.id) == nil)
-        #expect(try await listProgramStatus().isEmpty)
-    }
-
     @Test("programStatusReport for another incarnation is rejected")
     func programStatusReportWrongIncarnationRejected() async throws {
         let terminal = try await makeProgramStatusTerminal()
-        await router.programStatus.setEnabled(true)
 
         let response = try await sendProgramStatusReport(
             terminalID: terminal.id, incarnationID: UUID(),
@@ -92,42 +75,16 @@ extension RPCRouterTests {
     @Test("programStatusReport for a tmux terminal is rejected")
     func programStatusReportTmuxRejected() async throws {
         let terminal = try await makeProgramStatusTerminal(transport: .tmux)
-        await router.programStatus.setEnabled(true)
 
         _ = try await sendProgramStatusReport(
             terminalID: terminal.id, incarnationID: nil,
             payload: "state=working:app=claude-code")
-        #expect(try await listProgramStatus().isEmpty)
-    }
-
-    @Test("config.setProgramStatusEnabled drives the store's gate and retracts on off")
-    func programStatusFlagSetterDrivesStore() async throws {
-        let terminal = try await makeProgramStatusTerminal()
-
-        let on = try RPCRequest(
-            method: RPCMethod.configSetProgramStatusEnabled,
-            params: ConfigSetProgramStatusEnabledParams(enabled: true))
-        #expect(await router.handle(on).success)
-        #expect(router.programStatus.gate.isEnabled)
-
-        _ = try await sendProgramStatusReport(
-            terminalID: terminal.id, incarnationID: nil,
-            payload: "state=working:app=claude-code")
-        #expect(try await listProgramStatus().count == 1)
-
-        let off = try RPCRequest(
-            method: RPCMethod.configSetProgramStatusEnabled,
-            params: ConfigSetProgramStatusEnabledParams(enabled: false))
-        #expect(await router.handle(off).success)
-        #expect(!router.programStatus.gate.isEnabled)
-        #expect(await router.programStatus.snapshot(for: terminal.id) == nil)
         #expect(try await listProgramStatus().isEmpty)
     }
 
     @Test("session.states resolves an OSC-authoritative terminal from the store")
     func sessionStatesUsesProgramStatus() async throws {
         let terminal = try await makeProgramStatusTerminal()
-        await router.programStatus.setEnabled(true)
         _ = try await sendProgramStatusReport(
             terminalID: terminal.id, incarnationID: nil,
             payload: "state=done:app=claude-code")

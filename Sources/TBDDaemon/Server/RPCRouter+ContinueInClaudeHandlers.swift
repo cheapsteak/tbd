@@ -126,9 +126,8 @@ private struct PreparedContinueInClaude: Sendable {
     let freshClaudeSessionID: String
     let claudeCommand: String
     /// The `--settings` overlay `claudeCommand` names, planned before the
-    /// destination's incarnation exists and written at launch from the
-    /// session mod `SessionModSpawn.prepare` gives it, so a continuation that
-    /// fails before launch writes no overlay.
+    /// destination's incarnation exists and written at launch, so a
+    /// continuation that fails before launch writes no overlay.
     let claudeOverlay: ReplacementSpawnOverlay
     /// The `--name` in `claudeCommand`, reserved in the title store by
     /// preparation; the handler confirms it once the replacement is finalized
@@ -179,6 +178,15 @@ extension RPCRouter {
         } catch {
             await lifecycle.sessionTitles.release(prepared.claudeSpawnTitle)
             throw error
+        }
+
+        // Start admission: the replacement launches Claude. Nothing has been
+        // replaced yet, so a hold only gives back the reserved session name.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude,
+            worktreeID: prepared.source.worktreeID, terminalID: prepared.source.id) {
+            await lifecycle.sessionTitles.release(prepared.claudeSpawnTitle)
+            return held
         }
 
         let response: RPCResponse
@@ -378,15 +386,13 @@ extension RPCRouter {
             terminalID: source.id)
         // The destination's incarnation is minted only when the replacement
         // begins, so its session mod is prepared at launch, and the overlay is
-        // only planned here and written there. A desk whose spawn carries
-        // `usage` installs no statusline tee.
+        // only planned here and written there.
         let claudeOverlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolvedProfile?.fallbackModels,
             sessionKey: source.id.uuidString,
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-            watchDeskRole: source.watchDeskRole,
-            worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir)
+            // A Codex tab has no Claude values to carry.
+            extraSettingsJSON: nil)
         let claudeSpawn = ClaudeSpawnCommandBuilder.build(
             resumeID: nil,
             freshSessionID: freshClaudeSessionID,
@@ -526,8 +532,7 @@ extension RPCRouter {
             claudeSessionID: prepared.freshClaudeSessionID,
             incarnationID: destinationToken,
             sessionsDir: sessionsDir, now: now())
-        let claudeCommand = prepared.claudeOverlay.settle(
-            carrying: sessionMod, command: prepared.claudeCommand)
+        let claudeCommand = prepared.claudeOverlay.settle(command: prepared.claudeCommand)
         var destinationFailure: Error?
         do {
             // No graceful interrupt: this single tmux operation kills Codex

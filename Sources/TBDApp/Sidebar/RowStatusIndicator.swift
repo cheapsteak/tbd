@@ -172,7 +172,7 @@ enum RowStatusIndicator {
     /// neighbouring one.
     ///
     /// `needsAuth` and `turnFailed` come only from OSC-authoritative
-    /// terminals (Program Status Protocol, flag on) and default to false, so
+    /// terminals (Program Status Protocol) and default to false, so
     /// every other caller resolves exactly as before. Needs-sign-in outranks
     /// attention because nothing else moves until the user signs in; a failed
     /// turn sits below attention (a live prompt is more urgent) and above

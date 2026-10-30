@@ -4,113 +4,51 @@ import os
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "composer-draft")
 
 /// `TmuxSignalEnding`'s lines go where the coordinator logs every other park
-/// and swap ending. They fire for legacy swaps too, so they are not
-/// composer-draft soak signals.
+/// and swap ending. They fire for every tmux park, whatever the session's
+/// composer-draft status, so they are not composer-draft soak signals.
 private let endingLogger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation")
 
 /// What a park does with what the composer-draft feature knows about the
-/// session. See `docs/specs/2026-10-19-tbd-session-mod-design.md`, "Parking".
+/// session. The session mod is the park's only guard for an unsent draft.
+/// See `docs/specs/2026-10-24-mod-only-park-guard-design.md`, "Which parks go
+/// ahead".
 enum ComposerDraftParkDecision: Equatable, Sendable {
-    /// Spawned without the feature: today's rails decide, the pending-input
-    /// scrape among them.
-    case legacy
-    /// The park goes on and the pending-input scrape never refuses it: the
-    /// feature confirmed the draft is saved, or the park proceeds without that
-    /// confirmation (a profile swap, or a manual park the person overrode).
+    /// The park goes on and ends Claude by signal.
     case proceed
-    /// A manual park the feature cannot vouch for: the caller is asked, and a
-    /// yes reissues the park with the override.
-    case refuse(reason: String)
     /// An automatic park the feature cannot vouch for: the session is skipped.
+    /// `reason` is the `SessionModLiveness.UnknownReason` raw value.
     case skip(reason: String)
 }
 
-/// How a park, or an in-place profile swap, ends the Claude process it
-/// replaces. See `docs/specs/2026-10-19-tbd-session-mod-design.md`, "Parking".
-enum ParkEndingStyle: Equatable, Sendable {
-    /// `/exit` typed into the composer, then the transport's existing
-    /// fallbacks. Only a park of a session spawned without the feature ends
-    /// this way, never a profile swap.
-    case typedExit
-    /// SIGTERM to the Claude process, and nothing typed into its terminal.
-    case signal
-}
-
-/// The park gate for sessions spawned with the composer-draft feature.
+/// The park gate the session mod answers.
 enum ComposerDraftParkGate {
-    /// Legacy keeps the old path; confirmed proceeds; unknown proceeds for a
-    /// profile swap or an overridden manual park, refuses any other manual
-    /// park, and skips the merge-park and the idle sweep. The reason is the
-    /// `UnknownReason` raw value.
+    /// Every park of a session spawned without the feature, or one whose mod
+    /// confirmed the draft, proceeds: the first has saved nothing and nothing
+    /// can see its draft, the second has saved it. A session spawned with the
+    /// feature whose mod is not confirmed proceeds for a manual park and a
+    /// profile swap, which are gestures, and is skipped by the merge-park and
+    /// the idle sweep, which nobody asked for: on a machine where the mod never
+    /// loads, that condition never clears at a respawn.
     static func decide(
         status: ComposerDraftStatus,
-        policy: HibernateEligibilityPolicy,
-        overrideUnconfirmed: Bool
+        policy: HibernateEligibilityPolicy
     ) -> ComposerDraftParkDecision {
         switch status {
-        case .legacy:
-            return .legacy
-        case .confirmed:
+        case .legacy, .confirmed:
             return .proceed
         case .unknown(let unknown):
-            let reason = unknown.rawValue
             switch policy {
-            case .profileSwap:
+            case .manual, .profileSwap:
                 return .proceed
-            case .manual:
-                return overrideUnconfirmed ? .proceed : .refuse(reason: reason)
             case .merge, .automatic:
-                return .skip(reason: reason)
+                return .skip(reason: unknown.rawValue)
             }
         }
     }
 
-    /// How the park ends the process: a typed `/exit` only for a park of a
-    /// legacy session.
-    ///
-    /// A profile swap ends by signal whatever the status. It honours no live
-    /// rail, so the screen check that keeps a legacy park's typed `/exit` off
-    /// a draft never runs, and a typed `/exit` would land after whatever the
-    /// box holds and submit it to the model. A legacy session's draft is lost
-    /// at a swap, since nothing saved it, but it is never typed into or sent.
-    /// The tmux in-place swap, which never reaches a park, ends by signal for
-    /// the same reason.
-    ///
-    /// A session spawned with the feature is never typed into: no `/exit`, and
-    /// no Escape or Ctrl+C fallback either, because a daemon-sent Ctrl+C clears
-    /// the box and the feature would record the draft as gone. SIGTERM runs
-    /// the same graceful shutdown, so `session.end` still makes the final save.
-    ///
-    /// Reads the policy and `spawnedWithFeature`, which the
-    /// replacement-snapshot check keeps stable across the wait for the server
-    /// lock. Whether the box holds a draft, and how fresh the heartbeat is,
-    /// never change how the process ends.
-    static func endingStyle(
-        for status: ComposerDraftStatus, policy: HibernateEligibilityPolicy
-    ) -> ParkEndingStyle {
-        switch policy {
-        case .profileSwap:
-            return .signal
-        case .manual, .merge, .automatic:
-            return status.spawnedWithFeature ? .signal : .typedExit
-        }
-    }
-
-    /// The log line for a park where the feature and the pending-input scrape
-    /// disagree about whether the composer holds a draft, or nil when they
-    /// agree.
-    static func shadowDisagreement(
-        terminalID: UUID, featureHasDraft: Bool, scrapeHasDraft: Bool
-    ) -> String? {
-        guard featureHasDraft != scrapeHasDraft else { return nil }
-        return "composer-draft shadow disagreement terminal=\(terminalID.uuidString)"
-            + " feature=\(word(featureHasDraft)) scrape=\(word(scrapeHasDraft))"
-    }
-
-    /// The refusal a person reads when TBD cannot confirm the draft is saved:
-    /// the `terminal.hibernate` error, and the reason every other surface
-    /// records for an unconfirmed or skipped park.
-    static func unconfirmedRefusal(reason: String) -> String {
+    /// The reason a skipped park records: the `.notEligible` reason the merge
+    /// fan-out and the idle sweep's actuation row carry.
+    static func skipReason(_ reason: String) -> String {
         "TBD can't confirm this session's draft is saved (\(reason))."
     }
 
@@ -119,68 +57,15 @@ enum ComposerDraftParkGate {
     static func logSkip(terminalID: UUID, reason: String) {
         logger.notice("composer-draft: skipped park of \(terminalID.uuidString, privacy: .public): \(reason, privacy: .public)")
     }
-
-    private static func word(_ hasDraft: Bool) -> String {
-        hasDraft ? "draft" : "empty"
-    }
-}
-
-/// The gate's answer for one park, computed once in `performHibernate` and
-/// carried down to the transport leg that carries the park out, where the
-/// pending-input rails consult it and the ending reads its status.
-struct ComposerDraftParkContext: Sendable {
-    let status: ComposerDraftStatus
-    let decision: ComposerDraftParkDecision
-    /// The park's policy, which the ending reads beside `status`.
-    let policy: HibernateEligibilityPolicy
-    /// Where a shadow disagreement goes. Nil logs it at `.notice`, which is
-    /// what production does; a test records the lines through the
-    /// coordinator's `composerDraftShadowLog` seam.
-    var shadowLog: (@Sendable (String) -> Void)?
-
-    /// How the transport leg ends the process. See
-    /// `ComposerDraftParkGate.endingStyle(for:policy:)`.
-    var endingStyle: ParkEndingStyle {
-        ComposerDraftParkGate.endingStyle(for: status, policy: policy)
-    }
-
-    /// Whether one pending-input scrape result refuses the park.
-    ///
-    /// Only a legacy session is refused on the scrape. For any other session
-    /// the scrape never decides. Compares nothing and logs nothing: the tmux
-    /// park's fast pre-lock rail asks this, and the authoritative read under
-    /// the lock is the one compared, so a park logs a disagreement at most
-    /// once.
-    func scrapeRefuses(hasPendingInput: Bool) -> Bool {
-        decision == .legacy && hasPendingInput
-    }
-
-    /// The park's authoritative pending-input read: whether it refuses the
-    /// park, exactly as `scrapeRefuses(hasPendingInput:)` answers.
-    ///
-    /// While the flag exists, a confirmed session's result is also compared
-    /// with the feature's answer and any disagreement logged at `.notice`.
-    /// Each park calls this once: the tmux park under its server lock, the
-    /// holder park on its one screen read.
-    func judgeAuthoritativeScrape(hasPendingInput: Bool, terminalID: UUID) -> Bool {
-        if case .confirmed(let featureHasDraft) = status,
-           let line = ComposerDraftParkGate.shadowDisagreement(
-               terminalID: terminalID,
-               featureHasDraft: featureHasDraft,
-               scrapeHasDraft: hasPendingInput) {
-            if let shadowLog {
-                shadowLog(line)
-            } else {
-                logger.notice("\(line, privacy: .public)")
-            }
-        }
-        return scrapeRefuses(hasPendingInput: hasPendingInput)
-    }
 }
 
 /// Ends the Claude process in a tmux pane by signal, typing nothing into the
-/// pane: the tmux park's ending for a session spawned with the composer-draft
-/// feature, and the tmux in-place profile swap's ending for every session.
+/// pane: the ending of every tmux park and of the tmux in-place profile swap.
+/// Nothing is ever typed into a composer to end Claude, because a typed
+/// `/exit` lands after whatever the box holds and Enter submits it, and a
+/// daemon-sent Ctrl+C clears a draft the session mod would then record as
+/// gone. SIGTERM runs Claude Code's graceful shutdown, so the mod makes its
+/// final save in `session.end`.
 ///
 /// The pane's own pid is its login-shell wrapper, so the Claude process is
 /// looked up beneath it on the process table, never read off the screen.
@@ -188,9 +73,8 @@ struct ComposerDraftParkContext: Sendable {
 /// process group. Then the pane's current command is polled on the injected
 /// clock for Claude to leave.
 ///
-/// Best-effort, like the typed ending it stands in for: each caller's
-/// `respawn-window -k` is what guarantees the process ends, and it follows
-/// every outcome.
+/// Best-effort: each caller's `respawn-window -k` is what guarantees the
+/// process ends, and it follows every outcome.
 enum TmuxSignalEnding {
     enum Outcome: Equatable, Sendable {
         /// SIGTERM went to `pid`, and the pane stopped running Claude inside
@@ -204,8 +88,8 @@ enum TmuxSignalEnding {
         case noClaudeProcess
     }
 
-    /// `attempts` × `interval` is the poll window. Like the typed ending's
-    /// poll, `try?` on the sleep is not a cancellation check: a cancelled task
+    /// `attempts` × `interval` is the poll window. `try?` on the sleep is not
+    /// a cancellation check: a cancelled task
     /// burns the attempts at zero delay and reports `.stillRunning`, and the
     /// caller's respawn still ends the process. An outcome short of `.exited`
     /// is logged under the `Hibernation` category, naming `terminalID`:

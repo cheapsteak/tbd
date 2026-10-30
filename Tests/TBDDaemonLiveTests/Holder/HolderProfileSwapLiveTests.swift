@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// "Switch account" on a holder-backed tab, against a **real** holder and a
 /// **real** job.

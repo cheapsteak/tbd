@@ -33,9 +33,10 @@ public struct ProcessOutput: Sendable {
 /// The caller configures `executableURL`, `arguments`, `environment` and
 /// anything else it needs, and does **not** call `run()`: this helper installs
 /// its own pipes on `standardOutput` and `standardError` (replacing whatever
-/// was set), arms the termination handler, and starts the child itself.
+/// was set) and, when `stdin` is given, on `standardInput`, arms the
+/// termination handler, and starts the child itself.
 ///
-/// Three properties are load-bearing rather than incidental:
+/// These properties are load-bearing rather than incidental:
 ///
 /// - **The termination handler is armed before `run()`.** A short-lived child
 ///   can exit before `run()` returns, and a handler installed afterwards would
@@ -46,11 +47,22 @@ public struct ProcessOutput: Sendable {
 /// - **The continuation is resumed exactly once**, when the exit status and
 ///   both end-of-file reads have all landed — or immediately, with the error,
 ///   if `run()` throws.
+/// - **Standard input, when given, is written after `run()`, on a libdispatch
+///   thread, and then closed.** After, because the bytes need a reader; off
+///   the caller's thread, because a payload larger than the pipe's buffer
+///   blocks the write until the child reads. The write end is marked
+///   `F_SETNOSIGPIPE`, so a child that exits without reading turns the write
+///   into a discarded `EPIPE` rather than a `SIGPIPE` that would end the whole
+///   test process; its exit status already says what happened.
 ///
+/// - Parameter stdin: Bytes to feed the child, after which its standard input
+///   reads end-of-file. `nil`, the default, leaves `standardInput` as the
+///   caller set it (inherited when unset); an empty `Data` gives the child an
+///   immediate end-of-file.
 /// - Throws: whatever `Process.run()` throws (a missing or non-executable
 ///   binary, most often).
-public func collectOutput(of process: Process) async throws -> ProcessOutput {
-    let collector = ProcessOutputCollector(process: process)
+public func collectOutput(of process: Process, stdin: Data? = nil) async throws -> ProcessOutput {
+    let collector = ProcessOutputCollector(process: process, stdin: stdin)
     return try await collector.run()
 }
 
@@ -66,14 +78,19 @@ private final class ProcessOutputCollector: @unchecked Sendable {
     private let process: Process
     private let outPipe = Pipe()
     private let errPipe = Pipe()
+    /// Present exactly when the caller handed over bytes for standard input.
+    private let inPipe: Pipe?
+    private let stdinData: Data?
 
     private var continuation: CheckedContinuation<ProcessOutput, any Error>?
     private var status: Int32?
     private var stdout: Data?
     private var stderr: Data?
 
-    init(process: Process) {
+    init(process: Process, stdin: Data?) {
         self.process = process
+        self.stdinData = stdin
+        self.inPipe = stdin == nil ? nil : Pipe()
     }
 
     func run() async throws -> ProcessOutput {
@@ -86,6 +103,9 @@ private final class ProcessOutputCollector: @unchecked Sendable {
         lock.withLock { self.continuation = continuation }
         process.standardOutput = outPipe
         process.standardError = errPipe
+        if let inPipe {
+            process.standardInput = inPipe
+        }
         // Armed before `run()`: see the doc comment. `[weak self]` rather than a
         // strong capture because the handler is stored on the process, which
         // this object owns — a strong capture would be a retain cycle that only
@@ -116,6 +136,28 @@ private final class ProcessOutputCollector: @unchecked Sendable {
             let data = Self.readToEnd(descriptor: errPipe.fileHandleForReading.fileDescriptor)
             deliver { $0.stderr = data }
         }
+        // Standard input goes in from a third libdispatch thread, for the same
+        // reason and under the same capture rule.
+        if inPipe != nil {
+            DispatchQueue.global().async { [self] in
+                writeStdin()
+            }
+        }
+    }
+
+    /// Writes the caller's bytes to the child's standard input and closes it.
+    /// A failed write is discarded: it means the child exited without reading,
+    /// and its status and output are what the caller asserts on.
+    private func writeStdin() {
+        guard let inPipe, let stdinData else { return }
+        let handle = inPipe.fileHandleForWriting
+        _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+        if !stdinData.isEmpty {
+            // The throwing overload: the older `write(_:)` raises an
+            // Objective-C exception on `EPIPE`, which Swift cannot catch.
+            try? handle.write(contentsOf: stdinData)
+        }
+        try? handle.close()
     }
 
     /// Records one of the three parts and resumes the waiter once all three are

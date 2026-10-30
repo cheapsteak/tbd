@@ -1,14 +1,16 @@
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
 /// `forget` removes a worktree from TBD's tracking but, unlike `archive`,
-/// leaves the directory on disk. These tests pin both branches of that gating
-/// behavior:
-///   - forget KEEPS the directory (and removes the row from every listing).
-///   - archive REMOVES the directory (the contrasting branch).
+/// leaves the directory on disk. Both branches of that difference are pinned:
+///   - forget KEEPS the directory (and removes the row from every listing),
+///     here.
+///   - archive REMOVES the directory — the contrasting branch, pinned by
+///     `testArchiveWorktree` in `WorktreeLifecycleTests.swift`.
 
 @Test func testForgetKeepsDirectoryAndRemovesFromTracking() async throws {
     let (tempDir, repoDir) = try await createTestRepo()
@@ -60,30 +62,6 @@ import Testing
     #expect(terminals.isEmpty, "forget must delete the worktree's terminals")
     let tabs = try await db.tabs.listForWorktree(worktreeID: wt.id)
     #expect(tabs.isEmpty, "forget must delete the worktree's tabs")
-}
-
-/// Contrasting branch: `archive` DOES delete the directory. This anchors the
-/// behavioral difference forget is built to invert.
-@Test func testArchiveRemovesDirectoryUnlikeForget() async throws {
-    let (tempDir, repoDir) = try await createTestRepo()
-    defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let db = try TBDDatabase(inMemory: true)
-    let lifecycle = WorktreeLifecycle(
-        db: db,
-        git: GitManager(),
-        tmux: TmuxManager(dryRun: true),
-        hooks: HookResolver()
-    )
-
-    let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-    let wt = try await lifecycle.createWorktree(repoID: repo.id, skipClaude: true)
-    #expect(FileManager.default.fileExists(atPath: wt.localPath))
-
-    try await lifecycle.archiveWorktree(worktreeID: wt.id, force: true)
-
-    #expect(!FileManager.default.fileExists(atPath: wt.localPath),
-            "archive must delete the worktree directory (contrast with forget)")
 }
 
 @Test func testForgetWorktreeNotFound() async throws {

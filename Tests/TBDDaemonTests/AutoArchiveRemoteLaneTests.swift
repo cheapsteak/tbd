@@ -12,12 +12,38 @@ import Testing
 /// merge"). It performs the same act on the same code as a manual archive,
 /// under the opt-in it already has — there is no second flag, because a
 /// second switch would gate a switch. It declines by itself when the provider
-/// declares no `archive`, and a decline writes no actuation row: a background
-/// rail that rewrote a `.dispose` request on every merged transition it
-/// observed for an unretireable lane would fill the record with acts that
-/// never happened.
+/// declares no `archive`, when a guard refuses, and when the inventory is
+/// stale, and it records each decline as a request row under its own daemon
+/// actor confirmed `refused` with the reason `not-eligible`. The merged edge
+/// is not seen again for the rest of this daemon run, so that row is how a lane left active after its PR
+/// merged is traced to the refusal that kept it. The skips that come before
+/// any archive decision — a lane the rail is not armed for, and no
+/// provider manager (remote backends were off when the daemon started) —
+/// write no row.
 @Suite("Auto-archive on merge: remote lanes")
 struct AutoArchiveRemoteLaneTests {
+
+    /// The record a decline leaves: a dispose request naming the lane under
+    /// the rail's daemon actor, with no RPC method, confirmed `refused` with a
+    /// refusal sentence containing `fragment`.
+    private func expectDeclineRecorded(
+        _ fixture: RemoteLaneFixture, lane: Worktree, mentioning fragment: String,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
+        let (request, outcome) = try fixture.refusalRecord(sourceLocation: sourceLocation)
+        let actor = request["actor"] as? [String: Any]
+        #expect(actor?["kind"] as? String == "daemon", sourceLocation: sourceLocation)
+        #expect(actor?["rail"] as? String == "auto-archive-on-merge", sourceLocation: sourceLocation)
+        #expect(request["kind"] as? String == "dispose", sourceLocation: sourceLocation)
+        #expect(request["method"] == nil, "a daemon rail's row carries no RPC method",
+                sourceLocation: sourceLocation)
+        #expect((request["target"] as? [String: Any])?["worktree"] as? String == lane.id.uuidString,
+                sourceLocation: sourceLocation)
+        let error = outcome["error"] as? String
+        #expect(error?.contains(fragment) == true,
+                "the outcome does not carry the refusal: \(error ?? "no error")",
+                sourceLocation: sourceLocation)
+    }
 
     @Test("an armed remote lane whose provider declares archive is retired on merge")
     func armedRemoteLaneWithCapabilityIsArchived() async throws {
@@ -78,7 +104,7 @@ struct AutoArchiveRemoteLaneTests {
         // `stop` is never substituted for a missing `archive`, on any path.
         #expect(fixture.invoker.calls == [["describe"]])
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(try fixture.actuationRows().isEmpty, "a decline must write no actuation row")
+        try expectDeclineRecorded(fixture, lane: lane, mentioning: "does not declare the \"archive\" capability")
     }
 
     /// The opt-in is the only gate. A remote lane that was never armed is
@@ -138,12 +164,13 @@ struct AutoArchiveRemoteLaneTests {
         #expect(!archived)
         #expect(fixture.invoker.calls == [["describe"]])
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(try fixture.actuationRows().isEmpty)
+        try expectDeclineRecorded(fixture, lane: lane, mentioning: "working")
     }
 
     /// With no remote manager — the shape every install has while
     /// `remote_backends_enabled` is off — the rail declines exactly as it did
-    /// before it had a remote path at all.
+    /// before it had a remote path at all. It makes no archive decision there,
+    /// so it records nothing.
     @Test("with remote backends off the rail declines a remote lane silently")
     func remoteLaneDeclinedWithoutAManager() async throws {
         let fixture = try await RemoteLaneFixture.make(capabilities: ["archive"], tag: "rail-nomanager")
@@ -167,8 +194,8 @@ struct AutoArchiveRemoteLaneTests {
 
     /// The rail reads the same guards out of the same mirror, so it inherits
     /// the same refusal: a stale inventory is no basis for retiring a lane,
-    /// and the rail has no `--force` to reach for. It declines and writes no
-    /// row, exactly as it does for a missing capability.
+    /// and the rail has no `--force` to reach for. It declines and records
+    /// the decline, exactly as it does for a missing capability.
     @Test("an armed remote lane is left alone while the provider's inventory is stale")
     func staleInventoryDeclinesTheRail() async throws {
         let fixture = try await RemoteLaneFixture.make(
@@ -191,7 +218,7 @@ struct AutoArchiveRemoteLaneTests {
         #expect(!archived)
         #expect(!fixture.invoker.calls.contains { $0.first == "archive" })
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(try fixture.actuationRows().isEmpty)
+        try expectDeclineRecorded(fixture, lane: lane, mentioning: "stale")
     }
 
     // MARK: - The local path, unchanged

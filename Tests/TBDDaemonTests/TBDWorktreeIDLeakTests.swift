@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -855,32 +856,8 @@ func reparkDuringProfileReplacementLeavesReplacementAlive() async throws {
 @Test("createWorktree — setup tab exports TBD_WORKTREE_ID and TBD_TERMINAL_ID")
 func testCreateWorktreeSetupTabExportsTBDIDs() async throws {
     // Build a real git repo so completeCreateWorktree can run `git worktree add`.
-    let tempDir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("tbd-test-\(UUID().uuidString)")
-    let repoDir = tempDir.appendingPathComponent("repo")
-    try FileManager.default.createDirectory(at: repoDir, withIntermediateDirectories: true)
+    let (tempDir, repoDir) = try await createTestRepo()
     defer { try? FileManager.default.removeItem(at: tempDir) }
-
-    let initProcess = Process()
-    initProcess.executableURL = URL(fileURLWithPath: "/bin/bash")
-    initProcess.arguments = ["-c", "git init -b main && git commit --allow-empty -m init"]
-    initProcess.currentDirectoryURL = repoDir
-    initProcess.environment = [
-        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin",
-        "HOME": NSHomeDirectory(),
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_AUTHOR_NAME": "Test",
-        "GIT_AUTHOR_EMAIL": "test@test.com",
-        "GIT_COMMITTER_NAME": "Test",
-        "GIT_COMMITTER_EMAIL": "test@test.com",
-    ]
-    let initPipe = Pipe()
-    initProcess.standardOutput = initPipe
-    initProcess.standardError = initPipe
-    try initProcess.run()
-    initProcess.waitUntilExit()
-    #expect(initProcess.terminationStatus == 0, "git init failed")
 
     let db = try TBDDatabase(inMemory: true)
     let recorded = RecordedCommands()

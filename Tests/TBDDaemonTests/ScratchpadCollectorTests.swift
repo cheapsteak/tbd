@@ -30,8 +30,8 @@ struct ScratchpadCollectorTests: ~Copyable {
 
     @Test("slug replaces forward slashes with hyphens")
     func testSlugConversion() {
-        let slug = ScratchpadCollector.slug(forWorktreePath: "/Users/chang/tbd/worktrees/some-wt")
-        #expect(slug == "-Users-chang-tbd-worktrees-some-wt")
+        let slug = ScratchpadCollector.slug(forWorktreePath: "/Users/me/tbd/worktrees/some-wt")
+        #expect(slug == "-Users-me-tbd-worktrees-some-wt")
     }
 
     @Test("slug with single component")
@@ -49,7 +49,7 @@ struct ScratchpadCollectorTests: ~Copyable {
     @Test("cleanUp removes scratchpad dir and returns record stamped with repoPath")
     func testCleanUpSuccess() async {
         let collector = ScratchpadCollector(base: tmpDir)
-        let worktreePath = "/Users/chang/tbd/worktrees/test-wt"
+        let worktreePath = "/Users/me/tbd/worktrees/test-wt"
         let slug = ScratchpadCollector.slug(forWorktreePath: worktreePath)
 
         let scratchpadDir = tmpDir.appendingPathComponent(slug)
@@ -60,11 +60,11 @@ struct ScratchpadCollectorTests: ~Copyable {
         try? "test content".write(to: file1, atomically: true, encoding: .utf8)
 
         let now = Date()
-        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd", now: now)
+        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, repoPath: "/Users/me/tbd", now: now)
 
         #expect(record != nil)
         #expect(record?.kind == ReapKind.scratchpad)
-        #expect(record?.repoPath == "/Users/chang/tbd")
+        #expect(record?.repoPath == "/Users/me/tbd")
         #expect(record?.worktreePath == scratchpadDir.path)
         #expect(record?.apparentBytes != nil)
         #expect(!fm.fileExists(atPath: scratchpadDir.path))
@@ -73,7 +73,7 @@ struct ScratchpadCollectorTests: ~Copyable {
     @Test("cleanUp stamps an empty repoPath when the caller has none to give")
     func testCleanUpStampsEmptyRepoPathWhenUnknown() async {
         let collector = ScratchpadCollector(base: tmpDir)
-        let worktreePath = "/Users/chang/tbd/worktrees/test-wt-2"
+        let worktreePath = "/Users/me/tbd/worktrees/test-wt-2"
         let slug = ScratchpadCollector.slug(forWorktreePath: worktreePath)
         let scratchpadDir = tmpDir.appendingPathComponent(slug)
         try? fm.createDirectory(at: scratchpadDir, withIntermediateDirectories: true)
@@ -104,9 +104,9 @@ struct ScratchpadCollectorTests: ~Copyable {
     @Test("cleanUp returns nil when scratchpad does not exist")
     func testCleanUpNonExistent() async {
         let collector = ScratchpadCollector(base: tmpDir)
-        let worktreePath = "/Users/chang/tbd/worktrees/nonexistent"
+        let worktreePath = "/Users/me/tbd/worktrees/nonexistent"
 
-        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, repoPath: "/Users/chang/tbd", now: Date())
+        let record = await collector.cleanUp(forRemovedWorktreePath: worktreePath, repoPath: "/Users/me/tbd", now: Date())
 
         #expect(record == nil)
     }

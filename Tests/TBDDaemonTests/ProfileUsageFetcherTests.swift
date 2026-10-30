@@ -614,7 +614,7 @@ struct ProfileUsageKeychainDerivationTests {
     /// bare "Claude Code-credentials" item of the user's default ~/.claude.
     @Test func serviceNameIsAlwaysSuffixed() {
         let service = ClaudeCodeCredentialsKeychain.serviceName(
-            forConfigDirPath: "/Users/zionts/tbd/profiles/abc/claude")
+            forConfigDirPath: "/Users/octocat/tbd/profiles/abc/claude")
         #expect(service.hasPrefix("Claude Code-credentials-"))
         #expect(service != "Claude Code-credentials")
     }
@@ -622,6 +622,6 @@ struct ProfileUsageKeychainDerivationTests {
     /// Known vector from the class doc comment, verified empirically.
     @Test func knownSHA256Vector() {
         #expect(ClaudeCodeCredentialsKeychain.serviceSuffix(
-            forConfigDirPath: "/Users/zionts/.claude-profiles/zadam") == "db64a81f")
+            forConfigDirPath: "/Users/me/.claude-profiles/acme") == "9c701bd6")
     }
 }

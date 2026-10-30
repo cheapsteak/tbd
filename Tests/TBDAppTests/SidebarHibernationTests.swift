@@ -81,14 +81,11 @@ struct SidebarHibernationTests {
         #expect(result.hibernatedRoots.isEmpty)
     }
 
-    @Test("scratch rows qualify but the special supervision desk stays in place")
-    func scratchAndDesk() {
+    @Test("scratch rows qualify")
+    func scratchQualifies() {
         let scratch = worktree("scratch", repoID: nil)
-        let desk = worktree(NightwatchDeskPrompts.deskDisplayName, repoID: nil)
-        let result = partition([scratch, desk], terminals: [
-            scratch.id: [terminal(scratch)], desk.id: [terminal(desk)],
-        ])
-        #expect(result.workingRoots.map(\.id) == [desk.id])
+        let result = partition([scratch], terminals: [scratch.id: [terminal(scratch)]])
+        #expect(result.workingRoots.isEmpty)
         #expect(result.hibernatedRoots.map(\.id) == [scratch.id])
     }
 

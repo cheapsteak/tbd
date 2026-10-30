@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The app owns note content: `note.list` carries none, so `NotePaneView`
 /// reads and writes `TBDConstants.noteContentPath` itself. Two rules in that
@@ -29,12 +30,12 @@ struct NoteContentFileAccessTests {
     /// Runs `body` against a fresh `AppState` whose note content files live in
     /// a per-test temp directory, removed afterwards.
     private func withState(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.NoteContentFileAccess.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.NoteContentFileAccess")
+        let defaults = suite.defaults
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-note-content-\(UUID().uuidString)")
         defer {
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
             try? FileManager.default.removeItem(at: dir)
         }
         let state = AppState(userDefaults: defaults)

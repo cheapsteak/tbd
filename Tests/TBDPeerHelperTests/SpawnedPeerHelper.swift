@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import TBDShared
+import TBDKernel
 
 /// One real `TBDPeerHelper` process, spawned the way the daemon spawns it.
 ///
@@ -86,20 +86,26 @@ final class SpawnedPeerHelper: @unchecked Sendable {
         peerProtocol: Int = PeerBridgeFrameCodec.peerProtocol,
         sessionID: String = UUID().uuidString
     ) throws {
+        // Close-on-exec, as production builds them: sibling suites in this
+        // process `forkpty` and raw-`posix_spawn` long-lived children that close
+        // nothing, and one started while this helper runs would otherwise
+        // inherit the stdin write end and withhold the EOF that `closeStdin()`
+        // exists to deliver. Created before any stored property
+        // is assigned, so a throw here leaves nothing partly initialized.
+        let stdinPipe = try Pipe.closeOnExec()
+        let stdoutPipe = try Pipe.closeOnExec()
         self.handle = handle
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)
         root = URL(fileURLWithPath: "/tmp/tbdph-\(suffix)", isDirectory: true)
         socketDirectory = root.appendingPathComponent("s", isDirectory: true)
         sessionsDirectory = root.appendingPathComponent("r", isDirectory: true)
         store = ShadowPeerRecordStore(sessionsDirectory: sessionsDirectory)
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
         process = Process()
         stdinHandle = stdinPipe.fileHandleForWriting
         stdoutFD = stdoutPipe.fileHandleForReading.fileDescriptor
-        // Every stored property is set above, and nothing above can throw: a
-        // class initializer may not throw while the instance is only partly
-        // initialized, so all the fallible work lives below this line.
+        // Every stored property is set above, and nothing after the first
+        // assignment can throw until here: the fallible work that needs the
+        // scratch root lives below this line, where a failure can remove it.
 
         do {
             // Only the root is created here. The helper creates its own socket

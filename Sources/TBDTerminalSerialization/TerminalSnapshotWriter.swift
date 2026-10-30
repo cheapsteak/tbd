@@ -132,11 +132,11 @@ public enum TerminalSnapshotWriter {
     /// viewer receives is unaffected either way. At detach the daemon resets
     /// this emulator and replays the viewer's handback, overwriting the model
     /// wholesale. The real cost is therefore a briefly degraded model, which
-    /// matters for a `terminal.output` supervision read taken inside that
-    /// window, and which persists only if an attach fails before the detach
-    /// that would have overwritten it. (The overwrite is the handback
-    /// preamble's own reset prelude, which erases the display and the
-    /// scrollback before it replays either.)
+    /// matters for a `terminal.output` read taken inside that window, and
+    /// which persists only if an attach fails before the detach that would
+    /// have overwritten it. (The overwrite is the handback preamble's own
+    /// reset prelude, which erases the display and the scrollback before it
+    /// replays either.)
     ///
     /// - The selected character set (SCS). `cmdSaveCursor` carries `charset`,
     ///   it is absent from `CapturedTerminalState`, and no public SwiftTerm

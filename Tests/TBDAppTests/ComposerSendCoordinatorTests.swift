@@ -225,28 +225,40 @@ struct ComposerSendCoordinatorTests {
             },
             clock: clock)
 
-        async let outcome = coordinator.send(
-            text: "hi", paths: [:], state: .notRunning(exited: true),
-            terminalID: UUID(), worktreeID: UUID())
+        // **Arm the timeout without queueing on a shared queue.** Each turn on
+        // the cooperative pool or the main actor costs the saturated pass's
+        // per-test latency, tens of seconds, so a handshake that needs three of
+        // them overruns any reasonable arming bound. Three choices remove them:
+        //
+        // - `send` is awaited from this body, which is already on the main
+        //   actor, rather than from an `async let` child that would first need
+        //   a pool thread and then a main-actor turn to reach the task group.
+        // - The call carries a `GateExecutor` preference. SE-0417 makes the
+        //   group's nonisolated children inherit it, so the timeout child
+        //   starts on a thread the tests own and registers its sleeper at once.
+        // - The driver that waits for that sleeper and advances runs on
+        //   `gateHoldingTask`, so it needs no pool thread either. It may start
+        //   after the sleeper registers; `requireSleeperArmed` returns at once
+        //   then. A missed arming is recorded as the thrown error so its
+        //   diagnostic reaches the primary failure line.
+        let hold = ComposerSendCoordinator.wakeHoldTimeout
+        let driver = gateHoldingTask {
+            do {
+                try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
+                await clock.advance(by: hold)
+            } catch {
+                Issue.record(error)
+            }
+        }
 
-        // **Wait for the sleeper, then advance — on the fast pass's budget, not
-        // on the handshake's.** Three things have to happen before the timeout
-        // child registers anything: the `async let` child has to get a thread,
-        // `send` has to run its `wake` double and reach the task group *on the
-        // main actor* — a process-wide serialization point every other
-        // `@MainActor` test in the pass queues on — and the group's timeout child
-        // has to get a thread of its own. None of that is the coordinator being
-        // slow, so the bound belongs to `TestDeadlines.saturatedPass` (90 s): the
-        // clock's 45 s default sits *below* fast pass 2's measured p90 per-test
-        // latency (51.4 s, max 55.3 s), which is how this test came back red on
-        // CI while passing on an idle machine. Nothing in the doubles can hold
-        // the group back — the waiter double releases the main actor at its first
-        // suspension and the timeout child never touches it — so the wait only
-        // ever pays for scheduling.
-        try await clock.requireSleeperArmed(timeout: TestDeadlines.saturatedPass)
-        await clock.advance(by: ComposerSendCoordinator.wakeHoldTimeout)
+        let outcome = await withTaskExecutorPreference(GateExecutor.shared) {
+            await coordinator.send(
+                text: "hi", paths: [:], state: .notRunning(exited: true),
+                terminalID: UUID(), worktreeID: UUID())
+        }
+        await driver.value
 
-        guard case .failed(let message) = await outcome else {
+        guard case .failed(let message) = outcome else {
             Issue.record("the hold must expire on the injected clock")
             return
         }

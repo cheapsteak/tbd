@@ -215,7 +215,7 @@ struct ActuationLogTests {
     @Test("the refusal vocabulary is closed, and every name is query-shaped")
     func refusedReasonVocabulary() {
         #expect(Set(RefusedReason.allCases.map(\.rawValue))
-            == ["noop", "not-found", "not-eligible", "in-flight", "target-mismatch"])
+            == ["noop", "not-found", "not-eligible", "in-flight", "target-mismatch", "held"])
     }
 
     @Test("park and wake results classify onto the vocabulary, no-ops apart from declines")
@@ -402,7 +402,7 @@ struct ActuationLogTests {
     // MARK: - Vocabulary
 
     /// The record's `modeSource` and a screen's `source` name the same fact, and
-    /// a supervisor correlates them by string comparison — reading
+    /// a caller correlates them by string comparison — reading
     /// `screen.source` out of `tbd terminal output --json` and matching it
     /// against the row its send produced. Two spellings would break exactly the
     /// case worth correlating, `staleDaemon`: the one that says the composition

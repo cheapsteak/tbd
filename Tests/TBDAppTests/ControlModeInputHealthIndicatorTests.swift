@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// State-level tests for the control-mode "input not being delivered"
 /// indicator (#318 polish). The indicator's visibility is
@@ -14,9 +15,9 @@ import TBDShared
 struct ControlModeInputHealthIndicatorTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.InputHealth.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.InputHealth")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

@@ -26,6 +26,9 @@ struct ConfigGet: AsyncParsableCommand {
             "pr-poll-schedule: \(config.prPollScheduleEnabled ? "on" : "off")",
             "transcript-prompt-answer: \(config.transcriptPromptAnswerEnabled ? "on" : "off")",
             "composer-draft: \(config.composerDraftEnabled ? "on" : "off")",
+            "agent-background: \(config.agentBackgroundEnabled ? "on" : "off")",
+            "start-admission: \(config.startAdmissionEnabled ? "on" : "off")",
+            "holder-claim-reconcile: \(config.holderClaimReconcileEnabled ? "on" : "off")",
             "session-usage: \(config.sessionModUsageEnabled ? "on" : "off")",
             "clone-checkout: \(config.cloneCheckoutEnabled ? "on" : "off")",
         ].joined(separator: "\n")
@@ -55,18 +58,19 @@ struct ConfigSet: AsyncParsableCommand {
     static let onOffKeys = [
         "auto-archive-on-merge", "auto-hibernate-on-merge", "pr-poll-schedule",
         "transcript-prompt-answer", "composer-draft", "session-usage",
-        "clone-checkout",
+        "clone-checkout", "start-admission", "agent-background", "holder-claim-reconcile",
     ]
     static let modeKeys = ["update-mode"]
     static var allKeys: [String] { onOffKeys + modeKeys }
 
     @Argument(help: """
         Setting key (auto-archive-on-merge, auto-hibernate-on-merge, pr-poll-schedule, \
-        transcript-prompt-answer, composer-draft, session-usage, clone-checkout, update-mode)
+        transcript-prompt-answer, composer-draft, session-usage, clone-checkout, \
+        start-admission, agent-background, holder-claim-reconcile, update-mode)
         """)
     var key: String
 
-    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer, composer-draft, session-usage and clone-checkout; off|check|auto for update-mode")
+    @Argument(help: "on|off for the merge defaults, pr-poll-schedule, transcript-prompt-answer, composer-draft, session-usage, clone-checkout, start-admission, agent-background and holder-claim-reconcile; off|check|auto for update-mode")
     var value: String
 
     /// What the command says it did.
@@ -92,7 +96,7 @@ struct ConfigSet: AsyncParsableCommand {
                 + "permission prompts answered from the transcript."
         case ("transcript-prompt-answer", .off):
             return "Set transcript-prompt-answer to off. Prompts can no longer be answered from "
-                + "the transcript. Sessions already running keep their hooks until they restart."
+                + "the transcript, in any session; answer them in the terminal. Takes effect now."
         case ("composer-draft", .on):
             return "Set composer-draft to on. Claude sessions started from now on save unsent "
                 + "drafts, and hibernation keeps them."
@@ -101,12 +105,31 @@ struct ConfigSet: AsyncParsableCommand {
                 + "saved draft until they restart, so automatic hibernation skips them."
         case ("session-usage", .on):
             return "Set session-usage to on. Claude sessions started from now on save their "
-                + "context window, rate limits and cost to their session folder, and desk "
-                + "sessions stop wrapping your status line."
+                + "context window, rate limits and cost to their session folder."
         case ("session-usage", .off):
             return "Set session-usage to off. Claude sessions started from now on record no "
-                + "usage, and desk sessions wrap your status line again. Sessions already "
-                + "running keep what they started with until they restart."
+                + "usage. Sessions already running keep what they started with until they "
+                + "restart."
+        case ("start-admission", .on):
+            return "Set start-admission to on. Agent starts and wakes that a program asks for run "
+                + "~/tbd/hooks/start-admission first, and a nonzero exit holds the start. Starts you "
+                + "make in the app are never held. Takes effect now."
+        case ("start-admission", .off):
+            return "Set start-admission to off. Agent starts and wakes proceed without running "
+                + "the start-admission command. Takes effect now."
+        case ("agent-background", .on):
+            return "Set agent-background to on. tbd agents background on can lower agent "
+                + "process priority for a lease."
+        case ("agent-background", .off):
+            return "Set agent-background to off. tbd agents background on is refused; off and "
+                + "status still work."
+        case ("holder-claim-reconcile", .on):
+            return "Set holder-claim-reconcile to on. On each app poll, the daemon takes back "
+                + "the pty of any session the app reports it no longer holds, so a lost handback "
+                + "no longer leaves the session unread. Takes effect at the next poll."
+        case ("holder-claim-reconcile", .off):
+            return "Set holder-claim-reconcile to off. The daemon only logs the sessions it "
+                + "would take back from the app, and changes nothing. Takes effect at the next poll."
         case ("clone-checkout", .on):
             return "Set clone-checkout to on. New worktrees are cloned from a per-repo template "
                 + "checkout where the volume supports it, so unchanged files share disk blocks. "
@@ -183,6 +206,7 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetTranscriptPromptAnswerEnabled,
                 params: ConfigSetPromptAnswerParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
         case "composer-draft":
             let parsed = try Self.parseOnOff(value, key: key)
             try client.callVoid(
@@ -194,6 +218,24 @@ struct ConfigSet: AsyncParsableCommand {
             try client.callVoid(
                 method: RPCMethod.configSetSessionModUsageEnabled,
                 params: ConfigSetSessionModUsageEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "start-admission":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetStartAdmissionEnabled,
+                params: ConfigSetStartAdmissionEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "agent-background":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetAgentBackgroundEnabled,
+                params: ConfigSetAgentBackgroundEnabledParams(enabled: parsed.boolValue))
+            print(Self.confirmation(key: key, value: parsed))
+        case "holder-claim-reconcile":
+            let parsed = try Self.parseOnOff(value, key: key)
+            try client.callVoid(
+                method: RPCMethod.configSetHolderClaimReconcileEnabled,
+                params: ConfigSetHolderClaimReconcileParams(enabled: parsed.boolValue))
             print(Self.confirmation(key: key, value: parsed))
         case "clone-checkout":
             let parsed = try Self.parseOnOff(value, key: key)

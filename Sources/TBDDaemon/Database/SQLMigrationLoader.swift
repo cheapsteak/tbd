@@ -44,7 +44,8 @@ public struct BundledMigrations: Sendable {
 }
 
 public enum SQLMigrationLoaderError: LocalizedError, CustomStringConvertible, Sendable {
-    /// No candidate directory contained `TBD_TBDDaemonLib.bundle/Migrations`.
+    /// No candidate directory contained `TBD_TBDDaemonLib.bundle/Migrations`
+    /// in either bundle layout.
     case resourceBundleNotFound(searched: [String])
     /// The directory resolved but could not be enumerated or read.
     case migrationsDirectoryUnreadable(path: String, underlying: String)
@@ -122,19 +123,34 @@ public enum SQLMigrationLoader {
         return candidates
     }
 
+    /// Where `Migrations` sits inside the resource bundle. SwiftPM's native
+    /// build system emits a flat bundle; the `swiftbuild` backend emits a
+    /// macOS-style one with resources under `Contents/Resources`.
+    static let bundleResourceLayouts: [[String]] = [
+        [],
+        ["Contents", "Resources"],
+    ]
+
     /// Resolve `TBD_TBDDaemonLib.bundle/Migrations`, or throw naming every
     /// path that was searched.
     static func locateMigrationsDirectory() throws -> URL {
+        try locateMigrationsDirectory(in: candidateContainerURLs())
+    }
+
+    static func locateMigrationsDirectory(in containers: [URL]) throws -> URL {
         var searched: [String] = []
-        for container in candidateContainerURLs() {
-            let candidate = container
-                .appendingPathComponent(resourceBundleName)
-                .appendingPathComponent(migrationsSubdirectory)
-            searched.append(candidate.path)
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
-               isDirectory.boolValue {
-                return candidate
+        for container in containers {
+            let bundle = container.appendingPathComponent(resourceBundleName)
+            for layout in bundleResourceLayouts {
+                let candidate = layout
+                    .reduce(bundle) { $0.appendingPathComponent($1) }
+                    .appendingPathComponent(migrationsSubdirectory)
+                searched.append(candidate.path)
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+                   isDirectory.boolValue {
+                    return candidate
+                }
             }
         }
         throw SQLMigrationLoaderError.resourceBundleNotFound(searched: searched)

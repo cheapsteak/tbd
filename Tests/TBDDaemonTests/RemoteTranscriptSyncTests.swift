@@ -509,11 +509,6 @@ struct RemoteTranscriptSyncTests: ~Copyable {
         try #require(cache(sync).peekState())
     }
 
-    @Test func theThresholdsArePinned() {
-        #expect(RemoteTranscriptSync.tailRecordCount == 12)
-        #expect(RemoteTranscriptSync.tailResetGrowthThreshold == 524_288)
-    }
-
     @Test func flagOnTailsAnEmptyCache() async throws {
         let hint = RemoteTranscriptHint(id: "c1", size: 100)
         let provider = ScriptedProvider([

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import os
 import TBDShared
+import TBDKernel
 
 private let shadowPeerLogger = Logger(subsystem: "com.tbd.daemon", category: "shadowPeer")
 
@@ -13,7 +14,7 @@ private let shadowPeerLogger = Logger(subsystem: "com.tbd.daemon", category: "sh
 /// what the daemon knows about it, assertable without starting a process. The
 /// flags mirror `PeerHelperOptions.parse` exactly; the two are a contract
 /// between two targets that do not share a type (the helper deliberately links
-/// only `TBDShared`), so the argv shape is pinned by a test on each side.
+/// only `TBDKernel`), so the argv shape is pinned by a test on each side.
 public struct ShadowPeerHelperInvocation: Sendable, Equatable {
     /// The handle the **provider** minted for the remote session this shadow
     /// stands for. Never a socket path, and never persisted past this
@@ -227,8 +228,18 @@ public struct ShadowPeerHelperProcessSpawner: ShadowPeerHelperSpawning {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = invocation.arguments
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
+        // Close-on-exec, so no other child this daemon starts can inherit the
+        // stdin write end: a copy anywhere would withhold the EOF that is the
+        // helper's only cleanup signal after the daemon is SIGKILLed.
+        let stdinPipe: Pipe
+        let stdoutPipe: Pipe
+        do {
+            stdinPipe = try Pipe.closeOnExec()
+            stdoutPipe = try Pipe.closeOnExec()
+        } catch {
+            throw ShadowPeerHelperError.spawnFailed(
+                handle: invocation.handle, detail: String(describing: error))
+        }
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = FileHandle.nullDevice

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Tests for `AppState.selectRemoteSession(provider:sessionID:)` and its
 /// mutual exclusivity with `selectedWorktreeIDs` / `selectedRepoID` /
@@ -14,9 +15,9 @@ import TBDShared
 struct RemoteSessionSelectionTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RemoteSessionSelection.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteSessionSelection")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

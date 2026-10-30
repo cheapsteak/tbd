@@ -431,37 +431,16 @@ final class TmuxBridge: @unchecked Sendable {
         }
     }
 
-    /// Clean up every view session on one server.
-    ///
-    /// Fire-and-forget like `cleanupSession`. Sessions belonging to other
-    /// servers are left alone: `activeSessions` spans every server the app
-    /// currently shows a panel on.
-    ///
-    /// Deliberately not generation-scoped. This reclaims *everything* tracked
-    /// on the server rather than one panel's preparation, so there is no
-    /// stale-teardown race to guard against — filtering by generation here
-    /// could only leave a session behind.
-    func cleanupAllSessions(server: String) {
-        let sessions = takeSessions { $0.server == server }
-        guard !sessions.isEmpty else { return }
-
-        Task.detached { [self] in
-            await killSessions(sessions)
-            debugLog("CLEANUP ALL: server=\(server) sessions=\(sessions.count)")
-        }
-    }
-
     /// Reclaim every tracked view session, each on the server that owns it,
     /// blocking the caller until the kills have run.
     ///
-    /// This is the app-termination path, and blocking is the whole point:
-    /// `cleanupAllSessions(server:)` hands its kills to a detached task, and
-    /// nothing scheduled that way outlives the process — on
-    /// `applicationWillTerminate` the task would be enqueued and then die with
-    /// the app, having killed nothing. A view session that outlives the app
-    /// keeps its linked worktree window alive (tmux destroys a window only
-    /// when the last session referencing it goes away), and with it that
-    /// window's pane process and the whole tmux server.
+    /// This is the app-termination path, and blocking is the whole point: a
+    /// kill handed to a detached task and left there does not outlive the
+    /// process — on `applicationWillTerminate` the task would be enqueued and
+    /// then die with the app, having killed nothing. A view session that
+    /// outlives the app keeps its linked worktree window alive (tmux destroys
+    /// a window only when the last session referencing it goes away), and
+    /// with it that window's pane process and the whole tmux server.
     ///
     /// Bounded rather than open-ended: a wedged tmux may delay quitting by
     /// `timeout` at most, and one leaked session is the lesser harm.

@@ -6,15 +6,21 @@ what invokes tmux, which user-visible capability each invocation backs, and what
 would break without it. Every claim is cited to `file:line` in this worktree. If
 the code and this document disagree, the code wins; then fix the document.
 
+*Re-read against the tree on 2026-10-25 in the entries for the key-name
+`send-keys`, `capture-pane -p -e -J`, `windowExists`, `pane_current_command`
+and `pane_pid`, and in the section on which capabilities serve supervision:
+those cite that tree. Every other citation is from the 2026-08-26 reading.*
+
+*Measured on 2026-10-30, on macOS 27: what `ps eww` can read of another
+process's environment, in the pane-identity fallback entry. That entry's
+citations are still from the 2026-08-26 reading.*
+
 It is an inventory, not a proposal. It does not argue for or against any change
 to how terminals are driven.
 
-Two moving parts make the snapshot date load-bearing. The control-mode subsystem
-under `Sources/TBDDaemon/Tmux/ControlMode/` is built but shipped off, so half the
-surface below is code that exists and does not run. And the fleet-supervision
-subsystem is being replaced (root `CLAUDE.md`, "Nightwatch is being replaced"),
-so some of what is inventoried here is scheduled to be deleted rather than
-maintained.
+The snapshot date is load-bearing because of one moving part: the control-mode
+subsystem under `Sources/TBDDaemon/Tmux/ControlMode/` is built but shipped off,
+so half the surface below is code that exists and does not run.
 
 ## How to read this
 
@@ -34,7 +40,7 @@ to.
   install that has not opted in.
 - **Both** — a dependency the two paths share.
 
-**Five seams reach tmux.** Nothing else in `Sources/` spawns it.
+**Four seams reach tmux.** Nothing else in `Sources/` spawns it.
 
 - **`TmuxManager`** (`Sources/TBDDaemon/Tmux/TmuxManager.swift`) — the daemon's
   plain-subprocess seam. Static functions build argv; `runTmux` (`:1223`) execs
@@ -51,9 +57,6 @@ to.
   `tmux -L <server> -CC attach -t main`, one per server. Control-mode only;
   every control-mode command below rides this connection as command text rather
   than as a subprocess.
-- **Seeded user-land Python** — the supervision tick script embedded in
-  `Sources/TBDShared/NightwatchSkillContent.swift:954` shells out to
-  `tmux -L <srv> capture-pane -p -e -t <pane>` itself, outside every seam above.
 
 Plus one binary-location concern: `TmuxExecutableResolver`
 (`Sources/TBDShared/TmuxExecutableResolver.swift`) finds tmux on `PATH` or falls
@@ -132,60 +135,47 @@ tmux's environment plumbing.
 - **`send-keys -l`** (literal text) — `sendKeysCommand` (`:487-489`). Path:
   **default**. One caller: the rate-limit auto-continue rail
   (`LimitResumeActuator.swift:424`).
-- **`send-keys`** (key names) — `sendKeyCommand` (`:492-494`). Path: **default**.
+- **`send-keys`** (key names) — `sendKeyCommand` (`:736-738`). Path: **default**.
   Callers: the auto-continue rail's Escape/Enter bracket
-  (`LimitResumeActuator.swift:422, 426`), the graceful pane interrupt used before
-  parking (`HibernationCoordinator.swift:1162-1166` and the twin at
-  `RPCRouter+TerminalHandlers.swift:2103-2108`), the trailing Enter after a
-  `terminal.send` paste (`:2392, 2405`) and after a verified re-delivery
-  (`:2554`), and the supervision desk's nudge
-  and wrap-up Enters (`DeskSessionManager.swift:565, 702`).
-- **`send-keys … Enter`** (command form) — `sendCommandArgs` (`:727-729`), one
-  caller: typing `/exit` when parking a Claude session politely
-  (`HibernationCoordinator.swift:1129`).
+  (`LimitResumeActuator.swift:772, 776`), the named keys of
+  `terminal.send --keys` (`RPCRouter+TerminalHandlers.swift:4222`), and the
+  trailing Enter after a `terminal.send` paste (`:4209, 4330`) and after a
+  verified re-delivery (`:5057`). A park types nothing: it ends the session by
+  signal (`TmuxSignalEnding`, `ComposerDraftParkGate.swift:78`).
 - **`load-buffer` + `paste-buffer -d -p` + `delete-buffer`** — `pasteText`
   (`:950-996`), building on `loadBufferCommand` (`:498-500`),
   `pasteBufferCommand` (`:512-514`) and `deleteBufferCommand` (`:518-520`).
   Path: **default**. tmux is the sole bracketed-paste authority here: `-p` wraps
   the payload in `ESC[200~`/`ESC[201~` only if the pane enabled DECSET 2004, so
   the separate trailing Enter provably lands outside the paste. Callers: the
-  `terminal.send` handler (`RPCRouter+TerminalHandlers.swift:2383`), verified
-  re-delivery (`:2549`), and the supervision desk (`DeskSessionManager.swift:558,
-  695`).
+  `terminal.send` handler (`RPCRouter+TerminalHandlers.swift:2383`) and verified
+  re-delivery (`:2549`).
 
 The ultimate consumers of the send capability are: the CLI (`tbd terminal send`,
 `tbd terminal keys` — `TerminalCommands.swift:137, 167`), which is how one agent
 session messages another (`docs/cross-session-messaging.md`); the app's own UI
-send paths; the supervision desk's unattended nudges; and the rate-limit rail.
+send paths; and the rate-limit rail.
 
 ### Reading a pane's text
 
-Four capture shapes exist. Under the "No TUI screen-scraping" rule, only two of
-them classify what they read, and both are named exceptions.
+Three capture shapes exist. Under the "No TUI screen-scraping" rule, none of
+them classifies what it reads.
 
 - **`capture-pane -p`** — `capturePaneCommand` (`:526-528`). Path: **default**.
   One caller: `handleTerminalOutput` (`:1324-1344`) passes the text through
   verbatim as the result of the `terminal.output` RPC, which is what
   `tbd terminal output` prints — sanctioned pass-through.
-- **`capture-pane -p -e -J`** — `capturePaneWithAnsiCommand` (`:531-533`). Path:
-  **default**. One caller: `performHibernate`
-  (`HibernationCoordinator.swift:375`), which uses it twice over. The capture is
-  stored as the parked pane's display snapshot (verbatim), *and* it is fed to
-  `HibernationSafetyChecks.hasPendingInput` (`:379`) — **sanctioned scraper #1**,
-  exempted at `.swiftlint.yml:334`, the rail that refuses to park a session with
-  unsent text in its composer. The `-e` is load-bearing: dimness is the only
-  thing distinguishing a ghost suggestion from typed input.
+- **`capture-pane -p -e -J`** — `capturePaneWithAnsiCommand` (`:775-777`). Path:
+  **default**. One caller: the tmux park
+  (`HibernationCoordinator.swift:1305`), which reads it once and stores it
+  verbatim as the parked pane's display snapshot; nothing it shows refuses the
+  park. The `-e` keeps the styling the parked tab shows as its backdrop.
 - **`capture-pane -p -e -J -S -10000`** — `capturePaneScrollbackCommand`
   (`:541-546`). Path: **default**. Archival, verbatim, never parsed. Three
   callers, all snapshotting a pane into closed-terminal history immediately
   before its window dies: `captureThenKillWindow` (`WorktreeLifecycle.swift:252`),
   the hook-terminal close (`WorktreeLifecycle+PreSession.swift:462`), and
   `terminal.delete` (`RPCRouter+TerminalHandlers.swift:735`).
-- **The supervision tick's own capture** — `NightwatchSkillContent.swift:954`
-  runs `capture-pane -p -e` per fleet pane and regex-classifies the result.
-  **Sanctioned scraper #2**, exempted at `.swiftlint.yml:337` with an explicit
-  debt marker. Path: **default** (it shells out directly; control mode is
-  irrelevant to it).
 
 ### Asking what is alive, and who it belongs to
 
@@ -194,26 +184,31 @@ This is the largest read surface and the one with the most consumers.
 - **`list-sessions`** — `serverExists` (`:1192-1203`). Path: **both**. Callers:
   the reconcile sweep (`WorktreeLifecycle+Reconcile.swift:454, 572, 666`) and
   startup hibernation reconciliation (`HibernationCoordinator.swift:1095`).
-- **`list-panes -t <window>`** — `windowExists` (`:1177-1189`). Path: **both**.
-  Nine callers: the reconcile sweep (`Reconcile.swift:583, 669`), pre-session
-  completion polling (`PreSession.swift:247`), wake (`HibernationCoordinator.swift:883`)
-  and startup reconciliation (`:1098`), `terminal.delete` (`:700`), window
-  recreation (`:1071`), the rate-limit rail's eligibility check
-  (`LimitResumeActuator.swift:265`), and the supervision desk's live-terminal
-  resolution (`DeskSessionManager.swift:299`).
+- **`list-panes -t <window>`** — `windowExists` (`:1717-1729`). Path: **both**.
+  Four callers: pre-session completion polling (`PreSession.swift:328`), the
+  tmux park's liveness check (`HibernationCoordinator.swift:1286`), startup
+  reconciliation (`:2437`), and the rate-limit rail's eligibility check
+  (`LimitResumeActuator.swift:508`).
 - **`list-panes -F '#{pane_current_command}'`** — `paneCurrentCommandQuery`
-  (`:552-554`). Path: **both**. Answers "is an agent in the foreground of this
-  pane". Callers: reconcile (`Reconcile.swift:622`), hibernation's
-  took-effect verification (`HibernationCoordinator.swift:468`), startup
-  reconciliation (`:1102`), the polite-exit poll (`:1144`), and the supervision
-  desk (`DeskSessionManager.swift:308`). The classification itself is
+  (`:796-798`). Path: **both**. Answers "is an agent in the foreground of this
+  pane". Callers: reconcile (`Reconcile.swift:871`), the tmux park's liveness
+  check (`HibernationCoordinator.swift:1292`), hibernation's took-effect
+  verification (`:1516`), startup reconciliation (`:2441`), and
+  `TmuxSignalEnding`'s poll for Claude to leave after its SIGTERM
+  (`ComposerDraftParkGate.swift:122`). The classification itself is
   `ClaudeStateDetector.isClaudeProcess` (`:10-12`), a version-string regex over
   the command name — a process fact, not screen text.
-- **`list-panes -F '#{pane_pid}'`** — `panePIDQuery` (`:705-707`). Path: **both**.
-  Callers: session-ID recapture (`ClaudeStateDetector.swift:69`), the rate-limit
-  rail (`LimitResumeActuator.swift:317`), the two graceful-interrupt paths
-  (`HibernationCoordinator.swift:1169`, `RPCRouter+TerminalHandlers.swift:2112`),
-  and `killWindowAndReap` (`WorktreeLifecycle.swift:228`).
+- **`list-panes -F '#{pane_pid}'`** — `panePIDQuery` (`:1041-1043`). Path:
+  **both**. Callers: session-ID recapture (`ClaudeStateDetector.swift:79`), the
+  rate-limit rail (`LimitResumeActuator.swift:560`), `TmuxSignalEnding`'s
+  lookup of the Claude process under the pane, for the park and the profile
+  swap alike (`ComposerDraftParkGate.swift:112`), the pane-foreground probe
+  behind the exit-stamped guard and the running-shell move
+  (`HibernationCoordinator.swift:667`), `terminal.send`'s foreground-agent rail
+  (`RPCRouter+TerminalHandlers.swift:4001`), `terminal.completions`'
+  executable pin (`RPCRouter+CompletionHandlers.swift:79`), the tmux arm of
+  `AgentBackgroundRoots` (`AgentBackgroundRoots.swift:53`), and
+  `killWindowAndReap`'s window teardown (`WorktreeLifecycle.swift:334`).
 - **`list-panes -a -F '#{pane_pid}'`** — `listAllPanePIDsCommand` (`:722-724`),
   paired with **`display-message -p '#{pid}'`** (`serverPIDQuery`, `:718-720`).
   Path: **both**. One consumer, `AgentReaper` (`:37-39`, `:118`): everything
@@ -233,13 +228,12 @@ This is the largest read surface and the one with the most consumers.
 - **`list-panes -t <pane> -F '#{pane_id}\t#{pane_dead}\t#{@tbd_terminal_id}\t#{pane_start_command}'`**
   — `paneSendTargetQuery` (`:600-607`). Path: **both**. The single read that
   answers everything a send needs: does the pane exist, is its process alive, and
-  which TBD terminal does the pane itself claim to be. Five callers, and they are
+  which TBD terminal does the pane itself claim to be. Four callers, and they are
   the whole "do not type into a stranger" story: `terminal.send`'s pre-typing
   consultation (`RPCRouter+TerminalHandlers.swift:2456`), the reconcile sweep
   (`Reconcile.swift:589`), the wake path's disagreement check
-  (`HibernationCoordinator.swift:561`), the rate-limit rail
-  (`LimitResumeActuator.swift:358`), and the supervision desk
-  (`DeskSessionManager.swift:352`).
+  (`HibernationCoordinator.swift:561`), and the rate-limit rail
+  (`LimitResumeActuator.swift:358`).
 
 ### Pane identity
 
@@ -256,11 +250,17 @@ was written for.
 - **The fallback** — `resolvePaneTerminalID` (`:687-703`) reads the same UUID
   back out of `#{pane_start_command}`, anchored on the literal
   `export TBD_TERMINAL_ID='` that `envExportPrefixed` emits, and requires the
-  extracted value to parse as a UUID. macOS forbids reading another process's
-  environment under SIP, so the start command — not `ps eww` — is where the
-  planted value stays legible.
+  extracted value to parse as a UUID. The start command — not `ps eww` — is
+  where the planted value stays legible. `ps eww` reads a process's
+  environment through `sysctl(KERN_PROCARGS2)`, which returns it only as it
+  stood at exec and only to the same user. Every Apple platform binary tested
+  returns argv but no environment, and so do a few other apps (Dia, Chrome,
+  Postgres.app). The pane's own process is its shell, usually `/bin/zsh`, an
+  Apple platform binary, and the export prefix sets the id after that shell
+  has started. A program the shell launches, such as `claude`, does carry the
+  id in a readable environment.
 
-**How widely identity is relied on.** Four places, at three layers.
+**How widely identity is relied on.** Three places, at three layers.
 
 - **The send path.** `terminal.send` consults the pane before typing and refuses
   on a positive disagreement (`RPCRouter+TerminalHandlers.swift:2456`). The
@@ -268,16 +268,11 @@ was written for.
   nicety: "pane IDs are reused, and keys sent to a stale coordinate land in a
   different live session … so target identity is verified by deliberate
   comparison before typing"
-  (`docs/specs/2026-07-26-fleet-supervision-design.md:2762-2765`).
+  (`docs/specs/2026-07-26-fleet-supervision-design.md:2754-2756`).
 - **Reconciliation.** The sweep uses the same query to tell an owned dead pane
   (preserve) from a recycled coordinate now belonging to someone else (repair) —
   `Reconcile.swift:589`, and the `PaneSendTarget.dead(terminalID:)` doc comment
   at `TmuxManager.swift:13-17`.
-- **The supervision desk.** `liveAgentTerminals` (`DeskSessionManager.swift:248-317`)
-  documents the incident that forced it: one desk carried three terminal rows,
-  both dead ones had been assigned `%1`, and a stale row started resolving to a
-  live pane owned by an unrelated session — which would then have been pasted a
-  judge prompt plus Enter.
 - **Cross-session identification, outside TBD's own code.** TBD prints each
   terminal's tmux window and pane (`TerminalCommands.swift:121-130`), and
   Claude Code's `ListAgents` prints the same coordinate for a session inside
@@ -359,9 +354,8 @@ reconciler" doctrine, and all three consume tmux.
   passing).
 
 `kill-window` itself (`killWindowCommand`, `:483-485`) has the widest call list
-in the file — 27 sites across creation rollback, terminal delete, recreate,
-fork-swap, hook-terminal close, scratch close, forget, wake failure, and the
-supervision desk's close.
+in the file — 26 sites across creation rollback, terminal delete, recreate,
+fork-swap, hook-terminal close, scratch close, forget, and wake failure.
 
 ### Control-mode-only surface
 
@@ -388,49 +382,18 @@ not because it is currently load-bearing.
 
 ## Which capabilities exist only to serve supervision
 
-The careful answer is **very few**, and none of the primitives.
+*Re-read against the tree on 2026-10-25.*
 
-Supervision is a heavy *user* of tmux, but almost everything it uses is
-load-bearing elsewhere. `pasteText`, `sendKey`, `windowExists`,
-`paneCurrentCommand`, `paneSendTarget` and `killWindow` are all reached by the
-desk (`DeskSessionManager.swift:299, 308, 352, 558, 565, 695, 702, 782`) and all
-also reached by `terminal.send`, the reconcile sweep, hibernation, or terminal
-teardown. Retiring supervision would remove call sites, not capabilities.
+**None.** Fleet supervision is retired and has no implementation in the tree;
+its specs remain as the design record, and nothing in `Sources/` invokes tmux on
+its behalf.
 
-What is **exclusively** supervision's:
-
-- **The tick script's own `capture-pane -p -e`** (`NightwatchSkillContent.swift:954`)
-  and the regex classifier it feeds. This is the only tmux invocation in the tree
-  that exists solely to babysit the fleet, it is the only one that lives outside
-  every seam, and it is one of the two sanctioned screen-scrapers. It goes when
-  the tick script goes.
-- **The desk's unattended paste-plus-Enter rail** — the *shape*, not the
-  primitives. `nudgeDeskSession` and `postShiftWrapUp` paste and then send Enter
-  unconditionally, with no composer check (`docs/nightwatch.md:213-215` records
-  the 2026-07-25 incident where this spliced a nudge into the middle of a word a
-  human was typing). The replacement design names this explicitly as work to
-  close, by routing it through the same `terminal.send` actuation the public verb
-  uses (`2026-07-26-fleet-supervision-design.md:878-895`) — so the outcome is one
-  fewer *caller* of `pasteText`/`sendKey`, not one fewer capability.
-
-And the direction the replacement is heading matters more than either. The new
-supervision fact surface is specified to make **zero** tmux calls per agent:
-"Per agent this costs at most what `session.states` already costs: database reads
-plus byte-bounded transcript tails, and zero subprocesses, tmux calls, pane reads
-and model calls. That is a constraint, not an aspiration"
-(`SupervisionReadoutBuilder.swift:11-16`). `SessionStateResolver` refuses to add
-a liveness probe for the same reason and takes liveness as an input instead
-(`:233-248`).
-
-But the replacement does **not** shed tmux. It still needs exactly two things
-from it, both named in its own spec: pane and process liveness to identify gone
-agents (`design.md:139-140`), and act-time pane liveness plus identity
-verification on the send path (`design.md:2757-2766`). Those are
-`paneSendTarget`, `windowExists` and `serverExists` — the queries the existing
-send path and the reconcile sweep already depend on. So the honest summary is
-that supervision's replacement retires supervision's *reads of the screen*, and
-keeps supervision's *writes* and its liveness queries, both of which it shares
-with paths that have nothing to do with supervision.
+`session.states`, the state surface its readout was built on and which TBD
+keeps, makes **zero** tmux calls per agent: "per terminal it costs database
+reads plus bounded file tails, and no subprocess, tmux call, pane read or model
+call" (`RPCRouter+SessionStateHandlers.swift:209-213`). `SessionStateResolver`
+refuses to add a liveness probe for the same reason and takes liveness as an
+input instead (`SessionStateResolver.swift:250-265`).
 
 ## What breaks if the app stops seeing the byte stream
 
@@ -512,10 +475,11 @@ usually told.
   that is the normal state for most of a fleet. Without tmux there is no process
   to keep the pty alive between views.
 - **Every actuation into a session.** `send-keys` and `paste-buffer` are how the
-  daemon types. Without tmux, `tbd terminal send`, cross-session agent messaging,
-  the rate-limit auto-continue, the polite `/exit` before
-  parking, and every supervision nudge lose their transport. There is no second
-  path.
+  daemon types. Without tmux, `tbd terminal send`, cross-session agent messaging
+  and the rate-limit auto-continue lose their transport. There is no second
+  path. A park types nothing, so it needs no `send-keys`; it needs tmux for
+  `windowExists`, `paneCurrentCommand`, `capture-pane -p -e -J`, `panePID` and
+  `respawn-window`.
 - **Bracketed-paste correctness.** tmux is the sole wrapping authority
   (`PasteInterception.swift:8-19`); `-p` wrapping is what keeps a trailing Enter
   outside the paste, which is what stopped large `--submit` messages being
@@ -535,13 +499,12 @@ usually told.
   orphan-reclamation doctrine would need an entirely different ground truth.
 - **Process-tree reclamation.** `AgentReaper` finds structural orphans by
   the tmux server being their parent (`:37-39`).
-- **Scrollback for closed-terminal history and parked snapshots.**
-  `capture-pane -S -10000` is where both come from.
+- **Closed-terminal history and parked snapshots.** History comes from
+  `capture-pane -S -10000`, and a parked tab's snapshot from
+  `capture-pane -p -e -J`.
 - **Sizing detached panes.** `resize-window` is what stops a never-viewed
   terminal rendering into hard-wrapped 80x24 scrollback that cannot be reflowed
   when a wider view finally attaches.
-- **The supervision tick's whole fleet read** — it enumerates panes from the DB
-  and captures each one.
 
 Three more are easy to omit from such a list because no TBD code calls them —
 tmux supplies them to the user directly, and they would have to be rebuilt in
@@ -595,11 +558,11 @@ TBD and a thing TBD would then hold directly.
 **Pane identity stops being a problem TBD has.** The `@tbd_terminal_id` stamp,
 the `#{pane_start_command}` fallback with its UUID-parse hardening against
 user-authored env values, the four-field `paneSendTargetQuery`, and the
-five callers that consult it exist for exactly one reason: tmux recycles pane
+four callers that consult it exist for exactly one reason: tmux recycles pane
 ids, so a stale coordinate can resolve to a live session belonging to somebody
 else. If TBD owns the process, the session handle *is* the identity, and that
 failure class disappears along with the apparatus defending against it — from
-the send path, the reconcile sweep, and the supervision desk at once.
+the send path and the reconcile sweep at once.
 
 ### Genuinely hard, and separable
 
@@ -616,12 +579,12 @@ holder *is* the daemon, every daemon restart kills the fleet.
 
 **A VT and scrollback that exist while nothing is attached.** tmux keeps 50,000
 lines per pane (`TmuxManager.swift:274-286`) for panes nobody is looking at,
-which is the normal state for most of a fleet most of the time. Four
+which is the normal state for most of a fleet most of the time. Three
 capabilities are downstream of that and fail together without it: parked-pane
-display snapshots, closed-terminal history, the supervision tick's fleet read,
-and bracketed-paste correctness — the last because `paste-buffer -p` wraps only
-when the pane has set DECSET 2004, so replacing it means tracking 2004 per
-session, which means having parsed the output stream.
+display snapshots, closed-terminal history, and bracketed-paste correctness —
+the last because `paste-buffer -p` wraps only when the pane has set DECSET 2004,
+so replacing it means tracking 2004 per session, which means having parsed the
+output stream.
 
 ### The reference designs are different for each half
 
@@ -652,8 +615,7 @@ is sufficient for a terminal emulator, because nothing in a terminal emulator
 needs to read a session's screen while no window is showing it.
 
 It is not sufficient for TBD, and the gap is not incidental: reading unattended
-sessions is TBD's normal operating mode, not an edge case. A fleet-wide
-supervision read looks at panes none of which are on screen. A park snapshot is
+sessions is TBD's normal operating mode, not an edge case. A park snapshot is
 taken after a session may have gone unviewed for hours. Closed-terminal history
 is captured at kill time. So TBD's VT would have to live in the daemon or in the
 pty holder — a step beyond the iTerm2 shape, with its own references (a

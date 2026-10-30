@@ -185,6 +185,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// `AppState` owns it for the life of the process; this is a plain
     /// reference because the delegate is torn down with the app anyway.
     var tmuxBridge: TmuxBridge?
+    /// Signals every clone still running when the app terminates. A seam for
+    /// tests that drive `applicationWillTerminate`: the production
+    /// `RepoCloner.terminateAll` reaches every clone in the whole process, and
+    /// in a test process that includes the clones another suite is running.
+    var terminateClones: () -> Void = RepoCloner.terminateAll
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         lifecycleLogger.info("willFinishLaunching")
@@ -372,7 +377,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // SIGTERM to any clone still running, so git can clean up its
         // partial clone before the app is gone.
-        RepoCloner.terminateAll()
+        terminateClones()
         // Reclaim this app's tmux view sessions before the process goes. Each
         // one holds a worktree window linked into it, and tmux destroys a
         // window only when its last session reference drops — so a view
@@ -544,18 +549,6 @@ struct TBDAppMain: App {
                 .onOpenURL { url in
                     DeepLinkHandler.handle(url, appState: appState)
                 }
-                .onReceive(
-                    NSWorkspace.shared.notificationCenter
-                        .publisher(for: NSWorkspace.willSleepNotification)
-                ) { _ in
-                    // Best-effort: suspend idle Claude across all worktrees
-                    // before the machine sleeps, so a tmux server that dies
-                    // during a long sleep has less to recover. Gated on the
-                    // existing auto-suspend opt-in; #284 is the unconditional
-                    // safety net. AppState is @MainActor and onReceive runs on
-                    // the main actor, so this call is isolation-correct.
-                    appState.suspendIdleClaudeForSleep()
-                }
         }
         .defaultSize(width: 1200, height: 800)
         .windowResizability(.contentMinSize)
@@ -563,7 +556,6 @@ struct TBDAppMain: App {
         .commands {
             TBDCommands(appState: appState)
             ModelProfileMenu(appState: appState)
-            NightwatchStatusItem(appState: appState)
         }
 
         Settings {

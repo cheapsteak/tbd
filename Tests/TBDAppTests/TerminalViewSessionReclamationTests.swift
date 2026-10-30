@@ -169,6 +169,11 @@ struct TerminalViewSessionReclamationTests {
     /// pool"): the main thread is not a cooperative-pool thread, so the kill
     /// task that releases the wait always has somewhere to run — and the wait
     /// is bounded by `cleanupAllSessionsBlocking`'s own timeout regardless.
+    ///
+    /// The delegate's clone terminator is a no-op here. The production one,
+    /// `RepoCloner.terminateAll`, signals every clone in the process, and in
+    /// the test process that is `RepoClonerTests`' clones, running in the same
+    /// parallel pass.
     @Test("applicationWillTerminate reclaims tracked view sessions on every server")
     func terminateReclaimsSessionsAcrossServers() async throws {
         let fixture = try TmuxBridgeFixture()
@@ -185,6 +190,7 @@ struct TerminalViewSessionReclamationTests {
         await MainActor.run {
             let delegate = AppDelegate()
             delegate.tmuxBridge = bridge
+            delegate.terminateClones = {}
             delegate.applicationWillTerminate(
                 Notification(name: NSApplication.willTerminateNotification))
         }
@@ -363,6 +369,8 @@ struct TerminalViewSessionReclamationTests {
     func preparationCompletingAfterTeardownReclaimsItsSession() async throws {
         let fixture = try TmuxBridgeFixture()
         defer { fixture.remove() }
+        let suite = TestDefaultsSuite("TerminalViewSessionReclamationTests.inFlightPreparation")
+        defer { suite.tearDown() }
         let runner = RecordingTmuxRunner()
         // The verification query is preparation's last command, so holding it
         // parks the preparation with everything else already done.
@@ -375,9 +383,7 @@ struct TerminalViewSessionReclamationTests {
         let terminalView = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 640, height: 480),
             font: TBDTerminalView.defaultMonospaceFont,
-            appearance: AppearanceSettings(
-                defaults: UserDefaults(
-                    suiteName: "TerminalViewSessionReclamationTests.inFlightPreparation")!)
+            appearance: AppearanceSettings(defaults: suite.defaults)
         )
         let coordinator = TerminalPanelRepresentable.Coordinator()
         coordinator.tmuxBridge = bridge

@@ -142,9 +142,10 @@ struct TranscriptOverlayView: View {
             return "brain"
         case .systemReminder(_, let kind, _, _, _, _):
             switch kind {
-            case .skillBody:    return "sparkles"
-            case .nestedMemory: return "doc.text"
-            default:            return "info.circle"
+            case .skillBody:      return "sparkles"
+            case .nestedMemory:   return "doc.text"
+            case .compactSummary: return ActivityRowFormatter.compactSummaryIcon
+            default:              return "info.circle"
             }
         case .userPrompt, .assistantText, .slashCommand:
             return "doc.text"
@@ -175,6 +176,7 @@ struct TranscriptOverlayView: View {
             case .slashEnvelope:      label = "command"
             case .taskNotification:   label = "Background"
             case .nestedMemory:       label = "file"
+            case .compactSummary:     label = "Compact summary"
             case .other:              label = "info"
             }
             guard let source, !source.isEmpty else { return label }
@@ -313,6 +315,8 @@ struct TranscriptOverlayView: View {
                     )
                 case .systemReminder(_, let kind, let text, _, _, _) where kind == .skillBody:
                     SkillBodyRowBody(text: text)
+                case .systemReminder(_, let kind, let text, _, _, _) where kind == .compactSummary:
+                    CompactSummaryRowBody(text: text)
                 case .thinking(_, let text, _):
                     ThinkingRowBody(text: text)
                 case .systemReminder(let itemID, let kind, let text, _, _, let truncatedTo):

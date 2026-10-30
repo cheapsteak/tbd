@@ -38,19 +38,26 @@ import Testing
     /// Not every offset: cutting between two ordinary printable bytes exercises
     /// the same code as cutting between the two before them, and paying for
     /// tens of thousands of full renders to learn that costs half a minute per
-    /// run. What is *not* sampled is anything with internal structure — every
+    /// run. What is enumerated is everything with internal structure — every
     /// offset inside an escape sequence and inside a multi-byte UTF-8
     /// character is tried, because those are the cuts that leave the parser
-    /// holding half a token. The plain runs between them get a coarse stride
-    /// so a regression in the boring path still has somewhere to show up.
+    /// holding half a token. The plain runs between them are not cut singly
+    /// here; `aStreamFedInFixedSizeRunsPaintsTheSameScreen(stride: 1)` cuts
+    /// at every one of them in a single render.
     @Test func aSingleSplitAnywhereInTheStreamPaintsTheSameScreen() {
         let stream = Self.claudeShapedStream()
         let reference = Self.render(chunks: [stream[...]])
 
         let offsets = Self.interestingSplitOffsets(in: stream)
-        // Guards the sampler itself: a bug that returned only the stride would
-        // silently drop the cases this test exists for.
-        #expect(offsets.count > stream.count / 7 + 100)
+        // Guards the sampler itself: a bug that dropped a class of cut would
+        // silently drop the cases this test exists for. Every cut inside a
+        // multi-byte character and every cut right after an ESC must be kept.
+        let sampled = Set(offsets)
+        let missed = (1..<stream.count).filter { offset in
+            let structured = stream[offset] & 0xc0 == 0x80 || stream[offset - 1] == 0x1b
+            return structured && !sampled.contains(offset)
+        }
+        #expect(missed.isEmpty, "sampler skipped structured cuts at \(missed.prefix(8))")
 
         var firstFailure: (index: Int, screen: String)?
         for k in offsets {
@@ -79,16 +86,7 @@ import Testing
     func aStreamFedInFixedSizeRunsPaintsTheSameScreen(stride: Int) {
         let stream = Self.claudeShapedStream()
         let reference = Self.render(chunks: [stream[...]])
-
-        var chunks: [ArraySlice<UInt8>] = []
-        var start = 0
-        while start < stream.count {
-            let end = min(start + stride, stream.count)
-            chunks.append(stream[start..<end])
-            start = end
-        }
-
-        let painted = Self.render(chunks: chunks)
+        let painted = Self.render(chunks: Self.fixedRuns(of: stream, stride: stride))
         #expect(
             painted == reference,
             """
@@ -114,7 +112,9 @@ import Testing
     /// of one *character* — not one sequence — decides how many cells get used.
     ///
     /// Sampled the same way, and nothing is given up by it: every offset inside
-    /// every multi-byte character here is one of the offsets the sampler keeps.
+    /// every multi-byte character here is one of the offsets the sampler keeps,
+    /// and the plain cuts between them are covered by
+    /// `theWideCharacterStreamFedInFixedSizeRunsPaintsTheSameScreen` below.
     @Test func wideAndCombiningCharactersSurviveEverySplit() {
         let stream = Self.wideCharacterStream()
         let reference = Self.render(chunks: [stream[...]])
@@ -137,6 +137,33 @@ import Testing
                 """)
         }
         #expect(firstFailure == nil)
+    }
+
+    /// The wide/combining stream cut into uniform runs. The single-split test
+    /// above cuts only inside and just after its multi-byte characters; these
+    /// runs also cut at every plain byte, including the one just before each
+    /// wide glyph that has to wrap at the right margin.
+    @Test(arguments: [1, 2, 3])
+    func theWideCharacterStreamFedInFixedSizeRunsPaintsTheSameScreen(stride: Int) {
+        let stream = Self.wideCharacterStream()
+        let reference = Self.render(chunks: [stream[...]])
+        let painted = Self.render(chunks: Self.fixedRuns(of: stream, stride: stride))
+        #expect(
+            painted == reference,
+            """
+            Feeding the wide/combining stream in runs of \(stride) changed the screen.
+            \(Self.diff(reference: reference, actual: painted))
+            """)
+    }
+
+    /// The sampler itself, against offsets worked out by hand, so a scanner
+    /// bug cannot quietly shrink what the single-split tests cut. In
+    /// `ab ESC [ 1 m c ✻ d` the cuts kept are inside the CSI and just after
+    /// it (3–6), and inside the three-byte `✻` and just after it (8–10). An
+    /// OSC is kept through its BEL terminator and the cut after it.
+    @Test func theSamplerKeepsEveryCutInsideAndJustAfterAStructure() {
+        #expect(Self.interestingSplitOffsets(in: Array("ab\(Self.esc)[1mc✻d".utf8)) == [3, 4, 5, 6, 8, 9, 10])
+        #expect(Self.interestingSplitOffsets(in: Array("\(Self.esc)]0;t\u{07}x".utf8)) == [1, 2, 3, 4, 5, 6])
     }
 
     /// A chunk larger than the drain thread's 64 KB read buffer, to rule out a
@@ -314,21 +341,16 @@ import Testing
     // MARK: - Choosing where to cut
 
     /// The cuts worth paying for: every offset with structure on either side of
-    /// it, plus a coarse stride over everything else.
+    /// it.
     ///
     /// "Structure" is an escape sequence or a multi-byte UTF-8 character —
     /// anything the parser holds partial state across. Every offset inside one,
     /// and the offset immediately after it, is included; a cut between two
-    /// plain printable bytes exercises the same branch as its neighbours, so
-    /// those are sampled rather than enumerated.
+    /// plain printable bytes exercises the same branch as its neighbours, and
+    /// each stream's fixed-run test at stride 1 already cuts at all of those.
     private static func interestingSplitOffsets(in stream: [UInt8]) -> [Int] {
         guard stream.count > 1 else { return [] }
         var interesting = [Bool](repeating: false, count: stream.count)
-
-        // The coarse pass, so the boring runs still have somewhere to fail.
-        for offset in Swift.stride(from: 1, to: stream.count, by: 7) {
-            interesting[offset] = true
-        }
 
         // Every cut inside an escape sequence, and the one just after it.
         var index = 0
@@ -365,6 +387,19 @@ import Testing
         }
 
         return (1..<stream.count).filter { interesting[$0] }
+    }
+
+    /// `stream` cut into consecutive runs of `stride` bytes, the last one
+    /// possibly shorter.
+    private static func fixedRuns(of stream: [UInt8], stride: Int) -> [ArraySlice<UInt8>] {
+        var chunks: [ArraySlice<UInt8>] = []
+        var start = 0
+        while start < stream.count {
+            let end = min(start + stride, stream.count)
+            chunks.append(stream[start..<end])
+            start = end
+        }
+        return chunks
     }
 
     // MARK: - Reporting

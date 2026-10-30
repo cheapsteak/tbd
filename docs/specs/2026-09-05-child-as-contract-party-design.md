@@ -135,8 +135,7 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   wrong row.
 - **`cursor: (row, column)`** – in viewport coordinates, so `lines[viewportStart
   + cursor.row]` is the cursor's line when that row survived trimming; plus
-  whether the cursor is visible. The pending-input rail reasons about where
-  the cursor sits.
+  whether the cursor is visible.
 - **`size: (columns, rows)`** – the grid the lines were rendered from. A
   consumer that compares against the pty's own size can see a grid that
   disagrees with the child.
@@ -172,10 +171,11 @@ stale (`2026-08-30-pty-holder-session-transport-design.md:548-553`).
   rather than a second reading of `modesObserved` because the two can diverge
   in principle — a full repaint provoked from outside would restore every cell
   and not one mode — and because they are what different consumers ask about:
-  the input path asks whether the modes are facts, and the pending-input rail
-  asks whether the cells are. It is orthogonal to `source` in the same way
-  `modesObserved` is: a re-adopted draining reader is honestly `daemon` with
-  both flags false, its bytes parsed live and its screen part inheritance.
+  the input path asks whether the modes are facts, and the park's display
+  snapshot and `tbd terminal output` ask whether the cells are. It is
+  orthogonal to `source` in the same way `modesObserved` is: a re-adopted
+  draining reader is honestly `daemon` with both flags false, its bytes parsed
+  live and its screen part inheritance.
   What `false` costs a reader is worth stating plainly, because a TUI paints
   differentially — it positions the cursor and writes only the cells it is
   changing. Every cell the child has not rewritten since the emulator was
@@ -281,12 +281,10 @@ design builds is the pull the model has always required.
   **not** by lowering `modesObserved` itself: a viewer's SwiftTerm genuinely
   tracks the three child modes, and saying otherwise would send every send
   composed against a viewer answer back to the unobserved guess. Nothing is
-  lost by it: the only consumer that reads a screen's cursor
-  is the hibernation pending-input rail, and that rail refuses a `.viewer`
-  screen outright. Forking SwiftTerm to intercept the two calls is rejected —
-  a fork commit is a standing maintenance cost for a field no consumer reads,
-  and a producer that can one day observe it changes one line rather than the
-  wire.
+  lost by it: nothing in TBD decides anything from a screen's cursor. Forking
+  SwiftTerm to intercept the two calls is rejected — a fork commit is a
+  standing maintenance cost for a field no consumer reads, and a producer
+  that can one day observe it changes one line rather than the wire.
 
   **Closed Terminals' final screen rides the same reply, as an optional styled
   capture.** A typed screen structurally cannot carry one: its whitelist
@@ -339,11 +337,11 @@ Two consequences follow, and both are behaviour a reader will otherwise find
 surprising. A **pull that does not answer** re-reads the daemon's reader and
 takes whatever source it reports *then* — normally `staleDaemon`, but `daemon`
 if the viewer detached while the pull was in flight and the reader has resumed
-draining; labelling a resumed live emulator stale would make the hibernation
-rail refuse a park it could safely take. And a **viewer's answer carries the
-daemon reader's provenance**: `modesObserved` and `contentObserved` come from
-the reader, not the reply, because a viewer's emulator was seeded by this
-reader's attach preamble and can hand back no more than it was given. "The app
+draining; labelling a resumed live emulator stale would have `tbd terminal
+output` tell its reader that a live screen is frozen. And a **viewer's answer
+carries the daemon reader's provenance**: `modesObserved` and `contentObserved`
+come from the reader, not the reply, because a viewer's emulator was seeded by
+this reader's attach preamble and can hand back no more than it was given. "The app
 answered, so the screen must be observed" is the plausible wrong reading, and
 it is wrong in exactly the case that matters — a re-adopted session answers
 false on both axes for that emulator's whole life, and attaching a viewer to it
@@ -357,20 +355,19 @@ is in the consumer, where a reviewer can see it:
   records the source on the actuation row. This is the one place the design
   knowingly acts on possibly-stale information, and it gets its own section
   below.
-- **The hibernation pending-input check** – fails closed, as the transport
-  spec rules: a stale screen cannot prove the composer is empty. It fails
-  closed on the other axis too, refusing a live `daemon` screen whose
-  `contentObserved` is false, because a grid the emulator inherited blank can
-  show a phantom composer where the session is idle and a blank one where
-  somebody is typing — the two mistakes this rail exists to prevent, in one
-  screen. That refusal has a name of its own: there is no tab to close, and
-  the screen becomes checkable again when the daemon next starts the session.
-- **Fleet supervision, `tbd terminal output`** – accept, and surface the
-  source and age on stderr, plus the content caveat when `contentObserved` is
-  false. A desk that reads `staleDaemon, 40 minutes` has learned something a
-  string could never tell it, and a desk told that cells nobody has repainted
-  since the daemon restarted may be stale or blank will not read a phantom
-  composer line as the session's present state.
+- **The park's display snapshot** – declines, and so never pulls. A park
+  freezes the session's last frame as the parked tab's backdrop only from a
+  live `daemon` screen whose `contentObserved` is true: a stale screen is not
+  the frame the session was showing, and a grid the emulator inherited blank
+  holds cells the child never wrote. A declined screen costs the backdrop,
+  never the park — the screen decides nothing about whether a park goes ahead
+  ([`2026-10-24-mod-only-park-guard-design.md`](2026-10-24-mod-only-park-guard-design.md)).
+- **`tbd terminal output`** – accept, and surface the source and age on
+  stderr, plus the content caveat when `contentObserved` is false. A reader
+  that sees `staleDaemon, 40 minutes` has learned something a string could
+  never tell it, and a reader told that cells nobody has repainted since the
+  daemon restarted may be stale or blank will not read a phantom composer
+  line as the session's present state.
 
 ### The same object is the input side's mode oracle
 
@@ -473,9 +470,9 @@ difference between this residue and the defects above.
 Proceeding beats refusing for a reason specific to who sends when. A viewer
 that does not answer is an app that is napping, wedged, or busy — and the
 transport spec already observes that those states correlate with exactly the
-moments supervision most wants to act. A refusal would make the daemon's
-rails fail closed at those moments, every time, which turns a rare mis-paste
-into a systematic stall of unattended work. Modes flip rarely after startup —
+moments a machine caller most wants the session. A refusal would make the
+daemon's rails fail closed at those moments, every time, which turns a rare
+mis-paste into a systematic stall of unattended work. Modes flip rarely after startup —
 an agent TUI sets bracketed paste once and leaves it — so a stale answer
 frozen after startup is usually the right one, and the one frozen before it
 is the "off" the oracle declines to trust; when either is wrong, the outcome
@@ -522,9 +519,8 @@ any child.
   it does not make them the right source for agent *state*. "Is the agent
   stuck" belongs on hook and transcript state, as the rule already says. The
   screen contract serves the readers that legitimately need a screen — the
-  pending-input check, a person running
-  `tbd terminal output` — and the input composer, which needs modes and
-  nothing else.
+  park's display snapshot, a person running `tbd terminal output` — and the
+  input composer, which needs modes and nothing else.
 
 ## Delivery verification on holder sends
 
@@ -580,18 +576,17 @@ routes the same way every other send does.
   observation asks for one, on the holder transport exactly as on tmux, and a
   send that did not ask is never refused for a mechanism it did not invoke.
   The senders whose silence costs hours are the daemon's own rails — nobody is
-  looking at the screen when a desk nudges an agent at three in the morning —
+  looking at the screen when a rail resumes an agent at three in the morning —
   but arming on their behalf is not a term the send path can add by itself,
-  because those rails do not pass through it. Fleet-supervision nudges reach
-  tmux directly with no transport branch; the limit-resume actuator's holder
-  path writes to the injection courier itself; and the one rail that does route
-  through the handler, the queued prompt, sends with the dispatch envelope
-  suppressed so the operator's words arrive byte-identically, which leaves an
-  observation nothing to find — `DeliveryVerifier.envelopeAppears` searches the
-  transcript for that row's dispatch id and for nothing else. Covering a rail
-  therefore begins with routing that rail through the send path with its
-  envelope attached. Until that is done, a default keyed on the sender would
-  arm nothing.
+  because those rails do not pass through it. The limit-resume actuator's
+  holder path writes to the injection courier itself, and the one rail that
+  does route through the handler, the queued prompt, sends with the dispatch
+  envelope suppressed so the operator's words arrive byte-identically, which
+  leaves an observation nothing to find — `DeliveryVerifier.envelopeAppears`
+  searches the transcript for that row's dispatch id and for nothing else.
+  Covering a rail therefore begins with routing that rail through the send
+  path with its envelope attached. Until that is done, a default keyed on the
+  sender would arm nothing.
 - **Nothing about the ladder changes.** Requested, dispatched, landed
   (`2026-07-26-fleet-supervision-design.md` §12) stays the record's shape; the
   third rung simply becomes reachable on the transport where it is needed
@@ -682,8 +677,8 @@ exists, under a query-time delivery rule that leaves nothing stale.
   one not finding it records not landed and re-delivers through the courier,
   not through tmux; a send that did not pass `--verify` arms nothing and is
   refused for nothing, whatever the sender declares itself to be.
-- **The stale-source policies.** The hibernation check refuses on
-  `staleDaemon`; the oracle proceeds, wrapping an agent send whose stale
+- **The stale-source policies.** The park's display snapshot declines a
+  `staleDaemon` screen; the oracle proceeds, wrapping an agent send whose stale
   reading says bracketed paste is off and obeying a stale "on", and the
   actuation row carries `modeSource: staleDaemon` with an age and both
   `modeBracketedPaste` and `bracketedPaste`, asserted on the row rather than
@@ -768,9 +763,9 @@ two entries struck.
   transcript read a minute later, and at-least-once re-delivery is a decision
   a person should make per send.
 - **Refuse a send when the oracle cannot answer.** Never mis-pastes, and
-  that is its whole case. Its cost is that every supervision send fails
+  that is its whole case. Its cost is that every unattended send fails
   closed whenever the app naps, wedges or is busy — the moments that
-  correlate with supervision needing to send — so a rare visible mis-paste is
+  correlate with nobody watching the session — so a rare visible mis-paste is
   traded for a systematic stall of unattended work. The recorded
   `staleDaemon` provenance keeps the refusal's honesty without that cost.
 - **A new RPC method beside `terminal.output`.** Leaves the old method

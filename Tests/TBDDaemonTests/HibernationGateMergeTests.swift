@@ -29,17 +29,8 @@ struct HibernationGateMergeTests {
         )
     }
 
-    /// Default-carrying wrapper so the rail tests read as they did before the
-    /// veto arguments existed: veto OFF, no recorded input — i.e. exactly
-    /// today's merge-park behavior.
-    private func decideForMerge(
-        _ terminal: Terminal,
-        inputVetoEnabled: Bool = false,
-        lastInputAt: Date? = nil
-    ) -> HibernationGate.Decision {
-        HibernationGate.decideForMerge(
-            terminal: terminal, inputVetoEnabled: inputVetoEnabled,
-            lastInputAt: lastInputAt)
+    private func decideForMerge(_ terminal: Terminal) -> HibernationGate.Decision {
+        HibernationGate.decideForMerge(terminal: terminal)
     }
 
     // MARK: - The go path: no idle window at all
@@ -108,105 +99,10 @@ struct HibernationGateMergeTests {
         #expect(decideForMerge(t) == .notClaudeResumable)
     }
 
-    // MARK: - Rail: pending typed input (input veto)
-    //
-    // Merge-park has no idle marker, so it compares `lastInputAt` against
-    // `activityStateObservedAt` — the moment the session was observed to enter
-    // the at-rest state it is in now.
-
-    @Test func typedInputAfterGoingIdleBlocksWhenVetoEnabled() {
-        // The headline guarantee, on the MERGE path: a session that was typed
-        // into after it came to rest is not parked when its PR merges. Nobody
-        // is watching — merge-park now runs on the daemon's clock.
-        let atRest = now.addingTimeInterval(-10 * 60)
-        let t = claudeTerminal(activityStateObservedAt: atRest)
-        #expect(decideForMerge(
-            t, inputVetoEnabled: true,
-            lastInputAt: now.addingTimeInterval(-30)) == .pendingTypedInput)
-    }
-
-    @Test func typedInputAfterGoingIdleIsEligibleWhenVetoDisabled() {
-        // Flag OFF + identical inputs → `.eligible`. Proves the rail is truly
-        // gated and pins today's behavior for installs that have not opted in.
-        let atRest = now.addingTimeInterval(-10 * 60)
-        let t = claudeTerminal(activityStateObservedAt: atRest)
-        #expect(decideForMerge(
-            t, inputVetoEnabled: false,
-            lastInputAt: now.addingTimeInterval(-30)) == .eligible)
-    }
-
-    @Test func inputConsumedBeforeGoingIdleIsEligible() {
-        // Input recorded BEFORE the at-rest observation was submitted: the turn
-        // it started is what put the session back at rest. Nothing pending, so
-        // merge-park proceeds exactly as it does today.
-        let atRest = now.addingTimeInterval(-60)
-        let t = claudeTerminal(activityStateObservedAt: atRest)
-        #expect(decideForMerge(
-            t, inputVetoEnabled: true,
-            lastInputAt: now.addingTimeInterval(-10 * 60)) == .eligible)
-    }
-
-    @Test func noRecordedInputIsEligibleWithVetoOn() {
-        // Veto ON but nothing was ever typed into this pane (post-restart, or a
-        // pane only ever driven by TBD). The gate has no reason to refuse.
-        let t = claudeTerminal(activityStateObservedAt: now.addingTimeInterval(-60))
-        #expect(decideForMerge(t, inputVetoEnabled: true, lastInputAt: nil) == .eligible)
-    }
-
-    @Test func inputAtExactlyTheAtRestInstantBlocks() {
-        // `>=`, matching the sweep: input at the same instant as the at-rest
-        // observation counts as arriving after it.
-        let atRest = now.addingTimeInterval(-5 * 60)
-        let t = claudeTerminal(activityStateObservedAt: atRest)
-        #expect(decideForMerge(
-            t, inputVetoEnabled: true, lastInputAt: atRest) == .pendingTypedInput)
-    }
-
-    @Test func recordedInputWithNoObservationFailsClosed() {
-        // A row with no `activityStateObservedAt` (written before the
-        // provenance columns, or by a writer that never stamped one) offers no
-        // evidence the recorded input was ever consumed. Refuse: a session that
-        // survives a merge-park is recoverable, eaten input is not.
-        let t = claudeTerminal(activityStateObservedAt: nil)
-        #expect(decideForMerge(
-            t, inputVetoEnabled: true,
-            lastInputAt: now.addingTimeInterval(-60)) == .pendingTypedInput)
-    }
-
-    @Test func noObservationAndNoInputIsStillEligible() {
-        // The fail-closed arm above is scoped to rows that HAVE recorded input.
-        // A row with neither is the ordinary pre-provenance case and still parks.
-        let t = claudeTerminal(activityStateObservedAt: nil)
-        #expect(decideForMerge(t, inputVetoEnabled: true, lastInputAt: nil) == .eligible)
-    }
-
-    // MARK: - Precedence: hard rails still win
-
-    @Test func inputVetoLosesToRunning() {
-        let t = claudeTerminal(
-            activityState: .working, activityStateObservedAt: now.addingTimeInterval(-10 * 60))
-        #expect(decideForMerge(
-            t, inputVetoEnabled: true, lastInputAt: now) == .running)
-    }
-
-    @Test func inputVetoLosesToKeepWarm() {
-        let t = claudeTerminal(
-            keepWarm: true, activityStateObservedAt: now.addingTimeInterval(-10 * 60))
-        #expect(decideForMerge(t, inputVetoEnabled: true, lastInputAt: now) == .keepWarm)
-    }
-
-    @Test func inputVetoLosesToAlreadyHibernated() {
-        let t = claudeTerminal(
-            hibernatedAt: now.addingTimeInterval(-60),
-            activityStateObservedAt: now.addingTimeInterval(-10 * 60))
-        #expect(decideForMerge(t, inputVetoEnabled: true, lastInputAt: now) == .alreadyHibernated)
-    }
-
     // MARK: - Merge-park rides the same rails on every transport
 
-    /// A holder-backed row that passes every other merge rail — including the
-    /// input veto's `activityStateObservedAt` requirement, so the only thing
-    /// the tests below vary is the transport.
+    /// A holder-backed row that passes every other merge rail, so the only
+    /// thing the tests below vary is the transport.
     private func holderTerminal() -> Terminal {
         Terminal(
             worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
@@ -220,33 +116,18 @@ struct HibernationGateMergeTests {
     /// the per-worktree tri-state and `auto_hibernate_on_merge_default` decide
     /// the fan-out, and transport decides nothing.
     @Test func mergeParkElectsAHolderRow() {
-        #expect(HibernationGate.decideForMerge(
-            terminal: holderTerminal(), inputVetoEnabled: false,
-            lastInputAt: nil) == .eligible)
-    }
-
-    /// A holder row still answers to every other rail — the input veto
-    /// included.
-    @Test func theInputVetoStillAppliesToAHolderRow() {
-        #expect(HibernationGate.decideForMerge(
-            terminal: holderTerminal(), inputVetoEnabled: true,
-            lastInputAt: now) == .pendingTypedInput)
+        #expect(HibernationGate.decideForMerge(terminal: holderTerminal()) == .eligible)
     }
 
     /// The two transports get the same answer from the same facts, which is
     /// what makes the assertions above about the rails rather than about a
     /// transport special case.
     @Test func bothTransportsGetTheSameAnswerFromTheSameFacts() {
+        #expect(HibernationGate.decideForMerge(terminal: claudeTerminal()) == .eligible)
         #expect(HibernationGate.decideForMerge(
-            terminal: claudeTerminal(), inputVetoEnabled: false,
-            lastInputAt: nil) == .eligible)
-        #expect(HibernationGate.decideForMerge(
-            terminal: claudeTerminal(keepWarm: true), inputVetoEnabled: false,
-            lastInputAt: nil) == .keepWarm)
+            terminal: claudeTerminal(keepWarm: true)) == .keepWarm)
         var warmHolder = holderTerminal()
         warmHolder.keepWarm = true
-        #expect(HibernationGate.decideForMerge(
-            terminal: warmHolder, inputVetoEnabled: false,
-            lastInputAt: nil) == .keepWarm)
+        #expect(HibernationGate.decideForMerge(terminal: warmHolder) == .keepWarm)
     }
 }

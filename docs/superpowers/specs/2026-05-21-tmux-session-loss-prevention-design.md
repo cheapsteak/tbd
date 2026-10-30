@@ -8,7 +8,7 @@ instance. For `claude`/`codex` terminals this destroys the only database link
 to the session — the transcript JSONL survives on disk in
 `~/.claude/projects/`, but TBD can no longer show or resume it.
 
-On 2026-05-21 this destroyed ~40 Claude session links in the longeye-app repo
+On 2026-05-21 this destroyed ~40 Claude session links in the acme-app repo
 in a single incident. The user reported it as "lost a bunch of Claude
 sessions".
 
@@ -51,7 +51,7 @@ LaunchServices (default 256-fd soft limit), spawns the daemon as a child
 (`DaemonClient.swift:144`), which inherits 256, and the daemon spawns tmux,
 which inherits 256.
 
-A tmux server hosting many panes (the longeye-app server had 65 — each pane is
+A tmux server hosting many panes (the acme-app server had 65 — each pane is
 a pty master fd, plus a socket fd per attached client, plus per-operation
 spikes when spawning new panes) can exhaust 256 descriptors. tmux handles
 fd-allocation failure with `fatal()` → `exit(1)`. A clean `exit(1)` produces

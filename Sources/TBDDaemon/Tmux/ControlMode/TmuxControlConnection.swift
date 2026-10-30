@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 /// Owns a single `tmux -CC attach` control-mode connection to one tmux server.

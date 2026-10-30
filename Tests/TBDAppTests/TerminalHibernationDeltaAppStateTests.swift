@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// `terminalHibernationChanged` delta application to the cached terminal row.
 ///
@@ -15,9 +16,9 @@ import TBDShared
 struct TerminalHibernationDeltaAppStateTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.HibernationDelta.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.HibernationDelta")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

@@ -1331,7 +1331,7 @@ struct QueuedPromptDeliveryTests {
 
     /// Four of the five undeliverable outcomes leave the text in the column on
     /// purpose. The licence to type was spent by the pane the prompt was parked
-    /// for, so the next spawn — a revive, a desk session — types nothing into a
+    /// for, so the next spawn — a revive, a new tab — types nothing into a
     /// conversation the words were never written for.
     @Test("a retained prompt is not typed into a later spawn's agent")
     func aRetainedPromptIsNotTypedByALaterSpawn() async throws {

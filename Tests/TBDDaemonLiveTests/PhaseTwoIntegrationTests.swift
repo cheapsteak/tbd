@@ -1,9 +1,11 @@
 import Darwin
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// Proves the full Phase 2 data path against a real tmux server: live tmux
 /// output → control-mode connection (reader thread) → PaneFanout pipe →
@@ -67,7 +69,13 @@ struct PhaseTwoIntegrationTests {
         // Wire the daemon-side pieces manually.
         let supervisor = TmuxControlSupervisor()
         await supervisor.ensureConnection(serverName: server)
-        try await Task.sleep(for: .milliseconds(300))  // let the -CC connection settle
+        // The marker below is %output only to a control client that is already
+        // attached, so wait for that rather than for a fixed time: a reply on
+        // the connection's own command channel means the -CC client is attached
+        // and being served.
+        let client = try #require(
+            await supervisor.command(server: server), "the -CC connection never came up")
+        _ = try await client.send("display-message -p settled")
 
         let (readFD, attachGeneration) = try await supervisor.attach(server: server, paneID: paneID)
 

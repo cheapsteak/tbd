@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import TBDShared
+import TBDKernel
 import Testing
 
 @testable import TBDPeerHelper

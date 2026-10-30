@@ -31,7 +31,7 @@ Check for:
 Review these sections and update if they've drifted from the code:
 - **RPC Methods list** — compare against `RPCMethod` constants in `Sources/TBDShared/RPCProtocol.swift`
 - **Data model tables** — compare against migrations in `Sources/TBDDaemon/Database/Database.swift`
-- **Hook events** — compare against `HookEvent` enum in `Sources/TBDDaemon/Hooks/HookResolver.swift`
+- **Hook events** — compare against `HookEvent` enum in `Sources/TBDShared/HookResolver.swift`
 - **Tmux architecture** — compare against `Sources/TBDApp/Terminal/TmuxBridge.swift`
 - **Lifecycle flows** — compare against `Sources/TBDDaemon/Lifecycle/WorktreeLifecycle.swift`
 

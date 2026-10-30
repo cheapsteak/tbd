@@ -6,7 +6,7 @@ import TestSupport
 
 /// CLOCK: `EventDrivenTestClock` with its strict waits, because the recheck is
 /// a re-arming loop: the re-arm after a tick is the proof that the tick's
-/// refresh finished (`Tests/CLAUDE.md`, "The event-driven alternative").
+/// refresh finished (`Tests/CLAUDE.md`, "The event-driven clock").
 @Suite("Dev server running-file monitor", .clockDriven)
 struct DevServerRunningFileMonitorTests {
     private final class Box: @unchecked Sendable {

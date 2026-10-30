@@ -79,14 +79,6 @@ public enum ModelProfileKeychain {
             .appendingPathComponent(".tbd/claude-tokens", isDirectory: true)
     }
 
-    private static var storageDir: URL {
-        storageDir(environment: ProcessInfo.processInfo.environment)
-    }
-
-    private static func fileURL(id: String) -> URL {
-        storageDir.appendingPathComponent("\(id).token", isDirectory: false)
-    }
-
     /// The paths `load(id:)` tries, in order: the resolved storage dir first,
     /// then — only when an override is in force — the legacy production path.
     /// Without an override the two are the same directory, so the list is one
@@ -103,102 +95,157 @@ public enum ModelProfileKeychain {
         ]
     }
 
-    /// Create the storage directory if missing, with mode 0700.
-    private static func ensureStorageDir() throws {
-        let dir = storageDir
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: dir.path) {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [
-                .posixPermissions: 0o700
-            ])
-        } else {
-            // Enforce 0700 on an existing dir in case it was created with a
-            // looser umask by an earlier version of the code or by the user.
-            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
-        }
-    }
-
-    /// Store (or overwrite) a secret.
+    /// Store (or overwrite) a secret, in the store the process environment
+    /// names. A caller that was handed a `Store` uses that instead — see
+    /// `Store` for why the two exist.
     public static func store(id: String, token: String) throws {
-        guard let data = token.data(using: .utf8) else {
-            throw ModelProfileKeychainError.dataEncoding
-        }
-        try ensureStorageDir()
-        let url = fileURL(id: id)
-        do {
-            try data.write(to: url, options: [.atomic])
-        } catch {
-            throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
-        }
-        // Atomic write uses a temp file + rename, which may drop our intended
-        // mode bits. Set them explicitly after the write.
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: url.path
-        )
+        try Store().store(id: id, token: token)
     }
 
-    /// Load a secret. Returns nil if no file exists for the given id.
-    /// Throws if the file exists but has wrong mode or wrong owner — we don't
-    /// want to return secrets from a misconfigured restore.
-    ///
-    /// **Load-only fallback to the legacy path.** When `TBD_HOME` is overridden
-    /// and the override holds no entry for `id`, the production
-    /// `~/.tbd/claude-tokens/<id>.token` is tried before giving up, so a real
-    /// daemon run under an override (`scripts/mock.sh`, a hand-set `TBD_HOME`)
-    /// still sees the user's tokens instead of silently re-prompting for auth.
-    /// Reads only — `store` and `delete` stay inside the override, so under
-    /// `scripts/test.sh` the extra `stat` lands in the scratch home where
-    /// nothing exists and the fence is untouched.
+    /// Load a secret from the store the process environment names. See
+    /// `Store.load(id:)`.
     public static func load(id: String) throws -> String? {
-        let fm = FileManager.default
-        let candidates = loadCandidates(id: id, environment: ProcessInfo.processInfo.environment)
-        guard let url = candidates.first(where: { fm.fileExists(atPath: $0.path) }) else {
-            return nil
-        }
-
-        let attrs: [FileAttributeKey: Any]
-        do {
-            attrs = try fm.attributesOfItem(atPath: url.path)
-        } catch {
-            throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
-        }
-
-        if let perms = attrs[.posixPermissions] as? NSNumber {
-            let mode = perms.int16Value & 0o777
-            if mode != 0o600 {
-                throw ModelProfileKeychainError.permissionMismatch(
-                    String(format: "expected 0600, got 0%o", mode)
-                )
-            }
-        }
-        if let ownerID = attrs[.ownerAccountID] as? NSNumber {
-            if ownerID.uint32Value != getuid() {
-                throw ModelProfileKeychainError.ownerMismatch
-            }
-        }
-
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
-        }
-        guard let token = String(data: data, encoding: .utf8) else {
-            throw ModelProfileKeychainError.dataEncoding
-        }
-        return token
+        try Store().load(id: id)
     }
 
-    /// Idempotent delete.
+    /// Idempotent delete from the store the process environment names.
     public static func delete(id: String) throws {
-        let url = fileURL(id: id)
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: url.path) else { return }
-        do {
-            try fm.removeItem(at: url)
-        } catch {
-            throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
+        try Store().delete(id: id)
+    }
+
+    /// The secret store, bound to the environment that names its directory.
+    ///
+    /// **Why an instance exists beside the static entry points.** The statics
+    /// resolve `TBD_HOME` from the process environment on every call, so a
+    /// caller that seeds a secret and then reads it back straddles two
+    /// resolutions, and a concurrent `setenv` lands them in different homes.
+    /// The only defense the statics allow is serializing every reader against
+    /// every writer of `TBD_HOME`. A type that owns a `Store` — `RPCRouter`,
+    /// for every handler and for the profile resolver it builds — resolves
+    /// through it instead, so a test can hand it a scratch environment and
+    /// never touch the process-global one. Code holding a `Store` must use it;
+    /// calling a static from there would silently undo the injection.
+    ///
+    /// `environment: nil`, the default, reads the process environment on every
+    /// call, exactly as the statics do, so a default-constructed `Store` and
+    /// the statics always name the same directory.
+    public struct Store: Sendable {
+        private let environment: [String: String]?
+
+        public init(environment: [String: String]? = nil) {
+            self.environment = environment
+        }
+
+        private var resolvedEnvironment: [String: String] {
+            environment ?? ProcessInfo.processInfo.environment
+        }
+
+        private func fileURL(id: String, environment: [String: String]) -> URL {
+            ModelProfileKeychain.storageDir(environment: environment)
+                .appendingPathComponent("\(id).token", isDirectory: false)
+        }
+
+        /// Create the storage directory if missing, with mode 0700.
+        private func ensureStorageDir(environment: [String: String]) throws {
+            let dir = ModelProfileKeychain.storageDir(environment: environment)
+            let fm = FileManager.default
+            if !fm.fileExists(atPath: dir.path) {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [
+                    .posixPermissions: 0o700
+                ])
+            } else {
+                // Enforce 0700 on an existing dir in case it was created with a
+                // looser umask by an earlier version of the code or by the user.
+                try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+            }
+        }
+
+        /// Store (or overwrite) a secret.
+        public func store(id: String, token: String) throws {
+            guard let data = token.data(using: .utf8) else {
+                throw ModelProfileKeychainError.dataEncoding
+            }
+            // One resolution for the directory and the file, so the two can
+            // never name different homes.
+            let resolved = resolvedEnvironment
+            try ensureStorageDir(environment: resolved)
+            let url = fileURL(id: id, environment: resolved)
+            do {
+                try data.write(to: url, options: [.atomic])
+            } catch {
+                throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
+            }
+            // Atomic write uses a temp file + rename, which may drop our intended
+            // mode bits. Set them explicitly after the write.
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+        }
+
+        /// Load a secret. Returns nil if no file exists for the given id.
+        /// Throws if the file exists but has wrong mode or wrong owner — we don't
+        /// want to return secrets from a misconfigured restore.
+        ///
+        /// **Load-only fallback to the legacy path.** When `TBD_HOME` is overridden
+        /// and the override holds no entry for `id`, the production
+        /// `~/.tbd/claude-tokens/<id>.token` is tried before giving up, so a real
+        /// daemon run under an override (`scripts/mock.sh`, a hand-set `TBD_HOME`)
+        /// still sees the user's tokens instead of silently re-prompting for auth.
+        /// Reads only — `store` and `delete` stay inside the override, so under
+        /// `scripts/test.sh` the extra `stat` lands in the scratch home where
+        /// nothing exists and the fence is untouched.
+        public func load(id: String) throws -> String? {
+            let fm = FileManager.default
+            let candidates = ModelProfileKeychain.loadCandidates(
+                id: id, environment: resolvedEnvironment)
+            guard let url = candidates.first(where: { fm.fileExists(atPath: $0.path) }) else {
+                return nil
+            }
+
+            let attrs: [FileAttributeKey: Any]
+            do {
+                attrs = try fm.attributesOfItem(atPath: url.path)
+            } catch {
+                throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
+            }
+
+            if let perms = attrs[.posixPermissions] as? NSNumber {
+                let mode = perms.int16Value & 0o777
+                if mode != 0o600 {
+                    throw ModelProfileKeychainError.permissionMismatch(
+                        String(format: "expected 0600, got 0%o", mode)
+                    )
+                }
+            }
+            if let ownerID = attrs[.ownerAccountID] as? NSNumber {
+                if ownerID.uint32Value != getuid() {
+                    throw ModelProfileKeychainError.ownerMismatch
+                }
+            }
+
+            let data: Data
+            do {
+                data = try Data(contentsOf: url)
+            } catch {
+                throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
+            }
+            guard let token = String(data: data, encoding: .utf8) else {
+                throw ModelProfileKeychainError.dataEncoding
+            }
+            return token
+        }
+
+        /// Idempotent delete.
+        public func delete(id: String) throws {
+            let url = fileURL(id: id, environment: resolvedEnvironment)
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: url.path) else { return }
+            do {
+                try fm.removeItem(at: url)
+            } catch {
+                throw ModelProfileKeychainError.ioFailure(error.localizedDescription)
+            }
         }
     }
 }

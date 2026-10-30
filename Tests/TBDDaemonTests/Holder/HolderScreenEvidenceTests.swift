@@ -2,14 +2,10 @@ import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
 
-/// The one decision two callers share: whether a holder session's typed
-/// screen is something this daemon may judge.
+/// Whether a park's snapshot freezes this screen: whether a holder session's
+/// typed screen is its live one (`HibernationCoordinator.holderParkSnapshot`).
 ///
-/// Tier 1 — a pure function of two facts, and the reason it is tested here
-/// rather than only through its callers is that the callers cannot see each
-/// other. The park and the idle sweep each dress the answer in their own
-/// words; if the answer itself drifted, both would keep passing their own
-/// tests while disagreeing with each other.
+/// Tier 1 — a pure function of two facts.
 @Suite("Holder screen evidence")
 struct HolderScreenEvidenceTests {
 
@@ -38,10 +34,10 @@ struct HolderScreenEvidenceTests {
                 == .contentUnobserved)
     }
 
-    /// The one screen anybody may judge: the daemon is the live store and its
-    /// emulator watched this child from the start.
-    @Test("a live, fully observed daemon screen is judgeable")
-    func aLiveObservedDaemonScreenIsJudgeable() {
+    /// The one screen the snapshot freezes: the daemon is the live store and
+    /// its emulator watched this child from the start.
+    @Test("a live, fully observed daemon screen is frozen")
+    func aLiveObservedDaemonScreenIsFrozen() {
         #expect(HolderScreenEvidence.refusal(forSource: .daemon, contentObserved: true) == nil)
     }
 }

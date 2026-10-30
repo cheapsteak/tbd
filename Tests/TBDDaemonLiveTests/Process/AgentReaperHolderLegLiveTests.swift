@@ -4,6 +4,7 @@ import Testing
 
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// `AgentReaper`'s holder leg against the kernel's own answers about real pids.
 ///
@@ -14,10 +15,10 @@ import TBDShared
 /// leg can tell one from another using `ps`, not using a fake that was told the
 /// answer.
 ///
-/// The escalation tests at the bottom are the other half: `reapVerified`'s
+/// The escalation test at the bottom is the other half: `reapVerified`'s
 /// SIGTERM → grace → re-decide → SIGKILL sequence, driven through the real
 /// `ProductionProcessSignaller` against a real session leader whose disposition
-/// for SIGTERM is *ignore*. They exist because every other fixture in this file
+/// for SIGTERM is *ignore*. It exists because every other fixture in this file
 /// dies on the first SIGTERM, which leaves the highest-consequence branch of a
 /// process-killing guard — the group-widening `kill(-pid, SIGKILL)` — proven
 /// only by a dictionary swap in the scripted suite.
@@ -25,6 +26,11 @@ import TBDShared
 /// The companion `AgentReaperHolderLegTests` in `TBDDaemonTests` scripts the
 /// same matrix through `FakeProcessSignaller`; it can state cases this one
 /// cannot arrange (an unreadable start time) and runs in the parallel pass.
+/// The keep reasons that turn only on liveness — a live holder, a child that
+/// is already gone — live there alone: every sweep here already reads real
+/// liveness both ways, false for the spent holder pid and true for the live
+/// child, so a live twin of those cases would re-run the scripted decision on
+/// facts this file already proves.
 /// This suite is `.serialized` and lives in the live target because it spawns
 /// processes and waits on real deadlines.
 @Suite(.serialized)
@@ -150,8 +156,8 @@ struct AgentReaperHolderLegLiveTests {
     ///   group-widening in `ProductionProcessSignaller.signal` is conditional on
     ///   `getpgid(pid) == pid`; without the new session the job inherits the
     ///   test runner's process group, `signal` degrades to pid-exact, and the
-    ///   group test would fail for a reason that has nothing to do with the
-    ///   reaper. The tests assert the leadership rather than assume it.
+    ///   group assertion would fail for a reason that has nothing to do with
+    ///   the reaper. The test asserts the leadership rather than assume it.
     private struct SIGTERMProofJob {
         let jobPID: pid_t
         let grandchildPID: pid_t
@@ -368,9 +374,15 @@ struct AgentReaperHolderLegLiveTests {
     ) -> AgentReaper {
         AgentReaper(
             tmux: NoTmuxQuerier(), signaller: signaller,
-            // Bounded so a job that declines SIGTERM reaches SIGKILL inside the
-            // test's own deadline rather than the production 3 seconds.
-            graceAttempts: 20, pollInterval: .milliseconds(50),
+            // A 100 ms grace rather than the production 3 seconds, so the job
+            // that declines SIGTERM reaches SIGKILL at once. The escalation
+            // path is the same at any length: the grace only decides how long
+            // the reaper waits before it re-decides. A Foundation-launched job
+            // that dies of the SIGTERM but is not yet collected when the grace
+            // ends is a zombie that still answers `kill(pid, 0)`; the
+            // re-decision then keeps it or SIGKILLs the corpse, and no
+            // assertion on such a job reads `killed`.
+            graceAttempts: 5, pollInterval: .milliseconds(20),
             holderSessions: { records })
     }
 
@@ -388,6 +400,10 @@ struct AgentReaperHolderLegLiveTests {
     /// launchd. `WorktreeLifecycle+Reconcile` skips holder rows and the tmux
     /// sweep enumerates children of tmux server pids, so nothing but this leg
     /// can see it.
+    ///
+    /// Nothing is armed here, and that is a claim too: `AgentReaper` carries no
+    /// switch, and neither does this leg, so the ordinary sweep reclaims the
+    /// orphan on its own.
     @Test func aGenuineOrphanIsReaped() async throws {
         let deadHolder = try Self.spentPID()
         let child = try Self.spawnHangupProofShell()
@@ -402,7 +418,7 @@ struct AgentReaperHolderLegLiveTests {
         #expect(
             await Self.waitForPIDToVanish(childPID),
             "pid \(childPID) survived the holder leg's sweep")
-        #expect(signaller.terminated.contains(childPID))
+        #expect(signaller.terminated == [childPID])
     }
 
     // MARK: - The identity check earning its keep
@@ -456,89 +472,63 @@ struct AgentReaperHolderLegLiveTests {
         #expect(stranger.isRunning)
     }
 
-    /// A recorded pid whose process is gone is not signalled at all. The
-    /// recorded number is not a licence to kill on the strength of the row.
-    @Test func aRecordedPidWhoseProcessIsGoneIsNotSignalled() async throws {
-        let deadHolder = try Self.spentPID()
-        let spent = try Self.spentPID()
-        #expect(!Self.pidExists(spent), "the fixture pid must really be gone")
-
-        // A live bystander, so the assertion is not merely "nothing happened to
-        // a pid nothing could happen to": if the leg were to signal blindly, it
-        // would be signalling a number the kernel may hand out next.
-        let bystander = try Self.spawnHangupProofShell()
-        defer { Self.killAndReap(bystander) }
-
-        let signaller = RecordingProcessSignaller()
-        let subject = reaper(signaller, records: [record(holderPID: deadHolder, childPID: spent)])
-        #expect(
-            subject.decideHolderChild(record(holderPID: deadHolder, childPID: spent))
-                == .keep(reason: "child-gone"))
-
-        await subject.sweepHolderChildren()
-
-        #expect(signaller.terminated.isEmpty, "no signal may be sent to a pid naming nothing")
-        #expect(signaller.killed.isEmpty)
-        #expect(Self.pidExists(bystander.processIdentifier))
-    }
-
-    /// A live holder means a live session, whatever its job looks like.
-    @Test func aLiveHoldersChildIsLeftAlone() async throws {
-        let holder = try Self.spawnHangupProofShell()
-        defer { Self.killAndReap(holder) }
-        let child = try Self.spawnHangupProofShell()
-        defer { Self.killAndReap(child) }
-
-        let signaller = RecordingProcessSignaller()
-        await reaper(
-            signaller,
-            records: [
-                record(holderPID: holder.processIdentifier, childPID: child.processIdentifier)
-            ]
-        ).sweepHolderChildren()
-
-        #expect(signaller.terminated.isEmpty)
-        #expect(Self.pidExists(child.processIdentifier))
-        #expect(child.isRunning)
-    }
-
-    // MARK: - The leg carries no gate of its own, against a real process
-
-    /// The reaper's holder leg reclaims a real orphaned job on the ordinary
-    /// sweep. Nothing is armed here: `AgentReaper` carries no switch, and
-    /// neither does this leg.
-    @Test func aRealOrphanIsReapedWithNothingArmed() async throws {
-        let deadHolder = try Self.spentPID()
-        let child = try Self.spawnHangupProofShell()
-        defer { Self.killAndReap(child) }
-        let childPID = child.processIdentifier
-
-        let signaller = RecordingProcessSignaller()
-        let records = [record(holderPID: deadHolder, childPID: childPID)]
-
-        await reaper(signaller, records: records).sweepHolderChildren()
-        #expect(signaller.terminated == [childPID])
-        #expect(await Self.waitForPIDToVanish(childPID))
-    }
-
     // MARK: - SIGTERM → SIGKILL escalation, against a job that refuses SIGTERM
 
-    /// The escalation itself. Every other fixture in this file dies on the
-    /// reaper's first `terminate`, so without this the SIGKILL branch of
-    /// `reapVerified` is reached by no live test at all.
+    /// The escalation, against the one fixture in this file that survives
+    /// SIGTERM. Every other fixture dies on the reaper's first `terminate`, so
+    /// without this the SIGKILL branch of `reapVerified` is reached by no live
+    /// test at all.
+    ///
+    /// One sweep of one job carries three claims, each with its own premise
+    /// and its own diagnostic. They share the fixture because each needs the
+    /// same thing — a session leader that declines SIGTERM, with a descendant
+    /// in its group — and one sweep of it exercises all three:
+    ///
+    /// - **It escalates.** A job that declines SIGTERM is SIGKILLed, and ends.
+    /// - **The SIGKILL widens to the job's process group.**
+    ///   `ProductionProcessSignaller.signal` sends `kill(-pid, SIGKILL)` when
+    ///   the pid leads its own group, and that widening — justified in
+    ///   `c12c0386` by a measured real-process hazard — is the only thing that
+    ///   reclaims a descendant the orphaned job left running.
+    /// - **The escalation re-runs the identity decision**, against real kernel
+    ///   state rather than a scripted dictionary swap. Asserted as ordering,
+    ///   not as a call count: every fact `decideHolderChild` consults must be
+    ///   consulted *again* after the SIGTERM and before the SIGKILL. A shortcut
+    ///   that escalated on the first decision would leave that window empty,
+    ///   and the re-decision is what makes escalating by a recorded pid safe.
     @Test func aJobThatIgnoresSIGTERMIsEscalatedToSIGKILL() async throws {
         let fixture = try await Self.spawnSIGTERMProofJob()
         defer { fixture.tearDown() }
         let job = fixture.jobPID
+        let grandchild = fixture.grandchildPID
 
-        // The premise, proven through the very door the reaper uses: a real
-        // SIGTERM from `ProductionProcessSignaller` leaves this job running.
-        // Without it the test would also pass against a process that simply
-        // died of SIGTERM — which is the thing it exists to rule out.
+        // Premise 1 — the job leads its own group and the descendant is in it,
+        // so reclaiming the descendant can only be the widening and not a side
+        // effect of the job's death.
         #expect(getpgid(job) == job, "the fixture must lead its own process group")
+        #expect(
+            getpgid(grandchild) == job,
+            "pid \(grandchild) must share the job's process group for the widening to reach it")
+        // Premise 2 — the descendant's stdio is /dev/null, so a death here can
+        // never be explained by EIO on a vanished pty. That is the shape the
+        // original hazard was measured in.
+        #expect(
+            Self.openFiles(ofPID: grandchild)
+                == ["0": "/dev/null", "1": "/dev/null", "2": "/dev/null"])
+        // Premise 3 — proven through the very door the reaper uses: a real
+        // SIGTERM from `ProductionProcessSignaller`, which already widens to the
+        // group, leaves both of them running. Without it this would also pass
+        // against a process that simply died of SIGTERM — which is the thing it
+        // exists to rule out. A signal is delivered at once, but the corpse
+        // has to be scheduled through its exit before `ps` reports it, and
+        // that is slow under load; half a second keeps the premise from
+        // reading a dying job as a surviving one.
         ProductionProcessSignaller().terminate(job)
         #expect(
-            await Self.staysRunning(job, for: 0.5),
+            await Self.staysRunning(grandchild, for: 0.5),
+            "pid \(grandchild) died of the group SIGTERM; SIGKILL would prove nothing")
+        #expect(
+            Self.isRunning(job),
             "pid \(job) died of SIGTERM, so the escalation branch was never reached")
 
         let deadHolder = try Self.spentPID()
@@ -546,6 +536,7 @@ struct AgentReaperHolderLegLiveTests {
         await reaper(signaller, records: [record(holderPID: deadHolder, childPID: job)])
             .sweepHolderChildren()
 
+        // It escalates.
         #expect(signaller.terminated.contains(job))
         #expect(
             signaller.killed.contains(job),
@@ -553,45 +544,8 @@ struct AgentReaperHolderLegLiveTests {
         #expect(
             await Self.waitForOwnChildToExit(job),
             "pid \(job) outlived the sweep; nothing but SIGKILL can end it")
-    }
 
-    /// The group-widening half, live. `ProductionProcessSignaller.signal` sends
-    /// `kill(-pid, SIGKILL)` when the pid leads its own group, and that widening
-    /// — justified in `c12c0386` by a measured real-process hazard — is the only
-    /// thing that reclaims a descendant the orphaned job left running.
-    @Test func theSIGKILLEscalationWidensToTheJobsProcessGroup() async throws {
-        let fixture = try await Self.spawnSIGTERMProofJob()
-        defer { fixture.tearDown() }
-        let job = fixture.jobPID
-        let grandchild = fixture.grandchildPID
-
-        // Premise 1 — the descendant really is in the job's group, so reclaiming
-        // it can only be the widening and not a side effect of the job's death.
-        #expect(getpgid(job) == job, "the fixture must lead its own process group")
-        #expect(
-            getpgid(grandchild) == job,
-            "pid \(grandchild) must share the job's process group for the widening to reach it")
-        // Premise 2 — its stdio is /dev/null, so a death here can never be
-        // explained by EIO on a vanished pty. That is the shape the original
-        // hazard was measured in.
-        #expect(
-            Self.openFiles(ofPID: grandchild)
-                == ["0": "/dev/null", "1": "/dev/null", "2": "/dev/null"])
-        // Premise 3 — a real SIGTERM through the production door, which already
-        // widens to the group, leaves both of them running.
-        ProductionProcessSignaller().terminate(job)
-        #expect(
-            await Self.staysRunning(grandchild, for: 0.5),
-            "pid \(grandchild) died of the group SIGTERM; SIGKILL would prove nothing")
-        #expect(Self.isRunning(job), "pid \(job) died of SIGTERM; SIGKILL would prove nothing")
-
-        let deadHolder = try Self.spentPID()
-        let signaller = RecordingProcessSignaller()
-        await reaper(signaller, records: [record(holderPID: deadHolder, childPID: job)])
-            .sweepHolderChildren()
-
-        #expect(signaller.killed.contains(job))
-        #expect(await Self.waitForOwnChildToExit(job))
+        // The SIGKILL widened to the group.
         #expect(
             await Self.waitForProcessToStop(grandchild),
             """
@@ -599,38 +553,14 @@ struct AgentReaperHolderLegLiveTests {
             instead of on its process group, which is exactly the leak this leg exists to \
             collect
             """)
-    }
 
-    /// The re-decision that makes escalating by a recorded pid safe, run against
-    /// real kernel state rather than a scripted dictionary swap.
-    ///
-    /// Asserted as ordering, not as a call count: every fact
-    /// `decideHolderChild` consults must be consulted *again* after the SIGTERM
-    /// and before the SIGKILL. A shortcut that escalated on the first decision
-    /// would leave that window empty.
-    @Test func theSIGKILLEscalationReRunsTheIdentityDecision() async throws {
-        let fixture = try await Self.spawnSIGTERMProofJob()
-        defer { fixture.tearDown() }
-        let job = fixture.jobPID
-
-        #expect(getpgid(job) == job, "the fixture must lead its own process group")
-        ProductionProcessSignaller().terminate(job)
-        #expect(
-            await Self.staysRunning(job, for: 0.5),
-            "pid \(job) died of SIGTERM, so no re-decision could have happened")
-
-        let deadHolder = try Self.spentPID()
-        let signaller = RecordingProcessSignaller()
-        await reaper(signaller, records: [record(holderPID: deadHolder, childPID: job)])
-            .sweepHolderChildren()
-        #expect(await Self.waitForOwnChildToExit(job))
-
+        // The identity decision re-ran between the two signals.
         let events = signaller.events
         let sentTerm = try #require(
             events.firstIndex(of: .terminate(job)), "no SIGTERM reached pid \(job)")
-        // Either kill door counts here: which one the escalation takes is
-        // `theSIGKILLEscalationWidensToTheJobsProcessGroup`'s question, and this
-        // test should not go red for its answer.
+        // Either kill door counts here: whether the escalation widened is the
+        // grandchild assertion's question above, and this half should not go
+        // red for its answer.
         let sentKill = try #require(
             events.firstIndex(where: { $0 == .forceKill(job) || $0 == .forceKillProcessOnly(job) }),
             "no SIGKILL reached pid \(job)")

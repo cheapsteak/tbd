@@ -10,9 +10,9 @@ import TBDShared
 //  - OUT: DB-only settings *about* a session (`setKeepWarm`, `setPin`,
 //    renames, config writes, worktree/notes/repo mutations). Nothing there
 //    reaches a process, so nothing there is an actuation.
-//  - Sub-steps of one actuation are NOT separate rows. The polite `/exit`,
-//    the Escape/C-c and the SIGTERM inside a hibernate, the interrupt inside
-//    a profile swap, the paste-then-Enter inside a send — one row per
+//  - Sub-steps of one actuation are NOT separate rows. The SIGTERM and the
+//    forced replacement inside a hibernate, the interrupt inside a profile
+//    swap, the paste-then-Enter inside a send — one row per
 //    actuation-level intent, at the moment the intent is acted on.
 //
 // Two layers write, and only two: the **RPC handler** for anything a caller
@@ -254,10 +254,6 @@ enum ActuationRail {
     /// `AutoArchiveOnMergeCoordinator` archiving a whole worktree once its PR
     /// merged, tearing down its sessions with it.
     static let autoArchiveOnMerge = "auto-archive-on-merge"
-    /// The Watch Desk's wrap-up and nudge pastes, the spawn that opens its
-    /// judge session, and the close that kills that session's windows — all
-    /// acts the desk performs on its own, with no RPC behind them.
-    static let nightwatchDesk = "nightwatch-desk"
     /// The boot-time (and post-`cleanup`) reconcile sweep: it kills the windows
     /// of worktrees that left disk, parks sessions whose window is gone, and
     /// reaps orphaned windows and dead servers. One row per act — each is an

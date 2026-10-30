@@ -92,6 +92,10 @@ extension WorktreeLifecycle {
     ///     into the row so its process's hooks match it. Nil for every other
     ///     spawn — shells, Codex, dev servers, forks, and Claude with every
     ///     feature off.
+    ///   - claudeSpawnExtras: a Claude terminal's own plugin folders and
+    ///     settings overlay, written onto the new row so later starts of its
+    ///     session can reapply them. Already applied to `command` by the
+    ///     caller; nil stores nothing.
     ///   - codexLaunchOptions: the options a Codex spawn's command was built
     ///     with, nil for every other spawn and for a Codex spawn with none.
     ///     Written in the same insert, so every later relaunch of Codex in this
@@ -110,10 +114,10 @@ extension WorktreeLifecycle {
         claudeSessionID: String?,
         profileID: UUID?,
         kind: TerminalKind?,
-        watchDeskRole: WatchDeskRole? = nil,
         transport: TerminalSpawnTransport,
         serverName: String? = nil,
         sessionIncarnationID: UUID? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil,
         codexLaunchOptions: CodexLaunchOptions? = nil
     ) async throws -> Terminal {
         // The two transports diverge for exactly this one spawn, and converge
@@ -162,7 +166,6 @@ extension WorktreeLifecycle {
                 claudeSessionID: claudeSessionID,
                 profileID: profileID,
                 kind: kind,
-                watchDeskRole: watchDeskRole,
                 transport: holderHandle == nil ? .tmux : .holder,
                 holderPID: holderHandle?.holderPID,
                 childPID: holderHandle?.childPID,
@@ -177,6 +180,7 @@ extension WorktreeLifecycle {
                 holderChildStartedAt: holderHandle == nil ? nil : now(),
                 serverName: serverName,
                 sessionIncarnationID: sessionIncarnationID,
+                claudeSpawnExtras: claudeSpawnExtras,
                 codexLaunchOptions: codexLaunchOptions
             )
         } catch {

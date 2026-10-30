@@ -28,8 +28,20 @@ import Foundation
 /// hardcoding a path keeps bare `swift test` behaving exactly as before —
 /// unset in, unset out — which is the same rule `HOME` follows above.
 ///
-/// Throws `NSError(domain: "shell")` with the command output in the
-/// `NSLocalizedDescriptionKey` user info entry on non-zero exit.
+/// The wait goes through ``collectOutput(of:)``, so no cooperative-pool thread
+/// is parked on the child. Hundreds of tests reach this helper, directly or
+/// through the repo fixtures in `GitRepoHelpers.swift`, and a blocking
+/// `waitUntilExit()` here held one of CI's three pool threads for every spawn
+/// (see "Thread-blocking gates run off the cooperative pool" in
+/// `Tests/CLAUDE.md`). Both streams are drained while the command runs, so a
+/// chatty command cannot fill a pipe and stall. The wait ends once bash has
+/// exited **and** both streams have reached end-of-file, so a command that
+/// leaves a background child holding stdout or stderr open waits for that
+/// child as well; send such a child's output elsewhere (`cmd >/dev/null 2>&1 &`).
+///
+/// Throws `NSError(domain: "shell")` on non-zero exit, with the command, its
+/// stdout and then its stderr in the `NSLocalizedDescriptionKey` user info
+/// entry.
 public func shell(_ command: String, at dir: URL) async throws {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -49,17 +61,12 @@ public func shell(_ command: String, at dir: URL) async throws {
         environment["TMUX_TMPDIR"] = tmuxTmpdir
     }
     process.environment = environment
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    try process.run()
-    process.waitUntilExit()
-    guard process.terminationStatus == 0 else {
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
+    let result = try await collectOutput(of: process)
+    guard result.status == 0 else {
+        let output = String(data: result.stdout + result.stderr, encoding: .utf8) ?? ""
         throw NSError(
             domain: "shell",
-            code: Int(process.terminationStatus),
+            code: Int(result.status),
             userInfo: [NSLocalizedDescriptionKey: "Command failed: \(command)\n\(output)"]
         )
     }

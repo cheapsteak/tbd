@@ -1749,7 +1749,7 @@ public actor PRStatusManager {
         let observedAt = now()
         let signals: (failing: Bool, pending: Bool)
         if state != "OPEN" {
-            signals = (false, false)   // mapState ignores signals for MERGED/CLOSED
+            signals = (false, false)   // mapStateAndReason ignores signals for MERGED/CLOSED
         } else if let fetched = await fetchCheckSignals(url: url, number: number, repoPath: repoPath) {
             signals = fetched
         } else if let cached = cache[worktreeID] {
@@ -1797,8 +1797,8 @@ public actor PRStatusManager {
 
     // MARK: - State mapping (internal but static for testability)
 
-    /// Unified function that produces both state and reason in one pass — the single
-    /// source of truth that `mapState()` and `computeReason()` delegate to, so they can't drift.
+    /// Produces both state and reason in one pass, so the icon and the words
+    /// under it come from one decision and cannot drift apart.
     /// Required-check awareness: a failing *required* check is red and a pending *required*
     /// check is yellow regardless of merge state; non-required checks never color the icon.
     public static func mapStateAndReason(
@@ -1964,26 +1964,6 @@ public actor PRStatusManager {
         }
     }
 
-    public static func mapState(
-        forge: Forge = .github,
-        ghState: String,
-        mergeVerdictRaw: String,
-        reviewVerdictRaw: String = "",
-        isDraft: Bool = false,
-        requiredChecksFailing: Bool = false,
-        requiredChecksPending: Bool = false
-    ) -> PRMergeableState {
-        Self.mapStateAndReason(
-            forge: forge,
-            ghState: ghState,
-            mergeVerdictRaw: mergeVerdictRaw,
-            reviewVerdictRaw: reviewVerdictRaw,
-            isDraft: isDraft,
-            requiredChecksFailing: requiredChecksFailing,
-            requiredChecksPending: requiredChecksPending
-        ).state
-    }
-
     /// Conclusions (CheckRun) that count as a failing check.
     private static let failingCheckRunConclusions: Set<String> = [
         "FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"
@@ -2033,7 +2013,7 @@ public actor PRStatusManager {
     /// Only checks GitHub marks `isRequired` for this PR ever color the icon. A PR with no
     /// required checks (stacked PR targeting an unprotected feature branch, or a repo without
     /// branch protection) gets no CI coloring from checks — the mergeStateStatus refinement in
-    /// mapState decides instead, matching GitHub's own merge verdict.
+    /// mapStateAndReason decides instead, matching GitHub's own merge verdict.
     /// `aggregateRollupState` EXPECTED covers the post-push window: a required check that
     /// hasn't reported a context yet can't be seen in `contexts`.
     static func checkSignals(contexts: [CheckContext], aggregateRollupState: String?) -> (failing: Bool, pending: Bool) {
@@ -2212,28 +2192,6 @@ public actor PRStatusManager {
             "-f", "name=\(name)",
             "-f", "branch=\(branch)"
         ]
-    }
-
-    /// Compute human-readable reason string for the PR merge state.
-    /// Delegates to mapStateAndReason() for the single source of truth.
-    public static func computeReason(
-        forge: Forge = .github,
-        ghState: String,
-        mergeVerdictRaw: String,
-        reviewVerdictRaw: String = "",
-        isDraft: Bool = false,
-        requiredChecksFailing: Bool = false,
-        requiredChecksPending: Bool = false
-    ) -> String {
-        Self.mapStateAndReason(
-            forge: forge,
-            ghState: ghState,
-            mergeVerdictRaw: mergeVerdictRaw,
-            reviewVerdictRaw: reviewVerdictRaw,
-            isDraft: isDraft,
-            requiredChecksFailing: requiredChecksFailing,
-            requiredChecksPending: requiredChecksPending
-        ).reason
     }
 
     /// Priority for choosing between multiple PRs on the same branch.

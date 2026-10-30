@@ -1,3 +1,4 @@
+import ArgumentParser
 import Foundation
 #if canImport(Glibc)
 import Glibc
@@ -144,15 +145,32 @@ struct SocketClient: Sendable {
         return try decoder.decode(RPCResponse.self, from: responseData)
     }
 
+    /// Throws when the daemon answered with a failure.
+    ///
+    /// A start the start-admission command held is not an error in the request
+    /// but a "try again later": it prints `held: <reason>` on stderr and exits
+    /// 75 (`EX_TEMPFAIL`), whichever command asked. Branches on the
+    /// machine-readable code, never the prose. `stderr` is a seam so the
+    /// mapping is testable without a process exit.
+    static func requireSuccess(
+        _ response: RPCResponse,
+        stderr: (String) -> Void = { FileHandle.standardError.write(Data($0.utf8)) }
+    ) throws {
+        guard !response.success else { return }
+        if let line = StartHeld.stderrLine(for: response) {
+            stderr(line)
+            throw ExitCode(StartHeld.exitCode)
+        }
+        throw CLIError.rpcError(response.error ?? "Unknown error")
+    }
+
     /// Send an RPC request, decode the result, and throw on error response.
     func call<P: Encodable, R: Decodable>(
         method: String, params: P, resultType: R.Type
     ) throws -> R {
         let request = try RPCRequest(method: method, params: params)
         let response = try send(request)
-        guard response.success else {
-            throw CLIError.rpcError(response.error ?? "Unknown error")
-        }
+        try Self.requireSuccess(response)
         return try response.decodeResult(resultType)
     }
 
@@ -160,18 +178,14 @@ struct SocketClient: Sendable {
     func callVoid<P: Encodable>(method: String, params: P) throws {
         let request = try RPCRequest(method: method, params: params)
         let response = try send(request)
-        guard response.success else {
-            throw CLIError.rpcError(response.error ?? "Unknown error")
-        }
+        try Self.requireSuccess(response)
     }
 
     /// Send an RPC request with no params.
     func call<R: Decodable>(method: String, resultType: R.Type) throws -> R {
         let request = RPCRequest(method: method)
         let response = try send(request)
-        guard response.success else {
-            throw CLIError.rpcError(response.error ?? "Unknown error")
-        }
+        try Self.requireSuccess(response)
         return try response.decodeResult(resultType)
     }
 }
@@ -191,4 +205,16 @@ enum CLIError: LocalizedError, CustomStringConvertible {
     }
 
     var errorDescription: String? { description }
+}
+
+/// How `tbd` reports an agent start the start-admission command held.
+enum StartHeld {
+    /// `EX_TEMPFAIL`: try again later.
+    static let exitCode: Int32 = 75
+
+    /// The stderr line for a held start, or nil for any other response.
+    static func stderrLine(for response: RPCResponse) -> String? {
+        guard response.errorCode == RPCErrorCode.startHeld.rawValue else { return nil }
+        return "held: \(response.error ?? "start held")\n"
+    }
 }

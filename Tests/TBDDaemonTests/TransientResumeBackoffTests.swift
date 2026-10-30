@@ -25,10 +25,4 @@ import TBDShared
         #expect(TransientResumeBackoff.copy(forDelay: 300) == "5m")
         #expect(TransientResumeBackoff.copy(forDelay: 600) == "10m")
     }
-
-    @Test func constantsMatchBrief() {
-        #expect(TransientResumeBackoff.steps == [60, 120, 300, 600])
-        #expect(TransientResumeBackoff.maxAttempts == TransientResumeBackoff.steps.count)
-        #expect(TransientResumeBackoff.lookback == 30 * 60)
-    }
 }

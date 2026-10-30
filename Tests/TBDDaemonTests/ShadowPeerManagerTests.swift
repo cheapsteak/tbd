@@ -5,6 +5,7 @@ import Testing
 
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The repository every fixture's shadow and local session sit in, so a
 /// delivery test is a same-repository delivery unless it says otherwise.

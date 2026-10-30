@@ -3,6 +3,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 // Nested under TBDHomeSerialized: `isolateTBDHome()` mutates the process-global
 // `TBD_HOME` env var to isolate hook resolution and the runtime/presession

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The Settings toggles for the four opt-in orphan-GC collectors: the setter
 /// writes through the injected closure (the same RPC `tbd gc <collector>`
@@ -15,13 +16,13 @@ import TBDShared
 @Suite("GC collector settings")
 struct GCCollectorSettingsTests {
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-gc-collector-settings-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-gc-collector-settings")
+        let defaults = suite.defaults
         let state = AppState(userDefaults: defaults)
         // Keep any config read off a real daemon.
         state.configFetcher = { @MainActor in Config() }
         await body(state)
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     @Test func everyCollectorStartsAtItsShippedDefault() async {

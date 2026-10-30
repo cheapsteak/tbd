@@ -1,6 +1,6 @@
 # Design: Reclaim worktree SwiftPM `.build` disk
 
-*2026-07-08. Grounded in `~/projects/longeye-docs/disk-cleanup/tbd-swiftpm-build-lessons.md`
+*2026-07-08. Grounded in `~/projects/acme-docs/disk-cleanup/tbd-swiftpm-build-lessons.md`
 (the disk-full incident investigation), live measurement on this machine, and a
 web-research pass on SwiftPM/worktree prior art.*
 
@@ -124,8 +124,8 @@ Responsibilities, in order:
    worktree's `path`, `status`, and `liveClaudeSessionCount`. Only
    `status == "active"` worktrees are considered; archived ones are already
    reclaimed by `git worktree remove`. **Scope to SwiftPM worktrees only:**
-   `tbd worktree list` spans *every* repo TBD manages (longeye-app,
-   longeye-docs, agent-channels, …), so skip any worktree lacking a
+   `tbd worktree list` spans *every* repo TBD manages (acme-app,
+   acme-docs, agent-channels, …), so skip any worktree lacking a
    `Package.swift`. That file's presence is the exact discriminator — a
    worktree cannot produce a SwiftPM `.build`/`index-build` without it — so it
    correctly gates both the config seeding and the GC tiers, and never lets the

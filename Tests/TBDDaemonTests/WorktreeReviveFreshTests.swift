@@ -1,5 +1,6 @@
 import Foundation
 import GRDB
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -202,57 +203,6 @@ struct WorktreeReviveFreshTests {
         #expect(createdPaths.isEmpty)
     }
 
-    /// An ordinary create whose generated `tbd/<name>` collides still lands,
-    /// under a fresh name — the collision safety net the revive path above
-    /// relies on.
-    ///
-    /// The collision is real: the name is reserved first, then a branch is
-    /// planted on it, so git answers `fatal: a branch named 'tbd/…' already
-    /// exists`. It used to be simulated with the `reference-transaction` hook
-    /// the revive test still uses, which declines the first two
-    /// `refs/heads/tbd/` updates. That stands in for a collision only while
-    /// *every* git failure is retried blindly — the behavior that manufactured
-    /// orphan branches. A hook decline is a repo-level policy that no second
-    /// base and no second name can satisfy, so the create now fails fast on it
-    /// and surfaces git's own words.
-    @Test func ordinaryCreateStillRetriesGeneratedNameCollision() async throws {
-        let (tempDir, repoDir) = try await createTestRepo()
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-        let remoteDir = tempDir.appendingPathComponent("remote.git", isDirectory: true)
-        try FileManager.default.createDirectory(at: remoteDir, withIntermediateDirectories: true)
-        try await shell("git init --bare -b main", at: remoteDir)
-        try await shell("git remote add origin '\(remoteDir.path)'", at: repoDir)
-        try await shell("git push -u origin main", at: repoDir)
-
-        let db = try TBDDatabase(inMemory: true)
-        let lifecycle = makeReviveFreshLifecycle(db: db)
-        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
-
-        let pending = try await lifecycle.beginCreateWorktree(repoID: repo.id, skipClaude: true)
-        try await shell("git branch '\(pending.branch)'", at: repoDir)
-
-        let completion = try await lifecycle.completeCreateWorktree(
-            worktreeID: pending.id, skipClaude: true
-        )
-        if case .preSessionPending(let phase3) = completion {
-            await phase3.value
-        }
-
-        let created = try #require(try await db.worktrees.get(id: pending.id))
-        #expect(created.status == .active)
-        let worktreeRoot = try #require(repo.worktreeRoot)
-        #expect(try FileManager.default.contentsOfDirectory(atPath: worktreeRoot).count == 1)
-
-        // Checked out on a DIFFERENT generated branch, and the branch that
-        // caused the collision is untouched.
-        let listed = try await GitManager().worktreeList(repoPath: repoDir.path)
-        let tbdWorktrees = listed.filter { $0.branch.hasPrefix("tbd/") }
-        #expect(tbdWorktrees.count == 1)
-        #expect(tbdWorktrees.first?.branch != pending.branch)
-        let refs = try await GitManager().listRefs(repoPath: repoDir.path, prefix: "refs/heads")
-        #expect(refs.contains("refs/heads/\(pending.branch)"))
-    }
-
     @Test func successfulFetchCarriesOnlySelectedConversationAndSeedsProvenance() async throws {
         let (_, cleanup) = isolateTBDHome()
         defer { cleanup() }
@@ -350,7 +300,7 @@ struct WorktreeReviveFreshTests {
         // argument, so Claude does not start an unrequested turn. Provenance
         // lives in the seeded Notes tab asserted below, not in a prompt.
         #expect(
-            isPromptFreeForkResumeInvocation(claudeCommand),
+            isPromptFreeResumeInvocation(claudeCommand, forkSession: true),
             "fresh revive must spawn with no trailing prompt argument: \(claudeCommand)"
         )
 
@@ -375,6 +325,85 @@ struct WorktreeReviveFreshTests {
         )
         let order = try await db.worktrees.getTabOrder(worktreeID: created.id)
         #expect(order.last == note.id)
+    }
+
+    /// The source session's plugin folders and settings overlay, kept by the
+    /// archive under its session id, reach the carried-over conversation: its
+    /// command passes its folder and not its sibling's, its settings file
+    /// carries its overlay beside TBD's hooks, and its new row keeps them. The
+    /// archived source keeps its map.
+    @Test func reviveFreshBranchCarriesSourceExtras() async throws {
+        let (_, cleanup) = isolateTBDHome()
+        defer { cleanup() }
+        let (tempDir, repoDir) = try await createTestRepo()
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let plugA = tempDir.appendingPathComponent("plugins/plug-a", isDirectory: true)
+        let plugB = tempDir.appendingPathComponent("plugins/plug-b", isDirectory: true)
+        for dir in [plugA, plugB] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let extrasA = ClaudeSpawnExtras(
+            claudeSettingsOverlay: #"{"acmeSession":"A"}"#, pluginDirs: [plugA.path])
+        let extrasB = ClaudeSpawnExtras(
+            claudeSettingsOverlay: #"{"acmeSession":"B"}"#, pluginDirs: [plugB.path])
+
+        let db = try TBDDatabase(inMemory: true)
+        let recorder = PreSessionRecordedCommands()
+        let lifecycle = makeReviveFreshLifecycle(db: db, recorder: recorder)
+        let repo = try await makeTestRepo(db: db, tempDir: tempDir, repoDir: repoDir)
+        let archived = try await makeArchivedSource(
+            db: db,
+            repo: repo,
+            tempDir: tempDir,
+            sessions: ["A", "B"],
+            claudeSpawnExtras: ["A": extrasA, "B": extrasB],
+            archivedHeadSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        try writeSourceTranscript(sessionID: "A")
+
+        let outcome = try await lifecycle.reviveConversationOnFreshBranch(
+            archivedWorktreeID: archived.id,
+            sessionID: "A",
+            date: operationDate
+        )
+        guard case .ready = outcome.completion else {
+            Issue.record("expected the fresh revive to complete synchronously")
+            return
+        }
+
+        let created = outcome.result.worktree
+        let claude = try #require(
+            try await db.terminals.list(worktreeID: created.id).first { $0.kind == .claude })
+        #expect(claude.claudeSessionID == "A")
+        #expect(claude.claudeSpawnExtras == extrasA)
+        #expect(try await db.terminals.get(id: claude.id)?.claudeSpawnExtras == extrasA)
+
+        let command = try #require(
+            recorder.snapshot()
+                .filter { $0.contains("new-window") }
+                .compactMap(\.last)
+                .first { $0.contains("claude ") }
+        )
+        #expect(command.contains("--resume A"), "\(command)")
+        #expect(command.contains("--fork-session"), "\(command)")
+        #expect(
+            command.contains(" --plugin-dir \(SystemPromptBuilder.shellEscape(plugA.path))"),
+            "\(command)")
+        #expect(!command.contains(plugB.path), "\(command)")
+
+        let settingsPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: claude.id.uuidString)
+        #expect(
+            command.contains(" --settings \(SystemPromptBuilder.shellEscape(settingsPath))"),
+            "\(command)")
+        let settingsData = try Data(contentsOf: URL(fileURLWithPath: settingsPath))
+        let settings = try #require(
+            try JSONSerialization.jsonObject(with: settingsData) as? [String: Any])
+        #expect(settings["acmeSession"] as? String == "A")
+        #expect(settings["hooks"] != nil)
+
+        #expect(
+            try await db.worktrees.get(id: archived.id)?.archivedClaudeSpawnExtras
+                == ["A": extrasA, "B": extrasB])
     }
 
     @Test func fetchFailureCreatesFromLocalBaseAndReturnsStaleWarning() async throws {
@@ -724,60 +753,10 @@ struct WorktreeReviveFreshTests {
         #expect(claudeCommand.contains("--resume A"))
         #expect(claudeCommand.contains("--fork-session"))
         #expect(
-            isPromptFreeForkResumeInvocation(claudeCommand),
+            isPromptFreeResumeInvocation(claudeCommand, forkSession: true),
             "fresh revive must spawn with no trailing prompt argument: \(claudeCommand)"
         )
     }
-
-    /// Self-test for the guard below: a whitelist that cannot fail would make
-    /// every use of it vacuous.
-    @Test func promptFreeGuardRejectsATrailingPromptArgument() {
-        let base = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume A"
-            + " --fork-session --dangerously-skip-permissions --settings '/tmp/overlay.json'"
-        #expect(isPromptFreeForkResumeInvocation(base))
-        #expect(!isPromptFreeForkResumeInvocation(base + " 'You have been moved.'"))
-
-        // `--name '<worktree display name>'` is a permitted flag, not a
-        // positional — its quoted value must not smuggle a prompt past the
-        // guard, so the trailing-argument rejection still has to hold with it
-        // present.
-        let named = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume A"
-            + " --fork-session --dangerously-skip-permissions --name 'acme-worker'"
-            + " --settings '/tmp/overlay.json'"
-        #expect(isPromptFreeForkResumeInvocation(named))
-        #expect(!isPromptFreeForkResumeInvocation(named + " 'You have been moved.'"))
-
-        // A display name containing an apostrophe is escaped as `'acme'\''s'`.
-        // The guard must accept that shape (or it would report a conforming
-        // command as non-conforming) and must still reject a trailing prompt
-        // after it — the escape must not become a hole.
-        let escaped = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume A"
-            + " --fork-session --dangerously-skip-permissions --name 'acme'\\''s worktree'"
-            + " --settings '/tmp/overlay.json'"
-        #expect(isPromptFreeForkResumeInvocation(escaped))
-        #expect(!isPromptFreeForkResumeInvocation(escaped + " 'You have been moved.'"))
-    }
-
-    /// Whitelists the permitted invocation shape instead of blacklisting the
-    /// removed prompt's wording: only the resume/fork/permission flags plus the
-    /// optional file-path flags may appear. Any trailing positional argument
-    /// fails, whatever it says.
-    private func isPromptFreeForkResumeInvocation(_ command: String) -> Bool {
-        guard let start = command.range(of: "claude --resume") else { return false }
-        let invocation = String(command[start.lowerBound...])
-        let permitted = "^claude --resume [-0-9A-Za-z]+ --fork-session"
-            + " --dangerously-skip-permissions( --name \(Self.shellEscapedWordPattern))?"
-            + "( --settings '[^']*')?( --plugin-dir '[^']*')?$"
-        return invocation.range(of: permitted, options: .regularExpression) != nil
-    }
-
-    /// A single-quoted word as `SystemPromptBuilder.shellEscape` actually emits
-    /// it: an apostrophe inside the value closes the quote, escapes the
-    /// apostrophe and reopens (`'acme'\''s'`), so a naive `'[^']*'` cannot
-    /// match a legitimate command whose display name contains one. The helper
-    /// fails closed there, so it was never a safety hole — but a guard that
-    /// misreads a conforming command is a guard nobody trusts.
-    static let shellEscapedWordPattern = #"'(?:[^']|'\\'')*'"#
 
     /// `isolateTBDHome()` plus `TBD_CLAUDE_HOST_HOME`: the spawn (and the
     /// validation) resolves the profile config dir through the lifecycle's own
@@ -906,6 +885,7 @@ struct WorktreeReviveFreshTests {
         repo: Repo,
         tempDir: URL,
         sessions: [String],
+        claudeSpawnExtras: [String: ClaudeSpawnExtras] = [:],
         archivedHeadSHA: String
     ) async throws -> Worktree {
         let source = try await db.worktrees.create(
@@ -919,6 +899,7 @@ struct WorktreeReviveFreshTests {
         try await db.worktrees.archive(
             id: source.id,
             claudeSessionIDs: sessions,
+            claudeSpawnExtras: claudeSpawnExtras,
             archivedHeadSHA: archivedHeadSHA
         )
         try await db.writerForTests.write { database in

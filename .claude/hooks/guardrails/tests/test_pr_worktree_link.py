@@ -11,6 +11,7 @@ if _HOOKS_DIR not in sys.path:
 
 from guardrails.rules.pr_worktree_link import (  # noqa: E402
     _MAX_BODY_BYTES,
+    MCP_CREATE_PR_TOOL,
     PRWorktreeLinkRule,
     _file_has_link,
 )
@@ -45,6 +46,17 @@ def _informs(testcase, command, **kwargs):
     assert decision is not None, command
     testcase.assertEqual(decision.action, "info", command)
     return decision
+
+
+def _check_mcp(fields, cwd=_IN_WORKTREE, worktree_id=None):
+    tool_input = {"owner": "acme", "repo": "acme-prod", "title": "feat: x", "head": "b", "base": "main"}
+    tool_input.update(fields)
+    with _env(worktree_id=worktree_id):
+        if worktree_id is None:
+            os.environ.pop("TBD_WORKTREE_ID", None)
+        return PRWorktreeLinkRule().check(
+            tool_input, {"cwd": cwd, "tool_name": MCP_CREATE_PR_TOOL}
+        )
 
 
 class PRWorktreeLinkTests(unittest.TestCase):
@@ -650,6 +662,22 @@ class PRWorktreeLinkTests(unittest.TestCase):
     def test_silent_outside_tbd(self):
         self.assertIsNone(_check("gh pr create", cwd=_OUTSIDE))
         self.assertIsNone(_check("glab mr create", cwd=_OUTSIDE))
+
+    def test_mcp_body_without_link_informs_under_tbd(self):
+        for fields in ({"body": "Summary only"}, {}, {"body": "see tbd://open?worktree=abc"}):
+            d = _check_mcp(fields)
+            assert d is not None, fields
+            self.assertEqual(d.action, "info", fields)
+            self.assertIn("?worktree=", d.reason)
+        d = _check_mcp({"body": "Summary only"}, cwd=_OUTSIDE, worktree_id="1234-abcd")
+        assert d is not None
+        self.assertEqual(d.action, "info")
+
+    def test_mcp_body_with_link_silent(self):
+        self.assertIsNone(_check_mcp({"body": f"Summary\n\n[my-worktree]({_LINK})"}))
+
+    def test_mcp_silent_outside_tbd(self):
+        self.assertIsNone(_check_mcp({"body": "Summary only"}, cwd=_OUTSIDE))
 
     def test_never_denies(self):
         commands = (

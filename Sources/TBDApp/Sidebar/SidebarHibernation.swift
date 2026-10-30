@@ -64,7 +64,6 @@ enum SidebarHibernation {
                   worktree.status == .active,
                   worktree.archivedAt == nil,
                   worktree.location.isLocal,
-                  !worktree.isNightwatchDesk,
                   let inventory = terminals[worktree.id],
                   !inventory.isEmpty,
                   inventory.allSatisfy({ $0.worktreeID == worktree.id && $0.isParked })

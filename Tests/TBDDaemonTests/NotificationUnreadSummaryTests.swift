@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import GRDB
 @testable import TBDDaemonLib
 @testable import TBDShared
 
@@ -20,6 +21,18 @@ struct NotificationUnreadSummaryTests {
             path: "/tmp/test/.tbd/worktrees/\(name)",
             tmuxServer: "tbd-test"
         )
+    }
+
+    /// Overwrites a notification's `createdAt`. `create()` stamps `Date()`
+    /// and takes no date, so a test that orders by time sets the stamps
+    /// through the test writer, as `WorktreeStoreTests.stampArchivedAt` does.
+    private func stampCreatedAt(_ db: TBDDatabase, id: UUID, _ date: Date) async throws {
+        try await db.writerForTests.write { conn in
+            try conn.execute(
+                sql: "UPDATE notification SET createdAt = ? WHERE id = ?",
+                arguments: [date, id.uuidString]
+            )
+        }
     }
 
     @Test func emptyStoreReturnsEmpty() async throws {
@@ -53,12 +66,20 @@ struct NotificationUnreadSummaryTests {
     @Test func picksMostRecentTimestamp() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wt = try await makeWorktree(db, name: "wt-recent")
-        let a = try await db.notifications.create(worktreeID: wt.id, type: .responseComplete)
-        try await Task.sleep(nanoseconds: 10_000_000)
-        let b = try await db.notifications.create(worktreeID: wt.id, type: .taskComplete)
+        let first = try await db.notifications.create(worktreeID: wt.id, type: .responseComplete)
+        let middle = try await db.notifications.create(worktreeID: wt.id, type: .taskComplete)
+        let last = try await db.notifications.create(worktreeID: wt.id, type: .responseComplete)
+        // Creates in a row can share a stored millisecond, so the rows get
+        // explicit, distinct stamps. The newest is the middle row, so the
+        // summary cannot pass by keeping the first or the last row it reads.
+        let oldest = Date(timeIntervalSince1970: 1_767_225_600)
+        let newest = oldest.addingTimeInterval(120)
+        try await stampCreatedAt(db, id: first.id, oldest.addingTimeInterval(60))
+        try await stampCreatedAt(db, id: middle.id, newest)
+        try await stampCreatedAt(db, id: last.id, oldest)
         let summary = try await db.notifications.unreadSummaryByWorktree()
         // SQLite stores at millisecond precision; allow tolerance.
-        let expected = max(a.createdAt, b.createdAt).timeIntervalSince1970
+        let expected = newest.timeIntervalSince1970
         let actual = summary[wt.id]?.mostRecentAt.timeIntervalSince1970 ?? 0
         #expect(abs(actual - expected) < 0.001)
     }

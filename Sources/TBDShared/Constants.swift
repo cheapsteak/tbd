@@ -1,16 +1,12 @@
 import Foundation
+import TBDKernel
 
 public enum TBDConstants {
     public static let version = "0.1.0"
 
-    /// Base config directory resolved from the given environment dictionary.
-    /// Honors `TBD_HOME`; falls back to `~/tbd` when the key is absent or empty.
+    /// Base config directory; forwards to `KernelPaths.configDir(environment:)`.
     public static func configDir(environment: [String: String]) -> URL {
-        if let override = environment["TBD_HOME"], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("tbd")
+        KernelPaths.configDir(environment: environment)
     }
 
     /// Base config directory. Resolves `TBD_HOME` env var on every access so a
@@ -78,15 +74,9 @@ public enum TBDConstants {
     /// the app (SCM_RIGHTS). Sibling of `socketPath`.
     public static var vendSocketPath: String { vendSocketPath(environment: ProcessInfo.processInfo.environment) }
 
-    /// Directory holding one socket and one lock file per live pty holder:
-    /// `~/tbd/holders`. Honors TBD_HOME.
-    ///
-    /// Deliberately shallow and directly under the config dir: every holder
-    /// socket path must fit Darwin's ~104-byte `sun_path`, and nesting is the
-    /// thing that breaks that budget first. `HolderRendezvous` composes the
-    /// per-session names inside it and enforces the budget.
+    /// Holder rendezvous directory; forwards to `KernelPaths.holdersDir(environment:)`.
     public static func holdersDir(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
-        configDir(environment: environment).appendingPathComponent("holders")
+        KernelPaths.holdersDir(environment: environment)
     }
 
     /// Directory holding one subdirectory per Claude session for the session
@@ -117,6 +107,37 @@ public enum TBDConstants {
         updatesDir(environment: environment).appendingPathComponent("update.log").path
     }
 
+    /// The app bundle the last update replaced, kept as the no-rebuild route
+    /// back: `~/tbd/updates/previous/TBD.app`. `scripts/update.sh` moves it
+    /// here and restores it when the new daemon cannot come up, so the daemon
+    /// drops a retired column only once this build no longer uses it. Honors
+    /// TBD_HOME.
+    public static func keptAppBundle(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        updatesDir(environment: environment)
+            .appendingPathComponent("previous")
+            .appendingPathComponent("TBD.app")
+    }
+
+    /// The build identity sidecar inside an assembled app bundle:
+    /// `<bundle>/Contents/TBDBuildIdentity.json`, where
+    /// `scripts/restart-bundle-lib.sh` copies it.
+    public static func buildIdentityFile(inAppBundle bundle: URL) -> URL {
+        bundle
+            .appendingPathComponent("Contents")
+            .appendingPathComponent(BuildIdentityLoader.sidecarFileName)
+    }
+
+    /// The kept bundle's build identity sidecar:
+    /// `~/tbd/updates/previous/TBD.app/Contents/TBDBuildIdentity.json`.
+    /// Honors TBD_HOME.
+    public static func keptAppBundleIdentityFile(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        buildIdentityFile(inAppBundle: keptAppBundle(environment: environment))
+    }
+
     public static func databasePath(environment: [String: String]) -> String {
         configDir(environment: environment).appendingPathComponent("state.db").path
     }
@@ -126,11 +147,6 @@ public enum TBDConstants {
         configDir(environment: environment).appendingPathComponent("tbdd.pid").path
     }
     public static var pidFilePath: String { pidFilePath(environment: ProcessInfo.processInfo.environment) }
-
-    public static func portFilePath(environment: [String: String]) -> String {
-        configDir(environment: environment).appendingPathComponent("port").path
-    }
-    public static var portFilePath: String { portFilePath(environment: ProcessInfo.processInfo.environment) }
 
     public static func reposDir(environment: [String: String]) -> URL {
         configDir(environment: environment).appendingPathComponent("repos")
@@ -160,23 +176,9 @@ public enum TBDConstants {
     /// is unset or empty, preserving production behavior.
     public static var claudeScratchpadBase: URL { claudeScratchpadBase(environment: ProcessInfo.processInfo.environment) }
 
-    /// The host Claude store — `TBD_CLAUDE_HOST_HOME` when set, `~/.claude`
-    /// otherwise — resolved from the given environment dictionary.
-    ///
-    /// **The single resolution point for that override, package-wide.** It
-    /// lives in `TBDShared` rather than beside its daemon-side caller because
-    /// `TBDApp` needs it too and does not link `TBDDaemonLib`:
-    /// `LegacyHookSettingsPath` hand-built `homeDirectoryForCurrentUser/.claude`
-    /// for a dialog body, which is display-only today but shows the wrong path
-    /// under any override and is the exact shape of the leak
-    /// `LegacyHookScanner.globalSettingsPath` had.
-    /// `ClaudeProfileConfigDirManager.resolveHostBaseDirectory` delegates here.
+    /// The host Claude store; forwards to `KernelPaths.claudeHostHome(environment:)`.
     public static func claudeHostHome(environment: [String: String]) -> URL {
-        if let override = environment["TBD_CLAUDE_HOST_HOME"], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude", isDirectory: true)
+        KernelPaths.claudeHostHome(environment: environment)
     }
 
     /// The host Claude store. Resolves `TBD_CLAUDE_HOST_HOME` on every access,
@@ -194,6 +196,34 @@ public enum TBDConstants {
 
     public static func hookPath(repoID: UUID, eventName: String) -> String {
         hookPath(repoID: repoID, eventName: eventName, environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The agent background priority lease and record
+    /// (docs/specs/2026-10-21-agent-start-admission-design.md, "Restarts"):
+    /// `<configDir>/agent-background.json`. One file, rewritten in place; owned by
+    /// `AgentBackgroundController`'s sweep and by daemon start.
+    public static func agentBackgroundStatePath(environment: [String: String]) -> String {
+        configDir(environment: environment)
+            .appendingPathComponent("agent-background.json")
+            .path
+    }
+
+    public static var agentBackgroundStatePath: String {
+        agentBackgroundStatePath(environment: ProcessInfo.processInfo.environment)
+    }
+
+    /// The start-admission command (docs/specs/2026-10-21-agent-start-admission-design.md):
+    /// `<configDir>/hooks/start-admission`. One file per machine, not per repo,
+    /// because the question it answers is about the machine.
+    public static func startAdmissionHookPath(environment: [String: String]) -> String {
+        configDir(environment: environment)
+            .appendingPathComponent("hooks")
+            .appendingPathComponent("start-admission")
+            .path
+    }
+
+    public static var startAdmissionHookPath: String {
+        startAdmissionHookPath(environment: ProcessInfo.processInfo.environment)
     }
 
     /// Environment variable naming the shared dev-server running-file
@@ -449,9 +479,19 @@ public enum TBDConstants {
     public static func retainedTranscriptPath(
         provider: String, key: String, environment: [String: String]
     ) -> URL {
-        let directory = retainedTranscriptsDir(environment: environment).path
-        return URL(fileURLWithPath:
-            "\(directory)/\(filenameEscaped(provider))/\(filenameEscaped(key)).jsonl")
+        retainedTranscriptPath(
+            provider: provider, key: key,
+            directory: retainedTranscriptsDir(environment: environment))
+    }
+    /// The same path under an explicit transcripts directory, and the one place
+    /// the composition lives. For a caller that resolved the directory once and
+    /// walks it, so the files it lists and the paths it names come from the
+    /// same root: `OrphanGC` takes that root as a seam.
+    public static func retainedTranscriptPath(
+        provider: String, key: String, directory: URL
+    ) -> URL {
+        URL(fileURLWithPath:
+            "\(directory.path)/\(filenameEscaped(provider))/\(filenameEscaped(key)).jsonl")
     }
     public static func retainedTranscriptPath(provider: String, key: String) -> URL {
         retainedTranscriptPath(
@@ -543,7 +583,7 @@ public enum TBDConstants {
     }
 
     /// Directory holding daemon-managed runtime files — the Claude settings
-    /// overlays, the statusline tee and its captures: `~/tbd/runtime`.
+    /// overlays and the session-mod key: `~/tbd/runtime`.
     public static func runtimeDir(environment: [String: String]) -> URL {
         configDir(environment: environment).appendingPathComponent("runtime")
     }
@@ -556,53 +596,14 @@ public enum TBDConstants {
     }
     public static var modKeyPath: URL { modKeyPath(environment: ProcessInfo.processInfo.environment) }
 
-    /// The one shared statusline tee script: `~/tbd/runtime/statusline-tee.sh`.
-    ///
-    /// One file for the whole fleet rather than one per session — the script
-    /// takes its capture path and its delegate command as arguments, so nothing
-    /// session-specific is baked into it.
-    public static func statuslineTeeScriptPath(environment: [String: String]) -> String {
-        runtimeDir(environment: environment)
-            .appendingPathComponent("statusline-tee.sh")
-            .path
-    }
-    public static var statuslineTeeScriptPath: String {
-        statuslineTeeScriptPath(environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// Filename prefix/suffix for a session's statusline capture file. Shared
-    /// between the path builder and the orphan-prune sweep so the two can't
-    /// drift, exactly as the per-session overlay's pair is.
-    public static let statuslineCapturePrefix = "statusline-capture-"
-    public static let statuslineCaptureSuffix = ".json"
-
-    /// Where the tee publishes one session's statusline stdin JSON:
-    /// `~/tbd/runtime/statusline-capture-<sessionKey>.json`.
-    ///
-    /// The payload carries the session's cwd and repo paths, so the tee writes
-    /// it under a restrictive umask; the path itself is only an opaque terminal
-    /// id.
-    public static func statuslineCapturePath(
-        sessionKey: String,
-        environment: [String: String]
-    ) -> String {
-        runtimeDir(environment: environment)
-            .appendingPathComponent(
-                "\(statuslineCapturePrefix)\(sanitizedSessionKey(sessionKey))\(statuslineCaptureSuffix)")
-            .path
-    }
-    public static func statuslineCapturePath(sessionKey: String) -> String {
-        statuslineCapturePath(sessionKey: sessionKey, environment: ProcessInfo.processInfo.environment)
-    }
-
     /// Filesystem-safe rendering of a session key (non-`[A-Za-z0-9_-]` → `_`).
     ///
     /// Callers MUST pass a unique opaque id (the terminal UUID): the mapping is
     /// only collision-safe for such inputs, since two distinct human-readable
     /// strings could sanitize to the same filename while distinct UUIDs never
-    /// do. Lives here so the overlay files and the capture files sanitize
-    /// identically — a second implementation is how the prune sweep and the
-    /// path builder drift apart.
+    /// do. Lives here so every path builder and the prune sweep that reclaims
+    /// its files sanitize identically — a second implementation is how the two
+    /// drift apart.
     public static func sanitizedSessionKey(_ sessionKey: String) -> String {
         String(sessionKey.unicodeScalars.map { scalar -> Character in
             let isSafe = scalar == "-" || scalar == "_"
@@ -612,141 +613,4 @@ public enum TBDConstants {
             return isSafe ? Character(scalar) : "_"
         })
     }
-
-    /// Directory holding everything fleet supervision persists outside the DB:
-    /// the operator's `supervision.json`, the continuous `ledger.jsonl`, the
-    /// out-of-band `status.json` heartbeat, and one directory per declared
-    /// project. Honors `TBD_HOME` like every other derived path — never
-    /// hand-build it from `$HOME`.
-    public static func supervisionDir(environment: [String: String]) -> URL {
-        configDir(environment: environment).appendingPathComponent("supervision")
-    }
-    public static var supervisionDir: URL {
-        supervisionDir(environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// The operator's supervision file: `~/tbd/supervision/supervision.json`.
-    /// Project topology, per-project marks, mode declarations and selections,
-    /// supervisor bindings, sweep selection. Hand-editable; the daemon is its
-    /// only programmatic writer.
-    public static func supervisionFilePath(environment: [String: String]) -> String {
-        supervisionDir(environment: environment).appendingPathComponent("supervision.json").path
-    }
-    public static var supervisionFilePath: String {
-        supervisionFilePath(environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// The continuous supervision record: `~/tbd/supervision/ledger.jsonl`.
-    /// Append-only, one JSON object per line, whole-line writes.
-    public static func supervisionLedgerPath(environment: [String: String]) -> String {
-        supervisionDir(environment: environment).appendingPathComponent("ledger.jsonl").path
-    }
-    public static var supervisionLedgerPath: String {
-        supervisionLedgerPath(environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// The out-of-band heartbeat: `~/tbd/supervision/status.json`, rewritten
-    /// atomically at boot, at every brake edge, and on a fixed cadence while
-    /// the brake is released — so a watchdog that cannot reach the socket or
-    /// the DB can still tell whether the daemon is alive. See
-    /// `SupervisionStatusFile` for the full contract, including why staleness
-    /// under an engaged brake is expected rather than a liveness signal.
-    public static func supervisionStatusPath(environment: [String: String]) -> String {
-        supervisionDir(environment: environment).appendingPathComponent("status.json").path
-    }
-    public static var supervisionStatusPath: String {
-        supervisionStatusPath(environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// A project's own directory: `~/tbd/supervision/projects/<name>`. Holds
-    /// the operator-level playbook, the journal, the proposals doc, and any
-    /// customized sweep or transition program.
-    ///
-    /// **Returns nil when the name is not one safe path component, and the
-    /// optional return is the guarantee — do not make it non-optional.** A
-    /// helper that accepts an unvalidated name and hands back a path outside
-    /// its own directory *is* the vulnerability; refusing to compose one is how
-    /// this closes, and it closes for every caller at once, including callers
-    /// not yet written.
-    ///
-    /// Validating at the call site instead would be the same bug with more
-    /// steps: not every project name arrives through `supervision.json`, where
-    /// `SupervisionFile.validate()` already refuses an unusable name. A
-    /// singleton project is named by its repo's **display name**, which an
-    /// operator may edit to anything at all — `acme/web` yields
-    /// `…/supervision/projects/acme/web`, and `..` walks straight out of the
-    /// supervision directory. Those names never pass through the file's
-    /// validation, so the only place that can be relied on to check them is
-    /// here.
-    ///
-    /// A nil is not an error condition to escalate: the project is supervised
-    /// normally and only its directory is unavailable
-    /// (`SupervisionProject.hasUsableDirectory`,
-    /// `SupervisionWarningCode.unusableProjectName`). The operator's fix is to
-    /// rename the repo.
-    public static func supervisionProjectDir(
-        project: String, environment: [String: String]
-    ) -> URL? {
-        guard SupervisionFile.isSafeProjectName(project) else { return nil }
-        return supervisionDir(environment: environment)
-            .appendingPathComponent("projects")
-            .appendingPathComponent(project)
-    }
-    public static func supervisionProjectDir(project: String) -> URL? {
-        supervisionProjectDir(project: project, environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// A declared project's operator-level playbook:
-    /// `~/tbd/supervision/projects/<name>/supervision.md`.
-    ///
-    /// Nil for the same reason `supervisionProjectDir` is nil — a name that is
-    /// not one safe path component has no directory to hold it, so there is no
-    /// path to compose and the operator level is simply unavailable for that
-    /// project until the repo is renamed.
-    public static func supervisionPlaybookPath(
-        project: String, environment: [String: String]
-    ) -> String? {
-        supervisionProjectDir(project: project, environment: environment)?
-            .appendingPathComponent(supervisionPlaybookFileName).path
-    }
-    public static func supervisionPlaybookPath(project: String) -> String? {
-        supervisionPlaybookPath(project: project, environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// A singleton project's operator-level playbook:
-    /// `~/tbd/repos/<repoID>/supervision.md`.
-    ///
-    /// Keyed by repo id rather than by the project's name, which is the repo's
-    /// **display name** and may be anything at all — so unlike the declared
-    /// case this path always composes. Same file-backed per-repo pattern as
-    /// `hookPath` and `notesPath`: a user-authored editable blob lives in a
-    /// file, never in a DB column.
-    public static func repoPlaybookPath(repoID: UUID, environment: [String: String]) -> String {
-        reposDir(environment: environment)
-            .appendingPathComponent(repoID.uuidString)
-            .appendingPathComponent(supervisionPlaybookFileName)
-            .path
-    }
-    public static func repoPlaybookPath(repoID: UUID) -> String {
-        repoPlaybookPath(repoID: repoID, environment: ProcessInfo.processInfo.environment)
-    }
-
-    /// The one filename a playbook has, at every level. Named once so the
-    /// operator levels and the in-repo level cannot drift apart.
-    public static let supervisionPlaybookFileName = "supervision.md"
-
-    /// The in-repo playbook, relative to a repo's main checkout:
-    /// `.agents/supervision.md`. The directory name describes its audience —
-    /// local process guidance for any tool that drives agents — and TBD owns
-    /// particular filenames inside it, never the directory.
-    public static func repoAgentsPlaybookPath(checkout: String) -> String {
-        URL(fileURLWithPath: checkout, isDirectory: true)
-            .appendingPathComponent(agentsDirectoryName)
-            .appendingPathComponent(supervisionPlaybookFileName)
-            .path
-    }
-
-    /// The in-repo directory holding local process guidance for agent-driving
-    /// tools.
-    public static let agentsDirectoryName = ".agents"
 }

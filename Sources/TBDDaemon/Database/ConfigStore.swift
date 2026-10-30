@@ -43,13 +43,10 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     var scratch_instructions: String?
     var scratch_rename_prompt: String?
     var scratch_profile_override_id: String?
-    /// Nightwatch mode: 'off', 'daywatch', or 'nightwatch'. Nil/absent defaults to 'off'.
-    var nightwatch_mode: String?
     var auto_hibernate_enabled: Bool?
     var hibernate_idle_minutes: Int?
     var control_mode_enabled: Bool?
     var auto_resume_on_api_error: Bool?
-    var hibernate_input_veto_enabled: Bool?
     var auto_close_setup_enabled: Bool?
     /// Pre-accept Claude's folder-trust dialog for the worktrees of registered
     /// repos (TBD-created ones and the repo's own checkout), excluding
@@ -75,15 +72,9 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// so `nil` means "never chose" and resolves through
     /// `Config.autoCreateNotesDefault`.
     var auto_create_notes_enabled: Bool?
-    /// The fleet supervision brake (design 2026-07-26 §3, §7). **Genuinely
-    /// tri-state**, same shape as `queued_prompt_enabled`: the
-    /// `v75_config_supervision_enabled` column carries no SQL default, so
-    /// `nil` here means "never chose" rather than "off". Resolve it through
-    /// `Config.supervisionEnabledDefault`, never through `?? false`.
-    var supervision_enabled: Bool?
     /// Gate for the profile-dir collector
     /// (design 2026-08-15). **Genuinely tri-state**, same shape as
-    /// `supervision_enabled`: the `v78_config_gc_profile_dirs` column carries
+    /// `queued_prompt_enabled`: the `v78_config_gc_profile_dirs` column carries
     /// no SQL default, so `nil` here means "never chose" rather than "off".
     /// Resolve it through `Config.gcProfileDirsEnabledDefault`, never through
     /// `?? false`.
@@ -158,11 +149,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// `nil` means "never chose". Resolve it through
     /// `Config.prPollScheduleDefault`, never through `?? false`.
     var pr_poll_schedule_enabled: Bool?
-    /// Program Status Protocol (OSC 7501) gate. **Genuinely tri-state**: the
-    /// `20261010043448_config_program_status` migration carries no SQL default,
-    /// so `nil` means "never chose". Resolve it through
-    /// `Config.programStatusEnabledDefault`, never through `?? false`.
-    var program_status_enabled: Bool?
     /// Answering question and permission prompts from the transcript.
     /// **Genuinely tri-state**: the
     /// `20261010025458_config_transcript_prompt_answer` migration carries no SQL
@@ -174,6 +160,18 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// default, so `nil` means "never chose". Resolve it through
     /// `Config.composerDraftDefault`, never through `?? false`.
     var composer_draft_enabled: Bool?
+    /// Tri-state: the `config_agent_background` migration carries no SQL default,
+    /// so `nil` means "never chose". Resolve it through
+    /// `Config.agentBackgroundDefault`, never through `?? false`.
+    var agent_background_enabled: Bool?
+    /// Tri-state: the `config_start_admission` migration carries no SQL default,
+    /// so `nil` means "never chose". Resolve it through
+    /// `Config.startAdmissionDefault`, never through `?? false`.
+    var start_admission_enabled: Bool?
+    /// Tri-state: the `config_holder_claim_reconcile` migration carries no SQL
+    /// default, so `nil` means "never chose". Resolve it through
+    /// `Config.holderClaimReconcileEnabledDefault`, never through `?? false`.
+    var holder_claim_reconcile_enabled: Bool?
     /// Session usage recorded through the session mod. **Genuinely
     /// tri-state**: the `config_session_mod_usage` migration carries no SQL
     /// default, so `nil` means "never chose". Resolve it through
@@ -220,11 +218,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     /// - Parameter autoCreateNotesDefault: same shape, for
     ///   `auto_create_notes_enabled` — the parameter proves that an untouched
     ///   preference follows the shipped default while explicit choices stick.
-    /// - Parameter supervisionEnabledDefault: same shape, for
-    ///   `supervision_enabled` — the parameter exists so tests can prove the
-    ///   same NULL-follows/explicit-sticks property for the fleet brake
-    ///   without waiting for the real `Config.supervisionEnabledDefault`
-    ///   constant to change.
     /// - Parameter gcProfileDirsDefault: same shape again, for
     ///   `gc_profile_dirs_enabled` — the profile-dir collector's own soak gate.
     /// - Parameter claudeCloudEnabledDefault: same shape again, for the Claude
@@ -262,20 +255,29 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
     ///   `transcript_prompt_answer_enabled`.
     /// - Parameter composerDraftDefault: same shape again, for
     ///   `composer_draft_enabled`.
+    /// - Parameter startAdmissionDefault: same shape again, for
+    ///   `start_admission_enabled`.
+    /// - Parameter holderClaimReconcileDefault: same shape again, for
+    ///   `holder_claim_reconcile_enabled` — the holder viewer-claim sweep's
+    ///   soak gate.
+    /// - Parameter agentBackgroundDefault: same shape again, for
+    ///   `agent_background_enabled`.
     /// - Parameter sessionModUsageDefault: same shape again, for
     ///   `session_mod_usage_enabled`.
     /// - Parameter remoteTranscriptLiveSyncDefault: same shape again, for
     ///   `remote_transcript_live_sync_enabled` — the live remote transcript
     ///   sync's soak gate.
-    /// - Parameter programStatusDefault: same shape again, for
-    ///   `program_status_enabled` — the Program Status Protocol's soak gate.
     /// - Parameter cloneCheckoutDefault: same shape again, for
     ///   `clone_checkout_enabled` — the clone-backed worktree checkout's soak
     ///   gate.
+    /// - Parameter worktreeParksOnMerge: whether a worktree that is not
+    ///   archived overrides park-on-merge to true. It lives in the `worktree`
+    ///   table, so `ConfigStore.get()` reads it with one query beside this row;
+    ///   it is one of the ways automatic parking turns the composer-draft
+    ///   feature on.
     func toModel(
         queuedPromptDefault: Bool = Config.queuedPromptDefault,
         autoCreateNotesDefault: Bool = Config.autoCreateNotesDefault,
-        supervisionEnabledDefault: Bool = Config.supervisionEnabledDefault,
         gcProfileDirsDefault: Bool = Config.gcProfileDirsEnabledDefault,
         claudeCloudEnabledDefault: Bool = Config.claudeCloudEnabledDefault,
         gcOrphanProcessesDefault: Bool = Config.gcOrphanProcessesEnabledDefault,
@@ -289,10 +291,13 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         prPollScheduleDefault: Bool = Config.prPollScheduleDefault,
         transcriptPromptAnswerDefault: Bool = Config.transcriptPromptAnswerDefault,
         composerDraftDefault: Bool = Config.composerDraftDefault,
+        agentBackgroundDefault: Bool = Config.agentBackgroundDefault,
+        startAdmissionDefault: Bool = Config.startAdmissionDefault,
+        holderClaimReconcileDefault: Bool = Config.holderClaimReconcileEnabledDefault,
         sessionModUsageDefault: Bool = Config.sessionModUsageDefault,
         remoteTranscriptLiveSyncDefault: Bool = Config.remoteTranscriptLiveSyncEnabledDefault,
-        programStatusDefault: Bool = Config.programStatusEnabledDefault,
-        cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault
+        cloneCheckoutDefault: Bool = Config.cloneCheckoutDefault,
+        worktreeParksOnMerge: Bool = false
     ) -> Config {
         // Assembled in two steps rather than one literal, and deliberately so:
         // this initializer call reached the Swift type-checker's expression
@@ -312,8 +317,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             scratchInstructions: scratch_instructions,
             scratchRenamePrompt: scratch_rename_prompt,
             scratchProfileOverrideID: scratch_profile_override_id.flatMap(UUID.init(uuidString:)),
-            nightwatchMode: nightwatch_mode
-                .flatMap(NightwatchMode.init(rawValue:)) ?? .off,
             autoHibernateEnabled: auto_hibernate_enabled ?? false,
             // Clamped on read (not just on write) so every consumer sees a
             // bounded value regardless of what's actually in the row — a
@@ -328,7 +331,6 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             ),
             controlModeEnabled: control_mode_enabled ?? false,
             autoResumeOnApiError: auto_resume_on_api_error ?? false,
-            hibernateInputVetoEnabled: hibernate_input_veto_enabled ?? false,
             autoCloseSetupEnabled: auto_close_setup_enabled ?? false,
             autoTrustWorktrees: auto_trust_worktrees ?? true,
             gcEnabled: gc_enabled ?? true,
@@ -343,10 +345,8 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
             // that is the whole point of v70_config_queued_prompt.
             queuedPromptEnabled: queued_prompt_enabled ?? queuedPromptDefault,
             autoCreateNotesEnabled: auto_create_notes_enabled ?? autoCreateNotesDefault,
-            // Same reasoning, for the fleet supervision brake — NOT `?? false`.
-            supervisionEnabled: supervision_enabled ?? supervisionEnabledDefault,
-            // Same reasoning again, for the profile-dir collector's gate —
-            // NOT `?? false`.
+            // Same reasoning, for the profile-dir collector's gate — NOT
+            // `?? false`.
             gcProfileDirsEnabled: gc_profile_dirs_enabled ?? gcProfileDirsDefault,
             // Same reasoning again, for the Claude cloud gate — NOT `?? false`.
             claudeCloudEnabled: claude_cloud_enabled ?? claudeCloudEnabledDefault,
@@ -393,19 +393,30 @@ struct ConfigRecord: Codable, FetchableRecord, PersistableRecord, Sendable {
         // Transcript prompt-answer gate — NOT `?? false`.
         config.transcriptPromptAnswerEnabled =
             transcript_prompt_answer_enabled ?? transcriptPromptAnswerDefault
-        // Composer draft gate — NOT `?? false`. Assigned after construction,
-        // like the fields around it, to keep the initializer call inside the
-        // type-checker's budget.
-        config.composerDraftEnabled = composer_draft_enabled ?? composerDraftDefault
+        // Composer draft gate — NOT `?? false` — held on by automatic parking.
+        // A park's only guard for an unsent draft is the session mod, so every
+        // way TBD parks without a gesture turns the feature on: the idle
+        // sweep, the global park-on-merge default, and a worktree's own
+        // park-on-merge override. The stored column is left as the person set
+        // it, so an explicit off holds again once automatic parking is off.
+        // Assigned after construction, like the fields around it, to keep the
+        // initializer call inside the type-checker's budget.
+        let automaticParking = (auto_hibernate_enabled ?? false)
+            || (auto_hibernate_on_merge_default ?? false)
+            || worktreeParksOnMerge
+        config.composerDraftRequiredByAutoPark = automaticParking
+        config.composerDraftEnabled =
+            (composer_draft_enabled ?? composerDraftDefault) || automaticParking
+        config.agentBackgroundEnabled = agent_background_enabled ?? agentBackgroundDefault
+        config.startAdmissionEnabled = start_admission_enabled ?? startAdmissionDefault
+        // Holder viewer-claim reconcile gate — NOT `?? false`.
+        config.holderClaimReconcileEnabled =
+            holder_claim_reconcile_enabled ?? holderClaimReconcileDefault
         // Session usage gate — NOT `?? false`.
         config.sessionModUsageEnabled = session_mod_usage_enabled ?? sessionModUsageDefault
         // Live remote transcript sync gate — NOT `?? false`.
         config.remoteTranscriptLiveSyncEnabled =
             remote_transcript_live_sync_enabled ?? remoteTranscriptLiveSyncDefault
-        // Program Status Protocol gate — NOT `?? false`. Assigned after
-        // construction, like the fields around it, to keep the initializer
-        // call inside the type-checker's budget.
-        config.programStatusEnabled = program_status_enabled ?? programStatusDefault
         return config
     }
 }
@@ -432,10 +443,45 @@ public struct ConfigStore: Sendable {
         self.writer = writer
     }
 
+    /// The resolved config. Every reader goes through here, so all of them
+    /// agree on the effective composer-draft value, which also depends on the
+    /// worktrees' park-on-merge overrides (`ConfigRecord.toModel`).
     public func get() async throws -> Config {
         try await writer.read { db in
-            try ConfigRecord.fetchOne(db, key: Self.singletonID)?.toModel() ?? Config()
+            guard let record = try ConfigRecord.fetchOne(db, key: Self.singletonID) else {
+                return Config()
+            }
+            // An unreadable worktree table must not fail the config read:
+            // every subsystem opens on this read, and most never touch a
+            // worktree row. Resolving without the overrides is safe. Merge-park
+            // reads the worktree row before it parks and a spawn reads it
+            // before it starts, so while the table is unreadable neither can
+            // run, and nothing an override holds the mod on for can happen.
+            let worktreeParksOnMerge: Bool
+            do {
+                worktreeParksOnMerge = try Self.anyWorktreeParksOnMerge(db)
+            } catch {
+                configLogger.error(
+                    "Worktree park-on-merge overrides unreadable, resolving the composer draft without them: \(String(describing: error), privacy: .public)"
+                )
+                worktreeParksOnMerge = false
+            }
+            return record.toModel(worktreeParksOnMerge: worktreeParksOnMerge)
         }
+    }
+
+    /// Whether a worktree that is not archived overrides park-on-merge to
+    /// true. An archived worktree's override parks nothing: merge-park acts
+    /// only on active worktrees, and a revive disarms the override.
+    static func anyWorktreeParksOnMerge(_ db: GRDB.Database) throws -> Bool {
+        try Bool.fetchOne(
+            db,
+            sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM worktree
+                    WHERE autoHibernateOnMerge = 1 AND status != ?)
+                """,
+            arguments: [WorktreeStatus.archived.rawValue]) ?? false
     }
 
     /// Decode the `claude_env_settings` JSON column into an overrides map.
@@ -593,15 +639,6 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    public func setNightwatchMode(_ mode: NightwatchMode) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET nightwatch_mode = ? WHERE id = ?",
-                arguments: [mode.rawValue, Self.singletonID]
-            )
-        }
-    }
-
     /// Persist the auto-hibernate master switch + idle-timeout (minutes). The
     /// minutes value is floored at 1 so a zero/negative can't make the idle
     /// timer hibernate everything on the next sweep, and ceilinged at 99 days
@@ -626,19 +663,6 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET control_mode_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
-    /// Persist the pending-input veto for auto-hibernate (machine-interface
-    /// guard that prevents hibernation of sessions with typed-but-unsent input).
-    /// The hibernation sweep re-reads this per decision, so no daemon restart
-    /// is required — changes take effect on the next sweep cycle.
-    public func setHibernateInputVeto(enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET hibernate_input_veto_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }
@@ -689,40 +713,6 @@ public struct ConfigStore: Sendable {
                 sql: "UPDATE config SET auto_create_notes_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
-        }
-    }
-
-    /// Persist the fleet supervision brake (design 2026-07-26 §3, §7). Off is
-    /// the shipped default; releasing it hands TBD's autonomous processes the
-    /// authority to act, but nothing in the daemon reads this column to
-    /// actually act yet — the rest of the supervision subsystem lands in the
-    /// same series of changes. Writing either value is an explicit gesture
-    /// that leaves the column non-NULL forever after — including `false`,
-    /// which is the point: an operator who pulls the brake stays braked when
-    /// the shipped default eventually graduates.
-    ///
-    /// The read and the write share one transaction on purpose. Read-then-write
-    /// across two calls lets two concurrent toggles observe the same previous
-    /// value, and each then believes it caused the transition: the supervision
-    /// ledger gets two identical brake lines for one change, and the record
-    /// claims something happened twice. Serializing them here is what makes
-    /// "did this call move the brake" answerable at all.
-    ///
-    /// - Returns: the **resolved** brake as it stood immediately before this
-    ///   write — the column when it was set, the shipped default when it was
-    ///   NULL — so a caller can tell a real transition from a gesture that
-    ///   changed nothing.
-    @discardableResult
-    public func setSupervisionEnabled(enabled: Bool) async throws -> Bool {
-        try await writer.write { db -> Bool in
-            let previous = try Bool.fetchOne(
-                db, sql: "SELECT supervision_enabled FROM config WHERE id = ?",
-                arguments: [Self.singletonID])
-            try db.execute(
-                sql: "UPDATE config SET supervision_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-            return previous ?? Config.supervisionEnabledDefault
         }
     }
 
@@ -926,18 +916,6 @@ public struct ConfigStore: Sendable {
         }
     }
 
-    /// Persist the Program Status Protocol (OSC 7501) gate. Written on every
-    /// call, so either value is the explicit gesture that lifts the column out
-    /// of NULL.
-    public func setProgramStatusEnabled(_ enabled: Bool) async throws {
-        try await writer.write { db in
-            try db.execute(
-                sql: "UPDATE config SET program_status_enabled = ? WHERE id = ?",
-                arguments: [enabled, Self.singletonID]
-            )
-        }
-    }
-
     /// Persist the transcript prompt-answer gate. Written on every call, so either
     /// value is the explicit gesture that lifts the column out of NULL.
     public func setTranscriptPromptAnswerEnabled(_ enabled: Bool) async throws {
@@ -955,6 +933,39 @@ public struct ConfigStore: Sendable {
         try await writer.write { db in
             try db.execute(
                 sql: "UPDATE config SET composer_draft_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the the start admission gate flag. Written on every call, so either value
+    /// is the explicit gesture that lifts the column out of NULL.
+    public func setStartAdmissionEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET start_admission_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the holder viewer-claim reconcile gate. Written on every call, so
+    /// either value is the explicit gesture that lifts the column out of NULL.
+    public func setHolderClaimReconcileEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET holder_claim_reconcile_enabled = ? WHERE id = ?",
+                arguments: [enabled, Self.singletonID]
+            )
+        }
+    }
+
+    /// Persist the the agent background priority command flag. Written on every call, so either value
+    /// is the explicit gesture that lifts the column out of NULL.
+    public func setAgentBackgroundEnabled(_ enabled: Bool) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "UPDATE config SET agent_background_enabled = ? WHERE id = ?",
                 arguments: [enabled, Self.singletonID]
             )
         }

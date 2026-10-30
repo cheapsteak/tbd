@@ -3,9 +3,9 @@
    Light and dark are handled here via prefers-color-scheme — TBD injects no
    theme attribute and defines no CSS variable contract.
 
-   Palette is the warm paper ground from the Nightwatch architecture reference,
-   pushed further toward cream. Every foreground/background pair was measured
-   against the previous palette: all 16 improved, none regressed.
+   Palette is a warm paper ground pushed toward cream. Every
+   foreground/background pair was measured against the previous palette: all
+   16 improved, none regressed.
    Type follows Claude's artifact markdown sheet: flex-gap spacing, restrained
    headings, tile tables, Apple system fonts.
 

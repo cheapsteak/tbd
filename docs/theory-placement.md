@@ -18,7 +18,9 @@ rejected-alternatives entries are the case files
 [sweep program](specs/2026-08-01-fleet-supervision-sweep-program-design.md),
 [wake program](specs/2026-07-26-fleet-supervision-wake-program.md)). This
 document states each case in one line and points; the specs hold the full
-arguments.
+arguments. Fleet supervision itself is retired and TBD contains no
+implementation of it; the specs remain as the design record, so the examples
+draw on their reasoning, not on code in the tree.
 
 ## What a theory is
 
@@ -93,9 +95,9 @@ theories ship as authored defaults, not as compiled law.
    or count is a hypothesis wearing mechanism's clothes. Facts get
    timestamped; hypotheses get evaluated — and whoever evaluates owns the
    theory. *Example: the sixty-minute unanswered-briefing threshold read
-   as liveness mechanism until this test flagged it; it now ships as a
-   named constant in the reference sweep program beside idle-forty
-   (design §15, sweep program §7).*
+   as liveness mechanism until this test flagged it; the supervision
+   design made it a named constant in its reference sweep program beside
+   idle-forty (design §15, sweep program §7).*
 3. **The when/whether/what-instead probe.** Mechanism answers *how*. A
    compiled *when*, *whether*, or *what instead* is a decision looking
    for its owner. *Example: delivery-time desk replacement answered
@@ -130,8 +132,10 @@ theories ship as authored defaults, not as compiled law.
 ## What legitimately stays compiled
 
 The placement rule cuts both ways, and a doc about melting theories must
-say plainly what does not melt. Five things stay compiled because
-user-land cannot do them well:
+say plainly what does not melt. The supervision design kept five things
+compiled because user-land cannot do them well. The first three hold for
+TBD as it stands; the clock and the brake were that design's own, and
+TBD, which has no supervision, compiles neither:
 
 - **Facts and their timestamps** — a wrong fact poisons every consumer
   downstream, and per-event derivation across a fleet is a cost argument
@@ -148,14 +152,15 @@ user-land cannot do them well:
 - **The brake** — the operator's atomic stop over TBD's own hand,
   rechecked at the act (design §3, §8).
 
-Two structural principles govern the theories TBD *does* hold:
+Two structural principles governed the theories the supervision design
+held:
 
 - **Content, not law.** A shipped default is a theory — the reference
   sweep program's thresholds, the default transition ceremony, the
-  shipped continuation policy are all opinions. TBD holds them as
-  editable artifacts: shipped inside the install, improving with
-  releases, seeded exactly once into a project's ownership on the
-  customize gesture, and never rewritten after. What TBD declines is
+  shipped continuation policy are all opinions. The supervision design
+  held them as editable artifacts: shipped inside the install, improving
+  with releases, seeded exactly once into a project's ownership on a
+  customize gesture, and never rewritten after. What it declined is
   holding a theory as behavior only a rebuild can change (sweep program
   §7).
 - **The floor principle.** A theory that moves out leaves a fact-shaped

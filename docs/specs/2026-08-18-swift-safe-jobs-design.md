@@ -93,13 +93,26 @@ run on a machine whose owner lowered the bound and pin the build at that number
 on a machine whose owner raised it.
 
 CI is the exception, and it is explicit rather than inherited. The runner has
-roughly 7 GB of memory and an OOM floor that two parallel compiler frontends
-sit under, so the workflow job sets `TBD_SWIFT_JOBS: "2"` in its own `env:`
-block; the one step that bypasses the wrapper spells `-j "$TBD_SWIFT_JOBS"`
-rather than repeating the number. CI's memory ceiling is a property of CI's
+3 cores and roughly 7 GB of memory, and three parallel compiler frontends sit
+under its OOM ceiling at the ~1.35 GB peak each the two large modules reach
+under Swift 6.3, so the workflow job sets `TBD_SWIFT_JOBS: "3"` in its own
+`env:` block. Its build step, the job's one compile, goes through the wrapper
+and spells `-j "$TBD_SWIFT_JOBS"` rather than repeating the number, so the cap
+reads off the step that spends it. CI's memory ceiling is a property of CI's
 hardware, so it belongs in CI's configuration — where it is visible next to the
 runner it constrains, and where a change to the wrapper's default constant
 cannot silently lift it.
+
+CI's debug-information flags live there for the same kind of reason. The job's
+`CI_SWIFTPM_FLAGS` holds `--disable-index-store -Xswiftc -gline-tables-only`,
+and the build step and each of the four test passes spell it on their own
+command lines; the wrapper forwards those arguments untouched and adds only the
+job count. Nothing on a runner reads an index store or a local variable, and
+on paired cold builds, both arms on one runner, the flags took about 0.825 of
+the default's time. A
+developer machine needs full debug information for lldb, so the wrapper's
+defaults stay SwiftPM's, and the flags reach only the runs whose configuration
+names them.
 
 ## Accepted limitation
 

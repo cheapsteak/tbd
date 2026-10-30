@@ -49,8 +49,28 @@ struct TerminalCreate: AsyncParsableCommand {
     @Option(name: .long, help: "Existing Codex home for this terminal only (relative paths use the current directory). Requires --type codex and a readable PreToolUse hook; does not change ordinary Codex terminals.")
     var codexHome: String?
 
+    @Option(name: .customLong("plugin-dir"), help: "A Claude Code plugin folder (or folder of plugins, or .zip) to load in this terminal on every start. Repeatable. Relative paths resolve against the current folder.")
+    var pluginDirs: [String] = []
+
     @Flag(name: .long, help: "Output JSON")
     var json = false
+
+    /// The params this invocation sends, with each `--plugin-dir` and a
+    /// relative `--codex-home` made absolute against `cwd`, or none sent when
+    /// the flag was not given. `codexDisabledFeatures` is the
+    /// already-normalized `--codex-disable` list, nil when the flag was not
+    /// given.
+    func createParams(
+        worktreeID: UUID, prompt: String?, cwd: String,
+        codexDisabledFeatures: [String]? = nil
+    ) -> TerminalCreateParams {
+        TerminalCreateParams(
+            worktreeID: worktreeID, cmd: cmd, type: type, prompt: prompt,
+            claudeSettingsOverlay: claudeSettings, model: model,
+            codexDisabledFeatures: codexDisabledFeatures,
+            pluginDirs: pluginDirs.isEmpty ? nil : CLIPluginDirs.absolute(pluginDirs, cwd: cwd),
+            codexHome: Self.normalizedCodexHomePath(codexHome, currentDirectoryPath: cwd))
+    }
 
     mutating func validate() throws {
         if !codexDisable.isEmpty {
@@ -65,6 +85,15 @@ struct TerminalCreate: AsyncParsableCommand {
         }
         if codexHome != nil, type != .codex {
             throw ValidationError(TerminalCreateParams.codexHomeRequiresCodexMessage)
+        }
+        if !pluginDirs.isEmpty {
+            // The daemon's rule: a Claude type, or any resume, is a Claude
+            // terminal. This command sends no resume id, so only `--type
+            // claude` qualifies; no type, with or without `--cmd`, is a shell.
+            guard type == .claude else {
+                throw ValidationError(TerminalCreateParams.pluginDirsRequireClaudeMessage)
+            }
+            try CLIPluginDirs.validateNotBlank(pluginDirs)
         }
         guard let model else { return }
         guard type == .codex else {
@@ -82,12 +111,11 @@ struct TerminalCreate: AsyncParsableCommand {
         let disabledFeatures: [String]? = try codexDisable.isEmpty
             ? nil : TerminalCreateParams.normalizedCodexDisabledFeatures(codexDisable)
 
-        let params = TerminalCreateParams(
-            worktreeID: worktreeID, cmd: cmd, type: type,
+        let params = createParams(
+            worktreeID: worktreeID,
             prompt: try resolvePrompt(inline: prompt, file: promptFile),
-            claudeSettingsOverlay: claudeSettings, model: model,
-            codexDisabledFeatures: disabledFeatures,
-            codexHome: Self.normalizedCodexHomePath(codexHome))
+            cwd: FileManager.default.currentDirectoryPath,
+            codexDisabledFeatures: disabledFeatures)
         let terminal: Terminal = try client.call(
             method: params.rpcMethod,
             params: params,
@@ -192,7 +220,8 @@ struct TerminalSend: AsyncParsableCommand {
               --keys "Escape Enter"  whitespace-separated key names, sent one
                                   at a time. Interrupt is a keys payload
                                   (--keys "C-c"). Enter is itself a key, so
-                                  --submit does not apply here.
+                                  --submit does not apply here. One printable
+                                  character is its own key: --keys 4 presses 4.
 
             A non-empty text payload sent to an AGENT session is delivered
             behind a one-line attribution envelope carrying the send's record id
@@ -219,7 +248,7 @@ struct TerminalSend: AsyncParsableCommand {
     @Option(name: .long, help: "Text to send")
     var text: String?
 
-    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\" or \"C-c\"")
+    @Option(name: .long, help: "Whitespace-separated key names to send, e.g. \"Escape Enter\", \"C-c\" or \"4\"")
     var keys: String?
 
     @Flag(name: .long, help: "Press Enter after sending text")

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The Settings surface for the pty-holder transport gate — the flag that had
 /// no user-facing control at all, so its soak could not be started by any
@@ -16,10 +17,10 @@ import TBDShared
 struct PtyHolderSettingsTests {
 
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-pty-holder-settings-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-pty-holder-settings")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     // MARK: - The setter, both directions and both branches
@@ -62,9 +63,8 @@ struct PtyHolderSettingsTests {
         }
     }
 
-    /// A refused write (the daemon's pty-holder/watch-mode gate, or any other
-    /// failure) surfaces the error and re-fetches capabilities, so the toggle
-    /// snaps back to the daemon's persisted value instead of holding the
+    /// A failed write surfaces the error and re-fetches capabilities, so the
+    /// toggle snaps back to the daemon's persisted value instead of holding the
     /// optimistic flip.
     ///
     /// The cache is seeded `true` and the post-failure fetch returns `false` —
@@ -147,32 +147,38 @@ struct PtyHolderSettingsTests {
             #expect(state.daemonCapabilities == nil)
             #expect((state.daemonCapabilities?.ptyHolderEnabled ?? false) == false)
             #expect((state.daemonCapabilities?.ptyHolderSupported ?? false) == false)
-            #expect(!AppState.ptyHolderToggleIsInteractive(
-                supported: state.daemonCapabilities?.ptyHolderSupported ?? false,
-                flagOn: state.daemonCapabilities?.ptyHolderEnabled ?? false))
+            #expect(!AppState.ptyHolderToggleIsInteractive(state.daemonCapabilities))
         }
     }
 
     // MARK: - When the toggle is interactive
 
-    /// All four combinations, because the interesting one only exists now that
-    /// the flag ships ON: a daemon with no `TBDHolder` helper still resolves
-    /// the effective flag to `true`, which is what `NightwatchHolderGate`
-    /// reads, so the operator whose watch modes were turned off at boot needs
-    /// the control that turns the transport back off. Greying it out there
-    /// would name a remedy and withhold the means.
-    @Test func theToggleIsInertOnlyWhereNeitherDirectionDoesAnything() {
+    private static func capabilities(supported: Bool, flagOn: Bool) -> DaemonCapabilitiesResult {
+        DaemonCapabilitiesResult(
+            controlModeEnabled: false, ptyHolderEnabled: flagOn, ptyHolderSupported: supported)
+    }
+
+    /// A daemon that can start a holder offers the toggle in both positions,
+    /// so it can be turned off as well as on.
+    @Test func aSupportedDaemonOffersTheToggleWhicheverWayTheFlagSits() {
         #expect(
-            AppState.ptyHolderToggleIsInteractive(supported: true, flagOn: true),
+            AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: true, flagOn: true)),
             "a supported daemon running holders can be turned off")
         #expect(
-            AppState.ptyHolderToggleIsInteractive(supported: true, flagOn: false),
+            AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: true, flagOn: false)),
             "a supported daemon can be turned on")
+    }
+
+    /// A daemon with no `TBDHolder` helper greys the toggle in both positions.
+    /// The flag-on case is the one worth pinning: the flag ships ON, so that is
+    /// the position such a daemon usually reports, and it must not make the
+    /// control interactive.
+    @Test func anUnsupportedDaemonGreysTheToggleWhicheverWayTheFlagSits() {
         #expect(
-            AppState.ptyHolderToggleIsInteractive(supported: false, flagOn: true),
-            "no helper but the flag reads on: turning it off is the remedy the gate names")
+            !AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: false, flagOn: true)),
+            "no helper and the flag reads on: new sessions run in tmux either way")
         #expect(
-            !AppState.ptyHolderToggleIsInteractive(supported: false, flagOn: false),
-            "no helper and already off: neither direction changes anything")
+            !AppState.ptyHolderToggleIsInteractive(Self.capabilities(supported: false, flagOn: false)),
+            "no helper and the flag reads off: new sessions run in tmux either way")
     }
 }

@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// What the reclaimer is allowed to conclude from a probe that threw.
 ///

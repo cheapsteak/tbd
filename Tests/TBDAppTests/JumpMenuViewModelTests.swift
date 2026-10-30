@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 @testable import TBDShared
+import TestSupport
 
 @MainActor
 @Suite("JumpMenuViewModel Tests")
@@ -178,13 +179,13 @@ struct JumpMenuViewModelTests {
         let a = UUID(); let b = UUID()
         let vm = JumpMenuViewModel(
             worktrees: [
-                snap(a, name: "alpha", repo: "longeye-app"),
+                snap(a, name: "alpha", repo: "acme-app"),
                 snap(b, name: "beta", repo: "tbd"),
             ],
             unread: [:],
             recentIDs: []
         )
-        vm.query = "longeye"
+        vm.query = "acme"
         #expect(vm.rows.count == 1)
         #expect(vm.rows.first?.id == a)
     }
@@ -389,9 +390,9 @@ struct JumpMenuViewModelTests {
 struct JumpMenuSnapshotScratchTests {
 
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.JumpMenuSnapshot.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.JumpMenuSnapshot")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

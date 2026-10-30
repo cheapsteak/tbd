@@ -97,13 +97,73 @@ public struct NotificationStore: Sendable {
         }
     }
 
+    /// The statement `markRead` runs. `AND read = 0` changes no outcome, since
+    /// a read row stays read, but it is what lets SQLite answer through the
+    /// partial index `idx_notification_unread_worktree` instead of scanning
+    /// the table, and it stops every mark-read rewriting the worktree's
+    /// already-read rows.
+    static let markReadSQL = "UPDATE notification SET read = 1 WHERE worktreeID = ? AND read = 0"
+
     /// Mark all notifications for a worktree as read.
     public func markRead(worktreeID: UUID) async throws {
         try await writer.write { db in
             try db.execute(
-                sql: "UPDATE notification SET read = 1 WHERE worktreeID = ?",
+                sql: Self.markReadSQL,
                 arguments: [worktreeID.uuidString]
             )
+        }
+    }
+
+    /// The rows the retention sweep removes: a read row created before the
+    /// cutoff, and every row, read or unread, on an archived worktree. Unread
+    /// rows on any other worktree never match, so an unread badge on a worktree
+    /// that is not archived never vanishes on its own. One predicate for the
+    /// count and the delete, so a dry run reports exactly what a real run
+    /// removes.
+    ///
+    /// The archived arm deletes unread rows on purpose, including the
+    /// "Archived <name> — PR #N merged" notice `AutoArchiveOnMergeCoordinator`
+    /// writes on the worktree it has just archived: once a worktree is
+    /// archived, its notifications no longer matter. That notice reaches a
+    /// running app as a live event when it is written; this removes only the
+    /// stored row. The maintainer chose this rule; do not narrow it to read
+    /// rows or exempt a producer.
+    private static let expiredPredicate = """
+        (read = 1 AND createdAt < ?)
+        OR worktreeID IN (SELECT id FROM worktree WHERE status = ?)
+        """
+
+    private static func expiredArguments(readBefore cutoff: Date) -> StatementArguments {
+        [cutoff, WorktreeStatus.archived.rawValue]
+    }
+
+    /// How many rows `deleteExpired(readBefore:)` would remove now. Read-only;
+    /// the sweep's dry run reports it.
+    public func countExpired(readBefore cutoff: Date) async throws -> Int {
+        try await writer.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM notification WHERE \(Self.expiredPredicate)",
+                arguments: Self.expiredArguments(readBefore: cutoff)
+            ) ?? 0
+        }
+    }
+
+    /// Delete the read rows created before `cutoff` and every row on an
+    /// archived worktree, in one statement. Returns the number of rows
+    /// removed so the sweep can report what it reclaimed.
+    ///
+    /// Archived status is read at delete time, so a worktree revived before
+    /// the sweep keeps its unread rows. Rows of a deleted worktree need no
+    /// rule here: `notification.worktreeID` cascades on delete.
+    @discardableResult
+    public func deleteExpired(readBefore cutoff: Date) async throws -> Int {
+        try await writer.write { db in
+            try db.execute(
+                sql: "DELETE FROM notification WHERE \(Self.expiredPredicate)",
+                arguments: Self.expiredArguments(readBefore: cutoff)
+            )
+            return db.changesCount
         }
     }
 
@@ -115,14 +175,20 @@ public struct NotificationStore: Sendable {
             .max(by: { $0.severity < $1.severity })
     }
 
+    /// The query `unreadSummaryByWorktree` runs. Raw SQL with a literal
+    /// `read = 0` on purpose: SQLite uses the partial index
+    /// `idx_notification_unread_worktree` only when the query's WHERE matches
+    /// the index's own. GRDB's `Column("read") == false` renders as `NOT
+    /// "read"` (or a bound parameter), which reads the same rows but which
+    /// SQLite does not match against the index, so it scans the whole table.
+    static let unreadSummarySQL = "SELECT * FROM notification WHERE read = 0"
+
     /// One row per worktree with at least one unread notification: the highest
     /// severity unread type and the timestamp of the most-recent unread row.
     /// Used by the cmd-K jump menu to sort worktrees by attention-recency.
     public func unreadSummaryByWorktree() async throws -> [UUID: UnreadSummary] {
         let records = try await writer.read { db in
-            try NotificationRecord
-                .filter(Column("read") == false)
-                .fetchAll(db)
+            try NotificationRecord.fetchAll(db, sql: Self.unreadSummarySQL)
         }
         var result: [UUID: UnreadSummary] = [:]
         for record in records {

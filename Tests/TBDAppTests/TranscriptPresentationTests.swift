@@ -27,6 +27,26 @@ struct TranscriptPresentationTests {
         #expect(!summary.isExpanded)
     }
 
+    /// The prompt rail reads a collapsed group's work from `toolCallCount`;
+    /// `itemCount` also counts the reminder.
+    @Test("a group reports its tool calls apart from its other rows")
+    func groupReportsToolCallsApart() {
+        let presentation = TranscriptPresentation.build(
+            items: [
+                .assistantText(id: "a1", text: "Starting.", timestamp: nil),
+                tool("t1", "Read", #"{"file_path":"Sources/A.swift"}"#),
+                .systemReminder(id: "r1", kind: .toolReminder, text: "remember", timestamp: nil),
+                tool("t2", "Bash", #"{"command":"swift test"}"#)
+            ],
+            memo: TranscriptPresentationMemo())
+        guard case .activityGroupSummary(let summary) = presentation.nodes.last?.kind else {
+            Issue.record("expected activity group summary")
+            return
+        }
+        #expect(summary.itemCount == 3)
+        #expect(summary.toolCallCount == 2)
+    }
+
     @Test("expanded group flattens existing child rows after its summary")
     func expandsActivity() {
         let items = [

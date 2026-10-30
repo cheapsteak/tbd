@@ -351,7 +351,7 @@ struct DeliveryVerifierTests {
     @Test("the envelope is found in a realistic JSONL transcript, and joins on the row id")
     func envelopeFoundInRealisticJSONL() throws {
         let id = "a3f1b2c3d4e5"
-        let envelope = RPCRouter.dispatchEnvelope(id: id, from: "supervisor:acme-web")
+        let envelope = RPCRouter.dispatchEnvelope(id: id, from: "daemon:limit-resume")
         struct Line: Encodable { let type: String; let content: String }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -711,8 +711,9 @@ struct DeliveryVerifierTests {
         #expect(try results(at: harness.logPath) == ["dispatched", "undetermined"])
         let observation = try #require(try rows(at: harness.logPath).last)
         #expect(observation["confirms"] as? String == id)
-        // §12 leaves repair to playbook judgment, and a payload whose premise
-        // is an unbounded interval old is the stale-premise send §3 forbids.
+        // Repair is left to the operator or the caller (§12), and a payload
+        // whose premise is an unbounded interval old is the stale-premise send
+        // §3 forbids.
         #expect(harness.redeliveries.calls.isEmpty)
     }
 

@@ -220,11 +220,26 @@ adhoc_test_spec() {
 
 # THE CI PASSES, AS DATA: name|floor|swift-test args. These are `test.yml`'s four
 # `scripts/ci/watched-test-pass.sh` invocations with CI's single quotes removed
-# and the three args that do not decide which tests run or how dropped:
-# `--fingerprint` (it guards the developer's home directories) and the
-# `--xunit-output` pair (this script adds its own). `check_pass_table` compares
-# this table with the invocations parsed out of `test.yml`, and the `plans-guard` job
-# runs that check, so a CI pass that changes without this table changing fails.
+# and the args that do not decide which tests run or how dropped:
+# `--fingerprint` (it guards the developer's home directories), `--skip-build`
+# (CI builds once in a step of its own, and this script builds before its first
+# iteration — carrying the flag here would test whatever bundle the tree last
+# built), CI's build flags (below) and the `--xunit-output` pair (this script
+# adds its own).
+#
+# CI's build flags are the `test` job's CI_SWIFTPM_FLAGS, which every pass
+# spells as the one word CI_SWIFTPM_FLAGS_WORD. They make CI compile with less
+# debug information than SwiftPM's default, and this script keeps the default:
+# it runs on developer machines as well as in the nightly, and its build and its
+# iterations must agree. Its iterations run without `--skip-build`, so an
+# iteration carrying flags its build did not use would compile the whole package
+# again. The flags belong to how CI builds, never to which tests a pass runs.
+#
+# `check_pass_table` compares this table with the invocations parsed out of
+# `test.yml`, and the `script-harnesses` job runs that check, so a CI pass that
+# changes without this table changing fails.
+# shellcheck disable=SC2016 # the workflow's own text, matched literally
+CI_SWIFTPM_FLAGS_WORD='"${swiftpm_flags[@]}"'
 CI_PASSES=(
   "fast-pass-daemon-a|1200|--parallel --filter ^TBDDaemonTests\\.[A-O]"
   "fast-pass-daemon-b|1500|--parallel --filter ^TBDDaemonTests\\. --skip ^TBDDaemonTests\\.[A-O]"
@@ -300,7 +315,8 @@ should_induce_load() {
 
 # `name|floor|args` for each `scripts/ci/watched-test-pass.sh` invocation in a
 # workflow file, in the CI_PASSES form: continuation lines joined, CI's single
-# quotes removed, and `--fingerprint` and the xunit args dropped.
+# quotes removed, and `--fingerprint`, `--skip-build`, CI's build flags and the
+# xunit args dropped.
 pass_table_from_workflow() {
   local joined name floor args tok skip_next
   local -a parts kept
@@ -315,7 +331,8 @@ pass_table_from_workflow() {
     for tok in ${parts[@]+"${parts[@]}"}; do
       if [[ "$skip_next" -eq 1 ]]; then skip_next=0; continue; fi
       case "$tok" in
-        --fingerprint|--experimental-xunit-message-failure) ;;
+        --fingerprint|--skip-build|--experimental-xunit-message-failure) ;;
+        "$CI_SWIFTPM_FLAGS_WORD") ;;
         --xunit-output) skip_next=1 ;;
         *) kept+=("$tok") ;;
       esac

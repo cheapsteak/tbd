@@ -27,7 +27,7 @@ struct TerminalSendCommandTests {
         #expect(cmd.verify == false)
     }
 
-    /// The pair every delivery uses, and the one Nightwatch's Python dispatches.
+    /// The pair every delivery uses.
     @Test("--text --submit parses unchanged")
     func textSubmit() throws {
         let cmd = try parse(["--terminal", "ABC", "--text", "hello", "--submit"])

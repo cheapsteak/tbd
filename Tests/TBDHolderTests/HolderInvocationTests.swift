@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import TBDHolder
-@testable import TBDShared
+import TBDKernel
 
 /// The parts of the holder that need no process: the command line, the wire
 /// framing, the exit-status decode, and the one delay that carries the clock
@@ -20,9 +20,17 @@ struct HolderInvocationTests {
     /// A descriptor holding `bytes`, closed on the writing side so a reader
     /// sees end of file — the shape `HolderSpawner` hands the holder. Returned
     /// open; `HolderArguments.parse` closes it as it consumes it.
+    ///
+    /// Both ends are close-on-exec for the reason
+    /// `theLaunchDescriptorIsClosedOnceItIsRead` gives: a sibling suite's child
+    /// that inherited the write end would hold the pipe open after the `close`
+    /// below, and `parse`, which reads to end of file, would block until that
+    /// child exited.
     private static func descriptor(holding bytes: Data) throws -> Int32 {
         var ends: [Int32] = [-1, -1]
         try #require(pipe(&ends) == 0, "could not make a payload pipe")
+        _ = fcntl(ends[0], F_SETFD, FD_CLOEXEC)
+        _ = fcntl(ends[1], F_SETFD, FD_CLOEXEC)
         bytes.withUnsafeBytes { raw in
             var offset = 0
             while offset < raw.count {
@@ -150,12 +158,35 @@ struct HolderInvocationTests {
     /// Asserted from the far end of a socket pair rather than by asking whether
     /// the number is still open — a closed number can be handed straight back
     /// out to another thread, so only the peer can answer this without racing.
+    ///
+    /// The peer sees end of file only once EVERY copy of the holder's end is
+    /// closed, and this process is not the only place a copy can be. Every
+    /// test target links into one process, Swift Testing runs suites in
+    /// parallel, and sibling suites spawn children that close nothing —
+    /// `posix_spawn` with no attributes, SwiftTerm's `forkpty`,
+    /// `Foundation.Process` — some of which live for the rest of the run. A
+    /// `socketpair` is inheritable, so a child spawned in this window would
+    /// take a copy and keep the pair open after `parse` closed the one it was
+    /// given, and an immediate read would answer EAGAIN for somebody else's
+    /// child. Without the measures below, that failure measured 5 in about
+    /// 1,500 CI runs.
+    ///
+    /// Two measures, one for each kind of copy. Close-on-exec on both ends
+    /// keeps them out of any image a sibling execs; darwin has no
+    /// `SOCK_CLOEXEC`, so the microseconds between `socketpair` and `fcntl`
+    /// stay open, the residual `ChildReaperTests` accepts for its pipe. And a
+    /// child forked but not yet exec'd still holds its copy until the exec
+    /// drops it, so end of file is waited for, within a bound, rather than
+    /// read at once. A `parse` that left the descriptor open still fails: the
+    /// wait runs out and the read answers EAGAIN.
     @Test func theLaunchDescriptorIsClosedOnceItIsRead() throws {
         var ends: [Int32] = [-1, -1]
         try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &ends) == 0)
         let ours = ends[0]
         let holders = ends[1]
         defer { close(ours) }
+        _ = fcntl(ours, F_SETFD, FD_CLOEXEC)
+        _ = fcntl(holders, F_SETFD, FD_CLOEXEC)
 
         try JSONEncoder().encode(Self.launch).withUnsafeBytes { raw in
             _ = write(ours, raw.baseAddress, raw.count)
@@ -173,6 +204,15 @@ struct HolderInvocationTests {
         let parsed = try HolderArguments.parse(
             try Self.commandLine(session: UUID(), launchFD: String(holders)))
         #expect(parsed.launch == Self.launch)
+
+        // Returns the moment the last copy closes; the five seconds are a hang
+        // bound for a regression, not a budget a passing run spends.
+        var watched = pollfd(fd: ours, events: Int16(POLLIN), revents: 0)
+        var ready: Int32
+        repeat {
+            ready = poll(&watched, 1, 5_000)
+        } while ready == -1 && errno == EINTR
+        #expect(ready == 1, "the holder's end never reached end of file")
         #expect(read(ours, &byte, 1) == 0, "the spent descriptor must be closed, not left open")
     }
 

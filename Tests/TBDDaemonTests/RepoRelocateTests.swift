@@ -2,21 +2,15 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 @Suite struct RepoRelocateTests {
 
-    private func makeGitRepo(at url: URL) throws {
+    /// A real git repo at `url`, with one empty commit on `main`.
+    private func makeGitRepo(at url: URL) async throws {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        for args in [["init", "-b", "main"], ["commit", "--allow-empty", "-m", "init"]] {
-            let p = Process()
-            p.launchPath = "/usr/bin/env"
-            p.arguments = ["git", "-C", url.path] + args
-            p.standardOutput = Pipe()
-            p.standardError = Pipe()
-            try p.run()
-            p.waitUntilExit()
-        }
+        try await initTestRepo(at: url)
     }
 
     private func makeRouter(db: TBDDatabase) -> RPCRouter {
@@ -42,7 +36,7 @@ import TestSupport
 
         let oldDir = tmp.appendingPathComponent("old").path
         let newDir = tmp.appendingPathComponent("new")
-        try makeGitRepo(at: newDir)
+        try await makeGitRepo(at: newDir)
 
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(path: oldDir, displayName: "rel", defaultBranch: "main")

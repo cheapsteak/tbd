@@ -35,8 +35,8 @@ public enum GitPollCadence {
     /// background value is slower than the status sweep's because each pass is
     /// a network round trip against a rate-limited forge rather than a local
     /// subprocess — and because nothing overnight needs a PR state fresher than
-    /// five minutes. As with every loop here it never stops: supervision runs
-    /// with no app at all.
+    /// five minutes. As with every loop here it never stops: the daemon's PR
+    /// facts are read with no app open at all.
     public static func prInterval(isForeground: Bool) -> Duration {
         isForeground ? .seconds(30) : .seconds(300)
     }

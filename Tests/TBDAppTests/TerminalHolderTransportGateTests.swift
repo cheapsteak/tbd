@@ -131,7 +131,7 @@ struct TerminalHolderTransportGateTests {
         }
 
         func attach(
-            worktreeID: UUID, paneID: String, terminalID: UUID
+            worktreeID: UUID, paneID: String, terminalID: UUID, attachSeq: UInt64
         ) async throws -> HolderAttachment {
             lock.withLock { attachCallCount += 1 }
             return try attachOutcome()
@@ -198,8 +198,7 @@ struct TerminalHolderTransportGateTests {
         let runner: RefusingTmuxRunner
         let worktreeID: UUID
         let terminalID: UUID
-        let defaults: UserDefaults
-        let defaultsSuiteName: String
+        let defaultsSuite: TestDefaultsSuite
     }
 
     private static let paneID = "%1"
@@ -245,8 +244,8 @@ struct TerminalHolderTransportGateTests {
 
         // Isolated defaults: AppearanceSettings must never read or write the
         // developer's real TBDApp.plist.
-        let suiteName = "TBDAppTests.HolderTransportGate.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.HolderTransportGate")
+        let defaults = suite.defaults
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -273,8 +272,7 @@ struct TerminalHolderTransportGateTests {
             runner: runner,
             worktreeID: worktreeID,
             terminalID: terminalID,
-            defaults: defaults,
-            defaultsSuiteName: suiteName
+            defaultsSuite: suite
         )
     }
 
@@ -283,7 +281,7 @@ struct TerminalHolderTransportGateTests {
         // Releases the vended descriptor: the reader stops within a poll
         // interval and closes it on its way out.
         panel.coordinator.cleanup()
-        panel.defaults.removePersistentDomain(forName: panel.defaultsSuiteName)
+        panel.defaultsSuite.tearDown()
     }
 
     /// Whether `message` had already been fed into the panel.
@@ -416,9 +414,15 @@ struct TerminalHolderTransportGateTests {
         defer { fixture.remove() }
         let panel = try makePanel(transport: .holder, fixture: fixture)
         defer { tearDown(panel) }
-        let stub = StubHolderAttach(
-            attach: { throw DaemonClientError.attachUnavailable("unavailable") })
+        let stub = StubHolderAttach(attach: {
+            throw DaemonClientError.rpcError("attach failed: no live holder reader", code: nil)
+        })
         panel.coordinator.holderAttachClient = stub
+        // One attempt: what the placard says is under test here, not how
+        // often the panel asks — `HolderAttachRetryTests` owns that.
+        panel.coordinator.holderAttachRetryDelays = []
+        var retryOffers = 0
+        panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
         await panel.coordinator.startTmuxClient(
             terminalView: panel.view,
@@ -440,11 +444,48 @@ struct TerminalHolderTransportGateTests {
         let recorded = await panel.runner.recorded()
         #expect(recorded.isEmpty,
                 "a refused holder attach must not fall back into tmux, ran \(recorded)")
+        #expect(retryOffers == 1,
+                "the attach-failed placard points at a Retry button, so it must raise the banner that carries it")
     }
 
-    /// The attach-failed copy says the session keeps running and that
-    /// reopening the tab retries. When the daemon reports the holder gone,
-    /// both claims are false, so the ended copy must replace it.
+    /// A daemon with no holder transport wired answers "unavailable", and
+    /// will answer it to every attempt and every fresh panel. So the panel
+    /// asks once, and its placard promises no Retry and raises no banner.
+    ///
+    /// Runs on the production retry schedule and clock on purpose: were the
+    /// answer retried, the attempts would show it (and the test would take
+    /// the whole backoff to say so).
+    @MainActor
+    @Test("a holder attach the daemon can never serve is not retried and offers no Retry")
+    func startTmuxClientShowsUnavailablePlacardWithoutRetry() async throws {
+        let fixture = try TmuxBridgeFixture()
+        defer { fixture.remove() }
+        let panel = try makePanel(transport: .holder, fixture: fixture)
+        defer { tearDown(panel) }
+        let stub = StubHolderAttach(
+            attach: { throw DaemonClientError.attachUnavailable("unavailable") })
+        panel.coordinator.holderAttachClient = stub
+        var retryOffers = 0
+        panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
+
+        await panel.coordinator.startTmuxClient(
+            terminalView: panel.view,
+            bridge: panel.bridge,
+            server: Self.server,
+            windowID: "",
+            panelID: panel.terminalID
+        )
+
+        #expect(stub.attaches == 1, "an answer that cannot change must not be asked again")
+        #expect(didFeed(TerminalPreparationPresentation.holderAttachUnavailableMessage, panel))
+        #expect(!didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
+                "a refusal that Retry cannot change must not point at Retry")
+        #expect(retryOffers == 0, "a refusal that Retry cannot change must not raise the Retry banner")
+    }
+
+    /// The attach-failed copy says the session keeps running and that Retry
+    /// attaches again. When the daemon reports the holder gone, both claims
+    /// are false, so the ended copy must replace it.
     @MainActor
     @Test("a holder attach the daemon reports as ended shows the session-ended placard")
     func startTmuxClientShowsEndedPlacardWhenTheHolderIsGone() async throws {
@@ -456,6 +497,8 @@ struct TerminalHolderTransportGateTests {
             throw DaemonClientError.attachUnavailable(AttachRequestResult.holderSessionEndedStatus)
         })
         panel.coordinator.holderAttachClient = stub
+        var retryOffers = 0
+        panel.coordinator.onHolderAttachRetryOffered = { retryOffers += 1 }
 
         await panel.coordinator.startTmuxClient(
             terminalView: panel.view,
@@ -471,6 +514,88 @@ struct TerminalHolderTransportGateTests {
                 "an ended session must say it has ended")
         #expect(!didFeed(TerminalPreparationPresentation.holderAttachFailedMessage, panel),
                 "an ended session must not claim it keeps running")
+        #expect(retryOffers == 0,
+                "an ended session has nothing to attach to, so it must not be offered a Retry")
+    }
+
+    /// Closing a tab ends its session, so the placard for a session that
+    /// keeps running must never send the user there. Its remedy is the Retry
+    /// button the panel shows, and the copy must name it by the button's own
+    /// title so the two cannot drift apart. The ended copies keep their close
+    /// advice: there, closing is right.
+    @Test("the attach-failed placard points at Retry and never at closing the tab")
+    func attachFailedCopyPointsAtRetry() {
+        typealias Copy = TerminalPreparationPresentation
+        let copy = Copy.holderAttachFailedMessage.lowercased()
+        #expect(!copy.contains("close"), "closing the tab ends the session this copy says keeps running")
+        #expect(!copy.contains("reopen"), "reopening means closing first, which ends the session")
+        #expect(Copy.holderAttachFailedMessage.contains(TerminalRecoveryPresentation.retryTitle),
+                "the copy must name the button that retries, by its own title")
+        #expect(copy.contains("keeps running"))
+        let unavailable = Copy.holderAttachUnavailableMessage.lowercased()
+        #expect(!unavailable.contains("retry") && !unavailable.contains("close"),
+                "a refusal nothing can change must promise no remedy at all")
+        #expect(unavailable.contains("keeps running"))
+        #expect(Copy.holderSessionEndedMessage.contains("Close the tab"),
+                "the ended copy's close advice is correct and must stay")
+        #expect(Copy.holderClaudeSessionEndedMessage.contains("Close the tab"))
+    }
+
+    /// Retry is a fresh panel, not a reach into the failed one: the Retry
+    /// count is part of the pane's identity, so advancing it is what makes
+    /// SwiftUI tear the failed panel down and build one that attaches again.
+    /// It leaves the attach epoch alone — an account switch reads that one
+    /// (`SwitchingAccountPaneTests`).
+    @MainActor
+    @Test("Retry advances the terminal's Retry count, which changes its pane's identity")
+    func retryAdvancesTheRetryCount() {
+        let state = AppState()
+        let row = TBDShared.Terminal(
+            id: UUID(), worktreeID: UUID(), tmuxWindowID: "", tmuxPaneID: "",
+            label: "Shell", kind: .shell, transport: .holder)
+        let bystander = UUID()
+        @MainActor func identity() -> String {
+            TerminalPanePresentation.identity(
+                for: row, switching: nil,
+                attachEpoch: state.terminalAttachEpochs[row.id] ?? 0,
+                attachRetry: state.terminalAttachRetries[row.id] ?? 0)
+        }
+        let before = identity()
+
+        state.retryTerminalAttach(terminalID: row.id)
+
+        #expect(state.terminalAttachRetries[row.id] == 1)
+        #expect(state.terminalAttachEpochs[row.id] == nil, "Retry must leave the switch's epoch alone")
+        #expect(identity() != before, "a Retry that leaves the identity alone rebuilds nothing")
+        #expect(state.terminalAttachRetries[bystander] == nil,
+                "only the retried terminal's panel may be rebuilt")
+        state.retryTerminalAttach(terminalID: row.id)
+        #expect(state.terminalAttachRetries[row.id] == 2, "every Retry must be a fresh attempt")
+    }
+
+    @MainActor
+    @Test("a terminal's Retry count goes with the terminal")
+    func retryCountIsForgottenWithItsTerminal() {
+        let suite = TestDefaultsSuite("TBDAppTests.HolderTransportGate")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
+        let state = AppState(userDefaults: defaults)
+        let worktreeID = UUID()
+        func row() -> TBDShared.Terminal {
+            TBDShared.Terminal(
+                id: UUID(), worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
+                label: "Shell", kind: .shell, transport: .holder)
+        }
+        let removed = row()
+        let kept = row()
+        state.terminals[worktreeID] = [removed, kept]
+        state.retryTerminalAttach(terminalID: removed.id)
+        state.retryTerminalAttach(terminalID: kept.id)
+
+        state.removeDeletedTerminalFromState(terminalID: removed.id, worktreeID: worktreeID)
+
+        #expect(state.terminalAttachRetries[removed.id] == nil, "a removed terminal's count must not linger")
+        #expect(state.terminalAttachRetries[kept.id] == 1, "only the removed terminal's count goes")
     }
 
     @Test("only the ended status maps to the session-ended copy, and only a resumable Claude tab is promised a resume")
@@ -493,9 +618,15 @@ struct TerminalHolderTransportGateTests {
         }
         #expect(!Copy.holderSessionEndedMessage.contains("resume"),
                 "a tab that cannot resume must not be promised one")
-        #expect(Copy.holderAttachFailureMessage(
-            for: DaemonClientError.attachUnavailable("unavailable"),
-            terminal: tab(.claude, session: "s-1")) == Copy.holderAttachFailedMessage)
+        for permanent in [
+            DaemonClientError.attachUnavailable("unavailable") as any Error,
+            HolderAttachError.missingGeneration,
+        ] {
+            #expect(Copy.holderAttachFailureMessage(
+                for: permanent, terminal: tab(.claude, session: "s-1"))
+                == Copy.holderAttachUnavailableMessage,
+                "\(permanent) cannot change on Retry, so it must not get the Retry copy")
+        }
         #expect(Copy.holderAttachFailureMessage(
             for: DaemonClientError.rpcError("attach failed: no live holder reader", code: nil),
             terminal: tab(.claude, session: "s-1")) == Copy.holderAttachFailedMessage)
@@ -513,6 +644,9 @@ struct TerminalHolderTransportGateTests {
         let stub = attachStub(
             panel, fd: pty.readEnd,
             ready: { throw DaemonClientError.rpcError("attach.ready refused", code: nil) })
+        // One attempt: this is about how a refused ack ends, and the stub
+        // would hand a retry the descriptor the first reader closed.
+        panel.coordinator.holderAttachRetryDelays = []
 
         await panel.coordinator.startTmuxClient(
             terminalView: panel.view,
