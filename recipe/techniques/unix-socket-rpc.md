@@ -20,7 +20,7 @@ For ad-hoc calls during development, the `tbd` CLI covers the common methods, an
 (echo '{"method":"daemon.status","params":"{}"}'; sleep 1) | nc -U ~/tbd/sock
 ```
 
-`params` is itself a JSON-encoded string. The `sleep` holds the connection open until the reply arrives: without it, `nc` closes its side as soon as `echo` finishes, the daemon drops the connection before answering, and nothing is printed.
+`params` is itself a JSON-encoded string. The `sleep` holds the connection open until the reply arrives, so it must outlast the method: if it ends first, `nc` closes its side, the daemon drops the connection without answering, and nothing is printed. `daemon.status` answers well within a second; a slower method such as `pr.list` or `worktree.create` needs a longer `sleep`.
 
 ## Why not alternatives
 

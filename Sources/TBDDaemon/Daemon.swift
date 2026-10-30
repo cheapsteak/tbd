@@ -962,12 +962,13 @@ public final class Daemon: Sendable {
                 sessionModFeatures: await Self.startupSessionModFeatures(config: database.config))
         }
 
-        // 5c. Remove runtime files no current build writes, so copies an older
-        // build left under `~/tbd/runtime` don't accumulate. Non-fatal: a
-        // removal that fails is logged and startup continues. Skipped in mock
-        // mode, like the plugin write above: a mock daemon skips live
-        // reconciliation, and its isolated `TBD_HOME` holds no older build's
-        // files.
+        // 5c. Remove files no current build writes, so copies an older build
+        // left don't accumulate: runtime files under `~/tbd/runtime`, and the
+        // `port` file in the config dir itself. Non-fatal: a runtime file that
+        // fails to go is logged and startup continues; the `port` removal is
+        // best-effort and unlogged. Skipped in mock mode, like the plugin write
+        // above: a mock daemon skips live reconciliation, and its isolated
+        // `TBD_HOME` holds no older build's files.
         if mockMode == nil {
             RetiredRuntimeFiles().removeAll()
             // An older build published an RPC port in this file; nothing reads it now.

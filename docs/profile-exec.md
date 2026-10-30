@@ -77,8 +77,7 @@ are its own. When the command never runs, the status follows `env(1)`:
 
 `tbd profile exec` prints nothing on success and never prints a credential. The
 daemon hands the credential over in the `modelProfile.execEnvironment` result,
-whose description lists variable names only. That method is served on the
-daemon's Unix socket, which admits only its owner.
+whose description lists variable names only.
 
 ## Stricter than a spawn
 
