@@ -26,13 +26,21 @@ mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/stress-test.XXXXXX"; }
 mk_log() { local f="$1"; shift; printf '%s\n' "$@" > "$f"; }
 
 # A copy of the script with one guard deliberately weakened. Echoes its path.
+#
+# Only this shell may delete MUTANT_DIR. A child that bash forks for `sleep 30 &`
+# keeps a copy of this trap until it execs `sleep`, and bash runs the EXIT trap
+# when a signal kills it in that window. The kill-discipline cases below kill
+# their sleeps microseconds after spawning them. Without the check, the child
+# deleted the directory and every later `mutant_of` wrote into one that no longer
+# existed. `${BASHPID:-$$}` because bash 3.2 has no BASHPID; the comment above
+# test_only_the_harness_shell_deletes_the_mutant_dir says why that is safe.
 MUTANT_DIR="$(mktmpd)"
-MUTANT_SEQ=0
-trap 'rm -rf "$MUTANT_DIR"' EXIT
+MUTANT_DIR_OWNER="${BASHPID:-$$}"
+trap '[[ "${BASHPID:-$$}" == "$MUTANT_DIR_OWNER" ]] && rm -rf "$MUTANT_DIR"' EXIT
 mutant_of() {
   local sed_expr="$1" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.sh"
+  # mktemp, not a counter: callers run this in a command substitution.
+  out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX")"
   sed -E "$sed_expr" "$SCRIPT" > "$out"
   echo "$out"
 }
@@ -229,6 +237,89 @@ test_stop_spinners_verifies_by_captured_pid_and_reports_survivors() {
   kill -9 "$stubborn" 2>/dev/null
   wait "$stubborn" 2>/dev/null
   SPINNER_PIDS=()
+}
+
+# A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. The two cases above kill their
+# sleeps microseconds after spawning them. A child that bash forks for
+# `sleep 30 &` keeps a copy of every trap until it execs `sleep`, so a SIGTERM in
+# that window ran this harness's EXIT trap in the CHILD. The child deleted
+# MUTANT_DIR, and the mutation cases that sort after these failed now and then
+# on CI with "mutant.1.sh: No such file or directory". No case can win that race
+# on demand, so these run each trap's own code in a subshell, which is a forked
+# child exactly as `sleep 30 &` is until its exec.
+#
+# Both need BASHPID, which bash 3.2 lacks. On bash 3.2 the guards always pass,
+# and that is safe there: in 100 tries of `sleep & kill`, bash 3.2 ran no trap
+# in a child that had not exec'd yet. It dropped the signal instead.
+
+dir_state() { if [[ -d "$1" ]]; then echo present; else echo gone; fi; }
+
+# Run trap command $1 in this shell with MUTANT_DIR aimed at directory $2, so no
+# case can delete the real one. Wrap the call in ( ) to run it the way a forked
+# child would.
+run_trap_aimed_at() {
+  local MUTANT_DIR="$2"
+  eval "$1"
+}
+
+test_only_the_harness_shell_deletes_the_mutant_dir() {
+  if [[ -z "${BASHPID:-}" ]]; then
+    echo "ok   - bash $BASH_VERSION has no BASHPID, so the trap guard is not checked here"
+    return 0
+  fi
+  local spec body unguarded decoy
+  spec="$(trap -p EXIT)"
+  eval "set -- $spec"
+  body="${3:-}"
+  # shellcheck disable=SC2016 # the trap's text, not its expansion
+  assert_contains "the EXIT trap removes the mutant dir" "$body" 'rm -rf "$MUTANT_DIR"'
+
+  # A guard that never deletes anything would pass the child check below, so
+  # first the owner has to get through.
+  decoy="$(mktmpd)"
+  run_trap_aimed_at "$body" "$decoy"
+  assert_eq "the harness shell itself deletes it" "gone" "$(dir_state "$decoy")"
+
+  decoy="$(mktmpd)"
+  ( run_trap_aimed_at "$body" "$decoy" )
+  assert_eq "a forked child running the trap leaves the directory alone" "present" "$(dir_state "$decoy")"
+
+  # MUTATION: the trap as it was before the guard, run by the same child.
+  unguarded="${body#*&& }"
+  # shellcheck disable=SC2016 # the trap's text, not its expansion
+  assert_eq "the mutant really is the bare rm" 'rm -rf "$MUTANT_DIR"' "$unguarded"
+  ( run_trap_aimed_at "$unguarded" "$decoy" )
+  assert_eq "mutation: without the guard, a forked child deletes the directory" "gone" "$(dir_state "$decoy")"
+  rm -rf "$decoy"
+}
+
+# The script's own trap has the same hazard: a forked child running `cleanup`
+# would stop spinners from its own stale copy of SPINNER_PIDS. Sources script $1
+# in a fresh shell, has a subshell call `cleanup`, then lets the shell exit, and
+# prints one line for each shell that reached stop_spinners: "child" for the
+# subshell, "owner" for the shell that sourced the script, which gets there
+# through its EXIT trap.
+who_reaches_stop_spinners() {
+  # shellcheck disable=SC2016 # expanded by the inner shell
+  "$BASH" -c '
+    source "$1"
+    stop_spinners() { echo "$who"; }
+    who=child; ( cleanup )
+    who=owner
+  ' _ "$1"
+}
+
+test_only_the_shell_that_sourced_the_script_stops_its_spinners() {
+  if [[ -z "${BASHPID:-}" ]]; then
+    echo "ok   - bash $BASH_VERSION has no BASHPID, so the cleanup guard is not checked here"
+    return 0
+  fi
+  assert_eq "only the owner stops spinners, on its way out" "owner" "$(who_reaches_stop_spinners "$SCRIPT")"
+  local mutant
+  mutant="$(mutant_of 's/^  \[\[ .* \]\] && stop_spinners$/  stop_spinners/')"
+  assert_eq "the mutant really dropped the guard" "0" "$(grep -cF 'TRAP_OWNER_PID" ]] && stop_spinners' "$mutant")"
+  assert_eq "mutation: without the guard, a forked child stops them too" $'child\nowner' \
+    "$(who_reaches_stop_spinners "$mutant")"
 }
 
 test_run_with_deadline_kills_an_overrunning_command() {
