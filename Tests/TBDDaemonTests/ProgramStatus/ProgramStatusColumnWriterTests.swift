@@ -142,7 +142,8 @@ import TestSupport
         #expect(reason.programStatusBlock?.kind == .permission)
         #expect(reason.message == "")
         #expect(row.awaitingInputObservedAt == Self.at(1))
-        #expect(!(FactColumnJSON.encode(reason) ?? "").contains(Self.secret))
+        let encoded = FactColumnJSON.encode(reason) ?? ""
+        #expect(!encoded.contains(Self.secret))
     }
 
     @Test func blockedQuestionAndBareBlockedWriteWaiting() async throws {
