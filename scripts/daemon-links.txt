@@ -52,7 +52,6 @@ Claude -> Tmux
 Codex -> Base
 Codex -> Process
 Database -> Base
-Database -> Remote
 DevServers -> Base
 DevServers -> Database
 DevServers -> Holder

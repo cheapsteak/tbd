@@ -117,14 +117,13 @@ Exit 2 means the check could not run. It stops rather than report links it may h
 
 ### The cycle report
 
-A passing run ends with the cycles among the listed links:
+A passing run ends with the cycles among the listed links. The listed links form no loop, so it reports none:
 
 ```
-cycles among the listed links: 1 group
-    24 units, 134 links: (root), Actuation, AskUserQuestion, ...
+cycles among the listed links: none
 ```
 
-Within a group, every unit reaches every other by following links. The report is information, not a failure: it shows how far the folders are from having a direction.
+If the report names a group instead, some listed links form a loop again: within the group, every unit reaches every other by following links. The check still passes, because the report is information, not a failure. Only a new line in the list can close a loop, so the reviewer reads the group together with that line and decides whether the link belongs.
 
 ### Running it
 
