@@ -30,7 +30,10 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "claude-overl
 ///     a still-default worktree/branch at end-of-turn.
 /// - `StopFailure`: runs `tbd hooks stop-failure` to read the verbatim
 ///   API-error text from the transcript, then pipes that into
-///   `tbd notify --type error` — `Stop` fires only on normal completion.
+///   `tbd notify --type error` — `Stop` fires only on normal completion. The
+///   daemon runs the turn-end transcript sync on that call, or, when the
+///   subcommand hands a hard usage limit or a transient error to the daemon
+///   and prints nothing, on the RPC it makes instead.
 /// - `UserPromptSubmit`: runs `tbd hooks session-title`, which returns
 ///   `hookSpecificOutput.sessionTitle` when the session's wanted title
 ///   (worktree display name plus tab suffix) has changed since TBD last set it
@@ -85,7 +88,9 @@ public enum ClaudeHookOverlay {
     /// the transcript (so a session limit reads "You've hit your session limit
     /// · resets 3pm" rather than a generic "rate_limit"), then pipes the
     /// message into `tbd notify --type error`. Mirrors the `Stop` hook's
-    /// `MSG=$(…); tbd notify …` shape.
+    /// `MSG=$(…); tbd notify …` shape. An empty message — a limit or error
+    /// the daemon took over — raises no notification, and the subcommand's
+    /// own RPC has already run the turn-end transcript sync.
     /// Trailing `; true` keeps the hook exit 0 so it never wedges the agent.
     static let stopFailureCommand =
         #"MSG=$(tbd hooks stop-failure 2>/dev/null); [ -n "$MSG" ] && tbd notify --type error --message "$MSG" 2>/dev/null; true"#

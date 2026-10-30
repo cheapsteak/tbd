@@ -6,10 +6,12 @@ import DaemonTestSupport
 import TestSupport
 
 /// Turn-end lazy transcript sync, riding the `tbd notify` call the Stop
-/// (`response_complete`) and StopFailure (`error`) hooks make: when a Claude
-/// terminal's stored transcriptPath lies outside the project dir derived from
-/// the worktree's CURRENT path, the jsonl (+ subagents) is mirrored into the
-/// derived dir. Isolated entirely via the injectable
+/// (`response_complete`) and StopFailure (`error`) hooks make — or, for a
+/// StopFailure the daemon takes over (a hard usage limit, a handled transient
+/// error), the RPC `tbd hooks stop-failure` makes instead of printing a
+/// message: when a Claude terminal's stored transcriptPath lies outside the
+/// project dir derived from the worktree's CURRENT path, the jsonl (+
+/// subagents) is mirrored into the derived dir. Isolated entirely via the injectable
 /// ClaudeProfileConfigDirManager seam — no TBD_HOME, no ~/.claude. One test per
 /// branch of the sync conditional; a branch that syncs nothing is paired with
 /// one that does, so it cannot pass on a router that never syncs.
@@ -99,6 +101,23 @@ struct StopHookTranscriptSyncTests {
         try await notify(type, worktreeID: fx.worktreeID, terminalID: fx.terminal.id)
     }
 
+    private func reportHardLimit(_ fx: Fixture) async throws -> RPCResponse {
+        await router.handle(try RPCRequest(
+            method: RPCMethod.claudeRateLimitDetected,
+            params: RateLimitDetectedParams(
+                terminalID: fx.terminal.id, resetsAt: Date().addingTimeInterval(3600),
+                limitType: "session", rawMessage: "You've hit your session limit")))
+    }
+
+    private func reportTransient(_ fx: Fixture) async throws -> TransientApiErrorDetectedResult {
+        let response = await router.handle(try RPCRequest(
+            method: RPCMethod.claudeTransientApiErrorDetected,
+            params: TransientApiErrorDetectedParams(
+                terminalID: fx.terminal.id, errorClass: "overloaded",
+                rawMessage: "API Error: 529 overloaded")))
+        return try response.decodeResult(TransientApiErrorDetectedResult.self)
+    }
+
     private func isSynced(_ fx: Fixture) -> Bool {
         FileManager.default.fileExists(atPath: fx.derivedTranscript.path)
     }
@@ -124,6 +143,38 @@ struct StopHookTranscriptSyncTests {
 
         #expect(try await notify(.taskComplete, fx).success)
         #expect(try await notify(.attentionNeeded, fx).success)
+        #expect(!isSynced(fx))
+
+        #expect(try await notify(.error, fx).success)
+        #expect(isSynced(fx))
+    }
+
+    /// The hook prints nothing once the daemon takes a StopFailure over, so
+    /// no `tbd notify` follows: the RPC that took it over runs the sync.
+    @Test func aStopFailureTheDaemonTakesOverStillSyncs() async throws {
+        defer { try? FileManager.default.removeItem(at: home) }
+        let limit = try await makeFixture(outsideDerivedDir: true)
+        #expect(try await reportHardLimit(limit).success)
+        #expect(isSynced(limit))
+
+        router.limitResumeScheduler = LimitResumeScheduler(
+            store: db.scheduledResumes, config: db.config,
+            actuator: FakeActuator(), clock: TestPollerClock(),
+            jitterProvider: { 0 }, onOutcome: { _, _ in })
+        try await db.config.setAutoResumeOnApiError(true)
+        let transient = try await makeFixture(outsideDerivedDir: true)
+        #expect(try await reportTransient(transient).handled)
+        #expect(isSynced(transient))
+    }
+
+    /// A transient error the daemon does not handle leaves the message, and so
+    /// the sync, to the hook's own `tbd notify --type error`.
+    @Test func anUnhandledTransientLeavesTheSyncToNotify() async throws {
+        defer { try? FileManager.default.removeItem(at: home) }
+        let fx = try await makeFixture(outsideDerivedDir: true)
+        try await db.config.setAutoResumeOnApiError(false)
+
+        #expect(try await reportTransient(fx).handled == false)
         #expect(!isSynced(fx))
 
         #expect(try await notify(.error, fx).success)

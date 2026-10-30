@@ -5420,7 +5420,11 @@ extension RPCRouter {
         )))
 
         // The Stop and StopFailure hooks end a turn with exactly these two
-        // types, so the turn-end transcript sync rides the call they make.
+        // types, so the turn-end transcript sync rides the call they make. A
+        // StopFailure the daemon takes over — a hard usage limit, a handled
+        // transient error — makes no such call, and the RPC it makes instead
+        // runs the sync (`handleRateLimitDetected`,
+        // `handleTransientApiErrorDetected`).
         if params.type == .responseComplete || params.type == .error,
            let terminalID = params.terminalID,
            let terminal = try? await db.terminals.get(id: terminalID) {
@@ -5987,8 +5991,9 @@ extension RPCRouter {
         )))
     }
 
-    /// Stop-hook transcript sync. When a Claude session finishes a turn and
-    /// its recorded transcript lives OUTSIDE the project dir derived from the
+    /// Turn-end transcript sync, run for every Stop and StopFailure hook that
+    /// reaches the daemon. When a Claude session finishes a turn and its
+    /// recorded transcript lives OUTSIDE the project dir derived from the
     /// worktree's CURRENT path — the worktree moved or was promoted after the
     /// session started — mirror the jsonl and its subagents into the derived
     /// dir, so a later cwd-scoped `claude --resume` finds the conversation.

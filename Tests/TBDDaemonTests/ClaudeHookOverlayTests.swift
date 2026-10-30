@@ -226,6 +226,10 @@ extension TBDHomeSerialized {
         // Delegates message construction to the subcommand, then pipes into notify.
         #expect(cmd?.contains("tbd hooks stop-failure") == true)
         #expect(cmd?.contains("tbd notify --type error") == true)
+        // Only with a message: a StopFailure the daemon took over raises no
+        // empty error notification, and the subcommand's own RPC ran the
+        // turn-end transcript sync.
+        #expect(cmd?.contains(#"[ -n "$MSG" ] && tbd notify"#) == true)
     }
 
     @Test func generateBodyWithoutFallbackModelsOmitsKey() throws {

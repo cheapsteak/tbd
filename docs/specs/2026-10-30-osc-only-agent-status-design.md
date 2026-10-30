@@ -246,8 +246,11 @@ each loses its `tbd terminal-activity` call:
   response-complete notification).
 
 `UserPromptSubmit` on Claude has one job, the session title, which it gets
-from the `tbd hooks session-title` command. The `Stop` hook's transcript sync
-runs inside the `tbd notify` call that hook already makes.
+from the `tbd hooks session-title` command. The turn-end transcript sync runs
+inside the `tbd notify` call the `Stop` and `StopFailure` hooks already make.
+A `StopFailure` whose hard usage limit or transient error the daemon takes
+over prints no message and makes no such call; the RPC `tbd hooks
+stop-failure` makes instead runs the sync.
 
 ### What is removed
 
