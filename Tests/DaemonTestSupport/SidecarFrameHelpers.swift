@@ -1,13 +1,14 @@
 import Darwin
 import Foundation
+import TBDKernel
 import TBDShared
 
 /// Shared helpers for the framed-sidecar tests (M2.1). Daemon-target tests can't
 /// import the app-side `FDSidecarClient`, so they decode vend frames directly
-/// through the public `TBDShared` framing primitives.
+/// through the public `TBDShared` and `TBDKernel` framing primitives.
 ///
-/// Lives in `TestSupport` rather than a test target because it is used from both
-/// `TBDDaemonTests` and the tier-3 `TBDDaemonLiveTests` target
+/// Lives in `DaemonTestSupport` rather than a test target because it is used
+/// from both `TBDDaemonTests` and the tier-3 `TBDDaemonLiveTests` target
 /// (docs/specs/2026-07-24-test-hardening-design.md §3).
 public enum SidecarTestSupport {
 

@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import TBDShared
+import TBDKernel
 import os
 
 /// One holder process owns one session's pty master for that session's whole

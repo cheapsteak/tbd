@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import os
-import TBDShared
+import TBDKernel
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "shadowPeerHelper")
 
@@ -631,7 +631,7 @@ final class PeerHelper {
     /// The wrapper's element name, without its closing angle bracket.
     ///
     /// **Deliberately a second copy of `ShadowPeerAttribution`'s constants and
-    /// tag scanner, not a shared one.** The helper links `TBDShared` and
+    /// tag scanner, not a shared one.** The helper links `TBDKernel` and
     /// nothing else, by design (see `Package.swift`), and the two halves sit on
     /// opposite ends of the same contract the way `PeerHelperOptions.parse` and
     /// `ShadowPeerHelperInvocation.arguments` already do: each is pinned by a
