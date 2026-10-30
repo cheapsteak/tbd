@@ -19,7 +19,7 @@ struct TmuxControlModeBridge: Sendable {
     /// Environment the gate reads. Injectable so tests can flip the gate.
     let environment: [String: String]
     /// Sidecar over which attach handlers vend pane fds.
-    let fdVending: FDVendingServer
+    let fdVending: any PaneFDVending
     /// How long an attach may sit un-acked before the daemon cancels it
     /// (spec, pane lifecycle: "App fails to send attach.ready within timeout
     /// (e.g. 5 s) → daemon cancels attach"). Injectable for tests.
@@ -59,7 +59,7 @@ struct TmuxControlModeBridge: Sendable {
     init(supervisor: TmuxControlSupervisor,
          tmuxExecutableResolver: TmuxExecutableResolver = TmuxExecutableResolver(),
          environment: [String: String] = ProcessInfo.processInfo.environment,
-         fdVending: FDVendingServer,
+         fdVending: any PaneFDVending,
          readyTimeout: Duration = .seconds(5),
          inputRouter: ControlModeInputRouter? = nil,
          resizeCoordinator: ControlModeResizeCoordinator? = nil,

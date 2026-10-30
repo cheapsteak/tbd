@@ -142,4 +142,3 @@ SessionMod -> Base
 StartAdmission -> Process
 Tmux -> Process
 Tmux -> SSH
-Tmux -> Server
