@@ -132,14 +132,10 @@ struct PanelSurfaceWorkspaceView: View {
 
     // MARK: - Pure helpers
 
-    /// A width clamped to `SideRegion.widthRange`, the divider's own limit.
-    static func clampedWidth(_ width: Double) -> Double {
-        min(max(width, SideRegion.widthRange.lowerBound), SideRegion.widthRange.upperBound)
-    }
-
-    /// The divider's `[primary, side]` shares for a side-region width.
+    /// The divider's `[primary, side]` shares for a side-region width, clamped
+    /// by `SideRegion.clamp`, the divider's own limit.
     static func ratios(forWidth width: Double) -> [CGFloat] {
-        let clamped = clampedWidth(width)
+        let clamped = SideRegion.clamp(width)
         return [CGFloat(1 - clamped), CGFloat(clamped)]
     }
 
@@ -148,7 +144,7 @@ struct PanelSurfaceWorkspaceView: View {
     /// divider sends nothing.
     static func resizeOperation(ratios: [CGFloat], currentWidth: Double) -> PanelOperation? {
         guard ratios.count == 2 else { return nil }
-        let width = clampedWidth(Double(ratios[1]))
+        let width = SideRegion.clamp(Double(ratios[1]))
         guard width != currentWidth else { return nil }
         return .resize(width: width)
     }

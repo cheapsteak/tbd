@@ -159,8 +159,6 @@ public enum LegacyTabConverter {
               })
         else { return SideRegion.defaultWidth }
 
-        let share = 1 - Double(ratios[primaryIndex])
-        guard share.isFinite else { return SideRegion.defaultWidth }
-        return min(max(share, SideRegion.widthRange.lowerBound), SideRegion.widthRange.upperBound)
+        return SideRegion.clamp(1 - Double(ratios[primaryIndex]))
     }
 }

@@ -118,6 +118,14 @@ public struct SideRegion: Codable, Sendable, Equatable {
         self.width = width
     }
 
+    /// A width the model accepts: clamped to `widthRange`, or `defaultWidth`
+    /// when not finite. The one clamp the legacy converter and the divider
+    /// share.
+    public static func clamp(_ width: Double) -> Double {
+        guard width.isFinite else { return defaultWidth }
+        return min(max(width, widthRange.lowerBound), widthRange.upperBound)
+    }
+
     public func panel(id: PanelID) -> ViewerPanel? {
         panels.first { $0.id == id }
     }

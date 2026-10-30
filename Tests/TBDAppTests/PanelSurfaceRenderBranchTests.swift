@@ -158,8 +158,11 @@ struct PanelSurfaceRenderBranchTests {
     func ratiosFollowTheWidth() {
         let quarter: [CGFloat] = [0.75, 0.25]
         #expect(PanelSurfaceWorkspaceView.ratios(forWidth: 0.25) == quarter)
-        #expect(PanelSurfaceWorkspaceView.clampedWidth(1.5) == SideRegion.widthRange.upperBound)
-        #expect(PanelSurfaceWorkspaceView.clampedWidth(0) == SideRegion.widthRange.lowerBound)
+        // Out of range or not finite, the shares follow `SideRegion.clamp`.
+        #expect(PanelSurfaceWorkspaceView.ratios(forWidth: 1.5)
+            == PanelSurfaceWorkspaceView.ratios(forWidth: SideRegion.widthRange.upperBound))
+        #expect(PanelSurfaceWorkspaceView.ratios(forWidth: .nan)
+            == PanelSurfaceWorkspaceView.ratios(forWidth: SideRegion.defaultWidth))
     }
 
     @Test("a released drag sends the side's share, clamped to the model's range")

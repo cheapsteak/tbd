@@ -133,6 +133,18 @@ struct PanelSurfaceModelTests {
         #expect(SideRegion.defaultWidth == expectedDefault)
     }
 
+    @Test func clampKeepsInRangeWidthsBoundsTheRestAndDefaultsNonFinite() {
+        #expect(SideRegion.clamp(0.3) == 0.3)
+        #expect(SideRegion.clamp(SideRegion.widthRange.lowerBound) == SideRegion.widthRange.lowerBound)
+        #expect(SideRegion.clamp(SideRegion.widthRange.upperBound) == SideRegion.widthRange.upperBound)
+        #expect(SideRegion.clamp(0) == SideRegion.widthRange.lowerBound)
+        #expect(SideRegion.clamp(-2) == SideRegion.widthRange.lowerBound)
+        #expect(SideRegion.clamp(1.5) == SideRegion.widthRange.upperBound)
+        #expect(SideRegion.clamp(.nan) == SideRegion.defaultWidth)
+        #expect(SideRegion.clamp(.infinity) == SideRegion.defaultWidth)
+        #expect(SideRegion.clamp(-.infinity) == SideRegion.defaultWidth)
+    }
+
     // MARK: - Content references and history
 
     @Test func fileReferenceDefaultsToAutomatic() {
