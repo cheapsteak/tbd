@@ -500,10 +500,22 @@ should have caught them. It is also the destructive-at-a-user-gesture path and i
 reverses the `isTBDOwned` position. Deferred to its own spec rather than
 rejected outright.
 
-**Identify by TBD ancestry fingerprint rather than cwd.** Most precise about
-ownership, and it misses exactly the observed cases: `pnpm` and `process-compose`
-inherit no TBD marker in their argv, and macOS hides another process's
-environment, so an env-var marker cannot be read at all.
+**Identify by TBD ancestry fingerprint rather than cwd.** `pnpm` and
+`process-compose` inherit no TBD marker in their argv, but they do inherit
+`TBD_WORKTREE_ID` and `TBD_TERMINAL_ID` from the pane. macOS lets a process
+running as the same user read that environment, as it stood at exec, through
+`sysctl(KERN_PROCARGS2)`, the call `ps eww` makes. So the marker can be read
+for the observed cases. It is still a poor sole basis for a kill:
+
+- **The environment records where a process came from, not who owns it.** A
+  process inherits whatever ids its launcher had. `dirmngr`, a user-wide GnuPG
+  daemon, and Claude Code's own `claude daemon run` and `--bg-pty-host`
+  processes have all been seen carrying the ids of whichever terminal happened
+  to start them. A marker match could reclaim a user-wide service because one
+  worktree was archived.
+- **It cannot see Apple platform binaries.** macOS returns no environment for
+  `/bin/zsh`, `/bin/sleep`, `/usr/bin/perl` or anything under `/System`, so an
+  orphaned shell or script runner carries no readable marker.
 
 **Reclaim any orphan under a TBD worktree whose terminal row is gone, without
 requiring the worktree to be dead.** Catches more, and reclaims processes inside

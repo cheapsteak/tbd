@@ -980,9 +980,12 @@ public struct TmuxManager: Sendable {
     /// of `#{pane_start_command}`, because TBD plants `TBD_TERMINAL_ID` through
     /// the `env` map and `newWindowCommand` inlines that map as an
     /// `export KEY='value'; ` prefix on the command string — so every pane
-    /// spawned before the option existed still carries its own id. macOS forbids
-    /// reading another process's environment (SIP), so the start command, not
-    /// `ps eww`, is where the planted value remains legible.
+    /// spawned before the option existed still carries its own id. The start
+    /// command, not `ps eww`, is where the planted value remains legible: the
+    /// pane's own process is its shell, usually `/bin/zsh`, and macOS returns no
+    /// environment for an Apple platform binary. For any other binary it returns
+    /// only the environment the process had at exec, and the export prefix sets
+    /// the id after the shell has started.
     ///
     /// The fallback is deliberately narrow, because the start command also
     /// carries *user-authored free text*: the env map is inlined sorted by key,

@@ -73,9 +73,12 @@ relying on them.
   The plugin validator says so for user-installed plugins, and under
   `allowManagedHooksOnly` a user-tier plugin loads no hooks at all. Not
   measurable without managed settings.
-- **macOS does not let one process read another's environment**, so a secret
-  passed in a spawn's environment is not readable through `ps` or `/proc`-style
-  inspection.
+- **A spawn's environment is readable by the same user, and by no other.**
+  macOS returns a process's environment, as it stood at exec, through
+  `sysctl(KERN_PROCARGS2)`, the call `ps eww` makes. Any process running as the
+  same user can read it, unless the binary is an Apple platform binary;
+  `claude` is not one. A process running as another user gets `EINVAL`.
+  Measured on macOS 27.
 - **TBD spawns every Claude session with `--dangerously-skip-permissions`.**
   Permission dialogs appear only after the person leaves bypass mode, so
   questions are the common case.
@@ -110,8 +113,9 @@ the request unless it matches and the terminal's row holds that incarnation.
 An incarnation is minted per spawn, so binding the token to it binds it to one
 process in one terminal. Because the token is derived, it survives a daemon
 restart with no database change. A process outside the session, running as
-the same user, cannot learn a session's token without deliberately reading the
-key file, which is the same trust boundary that protects `state.db`. The
+the same user, can learn a session's token only by a deliberate read: of the
+key file, or of the session process's environment (`ps eww`). Both sit at the
+same trust boundary that protects `state.db`. The
 session's own descendants do inherit `TBD_MOD_TOKEN` with the rest of its
 environment: a command the Bash tool runs, an MCP server. Such a process:
 

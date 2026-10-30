@@ -11,6 +11,10 @@ the code and this document disagree, the code wins; then fix the document.
 and `pane_pid`, and in the section on which capabilities serve supervision:
 those cite that tree. Every other citation is from the 2026-08-26 reading.*
 
+*Measured on 2026-10-30, on macOS 27: what `ps eww` can read of another
+process's environment, in the pane-identity fallback entry. That entry's
+citations are still from the 2026-08-26 reading.*
+
 It is an inventory, not a proposal. It does not argue for or against any change
 to how terminals are driven.
 
@@ -246,9 +250,14 @@ was written for.
 - **The fallback** — `resolvePaneTerminalID` (`:687-703`) reads the same UUID
   back out of `#{pane_start_command}`, anchored on the literal
   `export TBD_TERMINAL_ID='` that `envExportPrefixed` emits, and requires the
-  extracted value to parse as a UUID. macOS forbids reading another process's
-  environment under SIP, so the start command — not `ps eww` — is where the
-  planted value stays legible.
+  extracted value to parse as a UUID. The start command — not `ps eww` — is
+  where the planted value stays legible. `ps eww` reads a process's
+  environment through `sysctl(KERN_PROCARGS2)`, which returns it only as it
+  stood at exec, only to the same user, and never for an Apple platform
+  binary. The pane's own process is its shell, usually `/bin/zsh`, which is
+  one, and the export prefix sets the id after that shell has started. A
+  non-Apple program the shell launches, such as `claude`, does carry the id in
+  a readable environment.
 
 **How widely identity is relied on.** Three places, at three layers.
 

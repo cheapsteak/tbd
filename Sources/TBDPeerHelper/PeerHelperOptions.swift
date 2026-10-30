@@ -7,10 +7,10 @@ import TBDShared
 /// convention.** The design requires helpers to carry distinctive argv "so `ps`
 /// reads sanely and no pattern-kill takes out a sibling", and every field below
 /// is spelled out on the command line for that reason rather than passed in the
-/// environment: `ps` shows arguments and does not show environment (macOS
-/// refuses `ps eww` for another process under SIP, and even for our own it is
-/// unreliable). So a `ps` line names the executable, the handle that identifies
-/// *which* shadow this is, and the peer name a human recognises.
+/// environment: `ps` shows arguments, and shows environment only under
+/// `ps eww` — and then only the environment the process had at exec, and only
+/// to the same user. So a `ps` line names the executable, the handle that
+/// identifies *which* shadow this is, and the peer name a human recognises.
 ///
 /// The discriminator to pattern-match on is `--handle <handle>`, never the
 /// executable name: `pkill -f TBDPeerHelper` takes out every shadow on the
