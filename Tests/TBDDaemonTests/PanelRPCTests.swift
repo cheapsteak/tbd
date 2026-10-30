@@ -134,13 +134,13 @@ struct PanelRPCTests {
         #expect(applyResponse.success)
         let applyResult = try applyResponse.decodeResult(PanelApplyResult.self)
         #expect(applyResult.replayed == false)
-        #expect(applyResult.tab.revision == 1)
+        #expect(applyResult.tab.revision > tab.revision)
 
         let getRequest = try RPCRequest(method: RPCMethod.panelGet, params: PanelGetParams(worktreeID: wtID))
         let getResponse = await router.handle(getRequest)
         #expect(getResponse.success)
         let getResult = try getResponse.decodeResult(PanelGetResult.self)
-        #expect(getResult.tabs.first?.revision == 1)
+        #expect(getResult.tabs.first?.revision == applyResult.tab.revision)
     }
 
     // MARK: - malformed params

@@ -141,7 +141,9 @@ struct PanelSyncTabsTests {
         #expect(surfaces.map(\.id) == [tabAID, tabBID])
         #expect(surfaces.map(\.label) == ["A", "B"])
         let importedA = try #require(surfaces.first)
-        #expect(importedA.revision == 0)
+        let importedB = try #require(surfaces.last)
+        #expect(importedA.revision > 0 && importedA.revision < importedB.revision,
+                "each import takes the daemon-wide counter's next value")
         let panel = try #require(importedA.side.panels.first)
         #expect(importedA.side.panels.count == 1)
         #expect(panel.content == Self.file("/one"))
@@ -288,11 +290,10 @@ struct PanelSyncTabsTests {
         let surfaces = try await db.panelSurface.surfaces(worktreeID: wtID)
         #expect(surfaces.map(\.id) == [tabB.tabID, tabAID])
         let updatedA = try #require(surfaces.last)
-        let expectedRevision = applied.revision + 1
         #expect(updatedA.label == "A renamed")
         #expect(updatedA.primary == .terminal(terminalID: terminalA))
         #expect(updatedA.side == applied.side)
-        #expect(updatedA.revision == expectedRevision)
+        #expect(updatedA.revision > applied.revision)
 
         // One delta for the sync, carrying both repositioned tabs.
         let delta = try #require(panelSurfaceDeltas(deltas).last)

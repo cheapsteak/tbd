@@ -136,6 +136,10 @@ struct PanelTabsFlagTests {
             let worktrees = try Int.fetchOne(
                 db, sql: "SELECT COUNT(*) FROM worktree WHERE id = ?", arguments: [wtID])
             #expect(worktrees == 1, "the worktree that owned the v1 rows must survive")
+            // The daemon-wide revision counter starts at zero, with no row
+            // left above it.
+            let counter = try Int64.fetchAll(db, sql: "SELECT value FROM panel_revision_counter")
+            #expect(counter == [0])
         }
     }
 

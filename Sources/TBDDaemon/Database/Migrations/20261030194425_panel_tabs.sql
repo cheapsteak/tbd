@@ -8,3 +8,8 @@ ALTER TABLE config ADD COLUMN panel_tabs_enabled INTEGER;
 DELETE FROM panel_operation_receipt;
 DELETE FROM panel_history;
 DELETE FROM workspace_tab_surface;
+-- One daemon-wide counter every surface write takes its revision from, so a
+-- tab's revisions keep rising across a delete and re-import. It never goes
+-- down; the surface rows are all gone above, so it starts at zero.
+CREATE TABLE IF NOT EXISTS panel_revision_counter (id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL);
+INSERT OR IGNORE INTO panel_revision_counter (id, value) VALUES (1, 0);

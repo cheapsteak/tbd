@@ -192,6 +192,14 @@ frame. The pure reducer in `TBDShared` keeps an optimistic layer available if
 soak measurement ever shows a visible gap: the app could run the same reducer,
 render at once, and let the reply confirm. It is not built.
 
+Revisions are daemon-wide. Every write that creates or changes a surface — an
+operation, an import, or a sync's update of position, label, primary or
+worktree — takes its revision from one persistent counter, incremented in the
+write's own transaction, that never decreases. So a tab's revisions keep
+rising when its surface is deleted and imported again, whether a sync dropped
+it, an archive and revive replaced it, or the migration emptied the tables, and
+any two snapshots of one tab compare correctly, across a daemon restart too.
+
 `baseRevision` is sent for diagnostics only. The daemon applies a valid
 operation against current state regardless of the base; it uses a stale base
 only to relabel an already-failing vanished-target error as `staleTarget`.
@@ -216,11 +224,14 @@ The schema keeps spec C's three tables. One `.sql` migration deletes every row
 of `panel_operation_receipt`, `panel_history` and `workspace_tab_surface`. No
 v1 row holds unique data: the app has never rendered from the daemon, so the
 legacy layout is still the truth on every install, and the tab sync re-imports
-from it.
+from it. The same migration adds `panel_revision_counter`, one row holding the
+daemon-wide revision counter (see "Round trip and conflicts"), starting at
+zero.
 
 - `workspace_tab_surface` keeps one row per workspace tab. Its `layout` column
-  holds the `SideRegion` JSON without histories; `primaryContent`, `label`,
-  `position` and `revision` keep their meaning.
+  holds the `SideRegion` JSON without histories; `primaryContent`, `label` and
+  `position` keep their meaning, and `revision` holds the counter value the
+  row's last write took.
 - `panel_history` keeps one row per panel. The store joins histories into
   `ViewerPanel.history` when it reads a surface and splits them out when it
   writes one, inside the same transaction.

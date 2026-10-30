@@ -50,13 +50,32 @@ struct PanelSurfaceStoreTests {
     }
 
     /// Imports `surfaces` into `worktreeID` at positions 0, 1, … through the
-    /// real sync path.
+    /// real sync path, and returns them as stored, in the same order. Each
+    /// import takes its revision from the daemon-wide counter, not from the
+    /// surface the test built.
+    @discardableResult
     private func seed(
         _ db: TBDDatabase, worktreeID: UUID, _ surfaces: [WorkspaceTabSurface], now: Date = Date()
-    ) async throws {
+    ) async throws -> [WorkspaceTabSurface] {
         let entries = surfaces.enumerated().map { index, surface in entry(for: surface, position: index) }
         let outcome = try await db.panelSurface.syncTabs(worktreeID: worktreeID, entries: entries, now: now)
         #expect(outcome.imported == surfaces.map(\.id))
+        try #require(outcome.changed.map(\.id) == surfaces.map(\.id))
+        return outcome.changed
+    }
+
+    /// `surface` at `revision`. A store write takes the counter's next value,
+    /// so a test compares everything but the revision against the surface it
+    /// built, and the revision on its own.
+    private static func revised(_ surface: WorkspaceTabSurface, _ revision: UInt64) -> WorkspaceTabSurface {
+        var copy = surface
+        copy.revision = revision
+        return copy
+    }
+
+    /// Each revision is higher than the one before it.
+    private static func strictlyIncreasing(_ revisions: [UInt64]) -> Bool {
+        zip(revisions, revisions.dropFirst()).allSatisfy { $0 < $1 }
     }
 
     private func historyRowCount(_ db: TBDDatabase, tabID: UUID) async throws -> Int {
@@ -102,10 +121,11 @@ struct PanelSurfaceStoreTests {
                 recency: [panelB.id, panelA.id], collapsed: true, width: 0.3),
             revision: 4)
 
-        try await seed(db, worktreeID: wtID, [surface])
+        let stored = try await seed(db, worktreeID: wtID, [surface])[0]
 
-        #expect(try await db.panelSurface.surface(tabID: surface.id) == surface)
-        #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == [surface])
+        #expect(stored == Self.revised(surface, stored.revision))
+        #expect(try await db.panelSurface.surface(tabID: surface.id) == stored)
+        #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == [stored])
         // One history row per panel, and the layout column carries no history.
         #expect(try await historyRowCount(db, tabID: surface.id) == 2)
         let layoutValue = try await layoutColumn(db, tabID: surface.id)
@@ -140,8 +160,10 @@ struct PanelSurfaceStoreTests {
         let missingHistory = makeSurface(worktreeID: wtID)
         let legacyLayout = makeSurface(worktreeID: wtID)
         let failsValidator = makeSurface(worktreeID: wtID)
-        let intact = makeSurface(worktreeID: wtID)
-        try await seed(db, worktreeID: wtID, [badHistory, missingHistory, legacyLayout, failsValidator, intact])
+        let built = makeSurface(worktreeID: wtID)
+        let seeded = try await seed(
+            db, worktreeID: wtID, [badHistory, missingHistory, legacyLayout, failsValidator, built])
+        let intact = seeded[4]
 
         let badPanelKey = badHistory.side.panels[0].id.uuidString
         let missingPanelKey = missingHistory.side.panels[0].id.uuidString
@@ -183,8 +205,7 @@ struct PanelSurfaceStoreTests {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
         let first = makeSurface(worktreeID: wtID)
-        let target = makeSurface(worktreeID: wtID)
-        try await seed(db, worktreeID: wtID, [first, target])
+        let target = try await seed(db, worktreeID: wtID, [first, makeSurface(worktreeID: wtID)])[1]
         let panelID = target.side.panels[0].id
         let destination = Self.file("/b.txt")
         let operationID = UUID()
@@ -201,7 +222,7 @@ struct PanelSurfaceStoreTests {
             return
         }
         #expect(result.replayed == false)
-        #expect(result.tab.revision == 1)
+        #expect(result.tab.revision > target.revision)
         #expect(result.tab.side.panels[0].history.entries == [destination, Self.file("/a.txt")])
         #expect(try await db.panelSurface.surface(tabID: target.id) == result.tab)
         #expect(try await db.panelSurface.receipt(operationID: operationID) == result)
@@ -212,8 +233,7 @@ struct PanelSurfaceStoreTests {
     @Test func applyReducingReplaysReceipt() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
-        let surface = makeSurface(worktreeID: wtID)
-        try await seed(db, worktreeID: wtID, [surface])
+        let surface = try await seed(db, worktreeID: wtID, [makeSurface(worktreeID: wtID)])[0]
         let operationID = UUID()
 
         let firstOutcome = try await db.panelSurface.applyReducing(
@@ -235,7 +255,8 @@ struct PanelSurfaceStoreTests {
         }
         #expect(secondOutcome == .replayed(applied))
         let stored = try await db.panelSurface.surface(tabID: surface.id)
-        #expect(stored?.revision == 1)
+        #expect(applied.tab.revision > surface.revision)
+        #expect(stored?.revision == applied.tab.revision, "the replay took no new revision")
         #expect(stored?.side.collapsed == true)
     }
 
@@ -243,8 +264,7 @@ struct PanelSurfaceStoreTests {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
         let otherWtID = try await makeWorktree(db, name: "other")
-        let surface = makeSurface(worktreeID: wtID)
-        try await seed(db, worktreeID: wtID, [surface])
+        let surface = try await seed(db, worktreeID: wtID, [makeSurface(worktreeID: wtID)])[0]
 
         let unknownTab = try await db.panelSurface.applyReducing(
             operationID: UUID(), tabID: UUID(), worktreeID: wtID, now: Date()
@@ -284,9 +304,10 @@ struct PanelSurfaceStoreTests {
     @Test func applyReducingRefusesAPanelIDOwnedByAnotherTab() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
-        let owner = makeSurface(worktreeID: wtID)
-        let target = makeSurface(worktreeID: wtID, paths: [])
-        try await seed(db, worktreeID: wtID, [owner, target])
+        let seeded = try await seed(
+            db, worktreeID: wtID, [makeSurface(worktreeID: wtID), makeSurface(worktreeID: wtID, paths: [])])
+        let owner = seeded[0]
+        let target = seeded[1]
         let collisionID = owner.side.panels[0].id
         let operationID = UUID()
 
@@ -317,8 +338,7 @@ struct PanelSurfaceStoreTests {
     @Test func invalidSurfaceIsRefusedAndRollsBack() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
-        let surface = makeSurface(worktreeID: wtID)
-        try await seed(db, worktreeID: wtID, [surface])
+        let surface = try await seed(db, worktreeID: wtID, [makeSurface(worktreeID: wtID)])[0]
 
         await #expect(throws: PanelSurfaceStoreError.self) {
             _ = try await db.panelSurface.applyReducing(
@@ -365,15 +385,15 @@ struct PanelSurfaceStoreTests {
             }
         }
         let wtID = try await makeWorktree(db)
-        let surface = makeSurface(worktreeID: wtID, paths: ["/seed.txt"])
-        try await seed(db, worktreeID: wtID, [surface])
+        let surface = try await seed(
+            db, worktreeID: wtID, [makeSurface(worktreeID: wtID, paths: ["/seed.txt"])])[0]
         let tabID = surface.id
         let panelID = surface.side.panels[0].id
         let store = db.panelSurface
 
         // K concurrent navigates on the SAME panel, each a distinct
-        // destination and operationID. Each bumps the revision by one and
-        // pushes history; K + 1 entries stay under the history cap.
+        // destination and operationID. Each takes a new revision and pushes
+        // history; K + 1 entries stay under the history cap.
         let k = 6
         try await withThrowingTaskGroup(of: Void.self) { group in
             for i in 0..<k {
@@ -391,8 +411,7 @@ struct PanelSurfaceStoreTests {
         }
 
         let finalSurface = try await db.panelSurface.surface(tabID: tabID)
-        let expectedRevision = UInt64(k)
-        #expect(finalSurface?.revision == expectedRevision)
+        #expect((finalSurface?.revision ?? 0) > surface.revision)
         let paths = Set((finalSurface?.side.panel(id: panelID)?.history.entries ?? []).compactMap {
             content -> String? in
             if case .file(let ref) = content { return ref.path }
@@ -422,10 +441,12 @@ struct PanelSurfaceStoreTests {
             now: Date())
 
         #expect(outcome.imported == [a.id, b.id])
-        #expect(outcome.changed == [a, b])
+        let revisions = outcome.changed.map(\.revision)
+        #expect(outcome.changed == zip([a, b], revisions).map { Self.revised($0, $1) })
+        #expect(Self.strictlyIncreasing([0] + revisions), "each import takes the counter's next value")
         #expect(outcome.reparented.isEmpty)
         #expect(outcome.removed.isEmpty)
-        #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == [a, b])
+        #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == outcome.changed)
         #expect(try await db.panelSurface.surface(tabID: skippedID) == nil)
         #expect(try await historyRowCount(db, tabID: a.id) == 2)
     }
@@ -433,8 +454,8 @@ struct PanelSurfaceStoreTests {
     @Test func syncNeverOverwritesPanels() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
-        let existing = makeSurface(worktreeID: wtID, paths: ["/a.txt"])
-        try await seed(db, worktreeID: wtID, [existing])
+        let existing = try await seed(
+            db, worktreeID: wtID, [makeSurface(worktreeID: wtID, paths: ["/a.txt"])])[0]
 
         // The app lists the tab again with a freshly converted candidate whose
         // panels differ; the stored panels win.
@@ -476,9 +497,12 @@ struct PanelSurfaceStoreTests {
     @Test func syncUpdatesPositionLabelPrimary() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
-        let a = makeSurface(worktreeID: wtID, label: "a")
-        let b = makeSurface(worktreeID: wtID, label: "b", paths: ["/b1.txt", "/b2.txt"])
-        try await seed(db, worktreeID: wtID, [a, b])
+        let seeded = try await seed(db, worktreeID: wtID, [
+            makeSurface(worktreeID: wtID, label: "a"),
+            makeSurface(worktreeID: wtID, label: "b", paths: ["/b1.txt", "/b2.txt"]),
+        ])
+        let a = seeded[0]
+        let b = seeded[1]
         let newPrimary = PrimaryContent.file(FileReference(path: "/renamed.md"))
 
         // B moves to the front with a new label and primary; A moves back,
@@ -491,13 +515,16 @@ struct PanelSurfaceStoreTests {
             ],
             now: Date())
 
+        try #require(outcome.changed.map(\.id) == [b.id, a.id])
         let expectedB = WorkspaceTabSurface(
             id: b.id, worktreeID: wtID, label: "renamed", primary: newPrimary,
-            side: b.side, revision: b.revision + 1)
+            side: b.side, revision: outcome.changed[0].revision)
         let expectedA = WorkspaceTabSurface(
             id: a.id, worktreeID: wtID, label: nil, primary: a.primary,
-            side: a.side, revision: a.revision + 1)
+            side: a.side, revision: outcome.changed[1].revision)
         #expect(outcome.changed == [expectedB, expectedA])
+        #expect(Self.strictlyIncreasing([a.revision, b.revision, expectedB.revision, expectedA.revision]),
+                "an update takes the counter's next value, above every earlier write")
         #expect(outcome.imported.isEmpty)
         #expect(outcome.reparented.isEmpty)
         #expect(outcome.removed.isEmpty)
@@ -509,8 +536,9 @@ struct PanelSurfaceStoreTests {
         let db = try TBDDatabase(inMemory: true)
         let scratchID = try await makeWorktree(db, name: "scratch")
         let mainID = try await makeWorktree(db, name: "main")
-        let moved = makeSurface(worktreeID: scratchID, label: "t", paths: ["/a.txt", "/b.txt"])
-        try await seed(db, worktreeID: scratchID, [moved])
+        let moved = try await seed(
+            db, worktreeID: scratchID,
+            [makeSurface(worktreeID: scratchID, label: "t", paths: ["/a.txt", "/b.txt"])])[0]
 
         let candidate = makeSurface(worktreeID: mainID, tabID: moved.id, label: "t", paths: ["/x.txt"])
         let outcome = try await db.panelSurface.syncTabs(
@@ -520,9 +548,11 @@ struct PanelSurfaceStoreTests {
                 importCandidate: candidate)],
             now: Date())
 
+        let revision = try #require(outcome.changed.first).revision
         let expected = WorkspaceTabSurface(
             id: moved.id, worktreeID: mainID, label: "t", primary: moved.primary,
-            side: moved.side, revision: moved.revision + 1)
+            side: moved.side, revision: revision)
+        #expect(revision > moved.revision)
         #expect(outcome.reparented == [moved.id])
         #expect(outcome.imported.isEmpty)
         #expect(outcome.changed == [expected])
@@ -542,11 +572,12 @@ struct PanelSurfaceStoreTests {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
         let otherWtID = try await makeWorktree(db, name: "other")
-        let kept = makeSurface(worktreeID: wtID)
-        let dropped = makeSurface(worktreeID: wtID, paths: ["/a.txt", "/b.txt"])
-        let elsewhere = makeSurface(worktreeID: otherWtID)
-        try await seed(db, worktreeID: wtID, [kept, dropped])
-        try await seed(db, worktreeID: otherWtID, [elsewhere])
+        let seeded = try await seed(db, worktreeID: wtID, [
+            makeSurface(worktreeID: wtID), makeSurface(worktreeID: wtID, paths: ["/a.txt", "/b.txt"]),
+        ])
+        let kept = seeded[0]
+        let dropped = seeded[1]
+        let elsewhere = try await seed(db, worktreeID: otherWtID, [makeSurface(worktreeID: otherWtID)])[0]
 
         // A receipt for the tab about to go; the sync leaves receipts alone.
         let operationID = UUID()
@@ -572,10 +603,14 @@ struct PanelSurfaceStoreTests {
     @Test func syncReportsChangedSurfacesOnly() async throws {
         let db = try TBDDatabase(inMemory: true)
         let wtID = try await makeWorktree(db)
-        let a = makeSurface(worktreeID: wtID, label: "a")
-        let b = makeSurface(worktreeID: wtID, label: "b")
-        let c = makeSurface(worktreeID: wtID, label: "c")
-        try await seed(db, worktreeID: wtID, [a, b, c])
+        let seeded = try await seed(db, worktreeID: wtID, [
+            makeSurface(worktreeID: wtID, label: "a"),
+            makeSurface(worktreeID: wtID, label: "b"),
+            makeSurface(worktreeID: wtID, label: "c"),
+        ])
+        let a = seeded[0]
+        let b = seeded[1]
+        let c = seeded[2]
 
         // The same list again changes nothing.
         let unchanged = try await db.panelSurface.syncTabs(
@@ -592,9 +627,11 @@ struct PanelSurfaceStoreTests {
             entries: [entry(for: a, position: 0), relabelled, entry(for: c, position: 2)],
             now: Date())
 
+        let revision = try #require(outcome.changed.first).revision
         let expectedB = WorkspaceTabSurface(
             id: b.id, worktreeID: wtID, label: "b2", primary: b.primary,
-            side: b.side, revision: b.revision + 1)
+            side: b.side, revision: revision)
+        #expect(revision > c.revision)
         #expect(outcome == SyncOutcome(changed: [expectedB]))
         #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == [a, expectedB, c])
     }
@@ -609,8 +646,37 @@ struct PanelSurfaceStoreTests {
             entries: [entry(for: a, position: 0), entry(for: a, position: 1)],
             now: Date())
 
-        #expect(outcome == SyncOutcome(changed: [a], imported: [a.id]))
-        #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == [a])
+        let stored = Self.revised(a, try #require(outcome.changed.first).revision)
+        #expect(outcome == SyncOutcome(changed: [stored], imported: [a.id]))
+        #expect(try await db.panelSurface.surfaces(worktreeID: wtID) == [stored])
+    }
+
+    /// Revisions are daemon-wide: a tab whose surface is deleted and imported
+    /// again comes back above every revision it had, so the app's revision
+    /// guard, which compares snapshots of one tab, never refuses it.
+    @Test func reimportAfterDeleteGetsAHigherRevision() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let wtID = try await makeWorktree(db)
+        let built = makeSurface(worktreeID: wtID)
+        let imported = try await seed(db, worktreeID: wtID, [built])[0]
+        let outcome = try await db.panelSurface.applyReducing(
+            operationID: UUID(), tabID: built.id, worktreeID: wtID, now: Date()
+        ) { current in
+            try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
+        }
+        guard case .applied(let applied)? = outcome else {
+            Issue.record("expected .applied, got \(String(describing: outcome))")
+            return
+        }
+        #expect(applied.tab.revision > imported.revision)
+
+        let deleted = try await db.panelSurface.syncTabs(worktreeID: wtID, entries: [], now: Date())
+        #expect(deleted.removed == [built.id])
+        #expect(try await db.panelSurface.surface(tabID: built.id) == nil)
+
+        let reimported = try await seed(db, worktreeID: wtID, [built])[0]
+        #expect(reimported.revision > applied.tab.revision,
+                "the re-import restarts nothing: its revision exceeds the deleted surface's last one")
     }
 
     // MARK: - commit and deleteSurfaces

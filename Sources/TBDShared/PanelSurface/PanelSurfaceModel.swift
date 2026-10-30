@@ -145,6 +145,9 @@ public struct WorkspaceTabSurface: Codable, Sendable, Equatable, Identifiable {
     public var label: String?
     public var primary: PrimaryContent
     public var side: SideRegion
+    /// Daemon-wide and monotonic: the daemon stores every write at the next
+    /// value of one counter, so of two snapshots of a tab the higher revision
+    /// is the newer, even across a delete and re-import.
     public var revision: UInt64
 
     public init(id: WorkspaceTabID, worktreeID: UUID, label: String? = nil,

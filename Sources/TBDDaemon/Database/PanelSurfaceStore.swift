@@ -185,6 +185,10 @@ public enum PanelSurfaceStoreError: LocalizedError, Equatable, Sendable {
     /// replaces a row it cannot read, so the tab would be stranded; the write
     /// is refused instead.
     case invalidSurface(tabID: WorkspaceTabID, violations: [PanelSurfaceViolation])
+    /// The one `panel_revision_counter` row the `panel_tabs` migration seeds
+    /// is gone, so no write can take a revision; the write is refused rather
+    /// than given one that could fall below a stored revision.
+    case revisionCounterMissing
 
     public var errorDescription: String? {
         switch self {
@@ -194,6 +198,8 @@ public enum PanelSurfaceStoreError: LocalizedError, Equatable, Sendable {
         case .invalidSurface(let tabID, let violations):
             let reason = violations.map { "\($0)" }.joined(separator: ", ")
             return "refusing to store tab \(tabID.uuidString)'s panel surface: it breaks the panel model (\(reason))"
+        case .revisionCounterMissing:
+            return "refusing to store a panel surface: the panel_revision_counter row is missing"
         }
     }
 }
@@ -249,6 +255,13 @@ public struct SyncOutcome: Sendable, Equatable {
 /// `panel_history` row per panel, and read back by joining the two inside one
 /// transaction. A row that fails to decode, lacks a panel's history, or fails
 /// the validator reads as no surface.
+///
+/// Revisions are daemon-wide: every write that creates or changes a surface
+/// takes its revision from the one-row `panel_revision_counter`, incremented
+/// inside the same transaction, and the counter never decreases. So a tab's
+/// revision keeps rising even when its surface is deleted and re-imported —
+/// by a sync, or by an archive and revive — and the app's revision guard can
+/// compare any two snapshots of a tab.
 public struct PanelSurfaceStore: Sendable {
     let writer: any DatabaseWriter
 
@@ -290,12 +303,17 @@ public struct PanelSurfaceStore: Sendable {
     /// `position: nil` keeps the row's existing position (0 for a new row).
     /// Throws `invalidSurface` or `panelHistoryOwnedByOtherTab` before
     /// anything lands.
+    ///
+    /// The surface is stored at the revision it carries, since its caller
+    /// owns it whole; the revision counter is raised to at least that
+    /// revision, so every later write still takes a higher one.
     public func commit(
         surface: WorkspaceTabSurface, position: Int?, receipt: PanelOperationReceiptRecord?,
         now: Date = Date()
     ) async throws {
         _ = try await writer.write { db in
             try Self.writeSurface(surface, position: position, db: db, now: now)
+            try Self.raiseRevisionCounter(toAtLeast: surface.revision, db: db)
             if let receipt {
                 try receipt.save(db)
                 if let receiptWorktreeID = UUID(uuidString: receipt.worktreeID) {
@@ -321,6 +339,31 @@ public struct PanelSurfaceStore: Sendable {
             byTab[row.tabID, default: [:]][decoded.panelID] = decoded.history
         }
         return byTab
+    }
+
+    /// The daemon-wide revision counter's next value, against an
+    /// already-open write transaction: it is incremented and read in the
+    /// caller's transaction, so a write that rolls back takes nothing.
+    private static func nextRevision(db: GRDB.Database) throws -> UInt64 {
+        try db.execute(sql: "UPDATE panel_revision_counter SET value = value + 1 WHERE id = 1")
+        guard let value = try Int64.fetchOne(
+            db, sql: "SELECT value FROM panel_revision_counter WHERE id = 1"
+        ) else {
+            throw PanelSurfaceStoreError.revisionCounterMissing
+        }
+        return UInt64(value)
+    }
+
+    /// Raises the revision counter to at least `revision`, never lowering
+    /// it, for a write that stores a revision it did not take from the
+    /// counter.
+    private static func raiseRevisionCounter(toAtLeast revision: UInt64, db: GRDB.Database) throws {
+        try db.execute(
+            sql: "UPDATE panel_revision_counter SET value = MAX(value, ?) WHERE id = 1",
+            arguments: [Int64(revision)])
+        guard db.changesCount > 0 else {
+            throw PanelSurfaceStoreError.revisionCounterMissing
+        }
     }
 
     /// One row's surface with its own histories joined in, or nil when the
@@ -418,7 +461,9 @@ public struct PanelSurfaceStore: Sendable {
     /// `reduce` is the pure synchronous shared reducer plus whatever error
     /// mapping the caller needs. Returns nil when the tab has no readable
     /// surface under `worktreeID` (the caller maps that to its not-found
-    /// error). The row keeps its position; the receipt stores the result.
+    /// error). The reduced surface is stored at the revision counter's next
+    /// value, whatever revision the reducer gave it. The row keeps its
+    /// position; the receipt stores the result.
     public func applyReducing(
         operationID: UUID, tabID: UUID, worktreeID: UUID, now: Date,
         reduce: @Sendable (WorkspaceTabSurface) throws -> WorkspaceTabSurface
@@ -438,7 +483,8 @@ public struct PanelSurfaceStore: Sendable {
                 return nil
             }
 
-            let next = try reduce(current)
+            var next = try reduce(current)
+            next.revision = try Self.nextRevision(db: db)
 
             try Self.writeSurface(next, position: record.position, db: db, now: now)
 
@@ -457,15 +503,16 @@ public struct PanelSurfaceStore: Sendable {
     /// transaction. For each listed tab, first occurrence only:
     ///
     /// - **No row** – inserts `importCandidate` under this worktree with the
-    ///   entry's position, label and (when given) primary; nothing when the
-    ///   candidate is nil, because the converter skipped the tab.
+    ///   entry's position, label and (when given) primary, at the revision
+    ///   counter's next value; nothing when the candidate is nil, because the
+    ///   converter skipped the tab.
     /// - **Unreadable row** – left exactly as it is. The store never replaces
     ///   data it could not read.
     /// - **Readable row** – re-points it to this worktree when it sits under
     ///   another, and applies the entry's position, label and primary (primary
-    ///   only when non-nil). When any of those changed, the revision goes up
-    ///   by one and the surface is reported in `changed`. Panels and histories
-    ///   are never touched.
+    ///   only when non-nil). When any of those changed, the surface takes the
+    ///   revision counter's next value and is reported in `changed`. Panels
+    ///   and histories are never touched.
     ///
     /// This worktree's rows for tabs not listed are deleted first; their
     /// histories cascade. Other worktrees' rows and every receipt are left
@@ -498,7 +545,7 @@ public struct PanelSurfaceStore: Sendable {
                     let imported = WorkspaceTabSurface(
                         id: entry.tabID, worktreeID: worktreeID, label: entry.label,
                         primary: entry.primary ?? candidate.primary, side: candidate.side,
-                        revision: candidate.revision)
+                        revision: try Self.nextRevision(db: db))
                     try Self.writeSurface(imported, position: entry.position, db: db, now: now)
                     outcome.imported.append(entry.tabID)
                     outcome.changed.append(imported)
@@ -515,7 +562,7 @@ public struct PanelSurfaceStore: Sendable {
                 }
                 let updated = WorkspaceTabSurface(
                     id: current.id, worktreeID: worktreeID, label: entry.label,
-                    primary: primary, side: current.side, revision: current.revision + 1)
+                    primary: primary, side: current.side, revision: try Self.nextRevision(db: db))
 
                 // Only the row's own columns; `layout` and `panel_history`
                 // stay as they are.
