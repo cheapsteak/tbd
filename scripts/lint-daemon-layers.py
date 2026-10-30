@@ -7,7 +7,7 @@ without a build. It reads every Swift file in the library, finds each place a
 file in one folder names a declaration from another, and compares the links
 those references make with the committed list. It fails on a link the list
 lacks, so a new one reaches review in the diff, and on a listed link no code
-makes any more, so the list only shrinks. The design is in
+makes any more, so a removed link leaves the list in the same change and the list grows only by a hand edit a reviewer sees. The design is in
 docs/specs/2026-10-30-daemon-layer-order-design.md; how to read and fix a
 failure is in Sources/TBDDaemon/CLAUDE.md, "Links between folders".
 
@@ -21,7 +21,8 @@ top-level functions and globals. A file references unit B when it names one
 of B's, in code or in a string's interpolation. A name in a comment, a
 literal or a raw identifier, after a `.` (but not after `...`), or as a label
 -- an argument label or a function type's parameter name in parentheses, a
-trailing closure's label, a statement label -- is not a reference, and
+trailing closure's label, a statement label -- is not a reference (bar the false forms listed in
+Sources/TBDDaemon/CLAUDE.md), and
 neither is a name the file declares for itself: a member, a nested type or one
 declared in a body, a generic parameter, a private declaration, or a
 lowercase local, pattern binding or parameter.

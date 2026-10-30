@@ -22,7 +22,7 @@ A link `A -> B` means that a Swift file in unit A names a declaration from unit 
 - Every link the code makes is listed in `scripts/daemon-links.txt`, one `A -> B` per line, sorted.
 - Every listed link is one the code makes.
 
-So a new link is added to the list by hand, in the change that makes it, and the reviewer sees it in the diff. A change that removes a link's last reference deletes the link's line in the same change, so the list only shrinks. The spec describes where that shrinking leads.
+So a new link is added to the list by hand, in the change that makes it, and the reviewer sees it in the diff. A change that removes a link's last reference deletes the link's line in the same change, because a listed link with no reference fails as stale. The list grows only by a hand edit a reviewer sees. The spec describes where the list is headed.
 
 ### What counts as a reference
 
@@ -35,7 +35,7 @@ The check indexes each unit's top-level declarations that are not `private` or `
 It ignores:
 
 - a name after a `.`, though not after `...`;
-- a label: an argument label or a function type's parameter name in parentheses, a trailing closure's label, or a statement's label, where it is declared and after `break` or `continue`;
+- a label (except the forms listed under false links below): an argument label or a function type's parameter name in parentheses, a trailing closure's label, or a statement's label, where it is declared and after `break` or `continue`;
 - every name in a comment, a string, a regex literal or a raw identifier such as `` `checks that Widget parses` ``.
 
 ### Links the check can miss
@@ -54,6 +54,8 @@ A missed reference makes no link, so the list can understate how two folders dep
 
 - **A member or nested type used bare, declared in another file.** A type's member or nested type declared in one file and used bare in the type's extension in another file reads as a reference to any other unit's top-level declaration of the same name. The check sees a member only in the file that declares it.
 - **A subscript's argument label**, as in `cache[widgetLimit: 2]`, reads as a dictionary key.
+- **A declaration's outer argument label** when the parameter has a separate inner name, as in `func f(widgetLimit limit: Int)`, and **the second and later labels of a compound name**, as in `run(fetch:widgetLimit:)` or `#selector(handle(_:widgetLimit:))`, read as references to a same-named declaration in another folder.
+- **A force-unwrap glued to a division slash**, as in `a!/2`, reads as the start of a regex literal. It can stop the check with exit 2 ("unterminated string literal") or hide a reference later on that line. Write `a! / 2`.
 - **A statement label after a `case` on its line**, as in `case .a: outer: for x in xs`, reads as a reference. A label that starts its line, or follows `{` or `;`, does not.
 - **An uppercase name a pattern binds**, as in `case let .some(Widget)`. In a pattern the check binds only lowercase names, so that no type in it is taken for a binding.
 

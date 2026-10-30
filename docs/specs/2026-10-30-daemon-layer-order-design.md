@@ -27,7 +27,7 @@ The daemon stays one module. A lint check gives the folders a direction, in thre
 `scripts/lint-daemon-layers.py` runs in the `lint` CI job and in the pre-push hook, like `scripts/lint-migrations.py`. It needs no build, and it scans the whole daemon in about 1 s.
 
 - **The index.** It reads every Swift file in the library and indexes each unit's top-level declarations that are not `private` or `fileprivate`: types, typealiases, top-level functions and globals. Names declared in an extension count as the extended type's.
-- **A reference.** A file in unit A references unit B when it names a declaration from B's index. It does not count a name that follows a `.`, an argument label, or a name in a comment or a string. It does count code inside a string's interpolation, an extension on B's type, and a conformance to B's protocol.
+- **A reference.** A file in unit A references unit B when it names a declaration from B's index. It does not count a name that follows a `.`, an argument label (bar the false forms in Sources/TBDDaemon/CLAUDE.md), or a name in a comment or a string. It does count code inside a string's interpolation, an extension on B's type, and a conformance to B's protocol.
 - **Blind spots.** The check matches names, not types:
   - A member reached through a value whose type is inferred is invisible, as in `db.terminals.setStartHeld()`.
   - So is a member that another folder's extension adds.
@@ -47,7 +47,7 @@ The daemon stays one module. A lint check gives the folders a direction, in thre
 
 The check ships with `scripts/daemon-links.txt`, which lists every link the daemon has today, one `A -> B` per line, sorted.
 - **A new link fails the check** unless the same change adds it to the list. A reviewer then sees the new link in the diff.
-- **A listed link that no code uses fails the check as stale.** So a link removed from the code leaves the list in the same change, and the list can only shrink.
+- **A listed link that no code uses fails the check as stale.** So a link removed from the code leaves the list in the same change, and the list grows only by a hand edit a reviewer sees.
 
 ### Stage 2: break the cycle
 
