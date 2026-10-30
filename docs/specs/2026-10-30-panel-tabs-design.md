@@ -319,10 +319,11 @@ The converter in `TBDShared` maps one legacy tab to one surface:
 - A tab whose layout holds a terminal anywhere but its primary is not
   converted. If it has no surface it gets none, renders legacy, and the sync
   result names it in `skippedTabIDs`, with its reason in `skipped`; a tab that
-  already has a surface keeps it and is not named. Spec C's importer promoted such terminals to new workspace
-  tabs, but workspace tabs are app-owned here, so a daemon-made tab would be
-  deleted by the next sync. Terminal splits cannot be created since spec C's
-  phase 1, so only layouts older than that carry one.
+  already has a surface keeps it and is not named. Spec C's importer promoted
+  such terminals to new workspace tabs, but workspace tabs are app-owned here,
+  so a daemon-made tab would be deleted by the next sync. Terminal splits
+  cannot be created since spec C's phase 1, so only layouts older than that
+  carry one.
 - Each viewer pane in the legacy layout becomes one `ViewerPanel`, in pre-order,
   with a freshly minted panel ID. Legacy pane IDs cannot be reused: a note
   pane's ID is the note's own ID, so one note open in two tabs would collide,
