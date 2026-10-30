@@ -183,6 +183,30 @@ final class PanelEnvelopeCollector {
     func record(_ envelope: PanelOperationEnvelope) { envelopes.append(envelope) }
 }
 
+/// Holds a stubbed seam's call until the test releases it, so a test can act
+/// while that call is in flight. Once released it lets every later call
+/// straight through. Main-actor isolated rather than a semaphore, so nothing
+/// blocks a thread (`Tests/CLAUDE.md`, "Thread-blocking gates").
+@MainActor
+final class PanelCallGate {
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    /// A call is parked here now.
+    var isHolding: Bool { waiter != nil }
+
+    func wait() async {
+        if released { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+
+    func release() {
+        released = true
+        waiter?.resume()
+        waiter = nil
+    }
+}
+
 /// One ordered log across several seams, for tests that pin the order of
 /// calls to different RPCs.
 @MainActor

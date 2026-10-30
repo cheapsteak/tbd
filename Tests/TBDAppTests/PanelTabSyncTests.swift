@@ -242,4 +242,49 @@ struct PanelTabSyncTests {
             #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == imported)
         }
     }
+
+    @Test("the flag turning on while a sync is in flight loads only after that sync and its own")
+    func offToOnWaitsForInFlightFlushBeforeLoading() async throws {
+        try await Fixture.withState(panelTabs: true) { state in
+            let log = PanelEventLog()
+            let gate = PanelCallGate()
+            let tab = Fixture.terminalTab(label: "agent")
+            let worktreeID = UUID()
+            state.panelSyncTrigger = { @MainActor params in
+                log.record("sync \(params.worktreeID)")
+                await gate.wait()
+                return Fixture.emptySyncResult
+            }
+            let imported = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 0)
+            let gets = Fixture.collectGets(state, into: log) { _ in
+                PanelGetResult(tabs: [imported], activeTabID: nil)
+            }
+            let off = Fixture.capabilities(panelTabs: false)
+            let on = Fixture.capabilities(panelTabs: true)
+
+            // A sync goes out and stays in flight.
+            state.tabs[worktreeID] = [tab]
+            state.markPanelSyncReady(worktreeIDs: [worktreeID])
+            await Fixture.drainMainActor()
+            try #require(gate.isHolding, "precondition: the first sync is in flight")
+
+            // The flag goes off and comes back on while it is.
+            state.daemonCapabilitiesFetcher = { @MainActor in off }
+            await state.refreshDaemonCapabilities()
+            state.daemonCapabilitiesFetcher = { @MainActor in on }
+            await state.refreshDaemonCapabilities()
+            await Fixture.drainMainActor()
+            #expect(gets.worktreeIDs.isEmpty,
+                    "a load issued now could land before the in-flight sync's imports and drop them")
+
+            gate.release()
+            await Fixture.drainMainActor()
+
+            let expectedEvents: [String] = ["sync \(worktreeID)", "sync \(worktreeID)", "get \(worktreeID)"]
+            #expect(log.events == expectedEvents,
+                    "the load waits for the in-flight sync, and for the sync the flag turning on asked for")
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == imported)
+            #expect(state.panelSyncFlushTask == nil)
+        }
+    }
 }

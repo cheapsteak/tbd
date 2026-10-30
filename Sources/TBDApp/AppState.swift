@@ -864,9 +864,10 @@ final class AppState {
     /// A tab-sync flush is scheduled or running; later changes join it rather
     /// than scheduling another.
     @ObservationIgnored var panelSyncFlushScheduled = false
-    /// A flush is sending. Syncs go out one at a time, so the daemon applies
-    /// a worktree's tab lists in the order the app built them.
-    @ObservationIgnored var panelSyncFlushInFlight = false
+    /// The flush that is sending, if one is. Syncs go out one at a time, so
+    /// the daemon applies a worktree's tab lists in the order the app built
+    /// them; a later flush awaits this one before it starts.
+    @ObservationIgnored var panelSyncFlushTask: Task<Void, Never>?
     /// Worktrees whose tab list is complete enough to sync: both the
     /// terminal-backed and the note-backed tabs have been reconciled against a
     /// fetch since the current subscription. A sync deletes the surface of

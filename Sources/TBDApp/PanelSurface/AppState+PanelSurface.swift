@@ -332,19 +332,31 @@ extension AppState {
     /// tabs as they are when it goes out. A dirty worktree that is not ready
     /// stays dirty until it is.
     ///
-    /// One flush runs at a time and keeps going until nothing ready is dirty,
-    /// so a change made while a sync is in flight is sent after it, never
-    /// beside it: two syncs racing for one worktree could land out of order
-    /// and leave the daemon holding the older tab list. A failure is logged
-    /// and not retried; the next change, or the next subscription, sends the
-    /// worktree again.
+    /// One flush runs at a time, so a change made while a sync is in flight
+    /// is sent after it, never beside it: two syncs racing for one worktree
+    /// could land out of order and leave the daemon holding the older tab
+    /// list. A call made while a flush is sending waits for it, then runs its
+    /// own pass, so when it returns every change made before the call has
+    /// gone out — what a caller that loads surfaces next relies on. A failure
+    /// is logged and not retried; the next change, or the next subscription,
+    /// sends the worktree again.
     func flushPanelTabSync() async {
-        guard !panelSyncFlushInFlight else { return }
-        panelSyncFlushInFlight = true
-        defer {
-            panelSyncFlushInFlight = false
-            panelSyncFlushScheduled = false
+        // The flush clears its own handle as its last step, so once a waiter
+        // resumes the handle names a newer flush or none.
+        while let sending = panelSyncFlushTask {
+            await sending.value
         }
+        let flush = Task { @MainActor [weak self] in
+            await self?.sendDirtyPanelTabSyncs()
+            self?.panelSyncFlushTask = nil
+        }
+        panelSyncFlushTask = flush
+        await flush.value
+    }
+
+    /// The body of one flush: keeps going until nothing ready is dirty.
+    private func sendDirtyPanelTabSyncs() async {
+        defer { panelSyncFlushScheduled = false }
         while panelTabsActive,
               let worktreeID = panelSyncDirty.first(where: { panelSyncReadyWorktrees.contains($0) }) {
             panelSyncDirty.remove(worktreeID)
@@ -377,7 +389,9 @@ extension AppState {
     /// a daemon-rendered tab falls back to legacy at once and nothing further
     /// is sent. Off to on marks every worktree with tabs dirty, syncs the
     /// ready ones, then loads every worktree's surfaces — loading after the
-    /// sync, so a fetch taken before the sync's imports cannot drop them.
+    /// sync, so a fetch taken before the sync's imports cannot drop them. A
+    /// flush still sending from before the flag went off is waited out
+    /// first, by `flushPanelTabSync` itself.
     func panelTabsCapabilityChanged(wasEnabled: Bool) {
         guard panelTabsActive else {
             if !panelSurfaces.isEmpty {
