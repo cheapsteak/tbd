@@ -197,11 +197,11 @@ run_pass() {
 # one is. A green mutant means the assertion above it was not testing that guard.
 # It is written NEXT TO the fixture's faithful copy, because the script resolves
 # `scripts/test.sh` relative to its own directory.
-MUTANT_SEQ=0
 mutant_of() {
   local fix="$1" sed_expr="$2" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$fix/scripts/ci/mutant.$MUTANT_SEQ.sh"
+  # mktemp, not a counter: callers run this inside `$(...)`, where a bump never
+  # reaches the next call, so every mutant would share one file.
+  out="$(mktemp "$fix/scripts/ci/mutant.XXXXXX")"
   sed -E "$sed_expr" "$SCRIPT" > "$out"
   chmod +x "$out"
   echo "$out"

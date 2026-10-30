@@ -304,15 +304,15 @@ run_wrapper() { run_script "$SCRIPT" "$@"; }
 # up their fixtures, but a case that fails early would otherwise leave a mutant
 # behind on every run.
 MUTANT_DIR="$(mktmpd)"
-MUTANT_SEQ=0
 trap 'rm -rf "$MUTANT_DIR"' EXIT
 # A mutant of scripts/test.sh sources its libraries from beside itself, as the
 # real one does, so they have to be beside it here too.
 cp "$HERE/dsym-prune-lib.sh" "$MUTANT_DIR/"
 mutant_of() {
   local source_script="$1" sed_expr="$2" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.sh"
+  # mktemp, not a counter: callers run this inside `$(...)`, where a bump never
+  # reaches the next call, so every mutant would share one file.
+  out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX")"
   sed -E "$sed_expr" "$source_script" > "$out"
   echo "$out"
 }
