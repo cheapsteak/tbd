@@ -107,7 +107,7 @@ private func newWindowBodies(_ recorded: [[String]]) -> [String] {
 private let codexDryRunExecutable = "/opt/tbd-test/bin/codex"
 
 private func containsCodexProfileLaunch(_ body: String) -> Bool {
-    let executable = SystemPromptBuilder.shellEscape(codexDryRunExecutable)
+    let executable = shellEscape(codexDryRunExecutable)
     return body.contains(
         "unset CODEX_CI CODEX_THREAD_ID; \(executable) --profile tbd --dangerously-bypass-approvals-and-sandbox")
         || body.contains(
@@ -268,7 +268,7 @@ func testHandleTerminalRecreateWindowSetsWorktreeID() async throws {
     #expect(replacementCommand.contains(
         "TBD_TERMINAL_INCARNATION_ID='\(incarnationID.uuidString)'"))
     #expect(replacementCommand.contains(
-        "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))"))
+        "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))"))
     #expect(bodies.contains { $0.contains("tail -f /dev/null") },
             "the replacement window must stay inert until its token commits")
 

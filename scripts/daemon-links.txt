@@ -45,12 +45,11 @@ Claude -> Actuation
 Claude -> Base
 Claude -> Database
 Claude -> Keychain
-Claude -> Lifecycle
 Claude -> ModelProfile
 Claude -> Process
 Claude -> SessionMod
 Claude -> Tmux
-Codex -> Lifecycle
+Codex -> Base
 Codex -> Process
 Database -> Base
 Database -> Claude
@@ -76,8 +75,8 @@ Holder -> Base
 Holder -> Database
 Holder -> Process
 Holder -> ProgramStatus
+Hooks -> Base
 Hooks -> Claude
-Hooks -> Lifecycle
 Lifecycle -> Actuation
 Lifecycle -> AskUserQuestion
 Lifecycle -> Base

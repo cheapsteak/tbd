@@ -1115,7 +1115,7 @@ struct PreSessionHookTests {
             .filter { $0.contains("new-window") }
             .compactMap(\.last)
             .first { $0.contains("claude --session-id") })
-        #expect(command.contains(" --plugin-dir \(SystemPromptBuilder.shellEscape(pluginDir))"),
+        #expect(command.contains(" --plugin-dir \(shellEscape(pluginDir))"),
                 "\(command)")
 
         let settingsPath = ClaudeHookOverlay.perSessionOverlayPath(sessionKey: primary.id.uuidString)

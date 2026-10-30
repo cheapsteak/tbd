@@ -125,14 +125,14 @@ enum ClaudeSpawnCommandBuilder {
         // would fail with "settings file not found".
         let settingsFlag: String
         if let p = settingsOverlayPath, fileExists(p) {
-            settingsFlag = " --settings \(SystemPromptBuilder.shellEscape(p))"
+            settingsFlag = " --settings \(shellEscape(p))"
         } else {
             settingsFlag = ""
         }
 
         let ownPluginFlag: String
         if let p = pluginDirPath, fileExists(p) {
-            ownPluginFlag = " --plugin-dir \(SystemPromptBuilder.shellEscape(p))"
+            ownPluginFlag = " --plugin-dir \(shellEscape(p))"
         } else {
             ownPluginFlag = ""
         }
@@ -144,7 +144,7 @@ enum ClaudeSpawnCommandBuilder {
         var seenPluginDirs: Set<String> = pluginDirPath.map { [$0] } ?? []
         for dir in extraPluginDirs where seenPluginDirs.insert(dir).inserted {
             if fileExists(dir) {
-                extraPluginFlag += " --plugin-dir \(SystemPromptBuilder.shellEscape(dir))"
+                extraPluginFlag += " --plugin-dir \(shellEscape(dir))"
             } else {
                 pluginDirLogger.warning("skipping missing plugin folder: \(dir, privacy: .public)")
             }
@@ -157,7 +157,7 @@ enum ClaudeSpawnCommandBuilder {
         // session.
         let nameFlag: String
         if let sanitized = sanitizedSessionName(sessionName) {
-            nameFlag = " --name \(SystemPromptBuilder.shellEscape(sanitized))"
+            nameFlag = " --name \(shellEscape(sanitized))"
         } else {
             nameFlag = ""
         }
@@ -167,9 +167,9 @@ enum ClaudeSpawnCommandBuilder {
         // spawn, so the prompt never has to fit in the command string.
         let promptArgument: String
         if let p = initialPrompt, !p.isEmpty {
-            promptArgument = " \(SystemPromptBuilder.shellEscape(p))"
+            promptArgument = " \(shellEscape(p))"
         } else if let path = initialPromptFilePath, !path.isEmpty {
-            promptArgument = " \"$(cat \(SystemPromptBuilder.shellEscape(path)))\""
+            promptArgument = " \"$(cat \(shellEscape(path)))\""
         } else {
             promptArgument = ""
         }
@@ -183,7 +183,7 @@ enum ClaudeSpawnCommandBuilder {
         } else if let sessionID = freshSessionID {
             var b = "claude --session-id \(sessionID) \(skipPermissionsFlag)\(nameFlag)\(settingsFlag)\(pluginFlag)"
             if let prompt = appendSystemPrompt {
-                b += " --append-system-prompt \(SystemPromptBuilder.shellEscape(prompt))"
+                b += " --append-system-prompt \(shellEscape(prompt))"
             }
             b += promptArgument
             base = b
@@ -258,7 +258,7 @@ enum ClaudeSpawnCommandBuilder {
         let inlineExports = env
             .filter { routingKeys.contains($0.key) }
             .sorted(by: { $0.key < $1.key })
-            .map { "export \($0.key)=\(SystemPromptBuilder.shellEscape($0.value));" }
+            .map { "export \($0.key)=\(shellEscape($0.value));" }
             .joined(separator: " ")
         let command = inlineExports.isEmpty ? base : "\(inlineExports) \(base)"
         return Result(command: command, sensitiveEnv: env)

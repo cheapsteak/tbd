@@ -113,7 +113,7 @@ struct HibernationCoordinatorTests {
         #expect(shellRespawn.contains(
             "TBD_TERMINAL_INCARNATION_ID='\(parkedToken.uuidString)'"))
         #expect(shellRespawn.contains(
-            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))"))
+            "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))"))
 
         let staleApplication = try await db.terminals.applySessionStart(
             id: terminalID,
@@ -1683,7 +1683,7 @@ struct HibernationCoordinatorTests {
             "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
         let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
         #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))") == true)
+            "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))") == true)
 
         let staleHook = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,
@@ -1741,7 +1741,7 @@ struct HibernationCoordinatorTests {
             "TBD_TERMINAL_INCARNATION_ID='\(replacementToken.uuidString)'") == true)
         let matchedCLIPath = try #require(AgentProcessEnvironment.cliPath)
         #expect(recorder.blockedCommand?.last?.contains(
-            "TBD_CLI_PATH=\(SystemPromptBuilder.shellEscape(matchedCLIPath))") == true)
+            "TBD_CLI_PATH=\(shellEscape(matchedCLIPath))") == true)
 
         let gapEvent = try RPCRequest(
             method: RPCMethod.terminalSessionEvent,

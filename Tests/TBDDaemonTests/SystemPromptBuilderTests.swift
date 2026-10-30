@@ -10,31 +10,31 @@ struct SystemPromptBuilderTests {
 
     @Test("shellEscape wraps text in single quotes")
     func shellEscapeSimple() {
-        let result = SystemPromptBuilder.shellEscape("hello world")
+        let result = shellEscape("hello world")
         #expect(result == "'hello world'")
     }
 
     @Test("shellEscape handles single quotes")
     func shellEscapeSingleQuotes() {
-        let result = SystemPromptBuilder.shellEscape("don't mock")
+        let result = shellEscape("don't mock")
         #expect(result == "'don'\\''t mock'")
     }
 
     @Test("shellEscape handles double quotes")
     func shellEscapeDoubleQuotes() {
-        let result = SystemPromptBuilder.shellEscape("use \"pytest\"")
+        let result = shellEscape("use \"pytest\"")
         #expect(result == "'use \"pytest\"'")
     }
 
     @Test("shellEscape handles newlines")
     func shellEscapeNewlines() {
-        let result = SystemPromptBuilder.shellEscape("line1\nline2")
+        let result = shellEscape("line1\nline2")
         #expect(result == "'line1\nline2'")
     }
 
     @Test("shellEscape handles special shell characters")
     func shellEscapeSpecialChars() {
-        let result = SystemPromptBuilder.shellEscape("$HOME `cmd` $(eval)")
+        let result = shellEscape("$HOME `cmd` $(eval)")
         #expect(result == "'$HOME `cmd` $(eval)'")
     }
 

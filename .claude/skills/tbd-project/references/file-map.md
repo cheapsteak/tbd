@@ -61,6 +61,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ListeningSocket.swift` — `bindListeningSocket(at:)`, which creates and binds an owner-only `AF_UNIX` socket, and `SocketServerStartError`; the RPC and mod-channel servers share both
 - `ShadowPeerPermissionClass.swift` — the permission class (`bypass` / `prompting`) a cross-session message attests
 - `RepoTOML.swift` — the name and path of a repository's committed `tbd.toml`
+- `ShellEscape.swift` — `shellEscape(_:)`, which single-quotes a string for a shell command line
 
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
