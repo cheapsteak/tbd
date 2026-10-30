@@ -9,8 +9,8 @@
 # change that makes it, and delete a line in the change that removes its last
 # reference. Keep the lines sorted (LC_ALL=C sort).
 #
-# How to read and fix a failure: Sources/TBDDaemon/CLAUDE.md, "Links between
-# folders".
+# How to read and fix a failure: Sources/TBDDaemon/CLAUDE.md,
+# "Links between folders".
 
 (root) -> Actuation
 (root) -> AskUserQuestion
