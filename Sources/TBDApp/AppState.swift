@@ -873,6 +873,20 @@ final class AppState {
     /// every tab it does not list, so a list holding only one of the two
     /// would delete the other's panels. Cleared on resubscribe.
     @ObservationIgnored var panelSyncReadyWorktrees: Set<UUID> = []
+    /// Bumped by every resubscribe reset. A `panel.get` or `panel.apply` reply,
+    /// or a delta from the subscription the reset replaced, that crosses a
+    /// bump belongs to the old daemon and is discarded: adopting it would
+    /// re-seed the revisions the reset cleared.
+    @ObservationIgnored var panelSurfaceResetGeneration: UInt64 = 0
+    /// `panel.get` calls awaiting their reply. While any is, every delta and
+    /// adopted apply reply records the tab IDs it touched in
+    /// `panelTabsTouchedInFlight`, so a reply can tell what changed under it.
+    @ObservationIgnored var panelLoadsInFlight = 0
+    /// Orders those touches against each load's issue point.
+    @ObservationIgnored var panelTouchSequence: UInt64 = 0
+    /// Tab ID → the `panelTouchSequence` of its latest touch, kept only while a
+    /// load is in flight and emptied when the last one lands.
+    @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
@@ -3002,11 +3016,19 @@ final class AppState {
         // And for panel surfaces: a new daemon may have reset their revisions,
         // and the copy's revision guard would refuse every lower one.
         resetPanelSurfacesForResubscribe()
+        let panelGeneration = panelSurfaceResetGeneration
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
                 Task { @MainActor [weak self] in
-                    self?.handleDelta(delta)
+                    guard let self else { return }
+                    // A panel delta still queued from a subscription that a
+                    // later reset replaced comes from the old daemon.
+                    if case .panelSurfaceChanged = delta,
+                       self.panelSurfaceResetGeneration != panelGeneration {
+                        return
+                    }
+                    self.handleDelta(delta)
                 }
             }
             // Subscription disconnected — nil out so poll loop restarts it

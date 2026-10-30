@@ -141,6 +141,115 @@ struct PanelSurfaceCopyTests {
         }
     }
 
+    @Test("a full get keeps a tab a delta adopted while it was in flight")
+    func getKeepsTabAdoptedFromDeltaInFlight() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let worktreeID = UUID()
+            let keptID = UUID()
+            let droppedID = UUID()
+            let importedID = UUID()
+            state.panelSurfaces = [worktreeID: [
+                keptID: Fixture.surface(tabID: keptID, worktreeID: worktreeID, revision: 1),
+                droppedID: Fixture.surface(tabID: droppedID, worktreeID: worktreeID, revision: 1),
+            ]]
+            let imported = Fixture.surface(tabID: importedID, worktreeID: worktreeID, revision: 0)
+            let keptFresh = Fixture.surface(tabID: keptID, worktreeID: worktreeID, revision: 2)
+            let importDelta = StateDelta.panelSurfaceChanged(
+                Fixture.delta(worktreeID: worktreeID, tabs: [imported]))
+            state.panelGetFetcher = { @MainActor [weak state] _ in
+                // A sync's import lands while the get is in flight; the get's
+                // snapshot was taken before it.
+                state?.handleDelta(importDelta)
+                return PanelGetResult(tabs: [keptFresh], activeTabID: nil)
+            }
+
+            await state.loadPanelSurfaces(worktreeID: worktreeID)
+
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: importedID) == imported,
+                    "a tab adopted from a delta during the get is not the get's to drop")
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: keptID) == keptFresh)
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: droppedID) == nil,
+                    "a tab held when the get was issued, and omitted by it, is still dropped")
+            #expect(state.panelLoadsInFlight == 0)
+            #expect(state.panelTabsTouchedInFlight.isEmpty, "the touch log empties with the last load")
+        }
+    }
+
+    @Test("a full get does not put back a tab a delta removed while it was in flight")
+    func getDoesNotRestoreTabRemovedInFlight() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let worktreeID = UUID()
+            let removedID = UUID()
+            let otherID = UUID()
+            let removed = Fixture.surface(tabID: removedID, worktreeID: worktreeID, revision: 3)
+            state.panelSurfaces = [worktreeID: [
+                removedID: removed,
+                otherID: Fixture.surface(tabID: otherID, worktreeID: worktreeID, revision: 1),
+            ]]
+            let otherFresh = Fixture.surface(tabID: otherID, worktreeID: worktreeID, revision: 2)
+            let removalDelta = StateDelta.panelSurfaceChanged(
+                Fixture.delta(worktreeID: worktreeID, removed: [removedID]))
+            state.panelGetFetcher = { @MainActor [weak state] _ in
+                // The tab is closed while the get is in flight; the get's
+                // snapshot was taken before the close.
+                state?.handleDelta(removalDelta)
+                return PanelGetResult(tabs: [removed, otherFresh], activeTabID: nil)
+            }
+
+            await state.loadPanelSurfaces(worktreeID: worktreeID)
+
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: removedID) == nil,
+                    "a stale listing must not put back a tab removed during the get")
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: otherID) == otherFresh)
+        }
+    }
+
+    @Test("a get reply from before a resubscribe reset is discarded")
+    func resultFromBeforeResetIsDiscarded() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let oldDaemon = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 7)
+            // `tabs` stays empty, so the reset itself starts no reload.
+            state.panelGetFetcher = { @MainActor [weak state] _ in
+                state?.resetPanelSurfacesForResubscribe()
+                return PanelGetResult(tabs: [oldDaemon], activeTabID: nil)
+            }
+
+            await state.loadPanelSurfaces(worktreeID: worktreeID)
+
+            #expect(state.panelSurfaces.isEmpty,
+                    "an old daemon's revision 7 would make the guard refuse the new daemon's lower ones")
+
+            // The new daemon's lower revision is then adopted, not refused.
+            let newDaemon = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 0)
+            _ = Fixture.collectGets(state) { _ in
+                PanelGetResult(tabs: [newDaemon], activeTabID: nil)
+            }
+            await state.loadPanelSurfaces(worktreeID: worktreeID)
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tabID) == newDaemon)
+        }
+    }
+
+    @Test("an apply reply from before a resubscribe reset is not adopted")
+    func applyReplyFromBeforeResetIsDiscarded() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let worktreeID = UUID()
+            let tabID = UUID()
+            let oldDaemon = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 7)
+            state.panelApplyTrigger = { @MainActor [weak state] _ in
+                state?.resetPanelSurfacesForResubscribe()
+                return PanelApplyResult(tab: oldDaemon, replayed: false)
+            }
+
+            let returned = await state.applyPanelOperation(
+                worktreeID: worktreeID, tabID: tabID, .setCollapsed(true))
+
+            #expect(returned == nil)
+            #expect(state.panelSurfaces.isEmpty)
+        }
+    }
+
     @Test("a delta's activeTabID does not move the selected workspace tab")
     func deltaActiveTabIDIgnored() async {
         await Fixture.withState(panelTabs: true) { state in

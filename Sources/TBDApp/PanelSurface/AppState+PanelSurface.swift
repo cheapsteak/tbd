@@ -37,43 +37,106 @@ extension AppState {
     // MARK: - Loading
 
     /// Fetches every surface of one worktree (`panel.get` without a tab) and
-    /// merges it into the copy.
+    /// merges it into the copy as it stands when the reply lands.
     ///
-    /// Which tabs exist follows the fetch: a tab the copy holds and the result
-    /// omits is dropped, whatever its revision. What each listed tab contains
-    /// goes through the revision guard, because a delta can land a newer
-    /// revision while this fetch is in flight, and nothing would correct a
-    /// revert until the next mutation. The result's `activeTabID` is ignored:
-    /// workspace-tab selection is the app's. A failed fetch keeps the copy as
-    /// it was.
+    /// The reply is a snapshot from somewhere inside the await, and deltas keep
+    /// arriving meanwhile, so it is merged rather than assigned:
+    ///
+    /// - **Removal:** a tab the copy held when the get was issued, and the
+    ///   result omits, is dropped whatever its revision.
+    /// - **Content:** a listed tab the copy holds goes through the revision
+    ///   guard, so a delta's newer revision is not reverted.
+    /// - **Touched in flight:** a tab a delta or an apply reply touched while
+    ///   the get was in flight keeps what that touch left. One adopted then is
+    ///   not dropped by the result's omission, and one removed then is not put
+    ///   back by its listing.
+    ///
+    /// The result's `activeTabID` is ignored: workspace-tab selection is the
+    /// app's. A failed fetch keeps the copy as it was, and a reply that crossed
+    /// the flag turning off or a resubscribe reset is discarded.
     func loadPanelSurfaces(worktreeID: UUID) async {
         guard panelTabsActive else { return }
-        let result: PanelGetResult
+        let generation = panelSurfaceResetGeneration
+        let heldAtIssue = Set((panelSurfaces[worktreeID] ?? [:]).keys)
+        let issuedAt = panelTouchSequence
+        panelLoadsInFlight += 1
+        let fetched: PanelGetResult?
         do {
-            result = try await panelGetFetcher(worktreeID)
+            fetched = try await panelGetFetcher(worktreeID)
         } catch {
             logger.error("""
                 panel.get failed for worktree \(worktreeID, privacy: .public): \
                 \(error.localizedDescription, privacy: .public)
                 """)
+            fetched = nil
+        }
+        let touchedInFlight = panelTabsTouched(since: issuedAt)
+        endPanelLoad()
+        guard let result = fetched else { return }
+        // Turning the flag off cleared the copy, and a reset cleared it for a
+        // new daemon; a reply that crossed either must not refill it.
+        guard panelTabsActive, panelSurfaceResetGeneration == generation else {
+            logger.debug("discarded a panel.get reply that crossed a reset or the flag turning off")
             return
         }
-        // The flag can go off while the fetch is in flight; turning it off
-        // cleared the copy, and a late reply must not refill it.
-        guard panelTabsActive else { return }
-        let held = panelSurfaces[worktreeID] ?? [:]
-        var merged: [WorkspaceTabID: WorkspaceTabSurface] = [:]
+        var surfaces = panelSurfaces
+        surfaces[worktreeID] = Self.merge(
+            result, into: surfaces[worktreeID] ?? [:],
+            heldAtIssue: heldAtIssue, touchedInFlight: touchedInFlight)
+        commitPanelSurfaces(surfaces)
+    }
+
+    /// The merge rules `loadPanelSurfaces` documents, on one worktree's entry.
+    /// Returns nil for an entry left empty.
+    private static func merge(
+        _ result: PanelGetResult,
+        into current: [WorkspaceTabID: WorkspaceTabSurface],
+        heldAtIssue: Set<WorkspaceTabID>,
+        touchedInFlight: Set<WorkspaceTabID>
+    ) -> [WorkspaceTabID: WorkspaceTabSurface]? {
+        var merged = current
+        let listed = Set(result.tabs.map(\.id))
+        for tabID in heldAtIssue where !listed.contains(tabID) && !touchedInFlight.contains(tabID) {
+            merged.removeValue(forKey: tabID)
+        }
         for incoming in result.tabs {
-            if let mine = held[incoming.id], incoming.revision < mine.revision {
-                Self.logRefusedRevision(incoming, held: mine.revision)
-                merged[incoming.id] = mine
-            } else {
+            if let mine = current[incoming.id] {
+                guard incoming.revision >= mine.revision else {
+                    logRefusedRevision(incoming, held: mine.revision)
+                    continue
+                }
+                merged[incoming.id] = incoming
+            } else if !touchedInFlight.contains(incoming.id) {
+                // Absent from the copy and untouched since the get was
+                // issued: new to the copy. Absent but touched means a delta
+                // removed it, or moved it to another worktree, in flight.
                 merged[incoming.id] = incoming
             }
         }
-        var surfaces = panelSurfaces
-        surfaces[worktreeID] = merged.isEmpty ? nil : merged
-        commitPanelSurfaces(surfaces)
+        return merged.isEmpty ? nil : merged
+    }
+
+    /// Records that a delta or an apply reply touched these tabs, for any load
+    /// in flight to see. Free when no load is in flight.
+    private func notePanelTabsTouched(_ tabIDs: [WorkspaceTabID]) {
+        guard panelLoadsInFlight > 0, !tabIDs.isEmpty else { return }
+        panelTouchSequence += 1
+        for tabID in tabIDs {
+            panelTabsTouchedInFlight[tabID] = panelTouchSequence
+        }
+    }
+
+    /// The tabs touched after `sequence`, the issue point of one load.
+    private func panelTabsTouched(since sequence: UInt64) -> Set<WorkspaceTabID> {
+        Set(panelTabsTouchedInFlight.compactMap { $0.value > sequence ? $0.key : nil })
+    }
+
+    /// Ends one load's window; the touch log empties when the last one ends.
+    private func endPanelLoad() {
+        panelLoadsInFlight -= 1
+        if panelLoadsInFlight == 0 {
+            panelTabsTouchedInFlight.removeAll()
+        }
     }
 
     // MARK: - Adopting
@@ -82,6 +145,7 @@ extension AppState {
     /// the one held is refused. An equal revision is the same content (the
     /// apply reply and the delta that follows it), so it changes nothing.
     func adoptPanelTab(_ surface: WorkspaceTabSurface) {
+        notePanelTabsTouched([surface.id])
         var surfaces = panelSurfaces
         Self.adopt(surface, into: &surfaces)
         commitPanelSurfaces(surfaces)
@@ -93,6 +157,7 @@ extension AppState {
     /// back the selection the app itself recorded.
     func applyPanelSurfaceDelta(_ delta: PanelSurfaceDelta) {
         guard panelTabsActive else { return }
+        notePanelTabsTouched(delta.removedTabIDs + delta.tabs.map(\.id))
         var surfaces = panelSurfaces
         if var worktreeSurfaces = surfaces[delta.worktreeID] {
             for tabID in delta.removedTabIDs {
@@ -145,14 +210,17 @@ extension AppState {
     /// `panel.apply` (a fresh operation ID, origin `.appUser`, the copy's
     /// revision as `baseRevision`) and adopts the tab the daemon returns.
     ///
-    /// Returns the daemon's tab, or nil when the flag is off or the apply
-    /// failed. A failure is logged, shown as an error toast, and followed by a
-    /// refetch of the worktree, so the copy snaps to the daemon's truth.
+    /// Returns the daemon's tab, or nil when the flag is off, the apply failed,
+    /// or the reply crossed the flag turning off or a resubscribe reset (it is
+    /// then not adopted). A failure is logged, shown as an error toast, and
+    /// followed by a refetch of the worktree, so the copy snaps to the
+    /// daemon's truth.
     @discardableResult
     func applyPanelOperation(
         worktreeID: UUID, tabID: UUID, _ operation: PanelOperation
     ) async -> WorkspaceTabSurface? {
         guard panelTabsActive else { return nil }
+        let generation = panelSurfaceResetGeneration
         let envelope = PanelOperationEnvelope(
             operationID: UUID(),
             worktreeID: worktreeID,
@@ -162,9 +230,13 @@ extension AppState {
             operation: operation)
         do {
             let result = try await panelApplyTrigger(envelope)
-            // Same reason as in `loadPanelSurfaces`: the flag going off
-            // cleared the copy, and a late reply must not refill it.
-            guard panelTabsActive else { return nil }
+            // Same reason as in `loadPanelSurfaces`: the flag going off, or a
+            // reset for a new daemon, cleared the copy, and a reply that
+            // crossed either must not refill it.
+            guard panelTabsActive, panelSurfaceResetGeneration == generation else {
+                logger.debug("discarded a panel.apply reply that crossed a reset or the flag turning off")
+                return nil
+            }
             adoptPanelTab(result.tab)
             return result.tab
         } catch {
@@ -301,11 +373,14 @@ extension AppState {
     /// Called from `startSubscription()`, the sign of a possibly new daemon.
     /// A new daemon may have reset every revision (its migration clears the
     /// surface rows), and the revision guard would then refuse every one, so
-    /// the copy is cleared and refetched. Readiness is cleared too: each
+    /// the copy is cleared and refetched. The reset generation is bumped, so a
+    /// get or apply reply, or a queued delta of the replaced subscription,
+    /// still in flight cannot re-seed old revisions. Readiness is cleared too: each
     /// worktree's tab list is re-checked against fresh fetches before it is
     /// sent, and every worktree with tabs is marked dirty so it is sent once
     /// it is ready.
     func resetPanelSurfacesForResubscribe() {
+        panelSurfaceResetGeneration += 1
         panelSyncReadyWorktrees.removeAll()
         if !panelSurfaces.isEmpty {
             panelSurfaces = [:]
