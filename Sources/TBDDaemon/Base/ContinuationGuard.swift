@@ -3,7 +3,8 @@ import os
 /// One-shot claim used to enforce the single-resume contract of a
 /// `CheckedContinuation` shared across a termination handler, a timeout timer,
 /// and a spawn-failure path. `claim()` returns `true` exactly once.
-/// Package-internal so the git runner reuses it for the same purpose.
+/// Package-internal because two folders use it: `BoundedProcessRunner`
+/// (Process) and `HolderRegistry` (Holder), which is why it sits in Base.
 final class ContinuationGuard: @unchecked Sendable {
     private let lock = OSAllocatedUnfairLock(initialState: false)
     /// Returns true the first time it is called, false thereafter.
