@@ -37,7 +37,7 @@ Every daemon-managed path lives under `~/tbd/` (no dot): `~/tbd/state.db`, `~/tb
 
 ### SPM Package Structure
 
-Five targets in one package — `TBDShared` (library), `TBDDaemonLib` (library), `TBDDaemon` (executable, just main.swift), `TBDCLI` (executable), `TBDApp` (executable). Tests import `TBDDaemonLib`, not `TBDDaemon`.
+Main targets in one package — `TBDKernel` (library, the helper programs' shared contract), `TBDShared` (library), `TBDDaemonLib` (library), `TBDDaemon` (executable, just main.swift), `TBDCLI`, `TBDApp`, `TBDPeerHelper` and `TBDHolder` (executables), plus small support targets. Tests import `TBDDaemonLib`, not `TBDDaemon`.
 
 The `TBDDaemon` and `TBDDaemonLib` targets share `Sources/TBDDaemon/` — `TBDDaemonLib` excludes `main.swift`, `TBDDaemon` only includes `main.swift` and excludes all subdirectories.
 

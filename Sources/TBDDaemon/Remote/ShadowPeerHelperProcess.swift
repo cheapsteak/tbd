@@ -14,7 +14,7 @@ private let shadowPeerLogger = Logger(subsystem: "com.tbd.daemon", category: "sh
 /// what the daemon knows about it, assertable without starting a process. The
 /// flags mirror `PeerHelperOptions.parse` exactly; the two are a contract
 /// between two targets that do not share a type (the helper deliberately links
-/// only `TBDShared`), so the argv shape is pinned by a test on each side.
+/// only `TBDKernel`), so the argv shape is pinned by a test on each side.
 public struct ShadowPeerHelperInvocation: Sendable, Equatable {
     /// The handle the **provider** minted for the remote session this shadow
     /// stands for. Never a socket path, and never persisted past this
