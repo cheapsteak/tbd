@@ -257,8 +257,24 @@ test_name_after_dot_ignored() {
   both_ways "after a dot, uppercase" 1 Widget 'let k = Widget.self' 'let k = Outer.Widget.self'
 }
 
+# `...` is an operator, not a member access: the name after it is a range's
+# bound. `..<` needs no exception, and keeps working.
+test_name_after_a_range_counts() {
+  both_ways "closed range" 1 widgetLimit 'for i in 0...widgetLimit {}' 'for i in 0...limit {}'
+  both_ways "closed range, uppercase" 1 Widget 'for i in 1...Widget.maxAttempts {}' 'for i in 1...Int.max {}'
+  both_ways "half-open range" 1 widgetLimit 'for i in 0..<widgetLimit {}' 'for i in 0..<limit {}'
+}
+
 test_argument_label_ignored() {
   both_ways "argument label" 1 widgetLimit 'takes(widgetLimit)' 'takes(widgetLimit: 1)'
+}
+
+# A name before a `:` is a label only directly in parentheses. In brackets it
+# is a dictionary key, and after a `case` item's comma a pattern: both code.
+test_label_rule_is_for_parentheses() {
+  both_ways "dictionary key" 1 widgetLimit 'let d = [a: 1, widgetLimit: 2]' 'let d = [a: 1, limit: 2]'
+  both_ways "case item" 1 widgetLimit 'switch n { case 1, widgetLimit: break; default: break }' \
+    'switch n { case 1, 2: break; default: break }'
 }
 
 # A label is skipped where it stands; it does not make the name the file's own.
@@ -320,6 +336,20 @@ test_scoped_import_is_not_a_declaration() {
   put "$d" Mid/Reader.swift $'import struct TBDShared.Gizmo\nimport func TBDShared.gizmoCount\nstruct Reader {}'
   run_check "$d"
   assert_rc "a scoped import declares nothing" 0 "$RUN_RC" "$RUN_OUT"
+}
+
+# A `private` belongs to the one declaration it modifies: it does not hide the
+# next declaration on its line, and it still applies from the line above.
+test_privacy_is_per_declaration() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let g = Gizmo()'
+  put "$d" Base/More.swift 'private let seed = 1; struct Gizmo {}'
+  run_check "$d"
+  assert_rc "a declaration after a private one on its line is indexed" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: Gizmo"
+  put "$d" Base/More.swift $'let seed = 1\nprivate\nstruct Gizmo {}'
+  run_check "$d"
+  assert_rc "a private on the line above its keyword is not" 0 "$RUN_RC" "$RUN_OUT"
 }
 
 test_private_declarations_not_indexed() {

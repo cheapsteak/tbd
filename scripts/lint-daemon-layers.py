@@ -390,6 +390,10 @@ def is_identifier(text: str) -> bool:
 TYPE_KEYWORDS = frozenset({"struct", "enum", "class", "actor", "protocol", "extension"})
 NAMED_KEYWORDS = frozenset({"func", "typealias", "let", "var"})
 PRIVATE_MODIFIERS = frozenset({"private", "fileprivate"})
+# Every keyword that starts a declaration, so takes the modifiers before it.
+DECLARATION_KEYWORDS = TYPE_KEYWORDS | NAMED_KEYWORDS | frozenset({
+    "case", "init", "deinit", "subscript", "import", "operator", "precedencegroup", "macro",
+})
 
 # `class` followed by one of these is the `class` modifier, as in
 # `class func` or `class override var`, not a class declaration.
@@ -412,16 +416,19 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
     # and the line it is on.
     stack: list[tuple[str | None, int]] = []
     pending_type: str | None = None
-    private_line = 0  # the line of the last `private` or `fileprivate` modifier
+    # A `private` or `fileprivate` modifier seen since the last declaration
+    # keyword, which the next one takes: modifiers precede their keyword,
+    # on its line or an earlier one.
+    pending_private = False
     count = len(tokens)
 
-    def declare(name: Token, kind: str, keyword: Token) -> None:
+    def declare(name: Token, kind: str, private: bool) -> None:
         declarations.append(Declaration(
             name=name.text,
             kind=kind,
             line=name.line,
             at_file_scope=not stack,
-            private=private_line == keyword.line,
+            private=private,
         ))
 
     for i, token in enumerate(tokens):
@@ -429,29 +436,34 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
         if text == "{":
             stack.append((pending_type, token.line))
             pending_type = None
+            pending_private = False
             continue
         if text == "}":
             if not stack:
                 raise CannotCheck(f'cannot scan {path}:{token.line}: "}}" with no matching "{{"')
             stack.pop()
+            pending_private = False
             continue
         if text in PRIVATE_MODIFIERS:
             # `private(set)` restricts only the setter; the name stays visible.
             if i + 1 >= count or tokens[i + 1].text != "(":
-                private_line = token.line
+                pending_private = True
             continue
-        if stack and stack[-1][0] is None:
+        if text not in DECLARATION_KEYWORDS:
             continue
         # `Foo.Type` is no declaration, and neither is `import struct M.Name`,
         # which brings one declaration in from another module.
         if i and tokens[i - 1].text in (".", "import"):
             continue
         following = tokens[i + 1] if i + 1 < count else None
+        if text == "class" and following is not None and following.text in CLASS_AS_MODIFIER:
+            continue
+        private, pending_private = pending_private, False
+        if stack and stack[-1][0] is None:
+            continue
 
         if text in TYPE_KEYWORDS:
             if following is None or not is_identifier(following.text):
-                continue
-            if text == "class" and following.text in CLASS_AS_MODIFIER:
                 continue
             name = following.text
             if text == "extension":
@@ -459,13 +471,13 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
                 while j + 1 < count and tokens[j].text == "." and is_identifier(tokens[j + 1].text):
                     name += "." + tokens[j + 1].text
                     j += 2
-            declare(Token(name, following.line), text, token)
+            declare(Token(name, following.line), text, private)
             pending_type = text
             continue
 
         if text in NAMED_KEYWORDS and following is not None:
             if is_identifier(following.text):
-                declare(following, text, token)
+                declare(following, text, private)
             elif following.text == "(" and text in ("let", "var"):
                 # A tuple pattern: `let (a, b) = ...` declares both.
                 depth = 0
@@ -478,7 +490,7 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
                         if depth == 0:
                             break
                     elif is_identifier(inner.text):
-                        declare(inner, text, token)
+                        declare(inner, text, private)
             continue
 
         if text == "case" and stack and stack[-1][0] in ("enum", "extension"):
@@ -491,7 +503,7 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
                 if inner.line != token.line:
                     break
                 if depth == 0 and expect_name and is_identifier(inner.text):
-                    declare(inner, "case", token)
+                    declare(inner, "case", private)
                 expect_name = False
                 if inner.text == "(":
                     depth += 1
@@ -624,19 +636,37 @@ def file_references(source: SourceFile, index: dict[str, set[str]]) -> list[Refe
     count = len(tokens)
     seen: set[Reference] = set()
     references: list[Reference] = []
+    # The open brackets, innermost last.
+    brackets: list[str] = []
     for i, token in enumerate(tokens):
-        units = index.get(token.text)
-        if not units or source.unit in units or token.text in own:
+        text = token.text
+        if text in ("(", "[", "{"):
+            brackets.append(text)
+            continue
+        if text in (")", "]", "}"):
+            if brackets:
+                brackets.pop()
+            continue
+        units = index.get(text)
+        if not units or source.unit in units or text in own:
             continue
         before = tokens[i - 1].text if i else ""
-        # After a `.` it names a member of whatever precedes it.
-        if before == ".":
+        # After a `.` it names a member of whatever precedes it. After `...`
+        # it is a range's bound, as in `0...widgetLimit`.
+        if before == "." and not (i >= 2 and tokens[i - 2].text == "."):
             continue
         # `f(widgetLimit: 1)` and `f(a, widgetLimit: 1)`: an argument label.
-        if before in ("(", ",") and _is_local_name(token.text) and i + 1 < count and tokens[i + 1].text == ":":
+        # Only directly in parentheses: in `[a: 1, widgetLimit: 2]` it is a
+        # dictionary key, and in `case 1, widgetLimit:` a pattern.
+        if (
+            before in ("(", ",")
+            and brackets and brackets[-1] == "("
+            and _is_local_name(text)
+            and i + 1 < count and tokens[i + 1].text == ":"
+        ):
             continue
         for unit in sorted(units):
-            reference = Reference(source.path, token.line, token.text, (source.unit, unit))
+            reference = Reference(source.path, token.line, text, (source.unit, unit))
             if reference not in seen:
                 seen.add(reference)
                 references.append(reference)
