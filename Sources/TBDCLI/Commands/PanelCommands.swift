@@ -515,42 +515,57 @@ private func parseUUID(_ raw: String, label: String) throws -> UUID {
     return id
 }
 
-/// The tab an Arrange verb acts on: `--tab` when given, else the worktree's
-/// active tab as an unscoped `panel.get` reports it (the daemon reads
-/// `worktree.activeTabID`, which the app keeps current).
-func resolveTabID(client: SocketClient, worktreeID: UUID, tab: String?) throws -> UUID {
-    try resolveTabID(tab: tab) {
-        let current: PanelGetResult = try client.call(
-            method: RPCMethod.panelGet,
-            params: PanelGetParams(worktreeID: worktreeID),
-            resultType: PanelGetResult.self
-        )
-        return current.activeTabID
-    }
+/// The tab an Arrange verb acts on, and the `panel.get` reply its
+/// `baseRevision` comes from.
+struct PanelTarget {
+    let tabID: UUID
+    let current: PanelGetResult
 }
 
-/// The decision inside `resolveTabID(client:worktreeID:tab:)`, with the
-/// active-tab lookup injected. The lookup runs only when `tab` is nil.
-func resolveTabID(tab: String?, activeTabID: () throws -> UUID?) throws -> UUID {
+/// Resolves the tab an Arrange verb acts on with one `panel.get`, whose reply
+/// the envelope's `baseRevision` is then read from. `get` sends that get,
+/// scoped to the tab it is passed or unscoped for nil.
+///
+/// With `--tab`, the get is scoped to that tab. Without it, the get is
+/// unscoped: its `activeTabID` names the worktree's active tab (the daemon
+/// reads `worktree.activeTabID`, which the app keeps current), and it carries
+/// every surface of the worktree, that tab's among them when it has one.
+func resolvePanelTarget(
+    tab: String?, get: (_ tabID: UUID?) throws -> PanelGetResult
+) throws -> PanelTarget {
     if let tab {
-        return try parseUUID(tab, label: "tab ID")
+        let tabID = try parseUUID(tab, label: "tab ID")
+        return PanelTarget(tabID: tabID, current: try get(tabID))
     }
-    guard let active = try activeTabID() else {
+    let current = try get(nil)
+    guard let active = current.activeTabID else {
         throw CLIError.invalidArgument("no active tab; pass --tab")
     }
-    return active
+    return PanelTarget(tabID: active, current: current)
 }
 
 /// Resolve the worktree and tab, apply `operation` as the agent CLI, and
-/// print the tab it leaves behind. Every Arrange verb's `run()` is this call.
+/// print the tab it leaves behind. Every Arrange verb's `run()` is this call:
+/// one `panel.get` (see `resolvePanelTarget`), then one `panel.apply`.
 private func runPanelOperation(
     worktree: String, tab: String?, json: Bool, operation: PanelOperation
 ) throws {
     let client = SocketClient()
     let worktreeID = try resolveWorktreeArg(worktree, client: client)
-    let tabID = try resolveTabID(client: client, worktreeID: worktreeID, tab: tab)
-    let result = try applyPanelOperation(
-        client: client, worktreeID: worktreeID, tabID: tabID, operation: operation)
+    let target = try resolvePanelTarget(tab: tab) { scopedTabID in
+        try client.call(
+            method: RPCMethod.panelGet,
+            params: PanelGetParams(worktreeID: worktreeID, tabID: scopedTabID),
+            resultType: PanelGetResult.self
+        )
+    }
+    let envelope = panelEnvelope(
+        worktreeID: worktreeID, tabID: target.tabID, current: target.current, operation: operation)
+    let result: PanelApplyResult = try client.call(
+        method: RPCMethod.panelApply,
+        params: PanelApplyParams(envelope: envelope),
+        resultType: PanelApplyResult.self
+    )
     printApplyResult(result, json: json)
 }
 
@@ -567,25 +582,6 @@ func panelEnvelope(
         operationID: operationID, worktreeID: worktreeID, tabID: tabID,
         baseRevision: current.tabs.first(where: { $0.id == tabID })?.revision,
         origin: .agentCLI, operation: operation)
-}
-
-/// Fetch a tab's current revision, then apply an operation against it. The
-/// `baseRevision` fetch-then-apply sequence lives in exactly one place.
-private func applyPanelOperation(
-    client: SocketClient, worktreeID: UUID, tabID: UUID, operation: PanelOperation
-) throws -> PanelApplyResult {
-    let current: PanelGetResult = try client.call(
-        method: RPCMethod.panelGet,
-        params: PanelGetParams(worktreeID: worktreeID, tabID: tabID),
-        resultType: PanelGetResult.self
-    )
-    let envelope = panelEnvelope(
-        worktreeID: worktreeID, tabID: tabID, current: current, operation: operation)
-    return try client.call(
-        method: RPCMethod.panelApply,
-        params: PanelApplyParams(envelope: envelope),
-        resultType: PanelApplyResult.self
-    )
 }
 
 /// Resolve a worktree argument that could be a UUID or a name. Duplicated

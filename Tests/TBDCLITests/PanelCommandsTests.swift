@@ -256,40 +256,94 @@ struct PanelOperationMappingTests {
     }
 }
 
+/// `resolvePanelTarget`: an Arrange verb makes one `panel.get`, scoped to
+/// `--tab` when given and unscoped otherwise, and reads the envelope's
+/// `baseRevision` from that same reply.
 @Suite("tbd panel tab resolution")
 struct PanelTabResolutionTests {
-    @Test func givenTabWinsWithoutAskingForTheActiveTab() throws {
+    private func surface(_ tabID: UUID, revision: UInt64) -> WorkspaceTabSurface {
+        WorkspaceTabSurface(
+            id: tabID, worktreeID: UUID(), primary: .terminal(terminalID: UUID()), revision: revision)
+    }
+
+    @Test func givenTabMakesOneGetScopedToThatTab() throws {
         let tabID = UUID()
-        var asked = false
-        let resolved = try resolveTabID(tab: tabID.uuidString) {
-            asked = true
-            return UUID()
+        var asked: [UUID?] = []
+        let target = try resolvePanelTarget(tab: tabID.uuidString) { scoped in
+            asked.append(scoped)
+            return PanelGetResult(tabs: [surface(tabID, revision: 3)], activeTabID: nil)
         }
-        #expect(resolved == tabID)
-        #expect(!asked)
+        let expected: [UUID?] = [tabID]
+        #expect(asked == expected)
+        #expect(target.tabID == tabID)
+        let envelope = panelEnvelope(
+            worktreeID: UUID(), tabID: target.tabID, current: target.current, operation: .setCollapsed(true))
+        #expect(envelope.baseRevision == 3)
     }
 
-    @Test func invalidGivenTabIsRejected() {
-        #expect(throws: CLIError.self) {
-            _ = try resolveTabID(tab: "not-a-uuid") { UUID() }
+    @Test func invalidGivenTabIsRejectedBeforeAnyGet() {
+        var asked = 0
+        do {
+            _ = try resolvePanelTarget(tab: "not-a-uuid") { _ in
+                asked += 1
+                return PanelGetResult(tabs: [], activeTabID: nil)
+            }
+            Issue.record("expected resolvePanelTarget to throw")
+        } catch {
+            #expect(error is CLIError, "expected CLIError, got \(error)")
         }
+        #expect(asked == 0)
     }
 
-    @Test func missingTabFallsBackToTheActiveTab() throws {
+    /// Without `--tab` the unscoped get both names the active tab and carries
+    /// its surface, so no second, tab-scoped get is needed for the revision.
+    @Test func missingTabMakesOneUnscopedGetAndTakesTheRevisionFromIt() throws {
         let activeTabID = UUID()
-        let resolved = try resolveTabID(tab: nil) { activeTabID }
-        #expect(resolved == activeTabID)
+        let otherTabID = UUID()
+        var asked: [UUID?] = []
+        let target = try resolvePanelTarget(tab: nil) { scoped in
+            asked.append(scoped)
+            return PanelGetResult(
+                tabs: [surface(otherTabID, revision: 9), surface(activeTabID, revision: 4)],
+                activeTabID: activeTabID)
+        }
+        let expected: [UUID?] = [nil]
+        #expect(asked == expected, "one unscoped get, and no tab-scoped one")
+        #expect(target.tabID == activeTabID)
+        let envelope = panelEnvelope(
+            worktreeID: UUID(), tabID: target.tabID, current: target.current, operation: .setCollapsed(true))
+        #expect(envelope.baseRevision == 4, "the active tab's revision, not another tab's")
+    }
+
+    /// With the side panel off, or an active tab the daemon has no surface
+    /// for, the apply still goes out without a base revision, and the daemon's
+    /// refusal names the real reason.
+    @Test func activeTabWithoutASurfaceStillSendsWithoutABaseRevision() throws {
+        let activeTabID = UUID()
+        let target = try resolvePanelTarget(tab: nil) { _ in
+            PanelGetResult(tabs: [surface(UUID(), revision: 2)], activeTabID: activeTabID)
+        }
+        #expect(target.tabID == activeTabID)
+        let envelope = panelEnvelope(
+            worktreeID: UUID(), tabID: target.tabID, current: target.current, operation: .resize(width: 0.4))
+        #expect(envelope.tabID == activeTabID)
+        #expect(envelope.baseRevision == nil)
     }
 
     @Test func missingTabWithNoActiveTabAsksForTab() {
+        var asked = 0
         do {
-            _ = try resolveTabID(tab: nil) { nil }
-            Issue.record("expected resolveTabID to throw")
+            _ = try resolvePanelTarget(tab: nil) { _ in
+                asked += 1
+                return PanelGetResult(tabs: [], activeTabID: nil)
+            }
+            Issue.record("expected resolvePanelTarget to throw")
         } catch let error as CLIError {
             #expect("\(error)" == "no active tab; pass --tab")
         } catch {
             Issue.record("expected CLIError, got \(error)")
         }
+        #expect(asked == 1)
     }
 }
 
