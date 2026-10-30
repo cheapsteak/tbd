@@ -720,30 +720,24 @@ extension AppState {
         } catch {
             logger.error("Failed to archive worktree: \(error)")
             if case .rpcError(let refusal, let code)? = error as? DaemonClientError {
-                switch Self.archiveFailureSurface(
+                let surface = Self.archiveFailureSurface(
                     forErrorCode: code, alreadyForced: force,
-                    alreadyDiscardingUncommitted: discardUncommittedChanges) {
-                case .offerArchiveAnyway:
-                    if confirmArchiveAnyway(refusal: refusal) {
-                        if let flags = Self.archiveRetryFlags(after: .offerArchiveAnyway, force: force) {
-                            await archiveWorktree(
-                                id: id, force: flags.force,
-                                discardUncommittedChanges: flags.discardUncommittedChanges)
-                        }
+                    alreadyDiscardingUncommitted: discardUncommittedChanges)
+                // The user's answer to the offer, or nil when the surface
+                // offers nothing and the plain alert below shows instead.
+                let confirmed: Bool?
+                switch surface {
+                case .offerArchiveAnyway: confirmed = confirmArchiveAnyway(refusal: refusal)
+                case .offerDiscardUncommitted: confirmed = confirmDiscardUncommitted(refusal: refusal)
+                case .plainFailure: confirmed = nil
+                }
+                if let confirmed {
+                    if confirmed, let flags = Self.archiveRetryFlags(after: surface, force: force) {
+                        await archiveWorktree(
+                            id: id, force: flags.force,
+                            discardUncommittedChanges: flags.discardUncommittedChanges)
                     }
                     return
-                case .offerDiscardUncommitted:
-                    if confirmDiscardUncommitted(refusal: refusal) {
-                        if let flags = Self.archiveRetryFlags(
-                            after: .offerDiscardUncommitted, force: force) {
-                            await archiveWorktree(
-                                id: id, force: flags.force,
-                                discardUncommittedChanges: flags.discardUncommittedChanges)
-                        }
-                    }
-                    return
-                case .plainFailure:
-                    break
                 }
             }
             showAlert("Archive failed: \(error)", isError: true)
