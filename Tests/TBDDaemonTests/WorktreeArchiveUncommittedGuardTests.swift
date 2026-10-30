@@ -104,8 +104,14 @@ struct WorktreeArchiveUncommittedGuardTests {
         }
     }
 
-    private static func makeFixture() async throws -> Fixture {
+    /// `beforeWorktree` runs once the repository exists and before the
+    /// worktree is created from its `main`, so what it commits there is on
+    /// the branch the worktree starts from.
+    private static func makeFixture(
+        beforeWorktree: (_ tempDir: URL, _ repoDir: URL) async throws -> Void = { _, _ in }
+    ) async throws -> Fixture {
         let (tempDir, repoDir) = try await createTestRepo()
+        try await beforeWorktree(tempDir, repoDir)
         let db = try TBDDatabase(inMemory: true)
         // A global hooks directory that does not exist, so the only archive
         // hook that can resolve is one a test installs in the worktree.
@@ -200,6 +206,63 @@ struct WorktreeArchiveUncommittedGuardTests {
                 "the refusal did not name the file: \(response.error ?? "no error")")
         #expect(try await f.status() == .active)
         #expect(try String(contentsOfFile: tracked, encoding: .utf8) == "edited\n")
+    }
+
+    /// `status.showUntrackedFiles=no` hides untracked files from a plain
+    /// `git status`, so the guard asks for them explicitly.
+    @Test func anUntrackedFileHiddenByConfigStillRefusesTheArchive() async throws {
+        let f = try await Self.makeFixture()
+        defer { f.cleanUp() }
+        try await shell("git config status.showUntrackedFiles no", at: URL(fileURLWithPath: f.path))
+        try f.writeUntracked("notes.md", "half a thought\n")
+        try #require(await GitManager().isDirty(worktreePath: f.path) == false,
+                     "a plain git status still lists the file, so the setting is not exercised")
+
+        let response = try await f.archive()
+
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.worktreeArchiveUncommitted.rawValue)
+        #expect(response.error?.contains("notes.md") == true,
+                "the refusal did not name the file: \(response.error ?? "no error")")
+        #expect(try await f.status() == .active)
+        let notes = (f.path as NSString).appendingPathComponent("notes.md")
+        #expect(try String(contentsOfFile: notes, encoding: .utf8) == "half a thought\n")
+    }
+
+    /// `ignore = dirty` on a submodule in `.gitmodules` hides edits inside
+    /// its checkout from a plain `git status`, so the guard overrides it.
+    @Test func anEditInsideAnIgnoredSubmoduleStillRefusesTheArchive() async throws {
+        let f = try await Self.makeFixture(beforeWorktree: { tempDir, repoDir in
+            let subRepo = tempDir.appendingPathComponent("subrepo")
+            try FileManager.default.createDirectory(at: subRepo, withIntermediateDirectories: true)
+            try await shell(
+                "git init -q -b main && echo base > file.txt && git add file.txt && "
+                    + "git -c user.email=t@example.com -c user.name=t commit -qm sub",
+                at: subRepo)
+            try await shell(
+                "git -c protocol.file.allow=always submodule add -q '\(subRepo.path)' sub && "
+                    + "git config -f .gitmodules submodule.sub.ignore dirty && "
+                    + "git add .gitmodules && "
+                    + "git -c user.email=t@example.com -c user.name=t commit -qm 'add sub'",
+                at: repoDir)
+        })
+        defer { f.cleanUp() }
+        let worktreeDir = URL(fileURLWithPath: f.path)
+        try await shell(
+            "git -c protocol.file.allow=always submodule update --init -q", at: worktreeDir)
+        let edited = worktreeDir.appendingPathComponent("sub/file.txt").path
+        try "edited\n".write(toFile: edited, atomically: true, encoding: .utf8)
+        try #require(await GitManager().isDirty(worktreePath: f.path) == false,
+                     "a plain git status still lists the submodule, so the setting is not exercised")
+
+        let response = try await f.archive()
+
+        #expect(!response.success)
+        #expect(response.errorCode == RPCErrorCode.worktreeArchiveUncommitted.rawValue)
+        #expect(response.error?.contains(" M sub") == true,
+                "the refusal did not name the submodule: \(response.error ?? "no error")")
+        #expect(try await f.status() == .active)
+        #expect(try String(contentsOfFile: edited, encoding: .utf8) == "edited\n")
     }
 
     @Test func aCleanWorktreeArchives() async throws {

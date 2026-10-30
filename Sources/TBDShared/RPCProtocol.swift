@@ -139,9 +139,10 @@ public enum RPCErrorCode: String, Sendable {
     /// A local worktree's `worktree.archive` was refused because its folder
     /// holds uncommitted changes (tracked edits, or untracked files that are
     /// not ignored), or because `git status` could not show it clean. The
-    /// archive deletes the folder and a revive restores only the branch, so
-    /// nothing changed. The message states the fact alone; the CLI appends its
-    /// `--force` hint and the app offers to archive anyway with
+    /// daemon refused before changing anything, because archiving deletes the
+    /// folder and a revive restores only what is committed on the branch. The
+    /// message states the fact alone; the CLI appends its `--force` hint and
+    /// the app offers to archive anyway with
     /// `WorktreeArchiveParams.discardUncommittedChanges`.
     case worktreeArchiveUncommitted
 }

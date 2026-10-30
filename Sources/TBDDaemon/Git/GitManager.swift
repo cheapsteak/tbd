@@ -1061,12 +1061,16 @@ public struct GitManager: Sendable {
     /// `--untracked-files=normal` is passed explicitly because every caller
     /// asks whether deleting the directory would lose work, and a user's
     /// `status.showUntrackedFiles=no` would otherwise hide untracked files
-    /// from that answer and report a tree holding new files as clean. Ignored
-    /// files stay out either way: build output is not work.
+    /// from that answer and report a tree holding new files as clean.
+    /// `--ignore-submodules=none` is passed for the same reason: a
+    /// `submodule.<name>.ignore` of `dirty` or `all`, often committed in
+    /// `.gitmodules`, would otherwise hide edits inside a submodule's checkout.
+    /// Ignored files stay out either way: build output is not work.
     public func uncommittedStatus(worktreePath: String) async throws -> String {
         try await run(
             arguments: [
                 "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal",
+                "--ignore-submodules=none",
             ],
             at: worktreePath)
     }

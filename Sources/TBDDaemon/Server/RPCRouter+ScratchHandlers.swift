@@ -327,13 +327,15 @@ extension RPCRouter {
         // child rendering nowhere until reconcile nulls the pointer.
         //
         // Unconditional, and deliberately NOT gated on the caller's `force`:
-        // `handleWorktreeArchive` does not forward `force` to
-        // `beginArchiveWorktree` either, so this assertion always runs for a
-        // repo worktree arriving through the same door. `force` bypasses it
-        // only for the in-process cascade flows that call the lifecycle
-        // directly (`repo.remove`), and no cascade reaches a repo-less row.
-        // Honouring `force` here would have made one flag mean opposite things
-        // on the two branches of one RPC.
+        // on the repo branch, `handleWorktreeArchive` passes `force` into
+        // `beginArchiveWorktree`'s `discardUncommittedChanges`, which lifts
+        // the uncommitted-changes guard, and never into that function's own
+        // `force`, so this assertion always runs for a repo worktree arriving
+        // through the same door. `force` bypasses it only for the in-process
+        // cascade flows that call the lifecycle directly (`repo.remove`), and
+        // no cascade reaches a repo-less row. Honouring `force` here would
+        // have made one flag mean opposite things on the two branches of one
+        // RPC.
         try await db.worktrees.assertArchivable(id: worktreeID)
 
         // Same teardown as `scratch.delete`, so the same row: one per call,
