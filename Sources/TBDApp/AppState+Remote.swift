@@ -168,8 +168,9 @@ extension AppState {
         )
 
         let selection = RemoteSessionSelection(provider: delta.provider, sessionID: delta.sessionID)
-        // Currently viewing this session — no unread to record, mirrors the
-        // `visible` guard in `handleNotificationDelta`.
+        // Currently viewing this session — no unread to record, like the
+        // attended-worktree guard in `handleNotificationDelta` (which, unlike
+        // this one, also requires TBD to be the active app).
         guard selectedRemoteSession != selection else { return }
         // Classify from the delta's own `exitCode` first — the attention
         // delta and the `.remoteSessionsChanged` mirror refresh are broadcast

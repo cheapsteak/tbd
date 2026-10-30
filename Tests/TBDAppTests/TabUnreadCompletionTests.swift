@@ -200,10 +200,11 @@ struct TabUnreadCompletionTests {
     // MARK: - Record-before-early-return ordering
 
     /// The recording branch in `handleNotificationDelta` runs BEFORE the
-    /// visible-worktree early-return, so a completion on a background tab of a
-    /// worktree that IS focused/visible still bolds. This pins that load-bearing
-    /// ordering: the worktree is in `visibleWorktreeIDs`, yet the background
-    /// tab's terminal is still recorded.
+    /// attended-worktree early-return, so a completion on a background tab of
+    /// a worktree the user IS looking at still bolds. This pins that
+    /// load-bearing ordering: the app is active and the worktree is in
+    /// `attendedWorktreeIDs`, yet the background tab's terminal is still
+    /// recorded.
     @Test func responseComplete_recordsEvenWhenWorktreeVisible() {
         withState { state in
             let worktreeID = UUID()
@@ -216,9 +217,11 @@ struct TabUnreadCompletionTests {
                 ]
             ]
             state.activeTabIndices = [worktreeID: 0]
-            // Single-selecting makes the worktree visible (in visibleWorktreeIDs).
+            // Single-selecting with the app active makes the worktree attended,
+            // so the handler takes the early return after recording.
+            state.isAppActive = { true }
             state.selectedWorktreeIDs = [worktreeID]
-            #expect(state.visibleWorktreeIDs.contains(worktreeID))
+            #expect(state.attendedWorktreeIDs.contains(worktreeID))
 
             state.handleDelta(makeDelta(worktreeID: worktreeID, terminalID: backgroundTerminal))
 

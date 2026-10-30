@@ -564,11 +564,11 @@ struct DeltaIngestionTests {
 /// notification — response completions, errors, focus pushes — so its cadence
 /// tracks agent output across the whole fleet.
 ///
-/// Both tests keep the delta's worktree VISIBLE (selected), which makes the
-/// handler return at `AppState.swift:2335` before it reaches
-/// `macNotificationManager`. That
-/// is deliberate: driving the full path in a unit test would play a sound and
-/// post a system notification on the developer's machine.
+/// Both tests keep the delta's worktree ATTENDED (selected, with the app
+/// reported active through `isAppActive`), which makes the handler return
+/// before it updates `unreadByWorktree` or reaches `postNotificationBanner`.
+/// That is deliberate: these count the bold alone, and driving the full path
+/// would publish the summary too.
 @MainActor
 @Suite("Notification arrivals")
 struct NotificationDeltaTests {
@@ -581,6 +581,7 @@ struct NotificationDeltaTests {
             let worktreeID = UUID()
             state.worktrees = [repoID: [makeWorktree(id: worktreeID, repoID: repoID)]]
             state.selectedWorktreeIDs = [worktreeID]
+            state.isAppActive = { true }
             let backgroundTerminal = UUID()
 
             let count = countEmissions(of: state) {
@@ -607,6 +608,7 @@ struct NotificationDeltaTests {
             let worktreeID = UUID()
             state.worktrees = [repoID: [makeWorktree(id: worktreeID, repoID: repoID)]]
             state.selectedWorktreeIDs = [worktreeID]
+            state.isAppActive = { true }
             let backgroundTerminal = UUID()
             let delta = NotificationDelta(
                 notificationID: UUID(),

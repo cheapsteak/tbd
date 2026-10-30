@@ -734,6 +734,19 @@ final class AppState {
         return ids
     }
 
+    /// Whether TBD is the frontmost app. Production reads `NSApp.isActive`;
+    /// tests inject a value, because under `swift test` `NSApp` is nil (or,
+    /// once something has touched `NSApplication.shared`, never active).
+    @ObservationIgnored var isAppActive: @MainActor () -> Bool = { NSApp?.isActive ?? false }
+
+    /// Worktree IDs the user is actually looking at: `visibleWorktreeIDs`
+    /// while TBD is active, and none while it is in the background. A selected
+    /// or pinned worktree is not being watched while the user is in another
+    /// app, so its notifications must still post a banner and stay unread.
+    var attendedWorktreeIDs: Set<UUID> {
+        isAppActive() ? visibleWorktreeIDs : []
+    }
+
     /// Worktree IDs with at least one terminal currently in the `.working`
     /// activity state (an agent is actively running). These must not have their
     /// view trees torn down by keep-alive eviction — unmounting kills the
@@ -2477,6 +2490,20 @@ final class AppState {
     @ObservationIgnored private(set) var holderClaimSweepUnsupported = false
     @ObservationIgnored private var subscriptionTask: Task<Void, Never>?
     let macNotificationManager = MacNotificationManager()
+    /// How `handleNotificationDelta` posts a macOS banner, given the delta and
+    /// the worktree's resolved display name — injectable because
+    /// `postIfEnabled` returns early on the unbundled test executable, so tests
+    /// replace this with a recorder to observe which arrivals post.
+    @ObservationIgnored lazy var postNotificationBanner: @MainActor (NotificationDelta, String?) -> Void =
+        { [macNotificationManager] notification, worktreeName in
+            macNotificationManager.postIfEnabled(
+                worktreeID: notification.worktreeID,
+                message: notification.message,
+                worktreeName: worktreeName,
+                type: notification.type,
+                terminalID: notification.terminalID
+            )
+        }
 
     private static let layoutsKey = "com.tbd.app.layouts"
     private static let paneHistoriesKey = "com.tbd.app.paneHistories"
@@ -3670,16 +3697,17 @@ final class AppState {
         // Record a background-tab arrival so its tab label bolds. Fires for any
         // terminal-stamped delta (any type — response completions, errors, focus
         // pushes, etc.), as long as it isn't the tab the user is already looking
-        // at. Done BEFORE the visible-worktree early-return because a worktree
-        // can be "visible" (selected) while the stamped terminal lives on a
-        // background tab.
+        // at. Done BEFORE the attended-worktree early-return because a worktree
+        // can be attended (selected while TBD is active) while the stamped
+        // terminal lives on a background tab.
         if let tid = notification.terminalID,
            !isActiveTabTerminal(tid, inFocusedWorktree: notification.worktreeID) {
             unreadTerminals.insert(tid)
         }
 
-        let visible = visibleWorktreeIDs
-        guard !visible.contains(notification.worktreeID) else { return }
+        // Only a worktree the user is actually looking at skips the summary
+        // and the banner; a visible one does not while TBD is in the background.
+        guard !attendedWorktreeIDs.contains(notification.worktreeID) else { return }
 
         // Update local unread summary state. The delta doesn't carry a
         // timestamp so we use "now" — close enough for the jump menu's
@@ -3700,14 +3728,11 @@ final class AppState {
 
         // Post the macOS notification. Its sound rides on the notification,
         // so Focus and Do Not Disturb silence both together.
-        macNotificationManager.postIfEnabled(
-            worktreeID: notification.worktreeID,
-            message: notification.message,
+        postNotificationBanner(
+            notification,
             // Resolve the name here (scratch-aware) instead of handing over
             // the whole materialized allWorktrees array for one lookup.
-            worktreeName: findWorktree(id: notification.worktreeID)?.displayName,
-            type: notification.type,
-            terminalID: notification.terminalID
+            findWorktree(id: notification.worktreeID)?.displayName
         )
     }
 
@@ -4553,16 +4578,17 @@ final class AppState {
     }
 
     /// Refresh unread notifications from the daemon.
-    /// Notifications for currently visible worktrees (selected or pinned) are
-    /// automatically marked as read so the badge never appears while the user
-    /// is looking at the terminal.
+    /// While TBD is active, notifications for currently visible worktrees
+    /// (selected or pinned) are automatically marked as read so the badge
+    /// never appears while the user is looking at the terminal. While it is in
+    /// the background nothing is attended, so every unread stays unread.
     func refreshNotifications() async {
         do {
             let fetched = try await daemonClient.listNotifications()
 
             // Auto-mark-as-read for worktrees the user is currently looking at
-            let visible = visibleWorktreeIDs
-            let toMarkRead = Self.worktreeIDsToAutoMarkRead(unreadSummaries: fetched, visible: visible)
+            let attended = attendedWorktreeIDs
+            let toMarkRead = Self.worktreeIDsToAutoMarkRead(unreadSummaries: fetched, visible: attended)
             for worktreeID in toMarkRead {
                 do {
                     try await daemonClient.markNotificationsRead(worktreeID: worktreeID)
@@ -4571,8 +4597,8 @@ final class AppState {
                 }
             }
 
-            // Only include notifications for non-visible worktrees in UI state
-            let filtered = fetched.filter { !visible.contains($0.key) }
+            // Only include notifications for unattended worktrees in UI state
+            let filtered = fetched.filter { !attended.contains($0.key) }
             if filtered != unreadByWorktree {
                 unreadByWorktree = filtered
             }
@@ -4584,14 +4610,16 @@ final class AppState {
 
     /// Pure mirror of `refreshNotifications`' auto-mark-read reconcile: a
     /// `notifications.markRead` RPC is due only for worktrees that BOTH have
-    /// unread rows (present in the daemon's unread-only summary) AND are
-    /// currently visible. Keying off the fetched summary is load-bearing in
-    /// two directions: idle poll ticks (no unread anywhere) fire zero RPCs,
-    /// and a notification arriving while its worktree is already visible is
-    /// still marked read on the next tick. A guard on `unreadByWorktree`
-    /// would break the latter — it excludes visible worktrees by
-    /// construction, so an arrive-while-visible notification would never
-    /// qualify and would resurface as unread once the worktree left view.
+    /// unread rows (present in the daemon's unread-only summary) AND are in
+    /// `visible` — which the caller passes as `attendedWorktreeIDs`, the
+    /// worktrees visible while TBD is active. Keying off the fetched summary is
+    /// load-bearing in two directions: idle poll ticks (no unread anywhere)
+    /// fire zero RPCs, and a notification arriving while its worktree is
+    /// already visible is still marked read on the next tick. A guard on
+    /// `unreadByWorktree` would break the latter — it excludes attended
+    /// worktrees by construction, so an arrive-while-visible notification
+    /// would never qualify and would resurface as unread once the worktree
+    /// left view.
     nonisolated static func worktreeIDsToAutoMarkRead(
         unreadSummaries: [UUID: UnreadSummary],
         visible: Set<UUID>
