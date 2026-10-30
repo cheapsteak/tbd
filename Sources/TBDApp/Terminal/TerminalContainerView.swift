@@ -271,6 +271,16 @@ struct SingleWorktreeView: View {
                       AppState.shouldPopulateHistoryForEmptyTabs(worktree: worktree) else { return }
                 await appState.fetchSessions(worktreeID: worktreeID)
             }
+            .task(id: PanelSurfaceLoadKey(
+                worktreeID: worktreeID, tabID: activeTab?.id, active: appState.panelTabsActive
+            )) {
+                // Fill the app's copy of this worktree's panel surfaces, so the
+                // active tab can render from the daemon. Deltas keep it current
+                // after that; this load is the backstop for a tab the copy
+                // does not hold yet. Inert while `panel_tabs_enabled` is off.
+                guard appState.panelTabsActive else { return }
+                await appState.loadPanelSurfaces(worktreeID: worktreeID)
+            }
         } else {
             Text("Worktree not found")
                 .foregroundStyle(.secondary)
@@ -286,6 +296,13 @@ struct SingleWorktreeView: View {
     private func layoutContent(worktree: LocalWorktree?) -> some View {
         if appState.historyActiveWorktrees.contains(worktreeID) {
             HistoryPaneView(worktreeID: worktreeID)
+        } else if let tab = activeTab, let worktree,
+                  case .daemon(let surface) = appState.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) {
+            // The daemon-owned surface: only with `panel_tabs_enabled` on and
+            // this tab in the app's copy. Every other case falls through to
+            // the legacy branch below, unchanged.
+            PanelSurfaceWorkspaceView(surface: surface, worktree: worktree)
+                .id(tab.id) // Force new view hierarchy when switching tabs
         } else if let tab = activeTab, let worktree {
             let layoutBinding = Binding<LayoutNode>(
                 get: { appState.layouts[tab.id] ?? .pane(tab.content) },

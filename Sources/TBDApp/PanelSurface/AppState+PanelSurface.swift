@@ -19,6 +19,15 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "panelSurface")
 /// A worktree → tab → surface map, the shape of `AppState.panelSurfaces`.
 typealias PanelSurfaceCopy = [UUID: [WorkspaceTabID: WorkspaceTabSurface]]
 
+/// Which renderer draws one workspace tab (panel tabs spec, "The render
+/// branch").
+enum WorkspaceRenderPath: Equatable {
+    /// `SplitLayoutView` over the app-side `LayoutNode` tree, unchanged.
+    case legacy
+    /// `PanelSurfaceWorkspaceView` over this surface from the app's copy.
+    case daemon(WorkspaceTabSurface)
+}
+
 extension AppState {
 
     // MARK: - The switch
@@ -32,6 +41,16 @@ extension AppState {
     /// The copy's surface for one workspace tab, or nil when it holds none.
     func panelSurface(worktreeID: UUID, tabID: UUID) -> WorkspaceTabSurface? {
         panelSurfaces[worktreeID]?[tabID]
+    }
+
+    /// The renderer for one workspace tab. The daemon path needs both the flag
+    /// and a surface in the copy: the copy fills asynchronously, so a tab with
+    /// nothing loaded yet renders legacy rather than blank.
+    func workspaceRenderPath(worktreeID: UUID, tabID: UUID) -> WorkspaceRenderPath {
+        guard panelTabsActive,
+              let surface = panelSurface(worktreeID: worktreeID, tabID: tabID)
+        else { return .legacy }
+        return .daemon(surface)
     }
 
     // MARK: - Loading
@@ -248,6 +267,15 @@ extension AppState {
             showErrorToast(error.localizedDescription)
             await loadPanelSurfaces(worktreeID: worktreeID)
             return nil
+        }
+    }
+
+    /// `applyPanelOperation` for a gesture handler, which cannot await: the
+    /// operation goes out on a main-actor task, and the reply is adopted
+    /// there.
+    func sendPanelOperation(worktreeID: UUID, tabID: UUID, _ operation: PanelOperation) {
+        Task { @MainActor [weak self] in
+            _ = await self?.applyPanelOperation(worktreeID: worktreeID, tabID: tabID, operation)
         }
     }
 

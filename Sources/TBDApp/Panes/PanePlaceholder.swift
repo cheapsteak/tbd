@@ -546,12 +546,15 @@ struct PanePlaceholder: View {
 
 // MARK: - Header File Context Menu
 
-private extension View {
+extension View {
     /// Attach the pane-header file context menu (Copy Path / Reveal in Finder /
     /// Open With) only when the pane has an associated file — other panes get no
     /// contextMenu at all so right-click is a true no-op rather than an empty
     /// menu. `transcriptPath` supplies the `.jsonl` path for live-transcript
     /// panes (resolving it needs the terminal model, so the caller passes it in).
+    ///
+    /// Also hung on a side-region tab (`SideRegionView`), whose leaf hides
+    /// the title this menu otherwise sits on.
     @ViewBuilder
     func headerFileContextMenu(for content: PaneContent, transcriptPath: String?) -> some View {
         if let target = headerMenuTarget(for: content, transcriptPath: transcriptPath) {

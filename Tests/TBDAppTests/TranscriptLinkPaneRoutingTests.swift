@@ -74,6 +74,23 @@ struct TranscriptLinkPaneRoutingTests {
         #expect(destination == .openInBrowser(url))
     }
 
+    // On the daemon panel surface there is no layout to route into: a file is
+    // one `open` that the daemon's reuse rule places, and the new-panel
+    // modifier rides along as `newPanel`.
+    @Test func daemonDestination_forAFile_opensAPanel() {
+        let reuse = TranscriptLinkDestination.daemon(.file("/w/a.md"), newPanel: false)
+        let fresh = TranscriptLinkDestination.daemon(.file("/w/a.md"), newPanel: true)
+        let file = PanelContent.file(FileReference(path: "/w/a.md"))
+        #expect(reuse == .apply(.open(content: file, newPanel: false)))
+        #expect(fresh == .apply(.open(content: file, newPanel: true)))
+    }
+
+    @Test func daemonDestination_forAURL_leavesTheApp() {
+        let url = URL(string: "https://example.com/x")!
+        #expect(TranscriptLinkDestination.daemon(.web(url), newPanel: false) == .openInBrowser(url))
+        #expect(TranscriptLinkDestination.daemon(.web(url), newPanel: true) == .openInBrowser(url))
+    }
+
     // History REVEALS. Opening would execute a resolved path that happens to be
     // a shell script, and transcript text is agent-authored.
     @Test func historyDestination_forAFile_revealsInFinder() {

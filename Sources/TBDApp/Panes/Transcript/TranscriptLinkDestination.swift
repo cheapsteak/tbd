@@ -36,6 +36,24 @@ enum TranscriptLinkDestination {
         }
     }
 
+    /// The live pane's decision on the daemon panel surface (panel tabs spec).
+    enum DaemonLinkAction: Equatable {
+        case apply(PanelOperation)
+        case openInBrowser(URL)
+    }
+
+    /// A file becomes one `open` that the daemon's reuse rule places, so the
+    /// decision needs no layout; a URL leaves the app exactly as the legacy
+    /// pane's does. `newPanel` is the new-panel modifier, read by the caller.
+    static func daemon(_ target: TranscriptLinkTarget, newPanel: Bool) -> DaemonLinkAction {
+        switch target {
+        case .file(let path):
+            return .apply(.open(content: .file(FileReference(path: path)), newPanel: newPanel))
+        case .web(let url):
+            return .openInBrowser(url)
+        }
+    }
+
     static func history(_ target: TranscriptLinkTarget) -> History {
         switch target {
         case .file(let path): return .revealInFinder(path)
