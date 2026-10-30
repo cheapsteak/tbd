@@ -110,16 +110,17 @@ struct ProgramStatusParserTests {
                 worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
                 label: label, kind: kind, transport: .holder)
         }
+        // The app follows isCodexTerminal / isClaudeTab, the identity TBD
+        // launches a row by: a Codex label or kind makes it Codex.
         #expect(ProgramStatusProtocol.expectedApp(for: row(.claude, nil)) == "claude-code")
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.claude, TerminalLabel.codex)) == "codex")
         #expect(ProgramStatusProtocol.expectedApp(for: row(.codex, nil)) == "codex")
         #expect(ProgramStatusProtocol.expectedApp(for: row(.shell, nil)) == nil)
+        #expect(ProgramStatusProtocol.expectedApp(for: row(.shell, TerminalLabel.codex)) == "codex")
         // A row written before kinds were recorded: Claude unless its label
         // says Codex.
         #expect(ProgramStatusProtocol.expectedApp(for: row(nil, nil)) == "claude-code")
         #expect(ProgramStatusProtocol.expectedApp(for: row(nil, TerminalLabel.codex)) == "codex")
-        // An explicit kind wins over the label: the kind is what was launched.
-        #expect(ProgramStatusProtocol.expectedApp(for: row(.claude, TerminalLabel.codex)) == "claude-code")
-        #expect(ProgramStatusProtocol.expectedApp(for: row(.shell, TerminalLabel.codex)) == nil)
         #expect(ProgramStatusProtocol.knownApps == ["claude-code", "codex"])
     }
 

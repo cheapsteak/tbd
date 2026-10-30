@@ -60,8 +60,7 @@ enum ProgramStatusRowPresentation {
     /// agent's name.
     static func tooltipLabel(for terminal: TBDShared.Terminal) -> String {
         if let label = terminal.label, !label.isEmpty { return label }
-        return ProgramStatusProtocol.expectedApp(for: terminal) == ProgramStatusProtocol.codexApp
-            ? TerminalLabel.codex : "Claude"
+        return terminal.isCodexTerminal ? TerminalLabel.codex : "Claude"
     }
 
     /// The tooltip text, one block per OSC-authoritative terminal:
