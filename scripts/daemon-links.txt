@@ -52,7 +52,6 @@ Claude -> Tmux
 Codex -> Base
 Codex -> Process
 Database -> Base
-Database -> Claude
 Database -> Lifecycle
 Database -> PR
 Database -> Remote
