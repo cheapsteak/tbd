@@ -48,7 +48,7 @@ enum ReducerFixture {
     }
 }
 
-private typealias F = ReducerFixture
+private typealias Fixture = ReducerFixture
 
 /// One path through `open`'s reuse rule (spec "Operations").
 struct OpenReuseRow: Sendable, CustomTestStringConvertible {

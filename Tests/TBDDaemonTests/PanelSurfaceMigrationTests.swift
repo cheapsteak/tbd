@@ -11,11 +11,11 @@ struct PanelSurfaceMigrationTests {
     /// covers them.
     @Test func v59CreatesTables() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.writerForTests.read { dbConn in
-            #expect(try dbConn.tableExists("workspace_tab_surface"))
-            #expect(try dbConn.tableExists("panel_history"))
-            #expect(try dbConn.tableExists("panel_operation_receipt"))
+        let exists = try await db.writerForTests.read { dbConn in
+            try ["workspace_tab_surface", "panel_history", "panel_operation_receipt"]
+                .map { try dbConn.tableExists($0) }
         }
+        #expect(exists == [true, true, true])
     }
 
     @Test func panelSurfaceStoreIsEmptyForFreshWorktree() async throws {
