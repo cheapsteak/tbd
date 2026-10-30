@@ -284,6 +284,22 @@ test_private_extension_still_counts() {
   both_ways "private extension" 1 Widget 'private extension Widget {}' 'private extension Int {}'
 }
 
+# `import struct M.Name` imports one declaration from another module; it
+# declares nothing here. Read as a declaration of `M`, it would turn every
+# other unit's `import M` into a link.
+test_scoped_import_is_not_a_declaration() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift $'import TBDShared\nlet r = 1'
+  put "$d" Mid/Reader.swift 'struct TBDShared {}'
+  run_check "$d"
+  assert_rc "a declaration of the module's name is indexed" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and the import names it" "$RUN_OUT" \
+    "Sources/TBDDaemon/Top/User.swift:1: Top -> Mid is a new link: TBDShared is declared in Mid"
+  put "$d" Mid/Reader.swift $'import struct TBDShared.Gizmo\nimport func TBDShared.gizmoCount\nstruct Reader {}'
+  run_check "$d"
+  assert_rc "a scoped import declares nothing" 0 "$RUN_RC" "$RUN_OUT"
+}
+
 test_private_declarations_not_indexed() {
   local d; d="$(mkfix)"
   put "$d" Top/User.swift 'let x = baseSecret()'

@@ -421,7 +421,9 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
             continue
         if stack and stack[-1][0] is None:
             continue
-        if i and tokens[i - 1].text == ".":
+        # `Foo.Type` is no declaration, and neither is `import struct M.Name`,
+        # which brings one declaration in from another module.
+        if i and tokens[i - 1].text in (".", "import"):
             continue
         following = tokens[i + 1] if i + 1 < count else None
 
@@ -525,7 +527,7 @@ def local_names(tokens: list[Token]) -> set[str]:
                         break
                 elif _is_local_name(inner.text):
                     names.add(inner.text)
-        elif text in PARAMETER_OWNERS and not (i and tokens[i - 1].text == "."):
+        elif text in PARAMETER_OWNERS and not (i and tokens[i - 1].text in (".", "import")):
             # `func f<T>(_ a: Int, with b: [K: V] = [:])`: the name before
             # each `:` at depth 1 of the first parenthesised list.
             j = i + 1
