@@ -2,84 +2,168 @@ import Foundation
 import Testing
 @testable import TBDShared
 
+/// Each violation test builds a surface that breaks exactly one rule and
+/// expects exactly that one violation back, so a validator that over-reports
+/// fails as surely as one that under-reports.
 @Suite("PanelSurfaceValidator")
 struct PanelSurfaceValidatorTests {
-    private func surface(layout: PanelLayoutNode) -> WorkspaceTabSurface {
+    private static let site = URL(string: "https://example.com/docs")!
+
+    private func file(_ path: String) -> PanelContent {
+        .file(FileReference(path: path))
+    }
+
+    private func surface(_ side: SideRegion) -> WorkspaceTabSurface {
         WorkspaceTabSurface(id: UUID(), worktreeID: UUID(),
-                            primary: .terminal(terminalID: UUID()),
-                            layout: layout, revision: 0)
+                            primary: .terminal(terminalID: UUID()), side: side)
     }
-    private func slot(_ path: String, id: PanelID = UUID()) -> PanelLayoutNode {
-        .panel(PanelSlot(id: id, content: .file(FileReference(path: path))))
+
+    /// A region that satisfies every rule over `panels`: the first panel is
+    /// active and `recency` is the panel order.
+    private func region(_ panels: [ViewerPanel],
+                        width: Double = SideRegion.defaultWidth) -> SideRegion {
+        SideRegion(panels: panels, activePanelID: panels.first?.id,
+                   recency: panels.map(\.id), collapsed: false, width: width)
     }
+
+    private func violations(_ side: SideRegion) -> [PanelSurfaceViolation] {
+        PanelSurfaceValidator.violations(in: surface(side))
+    }
+
+    // MARK: - Valid surfaces
 
     @Test func validSurfaceHasNoViolations() {
-        let s = surface(layout: .split(SplitNode(
-            id: UUID(), direction: .horizontal,
-            children: [.primary, slot("/a")], ratios: [0.6, 0.4])))
-        #expect(PanelSurfaceValidator.violations(in: s).isEmpty)
+        var aHistory = PanelHistory.seeded(with: file("/old.swift"))
+        aHistory.recordReplacement(outgoing: file("/old.swift"), incoming: file("/a.swift"))
+        let a = ViewerPanel(id: UUID(), history: aHistory)
+        let b = ViewerPanel(id: UUID(), content: file("/b.md"))
+        let transcript = ViewerPanel(id: UUID(), content: .transcript(terminalID: UUID()))
+        let side = SideRegion(
+            panels: [a, b, transcript], activePanelID: transcript.id,
+            recency: [transcript.id, a.id, b.id], collapsed: false, width: 0.5)
+        #expect(violations(side) == [])
     }
 
-    @Test func missingAndDuplicatePrimaryAreViolations() {
-        #expect(PanelSurfaceValidator.violations(in: surface(layout: slot("/a")))
-            .contains(.primaryCount(0)))
-        let two = surface(layout: .split(SplitNode(
-            id: UUID(), direction: .vertical,
-            children: [.primary, .primary], ratios: [0.5, 0.5])))
-        #expect(PanelSurfaceValidator.violations(in: two).contains(.primaryCount(2)))
+    @Test func emptyRegionIsValid() {
+        #expect(violations(.empty) == [])
     }
 
-    @Test func duplicatePanelIDsAreCaught() {
-        let dup = UUID()
-        let s = surface(layout: .split(SplitNode(
-            id: UUID(), direction: .horizontal,
-            children: [.primary, slot("/a", id: dup), slot("/b", id: dup)],
-            ratios: [0.4, 0.3, 0.3])))
-        #expect(PanelSurfaceValidator.violations(in: s).contains(.duplicatePanelID(dup)))
+    @Test func widthBoundsAreInclusive() {
+        let panel = ViewerPanel(id: UUID(), content: file("/a"))
+        let bounds = [SideRegion.widthRange.lowerBound, SideRegion.widthRange.upperBound]
+        for width in bounds {
+            #expect(violations(region([panel], width: width)) == [], "width \(width)")
+        }
     }
 
-    @Test func duplicateSplitIDsAreCaught() {
-        let dup = UUID()
-        let inner = PanelLayoutNode.split(SplitNode(
-            id: dup, direction: .vertical, children: [slot("/a"), slot("/b")],
-            ratios: [0.5, 0.5]))
-        let s = surface(layout: .split(SplitNode(
-            id: dup, direction: .horizontal,
-            children: [.primary, inner], ratios: [0.5, 0.5])))
-        #expect(PanelSurfaceValidator.violations(in: s).contains(.duplicateSplitID(dup)))
+    // MARK: - One test per violation
+
+    @Test func duplicatePanelIDIsAViolation() {
+        let id = UUID()
+        let side = SideRegion(
+            panels: [ViewerPanel(id: id, content: file("/a")),
+                     ViewerPanel(id: id, content: file("/b"))],
+            activePanelID: id, recency: [id, id])
+        #expect(violations(side) == [.duplicatePanelID(id)])
     }
 
-    @Test func degenerateAndBadRatioSplitsAreCaught() {
-        let empty = UUID(), single = UUID(), mismatch = UUID(), tiny = UUID(), badSum = UUID()
-        #expect(PanelSurfaceValidator.violations(in: surface(layout: .split(SplitNode(
-            id: empty, direction: .horizontal, children: [], ratios: []))))
-            .contains(.degenerateSplit(empty)))
-        #expect(PanelSurfaceValidator.violations(in: surface(layout: .split(SplitNode(
-            id: single, direction: .horizontal, children: [.primary], ratios: [1.0]))))
-            .contains(.degenerateSplit(single)))
-        #expect(PanelSurfaceValidator.violations(in: surface(layout: .split(SplitNode(
-            id: mismatch, direction: .horizontal, children: [.primary, slot("/a")],
-            ratios: [1.0]))))
-            .contains(.ratioCountMismatch(mismatch)))
-        #expect(PanelSurfaceValidator.violations(in: surface(layout: .split(SplitNode(
-            id: tiny, direction: .horizontal, children: [.primary, slot("/a")],
-            ratios: [0.95, 0.05]))))
-            .contains(.ratioBelowMinimum(tiny)))
-        #expect(PanelSurfaceValidator.violations(in: surface(layout: .split(SplitNode(
-            id: badSum, direction: .horizontal, children: [.primary, slot("/a")],
-            ratios: [0.3, 0.3]))))
-            .contains(.ratioSumInvalid(badSum)))
+    @Test func activePanelMissingIsAViolation() {
+        let panel = ViewerPanel(id: UUID(), content: file("/a"))
+        let stray = UUID()
+        let side = SideRegion(panels: [panel], activePanelID: stray, recency: [panel.id])
+        #expect(violations(side) == [.activePanelMissing(stray)])
     }
 
-    @Test func nestedSplitViolationsAreCaught() {
-        let outer = UUID(), inner = UUID()
-        let s = surface(layout: .split(SplitNode(
-            id: outer, direction: .horizontal,
-            children: [.primary, .split(SplitNode(
-                id: inner, direction: .vertical,
-                children: [slot("/a"), slot("/b")], ratios: [0.95, 0.05]))],
-            ratios: [0.5, 0.5])))
-        let violations = PanelSurfaceValidator.violations(in: s)
-        #expect(violations == [.ratioBelowMinimum(inner)])
+    @Test func activePanelWithoutPanelsIsAViolation() {
+        let side = SideRegion(panels: [], activePanelID: UUID(), recency: [])
+        #expect(violations(side) == [.activePanelWithoutPanels])
+    }
+
+    @Test func noActivePanelIsAViolation() {
+        let panel = ViewerPanel(id: UUID(), content: file("/a"))
+        let side = SideRegion(panels: [panel], activePanelID: nil, recency: [panel.id])
+        #expect(violations(side) == [.noActivePanel])
+    }
+
+    @Test func recencyMismatchIsAViolation() {
+        let a = ViewerPanel(id: UUID(), content: file("/a"))
+        let b = ViewerPanel(id: UUID(), content: file("/b"))
+        let recencies: [String: [PanelID]] = [
+            "missing an ID": [a.id],
+            "an ID with no panel": [a.id, b.id, UUID()],
+            "a repeated ID": [a.id, a.id],
+            "an ID swapped for a stray": [a.id, UUID()],
+        ]
+        for (label, recency) in recencies {
+            let side = SideRegion(panels: [a, b], activePanelID: a.id, recency: recency)
+            #expect(violations(side) == [.recencyMismatch], "recency \(label)")
+        }
+    }
+
+    @Test func malformedHistoryIsAViolation() {
+        let outOfRange = ViewerPanel(
+            id: UUID(), history: PanelHistory(entries: [file("/a")], cursor: 1))
+        let empty = ViewerPanel(id: UUID(), history: PanelHistory())
+        for panel in [outOfRange, empty] {
+            #expect(violations(region([panel])) == [.malformedHistory(panel.id)])
+        }
+    }
+
+    @Test func historyOverCapIsAViolation() {
+        // maxEntries + 1 entries, all files.
+        let overCap = (0...PanelHistory.maxEntries).map { file("/f\($0).swift") }
+        let panel = ViewerPanel(id: UUID(), history: PanelHistory(entries: overCap, cursor: 0))
+        #expect(violations(region([panel])) == [.historyOverCap(panel.id)])
+
+        let atCap = (1...PanelHistory.maxEntries).map { file("/f\($0).swift") }
+        let full = ViewerPanel(id: UUID(), history: PanelHistory(entries: atCap, cursor: 0))
+        #expect(violations(region([full])) == [], "exactly maxEntries is allowed")
+    }
+
+    @Test func historyMixingKindsIsAViolation() {
+        let panel = ViewerPanel(
+            id: UUID(),
+            history: PanelHistory(entries: [file("/a"), .web(Self.site)], cursor: 0))
+        #expect(violations(region([panel])) == [.historyMixesKinds(panel.id)])
+    }
+
+    @Test func duplicateTranscriptViewIsAViolation() {
+        let terminal = UUID()
+        let first = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminal))
+        let second = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminal))
+        #expect(violations(region([first, second]))
+            == [.duplicateTranscriptView(terminalID: terminal)])
+    }
+
+    /// The rule counts views — what panels currently show — not history.
+    @Test func transcriptHeldOnlyInHistoryIsNotADuplicateView() {
+        let terminal = UUID()
+        let other = UUID()
+        let showing = ViewerPanel(id: UUID(), content: .transcript(terminalID: terminal))
+        let remembering = ViewerPanel(
+            id: UUID(),
+            history: PanelHistory(
+                entries: [.transcript(terminalID: other), .transcript(terminalID: terminal)],
+                cursor: 0))
+        #expect(remembering.content == .transcript(terminalID: other))
+        #expect(violations(region([showing, remembering])) == [])
+    }
+
+    @Test func widthOutsideRangeIsAViolation() {
+        let panel = ViewerPanel(id: UUID(), content: file("/a"))
+        let outside: [Double] = [0.05, 0.95, .infinity]
+        for width in outside {
+            #expect(violations(region([panel], width: width)) == [.widthOutOfRange(width)],
+                    "width \(width)")
+        }
+
+        // NaN never equals itself, so match the case instead of comparing it.
+        let nanViolations = violations(region([panel], width: .nan))
+        #expect(nanViolations.count == 1)
+        guard case .widthOutOfRange(let reported)? = nanViolations.first else {
+            Issue.record("expected widthOutOfRange, got \(nanViolations)")
+            return
+        }
+        #expect(reported.isNaN)
     }
 }
