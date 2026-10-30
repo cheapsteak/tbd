@@ -36,6 +36,26 @@ struct AwaitingInputSendGateTests {
         #expect(message.contains("Allow Bash(rm -rf)?"))
     }
 
+    /// A reason the program status store wrote carries the block kind and no
+    /// message, so the refusal must quote the text derived from the kind
+    /// rather than an empty string.
+    @Test func aStoreWrittenReasonRefusesWithTextFromItsKind() {
+        let cases: [(ProgramStatusBlockKind, String)] = [
+            (.permission, "Waiting for a permission decision"),
+            (.question, "Waiting for an answer to a question"),
+        ]
+        for (kind, text) in cases {
+            let stored = AwaitingInputReason(
+                message: "", programStatusBlock: ProgramStatusBlock(kind: kind, taskID: nil))
+            let decision = AwaitingInputSendGate.decide(reason: stored)
+            guard case .refuse(let message) = decision else {
+                Issue.record("expected a refusal for \(kind), got \(decision)")
+                continue
+            }
+            #expect(message.contains("— \"\(text)\""), "\(kind): \(message)")
+        }
+    }
+
     @Test func everyPromptOnScreenTypeRefuses() {
         for type in [
             "permission_prompt", "elicitation_dialog", "agent_needs_input",
