@@ -69,7 +69,6 @@ GC -> Lifecycle
 GC -> Process
 GC -> SessionMod
 GC -> Tmux
-Git -> (root)
 Git -> Tmux
 Holder -> Database
 Holder -> Process
@@ -94,7 +93,6 @@ Lifecycle -> SessionMod
 Lifecycle -> Tmux
 Mock -> Database
 Mock -> Tmux
-ModChannel -> (root)
 ModChannel -> AskUserQuestion
 ModChannel -> Server
 ModelProfile -> Database
@@ -108,7 +106,6 @@ PR -> Lifecycle
 PR -> Remote
 PR -> Server
 PanelSurface -> Database
-Process -> Database
 Process -> SessionMod
 Process -> Tmux
 ProgramStatus -> Database
