@@ -28,6 +28,16 @@ final class BroadcastRecorder: @unchecked Sendable {
 @Suite("PanelCoordinatorTests")
 struct PanelCoordinatorTests {
 
+    /// The three states of `panel_tabs_enabled`: never chosen (NULL), and
+    /// each explicit choice.
+    enum FlagState: Sendable, CaseIterable {
+        case unset, off, on
+    }
+
+    private static func file(_ path: String) -> PanelContent {
+        .file(FileReference(path: path))
+    }
+
     private func makeWorktree(_ db: TBDDatabase, name: String = "w") async throws -> UUID {
         let repo = try await db.repos.create(
             path: "/tmp/pc-\(UUID())", displayName: name, defaultBranch: "main")
@@ -37,32 +47,61 @@ struct PanelCoordinatorTests {
         return wt.id
     }
 
-    /// Seeds one tab directly via the store: a primary terminal plus a side
-    /// viewer panel at `panelID`.
+    private func setFlag(_ db: TBDDatabase, _ state: FlagState) async throws {
+        switch state {
+        case .unset: break
+        case .off: try await db.config.setPanelTabsEnabled(false)
+        case .on: try await db.config.setPanelTabsEnabled(true)
+        }
+    }
+
+    /// Seeds one tab through the store: a terminal primary plus one side
+    /// panel at `panelID` with `history` (a one-entry history of
+    /// `panelContent` when nil).
     @discardableResult
     private func seedTab(
         _ db: TBDDatabase, worktreeID: UUID, tabID: UUID = UUID(), panelID: PanelID = UUID(),
-        panelContent: PanelContent = .file(FileReference(path: "/a.txt")), revision: UInt64 = 0
+        panelContent: PanelContent = .file(FileReference(path: "/a.txt")),
+        history: PanelHistory? = nil, revision: UInt64 = 0, position: Int = 0
     ) async throws -> WorkspaceTabSurface {
-        let layout = PanelLayoutNode.split(SplitNode(
-            id: UUID(), direction: .horizontal,
-            children: [.primary, .panel(PanelSlot(id: panelID, content: panelContent))],
-            ratios: [0.5, 0.5]))
+        let panel = ViewerPanel(id: panelID, history: history ?? .seeded(with: panelContent))
         let surface = WorkspaceTabSurface(
             id: tabID, worktreeID: worktreeID, label: "tab",
-            primary: .terminal(terminalID: UUID()), layout: layout, revision: revision)
-        let history = PanelHistory.seeded(with: panelContent)
-        let state = PanelSurfaceState(surface: surface, histories: [panelID: history])
-        try await db.panelSurface.commit(state: state, position: 0, receipt: nil, now: Date())
+            primary: .terminal(terminalID: UUID()),
+            side: SideRegion(
+                panels: [panel], activePanelID: panelID, recency: [panelID],
+                collapsed: false, width: 0.4),
+            revision: revision)
+        try await db.panelSurface.commit(surface: surface, position: position, receipt: nil, now: Date())
+        return surface
+    }
+
+    /// Seeds a tab whose side region has no panels.
+    @discardableResult
+    private func seedEmptyTab(
+        _ db: TBDDatabase, worktreeID: UUID, tabID: UUID = UUID(), position: Int = 0
+    ) async throws -> WorkspaceTabSurface {
+        let surface = WorkspaceTabSurface(
+            id: tabID, worktreeID: worktreeID, label: "empty",
+            primary: .terminal(terminalID: UUID()), side: .empty, revision: 0)
+        try await db.panelSurface.commit(surface: surface, position: position, receipt: nil, now: Date())
         return surface
     }
 
     private func makeCoordinator(
         _ db: TBDDatabase, recorder: BroadcastRecorder,
-        now: @escaping @Sendable () -> Date = Date.init,
         makeID: @escaping @Sendable () -> UUID = UUID.init
     ) -> PanelCoordinator {
-        PanelCoordinator(db: db, broadcast: { recorder.record($0) }, now: now, makeID: makeID)
+        PanelCoordinator(db: db, broadcast: { recorder.record($0) }, makeID: makeID)
+    }
+
+    private func envelope(
+        worktreeID: UUID, tabID: UUID, operationID: UUID = UUID(), baseRevision: UInt64? = nil,
+        origin: PanelOperationOrigin = .appUser, _ operation: PanelOperation
+    ) -> PanelOperationEnvelope {
+        PanelOperationEnvelope(
+            operationID: operationID, worktreeID: worktreeID, tabID: tabID,
+            baseRevision: baseRevision, origin: origin, operation: operation)
     }
 
     private func receiptCount(_ db: TBDDatabase, worktreeID: UUID) async throws -> Int {
@@ -73,200 +112,135 @@ struct PanelCoordinatorTests {
         }
     }
 
-    // MARK: - Gating (both branches of each flag)
+    private func surfaceDeltas(_ recorder: BroadcastRecorder) -> [PanelSurfaceDelta] {
+        recorder.deltas.compactMap {
+            if case .panelSurfaceChanged(let delta) = $0 { return delta }
+            return nil
+        }
+    }
 
-    @Test func surfaceDisabledRejectsEveryOriginZeroBroadcastsZeroReceipts() async throws {
+    // MARK: - Gating: one flag, every origin
+
+    @Test(arguments: [FlagState.unset, .off], [PanelOperationOrigin.appUser, .agentCLI])
+    func gateRefusesWhenFlagNotOn(state: FlagState, origin: PanelOperationOrigin) async throws {
         let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, state)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
         let recorder = BroadcastRecorder()
         let coordinator = makeCoordinator(db, recorder: recorder)
-        // Neither flag flipped on — daemon_panel_surface_enabled is off.
 
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
-
+        let refused = envelope(
+            worktreeID: wtID, tabID: tab.id, origin: origin,
+            .open(content: Self.file("/b.txt"), newPanel: false))
         await #expect(throws: PanelCoordinatorError.surfaceDisabled) {
-            _ = try await coordinator.apply(envelope)
+            _ = try await coordinator.apply(refused)
         }
+
         #expect(recorder.count == 0)
         #expect(try await receiptCount(db, worktreeID: wtID) == 0)
+        #expect(try await db.panelSurface.surface(tabID: tab.id) == tab)
     }
 
-    @Test func agentCLIRejectedWhenAgentFlagOffEvenWithSurfaceFlagOn() async throws {
+    @Test(arguments: [PanelOperationOrigin.appUser, .agentCLI])
+    func gateAppliesWhenFlagOn(origin: PanelOperationOrigin) async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
-        // agent_panel_control_enabled left off.
+        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
         let recorder = BroadcastRecorder()
         let coordinator = makeCoordinator(db, recorder: recorder)
 
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .agentCLI,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
+        let result = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, origin: origin,
+            .open(content: Self.file("/b.txt"), newPanel: false)))
 
-        await #expect(throws: PanelCoordinatorError.agentControlDisabled) {
-            _ = try await coordinator.apply(envelope)
-        }
-        #expect(recorder.count == 0)
-        #expect(try await receiptCount(db, worktreeID: wtID) == 0)
+        #expect(result.replayed == false)
+        #expect(result.tab.revision == 1)
+        #expect(result.tab.side.panels.compactMap(\.content) == [Self.file("/b.txt")])
+        #expect(recorder.count == 1)
     }
 
-    @Test func appUserSucceedsWithOnlySurfaceFlagOn() async throws {
+    @Test func surfaceDisabledDescriptionNamesTheFlag() {
+        let description = PanelCoordinatorError.surfaceDisabled.errorDescription ?? ""
+        #expect(description.contains("panel_tabs_enabled"))
+    }
+
+    // MARK: - get (ungated)
+
+    @Test func getReturnsHistories() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
-        // agent_panel_control_enabled stays off — appUser doesn't need it.
+        // Flag never set: get is ungated.
+        let wtID = try await makeWorktree(db)
+        let history: PanelHistory = {
+            var built = PanelHistory.seeded(with: Self.file("/a.txt"))
+            built.recordReplacement(outgoing: Self.file("/a.txt"), incoming: Self.file("/a2.txt"))
+            return built
+        }()
+        let panelID = UUID()
+        let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID, history: history)
+        try await db.worktrees.setActiveTabID(worktreeID: wtID, tabID: tab.id)
+        let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
+
+        let whole = try await coordinator.get(worktreeID: wtID, tabID: nil)
+        #expect(whole.tabs == [tab])
+        #expect(whole.tabs.first?.side.panel(id: panelID)?.history == history)
+        #expect(whole.activeTabID == tab.id)
+
+        // A tab-scoped get answers about one tab and leaves activeTabID nil.
+        let scoped = try await coordinator.get(worktreeID: wtID, tabID: tab.id)
+        #expect(scoped.tabs == [tab])
+        #expect(scoped.activeTabID == nil)
+
+        // A tab under another worktree is not this worktree's tab.
+        let otherWtID = try await makeWorktree(db, name: "other")
+        let foreign = try await coordinator.get(worktreeID: otherWtID, tabID: tab.id)
+        #expect(foreign.tabs.isEmpty)
+    }
+
+    // MARK: - Resource existence
+
+    @Test func openOfMissingNoteIsInvalidResource() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
         let recorder = BroadcastRecorder()
         let coordinator = makeCoordinator(db, recorder: recorder)
+        let missingNoteID = UUID()
 
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
-
-        let result = try await coordinator.apply(envelope)
-        #expect(result.replayed == false)
-        #expect(recorder.count == 1)
-    }
-
-    // MARK: - Happy path: open, revision +1, broadcast, receipt
-
-    @Test func happyPathOpenIncrementsRevisionBroadcastsAndPersistsReceipt() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
-        try await db.config.setAgentPanelControlEnabled(true)
-        let wtID = try await makeWorktree(db)
-        let tab = try await seedTab(db, worktreeID: wtID, revision: 3)
-        let recorder = BroadcastRecorder()
-        let coordinator = makeCoordinator(db, recorder: recorder)
-        let opID = UUID()
-
-        let envelope = PanelOperationEnvelope(
-            operationID: opID, worktreeID: wtID, tabID: tab.id, baseRevision: 3,
-            origin: .agentCLI,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
-
-        let result = try await coordinator.apply(envelope)
-        #expect(result.replayed == false)
-        #expect(result.tab.revision == 4)
-
-        #expect(recorder.count == 1)
-        guard case .panelSurfaceChanged(let delta) = recorder.deltas[0] else {
-            Issue.record("expected panelSurfaceChanged delta")
+        let openMissing = envelope(
+            worktreeID: wtID, tabID: tab.id, .open(content: .note(noteID: missingNoteID), newPanel: false))
+        let error = await #expect(throws: PanelCoordinatorError.self) {
+            _ = try await coordinator.apply(openMissing)
+        }
+        guard case .invalidResource(let detail)? = error else {
+            Issue.record("expected invalidResource, got \(String(describing: error))")
             return
         }
-        #expect(delta.worktreeID == wtID)
-        #expect(delta.tabs == [result.tab])
-        #expect(delta.originOperationID == opID)
-
-        let receipt = try await db.panelSurface.receipt(operationID: opID)
-        #expect(receipt == result)
+        #expect(detail.contains(missingNoteID.uuidString))
+        #expect(recorder.count == 0)
+        #expect(try await receiptCount(db, worktreeID: wtID) == 0)
+        #expect(try await db.panelSurface.surface(tabID: tab.id) == tab)
     }
 
-    // MARK: - Idempotent replay: no re-apply, no re-persist, one broadcast total
-
-    @Test func duplicateOperationIDReplaysWithoutReapplyingOrRebroadcasting() async throws {
+    @Test func openOfOwnNoteApplies() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
+        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
+        let note = try await db.notes.create(worktreeID: wtID)
         let tab = try await seedTab(db, worktreeID: wtID)
-        let recorder = BroadcastRecorder()
-        let coordinator = makeCoordinator(db, recorder: recorder)
-        let opID = UUID()
+        let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
 
-        let envelope = PanelOperationEnvelope(
-            operationID: opID, worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
+        let result = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, .open(content: .note(noteID: note.id), newPanel: false)))
 
-        let first = try await coordinator.apply(envelope)
-        #expect(first.replayed == false)
-        #expect(recorder.count == 1)
-
-        let second = try await coordinator.apply(envelope)
-        #expect(second.replayed == true)
-        #expect(second.tab == first.tab)
-        #expect(recorder.count == 1)  // no second broadcast
-
-        // State unchanged by the replay: still exactly first's revision.
-        let state = try await db.panelSurface.state(tabID: tab.id)
-        #expect(state?.surface.revision == first.tab.revision)
+        #expect(result.tab.side.panels.contains { $0.content == .note(noteID: note.id) })
     }
 
-    // MARK: - baseRevision semantic rebase
-
-    @Test func staleBaseRevisionWithVanishedPanelMapsToStaleTarget() async throws {
+    @Test func transcriptOfForeignTerminalIsInvalidResource() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
-        let wtID = try await makeWorktree(db)
-        let tab = try await seedTab(db, worktreeID: wtID, revision: 5)
-        let recorder = BroadcastRecorder()
-        let coordinator = makeCoordinator(db, recorder: recorder)
-        let missingPanelID = UUID()
-
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: 1,  // stale
-            origin: .appUser,
-            operation: .close(panelID: missingPanelID))
-
-        await #expect(throws: PanelCoordinatorError.staleTarget(.panelNotFound(missingPanelID))) {
-            _ = try await coordinator.apply(envelope)
-        }
-        #expect(recorder.count == 0)
-    }
-
-    @Test func freshBaseRevisionWithVanishedPanelMapsToOperationError() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
-        let wtID = try await makeWorktree(db)
-        let tab = try await seedTab(db, worktreeID: wtID, revision: 5)
-        let recorder = BroadcastRecorder()
-        let coordinator = makeCoordinator(db, recorder: recorder)
-        let missingPanelID = UUID()
-
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: 5,  // fresh
-            origin: .appUser,
-            operation: .close(panelID: missingPanelID))
-
-        await #expect(throws: PanelCoordinatorError.operation(.panelNotFound(missingPanelID))) {
-            _ = try await coordinator.apply(envelope)
-        }
-        #expect(recorder.count == 0)
-    }
-
-    @Test func staleBaseRevisionWithSurvivingTargetAppliesSemanticRebase() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
-        let wtID = try await makeWorktree(db)
-        let panelID = UUID()
-        let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID, revision: 5)
-        let recorder = BroadcastRecorder()
-        let coordinator = makeCoordinator(db, recorder: recorder)
-
-        let envelope = PanelOperationEnvelope(
-            // stale relative to the tab's current revision (5), but the panel
-            // this operation targets still exists — must apply, not reject.
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: 1,
-            origin: .appUser,
-            operation: .navigate(panelID: panelID, destination: .file(FileReference(path: "/new.txt"))))
-
-        let result = try await coordinator.apply(envelope)
-        #expect(result.tab.revision == 6)
-        #expect(recorder.count == 1)
-    }
-
-    // MARK: - §5.5 resource existence
-
-    @Test func transcriptDestinationWithForeignTerminalIsInvalidResource() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
+        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let otherWtID = try await makeWorktree(db, name: "other")
         let foreignTerminal = try await db.terminals.create(
@@ -275,102 +249,249 @@ struct PanelCoordinatorTests {
         let recorder = BroadcastRecorder()
         let coordinator = makeCoordinator(db, recorder: recorder)
 
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(content: .transcript(terminalID: foreignTerminal.id), placement: .automatic))
-
-        await #expect(throws: PanelCoordinatorError.self) {
-            _ = try await coordinator.apply(envelope)
+        let openForeign = envelope(
+            worktreeID: wtID, tabID: tab.id,
+            .open(content: .transcript(terminalID: foreignTerminal.id), newPanel: false))
+        let error = await #expect(throws: PanelCoordinatorError.self) {
+            _ = try await coordinator.apply(openForeign)
+        }
+        guard case .invalidResource? = error else {
+            Issue.record("expected invalidResource, got \(String(describing: error))")
+            return
         }
         #expect(recorder.count == 0)
-        #expect(try await receiptCount(db, worktreeID: wtID) == 0)
+    }
+
+    // MARK: - Stale base revision
+
+    @Test func staleBaseRelabelsPanelNotFound() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
+        let wtID = try await makeWorktree(db)
+        let tab = try await seedTab(db, worktreeID: wtID, revision: 5)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+        let missingPanelID = UUID()
+
+        let stale = envelope(
+            worktreeID: wtID, tabID: tab.id, baseRevision: 1, .close(panelID: missingPanelID))
+        await #expect(throws: PanelCoordinatorError.staleTarget(.panelNotFound(missingPanelID))) {
+            _ = try await coordinator.apply(stale)
+        }
+        #expect(recorder.count == 0)
+    }
+
+    @Test func freshBaseKeepsPanelNotFoundAsOperation() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
+        let wtID = try await makeWorktree(db)
+        let tab = try await seedTab(db, worktreeID: wtID, revision: 5)
+        let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
+        let missingPanelID = UUID()
+
+        let fresh = envelope(
+            worktreeID: wtID, tabID: tab.id, baseRevision: 5, .close(panelID: missingPanelID))
+        await #expect(throws: PanelCoordinatorError.operation(.panelNotFound(missingPanelID))) {
+            _ = try await coordinator.apply(fresh)
+        }
+
+        let noBase = envelope(worktreeID: wtID, tabID: tab.id, .close(panelID: missingPanelID))
+        await #expect(throws: PanelCoordinatorError.operation(.panelNotFound(missingPanelID))) {
+            _ = try await coordinator.apply(noBase)
+        }
+    }
+
+    /// Only a vanished panel is relabelled: any other rejection under a stale
+    /// base stays an operation error.
+    @Test func staleBaseKeepsOtherErrorsAsOperation() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
+        let wtID = try await makeWorktree(db)
+        let panelID = UUID()
+        let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID, revision: 5)
+        let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
+        let web = PanelContent.web(URL(string: "https://example.com")!)
+
+        let stale = envelope(
+            worktreeID: wtID, tabID: tab.id, baseRevision: 1,
+            .navigate(panelID: panelID, destination: web))
+        let expected = PanelCoordinatorError.operation(
+            .kindMismatch(panelID: panelID, expected: .file, actual: .web))
+        await #expect(throws: expected) {
+            _ = try await coordinator.apply(stale)
+        }
+    }
+
+    @Test func staleBaseWithSurvivingTargetApplies() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
+        let wtID = try await makeWorktree(db)
+        let panelID = UUID()
+        let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID, revision: 5)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+
+        let result = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, baseRevision: 1,
+            .navigate(panelID: panelID, destination: Self.file("/new.txt"))))
+
+        #expect(result.tab.revision == 6)
+        #expect(result.tab.side.panel(id: panelID)?.content == Self.file("/new.txt"))
+        #expect(recorder.count == 1)
+    }
+
+    // MARK: - Broadcast and replay
+
+    @Test func applyBroadcastsTheCommittedTab() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
+        let wtID = try await makeWorktree(db)
+        let tab = try await seedTab(db, worktreeID: wtID, revision: 3)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+        let opID = UUID()
+
+        let result = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, operationID: opID, baseRevision: 3,
+            .open(content: Self.file("/b.txt"), newPanel: true)))
+        #expect(result.replayed == false)
+        #expect(result.tab.revision == 4)
+
+        let deltas = surfaceDeltas(recorder)
+        #expect(recorder.count == 1)
+        let delta = try #require(deltas.first)
+        #expect(delta.worktreeID == wtID)
+        #expect(delta.tabs == [result.tab])
+        #expect(delta.removedTabIDs.isEmpty)
+        #expect(delta.activeTabID == nil)
+        #expect(delta.originOperationID == opID)
+
+        // What was broadcast is what was stored and what the receipt replays.
+        #expect(try await db.panelSurface.surface(tabID: tab.id) == result.tab)
+        #expect(try await db.panelSurface.receipt(operationID: opID) == result)
+    }
+
+    @Test func replayDoesNotBroadcast() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
+        let wtID = try await makeWorktree(db)
+        let tab = try await seedTab(db, worktreeID: wtID)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder)
+
+        let once = envelope(
+            worktreeID: wtID, tabID: tab.id, .open(content: Self.file("/b.txt"), newPanel: true))
+        let first = try await coordinator.apply(once)
+        #expect(first.replayed == false)
+        #expect(recorder.count == 1)
+
+        let second = try await coordinator.apply(once)
+        #expect(second.replayed == true)
+        #expect(second.tab == first.tab)
+        #expect(recorder.count == 1)
+
+        // The replay re-applied nothing: still one new panel, first's revision.
+        let stored = try await db.panelSurface.surface(tabID: tab.id)
+        #expect(stored?.revision == first.tab.revision)
+        #expect(stored?.side.panels.count == 2)
     }
 
     // MARK: - tabNotFound
 
-    @Test func tabNotFoundThrowsAndBroadcastsNothing() async throws {
+    @Test func missingTabIsTabNotFound() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
+        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let recorder = BroadcastRecorder()
         let coordinator = makeCoordinator(db, recorder: recorder)
         let missingTabID = UUID()
 
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: missingTabID, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
-
+        let missing = envelope(
+            worktreeID: wtID, tabID: missingTabID, .open(content: Self.file("/b.txt"), newPanel: false))
         await #expect(throws: PanelCoordinatorError.tabNotFound(missingTabID)) {
-            _ = try await coordinator.apply(envelope)
+            _ = try await coordinator.apply(missing)
         }
         #expect(recorder.count == 0)
     }
 
-    @Test func tabBelongingToAnotherWorktreeIsTreatedAsNotFound() async throws {
+    @Test func tabOfAnotherWorktreeIsTabNotFound() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
+        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let otherWtID = try await makeWorktree(db, name: "other")
         let tab = try await seedTab(db, worktreeID: wtID)
         let recorder = BroadcastRecorder()
         let coordinator = makeCoordinator(db, recorder: recorder)
 
-        // Envelope claims the tab lives in `otherWtID`, but it actually
-        // belongs to `wtID` — must not mutate/broadcast under the wrong id.
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: otherWtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
-
+        // The envelope claims the tab lives in `otherWtID`; it must not
+        // mutate or broadcast under the wrong worktree.
+        let misattributed = envelope(
+            worktreeID: otherWtID, tabID: tab.id, .open(content: Self.file("/b.txt"), newPanel: false))
         await #expect(throws: PanelCoordinatorError.tabNotFound(tab.id)) {
-            _ = try await coordinator.apply(envelope)
+            _ = try await coordinator.apply(misattributed)
         }
         #expect(recorder.count == 0)
+        #expect(try await db.panelSurface.surface(tabID: tab.id) == tab)
     }
 
-    // MARK: - selectTab coverage lives in PanelCoordinatorPlacementTests (Task 9)
+    // MARK: - Close drops the panel's history row
 
-    // MARK: - Carry-forward #1: a tab-removing op leaves no stale surface/history row
-
-    @Test func closeOperationLeavesNoStalePanelHistoryRow() async throws {
+    @Test func closeLeavesNoHistoryRow() async throws {
         let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
+        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let panelID = UUID()
         let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID)
-        let recorder = BroadcastRecorder()
-        let coordinator = makeCoordinator(db, recorder: recorder)
+        let coordinator = makeCoordinator(db, recorder: BroadcastRecorder())
 
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser, operation: .close(panelID: panelID))
+        let result = try await coordinator.apply(envelope(
+            worktreeID: wtID, tabID: tab.id, .close(panelID: panelID)))
+        #expect(result.tab.side.panels.isEmpty)
+        #expect(result.tab.side.activePanelID == nil)
 
-        let result = try await coordinator.apply(envelope)
-        #expect(result.tab.layout.allPanelIDs.isEmpty)
-
-        let state = try await db.panelSurface.state(tabID: tab.id)
-        #expect(state?.histories.isEmpty == true)
-        try await db.writerForTests.read { dbc in
-            let count = try Int.fetchOne(
+        let count = try await db.writerForTests.read { dbc in
+            try Int.fetchOne(
                 dbc, sql: "SELECT COUNT(*) FROM panel_history WHERE panelID = ?",
                 arguments: [panelID.uuidString])
-            #expect(count == 0)
         }
+        #expect(count == 0)
     }
 
-    // MARK: - Actor-reentrancy lost update (production DatabasePool)
+    // MARK: - A failed commit does not broadcast
 
-    /// Regression for the reviewer's CRITICAL: actor isolation does NOT span
-    /// `await`, so a coordinator that loaded state, reduced, then awaited a
-    /// SEPARATE `commit` could have a concurrent same-tab apply read the stale
-    /// pre-commit revision (pool reads see a WAL snapshot) and silently clobber
-    /// the first. Only reproduces under a real `DatabasePool` (temp-file db) —
-    /// the in-memory `DatabaseQueue` used elsewhere serializes FIFO and hides
-    /// it. `applyReducing` closes the window by doing load→reduce→persist in
-    /// one write transaction; every concurrent apply then rebases on the last
-    /// committed tree, so all K increments and all K effects survive.
+    /// The reducer succeeds, then the store refuses the write: `makeID` mints
+    /// a panel ID whose history row belongs to another tab, tripping the
+    /// store's cross-tab guard. The transaction rolls back, nothing is
+    /// broadcast, and the target tab is unchanged.
+    @Test func failedCommitAfterReduceDoesNotBroadcast() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        try await setFlag(db, .on)
+        let wtID = try await makeWorktree(db)
+        let collisionID = UUID()
+        try await seedTab(db, worktreeID: wtID, panelID: collisionID, position: 0)
+        let target = try await seedEmptyTab(db, worktreeID: wtID, position: 1)
+        let recorder = BroadcastRecorder()
+        let coordinator = makeCoordinator(db, recorder: recorder, makeID: { collisionID })
+
+        let colliding = envelope(
+            worktreeID: wtID, tabID: target.id, .open(content: Self.file("/x.txt"), newPanel: true))
+        await #expect(throws: (any Error).self) {
+            _ = try await coordinator.apply(colliding)
+        }
+
+        #expect(recorder.count == 0)
+        #expect(try await db.panelSurface.surface(tabID: target.id) == target)
+        #expect(try await receiptCount(db, worktreeID: wtID) == 0)
+    }
+
+    // MARK: - Concurrent applies on a production DatabasePool
+
+    /// Actor isolation does not span `await`, so a coordinator that loaded a
+    /// surface, reduced, then awaited a separate write could let a concurrent
+    /// same-tab apply read the stale revision and clobber the first. Only a
+    /// real `DatabasePool` (temp-file database) shows it; the in-memory queue
+    /// serializes FIFO. `apply` goes through `applyReducing`, so every one of
+    /// K navigates lands.
     @Test func concurrentSameTabAppliesDoNotLoseUpdatesUnderPool() async throws {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("pc-race-\(UUID()).sqlite")
@@ -380,38 +501,33 @@ struct PanelCoordinatorTests {
                 try? FileManager.default.removeItem(atPath: tmp.path + suffix)
             }
         }
-        try await db.config.setPanelSurfaceEnabled(true)
+        try await setFlag(db, .on)
         let wtID = try await makeWorktree(db)
         let panelID = UUID()
-        let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID, revision: 0)
+        let tab = try await seedTab(db, worktreeID: wtID, panelID: panelID)
         let recorder = BroadcastRecorder()
         let coordinator = makeCoordinator(db, recorder: recorder)
+        let tabID = tab.id
 
-        // K concurrent navigates on the SAME panel, each a distinct destination
-        // and distinct operationID. navigate always increments revision by one
-        // and pushes history — additive without touching split ratios, so no
-        // reducer rejection muddies the lost-update signal.
         let k = 6
         try await withThrowingTaskGroup(of: Void.self) { group in
             for i in 0..<k {
                 group.addTask {
-                    let env = PanelOperationEnvelope(
-                        operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
+                    let navigate = PanelOperationEnvelope(
+                        operationID: UUID(), worktreeID: wtID, tabID: tabID, baseRevision: nil,
                         origin: .appUser,
                         operation: .navigate(
-                            panelID: panelID,
-                            destination: .file(FileReference(path: "/f\(i).txt"))))
-                    _ = try await coordinator.apply(env)
+                            panelID: panelID, destination: .file(FileReference(path: "/f\(i).txt"))))
+                    _ = try await coordinator.apply(navigate)
                 }
             }
             try await group.waitForAll()
         }
 
-        let finalState = try await db.panelSurface.state(tabID: tab.id)
-        // No lost update: each of the K applies incremented the revision.
-        #expect(finalState?.surface.revision == UInt64(k))
-        // Every navigate's destination survives in the panel's durable history.
-        let paths = Set((finalState?.histories[panelID]?.entries ?? []).compactMap {
+        let stored = try await db.panelSurface.surface(tabID: tabID)
+        let expectedRevision = UInt64(k)
+        #expect(stored?.revision == expectedRevision)
+        let paths = Set((stored?.side.panel(id: panelID)?.history.entries ?? []).compactMap {
             content -> String? in
             if case .file(let ref) = content { return ref.path }
             return nil
@@ -420,55 +536,5 @@ struct PanelCoordinatorTests {
             #expect(paths.contains("/f\(i).txt"), "navigate to /f\(i).txt was lost")
         }
         #expect(recorder.count == k)
-    }
-
-    // MARK: - Broadcast ordering against a FAILED commit
-
-    /// The disable-broadcast check proves a broadcast fires on success; this
-    /// proves none fires when the persist THROWS after a successful reduce.
-    /// Trips Task 6's cross-tab `panelHistoryOwnedByOtherTab` guard by forcing
-    /// the reducer to mint a new panel whose id already belongs to another
-    /// tab's history row — the write transaction rolls back, so no broadcast
-    /// and the target tab is unchanged.
-    @Test func failedCommitAfterReduceLeavesStateUnchangedAndDoesNotBroadcast() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.config.setPanelSurfaceEnabled(true)
-        let wtID = try await makeWorktree(db)
-
-        // Tab T2 owns a panel_history row for `collisionID`.
-        let collisionID = UUID()
-        _ = try await seedTab(db, worktreeID: wtID, panelID: collisionID)
-
-        // Tab T1: primary-only layout so `open .beside` mints a fresh panel.
-        let t1ID = UUID()
-        let t1 = WorkspaceTabSurface(
-            id: t1ID, worktreeID: wtID, label: "t1",
-            primary: .terminal(terminalID: UUID()), layout: .primary, revision: 0)
-        try await db.panelSurface.commit(
-            state: PanelSurfaceState(surface: t1, histories: [:]),
-            position: 1, receipt: nil, now: Date())
-
-        let recorder = BroadcastRecorder()
-        // makeID always returns the colliding id — the new panel slot's id will
-        // equal a panelID already owned by T2, tripping the store's guard.
-        let coordinator = makeCoordinator(db, recorder: recorder, makeID: { collisionID })
-
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: t1ID, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(
-                content: .file(FileReference(path: "/x.txt")),
-                placement: .beside(target: .primary, edge: .right, share: nil)))
-
-        await #expect(throws: (any Error).self) {
-            _ = try await coordinator.apply(envelope)
-        }
-        // No broadcast on a rolled-back commit.
-        #expect(recorder.count == 0)
-        // T1 is untouched: revision still 0, still primary-only, no phantom panel.
-        let reloaded = try await db.panelSurface.state(tabID: t1ID)
-        #expect(reloaded?.surface.revision == 0)
-        #expect(reloaded?.surface.layout == .primary)
-        #expect(reloaded?.histories.isEmpty == true)
     }
 }

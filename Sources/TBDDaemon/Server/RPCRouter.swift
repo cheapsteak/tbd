@@ -132,8 +132,8 @@ public final class RPCRouter: Sendable {
     /// Login-completion watching for profile login sessions. Injected so
     /// tests can shrink the watcher's poll timings.
     public let loginSessions: LoginSessionCoordinator
-    /// Daemon-owned panel surface actor (spec C Phase 2). Gating lives inside
-    /// the coordinator (§7.2) — `panel.*` handlers route to it and must not
+    /// Daemon-owned panel surface actor. Gating on `panel_tabs_enabled` lives
+    /// inside the coordinator — `panel.*` handlers route to it and must not
     /// re-implement gating. Broadcasts through the same `subscriptions`
     /// channel every other mutating handler uses.
     public let panelCoordinator: PanelCoordinator
@@ -1149,8 +1149,8 @@ public final class RPCRouter: Sendable {
                 return try await handlePanelGet(request.paramsData)
             case RPCMethod.panelApply:
                 return try await handlePanelApply(request.paramsData)
-            case RPCMethod.panelImportLegacy:
-                return try await handlePanelImportLegacy(request.paramsData)
+            case RPCMethod.panelSyncTabs:
+                return try await handlePanelSyncTabs(request.paramsData)
             default:
                 return RPCResponse(error: "Unknown method: \(request.method)")
             }

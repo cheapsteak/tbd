@@ -5,13 +5,13 @@ import Testing
 import DaemonTestSupport
 import TestSupport
 
-/// Router-level tests for `panel.get` / `panel.apply` / `panel.importLegacy`
-/// (Task 10, spec C §10). Exercises ROUTING only — `PanelCoordinator`'s
-/// internal gating/reduce/broadcast behavior is already covered exhaustively
-/// by `PanelCoordinatorTests`/`PanelCoordinatorPlacementTests`. Here we check:
-/// the RPC method reaches the coordinator, the two gate errors surface as the
-/// stable named-flag strings, a malformed payload decodes to an error
-/// response, and `daemon.capabilities` reports the new flag.
+/// Router-level tests for `panel.get` / `panel.apply` / `panel.syncTabs`.
+/// Exercises ROUTING only — `PanelCoordinator`'s gating, reduce and
+/// broadcast behavior is covered by `PanelCoordinatorTests`, and the sync's
+/// behavior by `PanelSyncTabsTests`. Here we check that each method reaches
+/// the coordinator, that the gate error surfaces as a string naming
+/// `panel_tabs_enabled`, and that a malformed payload decodes to an error
+/// response.
 @Suite("Panel RPC Tests")
 struct PanelRPCTests {
 
@@ -41,29 +41,36 @@ struct PanelRPCTests {
         return wt.id
     }
 
-    /// Seeds one tab directly via the store: a primary terminal plus a side
-    /// viewer panel — mirrors `PanelCoordinatorTests.seedTab`.
+    /// Seeds one tab through the store: a terminal primary plus one side
+    /// panel — mirrors `PanelCoordinatorTests.seedTab`.
     @discardableResult
     private func seedTab(
         _ db: TBDDatabase, worktreeID: UUID, tabID: UUID = UUID(), panelID: PanelID = UUID(),
         panelContent: PanelContent = .file(FileReference(path: "/a.txt"))
     ) async throws -> WorkspaceTabSurface {
-        let layout = PanelLayoutNode.split(SplitNode(
-            id: UUID(), direction: .horizontal,
-            children: [.primary, .panel(PanelSlot(id: panelID, content: panelContent))],
-            ratios: [0.5, 0.5]))
         let surface = WorkspaceTabSurface(
             id: tabID, worktreeID: worktreeID, label: "tab",
-            primary: .terminal(terminalID: UUID()), layout: layout, revision: 0)
-        let history = PanelHistory.seeded(with: panelContent)
-        let state = PanelSurfaceState(surface: surface, histories: [panelID: history])
-        try await db.panelSurface.commit(state: state, position: 0, receipt: nil, now: Date())
+            primary: .terminal(terminalID: UUID()),
+            side: SideRegion(
+                panels: [ViewerPanel(id: panelID, content: panelContent)],
+                activePanelID: panelID, recency: [panelID], collapsed: false, width: 0.5),
+            revision: 0)
+        try await db.panelSurface.commit(surface: surface, position: 0, receipt: nil, now: Date())
         return surface
+    }
+
+    private func openEnvelope(
+        worktreeID: UUID, tabID: UUID, origin: PanelOperationOrigin
+    ) -> PanelOperationEnvelope {
+        PanelOperationEnvelope(
+            operationID: UUID(), worktreeID: worktreeID, tabID: tabID, baseRevision: nil,
+            origin: origin,
+            operation: .open(content: .file(FileReference(path: "/b.txt")), newPanel: false))
     }
 
     // MARK: - panel.get (ungated)
 
-    @Test("panel.get on an empty store returns an empty result, no error, both flags off")
+    @Test("panel.get on an empty store returns an empty result, no error, flag unset")
     func getOnEmptyStoreReturnsEmptyResult() async throws {
         let (router, _) = try makeRouterAndDB()
         let request = try RPCRequest(
@@ -74,7 +81,7 @@ struct PanelRPCTests {
         #expect(result.tabs.isEmpty)
     }
 
-    @Test("panel.get reflects a committed tab")
+    @Test("panel.get reflects a committed tab with the flag unset")
     func getReflectsCommittedTab() async throws {
         let (router, db) = try makeRouterAndDB()
         let wtID = try await makeWorktree(db)
@@ -88,60 +95,41 @@ struct PanelRPCTests {
         #expect(result.tabs.map(\.id) == [tab.id])
     }
 
-    // MARK: - panel.apply gating surfaces as named-flag errors
+    // MARK: - panel.apply gating surfaces the flag by name
 
-    @Test("panel.apply surfaces the surface-disabled gate by name")
-    func applySurfaceDisabledNamesFlag() async throws {
+    @Test("panel.apply names panel_tabs_enabled when the flag is unset or off",
+          arguments: [PanelOperationOrigin.appUser, .agentCLI])
+    func applyDisabledNamesFlag(origin: PanelOperationOrigin) async throws {
         let (router, db) = try makeRouterAndDB()
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
-        // Both flags off (default).
+        let params = PanelApplyParams(envelope: openEnvelope(worktreeID: wtID, tabID: tab.id, origin: origin))
 
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
-        let request = try RPCRequest(method: RPCMethod.panelApply, params: PanelApplyParams(envelope: envelope))
-        let response = await router.handle(request)
+        // Never chosen.
+        let unsetResponse = await router.handle(try RPCRequest(method: RPCMethod.panelApply, params: params))
+        #expect(!unsetResponse.success)
+        #expect(unsetResponse.error?.contains("panel_tabs_enabled") == true)
 
-        #expect(!response.success)
-        #expect(response.error?.contains("daemon_panel_surface_enabled") == true)
+        // Explicitly off.
+        try await db.config.setPanelTabsEnabled(false)
+        let offResponse = await router.handle(try RPCRequest(method: RPCMethod.panelApply, params: params))
+        #expect(!offResponse.success)
+        #expect(offResponse.error?.contains("panel_tabs_enabled") == true)
     }
 
-    @Test("panel.apply surfaces the agent-control gate by name")
-    func applyAgentControlDisabledNamesFlag() async throws {
+    // MARK: - panel.apply happy path + panel.get reflects it
+
+    @Test("panel.apply commits with the flag on, for the app and an agent alike, and panel.get reflects it",
+          arguments: [PanelOperationOrigin.appUser, .agentCLI])
+    func applyHappyPathThenGetReflectsResult(origin: PanelOperationOrigin) async throws {
         let (router, db) = try makeRouterAndDB()
-        try await db.config.setPanelSurfaceEnabled(true)
-        // agent_panel_control_enabled left off.
+        try await db.config.setPanelTabsEnabled(true)
         let wtID = try await makeWorktree(db)
         let tab = try await seedTab(db, worktreeID: wtID)
 
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .agentCLI,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
-        let request = try RPCRequest(method: RPCMethod.panelApply, params: PanelApplyParams(envelope: envelope))
-        let response = await router.handle(request)
-
-        #expect(!response.success)
-        #expect(response.error?.contains("agent_panel_control_enabled") == true)
-    }
-
-    // MARK: - panel.apply happy path (flag on, appUser) + panel.get reflects it
-
-    @Test("panel.apply commits with the surface flag on and panel.get reflects it")
-    func applyHappyPathThenGetReflectsResult() async throws {
-        let (router, db) = try makeRouterAndDB()
-        try await db.config.setPanelSurfaceEnabled(true)
-        let wtID = try await makeWorktree(db)
-        let tab = try await seedTab(db, worktreeID: wtID)
-
-        let envelope = PanelOperationEnvelope(
-            operationID: UUID(), worktreeID: wtID, tabID: tab.id, baseRevision: nil,
-            origin: .appUser,
-            operation: .open(content: .file(FileReference(path: "/b.txt")), placement: .automatic))
         let applyRequest = try RPCRequest(
-            method: RPCMethod.panelApply, params: PanelApplyParams(envelope: envelope))
+            method: RPCMethod.panelApply,
+            params: PanelApplyParams(envelope: openEnvelope(worktreeID: wtID, tabID: tab.id, origin: origin)))
         let applyResponse = await router.handle(applyRequest)
         #expect(applyResponse.success)
         let applyResult = try applyResponse.decodeResult(PanelApplyResult.self)
@@ -165,41 +153,25 @@ struct PanelRPCTests {
         #expect(!response.success)
     }
 
-    // MARK: - panel.importLegacy dispatch (Task 11 implements the real behavior; see PanelImportHandlerTests)
-
-    @Test("panel.importLegacy route dispatches to the real handler (gate error with flag off), not Unknown method")
-    func importLegacyDispatchesToHandler() async throws {
+    @Test("panel.syncTabs with malformed params JSON decodes to an error response")
+    func syncTabsMalformedParamsDecodesToError() async throws {
         let (router, _) = try makeRouterAndDB()
-        let params = PanelImportParams(
-            worktreeID: UUID(), tabs: [], tabOrder: [], activeTabID: nil, paneHistories: [:])
-        let request = try RPCRequest(method: RPCMethod.panelImportLegacy, params: params)
+        let request = RPCRequest(method: RPCMethod.panelSyncTabs, params: #"{"not":"a tab list"}"#)
         let response = await router.handle(request)
         #expect(!response.success)
         #expect(response.error?.contains("Unknown method") == false)
     }
 
-    // MARK: - daemon.capabilities
+    // MARK: - panel.syncTabs dispatch (behavior lives in PanelSyncTabsTests)
 
-    @Test("capabilities carries panelSurfaceEnabled")
-    func capabilitiesCarriesPanelSurfaceFlag() async throws {
-        let (router, db) = try makeRouterAndDB()
-
-        var response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
-        var result = try response.decodeResult(DaemonCapabilitiesResult.self)
-        #expect(result.panelSurfaceEnabled == false)
-
-        try await db.config.setPanelSurfaceEnabled(true)
-        response = await router.handle(RPCRequest(method: RPCMethod.daemonCapabilities))
-        result = try response.decodeResult(DaemonCapabilitiesResult.self)
-        #expect(result.panelSurfaceEnabled == true)
-    }
-
-    /// Codable back-compat: capabilities JSON from a daemon without the new
-    /// panelSurfaceEnabled key must still decode with a safe default.
-    @Test("capabilities JSON without panelSurfaceEnabled decodes with default false")
-    func capabilitiesDecodeBackCompat() throws {
-        let json = Data(#"{"controlModeEnabled":true,"controlModeSupported":false}"#.utf8)
-        let result = try JSONDecoder().decode(DaemonCapabilitiesResult.self, from: json)
-        #expect(result.panelSurfaceEnabled == false)
+    @Test("panel.syncTabs dispatches to its handler and names the flag when it is unset")
+    func syncTabsDispatchesToHandler() async throws {
+        let (router, _) = try makeRouterAndDB()
+        let params = PanelSyncTabsParams(worktreeID: UUID(), tabs: [], paneHistories: [:])
+        let request = try RPCRequest(method: RPCMethod.panelSyncTabs, params: params)
+        let response = await router.handle(request)
+        #expect(!response.success)
+        #expect(response.error?.contains("Unknown method") == false)
+        #expect(response.error?.contains("panel_tabs_enabled") == true)
     }
 }
