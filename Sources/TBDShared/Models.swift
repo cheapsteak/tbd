@@ -1122,21 +1122,25 @@ public extension Terminal {
     ///   - not pinned keep-warm,
     ///   - not actively running a turn (`.working`),
     ///   - not waiting on a permission prompt (`.waitingForUser` — a raised
-    ///     hand; hibernating would eat it).
-    /// Manual "Hibernate now" bypasses the keep-warm and idle checks but keeps
-    /// the running/permission rails (see `isManuallyHibernatable`).
+    ///     hand; hibernating would eat it),
+    ///   - not `.unknown` — the agent has not reported its state, so a turn
+    ///     may be running.
+    /// Manual "Hibernate now" bypasses the keep-warm, unknown-activity and
+    /// idle checks but keeps the running/permission rails (see
+    /// `isManuallyHibernatable`).
     ///
     /// Transport does not enter into it: a holder-backed row is as eligible as
     /// a tmux-backed one, because both have a park mechanic and a wake path —
     /// see `isManuallyHibernatable`, which this defers the rails to.
     func isAutoHibernationEligible() -> Bool {
-        isManuallyHibernatable() && !keepWarm
+        isManuallyHibernatable() && !keepWarm && activityState != .unknown
     }
 
     /// Whether a MANUAL "Hibernate now" may act on this terminal. Same rails as
-    /// auto except keep-warm and idle-time don't apply — the user asked
-    /// explicitly. Still refuses to hibernate an in-flight turn or a raised
-    /// permission hand.
+    /// auto except keep-warm, unknown activity and idle-time don't apply — the
+    /// user asked explicitly, and a session that cannot report its state would
+    /// otherwise never be parkable. Still refuses to hibernate an in-flight
+    /// turn or a raised permission hand.
     ///
     /// The rails are the same on every transport. Park and wake on the holder
     /// transport do not go through tmux at all — the park ends the child by

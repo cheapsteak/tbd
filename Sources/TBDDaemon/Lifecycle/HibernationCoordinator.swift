@@ -1137,6 +1137,7 @@ public actor HibernationCoordinator {
         case .keepWarm: return "Terminal is pinned keep-warm"
         case .running: return "Session is actively running"
         case .waitingForUser: return "Session is waiting on a permission prompt"
+        case .unknownActivity: return "Session state is unknown — the agent is not reporting status"
         case .eligible, .featureDisabled, .notIdleLongEnough: return "Not hibernatable"
         }
     }
@@ -2391,7 +2392,7 @@ public actor HibernationCoordinator {
 
             case .featureDisabled, .notClaudeResumable,
                  .alreadyHibernated, .suspended, .keepWarm, .running,
-                 .waitingForUser:
+                 .waitingForUser, .unknownActivity:
                 // Not at rest (or ineligible): the idle clock and any armed
                 // debounce reset so a later settle starts a fresh full window.
                 idleSince[terminal.id] = nil

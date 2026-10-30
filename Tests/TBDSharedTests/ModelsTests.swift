@@ -361,6 +361,18 @@ func testTerminalCodexTranscriptBoundaryRoundTrip(_ boundary: Int64?) throws {
     #expect(warmTmux.isManuallyHibernatable())
 }
 
+/// A session that reports no state may be parked by hand — the user asked —
+/// but never automatically: TBD does not know whether a turn is running.
+@Test func unknownIsManuallyButNotAutomaticallyHibernatable() {
+    let unknown = Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
+                           claudeSessionID: "s", kind: .claude, activityState: .unknown)
+    #expect(unknown.isManuallyHibernatable())
+    #expect(!unknown.isAutoHibernationEligible())
+    var idle = unknown
+    idle.activityState = .idle
+    #expect(idle.isAutoHibernationEligible())
+}
+
 @Test func testAutoHibernationEligibilityAddsKeepWarmRail() {
     let base = Terminal(worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
                         claudeSessionID: "s", kind: .claude, activityState: .idle)

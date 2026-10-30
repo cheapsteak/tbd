@@ -123,12 +123,14 @@ struct HibernationGateTests {
         #expect(decide(t, idleSince: nil) == .notIdleLongEnough)
     }
 
-    @Test func unknownActivityCountsAsAtRest() {
-        // `.unknown` (hook hasn't fired) is treated as at-rest so a genuinely
-        // idle session isn't kept awake forever by a missing hook.
+    @Test func unknownActivityBlocksTheSweep() {
+        // `.unknown` means no agent report: TBD does not know whether a turn
+        // is running, so the sweep must not park it however long it has sat.
         let t = claudeTerminal(activityState: .unknown)
         let idleSince = now.addingTimeInterval(-31 * 60)
-        #expect(decide(t, idleSince: idleSince) == .eligible)
+        #expect(decide(t, idleSince: idleSince) == .unknownActivity)
+        // The same row, reported idle, parks.
+        #expect(decide(claudeTerminal(activityState: .idle), idleSince: idleSince) == .eligible)
     }
 
     // MARK: - Rail precedence (a louder rail wins over idle-time)
@@ -206,11 +208,15 @@ struct HibernationGateTests {
     /// The equivalences, and why they are what they are:
     ///
     /// - `blockingRail == nil` ⇔ `isAutoHibernationEligible`. Both are "every
-    ///   hard rail passes, keep-warm included".
-    /// - `blockingRail(the same row with keep-warm cleared) == nil` ⇔
-    ///   `isManuallyHibernatable`. A manual park overrides keep-warm and
-    ///   nothing else, so the honest way to say that is to ask the cascade the
-    ///   question with keep-warm taken out of it.
+    ///   hard rail passes, keep-warm and unknown activity included".
+    /// - `blockingRail(the same row with keep-warm cleared)` is nil or
+    ///   `.unknownActivity` ⇔ `isManuallyHibernatable`. A manual park
+    ///   overrides keep-warm, and parks a session that reports no state — the
+    ///   user asked, and a session that cannot report would otherwise never be
+    ///   parkable — and overrides nothing else. So the honest way to say that
+    ///   is to ask the cascade the question with keep-warm taken out of it, and
+    ///   forgive only the unknown-activity answer, which is the last rail in
+    ///   the cascade and so is returned only when every other rail passed.
     ///
     /// **Not** `rail == nil || rail == .keepWarm`, which is the obvious
     /// spelling and is wrong: `blockingRail` returns the most specific blocker
@@ -257,7 +263,9 @@ struct HibernationGateTests {
                                     let manual = terminal.isManuallyHibernatable()
                                     #expect((rail == nil) == auto,
                                             "blockingRail said \(String(describing: rail)) while isAutoHibernationEligible said \(auto) for \(transport) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
-                                    #expect((railIgnoringKeepWarm == nil) == manual,
+                                    let manualRail = railIgnoringKeepWarm == nil
+                                        || railIgnoringKeepWarm == .unknownActivity
+                                    #expect(manualRail == manual,
                                             "blockingRail with keep-warm cleared said \(String(describing: railIgnoringKeepWarm)) while isManuallyHibernatable said \(manual) for \(transport) session=\(String(describing: sessionID)) kind=\(String(describing: kind)) hibernated=\(hibernatedAt != nil) suspended=\(suspendedAt != nil) keepWarm=\(keepWarm) activity=\(activity)")
                                     rows += 1
                                     if rail == nil { passedEveryRail += 1 }

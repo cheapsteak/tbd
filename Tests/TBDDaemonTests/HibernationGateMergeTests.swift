@@ -43,10 +43,11 @@ struct HibernationGateMergeTests {
         #expect(decideForMerge(t) == .eligible)
     }
 
-    @Test func eligibleForUnknownActivity() {
-        // `.unknown` (hook hasn't fired) is treated as at-rest, same as the sweep.
+    @Test func unknownActivityBlocksMergePark() {
+        // `.unknown` means no agent report: a merge must not park a session
+        // whose turn may still be running, same as the sweep.
         let t = claudeTerminal(activityState: .unknown)
-        #expect(decideForMerge(t) == .eligible)
+        #expect(decideForMerge(t) == .unknownActivity)
     }
 
     // MARK: - Independence from the idle-sweep master switch
