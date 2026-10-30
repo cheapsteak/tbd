@@ -215,17 +215,18 @@ extension AppState {
     /// `removedTabIDs` whatever revision the copy holds, then adopts `tabs`
     /// under the revision guard. `activeTabID` is ignored — it only reports
     /// back the selection the app itself recorded.
+    ///
+    /// A removed tab leaves every worktree's entry, not only the delta's: tab
+    /// IDs are global, and a copy that missed a re-parent while disconnected
+    /// still holds the tab under the worktree it left.
     func applyPanelSurfaceDelta(_ delta: PanelSurfaceDelta) {
         guard panelTabsActive else { return }
         // A removal counts as a change whether or not the copy held the tab:
         // a get in flight may list it from before the removal.
         notePanelTabsTouched(delta.removedTabIDs)
         var surfaces = panelSurfaces
-        if var worktreeSurfaces = surfaces[delta.worktreeID] {
-            for tabID in delta.removedTabIDs {
-                worktreeSurfaces.removeValue(forKey: tabID)
-            }
-            surfaces[delta.worktreeID] = worktreeSurfaces.isEmpty ? nil : worktreeSurfaces
+        for tabID in delta.removedTabIDs {
+            Self.evict(tabID, fromAllBut: nil, in: &surfaces)
         }
         var adopted: [WorkspaceTabID] = []
         for surface in delta.tabs where Self.adopt(surface, into: &surfaces) {
@@ -257,10 +258,11 @@ extension AppState {
         surfaces.values.compactMap { $0[tabID]?.revision }.max()
     }
 
-    /// Removes a tab from every worktree's entry but `worktreeID`'s, dropping
-    /// an entry that leaves empty.
+    /// Removes a tab from every worktree's entry but `worktreeID`'s — from
+    /// every entry when `worktreeID` is nil — dropping an entry that leaves
+    /// empty.
     private static func evict(
-        _ tabID: WorkspaceTabID, fromAllBut worktreeID: UUID, in surfaces: inout PanelSurfaceCopy
+        _ tabID: WorkspaceTabID, fromAllBut worktreeID: UUID?, in surfaces: inout PanelSurfaceCopy
     ) {
         for other in Array(surfaces.keys) where other != worktreeID {
             guard surfaces[other]?[tabID] != nil else { continue }

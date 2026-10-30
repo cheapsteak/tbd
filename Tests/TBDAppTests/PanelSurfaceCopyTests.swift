@@ -117,6 +117,43 @@ struct PanelSurfaceCopyTests {
         }
     }
 
+    /// A copy that missed a re-parent while disconnected holds the tab under
+    /// the worktree it left. The removal, broadcast for the worktree it moved
+    /// to, still reaches it.
+    @Test("a removal drops the tab under whichever worktree the copy holds it")
+    func removalDropsTabUnderAnyWorktree() async {
+        await Fixture.withState(panelTabs: true) { state in
+            let scratchID = UUID()
+            let mainID = UUID()
+            let movedID = UUID()
+            let scratchKeptID = UUID()
+            let mainKeptID = UUID()
+            let scratchKept = Fixture.surface(tabID: scratchKeptID, worktreeID: scratchID, revision: 2)
+            let mainKept = Fixture.surface(tabID: mainKeptID, worktreeID: mainID, revision: 3)
+            state.panelSurfaces = [
+                scratchID: [
+                    movedID: Fixture.surface(tabID: movedID, worktreeID: scratchID, revision: 5),
+                    scratchKeptID: scratchKept,
+                ],
+                mainID: [mainKeptID: mainKept],
+            ]
+
+            state.handleDelta(.panelSurfaceChanged(
+                Fixture.delta(worktreeID: mainID, removed: [movedID])))
+
+            #expect(state.panelSurface(worktreeID: scratchID, tabID: movedID) == nil,
+                    "the tab is dropped from the worktree the copy still holds it under")
+            #expect(state.panelSurface(worktreeID: scratchID, tabID: scratchKeptID) == scratchKept)
+            #expect(state.panelSurface(worktreeID: mainID, tabID: mainKeptID) == mainKept)
+
+            state.handleDelta(.panelSurfaceChanged(
+                Fixture.delta(worktreeID: mainID, removed: [scratchKeptID])))
+            #expect(state.panelSurfaces[scratchID] == nil,
+                    "an entry the removal leaves empty drops out of the copy")
+            #expect(state.panelSurfaces[mainID] == [mainKeptID: mainKept])
+        }
+    }
+
     @Test("a full get drops tabs it does not list")
     func fullGetDropsAbsentTabs() async {
         await Fixture.withState(panelTabs: true) { state in

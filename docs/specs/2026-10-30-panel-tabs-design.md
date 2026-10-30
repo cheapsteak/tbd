@@ -212,7 +212,10 @@ worktree re-parents its tabs. Without that guard a `panel.get` in
 flight at revision N could land after a delta at N+1 and revert the copy, and
 since deltas fire only on change, nothing would correct it until the next
 mutation. Removal is exempt: a tab absent from a full `panel.get`, or named in a
-delta's `removedTabIDs`, is dropped whatever revision the copy holds.
+delta's `removedTabIDs`, is dropped whatever revision the copy holds. A tab
+named in `removedTabIDs` leaves every worktree's entry, not only the delta's,
+because a copy that missed a re-parent still holds the tab under the worktree
+it left.
 
 The app decides the transcript button's operation from its copy, so an agent
 mutation landing between the user's read and the click can make that one click
