@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Every argv the dry-run `TmuxManager` was handed. "Nothing was recorded" is
 /// the assertion that a guard sat ahead of the whole tmux mechanic, not merely

@@ -2,6 +2,7 @@ import Foundation
 import GRDB
 import os
 import TBDShared
+import TBDKernel
 
 private let artifactLogger = Logger(subsystem: "com.tbd.daemon", category: "shadowPeer")
 

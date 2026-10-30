@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import TBDHolder
-@testable import TBDShared
+import TBDKernel
 
 /// Live-process tests for the holder.
 ///

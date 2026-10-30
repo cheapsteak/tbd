@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import TBDShared
+@testable import TBDKernel
 
 /// Record-shape and atomic-write tests for shadow peers
 /// (docs/specs/2026-08-29-remote-peer-messaging-design.md § "Shadow peer

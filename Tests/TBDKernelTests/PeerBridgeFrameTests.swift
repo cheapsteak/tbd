@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import TBDShared
+import TBDKernel
 
 /// Wire-format tests for the `messages` stream
 /// (docs/specs/2026-08-29-remote-peer-messaging-design.md § "Contract change"

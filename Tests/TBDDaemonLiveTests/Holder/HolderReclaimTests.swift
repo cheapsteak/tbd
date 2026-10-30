@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Letting go of a session that has ended.
 ///

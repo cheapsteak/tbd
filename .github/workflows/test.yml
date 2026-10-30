@@ -662,16 +662,21 @@ jobs:
           # would be silent: a pathspec absent from both sides of a `git diff`
           # exits 0, so every PR touching the library would score as not touching
           # it and never save the cache this decision exists to grant it.
+          # `Sources/TBDKernel` is the library TBDShared depends on, so a symbol
+          # added to it is the change #7715 breaks on, and a change confined to
+          # it re-emits its own module and recompiles TBDShared and everything
+          # above it.
           # `Sources/TBDTerminalSerialization` is a first-party library the #7715
           # wipe removes in its own right, and TBDDaemonLib's one first-party
-          # dependency beyond TBDShared, so a change confined to it re-emits its
-          # own module, recompiles TBDDaemonLib and cascades downstream.
+          # dependency beyond TBDShared and TBDKernel, so a change confined to it
+          # re-emits its own module, recompiles TBDDaemonLib and cascades
+          # downstream.
           #
           # Three-dot: what this PR changed since it forked, not everything that
           # has landed on the base since.
           status=0
           git diff --quiet "origin/$BASE_REF...HEAD" -- \
-            Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved || status=$?
+            Sources/TBDKernel Sources/TBDShared Sources/TBDDaemon Sources/TBDTerminalSerialization Package.swift Package.resolved || status=$?
           case "$status" in
             0) decide false "no first-party library or package-manifest change" ;;
             1) decide true "touched a first-party library or the package manifest" ;;
@@ -805,7 +810,7 @@ jobs:
       # library build artifacts forces SPM to re-emit them while keeping the
       # rest of `.build/` warm.
       #
-      # The libraries wiped are TBDShared, TBDDaemonLib and
+      # The libraries wiped are TBDKernel, TBDShared, TBDDaemonLib and
       # TBDTerminalSerialization: every first-party library target whose
       # sources the decision below compares. TBDTerminalSerialization is
       # exposed in its own right, not only as something TBDDaemonLib imports —
@@ -824,7 +829,9 @@ jobs:
       # files, and every module that imports it already depends on TBDShared,
       # so its wipe brings no new module into the rebuild — only its own files
       # and the few downstream files that import it but not TBDShared or
-      # TBDDaemonLib.
+      # TBDDaemonLib. TBDKernel is ten files, and the modules that import it
+      # without TBDShared are the two helpers, their tests and TBDKernelTests,
+      # so its wipe can add those to a run's rebuild.
       #
       # The bug's precondition is that a library's SOURCES differ from the
       # sources its cached artifacts were built from, so the wipe is conditional
@@ -867,7 +874,7 @@ jobs:
           # that every source directory on the list is one library target's.
           # It does not check dependencies: that a module's first-party
           # dependencies are on the list is for review to hold.
-          for module in TBDShared TBDDaemonLib TBDTerminalSerialization; do
+          for module in TBDKernel TBDShared TBDDaemonLib TBDTerminalSerialization; do
             echo "=== $module artifacts before wipe ==="
             ls -la .build/*/debug/"$module".build 2>/dev/null || echo "(absent)"
             ls -la .build/*/debug/Modules/"$module".swiftmodule 2>/dev/null || echo "(absent)"
@@ -978,10 +985,13 @@ jobs:
       # any other target that reaches SwiftTerm. What keeps both TBDAppTests and
       # TestSupport off TBDDaemonLib is the SwiftLint rule
       # no_daemon_import_in_app_tests, in the lint job and the pre-push hook;
-      # for TestSupport this check is a second guard. The option changes
-      # nothing that is compiled, so it stays out of CI_SWIFTPM_FLAGS, and so
-      # out of the cache key that carries that value, and the passes, which run
-      # with `--skip-build`, do not spell it. It is best-effort: SwiftPM skips
+      # for TestSupport this check is a second guard. The check also keeps the
+      # holder and the peer helper, their tests and TestSupport off TBDShared
+      # (docs/specs/2026-10-30-helper-kernel-design.md), since none of them
+      # reaches SwiftTerm's plugin. The option changes nothing that is
+      # compiled, so it stays out of CI_SWIFTPM_FLAGS, and so out of the cache
+      # key that carries that value, and the passes, which run with
+      # `--skip-build`, do not spell it. It is best-effort: SwiftPM skips
       # the check without a message when the compiler offers no import
       # pre-scan, stops checking when one target's pre-scan fails, and visits
       # targets in an order that changes from run to run, so a green build does
@@ -1110,7 +1120,7 @@ jobs:
       #    package manifest. The primary key hashes every source file, so a PR's
       #    own entry is restorable by that same PR's later pushes and by nothing
       #    else; it earns 1.5 GB of a 10 GB store only when the next push would
-      #    otherwise rebuild nearly everything. Touching TBDShared,
+      #    otherwise rebuild nearly everything. Touching TBDKernel, TBDShared,
       #    TBDDaemonLib or TBDTerminalSerialization is exactly that case — an
       #    interface change cascades into every downstream module, and this job
       #    wipes and re-emits the libraries on such a run regardless. Touching

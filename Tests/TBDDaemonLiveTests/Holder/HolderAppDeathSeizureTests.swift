@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The **uncooperative** half of the handback: an app that died still holding
 /// a session's pty.

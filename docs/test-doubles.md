@@ -27,7 +27,7 @@ real SwiftUI views where a test can measure and photograph them.
   JSON files in a temp directory: no network, no auth. Register it in
   `~/tbd/agent-providers.json` and hand-edit a session file to drive the
   remote-backend UI through states a real provider would take hours to reach.
-- **tmux executable fixture** — `Tests/TestSupport/TmuxExecutableTestFixture.swift`.
+- **tmux executable fixture** — `Tests/DaemonTestSupport/TmuxExecutableTestFixture.swift`.
   Fakes the `tmux` binary itself for Swift tests: a stub executable that
   reports a known version and logs each invocation, plus a resolver pinned to
   it. Reach for it when a test's behavior turns on the tmux version and must

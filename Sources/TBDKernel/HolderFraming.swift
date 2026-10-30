@@ -17,7 +17,7 @@ public enum HolderFramingError: LocalizedError, Equatable {
 /// The holder wire framing: `[UInt32 little-endian byte count][JSON]`, both
 /// directions.
 ///
-/// It lives in `TBDShared` because both ends speak it — the holder binary
+/// It lives in `TBDKernel` because both ends speak it — the holder binary
 /// serving requests and the daemon-side `HolderClient` issuing them. A second
 /// implementation on the daemon side would be two chances to get the length
 /// word's endianness, the size cap, or the partial-frame carry wrong, and a

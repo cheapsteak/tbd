@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 import Testing
-@testable import TBDShared
+import TBDKernel
 
 /// `Pipe.closeOnExec()` marks both ends `FD_CLOEXEC`, and a plain `Pipe()`
 /// marks neither — the second fact is what keeps the first from being vacuous.

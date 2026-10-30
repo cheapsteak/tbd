@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// Tier 2: a real rendezvous directory with real (abandoned) unix sockets plus
 /// an in-memory database. The holders base, every other base the sweep walks,

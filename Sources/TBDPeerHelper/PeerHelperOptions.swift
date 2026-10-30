@@ -1,5 +1,5 @@
 import Foundation
-import TBDShared
+import TBDKernel
 
 /// One shadow peer helper's invocation.
 ///

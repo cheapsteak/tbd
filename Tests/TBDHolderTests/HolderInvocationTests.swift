@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Testing
 @testable import TBDHolder
-@testable import TBDShared
+import TBDKernel
 
 /// The parts of the holder that need no process: the command line, the wire
 /// framing, the exit-status decode, and the one delay that carries the clock

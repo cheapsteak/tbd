@@ -177,10 +177,11 @@ Account-database home lookups
 `FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
 escape both variables outright and are rejected mechanically by the
 `no_passwd_home_lookup` and `no_hardcoded_users_path` SwiftLint rules — the
-second covers `Tests/TBDSharedTests` and `Tests/TBDAppTests` as well, matches
-the dash-encoded `-Users-<name>-` form Claude Code scratchpad paths use, and
-fires in comments too, because a real username in a doc comment is a leak in a
-public repo even though it cannot open a file. Use `me` / `acme` / `x` / `test`
+second covers `Tests/TBDSharedTests`, `Tests/TBDKernelTests` and
+`Tests/TBDAppTests` as well, matches the dash-encoded `-Users-<name>-` form
+Claude Code scratchpad paths use, and fires in comments too, because a real
+username in a doc comment is a leak in a public repo even though it cannot open
+a file. Use `me` / `acme` / `x` / `test`
 in examples.
 
 Neither of those is the shape the leaks actually took, so a third rule covers
@@ -192,8 +193,9 @@ consults `TBD_HOME` / `TBD_CLAUDE_HOST_HOME` / `TBD_TEST_CODEX_HOME` at all.
 characters by one of those three as a whole path component, which is narrow
 enough to leave the ~20 legitimate home lookups (tilde-abbreviation for
 display, `~/Library` fallbacks, defaulted injection seams, `~/.ssh/tbd-agent.sock`)
-untouched. Three sites carry a reasoned inline suppression: `Constants.swift`
-is excluded outright as the file that *defines* the resolvers, and
+untouched. Three sites carry a reasoned inline suppression: `KernelPaths.swift`
+is excluded outright as the file that *defines* the resolvers, with
+`Constants.swift`, whose `TBDConstants` forwards to them, beside it, and
 `CodexHomeManager`, `ModelProfileKeychain.legacyStorageDir` and the frozen v-24
 conductors migration name a real path deliberately. Its limit is worth knowing
 before trusting it: the home value has to be visible near the append, so a path

@@ -3,7 +3,7 @@ import Foundation
 import TestSupport
 import Testing
 @testable import TBDHolder
-@testable import TBDShared
+import TBDKernel
 
 // Scaffolding for the holder's live-process tests.
 //
@@ -225,7 +225,7 @@ final class HolderFixture {
         let executable = try #require(locateExecutable(), "TBDHolder must be built beside the test bundle")
         let environment = ["TBD_HOME": home]
         try FileManager.default.createDirectory(
-            atPath: TBDConstants.holdersDir(environment: environment).path,
+            atPath: KernelPaths.holdersDir(environment: environment).path,
             withIntermediateDirectories: true)
 
         let socketPath = try HolderRendezvous.socketPath(sessionID: session, environment: environment)

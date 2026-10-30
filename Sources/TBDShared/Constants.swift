@@ -1,16 +1,12 @@
 import Foundation
+import TBDKernel
 
 public enum TBDConstants {
     public static let version = "0.1.0"
 
-    /// Base config directory resolved from the given environment dictionary.
-    /// Honors `TBD_HOME`; falls back to `~/tbd` when the key is absent or empty.
+    /// Base config directory; forwards to `KernelPaths.configDir(environment:)`.
     public static func configDir(environment: [String: String]) -> URL {
-        if let override = environment["TBD_HOME"], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("tbd")
+        KernelPaths.configDir(environment: environment)
     }
 
     /// Base config directory. Resolves `TBD_HOME` env var on every access so a
@@ -78,15 +74,9 @@ public enum TBDConstants {
     /// the app (SCM_RIGHTS). Sibling of `socketPath`.
     public static var vendSocketPath: String { vendSocketPath(environment: ProcessInfo.processInfo.environment) }
 
-    /// Directory holding one socket and one lock file per live pty holder:
-    /// `~/tbd/holders`. Honors TBD_HOME.
-    ///
-    /// Deliberately shallow and directly under the config dir: every holder
-    /// socket path must fit Darwin's ~104-byte `sun_path`, and nesting is the
-    /// thing that breaks that budget first. `HolderRendezvous` composes the
-    /// per-session names inside it and enforces the budget.
+    /// Holder rendezvous directory; forwards to `KernelPaths.holdersDir(environment:)`.
     public static func holdersDir(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
-        configDir(environment: environment).appendingPathComponent("holders")
+        KernelPaths.holdersDir(environment: environment)
     }
 
     /// Directory holding one subdirectory per Claude session for the session
@@ -186,23 +176,9 @@ public enum TBDConstants {
     /// is unset or empty, preserving production behavior.
     public static var claudeScratchpadBase: URL { claudeScratchpadBase(environment: ProcessInfo.processInfo.environment) }
 
-    /// The host Claude store — `TBD_CLAUDE_HOST_HOME` when set, `~/.claude`
-    /// otherwise — resolved from the given environment dictionary.
-    ///
-    /// **The single resolution point for that override, package-wide.** It
-    /// lives in `TBDShared` rather than beside its daemon-side caller because
-    /// `TBDApp` needs it too and does not link `TBDDaemonLib`:
-    /// `LegacyHookSettingsPath` hand-built `homeDirectoryForCurrentUser/.claude`
-    /// for a dialog body, which is display-only today but shows the wrong path
-    /// under any override and is the exact shape of the leak
-    /// `LegacyHookScanner.globalSettingsPath` had.
-    /// `ClaudeProfileConfigDirManager.resolveHostBaseDirectory` delegates here.
+    /// The host Claude store; forwards to `KernelPaths.claudeHostHome(environment:)`.
     public static func claudeHostHome(environment: [String: String]) -> URL {
-        if let override = environment["TBD_CLAUDE_HOST_HOME"], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude", isDirectory: true)
+        KernelPaths.claudeHostHome(environment: environment)
     }
 
     /// The host Claude store. Resolves `TBD_CLAUDE_HOST_HOME` on every access,

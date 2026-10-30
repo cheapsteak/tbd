@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import TBDShared
+import TBDKernel
 
 @Suite("Holder creation lock")
 struct HolderLockTests {

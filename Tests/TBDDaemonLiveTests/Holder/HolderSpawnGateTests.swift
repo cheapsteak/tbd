@@ -6,6 +6,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The gate that decides which transport a new session is born onto, and the
 /// read that renders it afterwards.

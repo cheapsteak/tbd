@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import TBDShared
+import TBDKernel
 
 @Suite("Holder rendezvous paths")
 struct HolderRendezvousTests {
@@ -16,7 +16,7 @@ struct HolderRendezvousTests {
         #expect(sock.contains(session.uuidString.lowercased()))
     }
 
-    /// Derived from TBDConstants, never hand-composed from $HOME — a path built
+    /// Derived from KernelPaths, never hand-composed from $HOME — a path built
     /// from $HOME silently ignores TBD_HOME and defeats the test fence.
     @Test func honorsTBDHome() throws {
         let a = try HolderRendezvous.socketPath(sessionID: session, environment: ["TBD_HOME": "/tmp/a"])

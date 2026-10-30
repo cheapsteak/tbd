@@ -1,6 +1,6 @@
 import Darwin
 import Foundation
-import TBDShared
+import TBDKernel
 
 /// One real `TBDPeerHelper` process, spawned the way the daemon spawns it.
 ///

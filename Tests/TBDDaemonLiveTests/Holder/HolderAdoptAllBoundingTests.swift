@@ -4,6 +4,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// A holder that is **reachable but will not answer** — the only failure shape
 /// `adoptAll`'s bounding exists for.

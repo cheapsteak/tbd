@@ -5,6 +5,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// An attach adopts a live session the registry never adopted, and leaves a
 /// session whose reader is being released alone.

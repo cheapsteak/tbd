@@ -5,6 +5,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Build a fresh router over an in-memory DB with dry-run tmux. Returns the
 /// DB too so tests can create repo/worktree rows for server resolution.
