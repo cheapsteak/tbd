@@ -1,8 +1,6 @@
 import Testing
 import Foundation
 @testable import TBDDaemonLib
-@testable import TBDShared
-import DaemonTestSupport
 import TestSupport
 
 // A daemon shutdown must survive being asked for twice.
@@ -17,24 +15,6 @@ import TestSupport
 // `exit(0)`.
 @Suite("Repeat server shutdowns")
 struct ServerShutdownLatchTests {
-
-    /// Throwaway RPCRouter: in-memory DB + dryRun tmux, so no real tmux server
-    /// is contacted and nothing under ~/tbd is touched.
-    private func makeRouter() throws -> RPCRouter {
-        let db = try TBDDatabase(inMemory: true)
-        return RPCRouter(
-            db: db,
-            lifecycle: WorktreeLifecycle(
-                db: db,
-                git: GitManager(),
-                tmux: TmuxManager(dryRun: true),
-                hooks: HookResolver()
-            ),
-            tmux: TmuxManager(dryRun: true),
-            startTime: Date(),
-            actuationLog: makeTestActuationLog()
-        )
-    }
 
     @Test("the latch runs its body once, and every caller waits for that one run")
     func latchRunsItsBodyOnceAndEveryCallerWaits() async throws {
@@ -118,8 +98,8 @@ struct ServerShutdownLatchTests {
 
     @Test("a default-constructed latch runs its body once across repeat calls")
     func defaultLatchRunsItsBodyOnce() async {
-        // The production configuration — `SocketServer` and `HTTPServer` both
-        // build their latch with no executor — keeps its once-only coverage.
+        // The production configuration — `SocketServer` and `ModChannelServer`
+        // both build their latch with no executor — keeps its once-only coverage.
         // Sequential rather than concurrent callers, because this run does go
         // to the cooperative pool: two awaits one after the other are two hops
         // on the shared FIFO queue, the same exposure every other test in the
@@ -149,36 +129,6 @@ struct ServerShutdownLatchTests {
             bodyThread == GateExecutor.threadName,
             "the latch's run landed on \(bodyThread ?? "an unnamed thread"), not the injected executor"
         )
-    }
-
-    @Test("a second shutdown of the HTTP server returns")
-    func repeatHTTPServerStopReturns() async throws {
-        // The sibling of `SocketServer` in the same teardown, and the one a
-        // fixed `SocketServer` would otherwise hand the hang straight on to:
-        // `Daemon.stop()` stops the socket server and then this one.
-        let portFilePath = "/tmp/tbd-httpshutdown-\(UUID().uuidString.prefix(8)).port"
-        defer { unlink(portFilePath) }
-
-        let server = HTTPServer(router: try makeRouter(), portFilePath: portFilePath)
-        try await server.start()
-        await server.stop()
-
-        let returned = ShutdownCounter()
-        // Started as a separate task and waited on with a deadline rather
-        // than awaited directly: the failure under test is a shutdown that
-        // never returns, and awaiting it would wedge the whole run instead of
-        // reporting it. `gateHoldingTask` keeps the caller off the cooperative
-        // pool; the server's own latch has no executor injected, but its run
-        // already finished with the first `stop()`, so this second call awaits
-        // a completed task and never needs the pool to make progress.
-        _ = gateHoldingTask {
-            await server.stop()
-            returned.increment()
-        }
-        try await waitFor(
-            "the second stop() to return",
-            observed: { "\(returned.count) of 1 returned" }
-        ) { returned.count == 1 }
     }
 }
 

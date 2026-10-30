@@ -31,8 +31,7 @@ extension RPCRouter {
     /// envelope suppression does, through the same check: the kernel-named
     /// peer pid must be the recorded app identity, re-verified
     /// (`authenticatesEnvelopeSuppression`). A nil context — every non-socket
-    /// caller, including the HTTP transport — is refused, as is any other
-    /// process on the socket.
+    /// caller — is refused, as is any other process on the socket.
     func promptAnswerPeerRefusal(
         connection: RPCConnectionContext?, method: String
     ) async -> RPCResponse? {

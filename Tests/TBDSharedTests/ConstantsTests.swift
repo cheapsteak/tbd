@@ -50,7 +50,6 @@ import Foundation
         let env = ["TBD_HOME": "/tmp/tbd-derived"]
         #expect(TBDConstants.databasePath(environment: env) == "/tmp/tbd-derived/state.db")
         #expect(TBDConstants.pidFilePath(environment: env) == "/tmp/tbd-derived/tbdd.pid")
-        #expect(TBDConstants.portFilePath(environment: env) == "/tmp/tbd-derived/port")
         #expect(TBDConstants.reposDir(environment: env).path == "/tmp/tbd-derived/repos")
         #expect(TBDConstants.socketPath(environment: env) == "/tmp/tbd-derived/sock")
         #expect(TBDConstants.actuationLogPath(environment: env) == "/tmp/tbd-derived/actuations.jsonl")
@@ -153,10 +152,6 @@ import Foundation
 
     @Test func pidFilePathSuffix() {
         #expect(TBDConstants.pidFilePath.hasSuffix("/tbdd.pid"))
-    }
-
-    @Test func portFilePathSuffix() {
-        #expect(TBDConstants.portFilePath.hasSuffix("/port"))
     }
 
     @Test func reposDirSuffix() {

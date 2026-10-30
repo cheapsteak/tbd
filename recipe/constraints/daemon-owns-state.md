@@ -14,6 +14,6 @@ The UI is a stateless client. All persistent state lives in the daemon process (
 ## What this constrains
 
 - The app process must never be the source of truth for anything persistent — it only owns window layout (split positions, tab order) in UserDefaults
-- All state mutations go through the daemon's RPC interface (Unix socket or HTTP)
+- All state mutations go through the daemon's RPC interface (its Unix socket)
 - The database schema is the daemon's responsibility, not the app's
 - State reconciliation on launch: the daemon reconciles its ledger against `git worktree list` — git is authoritative for what exists on disk, the ledger adds metadata

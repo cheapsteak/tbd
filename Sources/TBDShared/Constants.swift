@@ -158,11 +158,6 @@ public enum TBDConstants {
     }
     public static var pidFilePath: String { pidFilePath(environment: ProcessInfo.processInfo.environment) }
 
-    public static func portFilePath(environment: [String: String]) -> String {
-        configDir(environment: environment).appendingPathComponent("port").path
-    }
-    public static var portFilePath: String { portFilePath(environment: ProcessInfo.processInfo.environment) }
-
     public static func reposDir(environment: [String: String]) -> URL {
         configDir(environment: environment).appendingPathComponent("repos")
     }

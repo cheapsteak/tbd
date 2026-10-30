@@ -1858,51 +1858,6 @@ struct ModelProfileRPCTests {
         ])
     }
 
-    @Test("execEnvironment: the loopback HTTP transport refuses it, and the token never crosses it")
-    func execEnvironmentRefusedOverHTTP() async throws {
-        let (manager, base) = makeTempConfigDirManager()
-        defer { try? FileManager.default.removeItem(at: base) }
-        let (router, db, _) = makeRouter(configDirManager: manager)
-        defer { Task { await cleanupKeychain(db) } }
-
-        let profile = try await db.modelProfiles.create(name: "Reviewer", kind: .oauthToken)
-        let token = freshToken()
-        try keychain.store(id: profile.id.uuidString, token: token)
-
-        let portFilePath = "/tmp/tbd-http-socketonly-\(UUID().uuidString.prefix(8)).port"
-        defer { unlink(portFilePath) }
-        let server = HTTPServer(router: router, portFilePath: portFilePath)
-        try await server.start()
-        // An ephemeral session: no on-disk cache under the test fence's home.
-        let session = URLSession(configuration: .ephemeral)
-        func post(_ request: RPCRequest) async throws -> (body: String, response: RPCResponse) {
-            var http = URLRequest(url: URL(string: "http://127.0.0.1:\(server.port)/rpc")!)
-            http.httpMethod = "POST"
-            http.httpBody = try JSONEncoder().encode(request)
-            let (data, _) = try await session.data(for: http)
-            return (String(decoding: data, as: UTF8.self), try JSONDecoder().decode(RPCResponse.self, from: data))
-        }
-
-        do {
-            let refused = try await post(RPCRequest(
-                method: RPCMethod.modelProfileExecEnvironment,
-                params: ModelProfileExecEnvironmentParams(id: profile.id)))
-            #expect(!refused.response.success)
-            #expect(refused.response.error?.contains("Unix socket") == true)
-            #expect(!refused.body.contains(token))
-            // The transport itself still answers an ordinary method.
-            let listed = try await post(RPCRequest(method: RPCMethod.modelProfileList))
-            #expect(listed.response.success)
-            #expect(!listed.body.contains(token))
-        } catch {
-            await server.stop()
-            throw error
-        }
-        await server.stop()
-        // The socket path, which goes straight to the router, still serves it.
-        #expect(try await execEnvironment(router, id: profile.id).success)
-    }
-
     @Test("execEnvironment: unknown id fails with profile-not-found")
     func execEnvironmentUnknownID() async throws {
         let (router, _, _) = makeRouter()
