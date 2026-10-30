@@ -160,6 +160,71 @@ test_unicode_identifier_is_not_a_prefix_match() {
   both_ways "unicode" 1 Widget 'let x = Widget()' "$(printf 'let x = Widget\303\251()')"
 }
 
+# Code inside a literal still counts: an interpolation is code, and so is a
+# name in backticks.
+test_string_interpolation_counts() {
+  both_ways "interpolation" 1 Widget 'let s = "\(Widget.make())"' 'let s = "\(1)"'
+}
+
+# In a raw string only `\#(` interpolates; a bare `\(` is two characters of text.
+test_raw_string_interpolation_counts() {
+  both_ways "raw interpolation" 1 widgetLimit 'let s = #"\#(widgetLimit)"#' 'let s = #"\(widgetLimit)"#'
+}
+
+test_multiline_interpolation_counts() {
+  both_ways "multi-line interpolation" 2 widgetLimit $'let s = """\n\\(widgetLimit)\n"""' $'let s = """\nwidgetLimit\n"""'
+}
+
+test_backtick_name_counts() {
+  # shellcheck disable=SC2016 # the backticks are Swift, not command substitution
+  both_ways "backticks" 1 Widget 'let w = `Widget`()' 'let w = `Int`()'
+}
+
+# A `/` between two operands is division; reading it as a regex would hide
+# the name between the slashes.
+test_division_is_not_a_regex() {
+  both_ways "division" 1 Widget 'let x = total/Widget.scale/2' 'let x = total/other.scale/2'
+}
+
+# ---------------------------------------------------------------------------
+# Comments and literals are not references
+# ---------------------------------------------------------------------------
+
+test_line_comment_ignored() {
+  both_ways "line comment" 1 Widget 'let w = Widget()' 'let w = 0 // Widget()'
+}
+
+test_doc_comment_ignored() {
+  both_ways "doc comment" 1 Widget '_ = Widget.make()' '/// Widget.make()'
+}
+
+test_nested_block_comment_ignored() {
+  both_ways "nested block comment" 1 Widget 'let w = Widget() /* a /* b */ c */' 'let w = 0 /* a /* b */ Widget() */'
+}
+
+test_string_ignored() {
+  both_ways "string" 1 Widget 'let s = Widget.make()' 'let s = "Widget.make()"'
+}
+
+test_raw_string_ignored() {
+  both_ways "raw string" 1 Widget 'let s = Widget.make()' 'let s = #"say "Widget" \(Widget)"#'
+}
+
+test_multiline_string_ignored() {
+  both_ways "multi-line string" 2 Widget $'let s = """\n\\(Widget.make())\n"""' $'let s = """\nWidget "quoted" {\n"""'
+}
+
+# A lexer that misses the regex reads the quote as a string's start, or the
+# brace as unbalanced, and fails a file that is fine.
+test_bare_regex_ignored() {
+  both_ways "bare regex" 1 Widget 'let r = Widget.make()' 'let r = /Widget+/'
+  passes "a bare regex holding a quote and a brace" 'let r = /\{"Widget"/'
+}
+
+test_extended_regex_ignored() {
+  both_ways "extended regex" 1 Widget 'let r = Widget.make()' 'let r = #/Widget "x" {/#'
+}
+
 # ---------------------------------------------------------------------------
 # The list
 # ---------------------------------------------------------------------------
@@ -338,6 +403,37 @@ test_non_swift_files_are_ignored() {
 test_unbalanced_braces_cannot_scan() {
   cannot_scan "unclosed brace" 'struct A {' '1: unclosed "{"' 'struct A {}'
   cannot_scan "stray brace" '}' '1: "}" with no matching "{"' 'struct A {}'
+}
+
+test_unterminated_block_comment_cannot_scan() {
+  cannot_scan "block comment" '/* Widget' '1: unterminated block comment' '/* Widget */'
+}
+
+test_unterminated_string_cannot_scan() {
+  cannot_scan "string" 'let s = "Widget' '1: unterminated string literal' 'let s = "Widget"'
+}
+
+test_unterminated_multiline_string_cannot_scan() {
+  cannot_scan "multi-line string" $'let s = """\nWidget' '1: unterminated multi-line string literal' \
+    $'let s = """\nWidget\n"""'
+}
+
+test_unterminated_extended_regex_cannot_scan() {
+  cannot_scan "extended regex" 'let r = #/Widget' '1: unterminated regex literal' 'let r = #/Widget/#'
+}
+
+# A traceback would name the script, not the file; exit 2 names the file and line.
+test_non_utf8_cannot_scan() {
+  local d; d="$(mkfix)"
+  mkdir -p "$d/$DAEMON_REL/Top"
+  printf 'let a = 1\nlet s = "\351"\n' > "$d/$DAEMON_REL/Top/User.swift"
+  run_check "$d"
+  assert_rc "bytes that are not UTF-8 cannot be scanned" 2 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and the line is named" "$RUN_OUT" \
+    "lint-daemon-layers: cannot scan Sources/TBDDaemon/Top/User.swift:2: not valid UTF-8"
+  printf 'let a = 1\nlet s = "e"\n' > "$d/$DAEMON_REL/Top/User.swift"
+  run_check "$d"
+  assert_rc "fixed, the check passes" 0 "$RUN_RC" "$RUN_OUT"
 }
 
 # ---------------------------------------------------------------------------

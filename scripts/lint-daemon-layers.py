@@ -120,8 +120,216 @@ def unit_of(rel: PurePosixPath) -> str:
 # --------------------------------------------------------------------------
 
 
+_NOT_NEWLINE = re.compile(r"[^\n]")
+# The characters each mode must stop at; everything between them is copied
+# (code) or blanked (a literal's body) wholesale.
+_CODE_STOPS = re.compile(r'[/"#`]')
+_INTERPOLATION_STOPS = re.compile(r'[/"#`()]')
+_SINGLE_LINE_STOPS = re.compile(r'[\\"\n]')
+_MULTI_LINE_STOPS = re.compile(r'[\\"]')
+_BLOCK_COMMENT_MARKS = re.compile(r"/\*|\*/")
+_REGEX_STOPS = re.compile(r"[\\/]")
+
+# A bare `/regex/` can start only where an operand can: after one of these,
+# at the start of a line, or after `return`. Anywhere else a `/` is division.
+_REGEX_MAY_FOLLOW = frozenset("(,=:[{;!&|?^~")
+# ...and never with one of these after the `/`, which make it `/ x`, `//`,
+# `/*` or `/=`.
+_REGEX_MAY_NOT_START_WITH = frozenset(" \t\n/*=")
+
+
+class _String:
+    __slots__ = ("hashes", "multi_line", "start")
+
+    def __init__(self, hashes: int, multi_line: bool, start: int) -> None:
+        self.hashes = hashes
+        self.multi_line = multi_line
+        self.start = start
+
+
+class _Interpolation:
+    __slots__ = ("depth",)
+
+    def __init__(self) -> None:
+        self.depth = 0
+
+
 def blank_literals_and_comments(source: str, path: str) -> str:
-    return source
+    """`source` with comment text, literal bodies and backticks turned to spaces.
+
+    The result keeps the input's length and every newline, so line numbers
+    survive. Code inside a string's interpolation is kept, because it is code:
+    `"\\(Widget.make())"` references Widget. Raises CannotCheck at the opening
+    line of a comment or literal that never closes, rather than read the rest
+    of the file inside out.
+    """
+    out = list(source)
+    size = len(source)
+
+    def blank(start: int, end: int) -> None:
+        out[start:end] = _NOT_NEWLINE.sub(" ", source[start:end])
+
+    def fail(position: int, reason: str) -> None:
+        line = source.count("\n", 0, position) + 1
+        raise CannotCheck(f"cannot scan {path}:{line}: {reason}")
+
+    def block_comment_end(start: int) -> int:
+        # Swift's block comments nest.
+        depth = 0
+        position = start
+        while True:
+            mark = _BLOCK_COMMENT_MARKS.search(source, position)
+            if mark is None:
+                fail(start, "unterminated block comment")
+            depth += 1 if mark.group() == "/*" else -1
+            position = mark.end()
+            if depth == 0:
+                return position
+
+    def bare_regex_close(slash: int) -> int | None:
+        """The closing `/` of a bare regex opening at `slash`, or None when
+        that `/` is an operator."""
+        after = source[slash + 1:slash + 2]
+        if not after or after in _REGEX_MAY_NOT_START_WITH:
+            return None
+        k = slash - 1
+        while k >= 0 and out[k] in " \t":
+            k -= 1
+        if k >= 0 and out[k] != "\n" and out[k] not in _REGEX_MAY_FOLLOW:
+            end = k + 1
+            while k >= 0 and (out[k].isalnum() or out[k] == "_"):
+                k -= 1
+            if "".join(out[k + 1:end]) != "return":
+                return None
+        position = slash + 1
+        while position < size:
+            char = source[position]
+            if char == "\n":
+                return None
+            if char == "\\":
+                if source[position + 1:position + 2] in ("", "\n"):
+                    return None
+                position += 2
+                continue
+            if char == "/":
+                # `/ x /` is two divisions; a regex cannot end on a space.
+                return position if source[position - 1] not in " \t" else None
+            position += 1
+        return None
+
+    def extended_regex_end(start: int, slash: int, hashes: int) -> int:
+        closer = "/" + "#" * hashes
+        position = slash + 1
+        while True:
+            stop = _REGEX_STOPS.search(source, position)
+            if stop is None:
+                fail(start, "unterminated regex literal")
+            position = stop.start()
+            if source[position] == "\\":
+                position += 2
+            elif source.startswith(closer, position):
+                blank(slash + 1, position)
+                return position + len(closer)
+            else:
+                position += 1
+
+    # The open strings and interpolations, innermost last. Empty is code.
+    stack: list[_String | _Interpolation] = []
+    i = 0
+    while i < size:
+        top = stack[-1] if stack else None
+
+        if isinstance(top, _String):
+            stop = (_MULTI_LINE_STOPS if top.multi_line else _SINGLE_LINE_STOPS).search(source, i)
+            if stop is None:
+                break
+            k = stop.start()
+            blank(i, k)
+            char = source[k]
+            if char == "\n":
+                fail(top.start, "unterminated string literal")
+            elif char == '"':
+                closer = ('"""' if top.multi_line else '"') + "#" * top.hashes
+                if source.startswith(closer, k):
+                    stack.pop()
+                    i = k + len(closer)
+                else:
+                    out[k] = " "
+                    i = k + 1
+            elif source.startswith("#" * top.hashes, k + 1):
+                # A backslash with as many hashes as the string opened with:
+                # an interpolation if `(` follows, otherwise an escape.
+                after = k + 1 + top.hashes
+                if source[after:after + 1] == "(":
+                    blank(k, after)
+                    stack.append(_Interpolation())
+                    i = after + 1
+                else:
+                    end = after if source[after:after + 1] in ("", "\n") else after + 1
+                    blank(k, end)
+                    i = end
+            else:
+                out[k] = " "  # a raw string's plain backslash
+                i = k + 1
+            continue
+
+        stop = (_CODE_STOPS if top is None else _INTERPOLATION_STOPS).search(source, i)
+        if stop is None:
+            break
+        i = stop.start()
+        char = source[i]
+        if char == "`":
+            out[i] = " "
+            i += 1
+        elif char == "(":
+            top.depth += 1
+            i += 1
+        elif char == ")":
+            if top.depth == 0:
+                stack.pop()  # the interpolation closes and its string resumes
+            else:
+                top.depth -= 1
+            i += 1
+        elif char == "/":
+            after = source[i + 1:i + 2]
+            if after == "/":
+                end = source.find("\n", i)
+                end = size if end < 0 else end
+                blank(i, end)
+                i = end
+            elif after == "*":
+                end = block_comment_end(i)
+                blank(i, end)
+                i = end
+            else:
+                close = bare_regex_close(i)
+                if close is None:
+                    i += 1
+                else:
+                    blank(i + 1, close)
+                    i = close + 1
+        else:
+            # `"`, or a run of `#` that may open a raw string or an
+            # extended regex. Any other `#` is a directive's: `#if`.
+            j = i
+            while j < size and source[j] == "#":
+                j += 1
+            hashes = j - i
+            if source[j:j + 1] == '"':
+                multi_line = source.startswith('"""', j)
+                stack.append(_String(hashes, multi_line, i))
+                i = j + (3 if multi_line else 1)
+            elif hashes and source[j:j + 1] == "/":
+                i = extended_regex_end(i, j, hashes)
+            else:
+                i = j
+
+    for frame in reversed(stack):
+        if isinstance(frame, _String):
+            if frame.multi_line:
+                fail(frame.start, "unterminated multi-line string literal")
+            fail(frame.start, "unterminated string literal")
+    return "".join(out)
 
 
 PUNCTUATION = frozenset("{}()[]<>.,:;=@#?!&|+-*/%^~")
@@ -324,7 +532,12 @@ def scan_daemon(repo_root: Path) -> Scan:
         if rel == PurePosixPath(EXECUTABLE_ONLY):
             continue
         repo_path = (DAEMON_DIR / rel).as_posix()
-        source = path.read_bytes().decode("utf-8")
+        raw = path.read_bytes()
+        try:
+            source = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            line = raw[:error.start].count(b"\n") + 1
+            raise CannotCheck(f"cannot scan {repo_path}:{line}: not valid UTF-8") from None
         tokens = tokenize(blank_literals_and_comments(source, repo_path))
         files.append(SourceFile(repo_path, unit_of(rel), tokens, parse_declarations(tokens, repo_path)))
     index = build_index(files)
