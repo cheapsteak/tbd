@@ -877,19 +877,6 @@ final class AppState {
     /// every tab it does not list, so a list holding only one of the two
     /// would delete the other's panels. Cleared on resubscribe.
     @ObservationIgnored var panelSyncReadyWorktrees: Set<UUID> = []
-    /// Bumped by every resubscribe reset. A `panel.get` or `panel.apply` reply,
-    /// or a delta from the subscription the reset replaced, that crosses a
-    /// bump belongs to the old daemon and is discarded: one adopted during the
-    /// authoritative get's flight would count as a change that get keeps.
-    @ObservationIgnored var panelSurfaceResetGeneration: UInt64 = 0
-    /// Worktrees whose entry in the copy predates the last resubscribe reset.
-    /// The first full `panel.get` for one replaces its entry whole, without
-    /// the revision guard: a new daemon may count revisions from zero again.
-    @ObservationIgnored var panelAwaitingAuthoritativeGet: Set<UUID> = []
-    /// Worktrees awaiting that get for which the guard refused a delta or an
-    /// apply reply. The refused change may be newer than the get's snapshot,
-    /// so one more get follows the authoritative one.
-    @ObservationIgnored var panelRefusedWhileAwaiting: Set<UUID> = []
     /// `panel.get` calls awaiting their reply. While any is, every delta and
     /// adopted apply reply records the tab IDs it touched in
     /// `panelTabsTouchedInFlight`, so a reply can tell what changed under it.
@@ -3025,22 +3012,14 @@ final class AppState {
         programStatusSnapshots.removeAll()
         programStatusRevisions.removeAll()
         Task { [weak self] in await self?.hydrateProgramStatus() }
-        // And for panel surfaces: a new daemon may have reset their revisions,
-        // and the copy's revision guard would refuse every lower one.
+        // And for panel surfaces: deltas sent while no subscription was up
+        // were missed, so the copy's worktrees are refetched.
         resetPanelSurfacesForResubscribe()
-        let panelGeneration = panelSurfaceResetGeneration
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    // A panel delta still queued from a subscription that a
-                    // later reset replaced comes from the old daemon.
-                    if case .panelSurfaceChanged = delta,
-                       self.panelSurfaceResetGeneration != panelGeneration {
-                        return
-                    }
-                    self.handleDelta(delta)
+                    self?.handleDelta(delta)
                 }
             }
             // Subscription disconnected — nil out so poll loop restarts it

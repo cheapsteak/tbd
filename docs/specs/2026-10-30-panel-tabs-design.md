@@ -372,16 +372,22 @@ match: an agent opens content and lets the reuse rule place it.
 property of the `@Observable` `AppState`. It is filled by `panel.get` when the
 flag is on, kept current by a `panelSurfaceChanged` case in `handleDelta`, and
 cleared when the daemon reports the flag off. A delta or fetch while the flag is
-off leaves it untouched. It is also refetched whenever the app (re)subscribes
-to the daemon, because a new daemon may have reset revisions and the revision
-guard would otherwise refuse every lower one. The copy is kept meanwhile, so
-daemon-rendered tabs keep rendering instead of dropping to legacy and
-rebuilding their terminal views. The first full `panel.get` for each worktree
-after the resubscribe replaces that worktree's entry whole, without the guard,
-except that a tab a delta changed during that get's flight keeps the change.
-Until that get lands, deltas apply under the guard, and if the guard refused
-one, a second get follows, since the refused change may be newer than the
-first get's snapshot.
+off leaves it untouched.
+
+A full `panel.get` is merged into the copy rather than assigned, because deltas
+keep arriving during its flight. A tab the copy held when the get was issued,
+and the result omits, is dropped, unless a delta or an apply reply changed it
+in flight; a listed tab goes through the revision guard; and a tab removed in
+flight is never put back by the result's listing.
+
+Whenever the app (re)subscribes to the daemon, each worktree the copy holds is
+refetched, because deltas sent while no subscription was up were missed. The
+refetch merges under the guard like any other `panel.get`: revisions are
+daemon-wide and never decrease, so a daemon restart leaves them comparable.
+The copy is kept meanwhile, so daemon-rendered tabs keep rendering instead of
+dropping to legacy and rebuilding their terminal views. A worktree the copy
+does not hold is not refetched, so at launch, with the copy empty, each
+worktree is loaded once.
 
 One chokepoint, `applyPanelOperation`, builds the envelope (a fresh operation
 ID, origin `.appUser`, the copy's revision as `baseRevision`), sends it, and
@@ -469,7 +475,8 @@ Each gated branch is tested both ways, asserting opposite outcomes.
   - The copy: flag off leaves it untouched; a delta upserts; an older revision
     is refused; a removal is applied whatever the revision; a full `get` drops
     absent tabs; a delta's `activeTabID` does not move the selected tab;
-    resubscribing keeps rendering it until the first refetch replaces it.
+    resubscribing keeps rendering it and refetches the worktrees it holds;
+    launch loads each worktree once.
   - The tab-sync observer: a change to tab IDs, order, labels or a primary sends
     one sync per worktree; an unrelated `AppState` change sends none; flag off
     sends none.

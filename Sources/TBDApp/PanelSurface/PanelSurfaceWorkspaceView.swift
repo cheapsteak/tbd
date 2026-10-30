@@ -4,9 +4,9 @@ import TBDShared
 /// The `.task(id:)` key for loading a worktree's surfaces into the app's copy:
 /// a new worktree, or the flag turning on, starts a load. Not the active tab:
 /// one load fills every tab of the worktree, and deltas keep the copy current
-/// after it, so switching tabs costs no `panel.get`. Not the resubscribe reset
-/// either: the reset reloads every worktree itself, and its generation is not
-/// observed. A struct rather than an interpolated string, so a new dimension
+/// after it, so switching tabs costs no `panel.get`. Not the resubscribe
+/// either: it refetches the worktrees the copy holds itself. A struct rather
+/// than an interpolated string, so a new dimension
 /// is a compile error at the call site instead of a key that silently stays
 /// equal.
 struct PanelSurfaceLoadKey: Equatable {

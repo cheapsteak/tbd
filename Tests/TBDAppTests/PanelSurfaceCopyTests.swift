@@ -8,8 +8,7 @@ import TBDShared
 /// The app's copy of the daemon-owned panel surfaces (panel tabs spec, "The
 /// app's copy of the surface" and "Round trip and conflicts"): its gate on
 /// `panel_tabs_enabled`, the revision guard, removals, the full-get merge, the
-/// resubscribe reset and its authoritative get, and the `panel.apply`
-/// chokepoint.
+/// resubscribe refetch, and the `panel.apply` chokepoint.
 @Suite("Panel surface copy")
 @MainActor
 struct PanelSurfaceCopyTests {
@@ -205,52 +204,6 @@ struct PanelSurfaceCopyTests {
         }
     }
 
-    @Test("a get reply from before a resubscribe reset is discarded")
-    func resultFromBeforeResetIsDiscarded() async {
-        await Fixture.withState(panelTabs: true) { state in
-            let worktreeID = UUID()
-            let tabID = UUID()
-            let oldDaemon = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 7)
-            // `tabs` stays empty, so the reset itself starts no reload.
-            state.panelGetFetcher = { @MainActor [weak state] _ in
-                state?.resetPanelSurfacesForResubscribe()
-                return PanelGetResult(tabs: [oldDaemon], activeTabID: nil)
-            }
-
-            await state.loadPanelSurfaces(worktreeID: worktreeID)
-
-            #expect(state.panelSurfaces.isEmpty,
-                    "an old daemon's revision 7 would make the guard refuse the new daemon's lower ones")
-
-            // The new daemon's lower revision is then adopted, not refused.
-            let newDaemon = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 0)
-            _ = Fixture.collectGets(state) { _ in
-                PanelGetResult(tabs: [newDaemon], activeTabID: nil)
-            }
-            await state.loadPanelSurfaces(worktreeID: worktreeID)
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tabID) == newDaemon)
-        }
-    }
-
-    @Test("an apply reply from before a resubscribe reset is not adopted")
-    func applyReplyFromBeforeResetIsDiscarded() async {
-        await Fixture.withState(panelTabs: true) { state in
-            let worktreeID = UUID()
-            let tabID = UUID()
-            let oldDaemon = Fixture.surface(tabID: tabID, worktreeID: worktreeID, revision: 7)
-            state.panelApplyTrigger = { @MainActor [weak state] _ in
-                state?.resetPanelSurfacesForResubscribe()
-                return PanelApplyResult(tab: oldDaemon, replayed: false)
-            }
-
-            let returned = await state.applyPanelOperation(
-                worktreeID: worktreeID, tabID: tabID, .setCollapsed(true))
-
-            #expect(returned == nil)
-            #expect(state.panelSurfaces.isEmpty)
-        }
-    }
-
     @Test("a delta's activeTabID does not move the selected workspace tab")
     func deltaActiveTabIDIgnored() async {
         await Fixture.withState(panelTabs: true) { state in
@@ -313,8 +266,7 @@ struct PanelSurfaceCopyTests {
             state.removeArchivedWorktreeFromState(id: archivedID)
 
             #expect(state.tabs[archivedID] != nil, "precondition: archive leaves the tabs entry")
-            #expect(state.panelSurfaces[archivedID] == nil,
-                    "the daemon deleted its surfaces; held revisions would refuse a revive's re-imports")
+            #expect(state.panelSurfaces[archivedID] == nil, "the daemon deleted its surfaces")
             #expect(state.panelSurface(worktreeID: keptID, tabID: keptTab.id) == kept)
             await Fixture.drainMainActor()
         }
@@ -322,49 +274,50 @@ struct PanelSurfaceCopyTests {
 
     // MARK: - Resubscribe
 
-    @Test("a resubscribe keeps rendering the copy until the authoritative get, which adopts a lower revision")
-    func resubscribeKeepsCopyUntilAuthoritativeGet() async throws {
+    @Test("a resubscribe keeps rendering the copy and refetches only the worktrees it holds")
+    func resubscribeRefetchesHeldWorktrees() async throws {
         try await Fixture.withState(panelTabs: true) { state in
             let syncs = Fixture.collectSyncs(state)
             let tab = Fixture.terminalTab(label: "agent")
             let worktreeID = await Fixture.readyWorktree(state, tabs: [tab], syncs: syncs)
+            // A worktree with tabs whose surfaces the copy never loaded.
+            let unloadedID = await Fixture.readyWorktree(
+                state, tabs: [Fixture.terminalTab(label: "other")], syncs: syncs)
             let held = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 7)
             state.panelSurfaces = [worktreeID: [tab.id: held]]
-            // A restarted daemon: its migration cleared the rows, so the
-            // re-imported surface counts from zero again.
-            let restarted = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 0)
+            // A change the daemon made, and broadcast, while no subscription
+            // was up.
+            let missed = Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 9, label: "missed")
             let gate = PanelCallGate()
             let gets = PanelGetCollector()
             state.panelGetFetcher = { @MainActor requested in
                 gets.record(requested)
                 await gate.wait()
-                return PanelGetResult(tabs: [restarted], activeTabID: nil)
+                return PanelGetResult(tabs: [missed], activeTabID: nil)
             }
             // `startSubscription` re-seeds program status too; answered here so
             // the test sends no RPC of its own for it.
             state.programStatusListFetcher = { @MainActor in [] }
 
             state.startSubscription()
-            // Only the reset is under test: the subscription it started has no
-            // daemon to reach, and is ended at once.
+            // Only the refetch is under test: the subscription it started has
+            // no daemon to reach, and is ended at once.
             state.stopSubscription()
             await Fixture.drainMainActor()
 
-            try #require(gate.isHolding, "precondition: the authoritative get is in flight")
-            #expect(gets.worktreeIDs == [worktreeID])
+            try #require(gate.isHolding, "precondition: the refetch is in flight")
+            #expect(gets.worktreeIDs == [worktreeID], "only a worktree the copy holds is refetched")
             #expect(state.workspaceRenderPath(worktreeID: worktreeID, tabID: tab.id) == .daemon(held),
                     "the tab keeps rendering from the copy rather than dropping to legacy")
-            #expect(state.panelAwaitingAuthoritativeGet == [worktreeID])
             #expect(syncs.sent.isEmpty,
                     "readiness was cleared, so nothing is synced before both tab sources reload")
-            #expect(state.panelSyncDirty.contains(worktreeID))
+            #expect(state.panelSyncDirty.isSuperset(of: [worktreeID, unloadedID]))
 
             gate.release()
             await Fixture.drainMainActor()
 
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == restarted,
-                    "the authoritative get adopts revision 0 over the held 7, which the guard would refuse")
-            #expect(state.panelAwaitingAuthoritativeGet.isEmpty)
+            #expect(state.panelSurface(worktreeID: worktreeID, tabID: tab.id) == missed,
+                    "the refetch merges the change the subscription missed")
 
             state.markPanelSyncReady(worktreeIDs: [worktreeID])
             await Fixture.drainMainActor()
@@ -375,95 +328,37 @@ struct PanelSurfaceCopyTests {
         }
     }
 
-    @Test("before the authoritative get lands, deltas apply under the guard; one it refused is refetched after")
-    func deltaBeforeAuthoritativeGetIsGuarded() async {
-        await Fixture.withState(panelTabs: true) { state in
-            let worktreeID = UUID()
-            let heldID = UUID()
-            let newID = UUID()
-            let held = Fixture.surface(tabID: heldID, worktreeID: worktreeID, revision: 7, label: "old daemon")
-            state.panelSurfaces = [worktreeID: [heldID: held]]
-            // `tabs` stays empty, so the reset itself starts no load.
-            state.resetPanelSurfacesForResubscribe()
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: heldID) == held)
-
-            // The new daemon's revision 3 against the held 7: refused.
-            let refused = Fixture.surface(tabID: heldID, worktreeID: worktreeID, revision: 3, label: "new daemon")
-            let imported = Fixture.surface(tabID: newID, worktreeID: worktreeID, revision: 0)
-            state.handleDelta(.panelSurfaceChanged(Fixture.delta(
-                worktreeID: worktreeID, tabs: [refused, imported])))
-
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: heldID) == held,
-                    "the guard still applies before the authoritative get")
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: newID) == imported,
-                    "a tab the copy does not hold is adopted as usual")
-
-            // The authoritative get's snapshot predates the refused change; the
-            // follow-up get carries it.
-            let snapshot = Fixture.surface(tabID: heldID, worktreeID: worktreeID, revision: 2, label: "snapshot")
-            let calls = PanelGetCollector()
-            state.panelGetFetcher = { @MainActor requested in
-                calls.record(requested)
-                let heldTab = calls.worktreeIDs.count == 1 ? snapshot : refused
-                return PanelGetResult(tabs: [heldTab, imported], activeTabID: nil)
-            }
-
-            await state.loadPanelSurfaces(worktreeID: worktreeID)
-
-            #expect(calls.worktreeIDs == [worktreeID, worktreeID],
-                    "a refusal while awaiting the authoritative get earns exactly one more get")
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: heldID) == refused)
-            #expect(state.panelSurface(worktreeID: worktreeID, tabID: newID) == imported)
-            #expect(state.panelAwaitingAuthoritativeGet.isEmpty)
-            #expect(state.panelRefusedWhileAwaiting.isEmpty)
-        }
-    }
-
-    @Test("the authoritative get replaces the entry whole, keeping only what changed in its flight")
-    func authoritativeGetKeepsChangesMadeInItsFlight() async {
-        await Fixture.withState(panelTabs: true) { state in
-            let worktreeID = UUID()
-            let updatedID = UUID()
-            let removedID = UUID()
-            let droppedID = UUID()
-            let adoptedID = UUID()
-            let listedID = UUID()
-            state.panelSurfaces = [worktreeID: [
-                updatedID: Fixture.surface(tabID: updatedID, worktreeID: worktreeID, revision: 7),
-                removedID: Fixture.surface(tabID: removedID, worktreeID: worktreeID, revision: 5),
-                droppedID: Fixture.surface(tabID: droppedID, worktreeID: worktreeID, revision: 3),
-            ]]
-            state.resetPanelSurfacesForResubscribe()
-
-            let updated = Fixture.surface(tabID: updatedID, worktreeID: worktreeID, revision: 9)
-            let adopted = Fixture.surface(tabID: adoptedID, worktreeID: worktreeID, revision: 0)
-            let listed = Fixture.surface(tabID: listedID, worktreeID: worktreeID, revision: 0)
-            let inFlight = StateDelta.panelSurfaceChanged(Fixture.delta(
-                worktreeID: worktreeID, tabs: [updated, adopted], removed: [removedID]))
-            state.panelGetFetcher = { @MainActor [weak state] _ in
-                // Changes land while the get is in flight; its snapshot was
-                // taken before them.
-                state?.handleDelta(inFlight)
+    /// At connect the flag turns on and the subscription starts before any
+    /// load lands. The copy is still empty then, so the subscription refetches
+    /// nothing, and the flag turning on loads each worktree once.
+    @Test("launch loads each worktree's surfaces once")
+    func launchLoadsEachWorktreeOnce() async throws {
+        try await Fixture.withState(panelTabs: nil) { state in
+            let syncs = Fixture.collectSyncs(state)
+            let alpha = Fixture.terminalTab(label: "alpha")
+            let beta = Fixture.terminalTab(label: "beta")
+            let alphaID = await Fixture.readyWorktree(state, tabs: [alpha], syncs: syncs)
+            let betaID = await Fixture.readyWorktree(state, tabs: [beta], syncs: syncs)
+            let gets = Fixture.collectGets(state) { worktreeID in
+                let tab = worktreeID == alphaID ? alpha : beta
                 return PanelGetResult(
-                    tabs: [
-                        Fixture.surface(tabID: updatedID, worktreeID: worktreeID, revision: 0),
-                        Fixture.surface(tabID: removedID, worktreeID: worktreeID, revision: 0),
-                        listed,
-                    ],
+                    tabs: [Fixture.surface(tabID: tab.id, worktreeID: worktreeID, revision: 1)],
                     activeTabID: nil)
             }
+            state.programStatusListFetcher = { @MainActor in [] }
 
-            await state.loadPanelSurfaces(worktreeID: worktreeID)
+            // `connectAndLoadInitialState`: capabilities arrive with the flag
+            // on, then the subscription starts.
+            state.daemonCapabilities = Fixture.capabilities(panelTabs: true)
+            state.panelTabsCapabilityChanged(wasEnabled: false)
+            state.startSubscription()
+            state.stopSubscription()
+            await Fixture.drainMainActor()
 
-            let expected: [WorkspaceTabID: WorkspaceTabSurface] = [
-                updatedID: updated,
-                adoptedID: adopted,
-                listedID: listed,
-            ]
-            // Changed in flight keeps its change, removed in flight stays
-            // removed, and an old tab the get omits is dropped.
-            #expect(state.panelSurfaces[worktreeID] == expected)
-            #expect(state.panelAwaitingAuthoritativeGet.isEmpty)
+            #expect(gets.worktreeIDs.count == 2, "observed \(gets.worktreeIDs)")
+            #expect(Set(gets.worktreeIDs) == [alphaID, betaID])
+            #expect(state.panelSurface(worktreeID: alphaID, tabID: alpha.id) != nil)
+            #expect(state.panelSurface(worktreeID: betaID, tabID: beta.id) != nil)
         }
     }
 
