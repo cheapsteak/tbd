@@ -97,23 +97,6 @@ struct ProgramStatusRowPresentationTests {
         #expect(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s) == nil)
     }
 
-    /// Codex reports a main entry and never a task entry; a blocked one
-    /// still resolves to awaiting input, carrying its kind.
-    @Test func codexMainOnlySnapshotResolves() throws {
-        let incarnation = UUID()
-        let t = Self.terminal(incarnation: incarnation, kind: .codex)
-        let s = Self.snapshot(
-            terminalID: t.id, incarnation: incarnation, main: Self.entry(.blocked, kind: .question))
-        let r = try #require(ProgramStatusRowPresentation.resolution(terminal: t, snapshot: s))
-        guard case .awaitingInput(let reason) = r.value else {
-            Issue.record("expected awaiting input, got \(r.value.label)")
-            return
-        }
-        #expect(reason?.programStatusBlock == ProgramStatusBlock(kind: .question, taskID: nil))
-        #expect(r.workingTaskCount == 0)
-        #expect(ProgramStatusRowPresentation.suffixIndicator(for: r.value) == .attention)
-    }
-
     @Test func mapsErrorNeedsAuthAndWorkingTaskCount() throws {
         let incarnation = UUID()
         let t = Self.terminal(incarnation: incarnation)

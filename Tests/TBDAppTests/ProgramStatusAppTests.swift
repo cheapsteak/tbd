@@ -108,6 +108,8 @@ struct ProgramStatusAppTests {
         #expect(AppState.isProgramStatusEligible(holder(nil, nil)))
         #expect(AppState.isProgramStatusEligible(holder(.codex, nil)))
         #expect(AppState.isProgramStatusEligible(holder(nil, TerminalLabel.codex)))
+        #expect(AppState.isProgramStatusEligible(holder(.claude, TerminalLabel.codex)))
+        #expect(AppState.isProgramStatusEligible(holder(.shell, TerminalLabel.codex)))
         #expect(!AppState.isProgramStatusEligible(holder(.shell, nil)))
         #expect(!AppState.isProgramStatusEligible(TBDShared.Terminal(
             worktreeID: UUID(), tmuxWindowID: "@1", tmuxPaneID: "%1",
@@ -121,26 +123,41 @@ struct ProgramStatusAppTests {
 
     @Test("an eligible report is forwarded with the row's incarnation, in order")
     func forwardsInOrder() async throws {
+        try await assertForwardsInOrder(
+            kind: .claude, payloads: ["state=working", "state=blocked;kind=permission"])
+    }
+
+    @Test("a Codex holder row's report is forwarded with the row's incarnation")
+    func codexReportForwarded() async throws {
+        try await assertForwardsInOrder(
+            kind: .codex, payloads: ["state=blocked:app=codex:kind=permission"])
+    }
+
+    /// Seeds a holder row of `kind`, sends each payload through
+    /// `forwardProgramStatusReport`, and asserts they arrive in order carrying
+    /// the row's id, incarnation and observation time.
+    private func assertForwardsInOrder(kind: TerminalKind, payloads: [String]) async throws {
         let (state, cleanup) = makeAppState()
         defer { cleanup() }
         let incarnation = UUID()
-        let id = seed(state, kind: .claude, transport: .holder, incarnation: incarnation)
+        let id = seed(state, kind: kind, transport: .holder, incarnation: incarnation)
         let sent = SentParamsBox()
         state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
 
         let observedAt = Date(timeIntervalSince1970: 1_000)
-        state.forwardProgramStatusReport(
-            terminalID: id, payload: Array("state=working".utf8), observedAt: observedAt)
-        state.forwardProgramStatusReport(
-            terminalID: id, payload: Array("state=blocked;kind=permission".utf8), observedAt: observedAt)
+        for payload in payloads {
+            state.forwardProgramStatusReport(
+                terminalID: id, payload: Array(payload.utf8), observedAt: observedAt)
+        }
 
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count == 2 }
+        let expected = payloads.count
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count == expected }
         if outcome == .timedOut {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
         let params = sent.all
-        try #require(params.count == 2)
-        #expect(params.map(\.payload) == ["state=working", "state=blocked;kind=permission"])
+        try #require(params.count == expected)
+        #expect(params.map(\.payload) == payloads)
         #expect(params.allSatisfy { $0.terminalID == id })
         #expect(params.allSatisfy { $0.incarnationID == incarnation })
         #expect(params.allSatisfy { $0.observedAt == observedAt })
@@ -168,29 +185,6 @@ struct ProgramStatusAppTests {
             Issue.record(ForwardTimeout(observed: sent.count))
         }
         #expect(sent.all.map(\.payload) == ["state=done"])
-    }
-
-    @Test("a Codex holder row's report is forwarded with the row's incarnation")
-    func codexReportForwarded() async throws {
-        let (state, cleanup) = makeAppState()
-        defer { cleanup() }
-        let incarnation = UUID()
-        let id = seed(state, kind: .codex, transport: .holder, incarnation: incarnation)
-        let sent = SentParamsBox()
-        state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
-
-        state.forwardProgramStatusReport(
-            terminalID: id, payload: Array("state=blocked:app=codex:kind=permission".utf8),
-            observedAt: Date())
-        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count >= 1 }
-        if outcome == .timedOut {
-            Issue.record(ForwardTimeout(observed: sent.count))
-        }
-        let params = sent.all
-        try #require(params.count == 1)
-        #expect(params[0].payload == "state=blocked:app=codex:kind=permission")
-        #expect(params[0].terminalID == id)
-        #expect(params[0].incarnationID == incarnation)
     }
 
     // MARK: - The view's holder-vs-tmux switch
