@@ -92,16 +92,21 @@ it" design is real, but it lives in herdr-core, not in herdr v1.
   the other way round: the agent's hook reads it from its own environment and
   tells herdr which pane it is in.
 
-**Measured: macOS hides the environment only of Apple's own binaries.**
-`sysctl(KERN_PROCARGS2)`, the call `ps eww` uses, returns the environment a
-process had when it started, for any same-user process whose binary is not an
-Apple platform binary.
+**Measured on one macOS 27 machine: macOS does let a process read another
+process's environment, with exceptions.** `sysctl(KERN_PROCARGS2)`, the call
+`ps eww` uses, returned the environment a process had when it started for most
+same-user processes. Every Apple platform binary tested returned none.
 
-- **Readable:** `claude`, `node` and `pnpm`. A TBD-spawned `claude` exposed
+- **Readable:** `claude`, `node`, `pnpm`, and most binaries under `~`,
+  `/opt/homebrew` and `/nix/store`. A TBD-spawned `claude` exposed
   `TBD_TERMINAL_ID` and `TBD_WORKTREE_ID`, despite its hardened-runtime
   signing.
-- **Hidden:** `/bin/zsh`, `/bin/sleep`, `/usr/bin/perl` and anything under
-  `/System` return their arguments but no environment.
+- **Hidden, Apple:** `/bin/zsh`, `/bin/sleep`, `/usr/bin/perl` and anything
+  under `/System` return their arguments but no environment.
+- **Hidden, not Apple:** Dia, Chrome and Postgres.app also returned none.
+  Postgres rewrites its argument and environment area to set its process
+  title, which would explain its case. Why the Chromium-based apps return none
+  was not established.
 - **Other users:** their processes fail with EINVAL.
 - **Escapees:** a process that escaped with `setsid` plus a double fork was
   found by its token alone. A full scan of about 945 processes took 33–150 ms
@@ -125,8 +130,8 @@ reading code and still needs a live reproduction.
   gives no banner and no sound. herdr fixed the same bug in 0.5.3, and its
   most-upvoted notification discussion (#864) describes it.
 - **Several TBD docs and comments say macOS cannot read another process's
-  environment.** The measurement above shows that holds only for Apple
-  binaries. The claim appears in `docs/specs/2026-08-18-orphan-process-gc-design.md`
+  environment.** The measurement above shows that holds for Apple binaries
+  and a few others, not for agents and most dev tools. The claim appears in `docs/specs/2026-08-18-orphan-process-gc-design.md`
   (a rejected alternative), `docs/tmux-dependencies.md`, and comments in
   `TmuxManager.swift` and `PeerHelperOptions.swift`. The original test used
   `/bin/sleep`, one of the hidden cases.
@@ -205,9 +210,11 @@ TBD.
   read `$TBD_TERMINAL_ID` from the environment, so the same could happen.
 - **Hook events from inherited environments.** Claude Code's background
   daemons inherit the `TBD_TERMINAL_ID` of a terminal that may still exist.
-  herdr's #2012 is this bug, and it is still open. TBD's
-  `handleTerminalSessionEvent` checks cwd and incarnation, but not the
-  caller's pid. Whether TBD's hooks fire inside those daemons is not verified.
+  herdr's #2012 is this bug, and it is still open. TBD's socket layer
+  captures the caller's pid, but the `terminalSessionEvent` route does not
+  pass it to `handleTerminalSessionEvent`, which checks cwd and incarnation
+  only. So an inherited environment could attribute a hook to another live
+  terminal. Whether TBD's hooks fire inside those daemons is not verified.
 
 ## Claude hook gaps worth turning into tests
 
