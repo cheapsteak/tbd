@@ -1,0 +1,160 @@
+# Links between the daemon's folders that code makes today.
+#
+# "A -> B" means a Swift file under Sources/TBDDaemon/A names a declaration
+# from Sources/TBDDaemon/B. A folder's subfolders belong to it. (root) is the
+# files directly under Sources/TBDDaemon, except main.swift.
+#
+# scripts/lint-daemon-layers.py fails when code makes a link this list lacks,
+# and when the list holds a link no code makes. Add a new link by hand, in the
+# change that makes it, and delete a line in the change that removes its last
+# reference. Keep the links in byte order, below these comments. Sorting the
+# whole file would scramble the comments; Sources/TBDDaemon/CLAUDE.md gives a
+# command that sorts only the links.
+#
+# How to read and fix a failure: Sources/TBDDaemon/CLAUDE.md,
+# "Links between folders".
+
+(root) -> Actuation
+(root) -> AskUserQuestion
+(root) -> Claude
+(root) -> Codex
+(root) -> Database
+(root) -> DevServers
+(root) -> GC
+(root) -> Git
+(root) -> Holder
+(root) -> Hooks
+(root) -> Keychain
+(root) -> Lifecycle
+(root) -> Mock
+(root) -> ModChannel
+(root) -> ModelProfile
+(root) -> PR
+(root) -> Process
+(root) -> ProgramStatus
+(root) -> Remote
+(root) -> SSH
+(root) -> Server
+(root) -> SessionMod
+(root) -> Tmux
+(root) -> Update
+Actuation -> Database
+Actuation -> Lifecycle
+Actuation -> Server
+AskUserQuestion -> Server
+Claude -> Actuation
+Claude -> Database
+Claude -> Keychain
+Claude -> Lifecycle
+Claude -> ModelProfile
+Claude -> Process
+Claude -> Remote
+Claude -> SessionMod
+Claude -> Tmux
+Codex -> Lifecycle
+Codex -> Tmux
+Database -> Claude
+Database -> Lifecycle
+Database -> PR
+Database -> Remote
+DevServers -> Database
+DevServers -> Holder
+DevServers -> Process
+DevServers -> Remote
+DevServers -> Tmux
+GC -> Claude
+GC -> Database
+GC -> Git
+GC -> Holder
+GC -> Keychain
+GC -> Lifecycle
+GC -> Process
+GC -> SessionMod
+GC -> Tmux
+Git -> (root)
+Git -> Tmux
+Holder -> Database
+Holder -> Process
+Holder -> ProgramStatus
+Holder -> Tmux
+Hooks -> Claude
+Hooks -> Lifecycle
+Lifecycle -> Actuation
+Lifecycle -> AskUserQuestion
+Lifecycle -> Claude
+Lifecycle -> Codex
+Lifecycle -> Database
+Lifecycle -> DevServers
+Lifecycle -> Git
+Lifecycle -> Holder
+Lifecycle -> Hooks
+Lifecycle -> ModelProfile
+Lifecycle -> PR
+Lifecycle -> Process
+Lifecycle -> ProgramStatus
+Lifecycle -> Server
+Lifecycle -> SessionMod
+Lifecycle -> Tmux
+Mock -> Database
+Mock -> Tmux
+ModChannel -> (root)
+ModChannel -> AskUserQuestion
+ModChannel -> Server
+ModelProfile -> Database
+ModelProfile -> Keychain
+ModelProfile -> Server
+PR -> (root)
+PR -> Actuation
+PR -> Database
+PR -> Git
+PR -> Lifecycle
+PR -> Remote
+PR -> Server
+PanelSurface -> Database
+Process -> Database
+Process -> SessionMod
+Process -> Tmux
+ProgramStatus -> Database
+ProgramStatus -> Server
+Remote -> Actuation
+Remote -> Claude
+Remote -> Database
+Remote -> PR
+Remote -> Process
+Remote -> Server
+Remote -> Tmux
+Server -> Actuation
+Server -> AskUserQuestion
+Server -> Claude
+Server -> Codex
+Server -> Database
+Server -> DevServers
+Server -> Diagnostics
+Server -> GC
+Server -> Git
+Server -> Holder
+Server -> Hooks
+Server -> Keychain
+Server -> Lifecycle
+Server -> ModChannel
+Server -> ModelProfile
+Server -> PR
+Server -> PanelSurface
+Server -> Process
+Server -> ProgramStatus
+Server -> Remote
+Server -> SessionMod
+Server -> StartAdmission
+Server -> Tmux
+Server -> Update
+SessionMod -> ModChannel
+StartAdmission -> Lifecycle
+StartAdmission -> Server
+StartAdmission -> Tmux
+Tmux -> Claude
+Tmux -> Database
+Tmux -> Git
+Tmux -> Lifecycle
+Tmux -> Process
+Tmux -> SSH
+Tmux -> Server
