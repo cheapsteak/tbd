@@ -18,10 +18,14 @@ target, not the library, and is skipped.
 It matches names, not types. The index holds each unit's top-level
 declarations that are not private or fileprivate: types, typealiases,
 top-level functions and globals. A file references unit B when it names one
-of B's. A name the file declares for itself is never a reference from it.
+of B's, in code or in a string's interpolation. A name in a comment or a
+literal, after a `.`, or as an argument label is not a reference, and neither
+is a name the file declares for itself: a member, a nested type, a private
+declaration, or a lowercase local or parameter.
 
-It fails closed: Swift it cannot read stops it with exit 2, rather than let it
-report a link set that is silently wrong.
+It fails closed: Swift it cannot read -- an unbalanced brace, a literal or
+comment that never closes, bytes that are not UTF-8 -- stops it with exit 2,
+rather than let it report a link set that is silently wrong.
 
 Exit codes: 0 every link is listed and every listed link is made; 1 a new or
 stale link; 2 the tree or the list cannot be read.
@@ -473,16 +477,96 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
     return declarations
 
 
+LOCAL_BINDERS = frozenset({"let", "var", "for"})
+PARAMETER_OWNERS = frozenset({"func", "init", "subscript"})
+# A closure's head, `{ [weak self] (a: Int, b) -> T in`, holds only
+# identifiers and these. Any other token between a `{` and an `in` means the
+# `{` opened something else.
+CLOSURE_HEAD_PUNCTUATION = frozenset(",()[]:.<>-?!&@")
+CLOSURE_HEAD_STOPS = frozenset({
+    "for", "let", "var", "case", "if", "guard", "while", "return", "try", "await", "switch",
+})
+
+
+def _is_local_name(text: str) -> bool:
+    return is_identifier(text) and (text[0] == "_" or text[0].islower())
+
+
+def local_names(tokens: list[Token]) -> set[str]:
+    """Lowercase names the file binds anywhere: `let`, `var` and `for`
+    bindings, function, initializer and subscript parameters, and closure
+    parameters.
+
+    Only lowercase names, because only values are bound this way; a closure's
+    `(w: Widget)` still references Widget. The check does not track scopes,
+    so a local hides a global of the same name for the whole file -- a blind
+    spot Sources/TBDDaemon/CLAUDE.md names.
+    """
+    names: set[str] = set()
+    count = len(tokens)
+    for i, token in enumerate(tokens):
+        text = token.text
+        if text in LOCAL_BINDERS and i + 1 < count:
+            following = tokens[i + 1].text
+            if following != "(":
+                if _is_local_name(following):
+                    names.add(following)
+                continue
+            depth = 0
+            for inner in tokens[i + 1:]:
+                if inner.text == "(":
+                    depth += 1
+                elif inner.text == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif _is_local_name(inner.text):
+                    names.add(inner.text)
+        elif text in PARAMETER_OWNERS and not (i and tokens[i - 1].text == "."):
+            # `func f<T>(_ a: Int, with b: [K: V] = [:])`: the name before
+            # each `:` at depth 1 of the first parenthesised list.
+            j = i + 1
+            while j < count and tokens[j].text not in ("(", "{", "}", "="):
+                j += 1
+            if j >= count or tokens[j].text != "(":
+                continue
+            depth = 0
+            for k in range(j, count):
+                inner = tokens[k].text
+                if inner in ("(", "["):
+                    depth += 1
+                elif inner in (")", "]"):
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif inner == ":" and depth == 1 and _is_local_name(tokens[k - 1].text):
+                    names.add(tokens[k - 1].text)
+        elif text == "{":
+            head: list[str] = []
+            for inner in tokens[i + 1:]:
+                if inner.text == "in":
+                    names.update(head)
+                    break
+                if inner.text in CLOSURE_HEAD_PUNCTUATION:
+                    continue
+                if not is_identifier(inner.text) or inner.text in CLOSURE_HEAD_STOPS:
+                    break
+                if _is_local_name(inner.text):
+                    head.append(inner.text)
+    return names
+
+
 def own_names(source: SourceFile) -> set[str]:
     """Names the file declares for itself, which are never references from it:
-    members, nested types and private top-level declarations. A private
-    extension declares nothing; its name is the extended type's."""
-    return {
+    members, nested types, private top-level declarations and locals. A
+    private extension declares nothing; its name is the extended type's."""
+    declared = {
         declaration.name
         for declaration in source.declarations
         if not declaration.at_file_scope
         or (declaration.private and declaration.kind != "extension")
     }
+    return declared | local_names(source.tokens)
 
 
 def build_index(files: list[SourceFile]) -> dict[str, set[str]]:
@@ -506,11 +590,20 @@ def file_references(source: SourceFile, index: dict[str, set[str]]) -> list[Refe
     too: then the file most likely calls its own, and it counts toward none.
     """
     own = own_names(source)
+    tokens = source.tokens
+    count = len(tokens)
     seen: set[Reference] = set()
     references: list[Reference] = []
-    for token in source.tokens:
+    for i, token in enumerate(tokens):
         units = index.get(token.text)
         if not units or source.unit in units or token.text in own:
+            continue
+        before = tokens[i - 1].text if i else ""
+        # After a `.` it names a member of whatever precedes it.
+        if before == ".":
+            continue
+        # `f(widgetLimit: 1)` and `f(a, widgetLimit: 1)`: an argument label.
+        if before in ("(", ",") and _is_local_name(token.text) and i + 1 < count and tokens[i + 1].text == ":":
             continue
         for unit in sorted(units):
             reference = Reference(source.path, token.line, token.text, (source.unit, unit))

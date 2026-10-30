@@ -226,6 +226,89 @@ test_extended_regex_ignored() {
 }
 
 # ---------------------------------------------------------------------------
+# Names that are not references
+# ---------------------------------------------------------------------------
+
+# After a `.` a name is a member of whatever precedes it, never a top-level one.
+test_name_after_dot_ignored() {
+  both_ways "after a dot" 1 widgetCount 'let n = widgetCount()' 'let n = gadget.widgetCount()'
+  both_ways "after a dot, uppercase" 1 Widget 'let k = Widget.self' 'let k = Outer.Widget.self'
+}
+
+test_argument_label_ignored() {
+  both_ways "argument label" 1 widgetLimit 'takes(widgetLimit)' 'takes(widgetLimit: 1)'
+}
+
+# A label is skipped where it stands; it does not make the name the file's own.
+test_label_does_not_hide_a_later_use() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift $'takes(widgetLimit: 1)\nlet n = widgetLimit'
+  run_check "$d"
+  assert_rc "a use after a same-named label still counts" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "on its own line" "$RUN_OUT" "User.swift:2: Top -> Base is a new link: widgetLimit"
+}
+
+# The blind spot the guide names: a local of the same name shadows the global
+# for the whole file.
+test_local_let_shadows_lowercase_global() {
+  both_ways "local let" 1 widgetLimit 'func f() { let limit = 2; _ = widgetLimit }' \
+    'func f() { let widgetLimit = 2; _ = widgetLimit }'
+}
+
+test_parameter_shadows() {
+  both_ways "parameter" 1 widgetLimit 'func f(limit: Int) { _ = widgetLimit }' \
+    'func f(widgetLimit: Int) { _ = widgetLimit }'
+  passes "an external label's internal name shadows too" 'func f(with widgetLimit: Int) { _ = widgetLimit }'
+}
+
+test_closure_parameter_shadows() {
+  both_ways "closure parameter" 1 widgetLimit 'let g = { (limit: Int) in widgetLimit }' \
+    'let g = { (widgetLimit: Int) in widgetLimit }'
+}
+
+test_for_in_shadows() {
+  both_ways "for-in" 1 widgetLimit 'for x in xs { _ = widgetLimit }' 'for widgetLimit in xs { _ = widgetLimit }'
+}
+
+test_private_top_level_shadows() {
+  both_ways "private type" 2 Widget $'struct Gadget {}\nlet w = Widget()' $'private struct Widget {}\nlet w = Widget()'
+}
+
+test_nested_type_shadows() {
+  both_ways "nested type" 1 Widget 'struct Box { struct Gizmo {}; let w = Widget() }' \
+    'struct Box { struct Widget {}; let w = Widget() }'
+}
+
+# A private extension declares nothing of its own; it still extends Widget.
+test_private_extension_still_counts() {
+  both_ways "private extension" 1 Widget 'private extension Widget {}' 'private extension Int {}'
+}
+
+test_private_declarations_not_indexed() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'let x = baseSecret()'
+  run_check "$d"
+  assert_rc "another unit's private function is not a reference" 0 "$RUN_RC" "$RUN_OUT"
+  put "$d" Base/Widget.swift "${BASE_SWIFT/private func baseSecret/func baseSecret}"
+  run_check "$d"
+  assert_rc "made internal, it is" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: baseSecret"
+}
+
+# The blind spot the guide names: a member another unit's extension adds is
+# not indexed, so calling it makes no link.
+test_extension_members_not_indexed() {
+  local d; d="$(mkfix)"
+  put "$d" Top/User.swift 'extension Int { func f() -> String { gadgetName() } }'
+  run_check "$d"
+  assert_rc "a member from another unit's extension is not a reference" 0 "$RUN_RC" "$RUN_OUT"
+  put "$d" Base/Widget.swift "$BASE_SWIFT"$'\nfunc gadgetName() -> String { "" }'
+  run_check "$d"
+  assert_rc "a top-level function of the same name is" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "and is named" "$RUN_OUT" "Top -> Base is a new link: gadgetName"
+}
+
+# ---------------------------------------------------------------------------
 # The list
 # ---------------------------------------------------------------------------
 
