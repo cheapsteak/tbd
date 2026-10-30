@@ -253,11 +253,12 @@ was written for.
   extracted value to parse as a UUID. The start command — not `ps eww` — is
   where the planted value stays legible. `ps eww` reads a process's
   environment through `sysctl(KERN_PROCARGS2)`, which returns it only as it
-  stood at exec, only to the same user, and never for an Apple platform
-  binary. The pane's own process is its shell, usually `/bin/zsh`, which is
-  one, and the export prefix sets the id after that shell has started. A
-  non-Apple program the shell launches, such as `claude`, does carry the id in
-  a readable environment.
+  stood at exec and only to the same user. Every Apple platform binary tested
+  returns argv but no environment, and so do a few other apps (Dia, Chrome,
+  Postgres.app). The pane's own process is its shell, usually `/bin/zsh`, an
+  Apple platform binary, and the export prefix sets the id after that shell
+  has started. A program the shell launches, such as `claude`, does carry the
+  id in a readable environment.
 
 **How widely identity is relied on.** Three places, at three layers.
 

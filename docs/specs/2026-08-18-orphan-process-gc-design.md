@@ -513,9 +513,11 @@ for the observed cases. It is still a poor sole basis for a kill:
   processes have all been seen carrying the ids of whichever terminal happened
   to start them. A marker match could reclaim a user-wide service because one
   worktree was archived.
-- **It cannot see Apple platform binaries.** macOS returns no environment for
-  `/bin/zsh`, `/bin/sleep`, `/usr/bin/perl` or anything under `/System`, so an
-  orphaned shell or script runner carries no readable marker.
+- **It cannot see every process.** Every Apple platform binary tested
+  (`/bin/zsh`, `/bin/sleep`, `/usr/bin/perl`, binaries under `/System`)
+  returns argv but no environment, and so do a few other apps (Dia, Chrome,
+  Postgres.app). An orphaned shell or script runner carries no readable
+  marker.
 
 **Reclaim any orphan under a TBD worktree whose terminal row is gone, without
 requiring the worktree to be dead.** Catches more, and reclaims processes inside

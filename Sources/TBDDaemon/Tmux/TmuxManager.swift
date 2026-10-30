@@ -983,7 +983,7 @@ public struct TmuxManager: Sendable {
     /// spawned before the option existed still carries its own id. The start
     /// command, not `ps eww`, is where the planted value remains legible: the
     /// pane's own process is its shell, usually `/bin/zsh`, and macOS returns no
-    /// environment for an Apple platform binary. For any other binary it returns
+    /// environment for an Apple platform binary. Where it does return one, it is
     /// only the environment the process had at exec, and the export prefix sets
     /// the id after the shell has started.
     ///

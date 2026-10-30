@@ -73,12 +73,13 @@ relying on them.
   The plugin validator says so for user-installed plugins, and under
   `allowManagedHooksOnly` a user-tier plugin loads no hooks at all. Not
   measurable without managed settings.
-- **A spawn's environment is readable by the same user, and by no other.**
-  macOS returns a process's environment, as it stood at exec, through
-  `sysctl(KERN_PROCARGS2)`, the call `ps eww` makes. Any process running as the
-  same user can read it, unless the binary is an Apple platform binary;
-  `claude` is not one. A process running as another user gets `EINVAL`.
-  Measured on macOS 27.
+- **A `claude` spawn's environment is readable by the same user, and by no
+  other.** macOS returns a process's environment, as it stood at exec, through
+  `sysctl(KERN_PROCARGS2)`, the call `ps eww` makes. A process running as the
+  same user can read it for most binaries, `claude` among them. Every Apple
+  platform binary tested returns argv but no environment, and so do a few
+  other apps. A process running as another user gets `EINVAL`. Measured on
+  macOS 27.
 - **TBD spawns every Claude session with `--dangerously-skip-permissions`.**
   Permission dialogs appear only after the person leaves bypass mode, so
   questions are the common case.
