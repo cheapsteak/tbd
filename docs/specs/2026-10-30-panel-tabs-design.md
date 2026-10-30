@@ -398,12 +398,17 @@ flight is never put back by the result's listing.
 
 Whenever the app (re)subscribes to the daemon, each worktree the copy holds is
 refetched, because deltas sent while no subscription was up were missed. The
-refetch merges under the guard like any other `panel.get`: revisions are
-daemon-wide and never decrease, so a daemon restart leaves them comparable.
-The copy is kept meanwhile, so daemon-rendered tabs keep rendering instead of
-dropping to legacy and rebuilding their terminal views. A worktree the copy
-does not hold is not refetched, so at launch, with the copy empty, each
-worktree is loaded once.
+refetch waits for the daemon's acknowledgement of the subscription: the daemon
+registers the subscriber before it sends the ack, so a `panel.get` issued after
+the ack cannot miss a change, which lands either in its reply or in a later
+delta. For the same reason a `panel.get` still in flight when the ack arrives
+fetches once more when it lands, since the daemon may have answered it before
+registering. The refetch merges under the guard like any other `panel.get`:
+revisions are daemon-wide and never decrease, so a daemon restart leaves them
+comparable. The copy is kept meanwhile, so daemon-rendered tabs keep rendering
+instead of dropping to legacy and rebuilding their terminal views. A worktree
+the copy does not hold is not refetched: showing it, or the flag turning on,
+loads it.
 
 One chokepoint, `applyPanelOperation`, builds the envelope (a fresh operation
 ID, origin `.appUser`, the copy's revision as `baseRevision`), sends it, and
@@ -492,8 +497,9 @@ Each gated branch is tested both ways, asserting opposite outcomes.
   - The copy: flag off leaves it untouched; a delta upserts; an older revision
     is refused; a removal is applied whatever the revision; a full `get` drops
     absent tabs; a delta's `activeTabID` does not move the selected tab;
-    resubscribing keeps rendering it and refetches the worktrees it holds;
-    launch loads each worktree once.
+    resubscribing keeps rendering it and refetches the worktrees it holds,
+    only once the daemon acknowledges the subscription; a get in flight across
+    that acknowledgement fetches again; launch loads each worktree once.
   - The tab-sync observer: a change to tab IDs, order, labels or a primary sends
     one sync per worktree; an unrelated `AppState` change sends none; flag off
     sends none.

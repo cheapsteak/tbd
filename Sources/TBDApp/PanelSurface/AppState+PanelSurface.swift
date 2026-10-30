@@ -74,6 +74,10 @@ extension AppState {
     ///   change left. One adopted then is not dropped by the result's
     ///   omission, and one removed then is not put back by its listing. A
     ///   surface the guard refused changed nothing, so it does not count.
+    /// - **Registered in flight:** a get in flight when the daemon
+    ///   acknowledges a new subscription fetches once more after merging.
+    ///   The daemon may have answered it before registering the
+    ///   subscription, and a change between the two reached neither.
     ///
     /// The result's `activeTabID` is ignored: workspace-tab selection is the
     /// app's. A failed fetch keeps the copy as it was, and a reply that
@@ -82,6 +86,7 @@ extension AppState {
         guard panelTabsActive else { return }
         let heldAtIssue = Set((panelSurfaces[worktreeID] ?? [:]).keys)
         let issuedAt = panelTouchSequence
+        let registrationsAtIssue = panelSubscriptionRegistrations
         panelLoadsInFlight += 1
         let fetched: PanelGetResult?
         do {
@@ -107,6 +112,9 @@ extension AppState {
             result, worktreeID: worktreeID, into: &surfaces,
             heldAtIssue: heldAtIssue, touchedInFlight: touchedInFlight)
         commitPanelSurfaces(surfaces)
+        if panelSubscriptionRegistrations != registrationsAtIssue {
+            await loadPanelSurfaces(worktreeID: worktreeID)
+        }
     }
 
     /// The load key for a worktree's detail view showing `activeTabID`, read
@@ -509,23 +517,34 @@ extension AppState {
         }
     }
 
-    /// Called from `startSubscription()`. Deltas the daemon sent while no
-    /// subscription was up — across a daemon restart or a dropped
-    /// connection — were missed, so each worktree the copy holds is refetched
-    /// and merged under the usual guard, which a restart does not disturb:
-    /// revisions are daemon-wide and never decrease. The copy is kept
-    /// meanwhile, so daemon-rendered tabs keep rendering rather than falling
-    /// back to legacy and rebuilding their terminal views. A worktree the copy
-    /// does not hold is not fetched here — at launch that is every worktree,
-    /// and the flag turning on and showing a worktree load them, once.
-    ///
-    /// Readiness is cleared too: each worktree's tab list is re-checked
-    /// against fresh fetches before it is sent, and every worktree with tabs
-    /// is marked dirty so it is sent once it is ready.
+    /// Called from `startSubscription()`, before the new subscription is up.
+    /// Readiness is cleared: each worktree's tab list is re-checked against
+    /// fresh fetches before it is sent, and every worktree with tabs is marked
+    /// dirty so it is sent once it is ready. The copy is kept, so
+    /// daemon-rendered tabs keep rendering rather than falling back to legacy
+    /// and rebuilding their terminal views; it is refetched once the daemon
+    /// registers the subscription (`panelSubscriptionRegistered`).
     func resetPanelSurfacesForResubscribe() {
         panelSyncReadyWorktrees.removeAll()
         guard panelTabsActive else { return }
         panelSyncDirty.formUnion(tabs.keys)
+    }
+
+    /// Called when the daemon acknowledges a subscription `startSubscription()`
+    /// opened. The daemon registers the subscriber before it sends the ack,
+    /// so a `panel.get` issued from here on cannot miss a change: the change
+    /// lands either in the reply or in a later delta.
+    ///
+    /// Deltas the daemon sent before that — while no subscription was up,
+    /// across a daemon restart or a dropped connection — were missed, so each
+    /// worktree the copy holds is refetched and merged under the usual guard,
+    /// which a restart does not disturb: revisions are daemon-wide and never
+    /// decrease. A get still in flight now fetches again when it lands (see
+    /// `loadPanelSurfaces`). A worktree the copy does not hold is not fetched
+    /// here: showing it, or the flag turning on, loads it.
+    func panelSubscriptionRegistered() {
+        panelSubscriptionRegistrations &+= 1
+        guard panelTabsActive else { return }
         let heldWorktreeIDs = Array(panelSurfaces.keys)
         guard !heldWorktreeIDs.isEmpty else { return }
         Task { @MainActor [weak self] in

@@ -1930,7 +1930,16 @@ actor DaemonClient {
 
     /// Open a persistent socket that receives state deltas from the daemon.
     /// Runs in a loop until the socket disconnects or the task is cancelled.
-    nonisolated func subscribe(onDelta: @escaping DeltaHandler) async {
+    ///
+    /// `onRegistered` runs once, when the daemon's ack arrives. The daemon
+    /// registers the subscriber before it queues the ack, so from then on
+    /// every delta it broadcasts reaches this stream: a fetch issued after
+    /// `onRegistered` cannot miss a change, which lands either in the fetch's
+    /// reply or in a later delta.
+    nonisolated func subscribe(
+        onDelta: @escaping DeltaHandler,
+        onRegistered: @escaping @Sendable () -> Void = {}
+    ) async {
         guard let fd = try? makeConnectedSocket() else { return }
 
         // Send subscribe request
@@ -1959,6 +1968,7 @@ actor DaemonClient {
         }
 
         var accumulated = Data()
+        var registered = false
         let decoder = JSONDecoder()
         let probe = RPCVolumeProbe.shared
 
@@ -1994,6 +2004,10 @@ actor DaemonClient {
                 if let response = try? decoder.decode(RPCResponse.self, from: Data(lineData)),
                    response.success && response.result == nil {
                     probe.record(start: started, kind: .delta, type: "(ack)", bytes: lineData.count)
+                    if !registered {
+                        registered = true
+                        onRegistered()
+                    }
                     continue
                 }
 

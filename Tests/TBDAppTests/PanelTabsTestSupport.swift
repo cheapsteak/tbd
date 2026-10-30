@@ -134,6 +134,17 @@ enum PanelTabsFixture {
         return collector
     }
 
+    /// Stubs the daemon's state stream (`stateSubscriber`): a subscribe call
+    /// stays open until the test ends it, and the daemon acknowledges it only
+    /// when the test says so.
+    static func stubSubscription(_ state: AppState) -> PanelSubscriptionStub {
+        let stub = PanelSubscriptionStub()
+        state.stateSubscriber = { @MainActor onRegistered, _ in
+            await stub.serve(onRegistered: onRegistered)
+        }
+        return stub
+    }
+
     /// The one element a step was supposed to produce. Fails cleanly, naming
     /// everything that arrived, rather than indexing off the end of an array.
     static func single<Element>(
@@ -210,6 +221,34 @@ final class PanelCallGate {
         released = true
         waiter?.resume()
         waiter = nil
+    }
+}
+
+/// The daemon's end of a state subscription, for `PanelTabsFixture.stubSubscription`.
+/// Holds each subscribe call open on a gate, so the subscription stays in
+/// flight until `end()`, and calls the app's registration callback when the
+/// test plays the daemon's ack with `register()`.
+@MainActor
+final class PanelSubscriptionStub {
+    private var onRegistered: (@Sendable () -> Void)?
+    private let stream = PanelCallGate()
+
+    /// A subscribe call is open.
+    var isOpen: Bool { stream.isHolding }
+
+    func serve(onRegistered: @escaping @Sendable () -> Void) async {
+        self.onRegistered = onRegistered
+        await stream.wait()
+    }
+
+    /// The daemon's ack: the open subscription is registered.
+    func register() {
+        onRegistered?()
+    }
+
+    /// Ends the open subscribe call, and lets any later one return at once.
+    func end() {
+        stream.release()
     }
 }
 

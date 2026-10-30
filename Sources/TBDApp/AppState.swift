@@ -892,6 +892,10 @@ final class AppState {
     /// Tab ID → the `panelTouchSequence` of its latest touch, kept only while a
     /// load is in flight and emptied when the last one lands.
     @ObservationIgnored var panelTabsTouchedInFlight: [WorkspaceTabID: UInt64] = [:]
+    /// How many state subscriptions the daemon has acknowledged. A
+    /// `panel.get` in flight while this changes fetches again when it lands:
+    /// the daemon may have answered it before the subscription registered.
+    @ObservationIgnored var panelSubscriptionRegistrations: UInt64 = 0
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
@@ -2392,6 +2396,18 @@ final class AppState {
     /// `panelGetFetcher`, so tests can count syncs without a real daemon.
     @ObservationIgnored lazy var panelSyncTrigger: @MainActor (PanelSyncTabsParams) async throws -> PanelSyncTabsResult =
         { [daemonClient] params in try await daemonClient.panelSyncTabs(params) }
+    /// How `startSubscription()` opens the daemon's state stream
+    /// (`state.subscribe`) — injectable for the same reason as
+    /// `panelGetFetcher`, so tests can say when the daemon registers the
+    /// subscription without opening a socket. The first closure runs once,
+    /// when the daemon acknowledges the subscription; the second runs for
+    /// each delta. Returns when the stream ends.
+    @ObservationIgnored lazy var stateSubscriber: @MainActor (
+        _ onRegistered: @escaping @Sendable () -> Void,
+        _ onDelta: @escaping DaemonClient.DeltaHandler
+    ) async -> Void = { [daemonClient] onRegistered, onDelta in
+        await daemonClient.subscribe(onDelta: onDelta, onRegistered: onRegistered)
+    }
     /// How `refreshRepos()` fetches the repo list — injectable for the same
     /// reason as `remoteProvidersFetcher`, so tests can prove a failed fetch
     /// prunes no remembered sidebar group.
@@ -3019,15 +3035,23 @@ final class AppState {
         programStatusRevisions.removeAll()
         Task { [weak self] in await self?.hydrateProgramStatus() }
         // And for panel surfaces: deltas sent while no subscription was up
-        // were missed, so the copy's worktrees are refetched.
+        // were missed, so the copy's worktrees are refetched — once the
+        // daemon has registered the new subscription, so that no change can
+        // fall between a refetch's reply and the first delta.
         resetPanelSurfacesForResubscribe()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
-            await self.daemonClient.subscribe { [weak self] delta in
-                Task { @MainActor [weak self] in
-                    self?.handleDelta(delta)
-                }
-            }
+            await self.stateSubscriber(
+                { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.panelSubscriptionRegistered()
+                    }
+                },
+                { [weak self] delta in
+                    Task { @MainActor [weak self] in
+                        self?.handleDelta(delta)
+                    }
+                })
             // Subscription disconnected — nil out so poll loop restarts it
             await MainActor.run { self.subscriptionTask = nil }
         }
