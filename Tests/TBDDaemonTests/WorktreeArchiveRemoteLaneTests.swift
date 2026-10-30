@@ -10,10 +10,17 @@ import Testing
 /// `worktree.archive` on a remote lane
 /// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Archive"). Three
 /// routes out of the same handler — the verb, the `gone` exemption, and a
-/// refusal — plus the two guards on the verb path, and the record shape that
-/// separates them: **a refusal writes no actuation row at all**, because
-/// nothing was attempted and the record may claim solely acts that were
-/// attempted.
+/// refusal — plus the guards on the verb path, and the record shape that
+/// separates them: an act confirms its request row `dispatched` or
+/// `transport-failed`, and **a refusal confirms it `refused` with the reason
+/// `not-eligible`** and the refusal sentence as its detail. A refused outcome
+/// claims no act, only that the daemon declined.
+///
+/// The three guard refusals — the ones `force` lifts — carry
+/// `RPCErrorCode.remoteLaneArchiveGuarded`, and every other refusal carries no
+/// code. Both surfaces branch on that code to decide whether to offer force, so
+/// a refusal that carried it wrongly would offer a button that can only fail
+/// again.
 ///
 /// The local arms are here for the same reason they always were: this is a
 /// shared handler, and a run that showed the remote path working while
@@ -28,6 +35,20 @@ struct WorktreeArchiveRemoteLaneTests {
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: worktree.id, force: force),
             actor: .app))
+    }
+
+    /// The record a refused archive leaves: its `worktree.archive` dispose
+    /// request, confirmed `refused` with the response's own sentence.
+    private func expectRefusalRecorded(
+        _ fixture: RemoteLaneFixture, _ response: RPCResponse,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
+        let (request, outcome) = try fixture.refusalRecord(sourceLocation: sourceLocation)
+        #expect(request["kind"] as? String == "dispose", sourceLocation: sourceLocation)
+        #expect(request["method"] as? String == RPCMethod.worktreeArchive, sourceLocation: sourceLocation)
+        #expect(response.error != nil, "a refusal must say why", sourceLocation: sourceLocation)
+        #expect(outcome["error"] as? String == response.error,
+                "the outcome does not carry the refusal sentence", sourceLocation: sourceLocation)
     }
 
     // MARK: - The verb path
@@ -172,8 +193,8 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(fixture.invoker.calls == [["describe"]], "the gone path must call no verb")
         #expect(try await fixture.status(of: lane) == .archived)
         #expect(await fixture.manager.filingDecision(for: lane.id) != nil)
-        // A row genuinely changed status, so the record names that act —
-        // unlike a refusal, which writes nothing.
+        // A row genuinely changed status, so the record names that act and
+        // confirms it dispatched, where a refusal is confirmed refused.
         let rows = try fixture.actuationRows()
         #expect(rows.count == 2)
         #expect(rows.last?["result"] as? String == "dispatched")
@@ -213,7 +234,9 @@ struct WorktreeArchiveRemoteLaneTests {
                 "the refusal did not name the capability: \(response.error ?? "no error")")
         #expect(try await fixture.status(of: lane) == .active)
         #expect(fixture.invoker.calls == [["describe"]])
-        #expect(try fixture.actuationRows().isEmpty, "a refusal must write no actuation row")
+        // No retry gets past a missing capability, so nothing may offer force.
+        #expect(response.errorCode == nil)
+        try expectRefusalRecorded(fixture, response)
     }
 
     /// `stop` is never substituted for a missing `archive`. Ending compute
@@ -233,7 +256,8 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(fixture.invoker.calls == [["describe"]])
         #expect(!fixture.invoker.calls.contains { $0.first == "stop" })
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(try fixture.actuationRows().isEmpty)
+        #expect(response.errorCode == nil)
+        try expectRefusalRecorded(fixture, response)
     }
 
     /// Even forced. `--force` overrides the guards, which are about the
@@ -251,7 +275,8 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(!response.success)
         #expect(fixture.invoker.calls == [["describe"]])
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(try fixture.actuationRows().isEmpty)
+        #expect(response.errorCode == nil)
+        try expectRefusalRecorded(fixture, response)
     }
 
     @Test("archiving a remote lane is refused when remote backends are off")
@@ -267,7 +292,8 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(!response.success)
         #expect(response.error == "remote backends disabled")
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(try fixture.actuationRows().isEmpty)
+        #expect(response.errorCode == nil)
+        try expectRefusalRecorded(fixture, response)
     }
 
     // MARK: - The stale-snapshot gate
@@ -277,7 +303,7 @@ struct WorktreeArchiveRemoteLaneTests {
     /// mirror — `agentState` and `meta.workspace_dirty` — so on a stale mirror
     /// a session that was idle at the last good poll and is working now reads
     /// as safe, the guards pass, and a mid-task session is retired.
-    @Test("a stale provider inventory refuses the archive above the record")
+    @Test("a stale provider inventory refuses the archive, and the refusal is recorded")
     func staleInventoryRefusesTheArchive() async throws {
         let fixture = try await RemoteLaneFixture.make(
             capabilities: ["archive"],
@@ -300,7 +326,8 @@ struct WorktreeArchiveRemoteLaneTests {
                 "the refusal did not say why: \(response.error ?? "no error")")
         #expect(try await fixture.status(of: lane) == .active)
         #expect(!fixture.invoker.calls.contains { $0.first == "archive" })
-        #expect(try fixture.actuationRows().isEmpty, "a refusal must write no actuation row")
+        #expect(response.errorCode == RPCErrorCode.remoteLaneArchiveGuarded.rawValue)
+        try expectRefusalRecorded(fixture, response)
     }
 
     /// `--force` overrides it, exactly as it overrides the two guards: the user
@@ -349,7 +376,7 @@ struct WorktreeArchiveRemoteLaneTests {
     /// about — it consults the row's own `gone` flag, which a stale inventory
     /// does not put in doubt. Gating it would leave a lane whose provider
     /// cannot archive unretireable for as long as that provider is unhealthy,
-    /// with `--force` the only way out and the row menu never sending one.
+    /// with `--force` the only way out and the merge rail never sending one.
     @Test("a stale inventory does not gate the gone path")
     func staleInventoryDoesNotGateTheGonePath() async throws {
         let fixture = try await RemoteLaneFixture.make(
@@ -379,9 +406,13 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(!response.success)
         #expect(response.error?.contains("working") == true,
                 "the refusal did not say why: \(response.error ?? "no error")")
+        // The sentence states the fact alone; the remedy is each surface's,
+        // keyed off the code rather than read out of the prose.
+        #expect(response.error?.contains("--force") == false)
+        #expect(response.errorCode == RPCErrorCode.remoteLaneArchiveGuarded.rawValue)
         #expect(fixture.invoker.calls == [["describe"]])
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(try fixture.actuationRows().isEmpty)
+        try expectRefusalRecorded(fixture, response)
     }
 
     @Test("a provider-reported dirty checkout is refused, and the verb never runs")
@@ -397,9 +428,11 @@ struct WorktreeArchiveRemoteLaneTests {
         #expect(!response.success)
         #expect(response.error?.contains(RemoteLaneLifecycle.dirtyWorkspaceMetaKey) == true,
                 "the refusal did not name the key: \(response.error ?? "no error")")
+        #expect(response.error?.contains("--force") == false)
+        #expect(response.errorCode == RPCErrorCode.remoteLaneArchiveGuarded.rawValue)
         #expect(fixture.invoker.calls == [["describe"]])
         #expect(try await fixture.status(of: lane) == .active)
-        #expect(try fixture.actuationRows().isEmpty)
+        try expectRefusalRecorded(fixture, response)
     }
 
     /// The guard is inert until a provider adopts the key. A session that

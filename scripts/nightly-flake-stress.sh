@@ -236,7 +236,7 @@ adhoc_test_spec() {
 # again. The flags belong to how CI builds, never to which tests a pass runs.
 #
 # `check_pass_table` compares this table with the invocations parsed out of
-# `test.yml`, and the `plans-guard` job runs that check, so a CI pass that
+# `test.yml`, and the `script-harnesses` job runs that check, so a CI pass that
 # changes without this table changing fails.
 # shellcheck disable=SC2016 # the workflow's own text, matched literally
 CI_SWIFTPM_FLAGS_WORD='"${swiftpm_flags[@]}"'

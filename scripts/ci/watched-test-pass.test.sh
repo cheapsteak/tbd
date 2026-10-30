@@ -5,9 +5,9 @@
 # under test drives BSD `ps`, BSD `script(1)` and `/usr/bin/sample`, all of
 # which take different arguments or do not exist on Linux — which is why this
 # harness runs in the macOS `lint` job rather than joining the Linux collection
-# in `plans-guard`. A developer with Homebrew's bash first on `PATH` is running
-# 5.x, where constructs 3.2 cannot parse work fine and fail at RUN time from
-# inside a command substitution, where `bash -n` on 5.x never sees them.
+# in `script-harnesses`. A developer with Homebrew's bash first on `PATH` is
+# running 5.x, where constructs 3.2 cannot parse work fine and fail at RUN time
+# from inside a command substitution, where `bash -n` on 5.x never sees them.
 #
 # ZERO BUILDS, ZERO SwiftPM, AND NOTHING REAL IS TOUCHED. Every case runs the
 # script against a fixture directory holding a STUB `scripts/test.sh` this file

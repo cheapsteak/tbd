@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Frecency: usage count decayed with a seven-day half-life, floored at ten
 /// percent. It is a TIEBREAK, never a rank — a command you used yesterday must
@@ -16,8 +17,10 @@ import Testing
 struct FrecencyStoreTests {
     private let epoch = Date(timeIntervalSince1970: 1_800_000_000)
 
-    private func store(_ suiteName: String, now: Date) -> FrecencyStore {
-        FrecencyStore(defaults: UserDefaults(suiteName: suiteName)!, now: { now })
+    /// A fresh `UserDefaults` instance over `suite` on every call, so two
+    /// stores built from one suite are separate instances over the same domain.
+    private func store(_ suite: TestDefaultsSuite, now: Date) -> FrecencyStore {
+        FrecencyStore(defaults: suite.reopen(), now: { now })
     }
 
     // MARK: - The curve
@@ -57,32 +60,32 @@ struct FrecencyStoreTests {
     // MARK: - The store
 
     @Test func anUnknownCommandScoresZero() {
-        let suiteName = "FrecencyStoreTests-\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
-        #expect(store(suiteName, now: epoch).score("never-used") == 0)
+        let suite = TestDefaultsSuite("FrecencyStoreTests")
+        defer { suite.tearDown() }
+        #expect(store(suite, now: epoch).score("never-used") == 0)
     }
 
     @Test func recordingAccumulatesAndPersists() {
-        let suiteName = "FrecencyStoreTests-\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("FrecencyStoreTests")
+        defer { suite.tearDown() }
 
-        let first = store(suiteName, now: epoch)
+        let first = store(suite, now: epoch)
         first.record("compact")
         first.record("compact")
         #expect(first.score("compact") == 2)
 
         // A separate instance over the same suite reads the same numbers.
-        let later = store(suiteName, now: epoch.addingTimeInterval(7 * 86_400))
+        let later = store(suite, now: epoch.addingTimeInterval(7 * 86_400))
         #expect(abs(later.score("compact") - 1) < 0.0001)
     }
 
     /// Recording refreshes the timestamp, so a re-used command climbs back.
     @Test func aNewUseResetsTheDecayClock() {
-        let suiteName = "FrecencyStoreTests-\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("FrecencyStoreTests")
+        defer { suite.tearDown() }
 
-        store(suiteName, now: epoch).record("compact")
-        let weekLater = store(suiteName, now: epoch.addingTimeInterval(7 * 86_400))
+        store(suite, now: epoch).record("compact")
+        let weekLater = store(suite, now: epoch.addingTimeInterval(7 * 86_400))
         weekLater.record("compact")
         #expect(weekLater.score("compact") > 1.5,
                 "a fresh use must beat the decayed one it replaced")

@@ -32,7 +32,7 @@ Managing multiple AI coding agents on the same repo requires juggling git worktr
 - [Daemon-UI-CLI split](techniques/daemon-ui-cli.md) (Make)
 - [SQLite with WAL mode](techniques/sqlite-wal.md) (Buy: GRDB)
 - [Terminal emulation behind a protocol](techniques/terminal-protocol.md) (Wrap: SwiftTerm)
-- [Unix domain socket + HTTP RPC](techniques/unix-socket-rpc.md) (Make)
+- [Unix domain socket RPC](techniques/unix-socket-rpc.md) (Make)
 - [YYYYMMDD-adjective-animal naming](techniques/adjective-animal-naming.md) (Make)
 - [Stable SSH agent symlink](techniques/ssh-agent-symlink.md) (Make)
 

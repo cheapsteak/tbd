@@ -4,6 +4,7 @@ import Testing
 
 @testable import TBDApp
 @testable import TBDShared
+import TestSupport
 
 // DEFECT UNDER TEST: a view renders the persisted `PRStatus` as current truth.
 // That cache was measured lying — "Ready to merge" for pull requests merged days
@@ -153,9 +154,9 @@ struct PRFreshnessTests {
         // The layer between the RPC and the views. Merging them — dropping an
         // observation because there is no status, or vice versa — is the same
         // collapse one layer further out.
-        let suiteName = "TBDAppTests.PRFreshness.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.PRFreshness")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let withValue = UUID()
         let noValue = UUID()

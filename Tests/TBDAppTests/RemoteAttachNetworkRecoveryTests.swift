@@ -20,9 +20,9 @@ import TBDShared
 @Suite("Remote attach network recovery")
 struct RemoteAttachNetworkRecoveryTests {
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RemoteAttachNetworkRecovery.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachNetworkRecovery")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

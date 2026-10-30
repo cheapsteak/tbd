@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Jumps to a prompt in the transcript table, driven headlessly in
 /// `TableTranscriptScene`: a jump puts its target 16pt below the viewport top
@@ -84,9 +85,9 @@ struct PromptRailJumpTests {
 
     @Test("a jump pins a far row with an estimated height 16pt below the top")
     func jumpPinsAFarEstimatedRow() async throws {
-        let suiteName = "prompt-rail-jump-pin-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-pin")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // The row right above prompt 5 is the card, so the jump brings it on
@@ -149,9 +150,9 @@ struct PromptRailJumpTests {
     /// width. Only a move of the origin is a reader scroll.
     @Test("a viewport size change keeps the jump's pin and hold")
     func sizeChangeKeepsHold() async throws {
-        let suiteName = "prompt-rail-jump-resize-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-resize")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
@@ -184,9 +185,9 @@ struct PromptRailJumpTests {
 
     @Test("a reader scroll releases the jump anchor and the held target")
     func readerScrollReleasesAnchor() async throws {
-        let suiteName = "prompt-rail-jump-scroll-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-scroll")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
@@ -216,9 +217,9 @@ struct PromptRailJumpTests {
     /// depend on which row AppKit happens to keep still.
     @Test("a clip move inside the table's layout pass keeps the jump, and the pass's end re-pins it")
     func layoutPassMoveKeepsHold() async throws {
-        let suiteName = "prompt-rail-jump-layout-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-layout")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
@@ -291,9 +292,9 @@ struct PromptRailJumpTests {
     /// prompt keeps the pin but ends the hold.
     @Test("appends, a tail re-render and a noop keep the jump anchor and the target where it landed")
     func appendKeepsAnchor() async throws {
-        let suiteName = "prompt-rail-jump-append-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-append")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
@@ -413,9 +414,9 @@ struct PromptRailJumpTests {
     /// ends the pin, which would fight it, but the target stays active.
     @Test("following the tail after a jump to the end keeps the target active and ends the pin")
     func tailFollowKeepsHeldTarget() async throws {
-        let suiteName = "prompt-rail-jump-tail-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-tail")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let (scene, items) = try await Self.jumpedToPrompt58(appState: appState)
@@ -452,9 +453,9 @@ struct PromptRailJumpTests {
 
     @Test("a new prompt after a held jump target ends the hold")
     func newPromptReleasesHeldTarget() async throws {
-        let suiteName = "prompt-rail-jump-newprompt-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-newprompt")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let (scene, items) = try await Self.jumpedToPrompt58(appState: appState)
@@ -487,9 +488,9 @@ struct PromptRailJumpTests {
     /// away from the bottom, so the queued follow must not pull them back.
     @Test("a tail-follow queued before a jump does not undo it")
     func queuedTailFollowYieldsToJump() async throws {
-        let suiteName = "prompt-rail-jump-queued-follow-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-queued-follow")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
@@ -530,9 +531,9 @@ struct PromptRailJumpTests {
 
     @Test("a prepend and a width change each release the jump anchor")
     func prependAndWidthChangeRelease() async throws {
-        let suiteName = "prompt-rail-jump-release-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-release")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
@@ -592,9 +593,9 @@ struct PromptRailJumpTests {
 
     @Test("a jump to an unknown id leaves the scroll and any held jump alone")
     func unknownIDLeavesScroll() async throws {
-        let suiteName = "prompt-rail-jump-unknown-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-unknown")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
@@ -624,9 +625,9 @@ struct PromptRailJumpTests {
     /// end, and the held target, not the bottom rule, decides what is active.
     @Test("a jump near the end clamps at the bottom and holds its target active")
     func jumpNearEndHoldsTarget() async throws {
-        let suiteName = "prompt-rail-jump-end-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-end")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(
@@ -660,9 +661,9 @@ struct PromptRailJumpTests {
 
     @Test("previous and next step through the prompts")
     func previousNextSemantics() async throws {
-        let suiteName = "prompt-rail-jump-steps-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-steps")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: Self.promptCount, replySentences: Self.tallReplies)
@@ -728,9 +729,9 @@ struct PromptRailJumpTests {
 
     @Test("with no active prompt, next goes to the first and previous does nothing")
     func stepsWithoutAnActivePrompt() throws {
-        let suiteName = "prompt-rail-jump-noactive-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-noactive")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = PromptRailFixtures.conversation(prompts: 30, replySentences: Self.tallReplies)
@@ -756,9 +757,9 @@ struct PromptRailJumpTests {
 
     @Test("with no prompts, previous and next do nothing")
     func stepsWithoutPrompts() throws {
-        let suiteName = "prompt-rail-jump-noprompts-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("prompt-rail-jump-noprompts")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items: [TranscriptItem] = (0..<30).map { index in

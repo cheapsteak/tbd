@@ -4,6 +4,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // Tier 2: hosts real SwiftUI in an `NSHostingView` and turns the run loop a
 // bounded number of times. No subprocesses, no `~/tbd`; every `AppState` and
@@ -182,9 +183,9 @@ private func withHostedProbe(
     _ content: @MainActor (AppState) -> AnyView,
     _ body: (HostedProbe) -> Void
 ) {
-    let suiteName = "TBDAppTests.AppStateObservation.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let suite = TestDefaultsSuite("TBDAppTests.AppStateObservation")
+    let defaults = suite.defaults
+    defer { suite.tearDown() }
     let state = AppState(userDefaults: defaults)
 
     // `.defaultAppStorage` on the whole tree, not per view: an `@AppStorage`
@@ -516,9 +517,9 @@ struct AppStateFocusedTabTrackingTests {
     /// `let lastFocused = focusedTabCloseContext` line and this fails.
     @Test("a focus change still reaches canCloseFocusedTab once a terminal view has registered")
     func focusChangeReachesTheMenuItemWithRegisteredTerminals() {
-        let suiteName = "TBDAppTests.FocusedTabTracking.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.FocusedTabTracking")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
 
         // `resolvedFocusedTabCloseContext()` reaches `NSApp.keyWindow` on the

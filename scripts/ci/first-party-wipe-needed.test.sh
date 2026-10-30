@@ -7,7 +7,7 @@
 # fine and then fail at RUN time from inside a command substitution, where
 # `bash -n` on 5.x never sees them. Nothing here is macOS-only, though: the
 # script under test drives nothing but `git`, `grep` and shell builtins, so this
-# harness joins the Linux collection in the `plans-guard` job.
+# harness joins the Linux collection in the `script-harnesses` job.
 #
 # THE FIXTURE REPOSITORIES MIRROR THIS PACKAGE'S REAL LAYOUT, and that is
 # load-bearing rather than decorative. `Sources/TBDDaemonLib` does not exist:

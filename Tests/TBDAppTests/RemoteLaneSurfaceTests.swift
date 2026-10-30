@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Selecting an adopted remote lane must reach the same surface the Remote
 /// section's row reaches.
@@ -24,9 +25,9 @@ import TBDShared
 struct RemoteLaneSurfaceTests {
 
     private func withStateAsync(_ body: (AppState) async -> Void) async {
-        let suiteName = "TBDAppTests.RemoteLaneSurface.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteLaneSurface")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         await body(AppState(userDefaults: defaults))
     }
 

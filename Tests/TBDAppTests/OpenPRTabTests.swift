@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import TBDShared
 @testable import TBDApp
+import TestSupport
 
 /// Tier 1. The rule the TOOLBAR's PR surfaces share: clicking a PR opens an
 /// in-app webview tab, and clicking the SAME PR again focuses the tab that is
@@ -23,9 +24,9 @@ import TBDShared
 struct OpenPRTabTests {
 
     private func withAppState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.OpenPRTab.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.OpenPRTab")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 

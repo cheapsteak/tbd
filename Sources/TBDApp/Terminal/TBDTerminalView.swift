@@ -3,7 +3,6 @@ import Combine
 import SwiftTerm
 // Scoped, not a whole-module import: `TBDShared.Terminal` (the DB row model)
 // would collide with `SwiftTerm.Terminal`.
-import class TBDShared.ProgramStatusGate
 import enum TBDShared.ProgramStatusParser
 import enum TBDShared.ProgramStatusProtocol
 import os
@@ -72,10 +71,10 @@ class TBDTerminalView: TerminalView {
 
     /// Whether this view answers the Program Status Protocol (OSC 7501) probe
     /// and forwards its reports. Written on main by `TerminalPanelRepresentable`
-    /// (on only for a holder-transport panel with `program_status_enabled` on,
-    /// whatever agent it runs); read on SwiftTerm's parse thread inside
-    /// the synchronous OSC handler, hence a lock-guarded box rather than a
-    /// plain `Bool`. Off by default, so a tmux panel never answers.
+    /// (on only for a holder-transport panel, whatever agent it runs); read on
+    /// SwiftTerm's parse thread inside the synchronous OSC handler, hence a
+    /// lock-guarded box rather than a plain `Bool`. Off by default, so a tmux
+    /// panel never answers.
     let programStatusGate = ProgramStatusGate()
 
     /// Raised while `suspendOscObservation()` is in force — that is, while a
@@ -1189,4 +1188,24 @@ final class OscReplayMute: Sendable {
     func raise() { depth.withLock { $0 += 1 } }
 
     func lower() { depth.withLock { $0 = max($0 - 1, 0) } }
+}
+
+/// `TBDTerminalView`'s holder-vs-tmux switch for the Program Status Protocol
+/// (OSC 7501): on for a holder-transport panel, off for a tmux one. Set on
+/// main from the panel's transport, read on SwiftTerm's parse thread inside
+/// the synchronous OSC handler, hence a lock rather than a plain `Bool`.
+final class ProgramStatusGate: Sendable {
+    private let state: OSAllocatedUnfairLock<Bool>
+
+    init() {
+        state = OSAllocatedUnfairLock(initialState: false)
+    }
+
+    var isEnabled: Bool {
+        state.withLock { $0 }
+    }
+
+    func set(_ enabled: Bool) {
+        state.withLock { $0 = enabled }
+    }
 }

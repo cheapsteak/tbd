@@ -151,7 +151,9 @@ only when a worktree returns to unresolved, so a provider hiccup at the moment a
 merge is observed drops that lane's auto-archive for the rest of the daemon run.
 The recovery is a manual archive. Persisting the pending edge would fix it, and
 is deliberately not done here: it is a change to the rail's own trigger model
-rather than to remote archiving, and it belongs with the rail.
+rather than to remote archiving, and it belongs with the rail. What the rail
+does do is record the decline (§"The record"), so a lane left active after its
+PR merged can be traced to the refusal that kept it.
 
 Guarding the verb unconditionally, rather than inferring from a provider's other
 capabilities whether its archive might end compute, keeps one rule for both
@@ -384,6 +386,19 @@ belongs on that path. Wiring such a control to `remote.archive` instead would
 skip every guard this design rests on, which is why the distinction is stated
 here rather than left to be inferred from which surface was closer to hand.
 
+One error code marks the refusals `force` lifts:
+
+```swift
+// RPCErrorCode
+case remoteLaneArchiveGuarded
+```
+
+`worktree.archive` sets it on a remote lane's three guard refusals — the agent
+is working, the provider reports a dirty checkout, the inventory is stale — and
+on nothing else. A refusal `force` cannot lift (remote backends off, the cloud
+gate, a missing `archive` capability) carries no code, because no retry would
+get past it.
+
 ## Surfaces
 
 `RowActionMenu.Context` gains the row's location, its provider name, and the
@@ -394,6 +409,25 @@ children, and for the same reason: a tooltip on a disabled menu item is easy to
 miss. Hiding the item instead would leave the absence unexplained and give a
 provider author no signal that a capability is missing.
 
+A guard refusal comes back with the remedy each surface has. The daemon's
+sentence states the fact alone, and the response carries
+`remoteLaneArchiveGuarded`:
+
+- **The CLI** – `tbd worktree archive` appends "Re-run with --force to retire it
+  anyway." when it sees the code.
+- **The app** – shows the sentence in an alert with **Archive anyway** and
+  **Cancel**. Archive anyway sends the same archive with `force` set. A forced
+  archive cannot meet a guard, so the offer cannot repeat; a forced call that
+  fails for another reason gets the plain failure alert.
+
+Every other failure keeps the plain alert, because a button that would only
+fail again is a dead control. Both surfaces branch on the code and never on the
+sentence, so rewording a refusal cannot change which one offers force.
+
+Local archive is outside this. There `force` means archiving over uncommitted
+changes in a directory the archive deletes, which is a different decision, and
+the alert does not offer it.
+
 `ArchivedWorktreesView`'s hide-empty filter admits a remote lane on its location.
 The filter keeps a row when it has conversations or a revive in flight, and a
 remote lane's synthetic `remote://` path resolves to no Claude project
@@ -403,10 +437,22 @@ and then hidden, which is indistinguishable from the archive having failed.
 
 ## The record
 
-A refusal happens above the actuation row. Nothing was attempted, and the record
-may claim solely acts that were attempted, so a refused archive writes no
-request and no outcome — the same shape the current location gates use, and the
-same reason `repo.remove` writes no dispose row for a lane it never tore down.
+A remote archive or revive writes its request row before anything is decided,
+and a refusal confirms that row as `refused` with the reason `not-eligible` and
+the refusal sentence as its detail. This covers every refusal on the path:
+remote backends off, the Claude cloud gate (`claude_cloud_enabled`), a missing
+capability, the stale inventory, and both guards. A refused outcome claims no
+act — it says the daemon declined — so the record still names only what was
+attempted, and it can answer which archives the guards stopped. This is the
+shape the rest of the record already uses when a safety rail declines a park,
+a wake, or a hook re-run.
+
+Each refusal is also logged at `.notice`, the lowest level the unified log keeps
+on disk by default, so it can be found in Console without a debug subscription.
+
+The merge rail writes the same shape under its daemon actor when the archive
+decision refuses a lane. Its earlier skips — a lane it is not armed for, and
+a daemon started without remote backends — make no archive decision and write no row.
 
 The `gone` path does write a row and confirm it dispatched. No provider call was
 made, but the row genuinely changed status, and that is the act the record names.
@@ -446,10 +492,13 @@ Archive:
 - The guards refuse on `working` and on a provider-reported dirty checkout for
   the verb path, refuse on neither for the `gone` path, and both yield to
   `--force`.
+- The three guard refusals carry `remoteLaneArchiveGuarded`; the backends-off,
+  cloud-gate, and capability refusals carry no code.
 - An already-archived and an already-exited lane each flip without error.
 - The merge rail archives an armed remote lane whose provider declares `archive`,
-  and declines one whose provider does not, without writing an actuation row for
-  the decline.
+  and declines one whose provider does not, recording the decline as a request
+  row under its daemon actor confirmed as `refused`. An unarmed lane, and a lane
+  seen by a daemon started without remote backends, write no row.
 
 Revive:
 
@@ -497,8 +546,12 @@ Surfaces and record:
   filter at its default, alongside a local archived worktree with no
   conversations that the filter still hides — so a run that showed everything
   cannot pass by doing nothing.
-- A refused archive and a refused revive each write no actuation row; a `gone`
-  archive and a sync-driven archive each write one.
+- A refused archive and a refused revive each write a request row confirmed as
+  `refused` with reason `not-eligible` and the refusal sentence as its detail; a
+  `gone` archive and a sync-driven archive each write one confirmed as
+  `dispatched`.
+- The app offers Archive anyway for `remoteLaneArchiveGuarded` and for no other
+  failure, and the CLI appends the `--force` hint for that code alone.
 
 ## Rejected alternatives
 
@@ -543,6 +596,20 @@ and the user's revive silently undone.
 **Its own default-off flag for the filing sync.** Rejected because the
 subsystem is already behind `remote_backends_enabled` and a remote row cannot
 exist without it.
+
+**Refusing above the record.** Writing nothing for a refusal keeps the record to
+acts that went ahead, but it leaves a refused gesture with no trace once its
+alert is dismissed. A user who retries an archive that keeps failing then has
+nothing to read back, and neither does anyone diagnosing it later. A refused
+outcome already says the daemon declined, so the row makes no false claim.
+
+**Recording refusals only in the unified log.** Rejected because the system ages
+the log out on its own schedule, and the log is not joined with the actuation
+record that holds every other archive.
+
+**One error code per guard.** Rejected because both surfaces do the same thing
+for all three — offer force — and the sentence already says which guard fired.
+Three codes would add protocol surface without changing any behavior.
 
 ## Deliberate cuts
 

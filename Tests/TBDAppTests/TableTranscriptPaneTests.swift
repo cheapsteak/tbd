@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Headless tests of the NSTableView transcript pane (#129).
 ///
@@ -30,9 +31,9 @@ struct TableTranscriptPaneTests {
     /// headless. (#129)
     @Test("table bubble: per-block heights are cached and feed the reused cell (no re-measure)")
     func tableBlockHeightsCachedOnReuse() throws {
-        let suiteName = "table-harness-blockcache-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-blockcache")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = TableTranscriptScene.bubbleFixture()  // contains "b-table" (prose + GFM table + prose)
@@ -89,9 +90,9 @@ struct TableTranscriptPaneTests {
     /// Cheap + headless: it only asks the coordinator for heights and cells.
     @Test("peer bubble: heightOfRow == realized, and a user row is unchanged")
     func peerBubbleRowMeasureEqualsRender() throws {
-        let suiteName = "table-harness-peer-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-peer")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let repoID = UUID()
@@ -168,9 +169,9 @@ struct TableTranscriptPaneTests {
     /// coordinator for cells.
     @Test("native activity cells: Bash + systemReminder dispatch to ActivityRowCellView; AskUserQuestion stays hosted")
     func activityCellDispatch() {
-        let suiteName = "table-harness-activity-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-activity")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = TableTranscriptScene.allKindsFixture()
@@ -275,9 +276,9 @@ struct TableTranscriptPaneTests {
     /// height corrections were the drift source).
     @Test("expanding a work group keeps the summary row anchored", arguments: [true, false])
     func expandingGroupKeepsSummaryAnchored(atBottom: Bool) async throws {
-        let suiteName = "table-harness-group-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-group")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // Shape of the fixture, both arms: more leading rows than the bottom-window
@@ -453,9 +454,9 @@ struct TableTranscriptPaneTests {
     /// this cache.
     @Test("a worktree root arriving late relinks rows composed against the empty root")
     func lateWorktreeRootRelinksComposedRows() throws {
-        let suiteName = "table-harness-linkroot-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-linkroot")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -511,9 +512,9 @@ struct TableTranscriptPaneTests {
     /// shifted rows underneath it).
     @Test("a rebuild keeps exact heights for rows whose content did not change")
     func rebuildKeepsContentAddressedHeights() throws {
-        let suiteName = "table-harness-cachekeep-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-cachekeep")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // More rows than the bottom-window precompute measures, so a wipe cannot be
@@ -562,9 +563,9 @@ struct TableTranscriptPaneTests {
     /// rows; the prune keeps the total pinned to the live row count.
     @Test("cache growth stays bounded across repeated expand/collapse cycles")
     func cacheGrowthIsBounded() throws {
-        let suiteName = "table-harness-cachebound-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-cachebound")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = Self.activityGroupFixture(leadingBubbles: 30, groupSize: 4, trailingBubbles: 2)
@@ -599,9 +600,9 @@ struct TableTranscriptPaneTests {
     /// the bottom STILL follows the tail. Only a bumped toggle token suppresses it.
     @Test("a streaming append still follows the tail from the bottom")
     func streamingAppendStillFollowsTail() async throws {
-        let suiteName = "table-harness-tailfollow-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-tailfollow")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = Self.activityGroupFixture(leadingBubbles: 8, groupSize: 5, trailingBubbles: 1)
@@ -666,9 +667,9 @@ struct TableTranscriptPaneTests {
 
     @Test("a prepend keeps the top visible row where it was")
     func prependKeepsTopRowAnchored() async throws {
-        let suiteName = "table-harness-prepend-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-prepend")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let (before, after) = Self.prependArrays()
@@ -711,9 +712,9 @@ struct TableTranscriptPaneTests {
 
     @Test("a prepend while at the bottom stays at the bottom")
     func prependAtBottomStaysAtBottom() async throws {
-        let suiteName = "table-harness-prepend-bottom-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-prepend-bottom")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let (before, after) = Self.prependArrays()
@@ -738,9 +739,9 @@ struct TableTranscriptPaneTests {
 
     @Test("with no stable id on screen, a prepend keeps the distance from the bottom")
     func prependWithoutStableIDKeepsBottomDistance() async throws {
-        let suiteName = "table-harness-prepend-lineid-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-prepend-lineid")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         // Positional ids, as the parsers mint for records with no uuid: after the
@@ -785,9 +786,9 @@ struct TableTranscriptPaneTests {
     /// height inserted above them.
     @Test("a rebuild without a prepend token behaves as before")
     func rebuildWithoutPrependTokenUnchanged() async throws {
-        let suiteName = "table-harness-prepend-gate-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-prepend-gate")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let (before, after) = Self.prependArrays()
@@ -822,9 +823,9 @@ struct TableTranscriptPaneTests {
     /// reader's place, where they were.
     @Test("a reader scroll releases a held prepend anchor, and a viewport resize does not")
     func readerScrollReleasesPrependAnchor() async throws {
-        let suiteName = "table-harness-prepend-release-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-prepend-release")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let (before, after) = Self.prependArrays()
@@ -879,9 +880,9 @@ struct TableTranscriptPaneTests {
 
     @Test("near-top reports transitions only")
     func nearTopReportsTransitions() throws {
-        let suiteName = "table-harness-neartop-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("table-harness-neartop")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let (before, _) = Self.prependArrays()

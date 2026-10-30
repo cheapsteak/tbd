@@ -26,13 +26,21 @@ mktmpd()          { mktemp -d "${TMPDIR:-/tmp}/stress-test.XXXXXX"; }
 mk_log() { local f="$1"; shift; printf '%s\n' "$@" > "$f"; }
 
 # A copy of the script with one guard deliberately weakened. Echoes its path.
+#
+# Only this shell may delete MUTANT_DIR. A child that bash forks for `sleep 30 &`
+# keeps a copy of this trap until it execs `sleep`, and bash runs the EXIT trap
+# when a signal kills it in that window. The kill-discipline cases below kill
+# their sleeps microseconds after spawning them. Without the check, the child
+# deleted the directory and every later `mutant_of` wrote into one that no longer
+# existed. `${BASHPID:-$$}` because bash 3.2 has no BASHPID; the comment above
+# test_only_the_harness_shell_deletes_the_mutant_dir says why that is safe.
 MUTANT_DIR="$(mktmpd)"
-MUTANT_SEQ=0
-trap 'rm -rf "$MUTANT_DIR"' EXIT
+MUTANT_DIR_OWNER="${BASHPID:-$$}"
+trap '[[ "${BASHPID:-$$}" == "$MUTANT_DIR_OWNER" ]] && rm -rf "$MUTANT_DIR"' EXIT
 mutant_of() {
   local sed_expr="$1" out
-  MUTANT_SEQ=$((MUTANT_SEQ + 1))
-  out="$MUTANT_DIR/mutant.$MUTANT_SEQ.sh"
+  # mktemp, not a counter: callers run this in a command substitution.
+  out="$(mktemp "$MUTANT_DIR/mutant.XXXXXX")"
   sed -E "$sed_expr" "$SCRIPT" > "$out"
   echo "$out"
 }
@@ -229,6 +237,67 @@ test_stop_spinners_verifies_by_captured_pid_and_reports_survivors() {
   kill -9 "$stubborn" 2>/dev/null
   wait "$stubborn" 2>/dev/null
   SPINNER_PIDS=()
+}
+
+# A TRAP BELONGS TO THE SHELL THAT INSTALLED IT. The two cases above kill their
+# sleeps microseconds after spawning them. A child that bash forks for
+# `sleep 30 &` keeps a copy of every trap until it execs `sleep`, so a SIGTERM in
+# that window ran this harness's EXIT trap in the CHILD. The child deleted
+# MUTANT_DIR, and the mutation cases that sort after these failed now and then
+# on CI with "mutant.1.sh: No such file or directory". No case can win that race
+# on demand, so this one runs the trap's own code in a subshell, which is a
+# forked child exactly as `sleep 30 &` is until its exec.
+#
+# The guard needs BASHPID, which bash 3.2 lacks. On bash 3.2 it always passes,
+# and that is safe there: in 100 tries of `sleep & kill`, bash 3.2 ran no trap
+# in a child that had not exec'd yet. It dropped the signal instead.
+#
+# The script's own `trap cleanup EXIT INT TERM` gets no such guard, on purpose.
+# The flake bot runs it under bash 3.2, where the guard could not tell a child
+# from its parent and no pre-exec child runs a trap anyway. It signals its
+# spinners and deadline commands long after they exec. And the bash 3.2 lint
+# (scripts/flake-bash32.test.sh) forbids BASHPID in it. Here, a pre-exec child
+# that runs `cleanup` finds no spinners in its copy of SPINNER_PIDS and exits.
+
+dir_state() { if [[ -d "$1" ]]; then echo present; else echo gone; fi; }
+
+# Run trap command $1 in this shell with MUTANT_DIR aimed at directory $2, so no
+# case can delete the real one. Wrap the call in ( ) to run it the way a forked
+# child would.
+run_trap_aimed_at() {
+  local MUTANT_DIR="$2"
+  eval "$1"
+}
+
+test_only_the_harness_shell_deletes_the_mutant_dir() {
+  if [[ -z "${BASHPID:-}" ]]; then
+    echo "ok   - bash $BASH_VERSION has no BASHPID, so the trap guard is not checked here"
+    return 0
+  fi
+  local spec body unguarded decoy
+  spec="$(trap -p EXIT)"
+  eval "set -- $spec"
+  body="${3:-}"
+  # shellcheck disable=SC2016 # the trap's text, not its expansion
+  assert_contains "the EXIT trap removes the mutant dir" "$body" 'rm -rf "$MUTANT_DIR"'
+
+  # A guard that never deletes anything would pass the child check below, so
+  # first the owner has to get through.
+  decoy="$(mktmpd)"
+  run_trap_aimed_at "$body" "$decoy"
+  assert_eq "the harness shell itself deletes it" "gone" "$(dir_state "$decoy")"
+
+  decoy="$(mktmpd)"
+  ( run_trap_aimed_at "$body" "$decoy" )
+  assert_eq "a forked child running the trap leaves the directory alone" "present" "$(dir_state "$decoy")"
+
+  # MUTATION: the trap as it was before the guard, run by the same child.
+  unguarded="${body#*&& }"
+  # shellcheck disable=SC2016 # the trap's text, not its expansion
+  assert_eq "the mutant really is the bare rm" 'rm -rf "$MUTANT_DIR"' "$unguarded"
+  ( run_trap_aimed_at "$unguarded" "$decoy" )
+  assert_eq "mutation: without the guard, a forked child deletes the directory" "gone" "$(dir_state "$decoy")"
+  rm -rf "$decoy"
 }
 
 test_run_with_deadline_kills_an_overrunning_command() {
@@ -703,7 +772,7 @@ test_the_pass_table_drops_skip_build() {
 # would test the cache's bundle instead of the commit — and could go green. Every
 # step that forwards the flag must therefore name the build step's success in its
 # own `if:`. It lives here because this harness already reads test.yml's pass
-# invocations and owns the drop above, and `plans-guard` runs it.
+# invocations and owns the drop above, and the `script-harnesses` job runs it.
 #
 # One line per step that forwards `--skip-build` as an argument: `gated <name>`
 # or `UNGATED <name>`. Comment lines are ignored, so prose that mentions the flag
@@ -778,8 +847,8 @@ test_the_pass_table_drops_the_ci_build_flags() {
 # pass, which re-plans the build graph from its own command line. A step that
 # leaves them out builds or plans with SwiftPM's defaults, and nothing red says
 # so. This lives here for the reason `skip_build_gates` does: this harness
-# already reads test.yml's pass invocations and owns the drop above, and
-# `plans-guard` runs it.
+# already reads test.yml's pass invocations and owns the drop above, and the
+# `script-harnesses` job runs it.
 #
 # One line per command in the `test` job that runs `scripts/swift-safe`,
 # `scripts/test.sh` or `scripts/ci/watched-test-pass.sh`, continuation lines

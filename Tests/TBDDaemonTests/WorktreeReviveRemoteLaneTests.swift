@@ -14,6 +14,11 @@ import Testing
 /// reversible by the same gesture that filed it, while one the provider still
 /// asserts is archived is refused rather than flipped into a row the next
 /// snapshot would re-file.
+///
+/// Same record shape as archive: an act confirms its request row `dispatched`
+/// or `transport-failed`, and a refusal confirms it `refused` with the reason
+/// `not-eligible` and the refusal sentence as its detail. No revive refusal
+/// carries an error code, because revive has no `force` to lift one.
 @Suite("worktree.revive: remote lanes")
 struct WorktreeReviveRemoteLaneTests {
 
@@ -22,6 +27,21 @@ struct WorktreeReviveRemoteLaneTests {
             method: RPCMethod.worktreeRevive,
             params: WorktreeReviveParams(worktreeID: worktree.id),
             actor: .app))
+    }
+
+    /// The record a refused revive leaves: its `worktree.revive` request,
+    /// confirmed `refused` with the response's own sentence — and no error
+    /// code on the response, since nothing a caller could resend lifts it.
+    private func expectRefusalRecorded(
+        _ fixture: RemoteLaneFixture, _ response: RPCResponse,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) throws {
+        #expect(response.errorCode == nil, sourceLocation: sourceLocation)
+        let (request, outcome) = try fixture.refusalRecord(sourceLocation: sourceLocation)
+        #expect(request["method"] as? String == RPCMethod.worktreeRevive, sourceLocation: sourceLocation)
+        #expect(response.error != nil, "a refusal must say why", sourceLocation: sourceLocation)
+        #expect(outcome["error"] as? String == response.error,
+                "the outcome does not carry the refusal sentence", sourceLocation: sourceLocation)
     }
 
     // MARK: - The verb path
@@ -207,7 +227,7 @@ struct WorktreeReviveRemoteLaneTests {
                 "the refusal did not name the capability: \(response.error ?? "no error")")
         #expect(try await fixture.status(of: lane) == .archived)
         #expect(fixture.invoker.calls == [["describe"]])
-        #expect(try fixture.actuationRows().isEmpty, "a refusal must write no actuation row")
+        try expectRefusalRecorded(fixture, response)
     }
 
     @Test("reviving a remote lane is refused when remote backends are off")
@@ -223,7 +243,7 @@ struct WorktreeReviveRemoteLaneTests {
         #expect(!response.success)
         #expect(response.error == "remote backends disabled")
         #expect(try await fixture.status(of: lane) == .archived)
-        #expect(try fixture.actuationRows().isEmpty)
+        try expectRefusalRecorded(fixture, response)
     }
 
     // MARK: - The stale-snapshot gate
@@ -235,7 +255,7 @@ struct WorktreeReviveRemoteLaneTests {
     /// There is no `--force` on revive anywhere in TBD, here or on the
     /// `remote.unarchive` handler; the recovery is the provider's next
     /// successful poll.
-    @Test("a stale provider inventory refuses the revive above the record")
+    @Test("a stale provider inventory refuses the revive, and the refusal is recorded")
     func staleInventoryRefusesTheRevive() async throws {
         let fixture = try await RemoteLaneFixture.make(
             capabilities: ["archive", "unarchive"],
@@ -257,7 +277,7 @@ struct WorktreeReviveRemoteLaneTests {
                 "the refusal did not say why: \(response.error ?? "no error")")
         #expect(try await fixture.status(of: lane) == .archived)
         #expect(!fixture.invoker.calls.contains { $0.first == "unarchive" })
-        #expect(try fixture.actuationRows().isEmpty, "a refusal must write no actuation row")
+        try expectRefusalRecorded(fixture, response)
     }
 
     /// The ordinary case still works, so a run that refused everything cannot
@@ -300,10 +320,9 @@ struct WorktreeReviveRemoteLaneTests {
     // MARK: - The local path, unchanged
 
     /// A local worktree still resolves through the lifecycle, which rejects
-    /// an active row — and it does so **beneath** an already-written request
-    /// row. That two-row shape is what discriminates: had the new branch
-    /// captured a local worktree, the remote path would have refused above
-    /// the row and written none.
+    /// an active row by throwing beneath its request row. The outcome is what
+    /// discriminates: had the remote branch captured a local worktree, it
+    /// would have confirmed the row `refused` rather than `transport-failed`.
     @Test("a local worktree still reaches the lifecycle and records its request row")
     func localWorktreeStillReachesTheLifecycle() async throws {
         let fixture = try await RemoteLaneFixture.make(capabilities: [], tag: "revive-local")

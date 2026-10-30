@@ -3,10 +3,11 @@
 #
 # Every case runs against a temp directory. The three functions that reach for
 # system tools (codesign/security, open, pkill/pgrep) get stubs on a temp PATH
-# that record their arguments, so nothing here signs, launches, or kills
-# anything real. The daemon process cases start copies of `sleep` of their own
-# and signal only those. macOS-only: the assembly reads `plutil` and the
-# install uses `/bin/cp -cR`.
+# that record their arguments, and the library's `TBD_LSREGISTER` seam points
+# at a stub that does the same, so nothing here signs, launches, registers, or
+# kills anything real. The daemon process cases start copies of `sleep` of
+# their own and signal only those. macOS-only: the assembly reads `plutil` and
+# the install uses `/bin/cp -cR`.
 # shellcheck disable=SC2329 # test_* helpers are dispatched dynamically below
 set -uo pipefail
 
@@ -21,12 +22,26 @@ if [ ! -f "$HELPER" ]; then
     exit 1
 fi
 
-# shellcheck source=/dev/null
-source "$HELPER"
-
 FAIL=0
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/restart-bundle-test.XXXXXX")"
 trap 'rm -rf "$TEST_TMP"' EXIT
+
+# The library reaches LaunchServices by absolute path, so PATH cannot shadow
+# it. Point its seam at a stub that records the call instead, or the install
+# cases would register their fixture bundles — which carry the real bundle
+# identifier and tbd:// scheme — with the developer's LaunchServices, and the
+# last one registered would take tbd:// URLs. Set before the library is
+# sourced, since it reads the seam then, and exported so the cases that source
+# it again in a `bash -c` get the stub too.
+export TBD_LSREGISTER="$TEST_TMP/stub-lsregister"
+cat > "$TBD_LSREGISTER" << 'EOF'
+#!/bin/sh
+printf 'lsregister %s\n' "$*" >> "${FAKE_LSREGISTER_LOG:-/dev/null}"
+EOF
+chmod +x "$TBD_LSREGISTER"
+
+# shellcheck source=/dev/null
+source "$HELPER"
 
 pass() { echo "ok   - $1"; }
 fail() { echo "FAIL - $1"; FAIL=1; }
@@ -528,12 +543,16 @@ test_install_replaces_the_previous_bundle() {
     mkdir -p "$TEST_TMP/Applications/TBD.app/Contents"
     printf 'stale' > "$TEST_TMP/Applications/TBD.app/Contents/Leftover.txt"
 
+    export FAKE_LSREGISTER_LOG="$TEST_TMP/lsregister-install.log"
     assert_ok "install_app_bundle succeeds" install_app_bundle "$bundle" "$target"
     assert_file "the installed bundle has the binary" "$target/Contents/MacOS/TBDApp"
     assert_eq "the installed bundle names the source tree" \
         "$repo" "$(cat "$target/Contents/SourceWorktreePath.txt")"
     assert_no_file "a previous installation is replaced, not merged" \
         "$target/Contents/Leftover.txt"
+    assert_eq "the installed bundle is registered with LaunchServices" \
+        "lsregister -f $target" "$(cat "$FAKE_LSREGISTER_LOG" 2>/dev/null)"
+    unset FAKE_LSREGISTER_LOG
 }
 
 test_install_rejects_missing_arguments() {
@@ -568,11 +587,15 @@ EOF
 
     target="$TEST_TMP/Applications-gnu/TBD.app"
     mkdir -p "$(dirname "$target")"
+    export FAKE_LSREGISTER_LOG="$TEST_TMP/lsregister-gnu.log"
     assert_ok "install_app_bundle succeeds with a GNU cp first on PATH" \
         env PATH="$gnubin:$PATH" bash -c 'source "$1"; install_app_bundle "$2" "$3"' \
         _ "$HELPER" "$bundle" "$target"
     assert_file "the bundle installed under a GNU cp has the binary" \
         "$target/Contents/MacOS/TBDApp"
+    assert_eq "a re-sourced library registers through the stub too" \
+        "lsregister -f $target" "$(cat "$FAKE_LSREGISTER_LOG" 2>/dev/null)"
+    unset FAKE_LSREGISTER_LOG
 }
 
 # MARK: - App process control

@@ -93,7 +93,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
 - `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
-- `SocketServer.swift` / `HTTPServer.swift` — NIO Unix-socket + HTTP RPC servers
+- `SocketServer.swift` — NIO Unix-socket RPC server
 - `StateSubscription.swift` — `StateDelta` broadcasting to subscribed clients
 - `RepoSerializer.swift` — repo serialization for RPC results
 

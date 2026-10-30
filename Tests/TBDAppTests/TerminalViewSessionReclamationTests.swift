@@ -369,6 +369,8 @@ struct TerminalViewSessionReclamationTests {
     func preparationCompletingAfterTeardownReclaimsItsSession() async throws {
         let fixture = try TmuxBridgeFixture()
         defer { fixture.remove() }
+        let suite = TestDefaultsSuite("TerminalViewSessionReclamationTests.inFlightPreparation")
+        defer { suite.tearDown() }
         let runner = RecordingTmuxRunner()
         // The verification query is preparation's last command, so holding it
         // parks the preparation with everything else already done.
@@ -381,9 +383,7 @@ struct TerminalViewSessionReclamationTests {
         let terminalView = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 640, height: 480),
             font: TBDTerminalView.defaultMonospaceFont,
-            appearance: AppearanceSettings(
-                defaults: UserDefaults(
-                    suiteName: "TerminalViewSessionReclamationTests.inFlightPreparation")!)
+            appearance: AppearanceSettings(defaults: suite.defaults)
         )
         let coordinator = TerminalPanelRepresentable.Coordinator()
         coordinator.tmuxBridge = bridge

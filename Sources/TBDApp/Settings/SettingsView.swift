@@ -272,7 +272,6 @@ struct GeneralSettingsTab: View {
                 sessionModUsageToggle
                 autoCloseSetupToggle
                 queuedPromptToggle
-                programStatusToggle
                 updateModePicker
             }
         }
@@ -553,23 +552,6 @@ struct GeneralSettingsTab: View {
     static let prPollScheduleHelp = "Checks each pull request as often as its status needs, and keeps TBD's "
         + "GitHub API use under a fifth of your hourly budget. Off: checks every worktree every 30 seconds "
         + "while TBD is in front, and every 5 minutes otherwise."
-
-    /// Program Status Protocol (OSC 7501) on pty-holder sessions. Reads the
-    /// persisted flag from `daemon.capabilities` and writes via
-    /// `config.setProgramStatusEnabled`. Off by default (soaking).
-    @ViewBuilder
-    private var programStatusToggle: some View {
-        let capabilities = appState.daemonCapabilities
-        Toggle("Read Claude's own session status (holder sessions)", isOn: Binding(
-            get: { capabilities?.programStatusEnabled ?? Config.programStatusEnabledDefault },
-            set: { newValue in Task { await appState.setProgramStatusEnabled(newValue) } }
-        ))
-        .help(Self.programStatusHelp)
-    }
-
-    static let programStatusHelp = "Lets Claude Code report its state to TBD over the terminal on "
-        + "pty-holder sessions: permission prompts, failed turns, sign-in problems and "
-        + "background tasks. Applies to Claude sessions started after you turn it on."
 
     /// Auto-close the setup-hook tab after a clean run. Reads the persisted
     /// flag from `daemon.capabilities` and writes via

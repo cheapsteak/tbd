@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 // Tier 1: deterministic, in-process state only. No sleeps, no subprocesses,
 // no `~/tbd`.
@@ -368,8 +369,8 @@ func countEmissions(of state: AppState, duringAsync body: () async -> Void) asyn
 /// the root `CLAUDE.md`. Mirrors `AppStateDerivedCacheTests.withState`.
 @MainActor
 func withEmissionState(_ body: (AppState) -> Void) {
-    let suiteName = "TBDAppTests.AppStateEmissions.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let suite = TestDefaultsSuite("TBDAppTests.AppStateEmissions")
+    let defaults = suite.defaults
+    defer { suite.tearDown() }
     body(AppState(userDefaults: defaults))
 }

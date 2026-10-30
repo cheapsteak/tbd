@@ -209,7 +209,6 @@ public final class Daemon: Sendable {
     public nonisolated(unsafe) var db: TBDDatabase?
     public nonisolated(unsafe) var router: RPCRouter?
     public nonisolated(unsafe) var socketServer: SocketServer?
-    public nonisolated(unsafe) var httpServer: HTTPServer?
     public nonisolated(unsafe) var subscriptions: StateSubscriptionManager?
     public nonisolated(unsafe) var sshRefreshTask: Task<Void, Never>?
     public nonisolated(unsafe) var gitFetchTask: Task<Void, Never>?
@@ -419,7 +418,7 @@ public final class Daemon: Sendable {
 
     /// The DB-mutating startup reconciliation, gated on mock mode. Extracted
     /// from `start()` so the mock-mode branch is unit-testable without spawning
-    /// the socket/HTTP servers or background tasks. In mock mode this is a
+    /// the socket server or background tasks. In mock mode this is a
     /// no-op so hand-seeded fixtures render exactly as authored.
     func performStartupReconciliation(
         mockMode: MockMode?, database: TBDDatabase, git: GitManager,
@@ -556,11 +555,10 @@ public final class Daemon: Sendable {
     /// (step 9), never inside `performStartupReconciliation` (step 8d).** The
     /// pass spawns one `git` subprocess per archived row; measured on a box
     /// with 1,825 archived worktrees it ran for ~3 minutes, during which the
-    /// daemon had bound no socket, written no port file, and the app's connect
-    /// retries each spawned a daemon that exited "Another daemon is already
-    /// running". Nothing the backfill does needs to precede serving: it repairs
-    /// archived (inactive) rows, is idempotent, never deletes a row and never
-    /// throws.
+    /// daemon had bound no socket, and the app's connect retries each spawned
+    /// a daemon that exited "Another daemon is already running". Nothing the
+    /// backfill does needs to precede serving: it repairs archived (inactive)
+    /// rows, is idempotent, never deletes a row and never throws.
     ///
     /// Returns `nil` in mock mode, where the backfill is a total no-op like
     /// every other background rail.
@@ -964,14 +962,17 @@ public final class Daemon: Sendable {
                 sessionModFeatures: await Self.startupSessionModFeatures(config: database.config))
         }
 
-        // 5c. Remove runtime files no current build writes, so copies an older
-        // build left under `~/tbd/runtime` don't accumulate. Non-fatal: a
-        // removal that fails is logged and startup continues. Skipped in mock
-        // mode, like the plugin write above: a mock daemon skips live
-        // reconciliation, and its isolated `TBD_HOME` holds no older build's
-        // files.
+        // 5c. Remove files no current build writes, so copies an older build
+        // left don't accumulate: runtime files under `~/tbd/runtime`, and the
+        // `port` file in the config dir itself. Non-fatal: a runtime file that
+        // fails to go is logged and startup continues; the `port` removal is
+        // best-effort and unlogged. Skipped in mock mode, like the plugin write
+        // above: a mock daemon skips live reconciliation, and its isolated
+        // `TBD_HOME` holds no older build's files.
         if mockMode == nil {
             RetiredRuntimeFiles().removeAll()
+            // An older build published an RPC port in this file; nothing reads it now.
+            try? fm.removeItem(at: TBDConstants.configDir.appendingPathComponent("port"))
         }
 
         // 5d. Unload and remove the launch agent Nightwatch's scheduler
@@ -1053,17 +1054,11 @@ public final class Daemon: Sendable {
         // The Program Status Protocol (OSC 7501) store, built first because the
         // registry's readers feed it and the RPC router serves it: both must
         // hold ONE store, or a report the daemon's reader accepts would be
-        // invisible to `terminal.programStatusList` and the flag's setter would
-        // drive a gate no reader consults. Its gate starts at the persisted
-        // flag, read fresh here; `config.setProgramStatusEnabled` moves it
-        // afterwards. Built in mock mode too — the router always has a store —
-        // where nothing feeds it. Memory only, so it has nothing to reconcile.
+        // invisible to `terminal.programStatusList`. Built in mock mode too —
+        // the router always has a store — where nothing feeds it. Memory only,
+        // so it has nothing to reconcile.
         // Design: docs/specs/2026-10-10-program-status-protocol-design.md.
-        let programStatusEnabledAtBoot: Bool =
-            (try? await database.config.get())?.programStatusEnabled
-            ?? Config.programStatusEnabledDefault
-        let programStatusStore = ProgramStatusStore.live(
-            db: database, subscriptions: subs, enabled: programStatusEnabledAtBoot)
+        let programStatusStore = ProgramStatusStore.live(db: database, subscriptions: subs)
         Task { await programStatusStore.run() }
 
         // The holder registry, constructed HERE rather than at step 8e where it
@@ -1542,9 +1537,9 @@ public final class Daemon: Sendable {
         }
 
         // 8f. Build the dev-server monitor and install the router's hooks
-        // into it BEFORE the socket and HTTP servers serve (steps 9, 10): the
-        // hooks are plain `nonisolated(unsafe)` vars a request handler reads,
-        // so assigning them while requests run would race, and a
+        // into it BEFORE the socket server serves (step 9): the hooks are
+        // plain `nonisolated(unsafe)` vars a request handler reads, so
+        // assigning them while requests run would race, and a
         // `server.start`/`server.stop` served before the assignment would
         // skip its refresh. `refresh()` works before `start()` (step
         // 11a-dev-servers); until then the summary is empty.
@@ -1648,7 +1643,7 @@ public final class Daemon: Sendable {
             daemonLogger.error("failed to start FD vending sidecar: \(error.localizedDescription, privacy: .public)")
         }
 
-        // Every throw from here through step 10 leaves the sidecar bound
+        // Every throw from here through step 9a leaves the sidecar bound
         // (step 8h), and a failed start ends in `main.swift`'s `exit(1)`
         // without `stop()`. One cleanup covers them all, so no failed start
         // leaves a vend.sock nobody serves: stopping the sidecar removes the
@@ -1668,9 +1663,9 @@ public final class Daemon: Sendable {
             // The durable row remains Codex throughout the pass. It is NOT run
             // here: each pending row can wait up to `continueInClaudeReadinessTimeout`
             // for that hook, serially, so awaiting it would hold every later boot
-            // step (the HTTP server among them) behind N × 15 s. The maintenance
-            // task in step 11a-gc runs the same pass immediately after boot, off the
-            // critical path, and then hourly.
+            // step behind N × 15 s. The maintenance task in step 11a-gc runs the
+            // same pass immediately after boot, off the critical path, and then
+            // hourly.
 
             // 9a. Finish the holder sessions the startup budget did not reach.
             //
@@ -1709,11 +1704,6 @@ public final class Daemon: Sendable {
                 let remaining = deferredHolderAdoptions
                 Task { await holderRegistry.adoptRemaining(remaining) }
             }
-
-            // 10. Start HTTP server
-            let http = HTTPServer(router: rpcRouter)
-            self.httpServer = http
-            try await http.start()
         } catch {
             await fdVendingServer.stop()
             throw error
@@ -1961,9 +1951,14 @@ public final class Daemon: Sendable {
                     // Skip .missing repos so we don't spam errors against stale paths
                     // until the user relocates them.
                     for repo in allRepos where repo.status != .missing {
-                        do {
-                            try await git.fetch(repoPath: repo.path, branch: repo.defaultBranch)
-                        } catch {
+                        switch await Daemon.backgroundFetch(
+                            repoPath: repo.path, branch: repo.defaultBranch, git: git
+                        ) {
+                        case .fetched:
+                            break
+                        case .skippedNoOrigin:
+                            reconcileLogger.debug("Background fetch skipped for \(repo.displayName, privacy: .public): no origin remote, nothing to fetch")
+                        case .failed(let error):
                             reconcileLogger.warning("Background fetch failed for \(repo.displayName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                         }
                     }
@@ -2419,9 +2414,6 @@ public final class Daemon: Sendable {
         if let sock = socketServer {
             await sock.stop()
         }
-        if let http = httpServer {
-            await http.stop()
-        }
         if let modServer = modChannelServer {
             await modServer.stop()
         }
@@ -2441,22 +2433,7 @@ public final class Daemon: Sendable {
         // handover the successor has already written its own pid over it, and
         // deleting that claim would reopen the spawn race the successor-first
         // write exists to close.
-        let ownedPIDFile = pidFile.removeIfOwned()
-
-        // The port file holds a port, not a pid, so it cannot answer "is this
-        // mine?" on its own. The pid file is the proxy for it: one daemon
-        // writes both and one daemon removes both, so a pid file that was still
-        // ours means the port file beside it was ours too.
-        //
-        // When the pid file has already been claimed by a successor, this
-        // leaves a port file naming a port nobody is listening on — for the few
-        // moments until the successor binds and overwrites it. That stale
-        // window is the deliberately cheaper failure: deleting the file instead
-        // would race the successor's own write and could leave the app with no
-        // address at all for a daemon that is up and serving.
-        if ownedPIDFile {
-            try? FileManager.default.removeItem(atPath: TBDConstants.portFilePath)
-        }
+        pidFile.removeIfOwned()
 
         daemonLogger.info("Stopped.")
         Foundation.exit(0)

@@ -196,7 +196,7 @@ The format is pinned by a test because the scripts match it verbatim.
   the table: per transport, echo n/p50/p90/p99/max and the flatness ratio
   against the idle band; per transport, the oldest-wait distribution over
   on-screen draws, the parse maximum, and drops. Fixture-driven self-test,
-  run from the CI script-harness step like the other Python checks.
+  run in the CI `script-harnesses` job like the other Python checks.
 
 ### The headline
 

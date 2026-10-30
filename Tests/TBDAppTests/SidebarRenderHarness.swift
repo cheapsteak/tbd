@@ -5,6 +5,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Opt-in native SidebarView captures. No detail view or terminal is mounted.
 ///
@@ -35,9 +36,9 @@ struct SidebarRenderHarness {
     }
 
     private func render(width: Int, dark: Bool, expanded: Bool, into directory: URL) async throws {
-        let suite = "SidebarRenderHarness.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarRenderHarness")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         defaults.set(true, forKey: AppState.showScratchSectionKey)
         defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
         let state = AppState(userDefaults: defaults)
@@ -109,9 +110,9 @@ struct SidebarRenderHarness {
     }
 
     private func renderNested(width: Int, dark: Bool, expansion: Int, into directory: URL) async throws {
-        let suite = "SidebarRenderHarness.Nested.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarRenderHarness.Nested")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         defaults.set(false, forKey: AppState.showScratchSectionKey)
         let state = AppState(userDefaults: defaults)
         let api = Repo(path: "/tmp/acme-api", displayName: "acme/api")

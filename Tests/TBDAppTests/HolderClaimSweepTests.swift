@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The app's half of the holder claim reconcile
 /// (docs/specs/2026-10-25-holder-claim-reconcile-design.md): which sweeps
@@ -21,9 +22,9 @@ import TBDShared
 @Suite("Holder claim sweep")
 struct HolderClaimSweepTests {
     private func withAppState(_ body: (AppState) async throws -> Void) async rethrows {
-        let name = "tbd-holder-claim-sweep-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("tbd-holder-claim-sweep")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(AppState(userDefaults: defaults))
     }
 

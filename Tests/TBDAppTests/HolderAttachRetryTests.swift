@@ -37,11 +37,11 @@ struct HolderAttachRetryTests {
         let stub: ScriptedHolderDaemon
         let retryOffers: Counter
         let defaults: UserDefaults
-        let suiteName: String
+        let suite: TestDefaultsSuite
 
         func tearDown() {
             coordinator.cleanup()
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
 
         /// Whether `message` was fed. Consumes the answer — ask once per message.
@@ -65,8 +65,8 @@ struct HolderAttachRetryTests {
         state.terminals[worktreeID] = [TBDShared.Terminal(
             id: terminalID, worktreeID: worktreeID, tmuxWindowID: "", tmuxPaneID: "",
             label: "Shell", kind: .shell, transport: .holder)]
-        let suiteName = "TBDAppTests.HolderAttachRetry.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.HolderAttachRetry")
+        let defaults = suite.defaults
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
@@ -81,7 +81,7 @@ struct HolderAttachRetryTests {
         coordinator.onHolderAttachRetryOffered = { retryOffers.value += 1 }
         return Fixture(
             state: state, coordinator: coordinator, view: view, stub: stub,
-            retryOffers: retryOffers, defaults: defaults, suiteName: suiteName)
+            retryOffers: retryOffers, defaults: defaults, suite: suite)
     }
 
     private struct NoLiveReader: Error {}

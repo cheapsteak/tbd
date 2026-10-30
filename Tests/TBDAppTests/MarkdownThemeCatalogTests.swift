@@ -1,11 +1,12 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Tier 1 (real filesystem, but no concurrency, no sleeps, no external process).
 ///
 /// Every test supplies its own tmp themes directory and its own
-/// `UserDefaults(suiteName:)`. Neither `~/tbd` nor `UserDefaults.standard` is
+/// `TestDefaultsSuite`. Neither `~/tbd` nor `UserDefaults.standard` is
 /// reachable from here: `TBD_HOME` may not be `setenv`'d outside
 /// `TBDHomeSerialized` in `TBDDaemonTests`, and `.standard` on this unbundled
 /// executable is the developer's real `TBDApp.plist`.
@@ -22,9 +23,9 @@ struct MarkdownThemeCatalogTests {
     }
 
     private func withDefaults<T>(_ body: (UserDefaults) throws -> T) throws -> T {
-        let name = "com.tbd.tests.markdown-theme-catalog.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("com.tbd.tests.markdown-theme-catalog")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         return try body(defaults)
     }
 

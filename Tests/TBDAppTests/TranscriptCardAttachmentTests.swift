@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @MainActor
 @Suite("Transcript card attachment")
@@ -41,9 +42,9 @@ struct TranscriptCardAttachmentTests {
     /// comfortably above the old under-measured value.
     @Test("tall AskUserQuestion card measures its true (large) height-for-width")
     func tallAskMeasuresFullHeight() throws {
-        let suiteName = "card-attach-\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("card-attach")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let appState = AppState(userDefaults: defaults)
 
         let items = TranscriptCompareFixtures.items(for: "tallAsk")

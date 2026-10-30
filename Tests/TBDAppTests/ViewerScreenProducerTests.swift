@@ -6,6 +6,7 @@ import TBDTerminalSerialization
 import Testing
 
 @testable import TBDApp
+import TestSupport
 
 /// What a viewer's answer says, and what it refuses to say.
 ///
@@ -30,9 +31,9 @@ struct ViewerScreenProducerTests {
     private func withView(
         feeding text: String = "", _ body: (TBDTerminalView) throws -> Void
     ) throws {
-        let suiteName = "TBDAppTests.ViewerScreenProducer.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { UserDefaults().removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.ViewerScreenProducer")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let view = TBDTerminalView(
             frame: CGRect(x: 0, y: 0, width: 600, height: 300),
             font: TBDTerminalView.defaultMonospaceFont,
