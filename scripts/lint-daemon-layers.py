@@ -43,7 +43,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterable
+from typing import Iterable, NoReturn
 
 # --------------------------------------------------------------------------
 # Where things live, relative to the repository root
@@ -176,7 +176,7 @@ def blank_literals_and_comments(source: str, path: str) -> str:
     def blank(start: int, end: int) -> None:
         out[start:end] = _NOT_NEWLINE.sub(" ", source[start:end])
 
-    def fail(position: int, reason: str) -> None:
+    def fail(position: int, reason: str) -> NoReturn:
         line = source.count("\n", 0, position) + 1
         raise CannotCheck(f"cannot scan {path}:{line}: {reason}")
 
@@ -289,9 +289,12 @@ def blank_literals_and_comments(source: str, path: str) -> str:
             out[i] = " "
             i += 1
         elif char == "(":
+            # Only an interpolation stops at a parenthesis.
+            assert isinstance(top, _Interpolation)
             top.depth += 1
             i += 1
         elif char == ")":
+            assert isinstance(top, _Interpolation)
             if top.depth == 0:
                 stack.pop()  # the interpolation closes and its string resumes
             else:
@@ -448,7 +451,8 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
             elif following.text == "(" and text in ("let", "var"):
                 # A tuple pattern: `let (a, b) = ...` declares both.
                 depth = 0
-                for inner in tokens[i + 1:]:
+                for k in range(i + 1, count):
+                    inner = tokens[k]
                     if inner.text == "(":
                         depth += 1
                     elif inner.text == ")":
@@ -464,7 +468,8 @@ def parse_declarations(tokens: list[Token], path: str) -> list[Declaration]:
             # the line's comma-separated items.
             depth = 0
             expect_name = True
-            for inner in tokens[i + 1:]:
+            for k in range(i + 1, count):
+                inner = tokens[k]
                 if inner.line != token.line:
                     break
                 if depth == 0 and expect_name and is_identifier(inner.text):
@@ -518,7 +523,8 @@ def local_names(tokens: list[Token]) -> set[str]:
                     names.add(following)
                 continue
             depth = 0
-            for inner in tokens[i + 1:]:
+            for k in range(i + 1, count):
+                inner = tokens[k]
                 if inner.text == "(":
                     depth += 1
                 elif inner.text == ")":
@@ -548,7 +554,8 @@ def local_names(tokens: list[Token]) -> set[str]:
                     names.add(tokens[k - 1].text)
         elif text == "{":
             head: list[str] = []
-            for inner in tokens[i + 1:]:
+            for k in range(i + 1, count):
+                inner = tokens[k]
                 if inner.text == "in":
                     names.update(head)
                     break
