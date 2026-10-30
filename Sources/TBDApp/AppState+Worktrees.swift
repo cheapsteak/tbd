@@ -682,18 +682,30 @@ extension AppState {
     /// spaces are delegated to `archiveScratch(id:)` so callers don't have to
     /// route per collection.
     ///
-    /// The daemon routes them too now (`worktree.archive` dispatches a scratch
-    /// row to the same `scratch.archive` body), so this branch is no longer
-    /// what keeps the call from failing. It stays because the two client-side
+    /// The daemon routes them too (`worktree.archive` dispatches a scratch
+    /// row to the same `scratch.archive` body), so this branch is not what
+    /// keeps the call from failing. It exists because the two client-side
     /// settlements differ: `archiveScratch` also refreshes the Scratch
     /// section's Archived tab, which the repo-worktree leg has no reason to do.
     ///
-    /// A remote lane's guard refusal is offered back as Archive anyway, which
-    /// sends the same archive with `force` set (`archiveFailureSurface`); every
-    /// other failure gets the plain alert. Local archive's `force` — archiving
-    /// over uncommitted changes in a directory the archive deletes — is a
-    /// different decision, and nothing here offers it.
-    func archiveWorktree(id: UUID, force: Bool = false) async {
+    /// The daemon refuses two kinds of archive with a guard the caller can
+    /// lift, and each is offered back to the user rather than shown as a
+    /// plain failure (`archiveFailureSurface`):
+    ///
+    /// - A local worktree whose folder holds uncommitted changes, or whose
+    ///   `git status` the daemon could not read, is refused before anything
+    ///   changes, because archiving deletes the folder and a revive restores
+    ///   only the branch. The user is asked to confirm deleting the changes
+    ///   (`confirmDiscardUncommitted`), and a yes resends the archive with
+    ///   `discardUncommittedChanges`, which lifts only that guard: the
+    ///   worktree's archive hook still runs.
+    /// - A remote lane's guard refusal is offered back as Archive anyway,
+    ///   which resends the archive with `force` set.
+    ///
+    /// Every other failure gets the plain alert.
+    func archiveWorktree(
+        id: UUID, force: Bool = false, discardUncommittedChanges: Bool = false
+    ) async {
         let worktree = findWorktree(id: id)
         if worktree?.isScratch == true {
             await archiveScratch(id: id)
@@ -701,17 +713,30 @@ extension AppState {
         }
         let worktreeName = worktree?.displayName ?? "worktree"
         do {
-            try await daemonClient.archiveWorktree(id: id, force: force)
+            try await daemonClient.archiveWorktree(
+                id: id, force: force, discardUncommittedChanges: discardUncommittedChanges)
             removeArchivedWorktreeFromState(id: id)
             logger.info("Archived \(worktreeName)")
         } catch {
             logger.error("Failed to archive worktree: \(error)")
-            if case .rpcError(let refusal, let code)? = error as? DaemonClientError,
-               Self.archiveFailureSurface(forErrorCode: code, alreadyForced: force) == .offerArchiveAnyway {
-                if confirmArchiveAnyway(refusal: refusal) {
-                    await archiveWorktree(id: id, force: true)
+            if case .rpcError(let refusal, let code)? = error as? DaemonClientError {
+                switch Self.archiveFailureSurface(
+                    forErrorCode: code, alreadyForced: force,
+                    alreadyDiscardingUncommitted: discardUncommittedChanges) {
+                case .offerArchiveAnyway:
+                    if confirmArchiveAnyway(refusal: refusal) {
+                        await archiveWorktree(id: id, force: true)
+                    }
+                    return
+                case .offerDiscardUncommitted:
+                    if confirmDiscardUncommitted(refusal: refusal) {
+                        await archiveWorktree(
+                            id: id, force: force, discardUncommittedChanges: true)
+                    }
+                    return
+                case .plainFailure:
+                    break
                 }
-                return
             }
             showAlert("Archive failed: \(error)", isError: true)
         }
@@ -721,22 +746,32 @@ extension AppState {
     enum ArchiveFailureSurface: Equatable {
         /// A guard `force` lifts refused a remote lane: offer Archive anyway.
         case offerArchiveAnyway
+        /// A local worktree's folder holds uncommitted changes, or its status
+        /// could not be read: offer to archive and delete them.
+        case offerDiscardUncommitted
         /// The plain failure alert.
         case plainFailure
     }
 
     /// Classify an archive failure. Archive anyway is offered only for
-    /// `remoteLaneArchiveGuarded` on a call that was not already forced. A
-    /// forced archive cannot meet a guard, so a forced call that fails has
-    /// failed for another reason and the offer can never repeat. Every other
-    /// failure gets the plain alert, because a button that would only fail
-    /// again is a dead control. Branches on the code, never the sentence, so
-    /// rewording a refusal cannot change which failures offer force.
+    /// `remoteLaneArchiveGuarded` on a call that was not already forced, and
+    /// the offer to delete uncommitted changes only for
+    /// `worktreeArchiveUncommitted` on a call that was neither forced nor
+    /// already discarding them. Either flag lifts the guard its offer is for,
+    /// so a call that carried it and still failed has failed for another
+    /// reason, and neither offer can repeat. Every other failure gets the
+    /// plain alert, because a button that would only fail again is a dead
+    /// control. Branches on the code, never the sentence, so rewording a
+    /// refusal cannot change which failures offer a retry.
     static func archiveFailureSurface(
-        forErrorCode code: String?, alreadyForced: Bool
+        forErrorCode code: String?, alreadyForced: Bool, alreadyDiscardingUncommitted: Bool = false
     ) -> ArchiveFailureSurface {
         if !alreadyForced, code == RPCErrorCode.remoteLaneArchiveGuarded.rawValue {
             return .offerArchiveAnyway
+        }
+        if !alreadyForced, !alreadyDiscardingUncommitted,
+           code == RPCErrorCode.worktreeArchiveUncommitted.rawValue {
+            return .offerDiscardUncommitted
         }
         return .plainFailure
     }
@@ -764,6 +799,37 @@ extension AppState {
         alert.messageText = prompt.message
         alert.informativeText = prompt.informative
         alert.addButton(withTitle: prompt.confirm)
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Copy for the confirm that archives a local worktree over uncommitted
+    /// changes: the daemon's refusal sentence is the message, since it already
+    /// lists the changes or says why they could not be listed. The
+    /// informative text says what the button costs, in words that hold for
+    /// both refusals. Pure so the wording is unit-tested; the modal is
+    /// `confirmDiscardUncommitted`.
+    static func discardUncommittedPrompt(
+        refusal: String
+    ) -> (message: String, informative: String, confirm: String) {
+        (message: refusal,
+         informative: "Archiving deletes this worktree's folder. Reviving it later restores only what is "
+             + "committed on its branch, so uncommitted changes are lost for good.",
+         confirm: "Archive and Delete Changes")
+    }
+
+    /// Present the confirm that archives a local worktree over uncommitted
+    /// changes. Returns true if the user chose to delete them. The confirm
+    /// button is marked destructive, because nothing brings the files back.
+    /// Modal, like `confirmArchiveAnyway`.
+    func confirmDiscardUncommitted(refusal: String) -> Bool {
+        let prompt = Self.discardUncommittedPrompt(refusal: refusal)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = prompt.message
+        alert.informativeText = prompt.informative
+        let confirm = alert.addButton(withTitle: prompt.confirm)
+        confirm.hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
         return alert.runModal() == .alertFirstButtonReturn
     }

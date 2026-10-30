@@ -1057,9 +1057,18 @@ public struct GitManager: Sendable {
     /// than folded into "dirty", so a caller can tell "has work" from "could
     /// not look". Runs with `--no-optional-locks`, so a background caller
     /// never takes the index lock out from under a user's own git command.
+    ///
+    /// `--untracked-files=normal` is passed explicitly because every caller
+    /// asks whether deleting the directory would lose work, and a user's
+    /// `status.showUntrackedFiles=no` would otherwise hide untracked files
+    /// from that answer and report a tree holding new files as clean. Ignored
+    /// files stay out either way: build output is not work.
     public func uncommittedStatus(worktreePath: String) async throws -> String {
         try await run(
-            arguments: ["--no-optional-locks", "status", "--porcelain"], at: worktreePath)
+            arguments: [
+                "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal",
+            ],
+            at: worktreePath)
     }
 
     /// Returns `true` if `sha` is an ancestor of (contained in) any local

@@ -149,7 +149,11 @@ struct WorktreeArchiveDeletionQueueTests {
                 existedAtCallTime: FileManager.default.fileExists(atPath: path)
             )
         }
-        try await lifecycle.archiveWorktree(worktreeID: harness.worktreeID)
+        // The same 1 ms deadline kills the uncommitted-changes guard's
+        // `git status`, which refuses a status it could not read; the guard
+        // is not what this test is about, so it is lifted.
+        try await lifecycle.archiveWorktree(
+            worktreeID: harness.worktreeID, discardUncommittedChanges: true)
 
         // The fallback fires `onWorktreeRemoved` only when `worktreeRemove`
         // returned rather than threw, so this is the assertion a regression
@@ -193,7 +197,11 @@ struct WorktreeArchiveDeletionQueueTests {
         try #require(chflags(markerPath, UInt32(UF_IMMUTABLE)) == 0, "chflags must succeed for this test to force a real removal failure")
         defer { chflags(markerPath, 0) } // clear before cleanUp()'s removeItem, else that fails too
 
-        try await harness.lifecycle.archiveWorktree(worktreeID: harness.worktreeID)
+        // The marker is an untracked file, which the uncommitted-changes
+        // guard would refuse to delete; this test needs the archive to reach
+        // both removal paths, so the guard is lifted.
+        try await harness.lifecycle.archiveWorktree(
+            worktreeID: harness.worktreeID, discardUncommittedChanges: true)
 
         #expect(await observed.paths.isEmpty, "the callback must never fire when neither removal path succeeded")
         #expect(FileManager.default.fileExists(atPath: harness.worktreePath), "nothing removed the worktree — it must still be there")

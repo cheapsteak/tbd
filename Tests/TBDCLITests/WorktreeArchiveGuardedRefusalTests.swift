@@ -7,8 +7,10 @@ import Testing
 /// Tier 1. `tbd worktree archive` names the remedy for a remote lane's guard
 /// refusal. The daemon's sentence states the fact alone and marks the
 /// refusal `remoteLaneArchiveGuarded`; the CLI appends the `--force` hint for
-/// that code and for no other failure, because `--force` gets past nothing
-/// else (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Surfaces").
+/// that code, and for a local worktree's `worktreeArchiveUncommitted`
+/// (`WorktreeArchiveUncommittedRefusalTests`), and for no other failure,
+/// because `--force` gets past nothing else
+/// (`docs/specs/2026-08-16-remote-lane-archive-design.md` §"Surfaces").
 @Suite("worktree archive: guarded remote-lane refusal")
 struct WorktreeArchiveGuardedRefusalTests {
 

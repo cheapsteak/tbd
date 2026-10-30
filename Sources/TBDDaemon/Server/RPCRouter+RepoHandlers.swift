@@ -156,7 +156,11 @@ extension RPCRouter {
             let worktree: Worktree
             let wtRepo: Repo
             do {
-                (worktree, wtRepo) = try await lifecycle.beginArchiveWorktree(worktreeID: wt.id, force: true)
+                // The cascade bypasses the uncommitted-changes guard as it
+                // bypasses the children guard: removing the repo was the
+                // caller's decision about every worktree in it.
+                (worktree, wtRepo) = try await lifecycle.beginArchiveWorktree(
+                    worktreeID: wt.id, force: true, discardUncommittedChanges: true)
             } catch {
                 // The throw ends the cascade, so this row and every row
                 // behind it names a teardown that did not happen. They
