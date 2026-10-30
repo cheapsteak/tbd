@@ -512,7 +512,10 @@ public enum RPCMethod {
     public static let peerStatus = "peer.status"
     public static let panelGet = "panel.get"
     public static let panelApply = "panel.apply"
-    public static let panelImportLegacy = "panel.importLegacy"
+    /// Every workspace tab of a worktree, sent by the app on connect and on
+    /// each tab create, close, reorder or relabel; imports, re-parents,
+    /// updates and deletes surfaces to match (panel tabs spec, "Tab sync").
+    public static let panelSyncTabs = "panel.syncTabs"
 }
 
 // MARK: - Branch Listing
