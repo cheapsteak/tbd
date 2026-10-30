@@ -341,27 +341,21 @@ extension AppState {
     /// created, closed, reordered, relabelled and re-pointed from many places
     /// (terminal and note reconciliation, notes, the PR tab, the file viewer,
     /// terminal revival). Free while the flag is off.
-    ///
-    /// A worktree that leaves `tabs` also leaves the copy.
     func notePanelTabsChanged(old: [UUID: [TBDShared.Tab]], new: [UUID: [TBDShared.Tab]]) {
         guard panelTabsActive else { return }
         var dirty = Set<UUID>()
         for (worktreeID, tabList) in new where old[worktreeID] != tabList {
             dirty.insert(worktreeID)
         }
-        for worktreeID in old.keys where new[worktreeID] == nil {
-            dirty.insert(worktreeID)
-            forgetPanelSurfaces(worktreeID: worktreeID)
-        }
         markPanelSyncDirty(dirty)
     }
 
-    /// Drops one worktree from the copy: it left `tabs`, or it was archived.
-    /// Archiving deletes its surfaces on the daemon (`WorktreeStore.archive`),
-    /// which broadcasts their removal; the entry goes here without waiting
-    /// for that delta. Its sync state goes too: a pending sync would send the
-    /// archived tab list, which the daemon ignores, and a revive marks the
-    /// worktree ready again from fresh fetches before its tabs are synced.
+    /// Drops an archived worktree from the copy. Archiving deletes its
+    /// surfaces on the daemon (`WorktreeStore.archive`), which broadcasts
+    /// their removal; the entry goes here without waiting for that delta. Its
+    /// sync state goes too: a pending sync would send the archived tab list,
+    /// which the daemon ignores, and a revive marks the worktree ready again
+    /// from fresh fetches before its tabs are synced.
     func forgetPanelSurfaces(worktreeID: UUID) {
         if panelSurfaces[worktreeID] != nil {
             panelSurfaces.removeValue(forKey: worktreeID)
