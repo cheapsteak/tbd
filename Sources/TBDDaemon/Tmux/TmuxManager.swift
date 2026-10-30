@@ -303,38 +303,6 @@ public struct TmuxManager: Sendable {
         try await resourceCoordinator.withLock(server: server, operation: operation)
     }
 
-    /// Locks the worktree's current tmux server and revalidates the row after
-    /// waiting. Promotion and reconcile can change `tmuxServer` while a caller
-    /// is queued; retrying prevents a window from being created on the stale
-    /// server after the lock protecting it has already been released.
-    func withWorktreeServerLock<Result: Sendable>(
-        db: TBDDatabase,
-        worktreeID: UUID,
-        allowedStatuses: Set<WorktreeStatus>,
-        operation: @Sendable (LocalWorktree) async throws -> Result
-    ) async throws -> Result {
-        while true {
-            guard let candidate = try await db.worktrees.getLocal(id: worktreeID) else {
-                throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
-            }
-            guard allowedStatuses.contains(candidate.status) else {
-                throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
-            }
-            let candidateServer = candidate.tmuxServer
-            let result: Result? = try await withServerResourceLock(server: candidateServer) {
-                guard let current = try await db.worktrees.getLocal(id: worktreeID) else {
-                    throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
-                }
-                guard allowedStatuses.contains(current.status) else {
-                    throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
-                }
-                guard current.tmuxServer == candidateServer else { return nil }
-                return try await operation(current)
-            }
-            if let result { return result }
-        }
-    }
-
     // MARK: - Static Command Builders
 
     /// Derive tmux server name from repo path (stable across DB recreations AND process restarts).
@@ -1917,26 +1885,6 @@ public struct TmuxManager: Sendable {
     }
 }
 
-/// One-shot claim used to enforce the single-resume contract of a
-/// `CheckedContinuation` shared across a termination handler, a timeout timer,
-/// and a spawn-failure path. `claim()` returns `true` exactly once.
-/// Package-internal so the git runner reuses it for the same purpose.
-final class ContinuationGuard: @unchecked Sendable {
-    private let lock = OSAllocatedUnfairLock(initialState: false)
-    /// Returns true the first time it is called, false thereafter.
-    func claim() -> Bool {
-        lock.withLock { resumed in
-            if resumed { return false }
-            resumed = true
-            return true
-        }
-    }
-
-    /// Whether the continuation has already been resumed by someone. Read by the
-    /// spawn path to detect a deadline that fired *during* `Process.run()`.
-    var isClaimed: Bool { lock.withLock { $0 } }
-}
-
 /// Failure of a tmux subcommand.
 ///
 /// Conforms to `LocalizedError` so `localizedDescription` renders a sentence
@@ -1985,3 +1933,5 @@ public enum TmuxError: Error, Sendable, CustomStringConvertible, LocalizedError 
             .trimmingCharacters(in: .whitespacesAndNewlines) + "…"
     }
 }
+
+extension TmuxManager: TmuxProcessQuerying {}

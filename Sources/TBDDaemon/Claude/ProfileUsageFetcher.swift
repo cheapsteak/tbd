@@ -455,16 +455,6 @@ public struct LiveProfileUsageFetcher: ProfileUsageFetching {
 /// window out of all of them.
 public enum ClaudeUsagePayloadParser {
 
-    /// The API's per-model-family weekly bucket kind. Dropped by
-    /// `parseBuckets` — see the type comment.
-    static let weeklyScopedKind = "weekly_scoped"
-
-    /// True for a bucket that is not a plan-wide limit: the `weekly_scoped`
-    /// kind, or any bucket the API scoped to a single model.
-    static func isModelScoped(kind: String, modelDisplayName: String?) -> Bool {
-        kind == weeklyScopedKind || modelDisplayName != nil
-    }
-
     public struct ParseError: LocalizedError, CustomStringConvertible {
         public let description: String
 
@@ -484,7 +474,7 @@ public enum ClaudeUsagePayloadParser {
         if let limits = payload.limits, !limits.isEmpty {
             let buckets = limits.compactMap { raw -> ClaudeUsageLimitBucket? in
                 guard let kind = raw.kind, let percent = raw.percent else { return nil }
-                if isModelScoped(kind: kind, modelDisplayName: raw.scope?.model?.displayName) {
+                if ClaudeUsageBucketScope.isModelScoped(kind: kind, modelDisplayName: raw.scope?.model?.displayName) {
                     return nil
                 }
                 return ClaudeUsageLimitBucket(

@@ -10,8 +10,6 @@ public protocol TmuxProcessQuerying: Sendable {
     func livePanePIDs(server: String) async -> Set<Int32>
 }
 
-extension TmuxManager: TmuxProcessQuerying {}
-
 /// One holder-transport session, reduced to what the reaper's holder leg needs
 /// to decide whether its job is an orphan.
 ///

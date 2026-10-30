@@ -110,7 +110,7 @@ public actor PRPoller {
         // process lifetime regardless.
         loopTask = Task { [self] in
             while !Task.isCancelled {
-                await Daemon.sleepThroughGatedInterval(
+                await sleepThroughGatedInterval(
                     { await currentInterval() }, tick: waitStep, clock: clock)
                 guard !Task.isCancelled else { break }
                 await tick()

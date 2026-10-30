@@ -50,6 +50,21 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 - `Daemon.swift` — top-level orchestrator: initializes subsystems, writes session-instrumentation files, starts servers, reconciles, runs background tasks
 - `PIDFile.swift` — PID file management + stale detection
 
+### Base/
+The bottom folder: code that several daemon folders share and that uses no other daemon folder (rule in `Sources/TBDDaemon/CLAUDE.md`).
+- `StateSubscription.swift` — `StateSubscriptionManager`: `StateDelta` broadcasting to subscribed clients
+- `ShutdownLatch.swift` — runs a server's async shutdown once and lets every caller await that run
+- `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
+- `ModChannelToken.swift` — the HMAC token a session mod presents to the daemon's channel socket
+- `ContinuationGuard.swift` — one-shot claim that keeps a shared `CheckedContinuation` resumed exactly once
+- `SocketFileIdentity.swift` — a socket file's `(st_dev, st_ino)`, so a server unlinks only the socket it bound
+- `ListeningSocket.swift` — `bindListeningSocket(at:)`, which creates and binds an owner-only `AF_UNIX` socket, and `SocketServerStartError`; the RPC and mod-channel servers share both
+- `ShadowPeerPermissionClass.swift` — the permission class (`bypass` / `prompting`) a cross-session message attests
+- `RepoTOML.swift` — the name and path of a repository's committed `tbd.toml`
+- `ShellEscape.swift` — `shellEscape(_:)`, which single-quotes a string for a shell command line
+- `GatedIntervalSleep.swift` — `sleepThroughGatedInterval`, which sleeps in ticks until an interval it re-reads every tick has elapsed; the git fetch, git status and PR poll loops wait through it
+- `ClaudeUsageBucketScope.swift` — whether a Claude usage bucket is model-scoped rather than a plan-wide limit; the usage parser and the snapshot store both drop such buckets
+
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
 - `ClaudeProfileConfigDirManager.swift` — isolates a model profile's Claude config dir under `~/tbd/profiles/<id>/claude/`
@@ -69,7 +84,7 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 ### Lifecycle/
 - `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
-- `WorktreeLayout.swift` — canonical (`~/tbd/worktrees/`) + legacy path resolution, name sanitization
+- `TmuxManager+WorktreeServerLock.swift` — `withWorktreeServerLock`: locks a worktree's current tmux server and re-reads its row after waiting, retrying if the server changed
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
 - `HibernationCoordinator.swift` (+`Holder`) — parks and wakes Claude sessions on both transports: manual hibernate, the idle sweep, park-on-merge, and the parks the profile swap and the transport migration compose
 - `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours
@@ -95,6 +110,8 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 - `RepoStore` / `WorktreeStore` / `TerminalStore` / `NotificationStore` / `NoteStore` / `TabStore` — GRDB CRUD stores
 - `ConfigStore.swift` — global config
 - `ModelProfileRecord.swift` / `ModelProfileUsageRecord.swift` — model profile GRDB records
+- `PRUndeterminedCause.swift` — the closed vocabulary of reasons a PR lookup produced no answer; PR's status manager reports them, and `WorktreeStore` names one for a record it cannot read
+- `UncommittedArchiveRefusal.swift` — the stored shape of an archive refused for uncommitted work, which `WorktreeArchiveError` carries; Lifecycle's extension (`WorktreeLifecycle+Archive.swift`) evaluates it
 
 ### ModelProfile/
 - `ModelProfileResolver.swift` — picks a profile per spawn (terminal → repo → global default)
@@ -104,12 +121,13 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 ### Process/
 - `AgentReaper.swift` — detects and reaps orphaned agent child processes
 - `ProcessSignaller.swift` — injectable protocol wrapping OS process operations (signals, liveness checks)
+- `BoundedProcessRunner.swift` — `runBoundedProcess`: runs a subprocess under a deadline that a dedicated watchdog thread enforces; git, tmux, GC and remote-provider subprocesses run through it
+- `PipeDataAccumulator.swift` — thread-safe pipe reader that drains without waiting for EOF, so a grandchild holding the write end leaks nothing
 
 ### Server/
 - `RPCRouter.swift` — method dispatch, owns subsystem references
 - `RPCRouter+*Handlers.swift` — Repo, Worktree, Terminal, Tab, Session, Note, ModelProfile, AskUserQuestion, ManualSuspend, Subscription, LegacyHook, Relocate, Appearance (terminal COLORFGBG), ClaudePreferences (spawn-time Claude env settings), EnvOverrides (free-form env overrides per scope, `config.get`) handlers
 - `SocketServer.swift` — NIO Unix-socket RPC server
-- `StateSubscription.swift` — `StateDelta` broadcasting to subscribed clients
 - `RepoSerializer.swift` — repo serialization for RPC results
 
 ### Git/ Tmux/ SSH/ Keychain/ AskUserQuestion/
