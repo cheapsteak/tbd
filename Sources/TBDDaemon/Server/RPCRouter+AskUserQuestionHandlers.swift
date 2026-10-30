@@ -27,12 +27,16 @@ extension RPCRouter {
     /// inside `handleTerminalTranscript` can synthesize a transcript item
     /// before the assistant `tool_use` line is flushed to the JSONL.
     ///
-    /// Additionally marks the worktree as needing attention by creating an
-    /// `attentionNeeded` notification and broadcasting the matching delta.
-    /// Without this the Stop hook (end of turn) is the only path that flips
+    /// On a terminal that cannot report its state — any transport but the
+    /// pty holder — also marks the worktree as needing attention by creating
+    /// an `attentionNeeded` notification and broadcasting the matching delta.
+    /// There the Stop hook (end of turn) is otherwise the only path that flips
     /// the worktree to unread, but Stop doesn't fire while a tool call is
-    /// pending — so an AskUserQuestion would otherwise leave the worktree
-    /// silently waiting.
+    /// pending — so an AskUserQuestion would leave the worktree silently
+    /// waiting. A holder session reports the question itself over OSC 7501
+    /// (`blocked kind=question`), and `ProgramStatusStore` raises the banner
+    /// for it, so a notification here would be a second banner for one
+    /// question.
     func handleTerminalAskUserQuestionPending(_ paramsData: Data) async throws -> RPCResponse {
         let p = try decoder.decode(TerminalAskUserQuestionPendingParams.self, from: paramsData)
         let pending = PendingAskUserQuestion(
@@ -54,6 +58,10 @@ extension RPCRouter {
             // this handler already resolves; a missing row has no worktree.
             await activityLedger.recordAgentEvent(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
+            guard terminal.transport != .holder else {
+                askUserQuestionLog.debug("holder session — its own report raises the banner terminalID=\(p.terminalID.uuidString, privacy: .public)")
+                return .ok()
+            }
             let message = Self.askUserQuestionMessage(fromInputJSON: p.inputJSON)
             do {
                 let notification = try await db.notifications.create(

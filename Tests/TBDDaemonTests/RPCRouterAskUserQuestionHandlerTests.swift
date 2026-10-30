@@ -4,8 +4,9 @@ import Foundation
 @testable import TBDShared
 
 // Tests for the AskUserQuestion RPC handlers — verifies that PreToolUse
-// flips the worktree to unread (attentionNeeded notification) and that
-// PostToolUse marks notifications read as a belt-and-suspenders cleanup.
+// flips the worktree to unread (attentionNeeded notification) on a session
+// that cannot report its own state, and that PostToolUse marks notifications
+// read as a belt-and-suspenders cleanup.
 extension RPCRouterTests {
 
     // MARK: - Helpers
@@ -81,6 +82,34 @@ extension RPCRouterTests {
         let entries = await router.pendingQuestions.entries(forTerminal: terminal.id)
         #expect(entries.count == 1)
         #expect(entries.first?.toolUseID == "toolu_test")
+    }
+
+    // MARK: - Pending: transport decides who raises the banner
+
+    /// A holder session reports the question itself (`blocked kind=question`)
+    /// and the program status store raises the banner for it, so the hook
+    /// raises none there; a tmux session cannot report, so the hook still
+    /// does. Both still record the pending question for the transcript.
+    @Test("askUserQuestion.pending raises a notification on tmux and none on a holder session")
+    func askUserQuestionPendingNotifiesOnlyWhereTheAgentCannotReport() async throws {
+        let (_, holderWorktreeID) = try await makeRepoAndWorktree()
+        let (_, tmuxWorktreeID) = try await makeRepoAndWorktree()
+        let holder = try await db.terminals.create(
+            worktreeID: holderWorktreeID, tmuxWindowID: "", tmuxPaneID: "",
+            kind: .claude, transport: .holder)
+        let tmux = try await db.terminals.create(
+            worktreeID: tmuxWorktreeID, tmuxWindowID: "@mock-h", tmuxPaneID: "%mock-h",
+            kind: .claude, transport: .tmux)
+        let inputJSON = #"{"questions":[{"question":"Pick a fruit","header":"Fruit","options":[],"multiSelect":false}]}"#
+
+        #expect(await sendPending(terminalID: holder.id, inputJSON: inputJSON).success)
+        #expect(await sendPending(terminalID: tmux.id, inputJSON: inputJSON).success)
+
+        #expect(try await db.notifications.unread(worktreeID: holderWorktreeID).isEmpty)
+        let tmuxUnread = try await db.notifications.unread(worktreeID: tmuxWorktreeID)
+        #expect(tmuxUnread.map(\.type) == [.attentionNeeded])
+        #expect(await router.pendingQuestions.entries(forTerminal: holder.id).count == 1)
+        #expect(await router.pendingQuestions.entries(forTerminal: tmux.id).count == 1)
     }
 
     // MARK: - Pending: terminal missing

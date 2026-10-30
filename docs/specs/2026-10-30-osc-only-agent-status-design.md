@@ -135,6 +135,12 @@ row and `msg` must not reach `state.db`:
 `blocked kind=auth` raises no attention banner; Claude Code's `StopFailure`
 hook already reports the sign-in failure as an error notification.
 
+The `PreToolUse:AskUserQuestion` hook raises its own banner, with the
+question's text, only on a session that cannot report — any transport but the
+pty holder. On a holder session the agent reports the question as
+`blocked kind=question` and the store's banner is the one, so a question is
+announced once.
+
 ### PR poll pacing
 
 Every accepted report stamps the worktree activity ledger the PR poll schedule
