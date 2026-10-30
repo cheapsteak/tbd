@@ -772,7 +772,7 @@ test_the_pass_table_drops_skip_build() {
 # would test the cache's bundle instead of the commit — and could go green. Every
 # step that forwards the flag must therefore name the build step's success in its
 # own `if:`. It lives here because this harness already reads test.yml's pass
-# invocations and owns the drop above, and `plans-guard` runs it.
+# invocations and owns the drop above, and the `script-harnesses` job runs it.
 #
 # One line per step that forwards `--skip-build` as an argument: `gated <name>`
 # or `UNGATED <name>`. Comment lines are ignored, so prose that mentions the flag
@@ -847,8 +847,8 @@ test_the_pass_table_drops_the_ci_build_flags() {
 # pass, which re-plans the build graph from its own command line. A step that
 # leaves them out builds or plans with SwiftPM's defaults, and nothing red says
 # so. This lives here for the reason `skip_build_gates` does: this harness
-# already reads test.yml's pass invocations and owns the drop above, and
-# `plans-guard` runs it.
+# already reads test.yml's pass invocations and owns the drop above, and the
+# `script-harnesses` job runs it.
 #
 # One line per command in the `test` job that runs `scripts/swift-safe`,
 # `scripts/test.sh` or `scripts/ci/watched-test-pass.sh`, continuation lines
