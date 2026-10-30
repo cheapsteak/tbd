@@ -262,9 +262,10 @@ final class AppState {
     var focusedTabCloseContext: TabCloseContext?
     /// Unread notification summaries keyed by worktree ID. The cmd-K jump
     /// menu sorts by `mostRecentAt`; the sidebar consumes `.type` for the
-    /// severity dot. Worktrees the user is currently viewing are excluded
-    /// from this dictionary because `refreshNotifications` auto-marks them
-    /// read on every poll.
+    /// severity dot. While TBD is active, worktrees the user is viewing
+    /// (`attendedWorktreeIDs`) are excluded from this dictionary because
+    /// `refreshNotifications` auto-marks them read on every poll; while TBD is
+    /// in the background, a selected or pinned worktree can hold an entry here.
     var unreadByWorktree: [UUID: UnreadSummary] = [:] {
         didSet { sidebarParentRemoteGroupsCache.removeAll() }
     }
