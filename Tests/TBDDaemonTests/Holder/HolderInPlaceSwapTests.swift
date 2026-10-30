@@ -2,6 +2,8 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
+import DaemonTestSupport
 import TestSupport
 
 /// `terminal.swapProfile` in `.inPlace` mode, where the row it is asked about
@@ -257,9 +259,10 @@ struct HolderInPlaceSwapTests {
     }
 
     /// The field report: "Swap profile" on a tab whose holder was killed with
-    /// its job. The park finalizes without the screen rail — nothing is left
-    /// to hold unsent input — so the swap goes on to re-home the row and try
-    /// the wake, where it used to refuse for a reader that cannot come back.
+    /// its job. The park finalizes without the reader check and the
+    /// transcript rail — no process is left to end — so the swap goes on to
+    /// re-home the row and try the wake rather than refusing for a reader
+    /// that cannot come back.
     ///
     /// The pids are above macOS's pid range, so the real process table this
     /// fixture's coordinator asks answers "nothing runs there" for the child;
@@ -531,16 +534,14 @@ struct HolderInPlaceSwapTests {
             overlay: plainOverlay(terminal))
     }
 
-    /// The overlay a non-desk row with no fallback models or fragments plans:
-    /// the shared global file, which `settle` never writes.
+    /// The overlay a row with no fallback models or fragments plans: the shared
+    /// global file, which `settle` never writes.
     private static func plainOverlay(_ terminal: Terminal) -> ReplacementSpawnOverlay {
         ReplacementSpawnOverlay.plan(
             fallbackModels: nil,
             sessionKey: terminal.id.uuidString,
             repoSettingsJSON: nil,
-            watchDeskRole: nil,
-            worktreePath: nil,
-            profileConfigDir: nil)
+            extraSettingsJSON: nil)
     }
 
     /// With the flag on, a holder wake — the in-place swap's wake included —

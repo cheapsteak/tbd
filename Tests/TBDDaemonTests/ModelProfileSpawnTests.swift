@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -1566,9 +1567,9 @@ struct ModelProfileSpawnTests {
 
     /// The same swap of a session spawned without the feature — flag off, no
     /// spawn record — types nothing either and ends by the same SIGTERM. A
-    /// swap runs no screen check, so a typed `/exit` would submit whatever
-    /// draft the box holds; no Escape, Ctrl+C or `/exit` reaches the pane, and
-    /// the only signal is the one to the Claude pid under the pane's shell.
+    /// typed `/exit` would submit whatever draft the box holds; no Escape,
+    /// Ctrl+C or `/exit` reaches the pane, and the only signal is the one to
+    /// the Claude pid under the pane's shell.
     @Test("in-place swap of a legacy session: SIGTERM to Claude, no keys")
     func legacyTmuxSwapSendsNoKeys() async throws {
         let sessionsDir = try makeSessionsDir()
@@ -2328,31 +2329,16 @@ struct ModelProfileSpawnTests {
             deltas: deltas, configDirManager: configDirManager)
     }
 
-    /// Poll until `condition` is true or `timeout` elapses.
-    ///
-    /// The deadline is the shared saturated-pass budget, not a literal: what it
-    /// waits for is produced by the coordinator's own detached watcher task,
-    /// which runs on the cooperative pool behind the whole fast pass regardless
-    /// of how the test was started (`gateHoldingTask` in
-    /// `Tests/TestSupport/BoundedGateSupport.swift`). Five seconds is far below
-    /// that pass's healthy per-test latency.
-    private func waitFor(
-        _ condition: @Sendable () -> Bool,
-        timeout: Duration = TestDeadlines.saturatedPass
-    ) async -> Bool {
-        var elapsed: Duration = .zero
-        let step: Duration = .milliseconds(10)
-        while elapsed < timeout {
-            if condition() { return true }
-            try? await Task.sleep(for: step)
-            // `try?` swallows the CancellationError, and a cancelled sleep
-            // returns instantly — so without this the loop would spin through
-            // every remaining step at full speed instead of ending. Report
-            // whatever the condition says at the moment of cancellation.
-            if Task.isCancelled { return condition() }
-            elapsed += step
+    /// Carries the observed count on the primary failure line
+    /// (assertion-hygiene rule 4 in `Tests/CLAUDE.md`).
+    private struct BadgeRefreshTimeout: Error, CustomStringConvertible {
+        let baseline: Int
+        let observed: Int
+        let timeout: Duration
+        var description: String {
+            "no .modelProfilesChanged broadcast after the credential appeared — "
+                + "observed \(observed) against a baseline of \(baseline) after polling up to \(timeout)"
         }
-        return condition()
     }
 
     /// REGRESSION (profile env clobbered by shell rc files): the profile's
@@ -2530,10 +2516,16 @@ struct ModelProfileSpawnTests {
         // virtual clock because nothing on the spawn path now sleeps for a
         // test to advance past — a clock-driven window would only cover a
         // restored pump that happened to sleep on the same clock.
-        #expect(!(await waitFor({
+        //
+        // `pollUntilTrue` bounds the window by reading `ContinuousClock`, so
+        // it lasts three seconds of wall time however late each poll sleep
+        // resumes under load. A cancelled wait still read the condition
+        // fresh, so only `.satisfied` means the pane was touched.
+        let touched = await pollUntilTrue(timeout: .seconds(3), pollInterval: .milliseconds(50)) {
             fixture.captures.count > 0
                 || fixture.tmux.calls.contains { $0.contains("send-keys") || $0.contains("paste-buffer") }
-        }, timeout: .seconds(3))))
+        }
+        #expect(touched != .satisfied, "the login pane was read or typed into: \(fixture.tmux.calls)")
         #expect(fixture.captures.count == 0, "the login pane was read")
         #expect(
             !fixture.tmux.calls.contains { $0.contains("send-keys") },
@@ -2571,7 +2563,21 @@ struct ModelProfileSpawnTests {
         let claudeJSON = #"{"oauthAccount":{"emailAddress":"person@acme.example"}}"#
         try Data(claudeJSON.utf8).write(to: configDir.appendingPathComponent(".claude.json"))
 
-        #expect(await waitFor({ fixture.deltas.profilesChangedCount > baseline }))
+        // The deadline is the shared saturated-pass budget, not a literal: the
+        // broadcast comes from the coordinator's own detached watcher task,
+        // which runs on the cooperative pool behind the whole fast pass
+        // (`gateHoldingTask` in `Tests/TestSupport/BoundedGateSupport.swift`).
+        let refreshed = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass, pollInterval: .milliseconds(10)
+        ) {
+            fixture.deltas.profilesChangedCount > baseline
+        }
+        if refreshed == .timedOut {
+            Issue.record(BadgeRefreshTimeout(
+                baseline: baseline,
+                observed: fixture.deltas.profilesChangedCount,
+                timeout: TestDeadlines.saturatedPass))
+        }
     }
 }
 }

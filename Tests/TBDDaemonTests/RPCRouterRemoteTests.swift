@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// Thread-safe collector for broadcast StateDeltas. Mirrors the pattern in
@@ -125,10 +126,12 @@ struct RPCRouterRemoteTests: ~Copyable {
         let invoker = FakeProviderInvoker(script: [
             providerOK(#"{"sessions": [{"id": "a", "state": "running", "agent_state": "working"}]}"#),
             ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
         ])
         let manager = RemoteProviderManager(
             db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await manager.pollOnce(provider: provider)
         await manager.pollOnce(provider: provider)
         await manager.pollOnce(provider: provider)
 
@@ -164,9 +167,11 @@ struct RPCRouterRemoteTests: ~Copyable {
         let manager = RemoteProviderManager(
             db: db, subscriptions: subs,
             runner: FakeProviderInvoker(script: [
-                ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable")
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
             ]),
             registryURL: registryURL)
+        await manager.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         await manager.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         let r = router(manager: manager)
 
@@ -187,11 +192,13 @@ struct RPCRouterRemoteTests: ~Copyable {
         let invoker = FakeProviderInvoker(script: [
             providerOK(#"{"sessions": [{"id": "a", "state": "running"}]}"#),
             ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "inventory unavailable"),
             providerOK("last output"),
         ])
         let manager = RemoteProviderManager(
             db: db, subscriptions: subs, runner: invoker, registryURL: registryURL)
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await manager.pollOnce(provider: provider)
         await manager.pollOnce(provider: provider)
         await manager.pollOnce(provider: provider)
         let r = router(manager: manager)
@@ -203,7 +210,7 @@ struct RPCRouterRemoteTests: ~Copyable {
         let log = await call(r, "remote.log", #"{"provider":"fake","sessionID":"a"}"#)
         #expect(log.success)
         #expect(try log.decodeResult(RemoteLogResult.self).text == "last output")
-        #expect(invoker.calls == [["list"], ["list"], ["log", "a"]])
+        #expect(invoker.calls == [["list"], ["list"], ["list"], ["log", "a"]])
         #expect(await manager.providerStatuses().first?.health == .stale,
                 "a successful read-only verb must not claim inventory recovered")
     }

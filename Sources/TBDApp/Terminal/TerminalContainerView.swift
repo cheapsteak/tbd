@@ -388,12 +388,32 @@ enum HibernatedBannerModel {
     static func banner(for terminal: Terminal?) -> Banner? {
         guard let terminal else { return nil }
         if terminal.isParked {
-            return .hibernatedOverlay(message: message(for: terminal.hibernateReason))
+            return .hibernatedOverlay(message: message(for: terminal))
         }
         if let resumeAt = terminal.pendingResumeAt {
             return .scheduledResume(at: resumeAt, cancelTerminalID: terminal.id)
         }
         return nil
+    }
+
+    /// The parked pane's notice for a row: the park reason's phrasing, plus
+    /// why the last automatic wake was held when the row carries a hold
+    /// (`startHeldReason`, `startHeldAt` — set by the daemon's start-admission
+    /// gate, cleared by the next successful wake). Pure, with the clock's
+    /// zone and locale as inputs so the time is assertable.
+    static func message(
+        for terminal: Terminal,
+        timeZone: TimeZone = .current,
+        locale: Locale = .current
+    ) -> String {
+        let base = message(for: terminal.hibernateReason)
+        guard let reason = terminal.startHeldReason, !reason.isEmpty else { return base }
+        guard let heldAt = terminal.startHeldAt else {
+            return "\(base) · Automatic wake held: \(reason)"
+        }
+        var style = Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, timeZone: timeZone)
+        style.locale = locale
+        return "\(base) · Automatic wake held at \(heldAt.formatted(style)): \(reason)"
     }
 
     /// One-line phrasing per park reason. nil (legacy pre-v46 rows) reads the

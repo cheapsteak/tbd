@@ -2,7 +2,7 @@ import Foundation
 import TestSupport
 import Testing
 @testable import TBDHolder
-@testable import TBDShared
+import TBDKernel
 
 /// The holder's own suite. It is here now to hold the target open for the
 /// holder itself; the one thing worth asserting about a placeholder binary is

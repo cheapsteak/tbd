@@ -125,11 +125,26 @@ public enum RPCErrorCode: String, Sendable {
     /// provider identity is not the required source provider. This includes a
     /// repeated Continue-in-Claude request after the row already became Claude.
     case terminalWrongProvider
-    /// A `terminal.hibernate` was refused because the session was spawned with
-    /// the composer-draft feature and TBD cannot confirm its unsent draft is
-    /// saved. The app asks whether to hibernate anyway, and a yes reissues the
-    /// park with `TerminalHibernateParams.overrideUnconfirmedDraft`.
-    case composerDraftUnconfirmed
+    /// An agent start or wake was held by the user's start-admission command
+    /// (`~/tbd/hooks/start-admission`). The message is the command's reason.
+    /// Nothing was started and nothing is queued: the caller asks again when
+    /// it chooses to. `tbd` prints `held: <reason>` and exits 75.
+    case startHeld
+    /// A remote lane's `worktree.archive` was refused by one of the three
+    /// guards `force` lifts: the agent is working, the provider reports a
+    /// dirty checkout, or the provider's inventory is stale. The message states
+    /// the fact alone; the CLI appends the `--force` hint and the app offers
+    /// "Archive anyway". A refusal no retry gets past carries no code.
+    case remoteLaneArchiveGuarded
+    /// A local worktree's `worktree.archive` was refused because its folder
+    /// holds uncommitted changes (tracked edits, or untracked files that are
+    /// not ignored), or because `git status` could not show it clean. The
+    /// daemon refused before changing anything, because archiving deletes the
+    /// folder and a revive restores only what is committed on the branch. The
+    /// message states the fact alone; the CLI appends its `--force` hint and
+    /// the app offers to archive anyway with
+    /// `WorktreeArchiveParams.discardUncommittedChanges`.
+    case worktreeArchiveUncommitted
 }
 
 // MARK: - RPC Method Names
@@ -187,6 +202,12 @@ public enum RPCMethod {
     public static let attachReady = "attach.ready"
     public static let paneDetach = "pane.detach"
     public static let paneResize = "pane.resize"
+    /// The holder viewer-claim sweep: the app names the terminals it holds a
+    /// descriptor for, and the daemon takes back that app's viewer claims on
+    /// every other session — or, while `holder_claim_reconcile_enabled` is off,
+    /// only reports what it would take back. Design:
+    /// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+    public static let holderReconcileClaims = "holder.reconcileClaims"
     public static let daemonCapabilities = "daemon.capabilities"
     public static let terminalRecreateWindow = "terminal.recreateWindow"
     public static let noteCreate = "note.create"
@@ -218,12 +239,6 @@ public enum RPCMethod {
     public static let modelProfileHealthCheck = "modelProfile.healthCheck"
     public static let modelProfilePrepareConfigDir = "modelProfile.prepareConfigDir"
     public static let modelProfileExecEnvironment = "modelProfile.execEnvironment"
-
-    /// Methods served only on the daemon's Unix socket, never on its loopback
-    /// HTTP transport. The socket's mode admits only its owner; a loopback port
-    /// answers any local process, under any user. A method whose result carries
-    /// a secret belongs here.
-    public static let socketOnly: Set<String> = [modelProfileExecEnvironment]
     public static let terminalSwapProfile = "terminal.swapProfile"
     public static let terminalMigrateTransport = "terminal.migrateTransport"
     public static let terminalSessionEvent = "terminal.sessionEvent"
@@ -238,7 +253,7 @@ public enum RPCMethod {
     /// daemon rejects is debug-logged and the app must not retry.
     public static let terminalProgramStatusReport = "terminal.programStatusReport"
     /// Every terminal's current program-status snapshot (main entry and task
-    /// entries). Empty while `program_status_enabled` is off.
+    /// entries).
     public static let terminalProgramStatusList = "terminal.programStatusList"
     /// `prompt.answer` – the app answers a local prompt
     /// (`docs/specs/2026-10-20-mod-channel-prompt-answer-design.md`).
@@ -288,33 +303,12 @@ public enum RPCMethod {
     public static let scratchPromote = "scratch.promote"
     public static let scratchArchive = "scratch.archive"
     public static let scratchRevive = "scratch.revive"
-    public static let nightwatchSetMode = "nightwatch.setMode"
-    public static let nightwatchLeaseStatus = "nightwatch.lease.status"
-    public static let nightwatchLeaseAcquire = "nightwatch.lease.acquire"
-    public static let nightwatchLeaseValidate = "nightwatch.lease.validate"
-    public static let nightwatchLeaseRenew = "nightwatch.lease.renew"
-    public static let nightwatchLeaseTransfer = "nightwatch.lease.transfer"
-    public static let nightwatchLeaseRelease = "nightwatch.lease.release"
     public static let terminalCancelScheduledResume = "terminal.cancelScheduledResume"
     public static let configSetControlMode = "config.setControlMode"
-    public static let configSetHibernateInputVeto = "config.setHibernateInputVeto"
     public static let configSetDeliveryVerification = "config.setDeliveryVerification"
     public static let configSetQueuedPrompt = "config.setQueuedPrompt"
     public static let configSetClaudeCloud = "config.setClaudeCloud"
     public static let configSetAutoCreateNotes = "config.setAutoCreateNotes"
-    public static let configSetSupervisionEnabled = "config.setSupervisionEnabled"
-    public static let superviseStatus = "supervise.status"
-    public static let superviseSetProjectMark = "supervise.setProjectMark"
-    public static let superviseSetMode = "supervise.setMode"
-    public static let superviseProjectList = "supervise.projectList"
-    public static let superviseProjectCreate = "supervise.projectCreate"
-    public static let superviseProjectDelete = "supervise.projectDelete"
-    public static let superviseProjectMove = "supervise.projectMove"
-    public static let supervisePlaybook = "supervise.playbook"
-    public static let supervisePlaybookCustomize = "supervise.playbookCustomize"
-    public static let superviseReadout = "supervise.readout"
-    public static let superviseLedger = "supervise.ledger"
-    public static let superviseBrief = "supervise.brief"
     public static let worktreeSetPendingPrompt = "worktree.setPendingPrompt"
     public static let configSetAutoCloseSetup = "config.setAutoCloseSetup"
     public static let configSetAutoTrustWorktrees = "config.setAutoTrustWorktrees"
@@ -354,12 +348,6 @@ public enum RPCMethod {
     /// other. Reading needs no method of its own: `config.get` and
     /// `daemon.capabilities` carry the resolved value.
     public static let configSetPRPollScheduleEnabled = "config.setPRPollScheduleEnabled"
-    /// The Program Status Protocol gate (`program_status_enabled`): whether
-    /// TBD answers Claude Code's OSC 7501 probe on pty-holder sessions and
-    /// accepts its status reports. Applies to Claude processes started after
-    /// the change. Reading needs no method of its own: `config.get` and
-    /// `daemon.capabilities` carry the resolved value.
-    public static let configSetProgramStatusEnabled = "config.setProgramStatusEnabled"
     /// The transcript prompt-answer gate (`transcript_prompt_answer_enabled`).
     /// Hook changes reach a session on its next start. Reading needs no method
     /// of its own: `config.get` and `daemon.capabilities` carry the resolved value.
@@ -369,6 +357,22 @@ public enum RPCMethod {
     /// through the session mod. Reading needs no method of its own:
     /// `config.get` and `daemon.capabilities` carry the resolved value.
     public static let configSetComposerDraftEnabled = "config.setComposerDraftEnabled"
+    /// The the agent background priority command (`agent_background_enabled`). Reading needs no method of its
+    /// own: `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetAgentBackgroundEnabled = "config.setAgentBackgroundEnabled"
+    /// The start admission gate (`start_admission_enabled`). Reading needs no method of its
+    /// own: `config.get` and `daemon.capabilities` carry the resolved value.
+    public static let configSetStartAdmissionEnabled = "config.setStartAdmissionEnabled"
+    /// The holder viewer-claim reconcile gate (`holder_claim_reconcile_enabled`):
+    /// whether `holder.reconcileClaims` takes claims back or only reports what it
+    /// would take back. Reading needs no method of its own: `config.get` and
+    /// `daemon.capabilities` carry the resolved value.
+    public static let configSetHolderClaimReconcileEnabled = "config.setHolderClaimReconcileEnabled"
+    /// Turns agent background priority on (with a lease), off, or reports it.
+    /// Not an actuation row: it changes no session's input, pty or lifecycle,
+    /// and its effect lives in `agent-background.json`. Design:
+    /// docs/specs/2026-10-21-agent-start-admission-design.md, "Background priority".
+    public static let agentsBackground = "agents.background"
     /// The session usage gate (`session_mod_usage_enabled`): whether Claude
     /// sessions started from now on record their context window, rate limits
     /// and cost through the session mod. Reading needs no method of its own:
@@ -508,89 +512,6 @@ public enum RPCMethod {
     public static let panelImportLegacy = "panel.importLegacy"
 }
 
-public struct NightwatchLeaseStatusParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public init(worktreeID: UUID) { self.worktreeID = worktreeID }
-}
-
-public struct NightwatchLeaseAcquireParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public let terminalID: UUID
-    public init(worktreeID: UUID, terminalID: UUID) {
-        self.worktreeID = worktreeID
-        self.terminalID = terminalID
-    }
-}
-
-public struct NightwatchLeaseCredentialsParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public let terminalID: UUID
-    public let token: UUID
-    public let generation: Int64
-    public init(worktreeID: UUID, terminalID: UUID, token: UUID, generation: Int64) {
-        self.worktreeID = worktreeID; self.terminalID = terminalID
-        self.token = token; self.generation = generation
-    }
-}
-
-public struct NightwatchLeaseTransferParams: Codable, Sendable {
-    public let worktreeID: UUID
-    public let fromTerminalID: UUID
-    public let toTerminalID: UUID
-    public let token: UUID
-    public let generation: Int64
-    public init(
-        worktreeID: UUID, fromTerminalID: UUID, toTerminalID: UUID,
-        token: UUID, generation: Int64
-    ) {
-        self.worktreeID = worktreeID; self.fromTerminalID = fromTerminalID
-        self.toTerminalID = toTerminalID; self.token = token
-        self.generation = generation
-    }
-}
-
-public struct NightwatchLeaseStatusResult: Codable, Sendable {
-    public let held: Bool
-    public let lease: WatchDeskLeaseSnapshot?
-    public init(held: Bool, lease: WatchDeskLeaseSnapshot?) {
-        self.held = held; self.lease = lease
-    }
-}
-
-public struct WatchDeskLeaseSnapshot: Codable, Sendable {
-    public let worktreeID: UUID
-    public let terminalID: UUID
-    public let generation: Int64
-    public let acquiredAt: Date
-    public let renewedAt: Date
-    public let expiresAt: Date
-    public let valid: Bool
-    public let role: WatchDeskRole
-    /// `role` defaults to the powerless role for the same reason
-    /// `WatchDeskRole`'s decoder falls back to it: an unstated role must never
-    /// be reported as mutable authority. Callers that know the lease is valid
-    /// pass `.judge` explicitly.
-    public init(
-        worktreeID: UUID, terminalID: UUID, generation: Int64,
-        acquiredAt: Date, renewedAt: Date, expiresAt: Date, valid: Bool,
-        role: WatchDeskRole = .readOnlyCoordinator
-    ) {
-        self.worktreeID = worktreeID; self.terminalID = terminalID
-        self.generation = generation; self.acquiredAt = acquiredAt
-        self.renewedAt = renewedAt; self.expiresAt = expiresAt; self.valid = valid
-        self.role = role
-    }
-}
-
-public struct NightwatchLeaseAcquisitionResult: Codable, Sendable {
-    public let lease: WatchDeskLeaseSnapshot
-    public let credentialFile: String
-    public init(lease: WatchDeskLeaseSnapshot, credentialFile: String) {
-        self.lease = lease
-        self.credentialFile = credentialFile
-    }
-}
-
 // MARK: - Branch Listing
 
 /// Codable mirror of `BranchRef` for the `repo.listBranches` RPC.
@@ -711,13 +632,6 @@ public struct AppearanceUpdateColorFgBgParams: Codable, Sendable {
     /// background luminance. Format: "0;15" for light bg or "15;0" for dark bg.
     public let value: String
     public init(value: String) { self.value = value }
-}
-
-// MARK: - Nightwatch RPC
-
-public struct NightwatchSetModeParams: Codable, Sendable {
-    public let mode: NightwatchMode
-    public init(mode: NightwatchMode) { self.mode = mode }
 }
 
 // MARK: - Terminal Swap Profile
@@ -1026,7 +940,6 @@ public struct ModelProfileListResult: Codable, Sendable {
     public let globalEnvOverrides: [String: String]
     public let autoArchiveOnMergeDefault: Bool
     public let autoHibernateOnMergeDefault: Bool
-    public let nightwatchMode: NightwatchMode
     public let autoResumeOnLimitReset: Bool
     public let autoResumeOnApiError: Bool
     /// The orphan-GC master switch (config mirror, default true).
@@ -1052,7 +965,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         globalEnvOverrides: [String: String] = [:],
         autoArchiveOnMergeDefault: Bool = false,
         autoHibernateOnMergeDefault: Bool = false,
-        nightwatchMode: NightwatchMode = .off,
         autoResumeOnLimitReset: Bool = false,
         autoResumeOnApiError: Bool = false,
         gcEnabled: Bool = true,
@@ -1068,7 +980,6 @@ public struct ModelProfileListResult: Codable, Sendable {
         self.globalEnvOverrides = globalEnvOverrides
         self.autoArchiveOnMergeDefault = autoArchiveOnMergeDefault
         self.autoHibernateOnMergeDefault = autoHibernateOnMergeDefault
-        self.nightwatchMode = nightwatchMode
         self.autoResumeOnLimitReset = autoResumeOnLimitReset
         self.autoResumeOnApiError = autoResumeOnApiError
         self.gcEnabled = gcEnabled
@@ -1095,8 +1006,6 @@ public struct ModelProfileListResult: Codable, Sendable {
             Bool.self, forKey: .autoArchiveOnMergeDefault) ?? false
         autoHibernateOnMergeDefault = try c.decodeIfPresent(
             Bool.self, forKey: .autoHibernateOnMergeDefault) ?? false
-        nightwatchMode = try c.decodeIfPresent(
-            NightwatchMode.self, forKey: .nightwatchMode) ?? .off
         autoResumeOnLimitReset = try c.decodeIfPresent(
             Bool.self, forKey: .autoResumeOnLimitReset) ?? false
         autoResumeOnApiError = try c.decodeIfPresent(
@@ -1210,9 +1119,8 @@ public struct ModelProfileExecEnvironmentParams: Codable, Sendable {
 /// a token profile is shown only by its masked tail. This result exists so
 /// `tbd profile exec` can put the credential into a child process's
 /// environment, which is where a spawned session's credential goes too. It is
-/// served only on the daemon's Unix socket (`RPCMethod.socketOnly`), whose mode
-/// admits only its owner: the same boundary as the 0600 file the daemon reads
-/// it from. The loopback HTTP transport refuses it. `description`,
+/// served on the daemon's Unix socket, whose mode admits only its owner: the
+/// same boundary as the 0600 file the daemon reads it from. `description`,
 /// `debugDescription` and `customMirror` name the keys only, so printing,
 /// interpolating or dumping the value cannot reveal the secret.
 public struct ModelProfileExecEnvironmentResult: Codable, Sendable,
@@ -1612,9 +1520,14 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// the configured global preference. Optional for backward compatibility.
     public let primaryAgentPreference: PrimaryAgentPreference?
     /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
-    /// per-session `--settings` overlay for this spawn's Claude agent. General
-    /// passthrough — TBD does not interpret the contents. Optional/defaulted for
-    /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
+    /// per-session `--settings` overlay for the primary Claude terminal. General
+    /// passthrough — TBD does not interpret the contents. Kept on that
+    /// terminal's row with `pluginDirs` (`Terminal.claudeSpawnExtras`), and on
+    /// the pre-session hook's row for as long as that tab lives (a failed
+    /// hook's tab stays open); closed history and reopen ignore the hook row's
+    /// copy, because that row is a shell, not Claude. Ignored when the primary
+    /// is Codex. Optional/defaulted for backward compatibility (old daemons
+    /// ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
     /// GitHub PR number this worktree is being created from. Stamped on the row
     /// (with `useExistingBranch == true`) so `PRStatusManager` tracks it by
@@ -1644,7 +1557,15 @@ public struct WorktreeCreateParams: Codable, Sendable {
     /// (`Terminal.codexLaunchOptions`) so a relaunch of Codex in that tab keeps
     /// it. Optional/defaulted for backward compatibility.
     public let codexModel: String?
-    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil) {
+    /// Claude Code plugin folders for the primary Claude terminal — a plugin, a
+    /// folder of plugins, or a `.zip`, whatever `--plugin-dir` accepts — each
+    /// passed as `--plugin-dir` after TBD's own. Each path must be absolute or
+    /// start with `~/`, and must exist, or the create is refused before
+    /// anything of it exists. `~/` is expanded once, at create, and the
+    /// absolute paths are kept with `claudeSettingsOverlay`. Ignored when the
+    /// primary is Codex. Optional/defaulted for backward compatibility.
+    public let pluginDirs: [String]?
+    public init(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, prompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool? = nil, useExistingBranch: Bool? = nil, profileID: UUID? = nil, model: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, prNumber: Int? = nil, checkoutPRHead: Bool? = nil, autoArchiveOnMerge: Bool? = nil, codexModel: String? = nil, pluginDirs: [String]? = nil) {
         self.repoID = repoID; self.folder = folder; self.branch = branch; self.displayName = displayName; self.prompt = prompt
         self.cols = cols; self.rows = rows
         self.parentWorktreeID = parentWorktreeID
@@ -1660,6 +1581,7 @@ public struct WorktreeCreateParams: Codable, Sendable {
         self.checkoutPRHead = checkoutPRHead
         self.autoArchiveOnMerge = autoArchiveOnMerge
         self.codexModel = codexModel
+        self.pluginDirs = pluginDirs
     }
 }
 
@@ -1719,9 +1641,22 @@ public struct WorktreeListParams: Codable, Sendable {
 
 public struct WorktreeArchiveParams: Codable, Sendable {
     public let worktreeID: UUID
+    /// On a local worktree, lifts the uncommitted-changes guard
+    /// (`RPCErrorCode.worktreeArchiveUncommitted`) AND skips the archive hook;
+    /// this is what `tbd worktree archive --force` sends. On a remote lane, it
+    /// lifts the three guards `RPCErrorCode.remoteLaneArchiveGuarded` names.
+    /// A scratch space's archive deletes nothing and runs no hook, so it
+    /// changes nothing there.
     public let force: Bool
-    public init(worktreeID: UUID, force: Bool = false) {
+    /// On a local worktree, lifts only the uncommitted-changes guard, so the
+    /// archive hook still runs: what the app sends once the user confirms
+    /// deleting the changes. Ignored on a remote lane and a scratch space.
+    /// Optional so a payload from a client that predates it still decodes,
+    /// and `nil` reads as `false`.
+    public let discardUncommittedChanges: Bool?
+    public init(worktreeID: UUID, force: Bool = false, discardUncommittedChanges: Bool? = nil) {
         self.worktreeID = worktreeID; self.force = force
+        self.discardUncommittedChanges = discardUncommittedChanges
     }
 }
 
@@ -2738,7 +2673,8 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let worktreeID: UUID
     public let cmd: String?
     public let type: TerminalCreateType?
-    /// Session ID to resume from (for forking a Claude session).
+    /// Claude session ID to resume: the new terminal runs `claude --resume`
+    /// on that same id. It does not fork the session.
     public let resumeSessionID: String?
     /// Initial prompt for a fresh Claude or Codex session.
     public let prompt: String?
@@ -2758,7 +2694,9 @@ public struct TerminalCreateParams: Codable, Sendable {
     public let colorFgBg: String?
     /// Extra Claude Code settings (a JSON OBJECT string) deep-merged into TBD's
     /// per-session `--settings` overlay for this spawn's Claude agent. General
-    /// passthrough — TBD does not interpret the contents. Optional/defaulted for
+    /// passthrough — TBD does not interpret the contents. Applied on a resume
+    /// as well as a fresh start, and kept on the terminal's row with
+    /// `pluginDirs` (`Terminal.claudeSpawnExtras`). Optional/defaulted for
     /// backward compatibility (old daemons ignore the unknown key; old clients omit it).
     public let claudeSettingsOverlay: String?
     /// Codex model for this fresh Codex terminal, passed to Codex as
@@ -2774,19 +2712,34 @@ public struct TerminalCreateParams: Codable, Sendable {
     /// `normalizedCodexDisabledFeatures(_:)`. Optional/defaulted for backward
     /// compatibility (old clients omit it; nil = none).
     public let codexDisabledFeatures: [String]?
-    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, codexDisabledFeatures: [String]? = nil) {
+    /// Claude Code plugin folders for this terminal — a plugin, a folder of
+    /// plugins, or a `.zip`, whatever `--plugin-dir` accepts — each passed as
+    /// `--plugin-dir` after TBD's own. Each path must be absolute or start
+    /// with `~/`, and must exist, or the create is refused. `~/` is expanded
+    /// once, at create, and the absolute paths are kept on the terminal's row
+    /// with `claudeSettingsOverlay` (`Terminal.claudeSpawnExtras`). Claude
+    /// terminals only: any other kind with a non-empty list is refused.
+    /// Optional/defaulted for backward compatibility.
+    public let pluginDirs: [String]?
+    public init(worktreeID: UUID, cmd: String? = nil, type: TerminalCreateType? = nil, resumeSessionID: String? = nil, prompt: String? = nil, overrideProfileID: UUID? = nil, loginSession: Bool? = nil, cols: Int? = nil, rows: Int? = nil, colorFgBg: String? = nil, claudeSettingsOverlay: String? = nil, model: String? = nil, codexDisabledFeatures: [String]? = nil, pluginDirs: [String]? = nil) {
         self.worktreeID = worktreeID; self.cmd = cmd; self.type = type; self.resumeSessionID = resumeSessionID; self.prompt = prompt; self.overrideProfileID = overrideProfileID
         self.loginSession = loginSession
         self.cols = cols; self.rows = rows; self.colorFgBg = colorFgBg
         self.claudeSettingsOverlay = claudeSettingsOverlay
         self.model = model
         self.codexDisabledFeatures = codexDisabledFeatures
+        self.pluginDirs = pluginDirs
     }
 
     /// Shared by the CLI's argument validation and the daemon's refusal so a
     /// caller sees the same explanation whichever layer stops it.
     public static let modelRequiresCodexMessage =
         "--model requires --type codex: Claude models come from TBD model profiles, and shell terminals have no model."
+
+    /// The refusal for plugin folders on a terminal that is not Claude, shared
+    /// by the CLI's `--plugin-dir` validation and the daemon for the same
+    /// reason as `modelRequiresCodexMessage`.
+    public static let pluginDirsRequireClaudeMessage = "pluginDirs require a Claude terminal"
 
     public static let codexDisableRequiresCodexMessage =
         "--codex-disable requires --type codex: it turns off a Codex feature, and only Codex terminals run Codex."
@@ -2864,8 +2817,9 @@ public struct TerminalListParams: Codable, Sendable {
 }
 
 /// Which terminals `session.states` should report on. Absent `worktreeID` means
-/// the whole fleet — the ordinary call, since the point of the method is asking
-/// about every agent every cycle.
+/// every agent-bearing terminal in every worktree — the ordinary call, since
+/// the method is built to be asked about every agent at once. A terminal known
+/// to be a plain shell is never reported on, whichever scope is asked.
 public struct SessionStatesParams: Codable, Sendable {
     public let worktreeID: UUID?
     public init(worktreeID: UUID? = nil) { self.worktreeID = worktreeID }
@@ -2873,9 +2827,9 @@ public struct SessionStatesParams: Codable, Sendable {
 
 /// One `session.states` answer: a `SessionStateReport` per terminal.
 ///
-/// A wrapper rather than a bare array so a later slice can add a fleet-level
-/// field (a pass timestamp, a count of terminals skipped) without changing the
-/// shape every existing reader decodes.
+/// A wrapper rather than a bare array so a field about the whole answer (a
+/// count of terminals skipped, say) can be added without changing the shape
+/// every existing reader decodes.
 public struct SessionStatesResult: Codable, Sendable {
     public let reports: [SessionStateReport]
     public init(reports: [SessionStateReport]) { self.reports = reports }
@@ -3230,13 +3184,8 @@ public struct ConfigSetScratchProfileOverrideParams: Codable, Sendable {
 /// rails but not keep-warm or idle-time.
 public struct TerminalHibernateParams: Codable, Sendable {
     public let terminalID: UUID
-    /// Park even when TBD can't confirm the session's composer draft is saved,
-    /// which is otherwise refused with `RPCErrorCode.composerDraftUnconfirmed`.
-    /// Set only on the person's explicit "Hibernate anyway". nil == false.
-    public let overrideUnconfirmedDraft: Bool?
-    public init(terminalID: UUID, overrideUnconfirmedDraft: Bool? = nil) {
+    public init(terminalID: UUID) {
         self.terminalID = terminalID
-        self.overrideUnconfirmedDraft = overrideUnconfirmedDraft
     }
 }
 
@@ -3256,7 +3205,7 @@ public struct TerminalWakeParams: Codable, Sendable {
     /// atomic with the respawn. It reaches ONLY a session this call actually
     /// woke; on the idempotent no-op paths (already awake / wake in flight)
     /// it is never delivered anywhere, which is what makes it safe for
-    /// autonomous callers (nightwatch wake.py) racing a human wake.
+    /// autonomous callers racing a human wake.
     public let prompt: String?
     public init(terminalID: UUID, cols: Int? = nil, rows: Int? = nil, fallbackToDefaultProfile: Bool? = nil, prompt: String? = nil) {
         self.terminalID = terminalID
@@ -3429,15 +3378,6 @@ public struct ConfigSetControlModeParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setHibernateInputVeto` — persist the pending-input veto
-/// for auto-hibernate (machine-interface guard that prevents hibernation of
-/// sessions with typed-but-unsent input). The change applies on the next
-/// hibernation sweep; no daemon restart required.
-public struct ConfigSetHibernateInputVetoParams: Codable, Sendable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setDeliveryVerification` — the delivery-acknowledgement
 /// soak flag (default OFF, fleet-supervision design §12). This is the
 /// operator's enable path for the soak, and **enabling it means restarting the
@@ -3480,332 +3420,6 @@ public struct ConfigSetAutoCreateNotesParams: Codable, Sendable {
 public struct ConfigSetClaudeCloudParams: Codable, Sendable {
     public let enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
-}
-
-// MARK: - Supervision
-
-/// Params for `config.setSupervisionEnabled` — the fleet brake
-/// (`docs/specs/2026-07-26-fleet-supervision-design.md` §3, §8). `true`
-/// releases the brake, `false` engages it; either way the per-project marks are
-/// untouched, so releasing restores exactly the coverage that stood.
-///
-/// Sending either value is an explicit gesture: the backing column is NULL
-/// until this verb writes to it, and a written `false` stays engaged even after
-/// the shipped default graduates.
-public struct ConfigSetSupervisionEnabledParams: Codable, Sendable, Equatable {
-    public let enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
-/// A stable code a program may branch on, carried in `SupervisionStatus`.
-public enum SupervisionWarningCode: String, Codable, Sendable {
-    /// The brake is released and not one project is marked on — supervision is
-    /// on but nothing is being supervised. The loud case: the CLI says so in
-    /// words a human reads, and this code is the same fact for a program.
-    case noProjectsOn
-    /// One or more projects have a name that cannot be a directory, so nothing
-    /// can be written beside them — no playbook, journal, proposals, or
-    /// programs (`SupervisionTopology.projectsWithoutUsableDirectory(in:)`).
-    /// Supervision covers them regardless; the fix is renaming the repo, and
-    /// the message names which ones.
-    case unusableProjectName
-    /// Two or more repos share a display name, so none of them resolves to a
-    /// project and none is supervised — a project is identified by its name,
-    /// and two candidates for one name identify nothing
-    /// (`SupervisionTopology.ambiguousRepoNames(file:repos:)`). The rest of the
-    /// fleet is unaffected. The message names the repos; the operator's fix is
-    /// to rename one, or to declare a project naming them.
-    case ambiguousRepoName
-    /// The brake is engaged while at least one project's mark stands — the
-    /// exact mirror of `noProjectsOn`. An operator who runs
-    /// `tbd supervise on acme` against an engaged brake sees `on: acme` and
-    /// forms the belief that supervision is running; nothing is watching.
-    ///
-    /// **Emitted only when a mark actually stands.** An engaged brake over a
-    /// fleet with nothing marked is a deliberately quiet system, not a warning,
-    /// and warning there would train an operator to ignore the line — which
-    /// costs more than it buys.
-    ///
-    /// `SupervisionStatus.effectivelySupervising` is false in this state and in
-    /// `noProjectsOn` alike, and cannot tell them apart; they call for opposite
-    /// actions — release the brake, or mark a project — so the code is what a
-    /// program branches on.
-    case brakeEngagedWithProjectsOn
-}
-
-/// One warning on the status readout: a stable code, and the sentence a human
-/// gets.
-public struct SupervisionWarning: Codable, Sendable, Equatable {
-    public let code: SupervisionWarningCode
-    public let message: String
-    public init(code: SupervisionWarningCode, message: String) {
-        self.code = code
-        self.message = message
-    }
-}
-
-/// Result of `supervise.status`: the brake, then one entry per resolved project
-/// (declared and singleton alike — nothing here distinguishes them).
-public struct SupervisionStatus: Codable, Sendable, Equatable {
-    public static let currentSchemaVersion = 1
-
-    public let schemaVersion: Int
-    public let brake: SupervisionBrakeState
-    /// Whether TBD's own attention actually covers anything right now: the
-    /// brake released AND at least one project marked on.
-    public let effectivelySupervising: Bool
-    public let projects: [SupervisionStatusProject]
-    public let warnings: [SupervisionWarning]
-
-    public init(brake: SupervisionBrakeState, effectivelySupervising: Bool,
-                projects: [SupervisionStatusProject], warnings: [SupervisionWarning],
-                schemaVersion: Int = SupervisionStatus.currentSchemaVersion) {
-        self.schemaVersion = schemaVersion
-        self.brake = brake
-        self.effectivelySupervising = effectivelySupervising
-        self.projects = projects
-        self.warnings = warnings
-    }
-}
-
-/// One project's row on the status readout.
-public struct SupervisionStatusProject: Codable, Sendable, Equatable {
-    public let name: String
-    /// The project's mark. Effectively on is this AND a released brake.
-    public let on: Bool
-    public let mode: String
-    public let declaredModes: [String]
-    public let supervisor: SupervisionSupervisorArrangement
-    /// When the current coverage span opened, or null when the project is off
-    /// or the record holds no opening line.
-    public let spanStartedAt: SupervisionInstant?
-    /// When a sweep program last made contact, or null when it never has.
-    public let lastSweepContactAt: SupervisionInstant?
-    /// The project's declared contact window, or null when it declares none —
-    /// which is what the readout's "coverage unknown" reports. Null is the
-    /// honest not-yet value; nothing here invents a coverage claim.
-    public let coverageWindow: String?
-
-    public init(name: String, on: Bool, mode: String, declaredModes: [String],
-                supervisor: SupervisionSupervisorArrangement,
-                spanStartedAt: SupervisionInstant?, lastSweepContactAt: SupervisionInstant?,
-                coverageWindow: String?) {
-        self.name = name
-        self.on = on
-        self.mode = mode
-        self.declaredModes = declaredModes
-        self.supervisor = supervisor
-        self.spanStartedAt = spanStartedAt
-        self.lastSweepContactAt = lastSweepContactAt
-        self.coverageWindow = coverageWindow
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case name, on, mode, declaredModes, supervisor
-        case spanStartedAt, lastSweepContactAt, coverageWindow
-    }
-
-    /// Written by hand because synthesized `Codable` *omits* a nil optional.
-    /// The honest not-yet values are the point of these three fields, so they
-    /// are present and null rather than absent.
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(name, forKey: .name)
-        try container.encode(on, forKey: .on)
-        try container.encode(mode, forKey: .mode)
-        try container.encode(declaredModes, forKey: .declaredModes)
-        try container.encode(supervisor, forKey: .supervisor)
-        try container.encode(spanStartedAt, forKey: .spanStartedAt)
-        try container.encode(lastSweepContactAt, forKey: .lastSweepContactAt)
-        try container.encode(coverageWindow, forKey: .coverageWindow)
-    }
-}
-
-/// Params for `supervise.setProjectMark` — `tbd supervise on|off <project>`.
-/// The mark is coverage, never protection: it binds TBD's own hand and builds
-/// no wall around a terminal.
-public struct SuperviseSetProjectMarkParams: Codable, Sendable, Equatable {
-    public let project: String
-    public let on: Bool
-    public init(project: String, on: Bool) {
-        self.project = project
-        self.on = on
-    }
-}
-
-/// Result of `supervise.setProjectMark`. `changed` is false when the mark
-/// already stood as asked — a no-op is not a decision, and no ledger line is
-/// written for one.
-public struct SuperviseSetProjectMarkResult: Codable, Sendable, Equatable {
-    public static let currentSchemaVersion = 1
-
-    public let schemaVersion: Int
-    public let project: String
-    public let on: Bool
-    public let changed: Bool
-
-    public init(project: String, on: Bool, changed: Bool,
-                schemaVersion: Int = SuperviseSetProjectMarkResult.currentSchemaVersion) {
-        self.schemaVersion = schemaVersion
-        self.project = project
-        self.on = on
-        self.changed = changed
-    }
-}
-
-/// Params for `supervise.setMode` — the per-project selection, validated
-/// against the project's declared list (a lookup within `supervision.json`;
-/// TBD never parses the playbook to derive one).
-public struct SuperviseSetModeParams: Codable, Sendable, Equatable {
-    public let project: String
-    public let mode: String
-    public init(project: String, mode: String) {
-        self.project = project
-        self.mode = mode
-    }
-}
-
-/// Result of `supervise.setMode`, carrying the choices so the CLI can show them
-/// without a second call. `changed` is false when the mode already stood.
-public struct SuperviseSetModeResult: Codable, Sendable, Equatable {
-    public static let currentSchemaVersion = 1
-
-    public let schemaVersion: Int
-    public let project: String
-    public let mode: String
-    public let declaredModes: [String]
-    public let changed: Bool
-
-    public init(project: String, mode: String, declaredModes: [String], changed: Bool,
-                schemaVersion: Int = SuperviseSetModeResult.currentSchemaVersion) {
-        self.schemaVersion = schemaVersion
-        self.project = project
-        self.mode = mode
-        self.declaredModes = declaredModes
-        self.changed = changed
-    }
-}
-
-/// A member repo on the topology readout: the id the file holds, and the name a
-/// human typed or reads.
-public struct SupervisionProjectRepoRef: Codable, Sendable, Equatable {
-    public let id: UUID
-    public let name: String
-    public init(id: UUID, name: String) {
-        self.id = id
-        self.name = name
-    }
-}
-
-/// One project on the topology readout.
-///
-/// Declared projects and singletons appear alike, and no field distinguishes
-/// them: a reader sees a project with its repos and its policy, which is all
-/// there is to see (design §5).
-public struct SupervisionProjectTopologyEntry: Codable, Sendable, Equatable {
-    public let name: String
-    public let repos: [SupervisionProjectRepoRef]
-    public let policy: SupervisionPolicySource
-    /// The project's own sweep program, when one has been customized.
-    public let sweepScript: String?
-
-    public init(name: String, repos: [SupervisionProjectRepoRef],
-                policy: SupervisionPolicySource, sweepScript: String?) {
-        self.name = name
-        self.repos = repos
-        self.policy = policy
-        self.sweepScript = sweepScript
-    }
-}
-
-/// Result of `supervise.projectList`, and of every project mutation — a
-/// mutation answers with the topology it produced.
-public struct SuperviseProjectListResult: Codable, Sendable, Equatable {
-    public static let currentSchemaVersion = 1
-
-    public let schemaVersion: Int
-    public let projects: [SupervisionProjectTopologyEntry]
-
-    public init(projects: [SupervisionProjectTopologyEntry],
-                schemaVersion: Int = SuperviseProjectListResult.currentSchemaVersion) {
-        self.schemaVersion = schemaVersion
-        self.projects = projects
-    }
-}
-
-/// The policy source as a caller names it: `--policy repo:<id>` or
-/// `--policy operator`. The repo arrives as a string because the CLI accepts a
-/// repo UUID or a repo display name; resolving it to a `UUID` is the daemon's
-/// job.
-public enum SupervisionPolicyRequest: Codable, Sendable, Equatable {
-    case repo(String)
-    case `operator`
-
-    private enum CodingKeys: String, CodingKey {
-        case repo
-        case `operator`
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        if let repo = try container.decodeIfPresent(String.self, forKey: .repo) {
-            self = .repo(repo)
-            return
-        }
-        if let isOperator = try container.decodeIfPresent(Bool.self, forKey: .operator), isOperator {
-            self = .operator
-            return
-        }
-        throw DecodingError.dataCorruptedError(
-            forKey: .repo, in: container,
-            debugDescription: "a policy must be {\"repo\": \"<repo>\"} or {\"operator\": true}")
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .repo(let repo): try container.encode(repo, forKey: .repo)
-        case .operator: try container.encode(true, forKey: .operator)
-        }
-    }
-}
-
-/// Params for `supervise.projectCreate`. `repos` entries are repo UUIDs or repo
-/// display names, as typed.
-public struct SuperviseProjectCreateParams: Codable, Sendable, Equatable {
-    public let name: String
-    public let repos: [String]
-    public let policy: SupervisionPolicyRequest
-
-    public init(name: String, repos: [String], policy: SupervisionPolicyRequest) {
-        self.name = name
-        self.repos = repos
-        self.policy = policy
-    }
-}
-
-/// Params for `supervise.projectDelete`. Deleting a declaration returns its
-/// member repos to being their own projects.
-public struct SuperviseProjectDeleteParams: Codable, Sendable, Equatable {
-    public let name: String
-    public init(name: String) { self.name = name }
-}
-
-/// Params for `supervise.projectMove` — the only membership verb, because an
-/// add/remove pair can express states the "exactly one project" model forbids.
-/// `repo` is a repo UUID or display name; `to` is a project name or the
-/// documented `"singleton"` sentinel.
-public struct SuperviseProjectMoveParams: Codable, Sendable, Equatable {
-    /// The value of `to` that returns a repo to being its own project.
-    public static let singletonTarget = SupervisionMoveTarget.singletonArgument
-
-    public let repo: String
-    public let to: String
-
-    public init(repo: String, to: String) {
-        self.repo = repo
-        self.to = to
-    }
 }
 
 /// Params for `worktree.setPendingPrompt` — park the text the operator composed
@@ -3983,14 +3597,6 @@ public struct ConfigSetPRPollScheduleEnabledParams: Codable, Sendable {
     public init(enabled: Bool) { self.enabled = enabled }
 }
 
-/// Params for `config.setProgramStatusEnabled` — the gate for the Program
-/// Status Protocol (OSC 7501) on pty-holder sessions (default OFF during soak).
-/// Design: `docs/specs/2026-10-10-program-status-protocol-design.md`.
-public struct ConfigSetProgramStatusEnabledParams: Codable, Sendable {
-    public var enabled: Bool
-    public init(enabled: Bool) { self.enabled = enabled }
-}
-
 /// Params for `config.setTranscriptPromptAnswerEnabled` — the gate for
 /// answering Claude's question and permission dialogs from the transcript
 /// (default OFF during soak). Design:
@@ -4004,6 +3610,62 @@ public struct ConfigSetPromptAnswerParams: Codable, Sendable {
 /// restoring a Claude session's unsent prompt-box text (default OFF during
 /// soak). Design: `docs/specs/2026-10-19-tbd-session-mod-design.md`.
 public struct ConfigSetComposerDraftEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setStartAdmissionEnabled` — the start admission gate (default OFF).
+public struct ConfigSetStartAdmissionEnabledParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// Params for `config.setHolderClaimReconcileEnabled` — the holder viewer-claim
+/// reconcile gate (default OFF during soak). Design:
+/// `docs/specs/2026-10-25-holder-claim-reconcile-design.md`.
+public struct ConfigSetHolderClaimReconcileParams: Codable, Sendable {
+    public var enabled: Bool
+    public init(enabled: Bool) { self.enabled = enabled }
+}
+
+/// What `agents.background` does.
+public enum AgentBackgroundAction: String, Codable, Sendable {
+    case on
+    case off
+    case status
+}
+
+/// Params for `agents.background`. `durationSeconds` is required for `on`
+/// (at most `AgentBackgroundLimits.maximumLeaseSeconds`) and ignored otherwise.
+public struct AgentsBackgroundParams: Codable, Sendable {
+    public var action: AgentBackgroundAction
+    public var durationSeconds: Int?
+    public init(action: AgentBackgroundAction, durationSeconds: Int? = nil) {
+        self.action = action
+        self.durationSeconds = durationSeconds
+    }
+}
+
+/// The longest lease `agents.background` accepts.
+public enum AgentBackgroundLimits {
+    public static let maximumLeaseSeconds = 2 * 60 * 60
+}
+
+/// Result of `agents.background`: whether a lease is active, when it ends, and
+/// how many processes TBD has lowered and not yet restored.
+public struct AgentsBackgroundResult: Codable, Sendable, Equatable {
+    public var active: Bool
+    public var leaseEndsAt: Date?
+    public var loweredCount: Int
+    public init(active: Bool, leaseEndsAt: Date? = nil, loweredCount: Int = 0) {
+        self.active = active
+        self.leaseEndsAt = leaseEndsAt
+        self.loweredCount = loweredCount
+    }
+}
+
+/// Params for `config.setAgentBackgroundEnabled` — the agent background priority command (default OFF).
+public struct ConfigSetAgentBackgroundEnabledParams: Codable, Sendable {
     public var enabled: Bool
     public init(enabled: Bool) { self.enabled = enabled }
 }
@@ -4130,15 +3792,27 @@ public struct AttachRequestParams: Codable, Sendable {
     /// transport. Optional so an older app, which only ever attaches panes,
     /// still encodes and decodes.
     public let terminalID: UUID?
+    /// This request's place in the app's attach count: the app numbers every
+    /// `attach.request` it sends, from 1 and up by one, per app process.
+    ///
+    /// Holder transport only. The daemon records it on the pending attach and
+    /// keeps it on the claim that attach becomes, and `holder.reconcileClaims`
+    /// sweeps only claims whose seq is at or below the sweep's `throughSeq` —
+    /// so a sweep can never take back an attach the app numbered after it
+    /// built its held set, whichever of the two RPCs arrives first. Optional
+    /// for wire compatibility: an older app sends none, and a claim without
+    /// one is never swept.
+    public let attachSeq: UInt64?
     public init(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil
+        terminalID: UUID? = nil, attachSeq: UInt64? = nil
     ) {
         self.worktreeID = worktreeID
         self.paneID = paneID
         self.windowID = windowID
         self.attachID = attachID
         self.terminalID = terminalID
+        self.attachSeq = attachSeq
     }
 }
 
@@ -4154,6 +3828,24 @@ public struct AttachRequestResult: Codable, Sendable {
     /// error because the app tells the user something different: not "try
     /// again", but "this session has ended".
     public static let holderSessionEndedStatus = "ended"
+    /// The least holder-attach generation a daemon that randomizes its
+    /// generations ever mints: 2^32.
+    ///
+    /// **The contract it offers clients: a client may safely resend a
+    /// handback (`pane.detach`) for a holder attach generation at or above
+    /// this floor, and only for such a generation.** A daemon that mints one
+    /// starts each process's count at a random base drawn from
+    /// [2^32, 2^48 − 2^32), so the generation never matches a claim in a daemon
+    /// process that counts from 1 — those never reach the floor — and matches
+    /// one in another randomizing process only if two random 48-bit bases land
+    /// within a session's few attaches of each other. A resend that reaches a
+    /// daemon other than the one that minted it therefore finds no claim to
+    /// hand back. A generation below the floor may repeat across daemon
+    /// processes, and resending it could hand back a different viewer's claim.
+    ///
+    /// Holder attaches only: a control-mode attach's generation is the tmux
+    /// fanout's own count, which starts small in every process.
+    public static let uniqueGenerationFloor: UInt64 = 1 << 32
     /// Daemon-side fanout generation of the vended attach ("pending" only).
     /// The app echoes it back in `pane.detach` so a stale detach — a closing
     /// view racing a fresh attach for the same pane — cannot kill the newer
@@ -4173,6 +3865,46 @@ public struct AttachRequestResult: Codable, Sendable {
         self.status = status
         self.generation = generation
         self.snapshotPreamble = snapshotPreamble
+    }
+}
+
+/// Params for `holder.reconcileClaims` — the app's statement of which holder
+/// sessions it holds, sent on every poll tick. Design:
+/// docs/specs/2026-10-25-holder-claim-reconcile-design.md.
+public struct HolderReconcileClaimsParams: Codable, Sendable, Equatable {
+    /// The app's process. Before it takes any claim back, the daemon resolves
+    /// it to a process identity (pid, start time and executable) and compares
+    /// that with the claim's owner, so a pid it cannot resolve, or one that
+    /// was reused, takes nothing back. While `holder_claim_reconcile_enabled`
+    /// is off, the daemon does not resolve it: `wouldTakeBack` is matched by
+    /// pid alone, so it can also name a claim of an earlier process that held
+    /// the same pid.
+    public let appPID: Int32
+    /// The terminals the app holds a descriptor for, or has an attach in
+    /// flight for. The daemon never takes back a claim on one of these.
+    public let held: [UUID]
+    /// The highest `AttachRequestParams.attachSeq` the app had sent when it
+    /// built `held`. A claim whose seq is above it, or that has none, is
+    /// outside this sweep.
+    public let throughSeq: UInt64
+    public init(appPID: Int32, held: [UUID], throughSeq: UInt64) {
+        self.appPID = appPID
+        self.held = held
+        self.throughSeq = throughSeq
+    }
+}
+
+/// Result of `holder.reconcileClaims`. At most one of the two lists is
+/// non-empty: which one depends on `holder_claim_reconcile_enabled`.
+public struct HolderReconcileClaimsResult: Codable, Sendable, Equatable {
+    /// The sessions the daemon took back (flag on).
+    public let takenBack: [UUID]
+    /// The sessions the daemon would have taken back, while the flag is off.
+    /// Nothing was changed for them.
+    public let wouldTakeBack: [UUID]
+    public init(takenBack: [UUID] = [], wouldTakeBack: [UUID] = []) {
+        self.takenBack = takenBack
+        self.wouldTakeBack = wouldTakeBack
     }
 }
 
@@ -4282,10 +4014,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Whether the detected tmux meets the control-mode minimum (>= 3.2).
     /// Computed daemon-side so the app never parses version strings.
     public let controlModeSupported: Bool
-    /// Whether the pending-input veto for auto-hibernate is enabled. Guards
-    /// against hibernating sessions with typed-but-unsent input. Re-evaluated
-    /// by the daemon on every call.
-    public let hibernateInputVetoEnabled: Bool
     /// Whether the setup-hook tab auto-closes after a clean run (soak flag,
     /// default OFF). Re-evaluated by the daemon on every call.
     public let autoCloseSetupEnabled: Bool
@@ -4369,21 +4097,7 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// With the flag on and this false, every create silently falls back to
     /// tmux — so Settings says why, and greys the toggle out in the one state
     /// where neither direction would change anything (already off, no helper).
-    /// Turning the transport off stays available, because the effective flag is
-    /// what `NightwatchHolderGate` reads whether a holder can start or not.
     public let ptyHolderSupported: Bool
-    /// Whether any session on the pty-holder transport is still alive on this
-    /// daemon. The third term of `NightwatchHolderGate.watchModesBlocked`, sent
-    /// so the app's watch-mode controls reach the same verdict the daemon's
-    /// refusal will: a daemon whose `TBDHolder` helper went missing reports
-    /// `ptyHolderSupported == false` and may still be holding several adopted
-    /// sessions.
-    ///
-    /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `profileBalancingEnabled` gives. Absent on the
-    /// wire reads false, like `ptyHolderSupported`: a daemon that never sent it
-    /// is one that has no holder path to report.
-    public var ptyHolderSessionsLive: Bool = false
     /// Whether transcript streaming is on (`transcript_streaming_enabled`),
     /// resolved daemon-side through `Config.transcriptStreamingDefault`.
     public var transcriptStreamingEnabled: Bool
@@ -4402,21 +4116,29 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     /// Assigned after construction rather than passed to the initializer, for
     /// the type-checker reason `profileBalancingEnabled` gives.
     public var prPollScheduleEnabled: Bool = Config.prPollScheduleDefault
-    /// Whether the Program Status Protocol is on (`program_status_enabled`).
-    /// Default OFF while it soaks. Resolved through
-    /// `Config.programStatusEnabledDefault`.
-    ///
-    /// Assigned after construction rather than passed to the initializer, for
-    /// the type-checker reason `profileBalancingEnabled` gives.
-    public var programStatusEnabled: Bool = Config.programStatusEnabledDefault
     /// Whether answering prompts from the transcript is on
     /// (`transcript_prompt_answer_enabled`). Default OFF while it soaks.
     /// Resolved through `Config.transcriptPromptAnswerDefault`.
     public var transcriptPromptAnswerEnabled: Bool = Config.transcriptPromptAnswerDefault
-    /// Whether composer draft save-and-restore is on
-    /// (`composer_draft_enabled`). Default OFF while it soaks. Resolved
-    /// through `Config.composerDraftDefault`.
+    /// Whether composer draft save-and-restore is on: `Config.composerDraftEnabled`,
+    /// the effective value, which automatic parking holds on whatever the
+    /// stored `composer_draft_enabled` says.
     public var composerDraftEnabled: Bool = Config.composerDraftDefault
+    /// Whether automatic parking is what holds `composerDraftEnabled` on
+    /// (`Config.composerDraftRequiredByAutoPark`). Settings shows the toggle
+    /// on and greyed while it does.
+    public var composerDraftRequiredByAutoPark: Bool = false
+    /// Whether the agent background priority command is on (`agent_background_enabled`). Default OFF.
+    /// Resolved through `Config.agentBackgroundDefault`.
+    public var agentBackgroundEnabled: Bool = Config.agentBackgroundDefault
+    /// Whether the start admission gate is on (`start_admission_enabled`). Default OFF.
+    /// Resolved through `Config.startAdmissionDefault`.
+    public var startAdmissionEnabled: Bool = Config.startAdmissionDefault
+    /// Whether the holder viewer-claim reconcile acts (`holder_claim_reconcile_enabled`).
+    /// Default OFF while it soaks. Resolved through
+    /// `Config.holderClaimReconcileEnabledDefault`. The app does not gate its
+    /// sweeps on this; Settings reads the toggle back from it.
+    public var holderClaimReconcileEnabled: Bool = Config.holderClaimReconcileEnabledDefault
     /// Whether session usage recording is on (`session_mod_usage_enabled`).
     /// Default OFF while it soaks. Resolved through
     /// `Config.sessionModUsageDefault`.
@@ -4445,7 +4167,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
     public init(controlModeEnabled: Bool,
                 tmuxVersion: String? = nil,
                 controlModeSupported: Bool = false,
-                hibernateInputVetoEnabled: Bool = false,
                 autoCloseSetupEnabled: Bool = false,
                 deliveryVerificationEnabled: Bool = false,
                 autoTrustWorktrees: Bool = true,
@@ -4464,7 +4185,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         self.controlModeEnabled = controlModeEnabled
         self.tmuxVersion = tmuxVersion
         self.controlModeSupported = controlModeSupported
-        self.hibernateInputVetoEnabled = hibernateInputVetoEnabled
         self.autoCloseSetupEnabled = autoCloseSetupEnabled
         self.deliveryVerificationEnabled = deliveryVerificationEnabled
         self.autoTrustWorktrees = autoTrustWorktrees
@@ -4489,8 +4209,6 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // conservative "unsupported / unknown version".
         tmuxVersion = try c.decodeIfPresent(String.self, forKey: .tmuxVersion)
         controlModeSupported = try c.decodeIfPresent(Bool.self, forKey: .controlModeSupported) ?? false
-        // New field for pending-input veto; absent from older daemons defaults to false (soaking).
-        hibernateInputVetoEnabled = try c.decodeIfPresent(Bool.self, forKey: .hibernateInputVetoEnabled) ?? false
         // New field for setup-tab auto-close; absent from older daemons defaults to false (soaking).
         autoCloseSetupEnabled = try c.decodeIfPresent(Bool.self, forKey: .autoCloseSetupEnabled) ?? false
         // New field for delivery acknowledgement; absent from older daemons defaults to false (soaking).
@@ -4532,16 +4250,13 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // false rather than resolving through the shipped default: a daemon
         // that does not send `ptyHolderEnabled` has no holder path at all, so
         // it is running no holder-backed session whatever this install's
-        // default says, and calling the transport live there would grey out the
-        // Nightwatch controls that daemon can still honor. This is a different
-        // question from the config column's NULL: there, nobody chose; here,
-        // the sender does not know the field exists.
+        // default says. This is a different question from the config column's
+        // NULL: there, nobody chose; here, the sender does not know the field
+        // exists.
         ptyHolderEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderEnabled) ?? false
         ptyHolderSupported = try c.decodeIfPresent(
             Bool.self, forKey: .ptyHolderSupported) ?? false
-        ptyHolderSessionsLive = try c.decodeIfPresent(
-            Bool.self, forKey: .ptyHolderSessionsLive) ?? false
         transcriptStreamingEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptStreamingEnabled)
             ?? Config.transcriptStreamingDefault
@@ -4554,15 +4269,23 @@ public struct DaemonCapabilitiesResult: Codable, Sendable {
         // it has no schedule either, so fall through to the shipped default.
         prPollScheduleEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .prPollScheduleEnabled) ?? Config.prPollScheduleDefault
-        // New field for the Program Status Protocol gate. A daemon that does
-        // not send it does not speak the protocol, so fall through to the
-        // shipped default.
-        programStatusEnabled = try c.decodeIfPresent(
-            Bool.self, forKey: .programStatusEnabled) ?? Config.programStatusEnabledDefault
         transcriptPromptAnswerEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .transcriptPromptAnswerEnabled) ?? Config.transcriptPromptAnswerDefault
         composerDraftEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .composerDraftEnabled) ?? Config.composerDraftDefault
+        // A daemon that does not send it does not hold the feature on for
+        // automatic parking, so nothing greys the toggle.
+        composerDraftRequiredByAutoPark = try c.decodeIfPresent(
+            Bool.self, forKey: .composerDraftRequiredByAutoPark) ?? false
+        agentBackgroundEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .agentBackgroundEnabled) ?? Config.agentBackgroundDefault
+        startAdmissionEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .startAdmissionEnabled) ?? Config.startAdmissionDefault
+        // A daemon that does not send it knows nothing about the sweep, so fall
+        // through to the shipped default.
+        holderClaimReconcileEnabled = try c.decodeIfPresent(
+            Bool.self, forKey: .holderClaimReconcileEnabled)
+            ?? Config.holderClaimReconcileEnabledDefault
         sessionModUsageEnabled = try c.decodeIfPresent(
             Bool.self, forKey: .sessionModUsageEnabled) ?? Config.sessionModUsageDefault
         // Absent from a daemon that predates the thresholds: the shipped ones.

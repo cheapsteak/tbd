@@ -360,11 +360,6 @@ import Testing
         == ["-L", "tbd-abc", "list-panes", "-a", "-F", "#{pane_pid}"])
 }
 
-@Test func sendCommandWithEnter() {
-    let args = TmuxManager.sendCommandArgs(server: "tbd-test", paneID: "%42", command: "/exit")
-    #expect(args == ["-L", "tbd-test", "send-keys", "-t", "%42", "/exit", "Enter"])
-}
-
 // MARK: - Initial Window Size (cols/rows flags)
 //
 // Size flags (-x/-y) are emitted only on `new-session` — tmux's `new-window`

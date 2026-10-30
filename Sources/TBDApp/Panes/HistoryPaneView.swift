@@ -528,7 +528,8 @@ struct SessionTranscriptView: View {
                         scrollToBottomToken: scrollToBottomToken,
                         activityToggleToken: activityToggleToken,
                         linkRoot: linkRoot,
-                        nodesProvider: { presentation.nodes }
+                        nodesProvider: { presentation.nodes },
+                        promptRail: .rail(earlier: nil)
                     )
                     .overlay(alignment: .bottomTrailing) {
                         if !atBottom {

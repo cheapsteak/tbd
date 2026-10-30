@@ -1,8 +1,10 @@
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The pane-ownership guard (`TmuxManager.paneOwnership`) extended to every
 /// other call site that tears down a tmux window by DB-recorded coordinate.

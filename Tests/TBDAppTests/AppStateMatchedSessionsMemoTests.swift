@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The memo behind `AppState.sidebarMatchedRemoteSessions(repoID:)`. Each test
 /// reads the sort counter, the test seam that counts recomputes, so a
@@ -12,9 +13,9 @@ struct AppStateMatchedSessionsMemoTests {
     private typealias Fixture = MatchedSessionFixtures
 
     private func withState(_ body: (AppState, UUID) -> Void) {
-        let suite = "AppStateMatchedSessionsMemoTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("AppStateMatchedSessionsMemoTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         state.repos = [repo]

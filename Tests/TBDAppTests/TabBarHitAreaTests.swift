@@ -3,6 +3,7 @@ import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @Suite("Tab bar hit area")
 @MainActor
@@ -12,12 +13,12 @@ struct TabBarHitAreaTests {
         let worktreeID = UUID()
         let terminalID = UUID()
         let tab = TBDShared.Tab(id: terminalID, content: .terminal(terminalID: terminalID), label: "A")
-        let suiteName = "TabBarHitAreaTests-\(UUID().uuidString)"
+        let suite = TestDefaultsSuite("TabBarHitAreaTests")
 
         do {
-            let defaults = UserDefaults(suiteName: suiteName)!
+            let defaults = suite.defaults
             defaults.set(true, forKey: "probe")
-            defer { defaults.removePersistentDomain(forName: suiteName) }
+            defer { suite.tearDown() }
             let appState = AppState(userDefaults: defaults)
             appState.terminals[worktreeID] = [
                 Terminal(
@@ -61,7 +62,7 @@ struct TabBarHitAreaTests {
             #expect(paddedWidth > labelOnlyWidth + 2)
         }
 
-        #expect(UserDefaults.standard.persistentDomain(forName: suiteName) == nil)
+        #expect(UserDefaults.standard.persistentDomain(forName: suite.name) == nil)
     }
 
     private func keyViewProxyMaxWidth<Content: View>(_ rootView: Content) -> CGFloat {

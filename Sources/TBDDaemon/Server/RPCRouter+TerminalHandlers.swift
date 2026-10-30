@@ -1,6 +1,7 @@
 import Foundation
 import os
 import TBDShared
+import TBDKernel
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "terminalHandlers")
 private let perfTranscriptLog = Logger(subsystem: "com.tbd.daemon", category: "perf-transcript")
@@ -168,6 +169,21 @@ extension RPCRouter {
             codexDisabledFeatures = []
         }
 
+        // Which agent this call spawns, decided once: the plugin-folder check
+        // below, the admission gate and the spawn all read the same answer.
+        // Codex wins; otherwise a Claude type or any resume of a session is
+        // Claude; everything else is a shell.
+        let isCodexType = params.type == .codex
+        let isClaudeType = !isCodexType
+            && (params.type == .claude || params.resumeSessionID != nil)
+
+        // Plugin folders are Claude Code's `--plugin-dir`. Refuse them for
+        // every other kind rather than silently dropping them, as a model is
+        // refused above.
+        if !isClaudeType, !(params.pluginDirs ?? []).isEmpty {
+            return RPCResponse(error: TerminalCreateParams.pluginDirsRequireClaudeMessage)
+        }
+
         // Look up the worktree to get tmux server and path
         guard let worktree = try await db.worktrees.getLocal(id: params.worktreeID) else {
             return RPCResponse(error: "Worktree not found: \(params.worktreeID)")
@@ -217,6 +233,8 @@ extension RPCRouter {
         // spawn.
         let plannedTerminalID = UUID()
 
+        let startAgent: StartAdmissionAgent? = isCodexType ? .codex : (isClaudeType ? .claude : nil)
+
         // Request row before the first mutating step. `profile` is deliberately
         // absent: it is resolved further down, after the tmux server exists, and
         // reordering that resolution would move which failures happen before the
@@ -225,7 +243,39 @@ extension RPCRouter {
             .terminalCreate, actor: actor,
             target: .local(worktree: params.worktreeID, terminal: plannedTerminalID),
             prompt: params.prompt,
-            agent: (params.type ?? .shell).rawValue)
+            agent: startAgent?.rawValue ?? (params.type ?? .shell).rawValue)
+
+        // A Claude terminal's own values, kept on its row so later starts of
+        // its session can reapply them; a resume honors the ones it is given
+        // and copies none from an older row. Plugin folders are checked here,
+        // before any spawn work, because the starter is there to see a bad
+        // path; a later start that finds one gone skips it instead.
+        let spawnExtras: ClaudeSpawnExtras?
+        if isClaudeType {
+            do {
+                let pluginDirs = try ClaudePluginDirs.validated(
+                    params.pluginDirs ?? [],
+                    homeDirectory: NSHomeDirectory(),
+                    fileExists: { FileManager.default.fileExists(atPath: $0) })
+                spawnExtras = ClaudeSpawnExtras(
+                    claudeSettingsOverlay: params.claudeSettingsOverlay,
+                    pluginDirs: pluginDirs).nonEmpty
+            } catch {
+                let message = "\(error)"
+                await finishActuation(actuationID, .refused(.notEligible), error: message)
+                return RPCResponse(error: message)
+            }
+        } else {
+            spawnExtras = nil
+        }
+
+        // Start admission: an agent start only. A shell tab starts no agent.
+        if let startAgent,
+           let held = await holdStartIfDenied(
+               actuationID, actor: actor, agent: startAgent,
+               worktreeID: params.worktreeID, terminalID: plannedTerminalID) {
+            return held
+        }
 
         // Look up repo once for system prompt env vars and Claude session setup
         let repo: Repo?
@@ -271,7 +321,7 @@ extension RPCRouter {
         // vars from SystemPromptBuilder.promptLayers; those describe TBD as
         // a Claude-centric host and would be misleading noise inside a
         // Codex pane.
-        if params.type == .codex {
+        if isCodexType {
             guard let codexPreparation else {
                 await finishActuation(
                     actuationID, .refused(.notEligible),
@@ -353,7 +403,6 @@ extension RPCRouter {
             return try RPCResponse(result: terminal)
         }
 
-        let isClaudeType = params.type == .claude || params.resumeSessionID != nil
         // Login sessions are always fresh Claude spawns pinned to a profile:
         // the whole point is capturing `/login` credentials into that
         // profile's isolated config dir.
@@ -487,10 +536,9 @@ extension RPCRouter {
                 // Repo fragment is file-backed config, read fresh at
                 // spawn time — applies on every spawn path, resume included.
                 repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                // Per-spawn fragment applies to FRESH spawns only; a
-                // resume must not reapply it. Hooks overlay still resolves
-                // for resumes — only extraSettingsJSON goes nil.
-                extraSettingsJSON: params.resumeSessionID == nil ? params.claudeSettingsOverlay : nil
+                // The terminal's own overlay, on a fresh start and a resume
+                // alike.
+                extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
               )
             : nil
 
@@ -544,6 +592,7 @@ extension RPCRouter {
             shellFallback: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh",
             settingsOverlayPath: overlayPath,
             pluginDirPath: isClaudeType ? PluginDirWriter.pluginDirPath : nil,
+            extraPluginDirs: spawnExtras?.pluginDirs ?? [],
             envSettingOverrides: claudeEnvOverrides,
             sessionName: spawnTitle?.name,
             sessionModEnvironment: sessionMod?.environment ?? [:]
@@ -581,7 +630,8 @@ extension RPCRouter {
                         profileID: spawnProfileID,
                         kind: terminalKind,
                         transport: transport,
-                        sessionIncarnationID: sessionMod?.incarnationID)
+                        sessionIncarnationID: sessionMod?.incarnationID,
+                        claudeSpawnExtras: spawnExtras)
                     return spawned
                 }
             }
@@ -1156,9 +1206,11 @@ extension RPCRouter {
 
     /// Revive a closed terminal from its history entry into a NEW terminal in
     /// the same (live) worktree. Claude entries with a session id resume that
-    /// Claude session (no scrollback replay — Claude repaints its transcript);
-    /// every other kind opens a fresh shell with the raw capture (colors
-    /// intact) printed above the prompt. The history row is kept.
+    /// Claude session (no scrollback replay — Claude repaints its transcript),
+    /// with the plugin folders and settings overlay the entry kept; every
+    /// other kind opens a fresh shell with the raw capture (colors intact)
+    /// printed above the prompt, and ignores any stored values. The history
+    /// row is kept.
     func handleTerminalHistoryRevive(
         _ paramsData: Data, actor: ActuationActor? = nil
     ) async throws -> RPCResponse {
@@ -1203,6 +1255,13 @@ extension RPCRouter {
         // Claude-kind with a live session id → resume it. Mirrors the
         // archived-session restore spawn in WorktreeLifecycle+Create.
         if entry.kind == .claude, let sessionID = entry.claudeSessionID {
+            // Start admission: only this branch launches an agent. Every
+            // other kind opens a shell.
+            if let held = await holdStartIfDenied(
+                actuationID, actor: actor, agent: .claude,
+                worktreeID: worktree.id, terminalID: plannedTerminalID) {
+                return held
+            }
             let repo: Repo?
             if let rid = worktree.repoID {
                 repo = try await actuating(actuationID) { try await db.repos.get(id: rid) }
@@ -1221,6 +1280,10 @@ extension RPCRouter {
                 resolvedProfile = nil
             }
             let profileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
+            // The closed terminal's own plugin folders and settings overlay,
+            // copied onto its history entry when it closed: the reopened
+            // session starts with them and keeps them on its new row.
+            let spawnExtras = entry.claudeSpawnExtras
             // Reviving a closed terminal respawns claude in the same worktree,
             // so the same trust argument applies — including the seeder's
             // `foreignHead` refusal, which is why the flag lives on the row
@@ -1263,9 +1326,11 @@ extension RPCRouter {
                 settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                     fallbackModels: resolvedProfile?.fallbackModels,
                     sessionKey: plannedTerminalID.uuidString,
-                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                    repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                    extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
                 ),
                 pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: spawnExtras?.pluginDirs ?? [],
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: reviveSpawnTitle.name,
                 sessionModEnvironment: sessionMod?.environment ?? [:]
@@ -1295,7 +1360,8 @@ extension RPCRouter {
                         cols: resolvedCols,
                         rows: resolvedRows,
                         transport: transport,
-                        sessionIncarnationID: sessionMod?.incarnationID
+                        sessionIncarnationID: sessionMod?.incarnationID,
+                        claudeSpawnExtras: spawnExtras
                     )
                 }
             } catch {
@@ -1348,7 +1414,9 @@ extension RPCRouter {
     /// during revive: spawn it, insert the row, append it to the persisted tab
     /// order as the new active tab, and broadcast the same `.terminalCreated`
     /// delta the normal create path emits. `sessionIncarnationID` is the
-    /// session mod's, for a resumed Claude made with a feature on.
+    /// session mod's, for a resumed Claude made with a feature on;
+    /// `claudeSpawnExtras` are a reopened Claude session's stored values,
+    /// already applied to `spawnCommand` and written onto the new row.
     private func spawnRevivedTerminal(
         worktree: Worktree,
         plannedTerminalID: UUID,
@@ -1362,7 +1430,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         transport: TerminalSpawnTransport,
-        sessionIncarnationID: UUID? = nil
+        sessionIncarnationID: UUID? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil
     ) async throws -> Terminal {
         // The transport is decided like every other spawn's — once, by the
         // caller, from the same gate — and carried here rather than re-asked.
@@ -1386,7 +1455,8 @@ extension RPCRouter {
                 profileID: profileID,
                 kind: kind,
                 transport: transport,
-                sessionIncarnationID: sessionIncarnationID)
+                sessionIncarnationID: sessionIncarnationID,
+                claudeSpawnExtras: claudeSpawnExtras)
         }
         var order = try await db.worktrees.getTabOrder(worktreeID: worktree.id)
         if !order.contains(terminal.id) { order.append(terminal.id) }
@@ -1630,6 +1700,14 @@ extension RPCRouter {
 
         // Branch on terminal kind: codex stays codex; shell/claude become shell
         if terminal.kind == .codex || terminal.label == TerminalLabel.codex {
+            // Recreating a Codex window starts Codex again, so it asks start
+            // admission before the old window is touched. A held recreate
+            // leaves the tab as it was; the app's own recreate is never held.
+            if let held = await holdStartIfDenied(
+                actuationID, actor: actor, kind: .wake, agent: .codex,
+                worktreeID: worktree.id, terminalID: terminal.id) {
+                return held
+            }
             // Recreate as codex — preserve identity
             guard let codexPreparation else {
                 let message = "Codex launch preparation was unavailable"
@@ -2281,29 +2359,6 @@ extension RPCRouter {
     ) async throws -> RPCResponse {
         let params = try decoder.decode(TerminalMigrateTransportParams.self, from: paramsData)
 
-        // The third door into the Nightwatch/holder pair, and refused like the
-        // other two: `config.setPtyHolderEnabled` refuses `true` while a mode
-        // is on, `nightwatch.setMode` refuses a mode while the hazard is live.
-        // A watch mode and the holder are never both live — on the holder the
-        // desk's liveness check reads an empty tmux window id and leaks one
-        // Claude session per tick — and this migration CREATES holder-backed
-        // sessions, so it asks the flag door's own question with
-        // `enabling: true`: the migration is that enabling, for the rows it
-        // moves.
-        //
-        // Refused per CALL and before any row is read, because the hazard is
-        // the transport rather than any one session: nothing is written,
-        // nothing is broadcast, nothing is migrated, and no actuation row
-        // exists — the shape `nightwatch.setMode`'s refusal has. This is the
-        // authoritative gate; the app's hidden button is a courtesy on top of
-        // it and covers neither the CLI nor an older app build.
-        let config = try await db.config.get()
-        if NightwatchHolderGate.refusesHolder(
-            enabling: true, currentMode: config.nightwatchMode) {
-            logger.notice("transport migration: refusing the whole call — a watch mode is active")
-            return RPCResponse(error: NightwatchHolderGate.migrationRefusal)
-        }
-
         let operations = transportMigratorOperationsOverride ?? .production(
             hibernation: hibernationCoordinator, holderRegistry: holderRegistry)
         let migrator = TerminalTransportMigrator(db: db, operations: operations)
@@ -2320,10 +2375,27 @@ extension RPCRouter {
         var skipped: [TerminalMigrationSkip] = []
         var refused: [TerminalMigrationSkip] = []
         var alreadyHolder: [UUID] = []
+        // Moving a running Claude session starts it again, so start admission
+        // asks before each such move, until the first hold; the moves after it
+        // are held for the same reason without asking again. A held session is
+        // left running where it is and reported as skipped.
+        var heldReason: String?
         for terminalID in terminalIDs {
             let actuationID = try await beginActuation(
                 .terminalMigrateTransport, actor: actor,
                 target: await resolvedTerminalTarget(terminalID))
+            if StartAdmissionActorRule.isChecked(actor),
+               let terminal = (try? await db.terminals.get(id: terminalID)) ?? nil,
+               let agent = Self.startAdmissionAgent(forMigrating: terminal),
+               let held = await holdStartIfDenied(
+                   actuationID, actor: actor, kind: .wake, agent: agent,
+                   worktreeID: terminal.worktreeID, terminalID: terminalID,
+                   earlierHold: heldReason) {
+                let reason = held.error ?? "start held"
+                heldReason = heldReason ?? reason
+                skipped.append(TerminalMigrationSkip(terminalID: terminalID, reason: "held: \(reason)"))
+                continue
+            }
             let outcome = await migrator.migrate(terminalID: terminalID)
             await publishIfMovedToHolder(terminalID: terminalID, outcome: outcome)
             await finishActuation(
@@ -2517,15 +2589,6 @@ extension RPCRouter {
         // In-place respawn keeps the EXISTING terminal id so its `TBD_TERMINAL_ID`
         // (and thus SessionStart-hook routing) stays stable; fork uses a fresh id.
         let plannedTerminalID = mode == .inPlace ? oldTerminal.id : UUID()
-        // The desk role of the row this spawn will actually land on. An in-place
-        // swap keeps the row, and nothing in this handler touches
-        // `watch_desk_role`, so a resolve without the role would leave a row that
-        // still claims to be a desk running with no statusline tee — and, because
-        // a roleless resolve deletes the session's capture, with no denominator
-        // either. A fork creates a fresh row that is branded no desk (see
-        // `forkSwapNewTab`), so it must resolve without one or the overlay and
-        // the row would disagree in the other direction.
-        let swapDeskRole: WatchDeskRole? = mode == .inPlace ? oldTerminal.watchDeskRole : nil
         let swapConfig = try? await db.config.get()
         // The transport gate, asked once per swap from that one config read.
         // Only `.fork` decides a transport at all — `.inPlace` reshapes the row
@@ -2636,6 +2699,15 @@ extension RPCRouter {
             agent: TerminalKind.claude.rawValue,
             profile: resolved?.profileID.uuidString)
 
+        // Start admission: this swap launches a replacement Claude. The fork
+        // refusal above and the cold re-home start nothing and are not checked.
+        if let held = await holdStartIfDenied(
+            actuationID, actor: actor, agent: .claude,
+            worktreeID: worktree.id,
+            terminalID: mode == .fork ? plannedTerminalID : oldTerminal.id) {
+            return held
+        }
+
         // Carry the session transcript into the DESTINATION config dir so the
         // forked `claude --resume <id>` finds the conversation. Only matters on
         // the resume path — a fresh spawn has no prior transcript to carry.
@@ -2718,20 +2790,20 @@ extension RPCRouter {
         // on to reject. Both arms need it.
         //
         // The overlay is only planned here (`ReplacementSpawnOverlay`): every
-        // arm writes it — and deletes the row's previous statusline capture —
-        // immediately before its launch, from the session-mod features
-        // `SessionModSpawn.prepare` gave that launch. A swap that fails before
-        // it reaches its launch leaves the running process's overlay and
-        // capture untouched. Only an in-place swap has a desk role, and a desk
-        // carrying `usage` installs no statusline tee.
+        // arm writes it immediately before its launch. A swap that fails before
+        // it reaches its launch leaves the running process's overlay untouched.
         let profileConfigDir = await configDirManager.resolveConfigDir(for: resolved)
+        // The terminal's own plugin folders and settings overlay, read from the
+        // row being switched: every arm reapplies them — the in-place arms to
+        // the same row, the fork to the new row it copies them onto. (The cold
+        // re-home above changes only the parked row's profile, so its next
+        // wake reads them from that row.)
+        let spawnExtras = oldTerminal.claudeSpawnExtras
         let overlay = ReplacementSpawnOverlay.plan(
             fallbackModels: resolved?.fallbackModels,
             sessionKey: plannedTerminalID.uuidString,
             repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-            watchDeskRole: swapDeskRole,
-            worktreePath: worktree.path,
-            profileConfigDir: profileConfigDir
+            extraSettingsJSON: spawnExtras?.claudeSettingsOverlay
         )
 
         // The session name is the swapped tab's: the new tab on a fork, the
@@ -2765,6 +2837,7 @@ extension RPCRouter {
         let spawn = swapSpawn(
             plan: plan, mode: mode, resolved: resolved,
             overlay: overlay, profileConfigDir: profileConfigDir,
+            extraPluginDirs: spawnExtras?.pluginDirs ?? [],
             worktree: worktree, repo: repo, swapConfig: swapConfig,
             claudeEnvOverrides: claudeEnvOverrides,
             sessionName: swapSessionName,
@@ -2791,12 +2864,11 @@ extension RPCRouter {
             switch mode {
             case .fork:
                 // The fork's new tab is a fresh session under a new terminal
-                // id, so no running process shares its overlay; written here,
-                // from the session mod it was prepared with above.
+                // id, so no running process shares its overlay; written here.
                 response = try await forkSwapNewTab(
                     worktree: worktree.worktree,
                     plannedTerminalID: plannedTerminalID,
-                    spawnCommand: overlay.settle(carrying: forkSessionMod, command: spawn.command),
+                    spawnCommand: overlay.settle(command: spawn.command),
                     env: env,
                     sensitiveEnv: sensitiveEnv,
                     storedSessionID: storedSessionID,
@@ -2805,7 +2877,8 @@ extension RPCRouter {
                     cols: resolvedCols,
                     rows: resolvedRows,
                     transport: forkTransport,
-                    sessionIncarnationID: forkSessionMod?.incarnationID
+                    sessionIncarnationID: forkSessionMod?.incarnationID,
+                    claudeSpawnExtras: spawnExtras
                 )
 
             case .inPlace where oldTerminal.transport == .holder:
@@ -2958,6 +3031,9 @@ extension RPCRouter {
 
     /// The spawn a `terminal.swapProfile` will run, composed from its plan.
     ///
+    /// - Parameter extraPluginDirs: the switched terminal's own plugin folders,
+    ///   passed as `--plugin-dir` after TBD's on every arm; one that has gone
+    ///   is skipped by the builder.
     /// - Parameter sessionModEnvironment: the session mod's variables, for the
     ///   one arm that is a fresh spawn (a fork of a blank session); empty for
     ///   every other arm.
@@ -2967,6 +3043,7 @@ extension RPCRouter {
         resolved: ResolvedModelProfile?,
         overlay: ReplacementSpawnOverlay,
         profileConfigDir: String?,
+        extraPluginDirs: [String],
         worktree: LocalWorktree,
         repo: Repo?,
         swapConfig: Config?,
@@ -2994,6 +3071,7 @@ extension RPCRouter {
                 shellFallback: "",
                 settingsOverlayPath: overlay.path,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: extraPluginDirs,
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: sessionName,
                 sessionModEnvironment: sessionModEnvironment,
@@ -3020,6 +3098,7 @@ extension RPCRouter {
                 shellFallback: "",
                 settingsOverlayPath: overlay.path,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: extraPluginDirs,
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: sessionName,
                 sessionModEnvironment: sessionModEnvironment,
@@ -3193,12 +3272,6 @@ extension RPCRouter {
         case .notEligible(let reason):
             logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
             return (RPCResponse(error: reason), reason)
-        case .draftUnconfirmed(let unconfirmed):
-            // Not produced by a swap's park, which proceeds on an unconfirmed
-            // draft; refused like any other decline if it ever is.
-            let reason = ComposerDraftParkGate.unconfirmedRefusal(reason: unconfirmed)
-            logger.warning("inPlace swap: could not pause holder terminal \(oldTerminal.id, privacy: .public) for its account switch: \(reason, privacy: .public)")
-            return (RPCResponse(error: reason), reason)
         }
         guard let parkedRow = try await db.terminals.get(id: oldTerminal.id),
               parkedRow.isParked else {
@@ -3333,7 +3406,10 @@ extension RPCRouter {
     /// leaving the source session's tab untouched. Preserves the original
     /// fork-into-new-tab behavior; now only reached via the explicit "Fork
     /// session" action. `sessionIncarnationID` is the session mod's, set only
-    /// when the fork is a fresh spawn of a blank session.
+    /// when the fork is a fresh spawn of a blank session. `claudeSpawnExtras`
+    /// are the source terminal's own plugin folders and settings overlay,
+    /// already applied to `spawnCommand`, copied onto the new row so the
+    /// fork's later starts reapply them too.
     private func forkSwapNewTab(
         worktree: Worktree,
         plannedTerminalID: UUID,
@@ -3346,7 +3422,8 @@ extension RPCRouter {
         cols: Int,
         rows: Int,
         transport: TerminalSpawnTransport,
-        sessionIncarnationID: UUID?
+        sessionIncarnationID: UUID?,
+        claudeSpawnExtras: ClaudeSpawnExtras?
     ) async throws -> RPCResponse {
         // The transport is decided like every other spawn's — once, by the
         // caller, from the same gate — and carried here rather than re-asked.
@@ -3370,7 +3447,8 @@ extension RPCRouter {
                 profileID: profileID,
                 kind: .claude,
                 transport: transport,
-                sessionIncarnationID: sessionIncarnationID)
+                sessionIncarnationID: sessionIncarnationID,
+                claudeSpawnExtras: claudeSpawnExtras)
             return (terminal, currentWorktree.tmuxServer)
         }
 
@@ -3480,15 +3558,13 @@ extension RPCRouter {
         //    `respawn-window -k` remains the termination guarantee; the graceful
         //    stop gives Claude a chance to flush before the forced replacement.
         //
-        //    By SIGTERM for every session, spawned with the composer-draft
-        //    feature or not, and nothing typed into the pane: a swap runs no
-        //    screen check, so a typed `/exit` would submit whatever draft the
-        //    box holds, and a Ctrl+C would clear a draft the feature then
-        //    records as gone. See
-        //    `ComposerDraftParkGate.endingStyle(for:policy:)`. SIGTERM runs
-        //    the same graceful shutdown, so a feature session's `session.end`
-        //    makes the final save. The poll window is the park's, so a swap
-        //    waits for that save exactly as long as a park does.
+        //    By SIGTERM, exactly as a park ends a session, and nothing typed
+        //    into the pane: a typed `/exit` would submit whatever draft the
+        //    box holds, and a Ctrl+C would clear a draft the session mod then
+        //    records as gone. See `TmuxSignalEnding`. SIGTERM runs the
+        //    graceful shutdown, so a feature session's `session.end` makes the
+        //    final save. The poll window is the park's, so a swap waits for
+        //    that save exactly as long as a park does.
         await TmuxSignalEnding.end(
             tmux: tmux, server: server, paneID: paneID, terminalID: oldTerminal.id,
             inspector: paneProcessInspector, signaller: processSignaller, clock: clock,
@@ -3525,7 +3601,7 @@ extension RPCRouter {
             config: try? await db.config.get(),
             claudeSessionID: storedSessionID, incarnationID: incarnationID,
             sessionsDir: sessionsDir, now: now())
-        let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
+        let launchCommand = overlay.settle(command: spawnCommand)
 
         // 3. Respawn IN PLACE — same window id / pane id → the tab and terminal
         //    row survive.
@@ -3753,12 +3829,6 @@ extension RPCRouter {
     /// Reuses the send core rather than reaching for tmux directly, so the pane
     /// consultation, the per-terminal serializer lane and the actuation row all
     /// apply unchanged. Answers whether the bytes reached the pane.
-    ///
-    /// It does **not** buy the pending-input hibernate veto:
-    /// `InputActivityTracker.recordInput` has one caller — the app's own
-    /// keystroke stream (`Daemon.swift`) — and nothing in the tmux paste path
-    /// touches it. So an unsubmitted queued prompt staged in a composer is
-    /// invisible to the idle sweep, exactly like any other daemon-side paste.
     func sendQueuedPromptVerbatim(
         terminalID: UUID, text: String, submit: Bool
     ) async -> Bool {
@@ -4392,9 +4462,10 @@ extension RPCRouter {
     /// viewer attached. The window is then the whole attach, because that
     /// emulator stopped consuming bytes when the viewer took the pty, so a mode
     /// the child changed since is invisible here for as long as the viewer
-    /// holds it — possibly hours. It stays reachable forever — a napping,
-    /// wedged or mid-paste app is exactly the moment supervision wants to send
-    /// — which is why the rule below is not going anywhere.
+    /// holds it — possibly hours. It stays reachable forever — nothing stops an
+    /// agent's `tbd terminal send` or the queued prompt from arriving while the
+    /// app is napping, wedged or mid-paste — which is why the rule below is not
+    /// going anywhere.
     ///
     /// **So a stale reading is trusted in one direction only.** A viewer
     /// ordinarily takes the pty within milliseconds of a spawn or a wake,
@@ -4427,9 +4498,10 @@ extension RPCRouter {
     ///
     /// What remains is accepted by ruling: the design's "Proceeding on stale
     /// modes" section weighs a rare wrong composition against rails that fail
-    /// closed exactly when supervision most needs to send. What a wrong reading
-    /// costs is a wrong composition, and a wrong composition is visible in the
-    /// composer or diagnosable from the row — never a send that vanished. A
+    /// closed whenever the app is napping or wedged, which no sender waits
+    /// out. What a wrong reading costs is a wrong composition, and a wrong
+    /// composition is visible in the composer or diagnosable from the row —
+    /// never a send that vanished. A
     /// stale "on" for a child that has since turned bracketing off prints the
     /// `ESC[200~` and `ESC[201~` markers around the text; a shell that did so
     /// runs the line it made of them. A stale "off" for a shell that has since
@@ -4452,19 +4524,18 @@ extension RPCRouter {
         //
         // **An explicit `--verify` is the only thing that arms an observation**,
         // here as on tmux. Arming on the sender's behalf — giving the daemon's
-        // own supervision rails an observation they did not ask for — is a
-        // separate change, and one this transport cannot make on its own: the
-        // rails that would benefit do not pass through this handler at all.
-        // `DeskSessionManager.nudgeDeskSession` and `postShiftWrapUp` reach
-        // tmux directly with no transport branch, `LimitResumeActuator`'s
-        // holder path writes to `HolderInjectionCourier` itself, and
-        // `sendQueuedPromptVerbatim` — the one rail that does route through
-        // here — sends `.suppressed` so the operator's words arrive
-        // byte-identically, and an envelope-less send is one the observation
-        // structurally cannot find (`DeliveryVerifier.envelopeAppears` searches
-        // the transcript for this row's dispatch id and nothing else). Arming
-        // for a rail therefore begins with routing that rail through this
-        // handler with its envelope attached, not with a term here.
+        // own rails, the limit resume and the queued prompt, an observation
+        // they did not ask for — is a separate change, and one a term in this
+        // gate cannot make, because neither rail reaches it with an envelope.
+        // `LimitResumeActuator`'s holder path bypasses this handler entirely
+        // and writes to `HolderInjectionCourier` itself.
+        // `sendQueuedPromptVerbatim` does route through here, but it sends
+        // `.suppressed` so the operator's words arrive byte-identically, and an
+        // envelope-less send is one the observation structurally cannot find
+        // (`DeliveryVerifier.envelopeAppears` searches the transcript for this
+        // row's dispatch id and nothing else). Arming for a rail therefore
+        // begins with routing that rail through this handler with its envelope
+        // attached, not with a term here.
         //
         // The three checks below exist to keep a caller that asked for evidence
         // from being handed a silence that reads like confirmation, so they
@@ -4612,10 +4683,11 @@ extension RPCRouter {
         // the courier's write is about to fail and say so with the right cause.
         // Refusing here would put a second, wronger refusal in front of that,
         // and more importantly it would make every rail's send fail closed
-        // whenever the daemon cannot see a store: the moments that correlate
-        // exactly with supervision needing to send. The composition step's job
-        // is to record what it composed against, not to decide whether delivery
-        // is possible — the courier decides that, and it fails open.
+        // whenever the daemon cannot see a store, and no sender — an agent's
+        // `tbd terminal send`, the queued prompt — waits for one to appear. The
+        // composition step's job is to record what it composed against, not to
+        // decide whether delivery is possible — the courier decides that, and
+        // it fails open.
         let reading = await holderModeReading(terminalID: terminal.id)
         let modeSource = reading.map { ActuationModeSource($0.source) } ?? .unavailable
         // Both absent for `unavailable`: nothing answered, so there is no store
@@ -5038,8 +5110,8 @@ extension RPCRouter {
     /// `id` is the actuation row's own id — there is no second identifier
     /// namespace, so dispatch, transcript receipt and outcome all join on one
     /// string. `from` comes from `ActuationActor.dispatchLabel`, which is
-    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail or project name
-    /// can close the tag or open a second attribute.
+    /// whitelisted to `[A-Za-z0-9._:-]` and capped, so no rail or kind name can
+    /// close the tag or open a second attribute.
     static func dispatchEnvelope(id: String, from label: String) -> String {
         "<tbd-dispatch id=\"\(id)\" from=\"\(label)\"/>"
     }
@@ -5703,7 +5775,6 @@ extension RPCRouter {
             return .ok()
         }
         let expectedIncarnation = TerminalSessionIncarnation(terminal: terminal)
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
         // Any hook event marks the worktree active for the PR schedule.
         await activityLedger.recordHookEvent(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
@@ -5915,7 +5986,6 @@ extension RPCRouter {
             logger.debug("notificationEvent: unknown terminalID=\(params.terminalID.uuidString, privacy: .public) — ignoring")
             return .ok()
         }
-        await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
         await activityLedger.recordHookEvent(
             terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
 
@@ -6146,17 +6216,12 @@ extension RPCRouter {
             return .ok()
         }
 
-        // §13's hook-event rate. Counted here — before the unchanged-state
-        // early return below — because a session emitting the same state over
-        // and over is exactly the shape the counter exists to make visible, and
-        // a count taken after that guard would report zero for it. One actor
-        // hop and an integer add, which is the whole per-event budget.
-        // An app-originated interrupt shares this RPC but is a user action, not
-        // an agent hook, so it must not inflate the hook-event counter.
+        // Any agent hook marks the worktree active for the PR schedule.
+        // Recorded here, before the unchanged-state early return below, so a
+        // session repeating the same state still counts as active. An
+        // app-originated interrupt shares this RPC but is a user action, not
+        // agent activity, so it does not count.
         if params.origin == nil {
-            await sessionCounters.recordHookEvent(terminalID: terminal.id, at: observedAt)
-            // The same rule for the PR schedule's activity: a user interrupt is
-            // not agent activity.
             await activityLedger.recordHookEvent(
                 terminalID: terminal.id, worktreeID: terminal.worktreeID, at: observedAt)
         }
@@ -6344,7 +6409,8 @@ extension RPCRouter {
         // silent, leaving that terminal's pane rendering the entry forever.
         // Unioned with the polled terminal so a terminal that both lost an
         // expired entry and had one satisfied is still broadcast exactly once.
-        var affected = await pendingQuestions.gcExpired(now: Date(), maxAge: .seconds(900))
+        var affected = await pendingQuestions.gcExpired(
+            now: Date(), maxAge: PendingPromptExpirySweep.maxAge)
         let entries = await pendingQuestions.entries(forTerminal: params.terminalID)
         let merged = AskUserQuestionMerger.merge(jsonlItems: parsed, pending: entries)
         for satisfiedID in merged.satisfiedToolUseIDs {

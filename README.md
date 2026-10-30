@@ -90,7 +90,7 @@ Adopt your existing [Conductor](https://conductor.build) worktrees into TBD in p
 
 Flags:
 - `--all` — also adopt archived Conductor workspaces.
-- `--repo <name>` — limit to one Conductor repo (e.g. `--repo longeye-app`).
+- `--repo <name>` — limit to one Conductor repo (e.g. `--repo acme-app`).
 - `--dry-run` — print the plan, don't write anything.
 
 Idempotent — safe to re-run as you create new Conductor worktrees.

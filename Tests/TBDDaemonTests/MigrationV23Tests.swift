@@ -6,15 +6,6 @@ import GRDB
 
 @Suite struct MigrationV23Tests {
 
-    @Test func parentColumnExists() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.writerForTests.read { dbConn in
-            let columns = try Row.fetchAll(dbConn, sql: "PRAGMA table_info(worktree)")
-            let names = columns.compactMap { $0["name"] as String? }
-            #expect(names.contains("parentWorktreeID"))
-        }
-    }
-
     @Test func parentColumnDefaultsToNull() async throws {
         let db = try TBDDatabase(inMemory: true)
         let repo = try await db.repos.create(

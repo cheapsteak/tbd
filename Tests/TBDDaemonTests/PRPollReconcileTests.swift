@@ -3,6 +3,7 @@ import GRDB
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 /// What one `pr.list` poll reconciles: bindings a heal disproved, the branch

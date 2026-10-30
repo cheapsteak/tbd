@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// The Settings surface for the Claude cloud gate.
 ///
@@ -19,10 +20,10 @@ import TBDShared
 struct ClaudeCloudSettingsTests {
 
     private func withAppState(_ body: (AppState) async -> Void) async {
-        let name = "tbd-cloud-settings-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
+        let suite = TestDefaultsSuite("tbd-cloud-settings")
+        let defaults = suite.defaults
         await body(AppState(userDefaults: defaults))
-        defaults.removePersistentDomain(forName: name)
+        suite.tearDown()
     }
 
     // MARK: - The caption, one case per reachable (enabled, live, remoteBackendsEnabled) branch

@@ -3,6 +3,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Tier 3: every test spawns real children and waits on their exits and their
 /// pipe traffic in real time, which is the tier-3 definition in

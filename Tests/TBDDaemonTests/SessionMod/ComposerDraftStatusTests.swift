@@ -35,7 +35,7 @@ import Testing
     @Test func confirmedWithARestorableDraft() throws {
         let root = try fixture(draft: #"{"schemaVersion":1,"sessionId":"s","hasDraft":true,"text":"hi","cursor":2,"restorable":true,"savedAtMs":1}"#)
         defer { try? FileManager.default.removeItem(at: root) }
-        #expect(read(root) == .confirmed(hasDraft: true))
+        #expect(read(root) == .confirmed)
     }
 
     /// A draft whose text lacks part of the box (a collapsed paste, an image)
@@ -62,7 +62,7 @@ import Testing
         ] {
             let root = try fixture(draft: body)
             defer { try? FileManager.default.removeItem(at: root) }
-            #expect(read(root) == .confirmed(hasDraft: false), "\(body)")
+            #expect(read(root) == .confirmed, "\(body)")
         }
     }
 
@@ -79,13 +79,13 @@ import Testing
     @Test func confirmedEmpty() throws {
         let root = try fixture(draft: #"{"schemaVersion":1,"sessionId":"s","hasDraft":false,"savedAtMs":1}"#)
         defer { try? FileManager.default.removeItem(at: root) }
-        #expect(read(root) == .confirmed(hasDraft: false))
+        #expect(read(root) == .confirmed)
     }
 
-    @Test func confirmedWithNoDraftFileYetIsEmpty() throws {
+    @Test func confirmedWithNoDraftFileYet() throws {
         let root = try fixture(draft: nil)
         defer { try? FileManager.default.removeItem(at: root) }
-        #expect(read(root) == .confirmed(hasDraft: false))
+        #expect(read(root) == .confirmed)
     }
 
     @Test func unreadableDraftFileIsUnknown() throws {
@@ -103,11 +103,5 @@ import Testing
         #expect(ComposerDraftStatus.evaluate(liveness: .unknown(.staleHeartbeat), draft: .missing)
             == .unknown(.staleHeartbeat))
         #expect(ComposerDraftStatus.evaluate(liveness: .legacy, draft: .unreadable) == .legacy)
-    }
-
-    @Test func spawnedWithFeatureIsFalseOnlyForLegacy() {
-        #expect(!ComposerDraftStatus.legacy.spawnedWithFeature)
-        #expect(ComposerDraftStatus.confirmed(hasDraft: false).spawnedWithFeature)
-        #expect(ComposerDraftStatus.unknown(.noAliveFile).spawnedWithFeature)
     }
 }

@@ -231,9 +231,9 @@ struct ActuationObservationTests {
         let session = ActuationActor.session(
             worktree: "1B7E2C90-88AA-4F60-B1D0-9E8F7A6B5C4D", terminal: nil)
         #expect(session?.dispatchLabel == "session")
-        #expect(ActuationActor(kind: ActuationActor.Kind.supervisor).dispatchLabel == "supervisor")
-        #expect(ActuationActor(kind: ActuationActor.Kind.supervisor, project: "acme-web")
-            .dispatchLabel == "supervisor:acme-web")
+        // A kind this build does not know names itself bare.
+        #expect(ActuationActor(kind: "declared-by-a-newer-client").dispatchLabel
+            == "declared-by-a-newer-client")
         // A rail on a non-daemon actor is not that kind's sub-identity.
         #expect(ActuationActor(kind: ActuationActor.Kind.app, rail: "limit-resume")
             .dispatchLabel == "app")
@@ -261,7 +261,7 @@ struct ActuationObservationTests {
 
     @Test("a non-ASCII or whitespace label is replaced, never passed through")
     func dispatchLabelReplacesEverythingOutsideTheAlphabet() {
-        #expect(ActuationActor.daemon(rail: "night watch").dispatchLabel == "daemon:night_watch")
+        #expect(ActuationActor.daemon(rail: "limit resume").dispatchLabel == "daemon:limit_resume")
         #expect(ActuationActor.daemon(rail: "rail\nid").dispatchLabel == "daemon:rail_id")
         #expect(ActuationActor.daemon(rail: "réveil").dispatchLabel == "daemon:r_veil")
         // Sanitizing to nothing is not possible, but supplying nothing is:

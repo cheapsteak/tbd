@@ -1,21 +1,9 @@
 import Foundation
 import TBDShared
+import TBDKernel
 import os
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "Hibernation")
-
-/// What the park's pending-input rail got when it asked for a holder session's
-/// screen: a screen it may judge, or the refusal that stands in its place.
-///
-/// A type rather than an optional because the four ways to have no judgeable
-/// screen — no reader, a source the daemon is not the live store for, a live
-/// screen whose emulator never saw the child start, a projection that refused
-/// — carry different remedies and so different words, and collapsing them
-/// would hand the user a sentence that fits none of them.
-enum HolderScreenReading: Sendable {
-    case readable(TerminalScreen)
-    case refused(String)
-}
 
 /// What the park's escalation ladder may do to the pid a holder row records —
 /// the whole decision table, in one type, because each rung asks the same
@@ -127,33 +115,6 @@ extension HolderChildDisposition {
     }
 }
 
-/// The holder park's escalation ladder, as far as a unit test can reach it:
-/// the rung a park starts on. The rungs themselves run in
-/// `performHolderHibernate`, against a live reader and process table.
-enum HolderParkLadder {
-    enum Rung: Equatable, Sendable {
-        /// `/exit` written to the pty, then a poll for the child to leave.
-        case typedExit
-        /// SIGTERM to the child alone, then a poll.
-        case terminate
-        /// `HolderRegistry.abandon`: the holder lets go of the pty and the job
-        /// is killed by process group.
-        case abandon
-    }
-
-    /// A typed ending, a park of a session spawned without the
-    /// composer-draft feature, starts with `/exit`. A signal ending, every
-    /// profile swap and every park of a session spawned with the feature,
-    /// skips it and starts at SIGTERM, so nothing is typed into the composer.
-    /// The forced rung follows either way.
-    static func firstRung(for style: ParkEndingStyle) -> Rung {
-        switch style {
-        case .typedExit: return .typedExit
-        case .signal: return .terminate
-        }
-    }
-}
-
 /// Park and wake for the pty-holder transport.
 ///
 /// Split from `HibernationCoordinator` so the diff to that file is a set of
@@ -172,227 +133,68 @@ enum HolderParkLadder {
 /// invisible to every reconciler that reads rows.
 extension HibernationCoordinator {
 
-    /// How deep a tail of a holder session's screen the pending-input rail
-    /// judges.
-    ///
-    /// The depth `terminal.output` answers by default, and about a screen's
-    /// worth. The rail scans upward for the composer and stops at the first
-    /// prompt line it finds, so what it needs is the tail; asking for the whole
-    /// retained scrollback would put lines nobody is looking at under a check
-    /// that reads only the last of them.
+    /// How deep a tail of a holder session's screen the park keeps as its
+    /// display snapshot: the depth `terminal.output` answers by default, and
+    /// about a screen's worth.
     static let holderScreenLines = 50
 
-    /// The refusal for a holder session whose screen the daemon is not the
-    /// live source of.
-    ///
-    /// Fail-closed, per the transport design's two-store rule, and decided from
-    /// the typed screen's own `source` rather than from a second question about
-    /// who holds the pty. A viewer's attach suspends the daemon's drain, and a
-    /// suspended reader's screen answers `.staleDaemon` — the daemon's emulator
-    /// frozen at the moment of that attach. Asking a frozen screen whether
-    /// there is unsent typed input is exactly the wrong answer the rail exists
-    /// to prevent. Refusing is recoverable; eating a half-composed prompt is
-    /// not.
-    ///
-    /// `.viewer` — a screen the viewer itself answered a pull with — refuses
-    /// here for a different reason that lands in the same place: that screen is
-    /// live, but somebody is sitting at the keyboard of the session about to be
-    /// parked. It is not reachable from a `HolderReader`, which answers only
-    /// `.daemon` or `.staleDaemon`; the arm exists because a source is the
-    /// question this rail asks, and a new source must be answered rather than
-    /// defaulted.
-    ///
-    /// It names an action the user can take, which is why it is a separate
-    /// string from `holderNoReaderRefusal` below: closing the tab makes this
-    /// park possible, and telling somebody to close a tab they have not got
-    /// would be worse than saying nothing.
-    static let holderViewerAttachedRefusal =
-        "The daemon's screen for this session is not the live one — a viewer "
-        + "holds its pty — so it cannot check for unsent input; close the tab "
-        + "or wait for it to leave the viewer before hibernating"
-
-    /// The refusal for a holder session this daemon is not reading at all.
-    ///
-    /// The same fail-closed rail, reached from the opposite direction: nobody
-    /// holds the pty, and the daemon still has no emulator to judge — the
-    /// session was never adopted, or its reader is gone. Nothing the user does
-    /// to a tab changes that, so the text says what is true rather than
-    /// prescribing a gesture that would not help. The distinction is worth a
-    /// string of its own precisely because the remedies differ: one is a tab
-    /// to close, the other is a session the daemon has lost track of.
+    /// The refusal for a holder session this daemon is not reading at all:
+    /// nobody holds a reader for it, because the session was never adopted or
+    /// its reader is gone. A park does not end a session this daemon has lost
+    /// track of; nothing the user does to a tab changes that, so the text says
+    /// what is true rather than prescribing a gesture that would not help.
     static let holderNoReaderRefusal =
-        "The daemon is not reading this session's terminal, so it cannot check "
-        + "for unsent input before hibernating"
+        "The daemon is not reading this session's terminal, so it has not "
+        + "adopted the session and will not end it to hibernate"
 
-    /// The refusal for a screen that could not be projected at all.
+    /// The frame a park freezes as the parked tab's backdrop, kept as the row's
+    /// `suspendedSnapshot`, or nil when there is no live screen to freeze.
     ///
-    /// `TerminalScreen` refuses a line carrying a control character, and its
-    /// own documentation argues why that is a bug in whatever rendered the line
-    /// rather than a state a session can put itself in. This rail cannot repair
-    /// it and must not guess past it: a screen it could not read is a screen it
-    /// cannot clear of unsent input, so it fails closed like every other half
-    /// of this rail. The third string exists because the remedy is neither a
-    /// tab to close nor a session to re-adopt — it is a defect to fix, and a
-    /// refusal that said "close the tab" would send somebody chasing the wrong
-    /// thing.
-    static let holderScreenProjectionRefusal =
-        "The daemon could not read this session's screen to check for unsent "
-        + "input before hibernating"
-
-    /// The refusal for a live daemon screen whose emulator was built over a
-    /// child that was already running.
-    ///
-    /// The re-adoption case, and the reason the source alone is not enough. An
-    /// emulator the daemon builds across a restart starts blank, and the TUI
-    /// above it paints differentially — it positions the cursor and writes only
-    /// the cells it is changing — so the cells nobody has repainted since hold
-    /// nothing the child ever wrote. The screen is honestly `daemon`, its bytes
-    /// really are being parsed live, and it is still not a screen anyone can
-    /// check for a half-composed prompt: a composer that has gone quiet reads
-    /// as whatever stood there before, and a composer somebody is typing into
-    /// can read as blank.
-    ///
-    /// A fourth string because the remedy is unlike the other three. There is
-    /// no tab to close and nothing lost to re-adopt; the screen becomes
-    /// checkable again the next time this daemon starts the session itself, and
-    /// saying anything else would send somebody chasing a gesture that does not
-    /// help.
-    static let holderContentUnobservedRefusal =
-        "The daemon's emulator for this session was built over a child that was "
-        + "already running — the daemon restarted under it — so its screen can "
-        + "show stale or missing text and cannot be checked for unsent input; it "
-        + "becomes checkable again when this daemon next starts the session"
-
-    /// The refusal a screen's provenance implies, or nil when the daemon may
-    /// judge it.
-    ///
-    /// The whole policy, both axes, in one place, so the park and the idle
-    /// sweep cannot hold different opinions about which screens are judgeable.
-    /// Both ask this question; they differ only in how much of the screen they
-    /// pay for to get the answer.
-    ///
-    /// The source is asked first because it names an action the user can take
-    /// — close the tab — and a person told to close a tab has somewhere to go.
-    /// A `daemon` screen then still has to answer for its content: `source`
-    /// says which store is rendering live, and `contentObserved` says whether
-    /// that store's grid was ever painted by this child.
-    ///
-    /// The decision itself lives in `HolderScreenEvidence`, so the park and the
-    /// idle sweep cannot disagree about which screens are judgeable; what this
-    /// method adds is the hibernation wording for each answer.
-    static func holderRefusal(
-        forScreenSource source: TerminalScreen.Source, contentObserved: Bool
-    ) -> String? {
-        switch HolderScreenEvidence.refusal(forSource: source, contentObserved: contentObserved) {
-        case .viewerHoldsPty: return holderViewerAttachedRefusal
-        case .contentUnobserved: return holderContentUnobservedRefusal
-        case nil: return nil
-        }
-    }
-
-    /// The typed screen the park's rail judges, or the refusal that stands in
-    /// its place.
-    ///
-    /// One method so the three fail-closed refusals and the projection failure
-    /// are stated once and the park reads a single answer.
-    func holderScreenReading(
+    /// A display capture and nothing more: never judged. Whatever the screen
+    /// says, and whether or not it can be read at all, the park goes on — an
+    /// unreadable screen costs the backdrop, never the park. A screen that is
+    /// not the session's live one is not shown either, because the frame it
+    /// would freeze is not the one the session was showing: a viewer holds the
+    /// pty and the daemon's emulator is frozen at that attach, or the emulator
+    /// was built over a child that was already running and holds cells the
+    /// child never wrote (`HolderScreenEvidence`).
+    func holderParkSnapshot(
         terminalID: UUID, registry: HolderRegistry
-    ) async -> HolderScreenReading {
+    ) async -> String? {
         let screen: TerminalScreen?
         do {
             screen = try await holderScreen(terminalID: terminalID, registry: registry)
         } catch {
-            logger.error(
-                """
-                hibernate: could not project \(terminalID, privacy: .public)'s screen for the \
-                pending-input rail: \(error.localizedDescription, privacy: .public)
-                """)
-            return .refused(Self.holderScreenProjectionRefusal)
-        }
-        guard let screen else { return .refused(Self.holderNoReaderRefusal) }
-        if let refusal = Self.holderRefusal(
-            forScreenSource: screen.source, contentObserved: screen.contentObserved) {
-            return .refused(refusal)
-        }
-        return .readable(screen)
-    }
-
-    /// The frame a profile swap's park freezes as the tab's backdrop, or nil
-    /// when there is no readable screen to freeze.
-    ///
-    /// A display capture and nothing more: the same bytes every other park
-    /// persists into `suspendedSnapshot`, read through the same fail-closed
-    /// reading, but never judged. Whatever the screen says, and whether or not
-    /// it can be read at all, the swap's park goes on — an unreadable screen
-    /// costs the backdrop, never the swap. A screen the daemon may not judge
-    /// is also one it will not show, because the frame it would freeze is not
-    /// the one the session was showing.
-    func holderSwapBackdrop(
-        terminalID: UUID, registry: HolderRegistry
-    ) async -> String? {
-        switch await holderScreenReading(terminalID: terminalID, registry: registry) {
-        case .refused(let refusal):
-            logger.debug("hibernate: swap park of \(terminalID, privacy: .public) freezes no backdrop — \(refusal, privacy: .public)")
+            logger.debug("hibernate: park of \(terminalID, privacy: .public) freezes no snapshot — its screen would not project: \(error.localizedDescription, privacy: .public)")
             return nil
-        case .readable(let screen):
-            return screen.output.isEmpty ? nil : screen.output
         }
+        guard let screen else {
+            logger.debug("hibernate: park of \(terminalID, privacy: .public) freezes no snapshot — the daemon holds no screen for it")
+            return nil
+        }
+        if let refusal = HolderScreenEvidence.refusal(
+            forSource: screen.source, contentObserved: screen.contentObserved) {
+            logger.debug("hibernate: park of \(terminalID, privacy: .public) freezes no snapshot — its screen is not the live one (\(String(describing: refusal), privacy: .public))")
+            return nil
+        }
+        return screen.output.isEmpty ? nil : screen.output
     }
 
-    /// Whether the screen the park's pending-input rail would have to judge is
-    /// one this daemon may not judge — a viewer holds the pty, no reader was
-    /// ever adopted for the session, or the reader's emulator was built over a
-    /// child that was already running and so has never seen the whole screen.
+    /// Whether the daemon holds no reader for this holder session, so a park
+    /// of it would refuse with `holderNoReaderRefusal`.
     ///
-    /// The same question `performHolderHibernate` asks before its fail-closed
-    /// refusals, lifted out so the sweep can ask it *first*.
-    /// `HibernationGate` is pure — it decides from the row, the config and the
-    /// clock, and has no way to see who holds a pty — so the sweep is the only
+    /// The same question `performHolderHibernate` asks before it ends the job,
+    /// lifted out so the sweep can ask it *first*. `HibernationGate` is pure —
+    /// it decides from the row, the config and the clock, and has no way to
+    /// see which sessions the registry adopted — so the sweep is the only
     /// place with the registry in hand.
-    ///
-    /// **It reads the mode half of the oracle, not the whole screen.** Both
-    /// facts the policy turns on are cheap: `source` is one field taken from
-    /// one reader under one lock, which `HolderReader.modeReading` carries
-    /// without the whole-buffer walk that `screen(maxLines:)` pays for, and
-    /// `observedChildFromStart` is fixed at that reader's construction and
-    /// needs no lock at all. The same trade the send path's oracle makes, and
-    /// for the same reason: this runs on every sweep, for every idle holder
-    /// row, and the walk holds the emulator lock a live session's drain thread
-    /// needs. The two therefore agree on the question that decides the
-    /// refusal. They can differ on exactly one thing, a screen that will not
-    /// project at all: the sweep cannot foresee it, so such a row is armed here
-    /// and refused at the park. That is a producer bug rather than a session
-    /// state, and paying a request-and-refusal pair per sweep for one is better
-    /// than hiding it.
     ///
     /// A daemon with no registry at all answers false: that is the tmux-only
     /// configuration, where a holder row is a leftover and the park's own
     /// no-registry refusal is the right place to say so once.
-    func holderScreenIsUnreadable(terminalID: UUID) async -> Bool {
+    func holderHasNoReader(terminalID: UUID) async -> Bool {
         guard let registry = holderRegistry else { return false }
-        if let oracle = holderScreenOracle {
-            do {
-                guard let screen = try await oracle(terminalID) else { return true }
-                return Self.holderRefusal(
-                    forScreenSource: screen.source, contentObserved: screen.contentObserved) != nil
-            } catch {
-                // A refused projection, and the seam answers it the way the
-                // production path below does rather than better: that path
-                // reads two cheap facts and never walks a line, so it cannot
-                // see one. The sweep arms, the park refuses. A seam that
-                // answered `true` here would make a test agree where the
-                // shipped code does not.
-                return false
-            }
-        }
-        // The reader directly, never `HolderScreenResolver` — for
-        // `holderScreen`'s reason, and more sharply here: this runs for every
-        // idle holder row on every sweep, and a pull per row would spend the
-        // bound to learn something the refusal above does not distinguish.
-        guard let reader = await registry.reader(for: terminalID) else { return true }
-        let source = await reader.modeReading().source
-        return Self.holderRefusal(
-            forScreenSource: source, contentObserved: reader.observedChildFromStart) != nil
+        return await registry.reader(for: terminalID) == nil
     }
 
     /// The screen this daemon holds for a session, or nil when it holds none.
@@ -403,13 +205,9 @@ extension HibernationCoordinator {
     /// what `TerminalScreen`'s construction refuses.
     ///
     /// **This reads the reader directly and must not be routed through
-    /// `HolderScreenResolver`**, even though routing every screen read through
-    /// one resolver is the obvious tidy-up. `HolderScreenEvidence.refusal`
-    /// answers `.viewerHoldsPty` for `.staleDaemon` and `.viewer` alike — the
-    /// rail refuses either way, because a live screen somebody is sitting at
-    /// the keyboard of cannot prove the composer is empty — so a pull could not
-    /// change the outcome. It would only put the pull's bound in front of every
-    /// idle-sweep row, for an answer this rail discards.
+    /// `HolderScreenResolver`.** A screen a viewer holds is one the snapshot
+    /// does not freeze either way, so a pull could not change the outcome; it
+    /// would only put the pull's bound in front of every park.
     private func holderScreen(
         terminalID: UUID, registry: HolderRegistry
     ) async throws -> TerminalScreen? {
@@ -431,19 +229,19 @@ extension HibernationCoordinator {
     /// is the whole exclusion here, and it is enough: every mutation below
     /// addresses one terminal row and one holder.
     ///
-    /// `composerDraft` is the gate's answer from `performHibernate`: the
-    /// typed-input rail below consults it, and the ladder reads its status.
+    /// The session mod's draft gate has already let the park through
+    /// (`performHibernate`); nothing here reads the screen to decide anything,
+    /// and nothing is written to the pty. The job is ended by signal.
     func performHolderHibernate(
         terminal: Terminal,
         worktree: LocalWorktree,
         reason: HibernateReason,
-        policy: HibernateEligibilityPolicy,
-        composerDraft: ComposerDraftParkContext
+        policy: HibernateEligibilityPolicy
     ) async -> HibernateResult {
         // Re-read and re-check, in the same order and with the same refusal
         // strings the tmux path uses under its server lock. This method is
-        // actor-reentrant across the polite-exit poll below, so the row it
-        // decided on must be the row it acts on.
+        // actor-reentrant across the polls below, so the row it decided on
+        // must be the row it acts on.
         guard let currentTerminal = try? await db.terminals.get(id: terminal.id) else {
             return .notFound
         }
@@ -471,16 +269,14 @@ extension HibernationCoordinator {
 
         // Every refusal below clears `idleSince` and `pendingKillSince` like
         // every other refusal in this method. Each names a condition that will
-        // still hold on the next sweep — no registry on this daemon, a viewer
-        // that owns the pty until its tab closes, a session this daemon never
-        // adopted, a screen whose projection is broken — so leaving the markers
-        // armed would re-fire the identical refusal every pass. Clearing them
-        // makes the row start its idle clock again from the moment the
-        // condition clears.
+        // still hold on the next sweep — no registry on this daemon, a session
+        // this daemon never adopted — so leaving the markers armed would
+        // re-fire the identical refusal every pass. Clearing them makes the
+        // row start its idle clock again from the moment the condition clears.
 
-        // No registry means no reader, no way to write `/exit`, and no way to
-        // abandon the holder afterwards. Say so by name rather than parking a
-        // row whose process nothing in this daemon can end.
+        // No registry means no reader and no way to abandon the holder
+        // afterwards. Say so by name rather than parking a row whose process
+        // nothing in this daemon can end.
         guard let registry = holderRegistry else {
             idleSince[terminal.id] = nil
             pendingKillSince[terminal.id] = nil
@@ -489,14 +285,13 @@ extension HibernationCoordinator {
 
         // **A session whose holder and job are both verifiably gone is parked
         // without the live rails.** Every rail below asks something of a live
-        // session — its screen, its reader, its transcript mid-write — and a
-        // session with neither process has none of those to give: no reader
-        // exists to read a screen through, and there is no composer left to
-        // hold unsent input. Refusing it would strand the row forever, awake
-        // over nothing, with every wake, hibernate and profile swap refused for
-        // a reader that can never come back. Parking it is the truthful record,
-        // and the invariant this feature is judged on holds trivially: the
-        // child is not running. `HolderChildDisposition.sessionHasEnded` is
+        // session — its reader, its transcript mid-write — and a session with
+        // neither process has none of those to give: no reader exists.
+        // Refusing it would strand the row forever, awake over nothing, with
+        // every wake, hibernate and profile swap refused for a reader that can
+        // never come back. Parking it is the truthful record, and the
+        // invariant this feature is judged on holds trivially: the child is
+        // not running. `HolderChildDisposition.sessionHasEnded` is
         // fail-closed — an unrecorded pid, a pid that is alive under an
         // identity this daemon cannot confirm, or an unreadable one is not
         // "gone" — and it is the same answer the attach path gives the app.
@@ -506,74 +301,19 @@ extension HibernationCoordinator {
             logger.info("hibernate: \(terminal.id, privacy: .public)'s holder and job are both gone — parking it without the live rails")
         }
 
-        // Rail: typed-but-unsent input, read off the typed screen oracle.
-        // Fail-closed on every answer that is not a live daemon-rendered screen
-        // of observed content — a source the daemon is not the live store for,
-        // a live screen whose emulator was built over a running child, no
-        // reader at all, a projection that refused — because each one means the
-        // screen this rail would judge is not the screen the session is
-        // showing. Each answers with its own name: they differ in what the
-        // person reading the refusal can do next.
-        //
-        // The re-adoption case is the subtle one, and it is why the source is
-        // not the whole question. An emulator the daemon builds across a
-        // restart starts blank over a child that is already painting, and an
-        // Ink-style TUI paints differentially — it moves the cursor and writes
-        // only the cells it is changing. So every cell nobody has repainted
-        // since holds nothing the child ever wrote, and the projection mixes
-        // correct cells with blanks where there is text and stale text where
-        // the session has cleared. Measured in the field: a phantom composer
-        // line stood for over a minute while the real composer was empty. The
-        // screen carries that as `contentObserved`, and this rail refuses it
-        // like every other screen it may not judge.
-        //
-        // **A profile swap's park does not judge the screen.** The question
-        // is what the user's own gesture has already answered, and the tmux
-        // arm of the same action has never asked it. It still reads the
-        // screen once, for the backdrop alone: the tab shows the last frame
-        // under its "Switching account" caption for the second or two the
-        // ladder takes. See `holderSwapBackdrop`. Having not judged the
-        // screen, the swap's park types nothing into it: its ladder starts at
-        // SIGTERM, below.
-        let capturedSnapshot: String?
-        if sessionEnded {
-            capturedSnapshot = nil
-        } else if policy.honoursLiveRails {
-            switch await holderScreenReading(terminalID: terminal.id, registry: registry) {
-            case .refused(let refusal):
-                idleSince[terminal.id] = nil
-                pendingKillSince[terminal.id] = nil
-                logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — \(refusal, privacy: .public)")
-                return .notEligible(reason: refusal)
-            case .readable(let screen):
-                // The typed-input check decides only a legacy session's park;
-                // the composer-draft feature decides the rest. The holder park
-                // reads the screen once, so this is its authoritative read.
-                if composerDraft.judgeAuthoritativeScrape(
-                    hasPendingInput: HibernationSafetyChecks.hasPendingInput(paneCapture: screen.output),
-                    terminalID: terminal.id) {
-                    logger.debug("hibernate: skipping \(terminal.id, privacy: .public) — pending typed input in prompt")
-                    return .notEligible(reason: "Terminal has unsent typed input")
-                }
-                capturedSnapshot = screen.output.isEmpty ? nil : screen.output
-            }
-        } else {
-            capturedSnapshot = await holderSwapBackdrop(
-                terminalID: terminal.id, registry: registry)
-        }
+        // The display snapshot: the last frame, frozen as the parked tab's
+        // backdrop. Read once, for every policy, and judged by none — what the
+        // screen shows, and whether it can be read at all, never refuses a
+        // park. An ended session has no screen to freeze.
+        let capturedSnapshot: String? = sessionEnded
+            ? nil
+            : await holderParkSnapshot(terminalID: terminal.id, registry: registry)
 
-        // The reader the polite `/exit` below is written through. Read after
-        // the rail rather than inside it: the rail's subject is the screen, and
-        // a reader that answered a live screen a moment ago is the one this
-        // park writes to. A park that ends by signal never writes to it, and
-        // is still refused without one: no reader means a session this daemon
-        // has not adopted, whatever the ending.
-        let reader: HolderReader?
-        if sessionEnded {
-            reader = nil
-        } else if let live = await registry.reader(for: terminal.id) {
-            reader = live
-        } else {
+        // A park ends only a session this daemon has adopted, and the reader
+        // is the proof of adoption: no reader means the session was never
+        // adopted or its reader is gone. Nothing is written through the reader
+        // — the job is ended by signal below.
+        if !sessionEnded, await registry.reader(for: terminal.id) == nil {
             idleSince[terminal.id] = nil
             pendingKillSince[terminal.id] = nil
             logger.debug("hibernate: refusing \(terminal.id, privacy: .public) — the daemon holds no reader for this session")
@@ -619,59 +359,33 @@ extension HibernationCoordinator {
         }
 
         let childPID = currentTerminal.childPID ?? 0
-        // Rung 1 — polite park: `/exit` in band, so Claude flushes its
-        // transcript, shuts down MCP children and fires Stop hooks. Written to
-        // the pty the daemon is already reading — the same descriptor
-        // `terminal.send` uses — rather than through tmux `send-keys`, which
-        // addresses a pane this row has not got.
+        // The ladder starts at SIGTERM. Nothing is typed into the pty to end
+        // Claude: a typed `/exit` would land after whatever the composer holds
+        // and Enter would submit it, and a daemon-sent Ctrl+C would clear a
+        // draft the session mod would then record as gone. SIGTERM runs Claude
+        // Code's graceful shutdown, so the mod still makes its final save in
+        // `session.end`.
         //
-        // A refused write is not a failure of the park; it is the reason the
-        // ladder below exists. It is logged rather than swallowed because it
-        // names the one thing the rungs after it cannot: that the session never
-        // got the chance to shut itself down, so a `SIGTERM` it did not deserve
-        // is about to arrive. `HolderReader.write` is all-or-nothing — it
-        // either delivers the whole buffer within its budget or throws — so
-        // there is no partial-write value to inspect here; if that ever becomes
-        // a short count, it belongs in this same log line.
-        //
-        // An ended session skips the whole ladder: there is nothing to tell to
-        // exit and nothing to signal, and `sessionHasEnded` has already
-        // established that the child is gone.
-        //
-        // A profile swap, and a park of a session spawned with the
-        // composer-draft feature, skip this rung and start at SIGTERM: a typed
-        // `/exit` would go through the composer. A swap skips the screen check
-        // that keeps `/exit` off a draft, and a feature session is never typed
-        // into to end it. `ComposerDraftParkGate.endingStyle(for:policy:)`
-        // makes that choice and `HolderParkLadder` maps it to a rung.
-        let firstRung = HolderParkLadder.firstRung(for: composerDraft.endingStyle)
+        // An ended session skips the whole ladder: there is nothing to signal,
+        // and `sessionHasEnded` has already established that the child is
+        // gone.
         var gone = sessionEnded
-        if let reader, firstRung == .typedExit {
-            do {
-                try await reader.write(Data("/exit\r".utf8))
-            } catch {
-                logger.warning("hibernate: could not write the polite /exit for \(terminal.id, privacy: .public), so the escalation is what will end its job: \(error.localizedDescription, privacy: .public)")
-            }
-            gone = await pollUntilChildIsGone(
-                childPID: childPID, terminalID: terminal.id, registry: registry,
-                attempts: exitPollAttempts)
-        }
         // Whether the holder has already been told to let go. Only the forced
         // rung does that, and only as part of killing the job; every other way
         // out of the ladder still owes the holder its `forget`.
         var abandoned = false
 
         if !gone {
-            // Rung 2 — `SIGTERM` to the child, and to the child alone.
+            // Rung 1 — `SIGTERM` to the child, and to the child alone.
             //
-            // The tmux ladder is `/exit` → Escape → C-c C-c → SIGTERM →
-            // forced replacement, and this is the rung the holder park was
-            // missing: without it a session whose Stop hooks or MCP teardown
-            // outlast the three-second polite window went straight to a
-            // `SIGKILL` of its process group, which is where a transcript gets
-            // cut mid-write. `terminateProcessOnly` is deliberate — widening to
-            // the group is the forced rung's job, and on a recycled pid
-            // `getpgid` resolves to a stranger's group entirely.
+            // The tmux park's ending is the same SIGTERM, then a forced
+            // replacement. A session whose Stop hooks or MCP teardown take a
+            // while gets this rung's whole poll window before anything is
+            // killed, because a `SIGKILL` of its process group is where a
+            // transcript gets cut mid-write. `terminateProcessOnly` is
+            // deliberate — widening to the group is the forced rung's job, and
+            // on a recycled pid `getpgid` resolves to a stranger's group
+            // entirely.
             switch holderChildDisposition(childPID: childPID, terminal: currentTerminal) {
             case .gone:
                 gone = true
@@ -679,11 +393,7 @@ extension HibernationCoordinator {
                 return await refuseUnverifiableHolderChild(
                     currentTerminal, childPID: childPID, verdict: verdict, registry: registry)
             case .ours:
-                if firstRung == .typedExit {
-                    logger.debug("hibernate: /exit did not end the job for \(terminal.id, privacy: .public) within the poll window — sending SIGTERM to child \(childPID, privacy: .public)")
-                } else {
-                    logger.debug("hibernate: ending \(terminal.id, privacy: .public) by SIGTERM to child \(childPID, privacy: .public) — neither a profile swap nor a session spawned with the composer-draft feature is typed into")
-                }
+                logger.debug("hibernate: ending \(terminal.id, privacy: .public) by SIGTERM to child \(childPID, privacy: .public)")
                 signaller.terminateProcessOnly(childPID)
                 gone = await pollUntilChildIsGone(
                     childPID: childPID, terminalID: terminal.id, registry: registry,
@@ -697,7 +407,7 @@ extension HibernationCoordinator {
         }
 
         if !gone {
-            // Rung 3 — forced. `abandon` is the escalation: the holder is told
+            // Rung 2 — forced. `abandon` is the escalation: the holder is told
             // to let go (closing the pty master), the job is killed by process
             // group, and the holder's corpse is collected. Identity-checked
             // again rather than on the strength of the check above, because the
@@ -711,7 +421,8 @@ extension HibernationCoordinator {
                     currentTerminal, childPID: childPID, verdict: verdict, registry: registry)
             case .ours, .unrecorded:
                 logger.debug("hibernate: SIGTERM did not end the job for \(terminal.id, privacy: .public) within the poll window — abandoning the holder")
-                if let unfinished = await registry.abandon(terminal: currentTerminal) {
+                if let unfinished = await registry.abandon(
+                    terminal: currentTerminal, reason: .park) {
                     logger.warning("hibernate: holder teardown for \(terminal.id, privacy: .public) was incomplete: \(unfinished, privacy: .public)")
                 }
                 abandoned = true
@@ -764,8 +475,8 @@ extension HibernationCoordinator {
 
         // The transcript rail, asked a second time now that the child is gone.
         //
-        // The first ask was before `/exit`, which is the only moment it can
-        // stop a park; this one cannot and must not. The process is gone, and
+        // The first ask was before the SIGTERM, which is the only moment it
+        // can stop a park; this one cannot and must not. The process is gone, and
         // the row parked is the truthful record of that — rolling back here
         // would leave an awake row over a session that no longer exists, which
         // is a worse lie than a transcript that needs repair. So it reports and
@@ -803,7 +514,6 @@ extension HibernationCoordinator {
         } catch {
             logger.warning("hibernate: parked \(terminal.id, privacy: .public) but failed to clear its holder pids: \(error.localizedDescription, privacy: .public)")
         }
-        inputActivity.forget(paneID: InputActivityTracker.key(for: currentTerminal))
 
         guard let persisted = try? await db.terminals.get(id: terminal.id),
               persisted.isParked else {
@@ -960,12 +670,14 @@ extension HibernationCoordinator {
         do {
             let socketPath = try HolderRendezvous.socketPath(
                 sessionID: terminal.id, environment: registry.environment)
+            // A park's let-go: the one a later wake of this row may undo.
             await registry.abandon(
                 terminalID: terminal.id,
                 handle: HolderHandle(
                     holderPID: reapHolder ? (terminal.holderPID ?? 0) : 0,
                     childPID: 0,
-                    socketPath: socketPath))
+                    socketPath: socketPath),
+                reason: .park)
         } catch {
             // The processes are not the concern: nothing here was going to be
             // signalled anyway. What does outlive this call is bookkeeping
@@ -1267,8 +979,8 @@ extension HibernationCoordinator {
             sessionsDir: sessionsDir, now: now())
         // Written here and not when the overlay was planned: the adopting
         // branch above launches nothing, and must leave the running process's
-        // overlay and statusline capture as they are.
-        let launchCommand = overlay.settle(carrying: sessionMod, command: spawnCommand)
+        // overlay as it is.
+        let launchCommand = overlay.settle(command: spawnCommand)
 
         let handle: HolderHandle
         do {
@@ -1302,8 +1014,10 @@ extension HibernationCoordinator {
                 startedAt: now())
         } catch {
             // A holder and a job no row names would be reclaimable by nothing,
-            // so undo the spawn from the failing call itself.
-            await registry.abandon(terminalID: terminal.id, handle: handle)
+            // so undo the spawn from the failing call itself. A park's let-go,
+            // not a teardown's: the row stays parked, and a later wake may
+            // bring the session back.
+            await registry.abandon(terminalID: terminal.id, handle: handle, reason: .park)
             logger.warning("wake: started a holder for \(terminal.id, privacy: .public) but could not record its pids, so it was abandoned: \(error.localizedDescription, privacy: .public)")
             return await refuse(
                 "the replacement agent started, but recording its process ids failed: \(error.localizedDescription)")
@@ -1393,6 +1107,28 @@ extension HibernationCoordinator {
     /// must not silently un-park a row over a session nobody is running, and a
     /// spawn that turns out to be unnecessary is refused by the registry rather
     /// than duplicated.
+    ///
+    /// **The second leg adopts the holder before it un-parks the row.** The
+    /// startup adoption that failed is the one nothing would repeat, and an
+    /// awake row with no reader is a session nobody drains — whose job cannot
+    /// finish exiting — that no park can end, and that only an attach would
+    /// adopt. So the wake takes the hand-over itself, and the row comes back
+    /// awake with a reader on it and its pids checked against what the holder
+    /// reported. The wait is bounded as an attach's is
+    /// (`HolderRegistry.adoptWithinAttachBudget`), and a hand-over still
+    /// running at the limit finishes on its own. If the hand-over fails, or is
+    /// still running, the row is un-parked regardless: a row parked over a
+    /// live child is the state this transport treats as worst, while an awake
+    /// row names live pids every reconciler can judge, and the next attach
+    /// adopts on demand (`HolderRegistry.adoptForAttach`). The wake clears the
+    /// park's let-go mark it found on those paths, because that attach refuses
+    /// a session this registry told to let go and the wake has just revived
+    /// it. A teardown's let-go is never the wake's to undo: found before the
+    /// adoption, the wake does not reach for the holder at all. After the
+    /// adoption, whatever it came to, `refusalToUnpark` keeps the row parked —
+    /// releasing any reader the wake published — for a daemon that is shutting
+    /// down, a teardown that let the session go meanwhile, or a session
+    /// released or let go anew while the wake waited.
     private func adoptLiveHolderInsteadOfRespawning(
         _ terminal: Terminal, registry: HolderRegistry
     ) async -> WakeResult? {
@@ -1411,7 +1147,46 @@ extension HibernationCoordinator {
                     of: HolderChildIdentity.anchor(of: terminal),
                     executableIsAcceptable: AgentReaper.isHolderChildExecutable,
                     signaller: signaller) == .same {
-            evidence = "its recorded child \(childPID) is identity-verified alive"
+            // Adopted before the row stops being parked, for the reason the
+            // header gives: un-parked without a reader, nothing drains it.
+            // Bounded like an attach's adoption, because this wake holds its
+            // claim and its caller's RPC for as long as it waits. The let-go
+            // is read before the wait. A teardown's let-go — a delete, an
+            // archive — means the session is going away and the wake does not
+            // reach for its holder at all; a park's is the one this wake
+            // exists to undo, and its mark tells it apart from any newer
+            // let-go that lands while the wake is adopting.
+            let foundLetGo = await registry.letGo(for: terminal.id)
+            if foundLetGo?.reason == .teardown {
+                return keepParkedOverATeardown(terminal)
+            }
+            let adoption = await registry.adoptWithinAttachBudget(terminal: terminal)
+            if let leftParked = await refusalToUnpark(
+                terminal, adoption: adoption, foundLetGo: foundLetGo, registry: registry) {
+                return leftParked
+            }
+            if case .success(_)? = adoption {
+                evidence = "its recorded child \(childPID) is identity-verified alive, and its "
+                    + "holder is now adopted"
+                await restoreHolderPIDsFromRegistry(terminal, registry: registry)
+            } else {
+                if case .failure(let error)? = adoption {
+                    evidence = "its recorded child \(childPID) is identity-verified alive, though "
+                        + "its holder could not be adopted, so the next attach will adopt it"
+                    logger.warning("wake: \(terminal.id, privacy: .public) is parked over a live holder that would not hand its pty over; un-parking it without a reader: \(error.localizedDescription, privacy: .public)")
+                } else {
+                    evidence = "its recorded child \(childPID) is identity-verified alive, and its "
+                        + "holder's adoption is still running"
+                    logger.notice("wake: the adoption of \(terminal.id, privacy: .public)'s live holder outlasted its budget; un-parking the row while the adoption finishes on its own")
+                }
+                // The wake revives this session on purpose, and it leaves the
+                // adoption to the next attach — which refuses a session this
+                // registry told to let go, as a park that reached `abandon`
+                // did. Only the park's mark the wake found is cleared; a newer
+                // let-go, or any teardown, has already kept the row parked.
+                await registry.clearLetGo(
+                    terminalID: terminal.id, ifUnchangedSince: foundLetGo?.mark)
+            }
         } else {
             return nil
         }
@@ -1419,9 +1194,12 @@ extension HibernationCoordinator {
         do {
             try await db.terminals.clearHibernated(id: terminal.id)
         } catch {
-            // Nothing was started and nothing is abandoned: the row is exactly
-            // as it was, still parked over its own live holder, and the next
-            // retry or the next daemon start reaches this same branch again.
+            // Nothing was spawned and nothing is abandoned: the row is still
+            // parked over its own live holder and still names its pids. If
+            // this wake adopted the holder, the reader stays — it is draining
+            // a live session — and the next retry takes the first leg;
+            // otherwise the next retry or the next daemon start reaches this
+            // same branch again.
             logger.error("wake: \(terminal.id, privacy: .public) is parked over a holder that is already running, but the parked marker could not be cleared: \(error.localizedDescription, privacy: .public)")
             return .respawnFailed(
                 reason: "this session's holder is already running, but clearing its parked "
@@ -1439,6 +1217,84 @@ extension HibernationCoordinator {
         // No incarnation: adopting a holder that was already running spawns
         // nothing, so there is no new session for a caller's wait to scope to.
         return .ok(sessionIncarnationID: nil)
+    }
+
+    /// Why a wake that reached for a parked row's live holder must leave the
+    /// row parked after all, or nil when it may un-park it. Asked after the
+    /// adoption, whatever it came to, and before the row stops being parked.
+    ///
+    /// Three answers keep it parked, and none can be read off the adoption's
+    /// result alone:
+    ///
+    /// - **The daemon is shutting down** (when nothing was adopted). Asked of
+    ///   the registry, because a shutdown that began while the adoption was
+    ///   in flight reaches it as a supersession, a budget timeout or the
+    ///   hand-over's own failure — never as `daemonShuttingDown`. The row
+    ///   stays parked for the next daemon's startup adoption, which adopts
+    ///   parked rows too.
+    /// - **A teardown let the session go** while the wake waited — a delete or
+    ///   an archive reaches `abandon` with no hibernation claim, so it can
+    ///   overlap a wake. Nothing may revive that session.
+    /// - **The session was released, or let go anew, while the wake waited**:
+    ///   the adoption was superseded, a let-go newer than the one the wake
+    ///   found stands, or — after an adoption that published — the reader is
+    ///   already gone again.
+    ///
+    /// When the wake did adopt, a keep-parked answer also releases that
+    /// reader, so nothing reads a session the row will not show as awake;
+    /// the teardown that caused it would release it too, and a second release
+    /// is a no-op.
+    private func refusalToUnpark(
+        _ terminal: Terminal,
+        adoption: Result<HolderReader, Swift.Error>?,
+        foundLetGo: HolderRegistry.LetGo?,
+        registry: HolderRegistry
+    ) async -> WakeResult? {
+        var adopted = false
+        var superseded = false
+        switch adoption {
+        case .success(_)?:
+            adopted = true
+        case .failure(let error)?:
+            if let refusal = error as? HolderRegistry.Error, case .superseded = refusal {
+                superseded = true
+            }
+        case nil:
+            break
+        }
+        if !adopted, await registry.isShuttingDown {
+            logger.notice("wake: \(terminal.id, privacy: .public) is parked over a live holder, but the daemon is shutting down and adopts nothing; leaving the row parked for the next daemon to adopt")
+            return .respawnFailed(
+                reason: "the daemon is shutting down, so this session stays parked; its holder is "
+                    + "still running and the next daemon will adopt it")
+        }
+        let current = await registry.letGo(for: terminal.id)
+        let tornDown = current?.reason == .teardown
+        let letGoAnew = current != nil && current?.mark != foundLetGo?.mark
+        var readerGone = false
+        if adopted {
+            readerGone = await registry.reader(for: terminal.id) == nil
+        }
+        guard tornDown || superseded || letGoAnew || readerGone else { return nil }
+        if adopted {
+            await registry.release(terminalID: terminal.id)
+        }
+        if tornDown {
+            return keepParkedOverATeardown(terminal)
+        }
+        logger.notice("wake: \(terminal.id, privacy: .public) was released or let go while this wake was adopting its holder, so the row stays parked")
+        return .respawnFailed(
+            reason: "this session was released while the wake was adopting its holder, so it "
+                + "stays parked")
+    }
+
+    /// The answer for a wake that finds the session let go by a teardown: the
+    /// row stays parked, and nothing is adopted or kept.
+    private func keepParkedOverATeardown(_ terminal: Terminal) -> WakeResult {
+        logger.notice("wake: \(terminal.id, privacy: .public) is being torn down — its holder was let go by a delete, an archive or another teardown — so the wake leaves the row parked")
+        return .respawnFailed(
+            reason: "this session was released while the wake was adopting its holder, so it "
+                + "stays parked")
     }
 
     /// Put the registry's own view of a session's processes back onto its row.

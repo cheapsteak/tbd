@@ -2,6 +2,7 @@ import Foundation
 import TestSupport
 import Testing
 @testable import TBDShared
+import TBDKernel
 
 /// Where a fixture's own scratch root is minted, and why it has to be there.
 ///

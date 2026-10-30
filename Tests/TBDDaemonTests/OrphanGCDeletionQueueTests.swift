@@ -21,13 +21,29 @@ struct OrphanGCDeletionQueueTests {
         db: TBDDatabase, git: GitManager = GitManager(), now: @escaping @Sendable () -> Date = { Date() },
         beforeInterruptedArchiveReap: (@Sendable () async -> Void)? = nil
     ) -> OrphanGC {
-        OrphanGC(
+        // Every base the sweep walks sits under a root nothing creates. The
+        // scratch-space pool's queue is drained whatever the clock says, so a
+        // sweep left on the process-global `TBD_HOME` would drain entries
+        // another suite queued there.
+        let root = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdgcdq"), isDirectory: true)
+        return OrphanGC(
             db: db, git: git,
             broadcast: { _ in },
             liveCWDsProvider: { [] },
-            scratchpadBase: nil,
+            scratchpadBase: root.appendingPathComponent("s", isDirectory: true),
             now: now,
-            beforeInterruptedArchiveReap: beforeInterruptedArchiveReap
+            beforeInterruptedArchiveReap: beforeInterruptedArchiveReap,
+            profileDirBase: root.appendingPathComponent("p", isDirectory: true),
+            hangStackBase: root.appendingPathComponent("hs", isDirectory: true),
+            holdersBase: root.appendingPathComponent("h", isDirectory: true),
+            attachmentsBase: root.appendingPathComponent("a", isDirectory: true),
+            remoteTranscriptsEnvironment: ["TBD_HOME": root.path],
+            reposBase: root.appendingPathComponent("repos", isDirectory: true),
+            sessionsBase: root.appendingPathComponent("se", isDirectory: true),
+            devServersBase: root.appendingPathComponent("ds", isDirectory: true),
+            retainedTranscriptsBase: root.appendingPathComponent("rt", isDirectory: true),
+            scratchSpacesBase: root.appendingPathComponent("sc", isDirectory: true),
+            worktreesBase: root.appendingPathComponent("wt", isDirectory: true)
         )
     }
 

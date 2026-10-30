@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 import TestSupport
 
 /// One live Claude terminal, a dry-run tmux that records what it was asked to

@@ -25,7 +25,7 @@ private let logger = Logger(subsystem: "com.tbd.app", category: "markdown")
 ///
 /// Every entry point takes the themes directory and the `UserDefaults` instance
 /// as parameters, defaulted to production values. Tests pass a tmp directory and
-/// a `UserDefaults(suiteName:)` — they must never touch `~/tbd` or the
+/// the defaults of a `TestDefaultsSuite` — they must never touch `~/tbd` or the
 /// developer's real `TBDApp.plist`.
 enum MarkdownStylesheet {
 

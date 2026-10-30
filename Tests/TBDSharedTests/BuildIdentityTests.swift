@@ -154,6 +154,31 @@ struct BuildIdentityTests {
         #expect(identity.origin == .stamp)
     }
 
+    /// The build wrapper stamps the tree's schema epoch, which the daemon
+    /// reads from the kept rollback bundle before dropping a retired column.
+    @Test func schemaEpochDecodesWhenStamped() throws {
+        let json = #"{"commit":"cccccccccccccccccccccccccccccccccccccccc","schemaEpoch":3}"#
+        let identity = try JSONDecoder().decode(BuildIdentity.self, from: Data(json.utf8))
+        #expect(identity.schemaEpoch == 3)
+    }
+
+    /// A sidecar stamped before the wrapper recorded the epoch still decodes,
+    /// with no epoch rather than a failure.
+    @Test func schemaEpochIsNilInAnOlderSidecar() throws {
+        let identity = try JSONDecoder().decode(BuildIdentity.self, from: Data(Self.stampJSON.utf8))
+        #expect(identity.commit == "0123456789abcdef0123456789abcdef01234567")
+        #expect(identity.schemaEpoch == nil)
+    }
+
+    @Test func schemaEpochSurvivesRelabellingAndTheWire() throws {
+        let stamped = BuildIdentity(
+            commit: "d", shortCommit: "d123456", branch: "main", schemaEpoch: 2)
+        #expect(stamped.withOrigin(.worktreeHead).schemaEpoch == 2)
+        let decoded = try JSONDecoder().decode(
+            BuildIdentity.self, from: JSONEncoder().encode(stamped))
+        #expect(decoded == stamped)
+    }
+
     @Test func dirtyBuildsSaySoInTheDisplayForm() {
         let clean = BuildIdentity(commit: "c", shortCommit: "c123456", branch: "main")
         let dirty = BuildIdentity(

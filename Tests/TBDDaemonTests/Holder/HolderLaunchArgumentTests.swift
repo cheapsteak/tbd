@@ -3,6 +3,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// What a holder's command line may contain, and where its launch request
 /// travels instead.
@@ -155,6 +156,63 @@ struct HolderLaunchArgumentTests {
         let decoded = try JSONDecoder().decode(
             HolderLaunchRequest.self, from: Self.readToEndOfFile(descriptor))
         #expect(decoded == big)
+    }
+
+    /// Neither end of the channel may reach a child the daemon starts for any
+    /// other reason. Nearly all of those go through `Foundation.Process`, which
+    /// closes nothing that lacks `FD_CLOEXEC`: a stray copy of the write end
+    /// keeps the holder from its end of file, and a stray copy of the read end
+    /// hands that child the session's credentials.
+    ///
+    /// Non-vacuous: a plain `socketpair` is asserted inheritable first, so the
+    /// flag cannot be something the platform supplies on its own.
+    @Test func bothEndsOfTheLaunchChannelAreCloseOnExec() throws {
+        var plain: [Int32] = [-1, -1]
+        try #require(socketpair(AF_UNIX, SOCK_STREAM, 0, &plain) == 0)
+        let plainIsInheritable = !Self.isCloseOnExec(plain[0]) && !Self.isCloseOnExec(plain[1])
+        close(plain[0])
+        close(plain[1])
+        #expect(
+            plainIsInheritable,
+            "a plain socketpair arrives close-on-exec, so the assertions below prove nothing")
+
+        let (writeEnd, readEnd) = try HolderSpawner.makeLaunchSocketPair(payloadBytes: 0)
+        defer {
+            close(writeEnd)
+            close(readEnd)
+        }
+        #expect(
+            Self.isCloseOnExec(writeEnd),
+            """
+            the write end is inheritable, so any child the daemon starts while it is open \
+            withholds the holder's end of file until that child exits
+            """)
+        #expect(
+            Self.isCloseOnExec(readEnd),
+            """
+            the read end is inheritable, so any child the daemon starts before the holder's \
+            spawn can read the session's launch request
+            """)
+    }
+
+    /// The same flag on the descriptor `launchHolder` holds open across its
+    /// `posix_spawn`, reached through the production entry point. Its receive
+    /// buffer carries the whole request.
+    @Test func theDescriptorCarryingTheRequestIsCloseOnExec() throws {
+        let descriptor = try HolderSpawner.makeLaunchPayloadChannel(Self.launch)
+        defer { close(descriptor) }
+
+        #expect(
+            Self.isCloseOnExec(descriptor),
+            """
+            the descriptor carrying the launch request is inheritable, so a child the daemon \
+            starts before the holder's spawn can read the session's credentials
+            """)
+    }
+
+    private static func isCloseOnExec(_ fd: Int32) -> Bool {
+        let flags = fcntl(fd, F_GETFD)
+        return flags >= 0 && (flags & FD_CLOEXEC) != 0
     }
 
     private static func readToEndOfFile(_ descriptor: Int32) -> Data {

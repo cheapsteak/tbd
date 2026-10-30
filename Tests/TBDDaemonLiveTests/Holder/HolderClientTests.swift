@@ -4,6 +4,7 @@ import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The daemon-side half of the holder rendezvous, driven against real holder
 /// processes spawned through the real `HolderSpawner`.

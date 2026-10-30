@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import os
 import TBDShared
+import TBDKernel
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "gc")
 

@@ -17,8 +17,8 @@ Exactly one thing writes the reason: Claude Code's `Notification` hook, bridged
 through `tbd hooks notification` into `handleTerminalNotificationEvent`. Exactly
 one thing retracts it: **a later activity observation.** `setActivityState` nils
 the reason columns unconditionally — it is the superseding rail — and the
-same-value path calls `clearAwaitingInputReasonIfNotNewer` so a repeated state
-still supersedes a not-newer wait. Activity observations arrive from a small set
+same-value path clears a not-newer wait as well, so a repeated state still
+supersedes it. Activity observations arrive from a small set
 of hooks the TBD overlay registers: `UserPromptSubmit` reports working, `Stop`
 and `StopFailure` report idle, `SessionStart` re-establishes identity, and the
 `AskUserQuestion` pre/post pair brackets a question.
@@ -141,9 +141,10 @@ different routes. **Two of them reconcile**, through one shared helper:
 
 - **`terminal.list`** — the app's poll, every two seconds while the app is
   connected. This is the path that heals a row for the sidebar.
-- **`SupervisionReadoutBuilder`** — loads rows one at a time for a readout, and
-  can run with no app attached, which is exactly the case `terminal.list` cannot
-  cover.
+- **`terminal.send`'s opt-in awaiting-input gate** — asks the same question of
+  the one row it is about to paste into, so a prompt the session has already
+  moved past does not refuse the send
+  ([`2026-09-05-transcript-composer-design.md`](2026-09-05-transcript-composer-design.md)).
 
 **The third reader does not reconcile.** `handleSessionStates`, backing the
 `session.states` RPC, reads the same column through `SessionStateFactGatherer`
@@ -154,7 +155,7 @@ this is sound rather than an oversight:
   read-only reporter that also mutated the record it reports would give the same
   column two writers on two schedules.
 - A stale row it reads is transient. `terminal.list` heals it on its own polling
-  cadence, so `session.states` sees the corrected value on a later cycle without
+  cadence, so `session.states` sees the corrected value on a later call without
   doing anything itself.
 - Most importantly, the resolver does not report a stale prompt confidently. It
   independently compares the transcript's append stamp against the reason's
@@ -170,14 +171,13 @@ So the precision the supersession buys is available on the paths that write, and
 the path that only reads stays honest about what it does not know.
 
 There is no sweep and no timer. The check runs only for terminals holding a
-standing `.promptOnScreen` reason, and both reconciling call sites already
-perform far heavier transcript I/O on the same pass:
-`CodexTranscriptActivityTracker` reads Codex transcripts on every
-`terminal.list`, `ClaudeDelegationTracker` opens and reads a byte-limited tail of
-the JSONL for every terminal that just ended a turn, and the readout builder
-samples session counters from the transcript per agent. A background sweep would
-perform the same stats on a worse schedule and add a timer to own, name, and
-test.
+standing `.promptOnScreen` reason. `terminal.list` already performs far heavier
+transcript I/O on the same pass — `CodexTranscriptActivityTracker` reads Codex
+transcripts on every `terminal.list`, and `ClaudeDelegationTracker` opens and
+reads a byte-limited tail of the JSONL for every terminal that just ended a
+turn — and the send gate asks it of one row per gated send. A background sweep
+would perform the same stats on a worse schedule and add a timer to own, name,
+and test.
 
 ## Edges
 
@@ -197,10 +197,9 @@ something is worse, because it hides the one row that needs attention.
   pending prompt raised.
 - **Concurrency** — the stat and the delta read happen outside the database, so
   the clear re-reads the stored fingerprint inside the write transaction and
-  clears only if it still matches what was compared. This mirrors
-  `clearAwaitingInputReasonIfNotNewer`, whose comment explains why: the row a
-  handler read before an unbounded stretch of async work may already be stale,
-  and `handleTerminalNotificationEvent` runs concurrently on its own connection.
+  clears only if it still matches what was compared, because the row a handler
+  read before an unbounded stretch of async work may already be stale, and
+  `handleTerminalNotificationEvent` runs concurrently on its own connection.
   The fingerprint refresh on a sidechain-only append takes the same conditional
   form, so a reason recorded while the delta was being read is not overwritten
   by a measurement of the file as it stood before it.

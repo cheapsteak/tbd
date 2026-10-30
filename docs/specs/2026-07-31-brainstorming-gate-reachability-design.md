@@ -70,8 +70,8 @@ earlier session makes the spec a cheap transcription — not an unnecessary one.
 cannot read that material, so those decisions are the ones that most need writing down.
 
 **A human answers the brainstorming questions.** An agent may not answer its own. If none is
-available, stop — do not proceed on assumed answers. Agents, including the nightwatch desk, may
-not originate feature work; file it for a human instead.
+available, stop — do not proceed on assumed answers. Agents may not originate feature work; file
+it for a human instead.
 
 Bug fixes and minor UI changes need no spec. If a larger change genuinely needs none, say so in
 the PR description. This is convention, not a gate — no linter can see whether thinking happened.
@@ -204,6 +204,3 @@ concept — the gap is that nothing surfaces them to a session without a machine
 - **A Codex session must choose to read the file.** There is no roster entry making
   `tbd-brainstorming` discoverable by description-matching the way a real skill is. The follow-up
   above is what closes this.
-- **The nightwatch desk-prompt follow-up never landed.** The 2026-07-26 design left it pending on
-  PR #506 and nothing in `Sources/` matches it today. Its decided text reuses "the same four
-  blast-radius triggers"; whoever lands it should use the inverted definition instead.

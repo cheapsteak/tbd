@@ -43,6 +43,11 @@ public struct BuildIdentity: Codable, Sendable, Equatable {
     /// loader fills it in, because it is a fact about the *reading*, not about
     /// the build.
     public let origin: BuildIdentityOrigin
+    /// The `SchemaEpoch.current` of the tree this binary was built from: how
+    /// many column retirements it had made. Nil for a build stamped before
+    /// the build wrapper recorded it, which the column reconciler reads as
+    /// epoch 0.
+    public let schemaEpoch: Int?
 
     public init(
         commit: String,
@@ -51,7 +56,8 @@ public struct BuildIdentity: Codable, Sendable, Equatable {
         builtAt: String? = nil,
         sourceWorktree: String? = nil,
         dirty: Bool = false,
-        origin: BuildIdentityOrigin = .stamp
+        origin: BuildIdentityOrigin = .stamp,
+        schemaEpoch: Int? = nil
     ) {
         self.commit = commit
         self.shortCommit = shortCommit
@@ -60,6 +66,7 @@ public struct BuildIdentity: Codable, Sendable, Equatable {
         self.sourceWorktree = sourceWorktree
         self.dirty = dirty
         self.origin = origin
+        self.schemaEpoch = schemaEpoch
     }
 
     public init(from decoder: Decoder) throws {
@@ -76,6 +83,7 @@ public struct BuildIdentity: Codable, Sendable, Equatable {
         // Absent in the on-disk sidecar, present on the wire. A stamp read off
         // disk is by definition `.stamp`; the loader overrides for the fallback.
         origin = try c.decodeIfPresent(BuildIdentityOrigin.self, forKey: .origin) ?? .stamp
+        schemaEpoch = try c.decodeIfPresent(Int.self, forKey: .schemaEpoch)
     }
 
     /// The same identity, re-labelled with how it was learned.
@@ -83,7 +91,7 @@ public struct BuildIdentity: Codable, Sendable, Equatable {
         BuildIdentity(
             commit: commit, shortCommit: shortCommit, branch: branch,
             builtAt: builtAt, sourceWorktree: sourceWorktree, dirty: dirty,
-            origin: origin)
+            origin: origin, schemaEpoch: schemaEpoch)
     }
 
     /// Short display form: `<short>` or `<short>-dirty`.

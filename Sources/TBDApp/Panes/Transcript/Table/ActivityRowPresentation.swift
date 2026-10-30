@@ -524,6 +524,11 @@ enum ActivityRowFormatter {
         if kind == .taskNotification {
             return taskNotification(id: id, text: text, timestamp: timestamp)
         }
+        // A compaction marker reads as a statement of what happened, not as a
+        // labelled reminder — see `compactSummary` below.
+        if kind == .compactSummary {
+            return compactSummary(id: id, text: text, timestamp: timestamp)
+        }
 
         let label: String = {
             switch kind {
@@ -536,6 +541,7 @@ enum ActivityRowFormatter {
             // Covers both an injected CLAUDE.md and an @-mentioned file body;
             // the source segment below carries the path that tells them apart.
             case .nestedMemory: return "file"
+            case .compactSummary: return "compact"
             case .other: return "info"
             }
         }()
@@ -597,6 +603,39 @@ enum ActivityRowFormatter {
             }
         }
         return "\(count) chars" // unreachable: loop always returns on its last iteration
+    }
+
+    // MARK: Compact summary (a compacted conversation)
+
+    /// Leading glyph for a compaction marker, shared by this cell,
+    /// `SystemReminderRow` and the overlay's title bar so the three agree.
+    static let compactSummaryIcon = "arrow.down.right.and.arrow.up.left"
+
+    /// The compaction marker's title, shared with `SystemReminderRow`.
+    static let compactSummaryTitle = "Conversation compacted"
+
+    /// One line marking where Claude Code compacted the conversation: the
+    /// compress glyph, "Conversation compacted", and the size of the summary it
+    /// wrote in place of the earlier turns. The summary itself opens in the
+    /// overlay on click. No badge: the title already says what the row is.
+    private static func compactSummary(
+        id: String, text: String, timestamp: Date?
+    ) -> ActivityRowPresentation {
+        let size = injectedSize(text: text, truncatedTo: nil)
+        return ActivityRowPresentation(
+            iconSystemName: compactSummaryIcon,
+            titleSegments: [
+                ActivityRowSegment(text: compactSummaryTitle, style: .primary),
+                ActivityRowSegment(text: "·", style: .tertiary),
+                ActivityRowSegment(text: size, style: .tertiary),
+            ],
+            timestamp: timestamp,
+            isError: false,
+            badges: [],
+            openTargetID: id,
+            titleTruncation: .byTruncatingTail,
+            accessibilityLabel: "\(compactSummaryTitle), summary of \(size)"
+        )
     }
 
     // MARK: Task notification (background-task activity row)

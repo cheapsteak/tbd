@@ -3,23 +3,6 @@ import Foundation
 @testable import TBDApp
 @testable import TBDShared
 
-@MainActor
-@Suite("showScratchSection setting")
-struct ShowScratchSectionSettingTests {
-    @Test func defaultsToOn() {
-        let suiteName = "scratch-\(UUID().uuidString)"
-        let d = UserDefaults(suiteName: suiteName)!
-        defer { d.removePersistentDomain(forName: suiteName) }
-        // No stored value → @AppStorage default (true) applies at the view; assert
-        // the key convention and both explicit branches persist as written.
-        #expect(d.object(forKey: AppState.showScratchSectionKey) == nil)
-        d.set(false, forKey: AppState.showScratchSectionKey)
-        #expect(d.bool(forKey: AppState.showScratchSectionKey) == false)
-        d.set(true, forKey: AppState.showScratchSectionKey)
-        #expect(d.bool(forKey: AppState.showScratchSectionKey) == true)
-    }
-}
-
 /// Direct, falsifiable proof of the sidebar's Scratch-section gate, mirroring
 /// `ScratchExclusionTests.pollableWorktreesDiscriminatesScratchFromRegular`'s
 /// pattern of testing the extracted pure function instead of live view

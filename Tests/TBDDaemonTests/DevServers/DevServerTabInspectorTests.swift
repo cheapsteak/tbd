@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 @Suite("Dev server tab inspection")
 struct DevServerTabInspectorTests {

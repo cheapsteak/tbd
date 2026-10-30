@@ -287,9 +287,9 @@ struct CloneRepositoryModelTests {
     // MARK: - Fixtures
 
     private func withDefaults(_ body: (UserDefaults) async throws -> Void) async rethrows {
-        let name = "TBDAppTests.CloneRepositoryModel.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defer { defaults.removePersistentDomain(forName: name) }
+        let suite = TestDefaultsSuite("TBDAppTests.CloneRepositoryModel")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try await body(defaults)
     }
 

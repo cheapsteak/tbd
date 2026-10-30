@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDApp
+import TestSupport
 
 /// Tests for the WIP `enableTerminalAutoResize` feature flag. The flag gates
 /// the main-area resize broadcast to the daemon and the per-create cell
@@ -13,7 +14,7 @@ import Testing
 /// An earlier version of these tests mutated `.standard`, which clobbered the
 /// live app's preferences mid-test and triggered a real Claude `/exit`. Every
 /// test below now constructs `AppState(userDefaults:)` with a per-test
-/// `UserDefaults(suiteName:)` so `.standard` is never touched.
+/// `TestDefaultsSuite` so `.standard` is never touched.
 
 @MainActor
 @Suite("Terminal auto-resize flag")
@@ -32,10 +33,10 @@ struct TerminalAutoResizeFlagTests {
         _ enabled: Bool,
         _ body: (AppState, UserDefaults) throws -> Void
     ) rethrows {
-        let suiteName = "TBDAppTests.TerminalAutoResize.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let suite = TestDefaultsSuite("TBDAppTests.TerminalAutoResize")
+        let defaults = suite.defaults
         defer {
-            defaults.removePersistentDomain(forName: suiteName)
+            suite.tearDown()
         }
         defaults.set(enabled, forKey: key)
         let state = AppState(userDefaults: defaults)

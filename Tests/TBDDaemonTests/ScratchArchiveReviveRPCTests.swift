@@ -1,4 +1,5 @@
 import Testing
+import DaemonTestSupport
 import TestSupport
 import Foundation
 @testable import TBDDaemonLib
@@ -281,8 +282,9 @@ struct WorktreeArchiveScratchRoutingRPCTests {
     }
 
     /// `--force` is accepted and changes nothing on this path. What it governs
-    /// on the repo branch is phase 2's hook skip, and the scratch body has no
-    /// phase 2; the children refusal it does NOT govern is asserted in
+    /// on the repo branch is the uncommitted-changes guard and phase 2's hook
+    /// skip, and the scratch body deletes no folder and has no phase 2; the
+    /// children refusal it does NOT govern is asserted in
     /// `archiveRefusesAScratchSpaceWithAnActiveChild`.
     @Test func forceIsAcceptedAndChangesNothingOnAScratchSpace() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
@@ -397,10 +399,10 @@ struct WorktreeArchiveScratchRoutingRPCTests {
 
         // `--force` must NOT bypass it, because it does not bypass it for a
         // repo worktree arriving through this same door either:
-        // `handleWorktreeArchive` never forwards `force` to
-        // `beginArchiveWorktree`, so that assertion always runs there too. One
-        // flag meaning opposite things on the two branches of one RPC is the
-        // divergence this asserts against.
+        // `handleWorktreeArchive` never passes `force` on as
+        // `beginArchiveWorktree`'s own `force`, so that assertion always runs
+        // there too. One flag meaning opposite things on the two branches of
+        // one RPC is the divergence this asserts against.
         let forced = await router.handle(try RPCRequest(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: parent.id, force: true)))
@@ -441,32 +443,6 @@ struct WorktreeArchiveScratchRoutingRPCTests {
         #expect(try await db.worktrees.get(id: parent.id)?.status == .active)
     }
 
-    /// The Watch Desk is a scratch row, so the routing reaches it. Its lease row
-    /// and lease credential file have no reconciler, and only
-    /// `DeskSessionManager.closeDeskSession` releases them, so the generic body
-    /// must refuse rather than half-retire the desk.
-    @Test func archiveRefusesTheNightwatchWatchDesk() async throws {
-        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
-        let db = try TBDDatabase(inMemory: true)
-        let (router, _) = makeRouter(db: db)
-        let desk = try await db.worktrees.createScratch(
-            name: "watch-desk", displayName: NightwatchDeskPrompts.deskDisplayName,
-            path: "/tmp/desk-\(UUID().uuidString)", tmuxServer: "tbd-x")
-        #expect(desk.isNightwatchDesk)
-
-        for method in [RPCMethod.worktreeArchive, RPCMethod.scratchArchive] {
-            let archive = await router.handle(
-                method == RPCMethod.worktreeArchive
-                    ? try RPCRequest(method: method,
-                                     params: WorktreeArchiveParams(worktreeID: desk.id))
-                    : try RPCRequest(method: method,
-                                     params: ScratchArchiveParams(worktreeID: desk.id)))
-            #expect(!archive.success)
-            #expect(archive.error?.contains("Watch Desk") == true)
-            #expect(try await db.worktrees.get(id: desk.id)?.status == .active)
-        }
-    }
-
     /// `archivedAt` is the GC grace clock `OrphanProcessCollector` reaps from,
     /// so a retry must not re-stamp it and push the reap of a wedged agent out
     /// by another grace window.
@@ -492,49 +468,6 @@ struct WorktreeArchiveScratchRoutingRPCTests {
             return false
         }
         #expect(archived.count == 1)
-    }
-
-    /// The desk needs its own revive guard, not archive's: `closeDeskSession`
-    /// archives the desk row through the store directly and changes neither
-    /// `repoID` nor the display name, so the archived row still reads as the
-    /// desk and would otherwise pass every guard revive has. Reviving it would
-    /// report an active desk with no lease, no credential file and no terminals
-    /// behind it. Reachable from any client only because of this PR's routing.
-    @Test func reviveRefusesAnArchivedNightwatchWatchDesk() async throws {
-        let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
-        let db = try TBDDatabase(inMemory: true)
-        let (router, deltas) = makeRouter(db: db)
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("desk-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let desk = try await db.worktrees.createScratch(
-            name: "watch-desk", displayName: NightwatchDeskPrompts.deskDisplayName,
-            path: dir.path, tmuxServer: "tbd-x")
-        // Exactly what `closeDeskSession` does: archive the row through the
-        // store, touching neither `repoID` nor the display name.
-        try await db.worktrees.archive(id: desk.id)
-        let archived = try await db.worktrees.get(id: desk.id)
-        #expect(archived?.isNightwatchDesk == true)
-        // The folder is present, so the fileExists guard is not what refuses.
-        #expect(FileManager.default.fileExists(atPath: dir.path))
-
-        for method in [RPCMethod.worktreeRevive, RPCMethod.scratchRevive] {
-            let revive = await router.handle(
-                method == RPCMethod.worktreeRevive
-                    ? try RPCRequest(method: method,
-                                     params: WorktreeReviveParams(worktreeID: desk.id))
-                    : try RPCRequest(method: method,
-                                     params: ScratchReviveParams(worktreeID: desk.id)))
-            #expect(!revive.success)
-            #expect(revive.error?.contains("Watch Desk") == true)
-            #expect(try await db.worktrees.get(id: desk.id)?.status == .archived)
-        }
-        // And no revive delta told any client the desk came back.
-        #expect(!deltas.snapshot().contains {
-            if case .worktreeRevived(let d) = $0 { return d.worktreeID == desk.id }
-            return false
-        })
     }
 
     /// The one refusal that can follow a committed write. Forced deterministically

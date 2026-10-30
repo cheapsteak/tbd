@@ -25,8 +25,8 @@ submits normally.
 uses) and send Enter as a separate keystroke. The explicit `ESC[201~` terminator
 makes the Enter unambiguously outside the paste, so it can never be absorbed.
 This is a root-cause fix, TUI-agnostic, and empirically verified to submit large
-multi-line messages. Optionally layer a verify-and-retry step so the unattended
-(nightwatch) path can *detect* a non-submit rather than trust it blindly.
+multi-line messages. Optionally layer a verify-and-retry step so an unattended
+caller can *detect* a non-submit rather than trust it blindly.
 
 For messages that must arrive without touching a user's in-progress composer,
 `terminal.send` is the wrong abstraction even when submission is reliable.
@@ -160,9 +160,9 @@ consumed (input box cleared / no residual `[Pasted text]`); on a detected
 non-submit, retry Enter with bounded attempts, and return a real
 success/failure so the CLI exit code / RPC result can be trusted.
 - **Pros:** makes the silent non-submit **detectable and self-healing** — the
-  thing the unattended nightwatch path most needs (today `dispatch()` in
-  `NightwatchSkillContent.swift:405` fires `--submit` and returns `True`
-  unconditionally, so a drop is invisible). Defense-in-depth on top of Option 2.
+  thing an unattended caller most needs (a caller that fires `--submit` and
+  reports success unconditionally cannot see a drop). Defense-in-depth on top of
+  Option 2.
 - **Cons:** TUI-coupled — "did it submit?" needs per-TUI heuristics (Claude vs
   Codex render differently); capture is async so it races the render (needs
   bounded polling, cf. condition-based waiting); a wrong "not submitted" verdict
@@ -179,7 +179,7 @@ know). Folds into Option 3.
    proven in-repo mechanism, and is TUI-agnostic. Add tests for both branches
    (bracketed TUI submit; bare shell submit) per the repo's branch-coverage rule.
 2. **Then add Option 3 for the unattended path**, scoped to the agent TUIs, with
-   bounded retry and a trustworthy exit code that `nightwatch dispatch()` checks —
+   bounded retry and a trustworthy exit code that unattended callers check —
    so a genuine drop pages/logs instead of silently reporting success.
 
 The task's stated hypothesis ("send a separate Enter after the paste settles") is
@@ -194,9 +194,9 @@ waiting for it to "settle." Bracketing removes the race; waiting only narrows it
    escape/control sequences through `--text` that bracketing would neutralize? (I
    believe not — `send-keys -l` is already literal-only.)
 2. **Include the verify-and-retry layer (Option 3) now, or ship Option 2 and
-   observe first?** For nightwatch, detectability is the higher-value half.
+   observe first?** For unattended callers, detectability is the higher-value half.
 3. **Should `--submit`'s exit code become meaningful** (non-zero on a confirmed
-   non-submit)? That's a CLI-contract change nightwatch could then trust.
+   non-submit)? That's a CLI-contract change unattended callers could then trust.
 4. **Codex live confirmation:** I confirmed Claude Code end-to-end. The mechanism
    is protocol-level (both TUIs enable `?2004h`), but want me to spin up a Codex
    pane to confirm identical behavior before implementing?
@@ -241,7 +241,6 @@ wrongly detected a stuck submit) and coupled the daemon RPC layer to brittle Cla
 **Caveat (accepted):** the spike tested Claude Code only, not Codex. If a future/other agent
 TUI toggles `?2004l` while its composer is live, the silent-non-submit risk returns for that
 TUI; the fix then is a PROPER loud detector (report the drop through the RPC / exit code), not
-a silent retry. Also note nightwatch's `dispatch()` still returns success unconditionally
-without inspecting the result — a separate latent gap, out of scope here.
+a silent retry.
 
 **Exit-code semantics (Option 4)** remain deferred (documented as open question in this doc).

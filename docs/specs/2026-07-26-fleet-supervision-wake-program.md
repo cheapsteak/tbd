@@ -1,7 +1,9 @@
 # Fleet supervision — waking parked sessions: the wake program
 
-Status: **normative sub-document of the fleet-supervision design.** Extracted
-from §4 of
+Status: **retired.** Fleet supervision is retired: its implementation has been
+removed from TBD, and this document is kept as the design record.
+
+A normative sub-document of the fleet-supervision design, extracted from §4 of
 [`2026-07-26-fleet-supervision-design.md`](2026-07-26-fleet-supervision-design.md)
 to keep that document readable; it carries the same authority as the section it
 came from, and `design §N` below refers to that document's sections. It

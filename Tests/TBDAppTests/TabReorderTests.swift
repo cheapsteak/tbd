@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 // DaemonClient is a concrete actor (no protocol), so we can't inject a stub.
 // These tests verify pure-Swift state mutations on AppState — the persistence
@@ -12,15 +13,15 @@ import TBDShared
 /// which on this unbundled executable is the developer's real TBDApp.plist
 /// (selection changes save navigation history there).
 @MainActor
-private func makeIsolatedAppState() -> (AppState, String) {
-    let suiteName = "TBDAppTests.TabReorder.\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suiteName)!
-    return (AppState(userDefaults: defaults), suiteName)
+private func makeIsolatedAppState() -> (AppState, TestDefaultsSuite) {
+    let suite = TestDefaultsSuite("TBDAppTests.TabReorder")
+    let defaults = suite.defaults
+    return (AppState(userDefaults: defaults), suite)
 }
 
 @MainActor
-private func tearDown(_ suiteName: String) {
-    UserDefaults().removePersistentDomain(forName: suiteName)
+private func tearDown(_ suite: TestDefaultsSuite) {
+    suite.tearDown()
 }
 
 @MainActor

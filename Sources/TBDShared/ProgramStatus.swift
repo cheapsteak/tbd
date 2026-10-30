@@ -1,5 +1,4 @@
 import Foundation
-import os
 
 /// Constants of the Program Status Protocol (OSC 7501): a program running in
 /// a terminal reports its own state (working, blocked, done, ...) through an
@@ -253,24 +252,6 @@ public enum ProgramStatusParser {
         }
         guard let data = Data(base64Encoded: padded) else { return nil }
         return truncatedUTF8([UInt8](data), maxBytes: maxBytes)
-    }
-}
-
-/// A lock-guarded Bool, readable synchronously from any thread (the SwiftTerm
-/// parse thread reads it inside `registerOscHandler`).
-public final class ProgramStatusGate: Sendable {
-    private let state: OSAllocatedUnfairLock<Bool>
-
-    public init(enabled: Bool = false) {
-        state = OSAllocatedUnfairLock(initialState: enabled)
-    }
-
-    public var isEnabled: Bool {
-        state.withLock { $0 }
-    }
-
-    public func set(_ enabled: Bool) {
-        state.withLock { $0 = enabled }
     }
 }
 

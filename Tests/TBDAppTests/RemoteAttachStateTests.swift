@@ -38,9 +38,9 @@ final class ExitReportRecorder {
 @Suite("Remote attach state")
 struct RemoteAttachStateTests {
     private func withState(_ body: (AppState) -> Void) {
-        let suiteName = "TBDAppTests.RemoteAttachState.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachState")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         body(AppState(userDefaults: defaults))
     }
 
@@ -723,9 +723,9 @@ struct RemoteAttachStateTests {
     /// through the injected reporter seam — tests must never reach the real
     /// daemon socket.
     @Test func authExitReportsTheExitCodeToTheDaemon() async {
-        let suiteName = "TBDAppTests.RemoteAttachState.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachState")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let recorder = ExitReportRecorder()
         state.remoteAttachExitReporter = { provider, sessionID, exitCode in
@@ -742,9 +742,9 @@ struct RemoteAttachStateTests {
     /// at all, and a transport failure is handled entirely app-side by
     /// reconnect backoff.
     @Test func cleanAndUnexpectedExitsDoNotReportToTheDaemon() async {
-        let suiteName = "TBDAppTests.RemoteAttachState.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("TBDAppTests.RemoteAttachState")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let recorder = ExitReportRecorder()
         state.remoteAttachExitReporter = { provider, sessionID, exitCode in

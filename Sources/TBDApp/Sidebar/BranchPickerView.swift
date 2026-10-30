@@ -219,7 +219,7 @@ struct BranchPickerRow: View {
         .onHover { isHovered = $0 }
     }
 
-    /// `PR #454` for same-repo, `zionts · PR #454` for fork PRs; dimmed for drafts.
+    /// `PR #454` for same-repo, `octocat · PR #454` for fork PRs; dimmed for drafts.
     private func prPill(_ pr: OpenPRInfo) -> some View {
         let label = pr.isCrossRepository && !pr.headOwner.isEmpty
             ? "\(pr.headOwner) · PR #\(pr.number)"

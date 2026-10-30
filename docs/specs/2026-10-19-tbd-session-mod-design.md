@@ -2,8 +2,8 @@
 
 TBD parks idle Claude sessions to free memory and revives them on demand. A
 park must never lose text the person typed into Claude Code's composer but did
-not send. Today a screen-scrape guards that, and the guard breaks silently
-whenever Claude Code redraws its composer.
+not send. A screen-scrape cannot guard that: it breaks silently whenever
+Claude Code redraws its composer.
 
 This design gives TBD's Claude Code plugin, `tbd`, a hooks module: the
 **session mod**. Its first feature, `composer-draft`, saves the draft as the
@@ -11,40 +11,46 @@ person types and puts it back when the session revives, so a park can go ahead
 with a draft in the box and lose nothing. The mod is built as a home for later
 features: one module inside the existing plugin, one directory per session,
 one liveness check, and a per-spawn feature list. The composer feature ships
-behind a default-off flag, soaks with the scrape running in shadow, and ends
-by deleting the scrape and the keystroke veto.
+behind a default-off flag that automatic parking turns on, and it is the only
+guard a park has for an unsent draft: no park reads the screen to decide, and
+none types into the composer to end Claude.
 
-Related: [pending-input detection](../superpowers/specs/2026-07-09-pending-input-detection-design.md)
+Related: [mod-only park guard](2026-10-24-mod-only-park-guard-design.md)
+(which parks go ahead, and how automatic parking turns the feature on),
+[pending-input detection](../superpowers/specs/2026-07-09-pending-input-detection-design.md)
 (the keystroke veto this replaces), [named-reconciler doctrine](2026-08-15-named-reconciler-doctrine-design.md),
 [theory placement](../theory-placement.md).
 
 ## Problem
 
-`HibernationSafetyChecks.hasPendingInput` captures the terminal screen, finds
-the composer's prompt line, and refuses the park when text follows the prompt
-glyph. It fails in the unsafe direction: when Claude Code changes how it draws
-the composer, the scan finds no composer and reports "nothing pending". That
-happened. The scan looked for a line starting with `>`; current Claude Code
-draws the composer between two rules and starts the prompt line with `❯`.
-Against real screens captured from Claude Code 2.1.302, the original scan read
-all five draft states as empty, failing 10 of 14 cases. No test failed,
-because every fixture used the old screen. PR #1202 adds the new glyphs; the
-next redraw can break the scan the same way.
+The screen-scrape this design replaces, `HibernationSafetyChecks.hasPendingInput`,
+captured the terminal screen, found the composer's prompt line, and refused
+the park when text followed the prompt glyph. It fails in the unsafe
+direction: when Claude Code changes how it draws the composer, the scan finds
+no composer and reports "nothing pending". Field measurement showed it: the
+scan looked for a line starting with `>`, while Claude Code 2.1.302 draws the
+composer between two rules and starts the prompt line with `❯`. Against real
+screens captured from that release, the scan read all five draft states as
+empty, failing 10 of 14 cases. No test failed, because every fixture used the
+older screen. Adding the new glyphs leaves the next redraw free to break the
+scan the same way.
 
-The keystroke veto (`InputActivityTracker`, `hibernate_input_veto_enabled`) does
+A keystroke veto (`InputActivityTracker`, `hibernate_input_veto_enabled`) does
 not close the gap. It records that input reached a pane after the session went
-idle, but cannot tell whether that input was submitted or cleared. It is
-default-off, and it gates only the idle sweep and merge-park, never a manual
-park.
+idle, but cannot tell whether that input was submitted or cleared, and it can
+gate only automatic parks, never a manual one.
 
-A third hazard sits in how a park ends Claude. On tmux it types `/exit` and
-Enter into the composer, then falls back to Escape, Ctrl+C, Ctrl+C and SIGTERM.
-On the pty holder it writes `/exit\r`, then signals. Typing `/exit` is safe only
-while a guard guarantees an empty box. With a draft present, `/exit` lands at
-the end of the draft and Enter sends the half-written prompt to the model.
+A third hazard sits in how a park ends Claude. Typing `/exit` and Enter into
+the composer, with Escape and Ctrl+C as fallbacks, is safe only while a guard
+guarantees an empty box. With a draft present, `/exit` lands at the end of the
+draft and Enter sends the half-written prompt to the model, and a daemon-sent
+Ctrl+C clears it.
 
-**Goal:** a park never loses unsent composer text, and nothing in that
-guarantee reads the screen.
+**Goal:** a park never loses unsent composer text the session mod has saved,
+and nothing in that guarantee reads the screen. Automatic parking skips only a
+session spawned with the feature whose mod cannot vouch for its draft. A
+session spawned without the feature is parked, and with automatic parking on
+it exists only until its next spawn.
 
 ## Facts this design rests on
 
@@ -84,7 +90,7 @@ current tree. Only the newest Claude Code release is supported.
   …` or `… unloaded`, in every running session that loaded the plugin, legacy
   sessions included (measured live).
 - **A plugin's name is part of its identity.** It names the plugin's skills
-  (`tbd:tbd`, `tbd:nightwatch`), its error lines, `$.plugin.name`, and the keys
+  (`tbd:tbd`), its error lines, `$.plugin.name`, and the keys
   of its `$.state` and `$.store`.
 - **The hooks fire as documented.** A probe mod on a private tmux socket, in a
   live 2.1.303 session, wrote the box to a file on each event:
@@ -308,12 +314,12 @@ The feature writes the composer's state to `composer-draft.json` on every
 change, with a mark saying whether the saved text holds all of the draft.
 Before a park, the daemon checks the feature's liveness and reads that file.
 If the feature is confirmed for the live process and the draft, if any, is
-marked restorable, the park proceeds and ends Claude with a signal instead of
-typed keys. When the session resumes, the feature fills the saved draft back
+marked restorable, the park proceeds and ends Claude with a signal, as every
+park does. When the session resumes, the feature fills the saved draft back
 into the box and shows a short notice above the prompt. When TBD cannot
 confirm the draft, because liveness is unknown or the draft is not
-restorable, automatic parks skip the session, and a manual park asks the
-person. Archiving the worktree deletes the draft (see "Reclaiming files").
+restorable, automatic parks skip the session, and a manual park goes ahead.
+Archiving the worktree deletes the draft (see "Reclaiming files").
 
 ### Hooks
 
@@ -373,55 +379,51 @@ The mark lives in `$.state`, so a reload keeps it.
 
 ### Parking
 
-The gate's existing rails run unchanged. The feature's liveness, then its
-file, decides:
+The gate's other rails — a running turn, a permission prompt, keep-warm, the
+transcript tail — run unchanged. Then the feature decides, from how the session
+was spawned and what started the park:
 
-- **Legacy** – today's path: `hasPendingInput`, then the typed `/exit`.
-- **Confirmed** – the park proceeds, with an empty box or with a draft marked
-  restorable.
-- **Unknown** – the idle sweep and merge-park skip the session and log the
-  reason. A manual park returns a distinct refusal; the app turns it into
-  "TBD can't confirm this session's draft is saved. Hibernate anyway?", and a
-  yes reissues the park with an override.
+- **Spawned without the feature** (legacy) – every park proceeds. Nothing
+  saved the draft and nothing can see it, so an unsent draft is lost. On an
+  install with automatic parking on, such a session exists only until its next
+  spawn, because automatic parking turns the feature on (see "Flag").
+- **Confirmed** – every park proceeds, with an empty box or with a draft
+  marked restorable.
+- **Unknown** – a manual park and a profile swap proceed, and an unsent draft
+  may be lost. The idle sweep and merge-park skip the session and log the
+  reason. An unknown session does not become legacy at its next spawn, so on a
+  machine where the mod never loads, automatic parking reclaims nothing there.
 
 A confirmed session whose draft is marked not restorable, or carries no mark,
 reads unknown with the reason `draft-not-restorable`: a wake would restore the
 placeholder in place of the pasted content. It takes the unknown path
 unchanged.
 
-For a session spawned with the feature, TBD never types into the composer to
-end it: no `/exit`, and no Escape or Ctrl+C fallback either, because a
+Codex sessions are never parked.
+
+**Every park ends by signal.** Nothing is typed into the composer to end
+Claude: no `/exit`, and no Escape or Ctrl+C fallback either, because a
 daemon-sent Ctrl+C clears the box and the feature would record the draft as
-gone. It sends SIGTERM to the Claude process. Claude Code's SIGTERM handler
-runs the same graceful shutdown as Ctrl+C and SIGHUP, so `session.end` makes
-the final save, and the existing escalation (`respawn-window -k` on tmux,
-abandon on the holder) still guarantees the process ends. The rule covers the
-tmux park and the holder park.
+gone. On tmux, the park sends SIGTERM to the Claude process found under the
+pane's shell on the process table; when none is found, no SIGTERM is sent.
+`respawn-window -k` then guarantees the end. On the pty holder, the ladder
+starts at its terminate rung, SIGTERM to the job, and the forced rung, abandon,
+guarantees the end. Claude Code's SIGTERM handler runs the same graceful
+shutdown as Ctrl+C and SIGHUP, so `session.end` makes the final save.
 
-An in-place profile swap ("Switch account") ends by SIGTERM for every
-session, with or without the feature, on both transports, and types nothing
-into the terminal: no `/exit`, no Escape, no Ctrl+C. A swap skips the screen
-check that keeps a legacy park's typed `/exit` off a draft, so a typed `/exit`
-would land after whatever the box holds and Enter would submit it to the model.
-The existing escalation still guarantees the process ends: `respawn-window -k`
-on tmux, abandon on the holder. On tmux, the SIGTERM goes to the Claude
-process found under the pane's shell; when none is found, no SIGTERM is sent
-and `respawn-window -k` alone ends the pane.
+Each park reads the screen once, for the display snapshot the app shows
+while the session is parked. The snapshot decides nothing: what the screen
+shows, and whether it can be read at all, never refuses a park.
 
-A swap never refuses or asks, whatever the feature answers. It is an explicit
-gesture, and it ends and resumes the session the way a park and a wake do, so
-a confirmed draft comes back in the new process. When the answer is unknown,
-the swap restores whatever was last saved, which may be stale or missing; a
-draft marked not restorable comes back without its pasted content. A session
-spawned without the feature has saved nothing, so its draft is lost at a swap
-and nothing restores it, but it is never typed into or sent. "Fork session"
-leaves the source session, and its draft, untouched.
-
-While the flag exists, a park of a confirmed session still runs
-`hasPendingInput`, only to compare with the feature. Each disagreement goes to
-the `com.tbd.daemon` log under category `composer-draft` at `.notice`, which
-`log show` retains, naming the terminal, the feature's answer and the scrape's
-answer. The scrape never decides a park of a session spawned with the feature.
+An in-place profile swap ("Switch account") ends the same way, by SIGTERM, on
+both transports. A swap never refuses or asks, whatever the feature answers.
+It is an explicit gesture, and it ends and resumes the session the way a park
+and a wake do, so a confirmed draft comes back in the new process. When the
+answer is unknown, the swap restores whatever was last saved, which may be
+stale or missing; a draft marked not restorable comes back without its pasted
+content. A session spawned without the feature has saved nothing, so its draft
+is lost at a swap and nothing restores it, but it is never typed into or sent.
+"Fork session" leaves the source session, and its draft, untouched.
 
 ### Waking
 
@@ -450,10 +452,10 @@ than overwrite the drafts it may hold, logs that the draft was dropped, and
 still records the restore as done, so the restore is not retried. Either
 outcome is written to `composer-draft.restore.json`.
 
-A draft marked not restorable is restored as saved after a park the person
-overrode: they were warned that part of it could be lost. The box gets the
-text with the placeholders that stand for a collapsed paste or an image, and
-the notice says the pasted content did not come back.
+A draft marked not restorable is restored as saved after a park that went
+ahead without the feature's confirmation, a manual park or a profile swap. The
+box gets the text with the placeholders that stand for a collapsed paste or an
+image, and the notice says the pasted content did not come back.
 
 A message delivered with the wake arrives as an argument to `claude --resume`.
 Implementation verifies, against the fake model API, that Claude submits that
@@ -475,45 +477,48 @@ stays with the original session.
 - an optional field on the shared `Config` model
 - a setter RPC, `tbd config` support, and a Settings toggle
 
-While it is the only feature, the flag decides whether the plugin carries the
-hooks module at all, and it decides whether a spawn lists `composer-draft` in
-its features. A park follows `spawn.json`, not the current flag:
+The feature is on while the flag is, and also while automatic parking is on:
+the idle sweep, the global park-on-merge default, or a worktree that is not
+archived whose park-on-merge override is true. The sessions parked without
+anyone asking are then the ones the mod protects. That effective value is
+resolved where the daemon builds `Config`, so spawns, the plugin and the app
+agree; the stored flag is never written on automatic parking's behalf, and an
+explicit off holds again once automatic parking is off. Settings shows the
+toggle on and greyed while automatic parking holds it. See
+[mod-only park guard](2026-10-24-mod-only-park-guard-design.md), "The effective
+composer-draft value".
+
+The effective value decides whether the plugin carries the hooks module for
+this feature, and whether a spawn lists `composer-draft` in its features. A
+park follows `spawn.json`, not the current value:
 
 - **Turning it on** loads the module into running sessions, but sessions
   spawned earlier stay legacy until they respawn.
 - **Turning it off** unloads the module everywhere. Sessions spawned with the
   feature then read as unknown until they respawn: automatic parks skip them,
-  and a manual park asks. That fails safe.
+  and a manual park goes ahead.
 
 ### Soak and graduation
 
-The flag is turned on on the author's machine. The soak reads three signals.
-Two are `com.tbd.daemon` log lines under category `composer-draft`:
-feature-versus-scrape disagreements, and parks skipped or refused for an
-unknown reason, with the reason. The third is restores, read from the session
-directories rather than any log: each `~/tbd/sessions/*/composer-draft.restore.json`
-records its session's latest restore outcome, and a
-`composer-draft.unrestored` beside it holds the drafts that could not go back.
-The flag graduates when every case where the scrape saw a draft and the
-feature did not is explained as a scrape false positive, such as a grayed
-suggestion the scrape read as typed text, and restores have been seen working
-on both tmux and holder. Graduation flips `Config.composerDraftDefault`.
+The flag is turned on on the author's machine, and automatic parking turns it
+on wherever that is on. The soak reads two signals. One is the
+`com.tbd.daemon` log under category `composer-draft`: parks skipped for an
+unknown reason, with the reason. The other is restores, read from the session
+directories rather than any log: each
+`~/tbd/sessions/*/composer-draft.restore.json` records its session's latest
+restore outcome, and a `composer-draft.unrestored` beside it holds the drafts
+that could not go back. The flag graduates when every skip reason is
+explained, and restores have been seen working on both tmux and holder.
+Graduation flips `Config.composerDraftDefault`.
 
 ### Deletion after graduation
 
-A later PR deletes, together:
-
-- the flag, which makes `composer-draft` a feature every spawn lists and keeps
-  the hooks module in the plugin for good
-- `hasPendingInput`, its three call sites, and its `.swiftlint.yml` exclusion
-- the typed `/exit` and the Escape and Ctrl+C park endings
-- the keystroke veto: `InputActivityTracker`, its gate rail, its RPC and its
-  Settings toggle (the `hibernate_input_veto_enabled` column stays, since
-  landed migrations are frozen)
-
-The flag and the scrape go in one PR, so a person who opted out is never left
-without a guard. After it, a session whose feature is not confirmed never
-parks automatically.
+A later PR deletes the flag, which makes `composer-draft` a feature every
+spawn lists and keeps the hooks module in the plugin for good. Automatic
+parking then has nothing left to turn on, so `Config.composerDraftRequiredByAutoPark`
+and the greyed Settings toggle go with it. After it, a session spawned without
+the feature exists only until its next spawn, and a session whose feature is
+not confirmed never parks automatically.
 
 ## Testing
 
@@ -531,25 +536,20 @@ Each gating branch gets its own test.
 - **Draft status** – confirmed with a restorable draft and confirmed empty, on
   top of the liveness answer; a draft marked not restorable, or carrying no
   mark, reads `draft-not-restorable`; an empty box needs no mark.
-- **Park gate** – a legacy session takes the scrape path; a confirmed session
-  follows its file and never consults the scrape's answer.
-- **Park ending** – a park of a session spawned with the feature gets a
-  signal and no keys, asserted on the transport, for both transports, and
-  against a real holder, where the job's own stdin records nothing and its
-  `SIGTERM` handler runs; a park of a legacy session gets the typed `/exit` as
-  today. The job puts its terminal in non-canonical mode, so it records bytes
-  no Enter follows, a bare Escape or a Ctrl+C among them, and a control test
-  shows it recording such bytes written through the session's reader.
+- **Park gate** – legacy and confirmed proceed under every policy; unknown
+  proceeds for a manual park and a profile swap, and is skipped and logged by
+  the idle sweep and merge-park.
+- **Park ending** – every park gets a signal and no keys, legacy, unknown and
+  confirmed alike, asserted on the transport, for both transports, and against
+  a real holder, where the job's own stdin records nothing and its `SIGTERM`
+  handler runs. The job puts its terminal in non-canonical mode, so it records
+  bytes no Enter follows, a bare Escape or a Ctrl+C among them, and a control
+  test shows it recording such bytes written through the session's reader.
 - **Swap ending** – every in-place profile swap gets a signal and no keys,
-  whatever the session's status: the ending chosen for a swap is a signal for
-  legacy, unknown and confirmed sessions alike; the tmux swap sends no
-  `send-keys` and signals the Claude process under the pane, with and without
-  the feature; and against a real holder, a legacy session's swap park leaves
-  the job's stdin record empty and runs its `SIGTERM` handler.
-- **Manual park** – unknown returns the distinct refusal, and the override
-  parks.
-- **Shadow log** – a disagreement produces the log line, asserted on its
-  composed text.
+  whatever the session's status: the tmux swap sends no `send-keys` and
+  signals the Claude process under the pane, with and without the feature;
+  and against a real holder, a legacy session's swap park leaves the job's
+  stdin record empty and runs its `SIGTERM` handler.
 - **Spawn** – the flag on sets all three environment variables, lists
   `composer-draft` in `TBD_MOD_FEATURES`, and writes `spawn.json`; every
   feature off sets none of them and writes nothing.
@@ -612,8 +612,8 @@ Each gating branch gets its own test.
 
 - **Keep the scrape as a fallback for unknown liveness.** The fallback would
   run only when the mod is missing, which makes it the least exercised path in
-  the system, and the scrape fails silently in the unsafe direction. Refusing
-  the park fails safe, and a person at a manual park can override.
+  the system, and the scrape fails silently in the unsafe direction. Skipping
+  an automatic park fails safe, and a manual park is the person's own gesture.
 - **Have the mod report emptiness and refuse parks with a draft.** A stale
   "empty" still deletes the text, an idle session holding a draft never parks,
   and the scrape survives as an arguable second opinion on the same question.
@@ -657,9 +657,9 @@ Each gating branch gets its own test.
 - **Build the daemon-to-mod channel now.** No feature needs one yet, and its
   shape depends on the first consumer. The per-session directory leaves room
   for it.
-- **Gate a profile swap like a manual park, refusing and asking when the
-  draft is unconfirmed.** A swap is a gesture the person makes at that moment,
-  not a background action, so it proceeds and restores what was saved.
+- **Skip a profile swap like an automatic park when the draft is
+  unconfirmed.** A swap is a gesture the person makes at that moment, not a
+  background action, so it proceeds and restores what was saved.
 - **Restore silently, or announce with a toast.** A draft that reappears
   without a word is easy to send by accident. A notice above the prompt, where
   queued messages appear, explains the text at the spot the person is looking,

@@ -8,9 +8,9 @@ private let logger = Logger(subsystem: "com.tbd.daemon", category: "PRPoller")
 ///
 /// The problem it exists to solve: `PRStatusManager.fetchAll` used to run only
 /// inside the `pr.list` RPC handler, so PR facts were a side effect of an app
-/// being open and polling. They stopped overnight — which is when a fleet
-/// supervisor needs them most, and when the daemon is the only thing awake
-/// (fleet-supervision design §2, P1 gap 1).
+/// being open and polling. They stopped overnight — when the daemon is the
+/// only thing awake, and its merge-driven rails (auto-archive, park-on-merge)
+/// still need them (fleet-supervision design §2, P1 gap 1).
 ///
 /// It owns the timer and nothing else. The pass it drives is
 /// `RPCRouter.runPollPass`, which stays there because `pr.refresh` and the

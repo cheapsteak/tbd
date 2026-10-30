@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import DaemonTestSupport
 import TestSupport
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -31,6 +32,10 @@ struct DevServerArchiveTests {
         let tmp = FileManager.default.temporaryDirectory
         let pathA = tmp.appendingPathComponent("tbd-srvarc-a-\(UUID().uuidString)").path
         let pathB = tmp.appendingPathComponent("tbd-srvarc-b-\(UUID().uuidString)").path
+        // Plain folders, not git checkouts: archive's uncommitted-changes
+        // guard cannot read them and would refuse, so every archive below
+        // passes `discardUncommittedChanges: true`. The guard has its own
+        // suite, `WorktreeArchiveUncommittedGuardTests`.
         for p in [pathA, pathB] {
             try FileManager.default.createDirectory(atPath: p, withIntermediateDirectories: true)
             try Data("[servers.web]\ncommand = \"pnpm dev\"\n".utf8).write(to: URL(fileURLWithPath: p + "/tbd.toml"))
@@ -75,7 +80,7 @@ struct DevServerArchiveTests {
             worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
         let theirs = try report(f, root: f.pathB, pid: 600)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
         #expect(FileManager.default.fileExists(atPath: theirs))
     }
@@ -98,7 +103,7 @@ struct DevServerArchiveTests {
         #expect(reports.map(\.name) == ["web"])
         #expect(reports.first?.succeeded == false)
         #expect(reports.first?.message?.hasPrefix("left running:") == true)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.runner.runs.isEmpty)
         #expect(f.signalling.sentSignals.isEmpty)
         #expect(f.signalling.sentToProcesses.isEmpty)
@@ -114,7 +119,7 @@ struct DevServerArchiveTests {
             worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
         let file = try report(f, root: f.pathA, pid: 500)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
         #expect(f.signalling.sentToProcesses.isEmpty)
         #expect(FileManager.default.fileExists(atPath: file))
@@ -128,7 +133,7 @@ struct DevServerArchiveTests {
         let tab = try await f.db.terminals.create(
             worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
         f.inspector.set(.runningUnverifiable(pid: 700), for: tab.id)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.signalling.sentSignals.isEmpty)
         #expect(f.signalling.sentToProcesses.isEmpty)
         #expect(try await f.db.terminals.get(id: tab.id) == nil, "archive's teardown still removes the tab")
@@ -139,7 +144,7 @@ struct DevServerArchiveTests {
         let tab = try await f.db.terminals.create(
             worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
         #expect(try await f.db.terminals.get(id: tab.id) == nil, "archive's teardown still removes the tab")
     }
@@ -154,7 +159,7 @@ struct DevServerArchiveTests {
         f.inspector.set(.exited(code: 143), for: tab.id)
         await f.db.terminalHistory.recordServerExit(terminal: tab, serverName: "web", capture: nil, exitCode: 143)
         #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: f.worktreeA.id)["web"] != nil)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(try await f.db.terminalHistory.latestServerOutputs(worktreeID: f.worktreeA.id).isEmpty)
         #expect(try await f.db.terminalHistory.list(worktreeID: f.worktreeA.id).map(\.id) == [tab.id],
                 "the output stays in Closed Terminals")
@@ -171,7 +176,7 @@ struct DevServerArchiveTests {
             status = "docker compose ps db"
             stop = "docker compose stop db"
             """.utf8).write(to: URL(fileURLWithPath: f.pathA + "/tbd.toml"))
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.runner.runs.isEmpty)
         #expect(f.signalling.sentSignals.isEmpty)
     }
@@ -198,7 +203,7 @@ struct DevServerArchiveTests {
         let tab = try await f.db.terminals.create(
             worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "api")
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.runner.runs.isEmpty)
         #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
         #expect(f.signalling.sentToProcesses.isEmpty)
@@ -218,7 +223,7 @@ struct DevServerArchiveTests {
         let tab = try await f.db.terminals.create(
             worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.runner.runs.isEmpty)
         #expect(f.signalling.sentSignals == [.init(pgid: 700, signal: SIGTERM)])
         #expect(try await f.db.terminals.get(id: tab.id) == nil)
@@ -266,7 +271,7 @@ struct DevServerArchiveTests {
         let tab = try await f.db.terminals.create(
             worktreeID: f.worktreeA.id, tmuxWindowID: "@1", tmuxPaneID: "%1", kind: .shell, serverName: "web")
         f.inspector.set(.running(pid: 700, expectedStart: nil), for: tab.id)
-        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id)
+        _ = try await f.lifecycle.beginArchiveWorktree(worktreeID: f.worktreeA.id, discardUncommittedChanges: true)
         #expect(f.signalling.sentSignals.isEmpty)
     }
 }

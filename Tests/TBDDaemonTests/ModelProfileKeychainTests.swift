@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import TBDDaemonLib
+import TestSupport
 
 @Suite("ModelProfileKeychain")
 struct ModelProfileKeychainTests {
@@ -110,5 +111,34 @@ struct ModelProfileKeychainTests {
         #expect(ModelProfileKeychain.loadCandidates(id: id, environment: [:]).map(\.path) == [legacy])
         #expect(ModelProfileKeychain.loadCandidates(
             id: id, environment: ["TBD_HOME": ""]).map(\.path) == [legacy])
+    }
+
+    // MARK: - an injected Store stays inside the home it was given
+
+    /// The seam `RPCRouter` takes so `ModelProfileRPCTests` can run outside
+    /// `TBDHomeSerialized`. Nothing else pins that a `Store` built with an
+    /// environment resolves from it: if it fell back to the process
+    /// environment, every test seeding and reading through one would still
+    /// pass, because seed and read would still agree, and the suite would be
+    /// back in the `TBD_HOME` race without a failing test to say so. So this
+    /// looks for the file at the injected path itself.
+    @Test("Store(environment:) writes, reads and deletes inside the home it was given")
+    func injectedStoreStaysInItsHome() throws {
+        let home = URL(fileURLWithPath: fencedScratchRoot(prefix: "tbdkc"), isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let store = ModelProfileKeychain.Store(environment: ["TBD_HOME": home.path])
+        let id = freshID()
+        let file = home.appendingPathComponent("claude-tokens/\(id).token", isDirectory: false)
+
+        try store.store(id: id, token: "sk-ant-secret-C")
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        let mode = (try FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions]
+            as? NSNumber).map { $0.int16Value & 0o777 }
+        #expect(mode == 0o600)
+        #expect(try store.load(id: id) == "sk-ant-secret-C")
+
+        try store.delete(id: id)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(try store.load(id: id) == nil)
     }
 }

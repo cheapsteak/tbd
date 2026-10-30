@@ -1,4 +1,5 @@
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
@@ -232,8 +233,10 @@ struct WorktreeConversationCarryoverTests {
         #expect(command.hasSuffix(" 'do the thing'"))
     }
 
-    /// Self-test for the guard below: it must actually reject a trailing
-    /// prompt, or the two assertions above would pass vacuously.
+    /// Self-test for `isPromptFreeResumeInvocation`, which this suite and
+    /// `WorktreeReviveFreshTests` both assert spawns with: it must actually
+    /// reject a trailing prompt, or every one of those assertions would pass
+    /// vacuously.
     @Test func promptFreeGuardRejectsATrailingPromptArgument() {
         let base = "export CLAUDE_CONFIG_DIR='/tmp/cfg'; claude --resume ABC-123"
             + " --fork-session --dangerously-skip-permissions --settings '/tmp/overlay.json'"
@@ -262,29 +265,6 @@ struct WorktreeConversationCarryoverTests {
         #expect(!isPromptFreeResumeInvocation(escaped + " 'You have been moved.'", forkSession: true))
         #expect(!isPromptFreeResumeInvocation(escaped + " 'anything at all'", forkSession: true))
     }
-
-    /// Whitelists the permitted shape rather than blacklisting a phrase: the
-    /// claude invocation may consist only of its resume/fork/permission flags
-    /// plus the optional file-path flags. Any trailing positional argument —
-    /// whatever its wording — falls outside the shape and fails.
-    private func isPromptFreeResumeInvocation(
-        _ command: String, forkSession: Bool
-    ) -> Bool {
-        guard let start = command.range(of: "claude --resume") else { return false }
-        let invocation = String(command[start.lowerBound...])
-        let fork = forkSession ? " --fork-session" : ""
-        let permitted = "^claude --resume [-0-9A-Za-z]+\(fork) --dangerously-skip-permissions"
-            + "( --name \(Self.shellEscapedWordPattern))?( --settings '[^']*')?( --plugin-dir '[^']*')?$"
-        return invocation.range(of: permitted, options: .regularExpression) != nil
-    }
-
-    /// A single-quoted word as `SystemPromptBuilder.shellEscape` actually emits
-    /// it: an apostrophe inside the value closes the quote, escapes the
-    /// apostrophe and reopens (`'acme'\''s'`), so a naive `'[^']*'` cannot
-    /// match a legitimate command whose display name contains one. The helper
-    /// fails closed there, so it was never a safety hole — but a guard that
-    /// misreads a conforming command is a guard nobody trusts.
-    static let shellEscapedWordPattern = #"'(?:[^']|'\\'')*'"#
 
     private func makeCarryoverLifecycle(
         db: TBDDatabase,
@@ -361,3 +341,27 @@ struct WorktreeConversationCarryoverTests {
     }
 }
 }
+
+/// Whitelists the permitted shape of a resumed Claude spawn rather than
+/// blacklisting a phrase: the claude invocation may consist only of its
+/// resume/fork/permission flags plus the optional `--name` and file-path flags.
+/// Any trailing positional argument — whatever its wording — falls outside the
+/// shape and fails. Shared by the carryover and fresh-branch revive suites;
+/// `WorktreeConversationCarryoverTests.promptFreeGuardRejectsATrailingPromptArgument`
+/// proves it can fail.
+func isPromptFreeResumeInvocation(_ command: String, forkSession: Bool) -> Bool {
+    guard let start = command.range(of: "claude --resume") else { return false }
+    let invocation = String(command[start.lowerBound...])
+    let fork = forkSession ? " --fork-session" : ""
+    let permitted = "^claude --resume [-0-9A-Za-z]+\(fork) --dangerously-skip-permissions"
+        + "( --name \(shellEscapedWordPattern))?( --settings '[^']*')?( --plugin-dir '[^']*')?$"
+    return invocation.range(of: permitted, options: .regularExpression) != nil
+}
+
+/// A single-quoted word as `SystemPromptBuilder.shellEscape` actually emits
+/// it: an apostrophe inside the value closes the quote, escapes the
+/// apostrophe and reopens (`'acme'\''s'`), so a naive `'[^']*'` cannot
+/// match a legitimate command whose display name contains one. The guard
+/// fails closed there, so it was never a safety hole — but a guard that
+/// misreads a conforming command is a guard nobody trusts.
+private let shellEscapedWordPattern = #"'(?:[^']|'\\'')*'"#

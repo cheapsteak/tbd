@@ -1,6 +1,7 @@
 import Foundation
 import os
 import TBDShared
+import TBDKernel
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "worktreeLifecycle")
 private let timingLogger = Logger(subsystem: "com.tbd.daemon", category: "worktreeTiming")
@@ -26,13 +27,20 @@ public enum WorktreeCreateCompletion: Sendable {
 /// "you have been moved" context prompt as the spawn's trailing argument,
 /// which Claude answered immediately — an unwanted turn on every revive.
 /// Provenance lives solely in `notesSeed`, which seeds the Notes tab.
+///
+/// `claudeSpawnExtras` are the plugin folders and settings overlay the source
+/// session's terminal carried when its worktree was archived: the carried-over
+/// conversation starts with them and keeps them on its new row. Nil carries
+/// none.
 public struct ConversationCarryover: Sendable {
     let sourceSessionID: String
     let notesSeed: String
+    let claudeSpawnExtras: ClaudeSpawnExtras?
 
-    init(sourceSessionID: String, notesSeed: String) {
+    init(sourceSessionID: String, notesSeed: String, claudeSpawnExtras: ClaudeSpawnExtras? = nil) {
         self.sourceSessionID = sourceSessionID
         self.notesSeed = notesSeed
+        self.claudeSpawnExtras = claudeSpawnExtras
     }
 }
 
@@ -43,12 +51,12 @@ extension WorktreeLifecycle {
     ///
     /// This is the legacy all-in-one method. Prefer `beginCreateWorktree` +
     /// `completeCreateWorktree` for non-blocking creation.
-    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil) async throws -> Worktree {
-        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, skipClaude: skipClaude, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch, prNumber: prNumber)
+    public func createWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, initialPrompt: String? = nil, cols: Int? = nil, rows: Int? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, checkoutPRHead: Bool = false, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSpawnExtras: ClaudeSpawnExtras? = nil) async throws -> Worktree {
+        let pending = try await beginCreateWorktree(repoID: repoID, folder: folder, branch: branch, displayName: displayName, parentWorktreeID: parentWorktreeID, siblingOfWorktreeID: siblingOfWorktreeID, callerWorktreeID: callerWorktreeID, suppressAutoParent: suppressAutoParent, useExistingBranch: useExistingBranch, prNumber: prNumber)
         // Pass the original branch ref (may include `origin/` prefix) through
         // so phase 2 can dispatch to the correct git command.
         let existingBranchRef = useExistingBranch ? branch : nil
-        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, primaryAgentPreference: primaryAgentPreference, claudeSettingsOverlay: claudeSettingsOverlay)
+        let completion = try await completeCreateWorktree(worktreeID: pending.id, skipClaude: skipClaude, initialPrompt: initialPrompt, userSpecifiedFolder: folder != nil, userSpecifiedBranch: branch != nil, cols: cols, rows: rows, existingBranchRef: existingBranchRef, checkoutPRHead: checkoutPRHead, primaryAgentPreference: primaryAgentPreference, claudeSpawnExtras: claudeSpawnExtras)
         // Legacy synchronous contract: the returned worktree is fully set up.
         // Await phase 3 inline when a preSession hook gated the primary spawn.
         if case .preSessionPending(let phase3) = completion {
@@ -65,7 +73,7 @@ extension WorktreeLifecycle {
     /// Phase 1: Synchronous-fast. Generates a name, inserts a DB row with
     /// `status = .creating`, and returns the worktree immediately.
     /// NO git operations happen here.
-    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, skipClaude: Bool = false, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil) async throws -> Worktree {
+    public func beginCreateWorktree(repoID: UUID, folder: String? = nil, branch: String? = nil, displayName: String? = nil, parentWorktreeID: UUID? = nil, siblingOfWorktreeID: UUID? = nil, callerWorktreeID: UUID? = nil, suppressAutoParent: Bool = false, useExistingBranch: Bool = false, prNumber: Int? = nil, disarmParent: Bool = true) async throws -> Worktree {
         // 1. Fetch repo
         guard let repo = try await db.repos.get(id: repoID) else {
             throw WorktreeLifecycleError.repoNotFound(repoID)
@@ -81,12 +89,10 @@ extension WorktreeLifecycle {
         )
 
         // A worktree with active children isn't auto-archivable; disarm the parent.
-        if let parentID = resolvedParent {
-            do {
-                try await db.worktrees.setAutoArchiveOnMerge(id: parentID, value: false)
-            } catch {
-                logger.warning("failed to disarm auto-archive for \(parentID, privacy: .public): \(error, privacy: .public)")
-            }
+        // A caller that may still refuse the create passes `disarmParent: false`
+        // and calls `disarmAutoArchive(parentID:)` once the create is committed.
+        if disarmParent, let parentID = resolvedParent {
+            await disarmAutoArchive(parentID: parentID)
         }
 
         // 2. Generate name and construct path
@@ -166,6 +172,16 @@ extension WorktreeLifecycle {
         return worktree
     }
 
+    /// Turn off auto-archive-on-merge for a worktree that now has a child.
+    /// A failed write is logged and does not fail the create.
+    public func disarmAutoArchive(parentID: UUID) async {
+        do {
+            try await db.worktrees.setAutoArchiveOnMerge(id: parentID, value: false)
+        } catch {
+            logger.warning("failed to disarm auto-archive for \(parentID, privacy: .public): \(error, privacy: .public)")
+        }
+    }
+
     /// Returns `<base>`, or `<base>-2`, `<base>-3`, … — the first folder name
     /// under `parentDir` whose absolute path neither exists on disk NOR is
     /// already reserved by an existing worktree row (`reserved`). Caps at -1000
@@ -235,7 +251,7 @@ extension WorktreeLifecycle {
     /// Set `retryGeneratedNameOnCollision` to false when callers have already
     /// rendered or persisted the pending row's generated identity.
     @discardableResult
-    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSettingsOverlay: String? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true, rollBackOnFailure: Bool = true) async throws -> WorktreeCreateCompletion {
+    public func completeCreateWorktree(worktreeID: UUID, skipClaude: Bool = false, initialPrompt: String? = nil, userSpecifiedFolder: Bool = false, userSpecifiedBranch: Bool = false, cols: Int? = nil, rows: Int? = nil, existingBranchRef: String? = nil, checkoutPRHead: Bool = false, overrideProfileID: UUID? = nil, modelOverride: String? = nil, codexModelOverride: String? = nil, primaryAgentPreference: PrimaryAgentPreference? = nil, claudeSpawnExtras: ClaudeSpawnExtras? = nil, carryover: ConversationCarryover? = nil, retryGeneratedNameOnCollision: Bool = true, rollBackOnFailure: Bool = true) async throws -> WorktreeCreateCompletion {
         guard let worktree = try await db.worktrees.getLocal(id: worktreeID) else {
             throw WorktreeLifecycleError.worktreeNotFound(worktreeID)
         }
@@ -501,10 +517,18 @@ extension WorktreeLifecycle {
             // the primary terminals on its completion marker. The wait runs in
             // a background task so the caller's RepoSerializer lane is freed
             // immediately — never block it for the duration of the hook.
+            //
+            // The hook's row carries a create's Claude values, so a primary
+            // started by recovery after a daemon restart — which has nothing
+            // but rows to go on — still gets them. The row keeps them for as
+            // long as its tab lives (a failed hook's tab stays open); closed
+            // history and reopen ignore them, because the row is a shell, not
+            // Claude. Only a Claude primary has any use for them.
             if let preSession = try await spawnPreSessionTerminal(
                 worktree: spawnWorktree, repo: repo,
                 worktreePath: resultPath,
-                cols: cols, rows: rows
+                cols: cols, rows: rows,
+                claudeSpawnExtras: creationPrimaryKind == .claude ? claudeSpawnExtras : nil
             ) {
                 // Broadcast early. `.worktreeCreated` is for non-app clients —
                 // the app's handleDelta ignores it (default: break); what makes
@@ -536,7 +560,7 @@ extension WorktreeLifecycle {
                         modelOverride: modelOverride,
                         codexModelOverride: codexModelOverride,
                         primaryAgentPreference: primaryAgentPreference,
-                        claudeSettingsOverlay: claudeSettingsOverlay,
+                        claudeSpawnExtras: claudeSpawnExtras,
                         carryover: carryover,
                         preparedCodexLaunch: preparedCodexLaunch
                     )
@@ -564,7 +588,7 @@ extension WorktreeLifecycle {
                 modelOverride: modelOverride,
                 codexModelOverride: codexModelOverride,
                 primaryAgentPreference: primaryAgentPreference,
-                claudeSettingsOverlay: claudeSettingsOverlay,
+                claudeSpawnExtras: claudeSpawnExtras,
                 carryover: carryover,
                 preparedCodexLaunch: preparedCodexLaunch
             )
@@ -1316,6 +1340,15 @@ extension WorktreeLifecycle {
     /// Returns the created terminals as `(id, label)` pairs so phase 3 can
     /// broadcast `.terminalCreated` for each.
     ///
+    /// `claudeSpawnExtras` are a create's Claude values: a fresh Claude primary
+    /// gets them and keeps them on its row. A restored or carried-over
+    /// conversation never gets them, and nor does a primary that is not
+    /// Claude: each restored session reads its own values from
+    /// `archivedClaudeSpawnExtras` — the archived worktree's map, passed from
+    /// the same row as `archivedClaudeSessions` — and a carryover reads
+    /// `carryover.claudeSpawnExtras`. Every Claude row this spawns keeps the
+    /// values it started with.
+    ///
     /// **It does not read or write `worktree.pending_prompt`.** Its whole
     /// involvement with a queued prompt is one notification, after the primary
     /// terminal row exists, that the pane is up
@@ -1326,6 +1359,7 @@ extension WorktreeLifecycle {
         worktree: Worktree, repo: Repo?,
         worktreePath: String? = nil, skipClaude: Bool,
         archivedClaudeSessions: [String]? = nil,
+        archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]? = nil,
         initialPrompt: String? = nil,
         cols: Int? = nil,
         rows: Int? = nil,
@@ -1334,16 +1368,9 @@ extension WorktreeLifecycle {
         modelOverride: String? = nil,
         codexModelOverride: String? = nil,
         primaryAgentPreference: PrimaryAgentPreference? = nil,
-        claudeSettingsOverlay: String? = nil,
+        claudeSpawnExtras: ClaudeSpawnExtras? = nil,
         carryover: ConversationCarryover? = nil,
-        preparedCodexLaunch: CodexLaunchPreparation? = nil,
-        /// Non-nil when this spawn is a Watch Desk session, and the only thing
-        /// that installs the statusline tee (`StatuslineTee`). The desk spawn
-        /// path passes `.readOnlyCoordinator` — the role a desk terminal holds
-        /// until the lease store promotes one of them to `.judge` — because at
-        /// spawn time no lease has been acquired yet. Every other caller leaves
-        /// it nil and gets exactly the overlay it got before the tee existed.
-        watchDeskRole: WatchDeskRole? = nil
+        preparedCodexLaunch: CodexLaunchPreparation? = nil
     ) async throws -> [(id: UUID, label: String)] {
         try await tmux.withWorktreeServerLock(
             db: db,
@@ -1356,6 +1383,7 @@ extension WorktreeLifecycle {
                 worktreePath: worktreePath,
                 skipClaude: skipClaude,
                 archivedClaudeSessions: archivedClaudeSessions,
+                archivedClaudeSpawnExtras: archivedClaudeSpawnExtras,
                 initialPrompt: initialPrompt,
                 cols: cols,
                 rows: rows,
@@ -1364,10 +1392,9 @@ extension WorktreeLifecycle {
                 modelOverride: modelOverride,
                 codexModelOverride: codexModelOverride,
                 primaryAgentPreference: primaryAgentPreference,
-                claudeSettingsOverlay: claudeSettingsOverlay,
+                claudeSpawnExtras: claudeSpawnExtras,
                 carryover: carryover,
-                preparedCodexLaunch: preparedCodexLaunch,
-                watchDeskRole: watchDeskRole)
+                preparedCodexLaunch: preparedCodexLaunch)
         }
     }
 
@@ -1379,6 +1406,7 @@ extension WorktreeLifecycle {
         worktreePath: String?,
         skipClaude: Bool,
         archivedClaudeSessions: [String]?,
+        archivedClaudeSpawnExtras: [String: ClaudeSpawnExtras]?,
         initialPrompt: String?,
         cols: Int?,
         rows: Int?,
@@ -1387,10 +1415,9 @@ extension WorktreeLifecycle {
         modelOverride: String?,
         codexModelOverride: String?,
         primaryAgentPreference: PrimaryAgentPreference?,
-        claudeSettingsOverlay: String?,
+        claudeSpawnExtras: ClaudeSpawnExtras?,
         carryover: ConversationCarryover?,
-        preparedCodexLaunch: CodexLaunchPreparation?,
-        watchDeskRole: WatchDeskRole?
+        preparedCodexLaunch: CodexLaunchPreparation?
     ) async throws -> [(id: UUID, label: String)] {
         let worktreeID = worktree.id
         let tmuxServer = worktree.tmuxServer
@@ -1527,6 +1554,11 @@ extension WorktreeLifecycle {
         // exports, written into its row. Nil for any other primary, and for a
         // Claude one with every feature off.
         var primarySessionIncarnationID: UUID? = nil
+        // The Claude primary's values, applied to its start and kept on its
+        // row: the create's for a fresh primary, the archived session's own
+        // for a restored one, the source session's for a carryover. Nil for
+        // any other primary.
+        var primarySpawnExtras: ClaudeSpawnExtras? = nil
         // The options a Codex primary's command is built with, recorded on its
         // row so a relaunch of Codex in that tab keeps them. Nil for any other
         // primary.
@@ -1572,6 +1604,13 @@ extension WorktreeLifecycle {
             let sessionUUID = carryover?.sourceSessionID ?? archivedSession ?? UUID().uuidString
             primarySessionID = sessionUUID
             let isResume = archivedSession != nil || carryover != nil
+            if let carryover {
+                primarySpawnExtras = carryover.claudeSpawnExtras
+            } else if let archivedSession {
+                primarySpawnExtras = archivedClaudeSpawnExtras?[archivedSession]
+            } else {
+                primarySpawnExtras = claudeSpawnExtras
+            }
             // `--resume` is what actually restores the prior conversation;
             // `--session-id` is for starting a NEW session with a pre-chosen
             // UUID (used on fresh create). Reviving with `--session-id` on an
@@ -1617,9 +1656,6 @@ extension WorktreeLifecycle {
             // now. A carryover forks (`--fork-session`), and its id exists
             // only once it has launched, so it stays legacy — which the
             // recapture below, scheduled with no incarnation, relies on.
-            // Prepared before the overlay resolves, because whether this
-            // spawn carries `usage` decides whether a desk installs the
-            // statusline tee.
             let sessionMod = carryover == nil
                 ? SessionModSpawn.prepare(
                     config: config, claudeSessionID: sessionUUID,
@@ -1632,20 +1668,10 @@ extension WorktreeLifecycle {
                 // Repo fragment is file-backed config, read fresh at
                 // spawn time — applies on every spawn path, resume included.
                 repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
-                // Per-spawn fragment applies to FRESH primary spawns only;
-                // an archived-session resume must not reapply it. Hooks
-                // overlay still resolves for resumes — only
-                // extraSettingsJSON goes nil.
-                extraSettingsJSON: isResume ? nil : claudeSettingsOverlay,
-                // Desk sessions only — see the parameter's doc comment.
-                watchDeskRole: watchDeskRole,
-                // A spawn carrying `usage` reports its figures through the
-                // mod, so a desk keeps the person's own status line.
-                statuslineTee: ClaudeHookOverlay.installsStatuslineTee(carrying: sessionMod),
-                worktreePath: worktreePath,
-                // The same config dir this spawn runs with, so the tee
-                // delegates to the user-scope statusline THIS session reads.
-                profileConfigDir: profileConfigDir
+                // The primary's own fragment: the create's, the archived
+                // session's, or the carried-over source's. The hooks overlay
+                // resolves whether or not there is one.
+                extraSettingsJSON: primarySpawnExtras?.claudeSettingsOverlay
             )
             let spawnTitle = await ClaudeSessionTitle.forSpawn(
                 db: db, store: sessionTitles,
@@ -1676,6 +1702,7 @@ extension WorktreeLifecycle {
                 shellFallback: defaultShell,
                 settingsOverlayPath: primaryOverlayPath,
                 pluginDirPath: PluginDirWriter.pluginDirPath,
+                extraPluginDirs: primarySpawnExtras?.pluginDirs ?? [],
                 envSettingOverrides: claudeEnvOverrides,
                 sessionName: spawnTitle.name,
                 sessionModEnvironment: sessionMod?.environment ?? [:]
@@ -1716,12 +1743,9 @@ extension WorktreeLifecycle {
                 claudeSessionID: primarySessionID,
                 profileID: primaryProfileID,
                 kind: primaryTerminalKind,
-                // Same value the overlay above was built from, written to the row
-                // so the fact outlives this call. A desk woken from hibernation
-                // reuses this row, and the wake site has nothing else to read.
-                watchDeskRole: watchDeskRole,
                 transport: transport,
                 sessionIncarnationID: primarySessionIncarnationID,
+                claudeSpawnExtras: primarySpawnExtras,
                 codexLaunchOptions: primaryCodexLaunchOptions)
         } catch {
             await sessionTitles.release(primarySpawnTitle)
@@ -1892,6 +1916,9 @@ extension WorktreeLifecycle {
             for sessionID in additionalArchivedClaudeSessions {
                 let plannedID = UUID()
                 createdTerminalIDs.append(plannedID)
+                // This session's own values from the archive, applied to its
+                // start and kept on its new row.
+                let restoreSpawnExtras = archivedClaudeSpawnExtras?[sessionID]
                 let restoreProfileConfigDir = await configDirManager.resolveConfigDir(for: resolvedProfile)
                 // Pre-accept the folder-trust dialog so restoring an extra
                 // archived session onto a fresh profile dir doesn't re-prompt.
@@ -1935,9 +1962,11 @@ extension WorktreeLifecycle {
                     settingsOverlayPath: ClaudeHookOverlay.resolveOverlayPath(
                         fallbackModels: resolvedProfile?.fallbackModels,
                         sessionKey: plannedID.uuidString,
-                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id)
+                        repoSettingsJSON: ClaudeHookOverlay.repoSettingsFragment(repoID: repo?.id),
+                        extraSettingsJSON: restoreSpawnExtras?.claudeSettingsOverlay
                     ),
                     pluginDirPath: PluginDirWriter.pluginDirPath,
+                    extraPluginDirs: restoreSpawnExtras?.pluginDirs ?? [],
                     envSettingOverrides: claudeEnvOverrides,
                     sessionName: restoreSpawnTitle.name,
                     sessionModEnvironment: restoreSessionMod?.environment ?? [:]
@@ -1970,7 +1999,8 @@ extension WorktreeLifecycle {
                         profileID: resolvedProfile?.profileID,
                         kind: .claude,
                         transport: transport,
-                        sessionIncarnationID: restoreSessionMod?.incarnationID)
+                        sessionIncarnationID: restoreSessionMod?.incarnationID,
+                        claudeSpawnExtras: restoreSpawnExtras)
                 } catch {
                     await sessionTitles.release(restoreSpawnTitle)
                     throw error

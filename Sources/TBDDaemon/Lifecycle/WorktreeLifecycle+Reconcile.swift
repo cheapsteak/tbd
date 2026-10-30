@@ -1,6 +1,7 @@
 import Foundation
 import os
 import TBDShared
+import TBDKernel
 
 private let logger = Logger(subsystem: "com.tbd.daemon", category: "reconcile")
 
@@ -116,21 +117,6 @@ extension WorktreeLifecycle {
         let tips = resolvedTips ?? [:]
         let baseTip = tips["origin/\(repo.defaultBranch)"]
         await conflictSweepCache.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
-
-        // §13's "commits unchanged across cycles" rides along on the map that
-        // was just resolved: the sweep already knows every branch tip, so
-        // remembering when each one first arrived costs one actor hop and no
-        // subprocess. A tip that keeps arriving unchanged keeps its original
-        // stamp. Deliberately no working-tree diff fact — answering that half
-        // would mean a `git status` per worktree per sweep, and an
-        // unestablished fact is reported as nil rather than as "unchanged".
-        let observedAt = now()
-        await branchTipTracker.retain(repoID: repoID, worktreeIDs: Set(worktrees.map(\.id)))
-        for wt in worktrees {
-            guard let branchTip = tips[wt.branch] else { continue }
-            await branchTipTracker.record(
-                repoID: repoID, worktreeID: wt.id, branchTip: branchTip, at: observedAt)
-        }
 
         // PR-poll trigger: a push moves `origin/<branch>`, and that makes the
         // worktree's PR check due now. The local tip is deliberately ignored —

@@ -88,8 +88,8 @@ CLI's `worktree` noun already covers scratch spaces everywhere else:
 them. `worktree archive` refusing them was the odd one out.
 
 Routing in the daemon also fixes every client at once, including the ones that
-do not exist yet: the CLI, `tbd` skill invocations, hooks, scripts, and the
-nightwatch desk. Fixing it in the CLI instead would have reproduced the GUI's
+do not exist yet: the CLI, `tbd` skill invocations, hooks, and scripts.
+Fixing it in the CLI instead would have reproduced the GUI's
 client-side check a second time and left the next client to discover the trap a
 third time.
 
@@ -222,25 +222,6 @@ makes them reachable without a user gesture:
   resurrect a retired row as active. Both sibling verbs guard on the pointer
   explicitly, so revive does too.
 
-**The Watch Desk is refused.** `isNightwatchDesk` is `isScratch` plus the desk's
-display name, so the routing reaches the Nightwatch desk row. Its teardown is
-`DeskSessionManager.closeDeskSession`, which also clears the in-memory desk
-pointer and is paired with `releaseJudgeLease` to drop the lease row and unlink
-the lease credential file. Neither resource has a named reconciler, so retiring
-the desk through the generic body would leak both with nothing to reclaim them.
-Both doors refuse it and say so, which is the honest answer to the reconciler
-question this new destruction path would otherwise have to answer.
-
-Revive refuses it as well, and needs its own guard rather than inheriting
-archive's. `closeDeskSession` archives the desk row through
-`db.worktrees.archive` directly and changes neither `repoID` nor the display
-name, so the archived row still reads as the desk and satisfies every other
-revive guard. Bringing it back by hand would flip the row `.active` and
-broadcast a revive while the desk actor's pointer, lease row, lease credential
-file and terminals stay gone. Nothing legitimately revives a desk row:
-`ensureDeskSession`'s recovery path excludes archived worktrees deliberately, so
-the desk opens a fresh session instead.
-
 The app keeps its own listings honest on daemon-originated transitions: the
 `.worktreeRevived` handler drops the row from `archivedScratchWorktrees`, and the
 archived handler refreshes that listing for a scratch row. Without the first
@@ -269,13 +250,6 @@ path only ever kill individual windows, and the routing changes nothing here.
 Reconcile cannot resurrect the archived row. Scratch paths are absent from
 `WorktreeLayout.legacyAndCanonicalPrefixes`, so the re-adopt sweep does not scan
 `TBDConstants.scratchDir`.
-
-`DeskSessionManager.closeDeskSession` carries a third, hand-rolled copy of this
-teardown against a row of the same kind, and it has already drifted: it omits
-the `pendingQuestions.clear` and per-session overlay removal that
-`closeScratchTerminals` performs, so overlay files accumulate until the next
-daemon restart. Folding it onto the shared body is deferred, so the extraction
-here unifies the two RPC doors rather than every caller.
 
 Four further properties of the scratch body are pre-existing, unchanged by the
 routing, and deliberately left for separate changes. Each is a change to that
@@ -310,14 +284,13 @@ second copy of a message the reader has just learned not to trust.
 were nil would be routed to a path that leaves its directory and git
 registration in place, an under-cleanup rather than a data-loss failure, and
 would then be reported as archived. `repoID` is non-null for every row the
-create lifecycle writes, and the only two writers of a null one both go through
-`WorktreeStore.createScratch`: `handleScratchCreate`, whose rows are the
-intended target of this routing, and the Watch Desk's session creation, whose
-row is refused explicitly by the `isNightwatchDesk` guard in both shared bodies.
-So a row reaching the scratch teardown by way of a nil `repoID` it should not
-have had requires the DB to already be inconsistent. That premise is worth
-re-checking rather than inheriting: a third `createScratch` caller would widen
-this routing silently, and its rows would need their own answer here.
+create lifecycle writes, and the only writer of a null one is
+`WorktreeStore.createScratch`, called from `handleScratchCreate`, whose rows are
+the intended target of this routing. So a row reaching the scratch teardown by
+way of a nil `repoID` it should not have had requires the DB to already be
+inconsistent. That premise is worth re-checking rather than inheriting: a second
+`createScratch` caller would widen this routing silently, and its rows would
+need their own answer here.
 
 **A scratch row misclassified as a repo worktree.** The inverse is the dangerous
 direction, since it reaches the phase-2 deletion path, and it is exactly what

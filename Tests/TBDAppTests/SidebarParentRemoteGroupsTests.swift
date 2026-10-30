@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 @Suite("Sidebar parent remote groups")
 struct SidebarParentRemoteGroupsTests {
@@ -113,9 +114,9 @@ struct SidebarParentRemoteGroupsTests {
 @Suite("Sidebar parent group state")
 struct SidebarParentGroupStateTests {
     private func withState(_ body: (AppState, UUID) -> Void) {
-        let suite = "SidebarParentGroupStateTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarParentGroupStateTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let repo = Repo(path: "/tmp/acme", displayName: "acme")
         state.repos = [repo]

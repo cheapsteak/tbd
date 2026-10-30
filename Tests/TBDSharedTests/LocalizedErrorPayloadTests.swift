@@ -1,12 +1,13 @@
 import Testing
 import Foundation
 @testable import TBDShared
+import TBDKernel
 
 /// Tier 1. Regression cover for the NSError bridge-string defect.
 ///
 /// A Swift error that conforms only to `Error` bridges to `NSError`, and
 /// `localizedDescription` on that bridge renders
-/// "The operation couldn't be completed. (TBDShared.FDChannelError error 1.)" —
+/// "The operation couldn't be completed. (TBDKernel.FDChannelError error 1.)" —
 /// the case name is gone and every payload it carried (errno, path, UUID,
 /// reason) is gone with it. That string is what reaches the os.Logger error
 /// line and the user-facing alert, so the throw arrives carrying nothing.
@@ -204,7 +205,7 @@ struct LocalizedErrorPayloadTests {
     @Test("the bridge-shape matcher rejects a genuine bridge string")
     func bridgeShapeMatcherIsNotVacuous() {
         // Spelled with the typographic apostrophe Foundation actually emits.
-        let genuine = "The operation couldn\u{2019}t be completed. (TBDShared.FDChannelError error 1.)"
+        let genuine = "The operation couldn\u{2019}t be completed. (TBDKernel.FDChannelError error 1.)"
         #expect(Self.bridgePrefixes.contains { genuine.contains($0) })
         #expect(genuine.range(of: Self.bridgeShape, options: .regularExpression) != nil)
 

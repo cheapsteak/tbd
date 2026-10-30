@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 import TestSupport
 
 /// `HolderRegistry.abandonVerifiedJob` — the hook-tab teardown's decision about

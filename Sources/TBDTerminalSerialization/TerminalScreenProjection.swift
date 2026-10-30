@@ -108,9 +108,8 @@ public enum TerminalScreenProjection {
     /// The early return is **not** a second answer. With no lines the tail cut
     /// drops every enumerated row, so `droppedFromFront` equals the whole count
     /// and `viewportStart` reduces to `-rows` whatever the buffer holds.
-    /// `TerminalScreenProjectionParityTests` compares this against the full
-    /// walk at depth `0` over every fixture, and counts row accesses to prove
-    /// the walk did not run.
+    /// `TerminalScreenProjectionTests` checks this against a full walk of the
+    /// same terminal, and counts row accesses to prove the walk did not run.
     ///
     /// The line walk, when there is one, enumerates from `totalLinesTrimmed` —
     /// the absolute index of the oldest line still held — until
@@ -210,9 +209,8 @@ public enum TerminalScreenProjection {
     /// the cursor past the cells it is leaving alone rather than overwriting
     /// them with blanks, so the skipped cells become invisible NULs scattered
     /// through the line — and which cells get skipped changes with every
-    /// repaint, so the holes appear to move. Every consumer of this string
-    /// matches on text (fleet supervision, the pending-input rail, the login
-    /// driver), and a NUL is a missing character nothing displays. `tmux
+    /// repaint, so the holes appear to move. A reader of this string matches
+    /// on text, and a NUL is a missing character nothing displays. `tmux
     /// capture-pane`, which this replaces for machine reads, returns spaces;
     /// so does the styled serializer in `TerminalCellWalk`.
     ///

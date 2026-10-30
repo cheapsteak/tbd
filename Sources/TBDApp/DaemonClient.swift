@@ -70,7 +70,15 @@ struct AttachFDVendError: LocalizedError {
 /// Uses one-shot POSIX socket connections per RPC call (same approach as the CLI).
 actor DaemonClient {
     private let socketPath: String
+    /// Where the FD sidecar connects. Resolved once, at init, like
+    /// `socketPath`.
+    private let vendSocketPath: String
     private(set) var connected: Bool = false
+    /// Paces `reconnectSidecarIfDown`.
+    private var sidecarReconnectBackoff = SidecarReconnectBackoff()
+    /// How far the injected clock has moved since init: the timestamps
+    /// `sidecarReconnectBackoff` paces on.
+    private let elapsed: @Sendable () -> Duration
 
     /// Sidecar for receiving vended pane fds. Connected eagerly right after
     /// the RPC socket, so the daemon's accept has completed long before the
@@ -90,9 +98,14 @@ actor DaemonClient {
     /// returns in milliseconds and never approaches this ceiling.
     nonisolated static let rpcRecvDeadlineSeconds: TimeInterval = 300
 
-    init(socketPath: String? = nil) {
+    init(
+        socketPath: String? = nil, vendSocketPath: String? = nil,
+        clock: any Clock<Duration> = ContinuousClock()
+    ) {
         // See HookResolver — resolve here, not at the caller's site.
         self.socketPath = socketPath ?? TBDConstants.socketPath
+        self.vendSocketPath = vendSocketPath ?? TBDConstants.vendSocketPath
+        self.elapsed = ClockStopwatch.start(on: clock)
     }
 
     // MARK: - Connection
@@ -100,6 +113,10 @@ actor DaemonClient {
     /// Attempt to connect to the daemon (verifies socket exists and is reachable).
     /// If the daemon is not running, tries to find and launch `tbdd` automatically.
     func connect() async -> Bool {
+        // A reconnect to the daemon is a fresh start for the sidecar too: the
+        // run of reconnects `reconnectSidecarIfDown` was pacing, if any, was
+        // about a connection this one replaces.
+        sidecarReconnectBackoff = SidecarReconnectBackoff()
         // First try to connect directly
         if tryConnect() {
             connectSidecar()
@@ -139,11 +156,53 @@ actor DaemonClient {
     /// connected, so reconnect retries are safe.
     private func connectSidecar() {
         do {
-            try fdSidecar.connect(path: TBDConstants.vendSocketPath)
+            try fdSidecar.connect(path: vendSocketPath)
         } catch {
             daemonClientLogger.warning(
                 "FD sidecar connect failed (control-mode attach unavailable): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Reconnect the FD sidecar if it is down, paced for `caller` by
+    /// `SidecarReconnectBackoff`: the poll tick and a holder attach about to
+    /// send its request each on an escalating backoff of their own, so a
+    /// burst of panels cannot use up the poll's.
+    ///
+    /// `connect()` runs only while the app believes itself disconnected, so
+    /// it never sees a sidecar that drops on its own while the app stays
+    /// connected: the daemon handing it to a second app instance, the frame
+    /// scanner desyncing, or a daemon restart quick enough that no RPC failed
+    /// in between. Until something reconnects it, every new holder tab fails
+    /// to attach and every control-mode keystroke is dropped.
+    ///
+    /// - Returns: Whether the sidecar is connected afterwards.
+    @discardableResult
+    func reconnectSidecarIfDown(_ caller: SidecarReconnectBackoff.Caller) -> Bool {
+        let now = elapsed()
+        if fdSidecar.isConnected {
+            sidecarReconnectBackoff.noteConnected(at: now)
+            return true
+        }
+        guard sidecarReconnectBackoff.allowsReconnect(caller, at: now) else { return false }
+        connectSidecar()
+        let connected = fdSidecar.isConnected
+        sidecarReconnectBackoff.noteReconnect(caller, at: now)
+        let reconnects = caller == .poll
+            ? sidecarReconnectBackoff.reconnects : sidecarReconnectBackoff.attachReconnects
+        let outcome = connected ? "succeeded" : "failed"
+        let asker = caller == .poll ? "the poll tick" : "a holder attach"
+        daemonClientLogger.info("""
+            FD sidecar was down; reconnect \(reconnects, privacy: .public) of this run for \
+            \(asker, privacy: .public) \(outcome, privacy: .public)
+            """)
+        return connected
+    }
+
+    /// A holder attach was delivered: the run of attach-time sidecar
+    /// reconnects, if any, is over — a reconnect another instance keeps
+    /// taking away never gets this far.
+    func noteHolderAttachDelivered() {
+        sidecarReconnectBackoff.noteAttachDelivered()
     }
 
     /// Try a single connection attempt (non-async).
@@ -178,14 +237,23 @@ actor DaemonClient {
         return nil
     }
 
-    /// Launch the tbdd daemon as a background process.
-    private func launchDaemon(at path: String) {
+    /// Build the (unstarted) `Process` that launches the daemon.
+    ///
+    /// Deliberately sets no `qualityOfService`. On macOS a `Process` QoS is a
+    /// clamp every descendant inherits and cannot raise, so `.utility` here would
+    /// pin the daemon, every holder, every agent and every build they run to the
+    /// efficiency cores. Internal rather than private so a test can pin that.
+    nonisolated static func makeDaemonProcess(executablePath: String) -> Process {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        // Detach so the daemon outlives the app
-        process.qualityOfService = .utility
+        return process
+    }
+
+    /// Launch the tbdd daemon as a background process.
+    private func launchDaemon(at path: String) {
+        let process = Self.makeDaemonProcess(executablePath: path)
         do {
             try process.run()
             daemonClientLogger.info("Launched tbdd (pid: \(process.processIdentifier))")
@@ -199,7 +267,7 @@ actor DaemonClient {
     /// Create a connected Unix domain socket to the daemon.
     /// Caller is responsible for closing the returned file descriptor.
     ///
-    /// Internal rather than private so `DaemonClientSocketTests` can call it
+    /// Internal rather than private so `AppSocketInheritanceTests` can call it
     /// against a listener of its own and read the flags back off the returned
     /// descriptor. The fd otherwise never escapes this file.
     nonisolated func makeConnectedSocket() throws -> Int32 {
@@ -267,7 +335,7 @@ actor DaemonClient {
         // particular must not set that disposition (SwiftTerm's `forkpty`
         // children would inherit it).
         //
-        // Covered by `DaemonClientSocketTests.connectedSocketSuppressesSIGPIPE`,
+        // Covered by `AppSocketInheritanceTests.connectedSocketSuppressesSIGPIPE`,
         // which stands up a listener on a socket path of its own and reads the
         // option back off the descriptor this returns. Deleting this line
         // reddens that row.
@@ -650,11 +718,17 @@ actor DaemonClient {
         )
     }
 
-    /// Archive a worktree.
-    func archiveWorktree(id: UUID, force: Bool = false) async throws {
+    /// Archive a worktree. `force` and `discardUncommittedChanges` carry
+    /// `WorktreeArchiveParams`' meanings; the app sends the second once the
+    /// user confirms deleting a local worktree's uncommitted changes.
+    func archiveWorktree(
+        id: UUID, force: Bool = false, discardUncommittedChanges: Bool = false
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.worktreeArchive,
-            params: WorktreeArchiveParams(worktreeID: id, force: force)
+            params: WorktreeArchiveParams(
+                worktreeID: id, force: force,
+                discardUncommittedChanges: discardUncommittedChanges)
         )
     }
 
@@ -1154,17 +1228,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist supervision's fleet-wide authority switch (design 2026-07-26
-    /// §3, §7). `enabled: true` releases the fleet brake; `false` engages it.
-    /// Shipped OFF (braked); for now inert, since the rest of the supervision
-    /// subsystem is landing in the same series of changes.
-    func setSupervisionEnabled(_ enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetSupervisionEnabled,
-            params: ConfigSetSupervisionEnabledParams(enabled: enabled)
-        )
-    }
-
     /// Persist the tmux control-mode opt-in (M5). Applies to newly created
     /// panes; a truthy TBD_TMUX_CONTROL_MODE in the daemon's env still forces
     /// the gate on regardless of this flag.
@@ -1215,15 +1278,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the Program Status Protocol gate (default OFF, soaking). Applies
-    /// to Claude sessions started after the change.
-    func setProgramStatus(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetProgramStatusEnabled,
-            params: ConfigSetProgramStatusEnabledParams(enabled: enabled)
-        )
-    }
-
     /// Persist the transcript prompt-answer gate (default OFF, soaking). New
     /// sessions pick up the hooks.
     func setTranscriptPromptAnswer(enabled: Bool) async throws {
@@ -1260,16 +1314,6 @@ actor DaemonClient {
         )
     }
 
-    /// Persist the pending-input veto for auto-hibernate (machine-interface
-    /// guard that prevents hibernation of sessions with typed-but-unsent input).
-    /// Applies on the next hibernation sweep.
-    func setHibernateInputVeto(enabled: Bool) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.configSetHibernateInputVeto,
-            params: ConfigSetHibernateInputVetoParams(enabled: enabled)
-        )
-    }
-
     /// Persist the auto-close-setup-tab soak flag (default OFF). Applies to
     /// the next worktree creation.
     func setAutoCloseSetup(enabled: Bool) async throws {
@@ -1299,6 +1343,17 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.configSetPtyHolderEnabled,
             params: ConfigSetPtyHolderEnabledParams(enabled: enabled)
+        )
+    }
+
+    /// Persist the holder claim-reconcile gate (default OFF, soaking).
+    /// `holder.reconcileClaims` reads it on every sweep, so it applies from
+    /// the next poll tick. While it is off, a sweep only logs what it would
+    /// take back.
+    func setHolderClaimReconcileEnabled(_ enabled: Bool) async throws {
+        try await callVoidAsync(
+            method: RPCMethod.configSetHolderClaimReconcileEnabled,
+            params: ConfigSetHolderClaimReconcileParams(enabled: enabled)
         )
     }
 
@@ -1508,45 +1563,6 @@ actor DaemonClient {
         )
     }
 
-    /// Ask a provider to retain one of its own sessions' transcripts
-    /// (`docs/remote-provider-contract.md` § `transcript retain <id>`), and record the
-    /// receipt daemon-side. Unlike `remoteRename`, the capability check is the
-    /// DAEMON's here — the handler refuses before invoking anything — so a
-    /// caller need not pre-check, and gets a refusal naming the capability
-    /// rather than a raw provider error.
-    func remoteRetain(provider: String, sessionID: String) async throws -> RetainReceipt {
-        try await callAsync(
-            method: RPCMethod.remoteRetain,
-            params: RemoteRetainParams(provider: provider, sessionID: sessionID),
-            resultType: RetainReceipt.self
-        )
-    }
-
-    /// Put a transcript from anywhere — including this machine — into a
-    /// provider's durable store (`docs/remote-provider-contract.md` §
-    /// `transcript import`). `jsonl` is Claude Code transcript JSONL.
-    func remoteImport(provider: String, jsonl: String) async throws -> RetainReceipt {
-        try await callAsync(
-            method: RPCMethod.remoteImport,
-            params: RemoteImportParams(provider: provider, jsonl: jsonl),
-            resultType: RetainReceipt.self
-        )
-    }
-
-    /// Read a retained transcript back (`docs/remote-provider-contract.md` §
-    /// `transcript recall <key>`). With `saveLocally`, the daemon also writes it under
-    /// `~/tbd/transcripts/` and returns that path; the records come back in
-    /// `jsonl` either way.
-    func remoteRecall(
-        provider: String, key: String, saveLocally: Bool = false
-    ) async throws -> RemoteRecallResult {
-        try await callAsync(
-            method: RPCMethod.remoteRecall,
-            params: RemoteRecallParams(provider: provider, key: key, saveLocally: saveLocally),
-            resultType: RemoteRecallResult.self
-        )
-    }
-
     /// The retain and import receipts TBD holds, newest first, optionally
     /// filtered to one provider.
     ///
@@ -1634,14 +1650,29 @@ actor DaemonClient {
     /// default) is the control-mode caller, which names its pane.
     func attachRequest(
         worktreeID: UUID, paneID: String, windowID: String, attachID: UUID,
-        terminalID: UUID? = nil
+        terminalID: UUID? = nil, attachSeq: UInt64? = nil
     ) async throws -> AttachRequestResult {
         try await callAsync(
             method: RPCMethod.attachRequest,
             params: AttachRequestParams(
                 worktreeID: worktreeID, paneID: paneID, windowID: windowID, attachID: attachID,
-                terminalID: terminalID),
+                terminalID: terminalID, attachSeq: attachSeq),
             resultType: AttachRequestResult.self
+        )
+    }
+
+    /// Tell the daemon which holder sessions this app holds
+    /// (`holder.reconcileClaims`), so it can take back the viewer claims this
+    /// app owns on every other session. `held` and `throughSeq` are one
+    /// `HolderHandbackLedger.reconcileSnapshot()`. `appPID` is the claim owner
+    /// the daemon compares against, and defaults to this process.
+    func reconcileHolderClaims(
+        held: [UUID], throughSeq: UInt64, appPID: Int32 = getpid()
+    ) async throws -> HolderReconcileClaimsResult {
+        try await callAsync(
+            method: RPCMethod.holderReconcileClaims,
+            params: HolderReconcileClaimsParams(appPID: appPID, held: held, throughSeq: throughSeq),
+            resultType: HolderReconcileClaimsResult.self
         )
     }
 
@@ -1771,18 +1802,6 @@ actor DaemonClient {
         )
     }
 
-    /// Apply one panel-surface operation. Gated daemon-side
-    /// (`daemon_panel_surface_enabled` / `agent_panel_control_enabled`,
-    /// spec C §7.2) — a gated rejection surfaces as `DaemonClientError.rpcError`
-    /// naming the flag.
-    func panelApply(_ envelope: PanelOperationEnvelope) async throws -> PanelApplyResult {
-        try await callAsync(
-            method: RPCMethod.panelApply,
-            params: PanelApplyParams(envelope: envelope),
-            resultType: PanelApplyResult.self
-        )
-    }
-
     /// One-time legacy-tab import into the daemon-owned panel surface.
     /// The daemon returns a "not implemented" error until Task 11 lands.
     func panelImportLegacy(_ params: PanelImportParams) async throws -> PanelImportResult {
@@ -1793,32 +1812,12 @@ actor DaemonClient {
         )
     }
 
-    /// Manually suspend a single Claude terminal.
-    func terminalSuspend(terminalID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.terminalSuspend,
-            params: TerminalSuspendParams(terminalID: terminalID)
-        )
-    }
-
-    /// Manually resume a single suspended terminal.
-    func terminalResume(terminalID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.terminalResume,
-            params: TerminalResumeParams(terminalID: terminalID)
-        )
-    }
-
     /// Manually hibernate one Claude terminal (kill its process, keep the
     /// tmux window). Honors the running/permission rails.
-    /// `overrideUnconfirmedDraft` is set only after the person answered "Hibernate
-    /// anyway" to a `composerDraftUnconfirmed` refusal.
-    func terminalHibernate(terminalID: UUID, overrideUnconfirmedDraft: Bool = false) async throws {
+    func terminalHibernate(terminalID: UUID) async throws {
         try await callVoidAsync(
             method: RPCMethod.terminalHibernate,
-            params: TerminalHibernateParams(
-                terminalID: terminalID,
-                overrideUnconfirmedDraft: overrideUnconfirmedDraft ? true : nil)
+            params: TerminalHibernateParams(terminalID: terminalID)
         )
     }
 
@@ -1880,22 +1879,6 @@ actor DaemonClient {
         try await callVoidAsync(
             method: RPCMethod.terminalCancelScheduledResume,
             params: CancelScheduledResumeParams(terminalID: terminalID)
-        )
-    }
-
-    /// Suspend all Claude terminals in a worktree.
-    func worktreeSuspend(worktreeID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.worktreeSuspend,
-            params: WorktreeSuspendParams(worktreeID: worktreeID)
-        )
-    }
-
-    /// Resume all suspended terminals in a worktree.
-    func worktreeResume(worktreeID: UUID) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.worktreeResume,
-            params: WorktreeResumeParams(worktreeID: worktreeID)
         )
     }
 
@@ -2232,14 +2215,6 @@ actor DaemonClient {
         )
     }
 
-    /// Set the nightwatch mode (off, daywatch, or nightwatch).
-    func setNightwatchMode(_ mode: NightwatchMode) async throws {
-        try await callVoidAsync(
-            method: RPCMethod.nightwatchSetMode,
-            params: NightwatchSetModeParams(mode: mode)
-        )
-    }
-
     /// Fetch fresh usage for a single profile (60s server-side dedupe).
     func fetchProfileUsage(id: UUID) async throws -> ModelProfileUsage {
         let result = try await callAsync(
@@ -2431,8 +2406,7 @@ actor DaemonClient {
         )
     }
 
-    /// Every terminal's current program-status snapshot. Empty while
-    /// `program_status_enabled` is off.
+    /// Every terminal's current program-status snapshot.
     func terminalProgramStatusList() async throws -> [ProgramStatusSnapshot] {
         let result = try await callNoParamsAsync(
             method: RPCMethod.terminalProgramStatusList,

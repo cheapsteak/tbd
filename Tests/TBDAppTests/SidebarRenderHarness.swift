@@ -1,12 +1,24 @@
+#if TBD_HARNESSES
 import AppKit
 import Foundation
 import SwiftUI
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// Opt-in native SidebarView captures. No detail view or terminal is mounted.
-/// Set TBD_SIDEBAR_SHOTS_DIR to a task-owned output directory to enable.
+///
+/// Compiled only when the `TBD_HARNESSES` condition is set (see
+/// `Tests/CLAUDE.md`), so a normal run neither builds nor schedules it, and
+/// even then each test returns at once unless `TBD_SIDEBAR_SHOTS_DIR` names a
+/// task-owned output directory:
+///
+///     TBD_SIDEBAR_SHOTS_DIR=/tmp/sidebar-shots scripts/test.sh \
+///         -Xswiftc -DTBD_HARNESSES --filter SidebarRenderHarness
+///
+/// Nothing in CI compiles this file, so a refactor elsewhere can leave it
+/// failing to build; fix it when you next enable it.
 @MainActor
 @Suite("Sidebar render harness")
 struct SidebarRenderHarness {
@@ -24,11 +36,10 @@ struct SidebarRenderHarness {
     }
 
     private func render(width: Int, dark: Bool, expanded: Bool, into directory: URL) async throws {
-        let suite = "SidebarRenderHarness.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarRenderHarness")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         defaults.set(true, forKey: AppState.showScratchSectionKey)
-        defaults.set(false, forKey: AppState.nightwatchExperimentalKey)
         defaults.set(true, forKey: AppState.sidebarWorkflowGroupsKey)
         let state = AppState(userDefaults: defaults)
         let api = Repo(path: "/tmp/acme-api", displayName: "acme/api")
@@ -99,11 +110,10 @@ struct SidebarRenderHarness {
     }
 
     private func renderNested(width: Int, dark: Bool, expansion: Int, into directory: URL) async throws {
-        let suite = "SidebarRenderHarness.Nested.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let suite = TestDefaultsSuite("SidebarRenderHarness.Nested")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         defaults.set(false, forKey: AppState.showScratchSectionKey)
-        defaults.set(false, forKey: AppState.nightwatchExperimentalKey)
         let state = AppState(userDefaults: defaults)
         let api = Repo(path: "/tmp/acme-api", displayName: "acme/api")
         let web = Repo(path: "/tmp/acme-web", displayName: "acme/web")
@@ -148,5 +158,5 @@ struct SidebarRenderHarness {
         try capture.writePNG(to: directory.appendingPathComponent(name))
         #expect(state.recentlyAttachedRemoteSessions.isEmpty)
     }
-
 }
+#endif

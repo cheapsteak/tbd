@@ -1,8 +1,10 @@
 import Foundation
+import DaemonTestSupport
 import TestSupport
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// Every path that archives a worktree removes the session-mod directory of
 /// each Claude session in it, draft included, once that session's process has

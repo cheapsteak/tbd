@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDApp
 import TBDShared
+import TestSupport
 
 /// App-side behavior for the blocking `preSession` worktree hook:
 /// `.terminalCreated` delta consumption, tab selection hand-off from the
@@ -14,9 +15,9 @@ struct PreSessionAppStateTests {
     /// Build an isolated AppState (never `UserDefaults.standard` — that's the
     /// developer's real TBDApp.plist) and tear the suite down afterward.
     private func withAppState(_ body: (AppState) throws -> Void) rethrows {
-        let suiteName = "PreSessionAppStateTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("PreSessionAppStateTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         try body(AppState(userDefaults: defaults))
     }
 
@@ -414,9 +415,9 @@ struct PreSessionAppStateTests {
 
     /// Tier 1: deterministic in-process state only.
     @Test func mergeCreatedTerminalReconcilesStoredOrderOnlyOnInsertion() async {
-        let suiteName = "PreSessionAppStateTests-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let suite = TestDefaultsSuite("PreSessionAppStateTests")
+        let defaults = suite.defaults
+        defer { suite.tearDown() }
         let state = AppState(userDefaults: defaults)
         let worktreeID = seedWorktree(state, status: .creating).id
         let pre = seedPreSessionOnly(state, worktreeID: worktreeID)

@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import TBDKernel
 
 /// The session-ended step dev servers save their last output through
 /// (plan decision D2): called once per finished session, with the

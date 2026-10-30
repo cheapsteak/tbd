@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 import TBDShared
+import TBDKernel
 
 /// Tier 2: a real directory with real unix sockets, no `~/tbd`, no database, no
 /// spawned process. The base, the clock and the listener probe are injected;

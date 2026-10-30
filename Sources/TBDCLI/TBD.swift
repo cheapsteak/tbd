@@ -15,6 +15,7 @@ struct TBDCommand: AsyncParsableCommand {
             WorktreeCommand.self,
             ScratchCommand.self,
             ConfigCommand.self,
+            AgentsCommand.self,
             ProfileCommand.self,
             TerminalCommand.self,
             ServerCommand.self,
@@ -34,8 +35,6 @@ struct TBDCommand: AsyncParsableCommand {
             CleanupCommand.self,
             LinkCommand.self,
             DoctorCommand.self,
-            NightwatchCommand.self,
-            SuperviseCommand.self,
             GCCommand.self,
             PRCommand.self,
         ]

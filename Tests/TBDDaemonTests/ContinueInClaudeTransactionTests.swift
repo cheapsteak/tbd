@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import TBDDaemonLib
 @testable import TBDShared
+import DaemonTestSupport
 import TestSupport
 
 @Suite("Continue in Claude transaction")
@@ -219,6 +220,26 @@ struct ContinueInClaudeTransactionTests {
             return terminal
         }.last
         #expect(replacement == updated)
+    }
+
+    @Test("start admission holds the continuation before the source is replaced")
+    func startAdmissionHoldsTheContinuation() async throws {
+        let fixture = try await makeRPCFixture(ownsPane: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let stub = StubAdmission(.hold(reason: "camera in use"))
+        fixture.router.startAdmission = stub
+        try await fixture.db.config.setStartAdmissionEnabled(true)
+
+        let response = await continueRequest(fixture)
+
+        #expect(response.errorCode == RPCErrorCode.startHeld.rawValue)
+        #expect(response.error == "camera in use")
+        #expect(stub.requests.map(\.kind) == [.create])
+        #expect(stub.requests.first?.agent == .claude)
+        #expect(stub.requests.first?.terminalID == fixture.terminal.id)
+        #expect(!fixture.recorder.commands.contains { $0.contains("respawn-window") })
+        // The Codex source is exactly as it was.
+        #expect(try await fixture.db.terminals.get(id: fixture.terminal.id) == fixture.terminal)
     }
 
     /// The Claude destination launches under the pending incarnation that
@@ -915,7 +936,7 @@ struct ContinueInClaudeTransactionTests {
             .appendingPathComponent("continue-rpc-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true)
-        try run("/usr/bin/git", ["init", root.path])
+        try await run("/usr/bin/git", ["init", root.path])
         let rollout = root.appendingPathComponent("rollout.jsonl")
         let sessionMeta = """
             {"type":"session_meta","payload":{"id":"codex-thread","cwd":\(json(root.path))}}
@@ -1060,11 +1081,13 @@ struct ContinueInClaudeTransactionTests {
     private func waitForFreshClaudeSessionID(
         in recorder: CommandRecorder
     ) async -> String? {
-        for _ in 0..<2_000 {
-            if let sessionID = recorder.freshClaudeSessionID { return sessionID }
-            await Task.yield()
+        _ = await pollUntilTrue(
+            timeout: TestDeadlines.saturatedPass,
+            pollInterval: .milliseconds(10)
+        ) {
+            recorder.freshClaudeSessionID != nil
         }
-        return nil
+        return recorder.freshClaudeSessionID
     }
 
     private func json(_ value: String) -> String {
@@ -1073,15 +1096,15 @@ struct ContinueInClaudeTransactionTests {
         return String(array.dropFirst().dropLast())
     }
 
-    private func run(_ executable: String, _ arguments: [String]) throws {
+    /// Runs `executable` to completion, discarding its output, and waits
+    /// through `collectOutput(of:)` so the wait parks no cooperative-pool
+    /// thread.
+    private func run(_ executable: String, _ arguments: [String]) async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
+        let output = try await collectOutput(of: process)
+        guard output.status == 0 else {
             throw CocoaError(.executableRuntimeMismatch)
         }
     }

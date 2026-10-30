@@ -152,19 +152,36 @@ that turned the decoy loop into `chmod 000` on the developer's real `~/tbd` and
 owns them and can chmod them back.
 
 Two things the fence does *not* cover, so the existing disciplines stay
-load-bearing: `UserDefaults` (resolved by `cfprefsd` over XPC, hence the
-`AppState(userDefaults:)` rule in the root `CLAUDE.md`) and the Keychain, which
-breaks rather than redirects under `CFFIXED_USER_HOME` — Keychain-touching code
-must be reached through an injection seam such as
-`ClaudeCredentialsKeychainDeleting`. Account-database home lookups
+load-bearing: `UserDefaults` and the Keychain, which breaks rather than
+redirects under `CFFIXED_USER_HOME` — Keychain-touching code must be reached
+through an injection seam such as `ClaudeCredentialsKeychainDeleting`.
+
+`cfprefsd` resolves preferences over XPC, so a suite's backing plist is written
+to the **real** `~/Library/Preferences` whatever the wrapper exports, and
+`removePersistentDomain(forName:)` leaves it there as a 42-byte husk. No
+in-process teardown fixes that: six unlink orderings were measured, ten trials
+each, and all 60 files reappeared after the process exited (whether CF's
+exit-time sync or `cfprefsd` writes them back was not established). So mint
+every suite through `TestDefaultsSuite` / `withTestDefaults`
+(`Tests/TestSupport/UserDefaultsTestSupport.swift`), which names it
+`TBDTests.suites/<label>.<uuid>`; the `/` puts every file in one container that
+`scripts/test.sh` removes once the process is gone. With detection on it then
+watches the path briefly, because a sweeper started the instant the process
+exited still lost 1 in 10 to a trailing write; without detection a late write
+is left for the next run's pre-run reclaim. To check for leftovers, stat that one path or list the
+container — never enumerate `~/Library/Preferences`, which can hold hundreds of
+thousands of entries.
+
+Account-database home lookups
 (`getpwuid`/`getpwnam`/`getpwent`, `NSHomeDirectoryForUser(_:)`,
 `FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
 escape both variables outright and are rejected mechanically by the
 `no_passwd_home_lookup` and `no_hardcoded_users_path` SwiftLint rules — the
-second covers `Tests/TBDSharedTests` and `Tests/TBDAppTests` as well, matches
-the dash-encoded `-Users-<name>-` form Claude Code scratchpad paths use, and
-fires in comments too, because a real username in a doc comment is a leak in a
-public repo even though it cannot open a file. Use `me` / `acme` / `x` / `test`
+second covers `Tests/TBDSharedTests`, `Tests/TBDKernelTests` and
+`Tests/TBDAppTests` as well, matches the dash-encoded `-Users-<name>-` form
+Claude Code scratchpad paths use, and fires in comments too, because a real
+username in a doc comment is a leak in a public repo even though it cannot open
+a file. Use `me` / `acme` / `x` / `test`
 in examples.
 
 Neither of those is the shape the leaks actually took, so a third rule covers
@@ -176,16 +193,17 @@ consults `TBD_HOME` / `TBD_CLAUDE_HOST_HOME` / `TBD_TEST_CODEX_HOME` at all.
 characters by one of those three as a whole path component, which is narrow
 enough to leave the ~20 legitimate home lookups (tilde-abbreviation for
 display, `~/Library` fallbacks, defaulted injection seams, `~/.ssh/tbd-agent.sock`)
-untouched. Three sites carry a reasoned inline suppression: `Constants.swift`
-is excluded outright as the file that *defines* the resolvers, and
+untouched. Three sites carry a reasoned inline suppression: `KernelPaths.swift`
+is excluded outright as the file that *defines* the resolvers, with
+`Constants.swift`, whose `TBDConstants` forwards to them, beside it, and
 `CodexHomeManager`, `ModelProfileKeychain.legacyStorageDir` and the frozen v-24
 conductors migration name a real path deliberately. Its limit is worth knowing
 before trusting it: the home value has to be visible near the append, so a path
 built from a `home` that arrived as a parameter matches nothing. It narrows the
 shape rather than closing it.
 
-The wrapper's last layer, a before/after fingerprint of the five real
-directories, is on when `$CI` is set and off otherwise; `--fingerprint` opts in
+The wrapper's detection layer, a before/after fingerprint of six real roots,
+is on when `$CI` is set and off otherwise; `--fingerprint` opts in
 locally and `--no-fingerprint` forces it off. The default follows the argument
 rather than contradicting it: a live daemon and sibling worktrees write to
 `~/tbd` legitimately for the whole duration of a local run, and any concurrent
@@ -194,12 +212,19 @@ agent session starting in a new directory mints a fresh
 not the primary guard: it compares directory *listings*, so a leak that writes
 to a fixed path — or one that cleans up after itself in a `defer` — is invisible
 to it, while the tripwire fails on the permission check every run regardless.
-Full rationale is in the wrapper's header.
+The sixth root, `~/Library/Preferences`, has no fence half. What guards it is
+the SwiftLint rule `no_raw_userdefaults_suite`, which keeps every suite on the
+helper, and the helper's own test asserting that the backing file lands at the
+exact path inside `TBDTests.suites`; the fingerprint's count of plists in that
+container is the run-level backstop, and the container is reclaimed before and
+after every run whether or not detection is on. Full rationale is in the
+wrapper's header.
 
 The wrapper's own guards are regression-tested by `scripts/test.test.sh`, which
 runs in the `lint` CI job: it drives the symlink and ownership refusals on the
-fake home, the post-run mode-000 recheck, the fingerprint's seven arms (five
-roots, two of which are read twice), the tmux socket fence (its `sun_path`
+fake home, the post-run mode-000 recheck, the fingerprint's eight arms (six
+roots, two of which are read twice), the preferences reclaim, its three
+refusals and its post-run settle, the tmux socket fence (its `sun_path`
 budget and its kill-server sweep), the holder sweep and the abandoned-run-root
 reconciler, and the
 shared-lock pin against fixture directories with a stub `swift`, so it takes
@@ -235,6 +260,43 @@ The failure asymmetry is the thing reviewers get wrong: leaving a heavy suite
 in the parallel pass is merely the status quo, but moving a fast
 deterministic suite into the serial pass taxes every PR forever. When in
 doubt, leave it in the parallel pass.
+
+## Opt-in harnesses — `TBD_HARNESSES`
+
+Some suites exist for a person to run by hand: render harnesses that write
+PNGs to look at, benchmarks that print timings, oracle runs over a real
+session. Each is inert unless an environment variable asks for it, but an
+inert test still compiles into `TBDAppTests` on every run and still takes a
+turn in the pass. So these files compile only under the `TBD_HARNESSES`
+compilation condition:
+
+```sh
+scripts/test.sh -Xswiftc -DTBD_HARNESSES --filter <Suite>
+```
+
+`-Xswiftc` reaches every target, so the first such run rebuilds the package.
+Run it with `TBD_REMOTE_VERIFY` unset: the remote valve verifies on CI, which
+builds without the condition, so a green verdict from it says nothing about a
+harness.
+The condition only makes a harness exist; most also keep their own variable,
+so compiling them all does not start any of them. Each file's header names its
+variable and gives the full command:
+
+- **`TableTranscriptHarness`** – `TBD_TABLE_HARNESS=1`; set
+  `TBD_COMPARE_THIS_SESSION` to a session JSONL to run the real-session tests
+  over it. Its headless pane tests, which do run in CI, are
+  `TableTranscriptPaneTests`, and the two share `TableTranscriptScene`.
+- **`TranscriptEagerMeasureBench`** – `TBD_PERF_BENCH=1`.
+- **`ComposerRenderHarness`** – `TBD_COMPOSER_SHOTS_DIR=<dir>`.
+- **`SidebarRenderHarness`** – `TBD_SIDEBAR_SHOTS_DIR=<dir>`.
+- **`WorkbenchSnapshotTests`** – no variable. A normal run renders one
+  configuration as a smoke test, and the condition adds the rest of the size
+  and appearance matrix.
+
+Nothing in CI builds with the condition, so a refactor can break a harness
+without anything going red. Whoever next enables one fixes it. A new
+harness that only a person reads belongs behind the same condition; a test
+whose assertions guard behaviour does not, however slow it is.
 
 ## Population is the scheduler, and it is a moving target
 
@@ -343,12 +405,11 @@ paper tallies do not all fit under the ceiling:
 - `GatedIntervalSleepTests.returnsAfterExpectedPollCount` — 3
   `requireAdvanceWhenArmed` + 2 `requireSleeperArmed` + 1 `FireRecorder.next()`
   = **6** guards, 270 s, i.e. **over** the 240 s limit.
-- `GatedIntervalSleepTests.boundaryIsExact` (3 + 1 + 1) and
-  `DaywatchRunnerLoopTests.testSubsequentTicksAtInterval` (2 + 3) — **5**
-  guards, 225 s.
+- `GatedIntervalSleepTests.boundaryIsExact` (3 + 1 + 1) — **5** guards,
+  225 s.
 
 Paper is the operative word, and the arithmetic that matters is different:
-**at most one guard can elapse in any single run of these.** All three chains
+**at most one guard can elapse in any single run of these.** Both chains
 are on `EventDrivenTestClock`'s **strict** waits, where a missed arming throws
 before anything advances, so the chain stops at the first bad step and nothing
 after it runs. The one non-throwing guard in each chain — `FireRecorder.next()`,
@@ -408,13 +469,15 @@ code that hands its work to `Task.detached`, where `gateHoldingTask` cannot
 follow and only the bound is yours (see "Thread-blocking gates" below) — takes
 the shared constant.
 
-One more thing a reader should not have to mine a log for: the **"71 known
-issues" pass 1 reports on every run, and the 11 in pass 2, are deliberate
+One more thing a reader should not have to mine a log for: the **"72 known
+issues" pass 1 reports on every run, and the 12 in pass 2, are deliberate
 self-tests wrapped in `withKnownIssue`, not hidden failures** — almost all of
 them `EventDrivenTestClockSelfTests` driving its own hang guards to their
 diagnostics, plus `BoundedGateWaitTests`' unsignalled gate,
 `FlakyQuarantineSelfTests.retriesUntilPass`, and pass 2's
-`AppStatePublishFrequencyTests` excess-publish records.
+`AppStatePublishFrequencyTests` excess-publish records and
+`UserDefaultsTestSupportTests`' "teardown records a refused name as a failure
+and leaves the suite alone".
 
 Three remedies are already refuted; don't re-litigate them.
 
@@ -731,9 +794,9 @@ helper has.
 hands the main actor back, the queued block runs, and only then does the
 continuation resume — so the test observes the effect it came to assert.
 
-Two shapes, and they are not interchangeable.
-`TableTranscriptHarness.drainMainQueue()` is the minimal one — a few bare
-`Task.yield()`s, no condition and no sleep. That is enough when the work is
+Two shapes, and they are not interchangeable. `drainMainQueue()`
+(`Tests/TBDAppTests/TableTranscriptScene+Driving.swift`) is the minimal one — a
+few bare `Task.yield()`s, no condition and no sleep. That is enough when the work is
 already on the queue and handing it back is all that was missing, but it checks
 nothing and so **carries no failure signal**: if the work needs longer than the
 yields it gets, the test proceeds as though it arrived. Use it only where the
@@ -763,15 +826,22 @@ because it orders test *bodies* and this work escaped one.
 
 **What a nested run loop legitimately does** is run-loop-scheduled work only:
 `NSTimer`, `CFRunLoopSource`, AppKit display and layout. Driving those from a
-synchronous body is its one honest use, and the two `pump()` helpers in
-`Tests/TBDAppTests` exist for it. It is never a synchronization primitive for
-`DispatchQueue.main.async` or Swift concurrency — if a helper's docstring claims
-to "drain" either, the claim is false.
+synchronous body is its one honest use, and `RunLoopPump`
+(`Tests/TBDAppTests/Support/OffscreenHost.swift`) exists for it: one turn capped
+at `OffscreenHostDefaults.runLoopSpin`, and a turn-bounded `until`. It is never a
+synchronization primitive for `DispatchQueue.main.async` or Swift concurrency —
+if a helper's docstring claims to "drain" either, the claim is false.
 
 **And it can be a silent no-op.** `run(until:)` returns immediately when no
 input source or timer is attached to the loop — measured 0.000 s bare against
 0.321 s once a timer was added. A pump that appears to be doing something may be
-doing nothing at all, at either end of the range.
+doing nothing at all, at either end of the range. So a pump waits on a
+condition and counts turns, never elapsed time: `TableTranscriptScene.settle()`
+turns until the table's geometry holds still, and `AppStateObservationTests`'
+probe turns until the evaluation it asserts has happened. The exception is a
+positive control for a negative assertion: it gets exactly the negative's fixed
+window, because a control that waited longer would pass while the negative
+watched too short a window to see anything.
 
 The compiler already closes the worst half. `NSRunLoop.h` annotates every
 spinning method — `run`, `run(until:)`, `run(_:before:)`,
@@ -1034,7 +1104,9 @@ joining the task — rather than a weaker negative.
 **Count each `FireRecorder.next()` in the
 `.clockDriven` tally too**: it carries its own 45 s hang guard, exactly like an
 arming wait, so a test with 2 `advanceWhenArmed` + 2 `next()` has a
-180 s worst case against the 240 s limit. And `next()` is **non-throwing** — it
+180 s worst case against the 240 s limit, a figure that assumes every wait takes
+its default and scales with any explicit `next(timeout:)` or
+`requireAdvanceWhenArmed(by:timeout:)` budget. And `next()` is **non-throwing** — it
 records and returns `nil` — so it does not stop a chain the way a strict arming
 wait does: a `next()` that times out mid-chain leaves every guard after it
 payable in the same run. Put it last, which is what makes the poller chains
@@ -1060,9 +1132,9 @@ Worked examples, by shape:
 - **`@MainActor` debouncers** – `AppearanceDebounceTests` and
   `SearchQueryDebouncerTests`, which reproduced the polling starvation in a
   full-suite soak.
-- **Poller chains** – `GatedIntervalSleepTests` and `DaywatchRunnerLoopTests`,
-  whose chains on the polling helpers each paid five wall-clock guards (225 s of
-  the 240 s ceiling) and on the strict waits cost at most one.
+- **Poller chains** – `GatedIntervalSleepTests`, whose chains on the polling
+  helpers each paid five wall-clock guards (225 s of the 240 s ceiling) and on
+  the strict waits cost at most one.
 - **Arming behind an unstructured task, tier 3** – `GitManagerTimeoutTests`,
   whose sleeper arms inside `runBoundedProcess`. Its polled handshake starved
   past the test's own real `/bin/sleep 30` child under induced load, so the

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import TestSupport
 
 @testable import TBDDaemonLib
 @testable import TBDShared
@@ -576,13 +577,15 @@ struct RemoteProviderManagerTests {
     /// rather than confidently wrong.
     @Test func anAuthFailureFromStaleDoesNotInheritTheTransportMessage() async throws {
         let invoker = FakeProviderInvoker(script: [
-            // Transient → .stale, message taken from stderr.
+            // Two consecutive transient misses → .stale, message taken from stderr.
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "connection timed out"),
             ProviderResult(exitCode: 3, stdout: Data(), stderr: "connection timed out"),
             // Auth failure with nothing parseable in stdout.
             ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),
         ])
         let m = manager(invoker)
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
+        await m.pollOnce(provider: provider)
         await m.pollOnce(provider: provider)
         #expect(await m.providerStatuses().first?.errorMessage == "connection timed out")
 
@@ -632,10 +635,12 @@ struct RemoteProviderManagerTests {
     @Test func attachExitFromStaleDoesNotLaunderTheTransportMessageThroughTheProbe() async throws {
         let invoker = FakeProviderInvoker(script: [
             ProviderResult(exitCode: 3, stdout: Data(), stderr: "connection timed out"),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "connection timed out"),
             // The out-of-band probe re-confirms auth-needed but says nothing.
             ProviderResult(exitCode: 4, stdout: Data(), stderr: ""),
         ])
         let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         #expect(await m.providerStatuses().first?.health == .stale)
 
@@ -648,7 +653,7 @@ struct RemoteProviderManagerTests {
             "the transport message must not survive into the auth CTA via the probe")
         #expect(statuses.first?.remediationCommand == nil)
         #expect(
-            invoker.calls == [["list"], ["list"]],
+            invoker.calls == [["list"], ["list"], ["list"]],
             "the transition off .stale still fires exactly one probe")
     }
 
@@ -745,11 +750,117 @@ struct RemoteProviderManagerTests {
         }
     }
 
-    @Test func transientFailureMarksStaleNotAuth() async throws {
-        let invoker = FakeProviderInvoker(script: [
-            ProviderResult(exitCode: 3, stdout: Data(), stderr: "flaky network")
+    // MARK: - Missed-poll tolerance (`missedPollsBeforeStale`)
+
+    private static let goodList = #"{"sessions": [{"id": "a", "state": "running"}]}"#
+    private static let fakeProvider = RemoteProviderConfig(name: "fake", exec: "/x")
+
+    @Test func oneTimedOutPollDoesNotMarkTheInventoryStale() async throws {
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(providerOK(Self.goodList)), .timeout,
         ])
         let m = manager(invoker)
+        await m.pollOnce(provider: Self.fakeProvider)
+        await m.pollOnce(provider: Self.fakeProvider)
+        #expect(await m.providerStatuses().first?.health == .ok)
+        #expect(await m.hasStaleSnapshot(provider: "fake") == false)
+    }
+
+    @Test func oneTransientPollDoesNotMarkTheInventoryStale() async throws {
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(providerOK(Self.goodList)),
+            .result(ProviderResult(exitCode: 3, stdout: Data(), stderr: "flaky")),
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: Self.fakeProvider)
+        await m.pollOnce(provider: Self.fakeProvider)
+        #expect(await m.providerStatuses().first?.health == .ok)
+        #expect(await m.hasStaleSnapshot(provider: "fake") == false)
+    }
+
+    @Test func twoConsecutiveMissedPollsMarkTheInventoryStale() async throws {
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(providerOK(Self.goodList)), .timeout, .timeout,
+        ])
+        let m = manager(invoker)
+        for _ in 0..<3 { await m.pollOnce(provider: Self.fakeProvider) }
+        #expect(await m.providerStatuses().first?.health == .stale)
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+    }
+
+    @Test func aTimeoutThenATransientFailureCountAsConsecutiveMisses() async throws {
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(providerOK(Self.goodList)), .timeout,
+            .result(ProviderResult(exitCode: 3, stdout: Data(), stderr: "flaky")),
+        ])
+        let m = manager(invoker)
+        for _ in 0..<3 { await m.pollOnce(provider: Self.fakeProvider) }
+        #expect(await m.hasStaleSnapshot(provider: "fake"))
+    }
+
+    @Test func aSuccessBetweenMissesResetsTheCount() async throws {
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(providerOK(Self.goodList)), .timeout,
+            .result(providerOK(Self.goodList)), .timeout,
+        ])
+        let m = manager(invoker)
+        for _ in 0..<4 { await m.pollOnce(provider: Self.fakeProvider) }
+        #expect(await m.providerStatuses().first?.health == .ok)
+        #expect(await m.hasStaleSnapshot(provider: "fake") == false)
+    }
+
+    @Test func anEventsSnapshotBetweenMissesResetsTheCount() async throws {
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(providerOK(Self.goodList)), .timeout, .timeout,
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: Self.fakeProvider)
+        await m.pollOnce(provider: Self.fakeProvider)
+        try await m.apply(
+            snapshot: [RemoteSessionPayload(id: "a", state: .running)], provider: "fake")
+        await m.pollOnce(provider: Self.fakeProvider)
+        #expect(await m.hasStaleSnapshot(provider: "fake") == false)
+    }
+
+    @Test func anAuthFailureOnTheFirstMissIsStillImmediate() async throws {
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(providerOK(Self.goodList)),
+            .result(ProviderResult(exitCode: 4, stdout: Data(), stderr: "login")),
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: Self.fakeProvider)
+        await m.pollOnce(provider: Self.fakeProvider)
+        #expect(await m.providerStatuses().first?.health == .needsAuth)
+    }
+
+    @Test func aPermanentFailureOnTheFirstMissIsStillImmediate() async throws {
+        let invoker = FakeProviderInvoker(outcomes: [
+            .result(providerOK(Self.goodList)),
+            .result(ProviderResult(exitCode: 1, stdout: Data(), stderr: "broken")),
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: Self.fakeProvider)
+        await m.pollOnce(provider: Self.fakeProvider)
+        #expect(await m.providerStatuses().first?.health == .error)
+    }
+
+    // MARK: - Retirement
+
+    @Test func isRetiredReadsTheRegistryWithoutRegisteringAnything() async throws {
+        let m = manager(FakeProviderInvoker(script: []))
+        #expect(await m.isRetired(provider: "fake") == false, "the registry names it")
+        #expect(await m.isRetired(provider: "gone-acme"))
+        #expect(await m.isRetired(provider: ClaudeCloudProvider.name) == false, "reserved")
+        #expect(await m.providerStatuses().map(\.config.name).contains("gone-acme") == false)
+    }
+
+    @Test func transientFailureMarksStaleNotAuth() async throws {
+        let invoker = FakeProviderInvoker(script: [
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "flaky network"),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "flaky network"),
+        ])
+        let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         let statuses = await m.providerStatuses()
         #expect(statuses.first?.health == .stale)
@@ -760,20 +871,22 @@ struct RemoteProviderManagerTests {
 
     /// Tier 1: in-memory GRDB and a scripted provider only.
     @Test func structuredTransientPollPreservesTheLastSuccessfulSnapshot() async throws {
+        let overloaded = ProviderResult(
+            exitCode: 3,
+            stdout: Data(
+                #"{"error": {"code": "unreachable", "message": "provider transport overloaded", "retryable": true}}"#
+                    .utf8),
+            stderr: "")
         let invoker = FakeProviderInvoker(script: [
             providerOK(#"{"sessions": [{"id": "a", "state": "running", "agent_state": "working"}]}"#),
-            ProviderResult(
-                exitCode: 3,
-                stdout: Data(
-                    #"{"error": {"code": "unreachable", "message": "provider transport overloaded", "retryable": true}}"#
-                        .utf8),
-                stderr: ""),
+            overloaded, overloaded,
         ])
         let m = manager(invoker)
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
 
         await m.pollOnce(provider: provider)
         let firstSuccess = await m.providerStatuses().first?.lastSuccessfulSnapshotAt
+        await m.pollOnce(provider: provider)
         await m.pollOnce(provider: provider)
 
         let rows = try await db.remoteSessions.list()
@@ -786,7 +899,7 @@ struct RemoteProviderManagerTests {
         #expect(status?.errorMessage == "provider transport overloaded")
         #expect(status?.lastSuccessfulSnapshotAt == firstSuccess)
         #expect(status?.hasStaleSnapshot == true)
-        #expect(invoker.calls == [["list"], ["list"]])
+        #expect(invoker.calls == [["list"], ["list"], ["list"]])
     }
 
     @Test func truncatedInventoryErrorIsBoundedAndDoesNotExposeEmbeddedPayload() async throws {
@@ -828,9 +941,11 @@ struct RemoteProviderManagerTests {
 
     @Test func arbitraryProviderErrorIsCappedToTheWireLimit() async throws {
         let invoker = FakeProviderInvoker(script: [
-            ProviderResult(exitCode: 3, stdout: Data(), stderr: String(repeating: "x", count: 1_000))
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: String(repeating: "x", count: 1_000)),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: String(repeating: "x", count: 1_000)),
         ])
         let m = manager(invoker)
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         let message = await m.providerStatuses().first?.errorMessage
         #expect(message?.count == 240)
@@ -841,12 +956,14 @@ struct RemoteProviderManagerTests {
         let invoker = FakeProviderInvoker(script: [
             providerOK(#"{"sessions": [{"id": "a", "state": "running"}]}"#),
             ProviderResult(exitCode: 3, stdout: Data(), stderr: "temporary"),
+            ProviderResult(exitCode: 3, stdout: Data(), stderr: "temporary"),
             providerOK(#"{"sessions": [{"id": "a", "state": "running", "agent_state": "working"}]}"#),
         ])
         let m = manager(invoker)
         let provider = RemoteProviderConfig(name: "fake", exec: "/x")
         await m.pollOnce(provider: provider)
         let firstSuccess = await m.providerStatuses().first?.lastSuccessfulSnapshotAt
+        await m.pollOnce(provider: provider)
         await m.pollOnce(provider: provider)
         #expect(await m.hasStaleSnapshot(provider: "fake"))
 
@@ -877,9 +994,11 @@ struct RemoteProviderManagerTests {
         }
         let m = manager(
             FakeProviderInvoker(script: [
-                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
             ]))
 
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
 
         #expect(await m.hasStaleSnapshot(provider: "fake"))
@@ -904,8 +1023,10 @@ struct RemoteProviderManagerTests {
         }
         let m = manager(
             FakeProviderInvoker(script: [
-                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
             ]))
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         #expect(await m.hasStaleSnapshot(provider: "fake"))
 
@@ -934,9 +1055,11 @@ struct RemoteProviderManagerTests {
             now: lastGood)
         let m = manager(
             FakeProviderInvoker(script: [
-                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
             ]))
 
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
 
         let status = await m.providerStatuses().first
@@ -973,9 +1096,11 @@ struct RemoteProviderManagerTests {
             now: eventTime)
         let m = manager(
             FakeProviderInvoker(script: [
-                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline")
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
+                ProviderResult(exitCode: 3, stdout: Data(), stderr: "offline"),
             ]))
 
+        await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
         await m.pollOnce(provider: RemoteProviderConfig(name: "fake", exec: "/x"))
 
         let status = await m.providerStatuses().first
@@ -1091,10 +1216,8 @@ struct RemoteProviderManagerTests {
         // The poll loop's first tick fires with no initial delay but runs on
         // a background Task, so bound-poll for it rather than asserting
         // immediately.
-        let deadline = Date().addingTimeInterval(2)
-        while Date() < deadline {
-            if invoker.callsSnapshot().contains(["list"]) { break }
-            try await Task.sleep(for: .milliseconds(10))
+        _ = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) {
+            invoker.callsSnapshot().contains(["list"])
         }
         #expect(
             invoker.callsSnapshot().contains(["list"]),

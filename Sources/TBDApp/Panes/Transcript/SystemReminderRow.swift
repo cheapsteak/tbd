@@ -23,6 +23,7 @@ struct SystemReminderRow: View {
         case .skillBody: return "skill"
         case .taskNotification: return "background"
         case .nestedMemory: return "file"
+        case .compactSummary: return "compact"
         case .other: return "info"
         }
     }
@@ -33,8 +34,28 @@ struct SystemReminderRow: View {
         // treatment, same shared phrasing as the native cell.
         if kind == .taskNotification {
             taskNotificationRow
+        } else if kind == .compactSummary {
+            compactSummaryRow
         } else {
             reminderRow
+        }
+    }
+
+    /// A compacted conversation: one line saying so, with the summary's size;
+    /// the summary itself opens in the overlay. Mirrors the native cell's
+    /// `ActivityRowFormatter.compactSummary` presentation.
+    private var compactSummaryRow: some View {
+        ActivityRowChrome(
+            icon: ActivityRowFormatter.compactSummaryIcon,
+            timestamp: timestamp,
+            onOpen: { openTranscriptOverlay?(id) }
+        ) {
+            HStack(spacing: 6) {
+                Text(ActivityRowFormatter.compactSummaryTitle)
+                    .foregroundStyle(.primary)
+                Text("· \(ActivityRowFormatter.injectedSize(text: text, truncatedTo: nil))")
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 

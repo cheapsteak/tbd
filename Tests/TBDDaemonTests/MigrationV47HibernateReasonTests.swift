@@ -22,15 +22,6 @@ import GRDB
             label: "claude", claudeSessionID: "s-1", kind: .claude)
     }
 
-    @Test func hibernateReasonColumnExists() async throws {
-        let db = try TBDDatabase(inMemory: true)
-        try await db.writerForTests.read { dbConn in
-            let terminalCols = try Row.fetchAll(dbConn, sql: "PRAGMA table_info(terminal)")
-                .compactMap { $0["name"] as String? }
-            #expect(terminalCols.contains("hibernateReason"))
-        }
-    }
-
     /// Each reason round-trips through setHibernated → fetch unchanged.
     @Test(arguments: [HibernateReason.auto, .manual, .recovery])
     func hibernateReasonRoundTrips(reason: HibernateReason) async throws {

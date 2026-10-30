@@ -12,8 +12,8 @@ import Foundation
 /// wrapper is TERMed — and `TBD_TEST_SCRATCH_ROOT` names that dir so a fixture
 /// can put its root inside it and inherit the guarantee.
 ///
-/// **Why not under `TBD_HOME`.** The callers here bind a rendezvous socket at
-/// `<root>/holders/<36-char uuid>.sock`, against a `sun_path` cap of
+/// **Why not under `TBD_HOME`.** The socket-bearing callers bind a rendezvous
+/// socket at `<root>/holders/<36-char uuid>.sock`, against a `sun_path` cap of
 /// `HolderRendezvous.sunPathLimit` bytes. The fenced `TBD_HOME` is
 /// `<run root>/sanctioned/tbd`, and nesting there spends the budget:
 /// `/tmp/tbd-test-home.XXXXXXXX/sanctioned/tbd/<prefix>-xxxxxxxx/holders/<uuid>.sock`
@@ -35,8 +35,9 @@ import Foundation
 /// so a process-wide mutation races every concurrent suite.
 ///
 /// - Parameters:
-///   - prefix: Names the fixture in the directory listing. Kept short — every
-///     byte of it comes out of the `sun_path` budget above.
+///   - prefix: Names the fixture in the directory listing. Kept short when
+///     the root will hold a socket — every byte of it then comes out of the
+///     `sun_path` budget above.
 ///   - environment: Where `TBD_TEST_SCRATCH_ROOT` is read from.
 /// - Returns: A path that does not exist yet; the caller creates it.
 public func fencedScratchRoot(
