@@ -3,7 +3,20 @@
 Key source files and what they do. Not exhaustive — see the directory listing for the rest.
 
 ## Package
-- `Package.swift` — SPM manifest. Targets: TBDShared, TBDAppIcon, IconBaker, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
+- `Package.swift` — SPM manifest. Targets: TBDKernel, TBDShared, TBDAppIcon, IconBaker, TBDDaemonLib, TBDDaemon, TBDCLI, TBDApp
+
+## Sources/TBDKernel/
+The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelper` depend on it alone. What may go in is in its `CLAUDE.md`.
+- `HolderProtocol.swift` — holder wire messages and protocol version
+- `HolderFraming.swift` — length-prefixed JSON framing
+- `HolderRendezvous.swift` — socket, lock and log paths per session
+- `HolderLock.swift` — per-session creation lock
+- `FDChannel.swift` — descriptor passing over `SCM_RIGHTS`
+- `PeerBridgeFrame.swift` — peer helper frame codec
+- `ShadowPeerRecord.swift` — shadow peer registry record and store
+- `ProcessStartTime.swift` — kernel process start time, `procStart` format
+- `CloseOnExecPipe.swift` — `Pipe.closeOnExec()`
+- `KernelPaths.swift` — config, holders and host Claude store paths
 
 ## Sources/TBDShared/
 - `Constants.swift` — paths under `~/tbd/` (configDir, socket, db, pid, port, repos), version; honors `TBD_HOME`/`TBD_SOCKET_PATH`
@@ -22,6 +35,7 @@ Key source files and what they do. Not exhaustive — see the directory listing 
 - `ClaudeEnvRegistry.swift` — registry of user-configurable spawn-time Claude env settings (`ClaudeEnvValue`: bool/int/string, frozen JSON format; `ClaudeEnvRegistry.all` is the single source of truth)
 - `EnvOverridesCoding.swift` — JSON encode/decode for the free-form env-override `[String: String]` maps (config/repo/profile scopes)
 - `NewlineFrameScanner.swift` — incremental newline-delimited frame scanner for socket recv buffers
+- `FDVendHeader.swift` — sidecar vend header: the routing identity for each descriptor the daemon vends to the app
 - `TerminalLabel.swift` — canonical terminal display-label derivation shared by daemon + app
 - `HookResolver.swift` — worktree lifecycle hook resolution (`.worktree-hooks/` etc.) + async execution
 

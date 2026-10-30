@@ -13,7 +13,7 @@ import Foundation
 /// from `exec` to publishing, and the difference is exactly what a recycled-pid
 /// check would look at.
 ///
-/// Sits in `TBDShared` because both halves need it: the helper writes the value
+/// Sits in `TBDKernel` because both halves need it: the helper writes the value
 /// into its own record, and `ShadowPeerReconciler` compares a record's value
 /// against the pid it is filed under to recognise the **recycled-pid ghost** —
 /// the record Claude Code's reaper provably will not collect, because the
@@ -37,7 +37,7 @@ public enum ProcessStartTime {
     /// The start time one `kinfo_proc` records, or nil when it records none —
     /// shared by the single-pid read above and `ProcessTableSnapshot.read()`,
     /// which reads every process at once.
-    static func startTime(of info: kinfo_proc) -> Date? {
+    package static func startTime(of info: kinfo_proc) -> Date? {
         // `p_starttime` is a `#define` onto an anonymous union member, so the C
         // spelling does not survive into Swift; `p_un.__p_starttime` is the
         // imported name of the same `struct timeval` (sys/proc.h,

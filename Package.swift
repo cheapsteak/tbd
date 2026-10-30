@@ -97,8 +97,19 @@ let package = Package(
         .package(url: "https://github.com/pointfreeco/swift-clocks", from: "1.0.0"),
     ],
     targets: [
+        // The helper programs' contract: the holder's wire protocol, framing,
+        // rendezvous paths and lock, the descriptor channel, and the peer
+        // helper's frame codec and shadow peer record. A module with no
+        // dependencies, so a change elsewhere in `TBDShared` recompiles
+        // neither helper. What may go in: `Sources/TBDKernel/CLAUDE.md`.
+        .target(
+            name: "TBDKernel",
+            path: "Sources/TBDKernel",
+            exclude: ["CLAUDE.md"]
+        ),
         .target(
             name: "TBDShared",
+            dependencies: ["TBDKernel"],
             path: "Sources/TBDShared"
         ),
         // Per-worktree icon generation (AppKit + CoreGraphics + CoreText).
@@ -117,7 +128,8 @@ let package = Package(
         // here: the projection fills `TerminalScreen`'s own `Size` and
         // `ChildModes` and renders against its `isDisallowed` whitelist, rather
         // than keeping a third copy of a rule that must not drift. Acyclic by
-        // construction: `TBDShared` has no dependencies at all.
+        // construction: `TBDShared` depends only on `TBDKernel`, which depends
+        // on nothing.
         .target(
             name: "TBDTerminalSerialization",
             dependencies: [

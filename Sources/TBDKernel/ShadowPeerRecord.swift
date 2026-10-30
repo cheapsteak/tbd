@@ -289,7 +289,7 @@ public struct ShadowPeerRecord: Sendable, Equatable, Codable {
 /// `CLAUDE.md`, "Tests must not touch ~/tbd", and the
 /// `ClaudeProfileConfigDirManager.resolveConfigDir` bug recorded there).
 /// Resolution happens once, in `init(environment:)`, through
-/// `TBDConstants.claudeHostHome(environment:)` — the single resolution point
+/// `KernelPaths.claudeHostHome(environment:)` — the single resolution point
 /// for `TBD_CLAUDE_HOST_HOME`.
 public struct ShadowPeerRecordStore: Sendable {
     /// The registry directory: `<host claude store>/sessions` in production.
@@ -306,7 +306,7 @@ public struct ShadowPeerRecordStore: Sendable {
     /// across profiles by symlinking each profile's `sessions` into this one, so
     /// this is the directory every session on the machine reads.
     public init(environment: [String: String] = ProcessInfo.processInfo.environment) {
-        self.init(sessionsDirectory: TBDConstants.claudeHostHome(environment: environment)
+        self.init(sessionsDirectory: KernelPaths.claudeHostHome(environment: environment)
             .appendingPathComponent("sessions", isDirectory: true))
     }
 

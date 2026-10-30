@@ -192,8 +192,9 @@ consults `TBD_HOME` / `TBD_CLAUDE_HOST_HOME` / `TBD_TEST_CODEX_HOME` at all.
 characters by one of those three as a whole path component, which is narrow
 enough to leave the ~20 legitimate home lookups (tilde-abbreviation for
 display, `~/Library` fallbacks, defaulted injection seams, `~/.ssh/tbd-agent.sock`)
-untouched. Three sites carry a reasoned inline suppression: `Constants.swift`
-is excluded outright as the file that *defines* the resolvers, and
+untouched. Three sites carry a reasoned inline suppression: `KernelPaths.swift`
+is excluded outright as the file that *defines* the resolvers, with
+`Constants.swift`, whose `TBDConstants` forwards to them, beside it, and
 `CodexHomeManager`, `ModelProfileKeychain.legacyStorageDir` and the frozen v-24
 conductors migration name a real path deliberately. Its limit is worth knowing
 before trusting it: the home value has to be visible near the append, so a path

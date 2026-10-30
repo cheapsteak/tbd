@@ -7,7 +7,7 @@ import Foundation
 /// spawner must interpret it *before* any connection exists, which is exactly
 /// when no version has been exchanged.
 ///
-/// Every path here is derived from `TBDConstants`, never composed from `$HOME`:
+/// Every path here is derived from `KernelPaths`, never composed from `$HOME`:
 /// a hand-built `"\(home)/tbd/…"` silently ignores `TBD_HOME` and writes into
 /// the developer's real store under `scripts/test.sh`.
 public enum HolderRendezvous {
@@ -67,7 +67,7 @@ public enum HolderRendezvous {
     public static let fileExtensions = ["sock", "lock", "log"]
 
     private static func path(sessionID: UUID, ext: String, environment: [String: String]) -> String {
-        TBDConstants.holdersDir(environment: environment)
+        KernelPaths.holdersDir(environment: environment)
             .appendingPathComponent("\(sessionID.uuidString.lowercased()).\(ext)")
             .path
     }
