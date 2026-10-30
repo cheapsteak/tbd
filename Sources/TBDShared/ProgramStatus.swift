@@ -7,11 +7,30 @@ public enum ProgramStatusProtocol {
     public static let oscCode: Int = 7501
     /// ESC ] 7501 ; ? BEL
     public static let probeReply: String = "\u{1b}]7501;?\u{07}"
-    public static let expectedApp: String = "claude-code"
+    /// The `app` value Claude Code stamps on its reports.
+    public static let claudeCodeApp: String = "claude-code"
+    /// The `app` value Codex stamps on its reports.
+    public static let codexApp: String = "codex"
+    /// Every `app` value TBD accepts a report from.
+    public static let knownApps: Set<String> = [claudeCodeApp, codexApp]
     public static let titleMaxBytes: Int = 192
     public static let msgMaxBytes: Int = 2048
     public static let maxTaskEntries: Int = 32
     public static let maxTaskIDLength: Int = 32
+
+    /// The `app` value a report from `terminal`'s agent must carry, or nil
+    /// when the terminal runs no agent that reports: `claude-code` for a
+    /// Claude terminal, `codex` for a Codex one. A legacy row with no recorded
+    /// kind is Codex when its label says so (`isCodexTerminal`), and Claude
+    /// otherwise.
+    public static func expectedApp(for terminal: Terminal) -> String? {
+        switch terminal.kind {
+        case .claude: return claudeCodeApp
+        case .codex: return codexApp
+        case .shell: return nil
+        case nil: return terminal.isCodexTerminal ? codexApp : claudeCodeApp
+        }
+    }
 }
 
 /// The `state` value of a report. Unknown values are kept as
