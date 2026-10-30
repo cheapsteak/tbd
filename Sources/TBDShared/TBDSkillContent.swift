@@ -239,7 +239,9 @@ auto-archive off for the worktree instead.
 
 ## Panels
 
-Each worktree tab has a **primary** anchor (its terminal, or a file/web/note/transcript) plus an optional layout tree of **viewer panels** beside it.
+Each worktree tab shows its **primary** content (its terminal, or a file/web/note/transcript) and, beside it, one **side panel**: a strip of **panels**, one in front at a time. A panel shows a file, web page, note, or terminal transcript and keeps its own back/forward history. Terminals are **never** panels — they only appear as a tab's primary.
+
+The side panel is off unless the user enabled "Side panel with tabs" in Settings. While it is off, `tbd panel list` still works, and every command that changes the side panel fails with the daemon's error naming `panel_tabs_enabled` — ask the user to turn it on rather than retrying.
 
 ### See
 
@@ -247,17 +249,26 @@ Each worktree tab has a **primary** anchor (its terminal, or a file/web/note/tra
 tbd panel list "$TBD_WORKTREE_ID"
 ```
 
-Read-only and always available regardless of gating. Prints each tab's primary content plus its layout tree, including the **panelID**/**splitID** of every node — these are the handles Arrange commands target. Add `--tab <id>` to inspect one tab, `--json` for the raw result.
+Read-only. Prints each tab's primary content and its side panel: every panel in strip order with its **panelID** (the handle `--panel` takes) and its content, which panel is `[ACTIVE]`, and whether the side panel is collapsed. Add `--tab <id>` for one tab, `--json` for the raw result.
+
+### Open content
+
+```bash
+tbd panel open "$TBD_WORKTREE_ID" --file docs/notes.md
+```
+
+Open content and let the reuse rule place it — don't pick a panel yourself. `open` selects a panel already showing that content. Otherwise a file, web page, or note goes into a panel of the same kind (the active one if it matches, else the most recently used), and that panel keeps the old content in its history; a transcript, or content with no panel of its kind, gets a new panel. Pass `--new-panel` only when what a same-kind panel shows now should stay open in its own tab rather than move into that panel's history. Content is one of `--file <path>`, `--web <url>`, `--transcript <terminal-id>`, `--note <note-id>`.
 
 ### Arrange
 
-`open`, `navigate`, `close`, `move`, `resize`, `back`, `forward`, `jump`, `select-tab` rearrange panels in your own worktree — split a file open beside the terminal, swap what a panel shows, step through a panel's history, or switch the active tab. Run `tbd panel <verb> --help` for flags; most target a `--tab` plus a `--panel` or `--split` ID from `tbd panel list`.
+- `select --panel <id>` brings a panel to the front.
+- `navigate --panel <id>` points one panel at new content of its own kind.
+- `back`, `forward`, and `jump --index <n>` (each with `--panel <id>`) move through a panel's history.
+- `close --panel <id>` closes a panel and its history.
+- `collapse` hides the side panel and keeps its panels; `expand` shows it again. `open` and `select` expand it too.
+- `resize --width <fraction>` sets the side panel's width as a fraction of the tab's width.
 
-Terminals are **never** viewer panels — they only ever appear as a tab's primary anchor, so `open`/`navigate` content is always file, web, transcript, or note.
-
-### Gating
-
-Arrange requires the daemon's panel-surface flags, which default OFF during the current soak. If disabled, the command prints the daemon's error naming the flag and exits non-zero — ask the user to enable it rather than retrying. `list` works regardless.
+Every command acts on the worktree's active tab unless you pass `--tab <id>`. Run `tbd panel <verb> --help` for flags.
 
 ## Scratch spaces & promotion
 
