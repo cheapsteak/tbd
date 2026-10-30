@@ -320,6 +320,11 @@ let package = Package(
             // would return nil.
             resources: [.process("Fixtures")]
         ),
+        // The kernel's own suites, depending on the kernel alone like the helpers.
+        .testTarget(
+            name: "TBDKernelTests",
+            dependencies: ["TBDKernel"]
+        ),
         .testTarget(
             name: "TBDDaemonTests",
             dependencies: [

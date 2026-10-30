@@ -146,7 +146,7 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 - `FileViewer/FileViewerPanel.swift` — git status file viewer
 
 ## Tests/
-Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDAppTests/` (layout, pane content).
+Swift Testing framework. `TBDDaemonTests/` (database, git, lifecycle, tmux, hooks, RPC routing, model profiles, sessions, transcripts, suspend/resume, ...), `TBDSharedTests/` (models, emoji), `TBDKernelTests/` (holder protocol, framing, rendezvous and lock; peer frames and records; process start time), `TBDAppTests/` (layout, pane content).
 
 ## SessionMod/
 The session mod's TypeScript source: `hooks/register.ts` (entry point), `hooks/shared/session.ts` (environment, per-session directory, heartbeat), `hooks/features/composer-draft.tsx`, `types/index.d.ts` (the `$.state` contract) and `tests/` (`claude plugin test SessionMod`). Validate with `claude plugin validate --strict SessionMod`; regenerate `Sources/TBDShared/SessionModContent.swift` after every change.

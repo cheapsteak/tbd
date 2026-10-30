@@ -1,13 +1,14 @@
 # Lint scope. These keys take GLOB syntax.
 included:
   - Sources
-  # The two test targets guarded by the no_setenv_tbdhome_wrong_target custom rule.
+  # The three test targets guarded by the no_setenv_tbdhome_wrong_target custom rule.
   # TBDAppTests is also guarded by no_daemon_import_in_app_tests.
   # A custom rule only runs on files already inside the global lint scope, so these
   # dirs must be listed here for those rules to fire in CI (`swiftlint --strict`).
   # TBDDaemonTests is outside both rules' own `included:` regexes — setenv("TBD_HOME")
   # and the daemon library are legitimate there.
   - Tests/TBDSharedTests
+  - Tests/TBDKernelTests
   - Tests/TBDAppTests
   # In scope for custom rules only. Each of these dirs carries a nested
   # .swiftlint.yml whose `only_rules:` names no_polling_test_clock and
@@ -128,14 +129,14 @@ custom_rules:
   no_hardcoded_users_path:
     name: "No hardcoded /Users/ path literal"
     # included/excluded HERE take REGEX (not glob), matched against file path.
-    # The two test dirs are the ones the full rule set lints. The other test
+    # The three test dirs are the ones the full rule set lints. The other test
     # dirs are in the global scope too, but their nested configs run only the
     # custom rules their `only_rules:` lists name, and this is not one of them,
     # so it cannot reach them without being named there as well — and widening
     # it is a separate change.
     included:
       - "Sources/(TBDKernel|TBDShared|TBDDaemon|TBDApp|TBDPeerHelper|TBDHolder)/.*\\.swift"
-      - "Tests/(TBDSharedTests|TBDAppTests)/.*\\.swift"
+      - "Tests/(TBDSharedTests|TBDKernelTests|TBDAppTests)/.*\\.swift"
     # OPTIMIZED FOR THE PRIVACY RATIONALE, deliberately, and that decides both
     # knobs:
     #
@@ -364,7 +365,7 @@ custom_rules:
     name: "No setenv(TBD_HOME) outside TBDDaemonTests"
     # included/excluded HERE take REGEX (not glob), matched against file path.
     included:
-      - "Tests/(TBDSharedTests|TBDAppTests)/.*\\.swift"
+      - "Tests/(TBDSharedTests|TBDKernelTests|TBDAppTests)/.*\\.swift"
     regex: 'setenv\(\s*"TBD_HOME"'
     match_kinds:
       - identifier

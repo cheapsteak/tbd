@@ -177,10 +177,11 @@ Account-database home lookups
 `FileManager.homeDirectory(forUser:)`) and hardcoded `/Users/<name>/` paths
 escape both variables outright and are rejected mechanically by the
 `no_passwd_home_lookup` and `no_hardcoded_users_path` SwiftLint rules — the
-second covers `Tests/TBDSharedTests` and `Tests/TBDAppTests` as well, matches
-the dash-encoded `-Users-<name>-` form Claude Code scratchpad paths use, and
-fires in comments too, because a real username in a doc comment is a leak in a
-public repo even though it cannot open a file. Use `me` / `acme` / `x` / `test`
+second covers `Tests/TBDSharedTests`, `Tests/TBDKernelTests` and
+`Tests/TBDAppTests` as well, matches the dash-encoded `-Users-<name>-` form
+Claude Code scratchpad paths use, and fires in comments too, because a real
+username in a doc comment is a leak in a public repo even though it cannot open
+a file. Use `me` / `acme` / `x` / `test`
 in examples.
 
 Neither of those is the shape the leaks actually took, so a third rule covers
