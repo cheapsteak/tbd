@@ -274,8 +274,10 @@ time.
 
 ## Flag
 
-None. `program_status_enabled` gated the protocol during its soak, which ran
-from its introduction in #1182. This design retires it under the "Retiring a
+None, and no kill switch. The design removes the hook writers the protocol
+replaces, so a switch that turned the protocol off would leave every agent
+session with no source of state at all — worse than either source alone. The
+column that gated it, `program_status_enabled`, is retired under the "Retiring a
 column" checklist in `Sources/TBDDaemon/Database/CLAUDE.md`: the record
 property, the `Config` field and `programStatusEnabledDefault`, the config RPC
 and its params, the Settings toggle, the app's capability plumbing, and every
