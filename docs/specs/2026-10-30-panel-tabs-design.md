@@ -361,9 +361,16 @@ match: an agent opens content and lets the reuse rule place it.
 property of the `@Observable` `AppState`. It is filled by `panel.get` when the
 flag is on, kept current by a `panelSurfaceChanged` case in `handleDelta`, and
 cleared when the daemon reports the flag off. A delta or fetch while the flag is
-off leaves it untouched. It is also cleared and refetched whenever the app
-(re)subscribes to the daemon: a new daemon may have reset revisions, and the
-revision guard would otherwise refuse every lower one.
+off leaves it untouched. It is also refetched whenever the app (re)subscribes
+to the daemon, because a new daemon may have reset revisions and the revision
+guard would otherwise refuse every lower one. The copy is kept meanwhile, so
+daemon-rendered tabs keep rendering instead of dropping to legacy and
+rebuilding their terminal views. The first full `panel.get` for each worktree
+after the resubscribe replaces that worktree's entry whole, without the guard,
+except that a tab a delta changed during that get's flight keeps the change.
+Until that get lands, deltas apply under the guard, and if the guard refused
+one, a second get follows, since the refused change may be newer than the
+first get's snapshot.
 
 One chokepoint, `applyPanelOperation`, builds the envelope (a fresh operation
 ID, origin `.appUser`, the copy's revision as `baseRevision`), sends it, and
@@ -451,7 +458,7 @@ Each gated branch is tested both ways, asserting opposite outcomes.
   - The copy: flag off leaves it untouched; a delta upserts; an older revision
     is refused; a removal is applied whatever the revision; a full `get` drops
     absent tabs; a delta's `activeTabID` does not move the selected tab;
-    resubscribing clears and refetches it.
+    resubscribing keeps rendering it until the first refetch replaces it.
   - The tab-sync observer: a change to tab IDs, order, labels or a primary sends
     one sync per worktree; an unrelated `AppState` change sends none; flag off
     sends none.

@@ -879,9 +879,17 @@ final class AppState {
     @ObservationIgnored var panelSyncReadyWorktrees: Set<UUID> = []
     /// Bumped by every resubscribe reset. A `panel.get` or `panel.apply` reply,
     /// or a delta from the subscription the reset replaced, that crosses a
-    /// bump belongs to the old daemon and is discarded: adopting it would
-    /// re-seed the revisions the reset cleared.
+    /// bump belongs to the old daemon and is discarded: one adopted during the
+    /// authoritative get's flight would count as a change that get keeps.
     @ObservationIgnored var panelSurfaceResetGeneration: UInt64 = 0
+    /// Worktrees whose entry in the copy predates the last resubscribe reset.
+    /// The first full `panel.get` for one replaces its entry whole, without
+    /// the revision guard: a new daemon may count revisions from zero again.
+    @ObservationIgnored var panelAwaitingAuthoritativeGet: Set<UUID> = []
+    /// Worktrees awaiting that get for which the guard refused a delta or an
+    /// apply reply. The refused change may be newer than the get's snapshot,
+    /// so one more get follows the authoritative one.
+    @ObservationIgnored var panelRefusedWhileAwaiting: Set<UUID> = []
     /// `panel.get` calls awaiting their reply. While any is, every delta and
     /// adopted apply reply records the tab IDs it touched in
     /// `panelTabsTouchedInFlight`, so a reply can tell what changed under it.
