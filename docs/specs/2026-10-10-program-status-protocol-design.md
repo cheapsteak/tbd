@@ -175,8 +175,11 @@ probe handler checks the same replay state and stays silent while it is up.
   payload, observedAt}`. Forwarding the raw payload keeps a single parser on
   the path that decides anything.
 
-A report that arrives during a reader hand-off can be lost. The store keeps
-the last state it accepted, and the agent's next change corrects it.
+A report that arrives during a reader hand-off or a daemon restart can be
+lost. The store keeps the last state it accepted, and the agent's next change
+corrects it. For Codex, which never probes and suppresses repeats, the next
+change is the only recovery, so the worst case is the whole span of the
+current state (for example a full `blocked` wait).
 
 ### Trust
 
@@ -184,8 +187,10 @@ The store accepts a report only when all of these hold; otherwise it drops
 it with a debug log:
 
 - the terminal is a live holder session whose recorded agent reports:
-  Claude or Codex. A row written before kinds were recorded is Codex when its
-  label says so and Claude otherwise; a shell reports nothing;
+  Claude or Codex. The agent is the identity TBD launches and relaunches the
+  row by (`isCodexTerminal`, then `isClaudeTab`): Codex when the kind is
+  `codex` or the label says so, else Claude when the kind is `claude` or was
+  never recorded, else none — a plain shell reports nothing;
 - the report's incarnation matches the terminal's current incarnation, so a
   late report from a previous process cannot overwrite its successor;
 - the report's `app` is the terminal's own agent's — `app=claude-code` on a

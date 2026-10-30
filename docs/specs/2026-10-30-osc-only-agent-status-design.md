@@ -193,7 +193,7 @@ The mark's tooltip names the cause from the terminal's transport:
 - tmux – "The tmux transport doesn't carry agent status. Status needs the
   pty-holder transport."
 - holder – "This session isn't reporting status. Status needs Claude Code
-  2.1.295 or later, or Codex 0.164.0 or later. A session started before this
+  2.1.295 or later, or Codex 0.163.0 or later. A session started before this
   version of TBD reports after it is relaunched."
 
 The mark clears on the first accepted report. Shell terminals never show it.
