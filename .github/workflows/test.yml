@@ -127,9 +127,11 @@ jobs:
       # Its harness needs only bash and Python and runs in `script-harnesses`.
       # `!cancelled()` so that an earlier red guard in this job, such as
       # SwiftLint, does not cost this one its verdict.
+      # `/usr/bin/python3` is macOS's 3.9, the `python3` the pre-push hook
+      # finds on a Mac without Homebrew, so syntax newer than 3.9 fails here.
       - name: Check links between the daemon's folders
         if: ${{ !cancelled() }}
-        run: python3 scripts/lint-daemon-layers.py
+        run: /usr/bin/python3 scripts/lint-daemon-layers.py
 
       # The fence in `scripts/test.sh` is what stands between the suite and the
       # developer's real ~/tbd, ~/.claude and ~/.codex, and its guards were
@@ -387,8 +389,8 @@ jobs:
 
       # The harness for the daemon link check that the `lint` job runs. Its
       # fixtures are small sample trees of Swift that is scanned, never
-      # compiled, and it stays bash 3.2-clean because the pre-push hook runs
-      # the check on developers' Macs.
+      # compiled. It runs here under bash 5 and this runner's python3; the
+      # `lint` job holds the check itself to macOS's Python 3.9.
       - name: Test the daemon link check
         if: ${{ !cancelled() }}
         run: bash scripts/lint-daemon-layers.test.sh

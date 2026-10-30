@@ -14,10 +14,12 @@
 # failure could pass against a check that reddens on everything; the pass half
 # is what makes it discriminate.
 #
-# IT RUNS UNDER TWO INTERPRETERS. CI runs it on Linux under bash 5 and that
-# runner's python3; the pre-push hook runs the check itself under whatever
-# `python3` the developer has, which on a Mac without Homebrew is the system
-# 3.9. So the harness stays bash 3.2-clean, and `PYTHON` picks the interpreter:
+# IT RUNS UNDER PYTHON 3.9 AND BASH 3.2 AND UP. CI runs it on Linux under bash
+# 5 and that runner's python3. The pre-push hook runs the check itself, not
+# this harness, under whatever `python3` the developer has, which on a Mac
+# without Homebrew is the system 3.9; CI's `lint` job holds the check to that
+# 3.9. The harness is kept bash 3.2-clean so a Mac can run it under /bin/bash
+# too, though no CI job enforces that. `PYTHON` picks the interpreter:
 #   PYTHON=/usr/bin/python3 /bin/bash scripts/lint-daemon-layers.test.sh
 #
 # Name cases as arguments to run only those; with none, every `test_*` runs.
@@ -493,7 +495,20 @@ test_failure_footer() {
   run_check "$d"
   assert_rc "an unlisted link fails" 1 "$RUN_RC" "$RUN_OUT"
   assert_contains "the footer prints the line to add" "$RUN_OUT" $'\n    Top -> Base\n'
+  assert_contains "and how to repair main when the link is not this change's" "$RUN_OUT" \
+    "Add the line to scripts/daemon-links.txt in a one-line pull request of its own."
+  assert_lacks "it says nothing of stale links" "$RUN_OUT" "Delete the line"
   assert_contains "and points to the guide" "$RUN_OUT" 'Sources/TBDDaemon/CLAUDE.md, "Links between folders"'
+
+  put "$d" Top/User.swift 'let w = 1'
+  list "$d" 'Top -> Base'
+  run_check "$d"
+  assert_rc "a stale link fails" 1 "$RUN_RC" "$RUN_OUT"
+  assert_contains "the footer says to delete the line" "$RUN_OUT" \
+    "Delete its line from scripts/daemon-links.txt in this change."
+  assert_contains "and how to repair main when the change removed no reference" "$RUN_OUT" \
+    "Delete the line in a one-line pull request of its own."
+  assert_lacks "it says nothing of new links" "$RUN_OUT" "Add the line"
 }
 
 test_misspelled_unit_is_stale() {

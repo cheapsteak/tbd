@@ -18,10 +18,11 @@ target, not the library, and is skipped.
 It matches names, not types. The index holds each unit's top-level
 declarations that are not private or fileprivate: types, typealiases,
 top-level functions and globals. A file references unit B when it names one
-of B's, in code or in a string's interpolation. A name in a comment or a
-literal, after a `.`, or as an argument label is not a reference, and neither
-is a name the file declares for itself: a member, a nested type, a private
-declaration, or a lowercase local or parameter.
+of B's, in code or in a string's interpolation. A name in a comment, a
+literal or a raw identifier, after a `.` (but not after `...`), or as an
+argument label in parentheses is not a reference, and neither is a name the
+file declares for itself: a member, a nested type or one declared in a body, a
+generic parameter, a private declaration, or a lowercase local or parameter.
 
 It fails closed: a file or folder it cannot open, and Swift it cannot read
 -- an unbalanced brace, a literal or comment that never closes, bytes that
@@ -936,10 +937,18 @@ def failure_report(new: dict[Link, list[Reference]], stale: dict[Link, int], uni
             f"to {LINKS_FILE} in this change, so the reviewer sees it:"
         )
         lines.extend(f"    {link_text(link)}" for link in sorted(new, key=link_text))
+        lines.append(
+            "If this change makes no such reference, main already does: two "
+            "changes that each passed alone made it together. Add the line to "
+            f"{LINKS_FILE} in a one-line pull request of its own."
+        )
     if stale:
         lines.append(
             "A stale link is listed, but no code makes it any more. "
-            f"Delete its line from {LINKS_FILE} in this change."
+            f"Delete its line from {LINKS_FILE} in this change. If this change "
+            "removed none of its references, main is already stale: two changes "
+            "that each passed alone removed the last ones together. Delete the "
+            "line in a one-line pull request of its own."
         )
     lines.append(f"How to read and fix a failure: {GUIDE}.")
     return "\n".join(lines)
