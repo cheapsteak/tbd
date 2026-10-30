@@ -207,10 +207,20 @@ public struct TerminalHibernationDelta: Codable, Sendable {
     /// `clearHibernated`). Optional with a nil default so payloads from older
     /// daemons still decode.
     public let hibernateReason: HibernateReason?
+    /// The row's session incarnation as the park or wake committed it. Both
+    /// mint one, and the app labels every Program Status report it forwards
+    /// with its cached row's incarnation, so a cached row that kept the old
+    /// one past a wake would forward the woken agent's reports under an
+    /// incarnation the daemon no longer runs. Nil when the daemon could not
+    /// read the row back, and from daemons that predate this field: the app
+    /// then keeps its cached value. Optional with a nil default so payloads
+    /// from older daemons still decode.
+    public let sessionIncarnationID: UUID?
     public init(
         terminalID: UUID, worktreeID: UUID, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
-        suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil
+        suspendedSnapshot: String? = nil, hibernateReason: HibernateReason? = nil,
+        sessionIncarnationID: UUID? = nil
     ) {
         self.terminalID = terminalID
         self.worktreeID = worktreeID
@@ -220,6 +230,7 @@ public struct TerminalHibernationDelta: Codable, Sendable {
         self.tmuxPaneID = tmuxPaneID
         self.suspendedSnapshot = suspendedSnapshot
         self.hibernateReason = hibernateReason
+        self.sessionIncarnationID = sessionIncarnationID
     }
 }
 

@@ -2566,6 +2566,10 @@ public actor HibernationCoordinator {
     /// `isParkOrWake` is false only for a re-broadcast that changes neither
     /// (`setKeepWarm`); every other caller parks or wakes the row, which drops
     /// a holder row's Program Status entries (`dropProgramStatus`).
+    ///
+    /// A park or a wake also carries the row's session incarnation, read back
+    /// after the commit: both mint one, and the app forwards Program Status
+    /// reports under its cached row's incarnation.
     func broadcastHibernation(
         terminal: Terminal, hibernated: Bool, keepWarm: Bool,
         tmuxWindowID: String? = nil, tmuxPaneID: String? = nil,
@@ -2577,6 +2581,9 @@ public actor HibernationCoordinator {
         if isParkOrWake, terminal.transport == .holder {
             await dropProgramStatus(terminalID: terminal.id, hibernated: hibernated)
         }
+        let committedIncarnationID = isParkOrWake
+            ? (try? await db.terminals.get(id: terminal.id))?.sessionIncarnationID
+            : nil
         subscriptions?.broadcast(delta: .terminalHibernationChanged(TerminalHibernationDelta(
             terminalID: terminal.id,
             worktreeID: terminal.worktreeID,
@@ -2585,7 +2592,8 @@ public actor HibernationCoordinator {
             tmuxWindowID: tmuxWindowID,
             tmuxPaneID: tmuxPaneID,
             suspendedSnapshot: suspendedSnapshot,
-            hibernateReason: hibernateReason
+            hibernateReason: hibernateReason,
+            sessionIncarnationID: committedIncarnationID
         )))
     }
 

@@ -2854,6 +2854,31 @@ struct HibernationCoordinatorTests {
         #expect(delta?.hibernateReason == nil)
     }
 
+    /// A park and a wake each mint a session incarnation, and the app forwards
+    /// Program Status reports under its cached row's: both deltas carry the
+    /// incarnation the row holds once each has committed.
+    @Test func parkAndWakeDeltasCarryTheCommittedIncarnation() async throws {
+        let (db, _, terminalID) = try await setup(sessionIncarnationID: UUID())
+        let recorder = RecordedHibernationDeltas()
+        let coord = HibernationCoordinator(
+            db: db, tmux: TmuxManager(dryRun: true),
+            subscriptions: recorder.subscriptions(),
+            configDirManager: isolatedConfigDirManager(), sessionTitles: ClaudeSessionTitleStore(), actuationLog: makeTestActuationLog())
+        let before = try #require(try await db.terminals.get(id: terminalID)?.sessionIncarnationID)
+
+        #expect(await coord.manualHibernate(terminalID: terminalID) == .ok)
+        let parked = try #require(try await db.terminals.get(id: terminalID)?.sessionIncarnationID)
+        #expect(parked != before)
+        #expect(recorder.snapshot().last?.sessionIncarnationID == parked)
+
+        #expect(await coord.wake(terminalID: terminalID).isOk)
+        let woken = try #require(try await db.terminals.get(id: terminalID)?.sessionIncarnationID)
+        #expect(woken != parked)
+        let wakeDelta = try #require(recorder.snapshot().last)
+        #expect(wakeDelta.hibernated == false)
+        #expect(wakeDelta.sessionIncarnationID == woken)
+    }
+
     /// Keep-warm toggle on an ALREADY PARKED row re-broadcasts
     /// `hibernated: true` — it must carry the row's persisted snapshot and
     /// reason, or the in-place apply would wipe them from the cached row.

@@ -47,11 +47,12 @@ import TestSupport
         }
     }
 
-    /// Holds every terminal lookup suspended until `release()`, so a test can
-    /// run a drop while an ingest is parked on its lookup. Lookups after the
-    /// release pass straight through.
+    /// Holds the first terminal lookup suspended until `release()`, so a test
+    /// can run a drop while an ingest is parked on its lookup. Every later
+    /// lookup — the drop's own among them — passes straight through.
     fileprivate final class LookupGate: Sendable {
         private struct State: Sendable {
+            var calls = 0
             var arrived = false
             var released = false
             var waiting: CheckedContinuation<Void, Never>?
@@ -62,6 +63,11 @@ import TestSupport
         var hasArrived: Bool { state.withLock { $0.arrived } }
 
         func wait() async {
+            let isFirst: Bool = state.withLock { current in
+                current.calls += 1
+                return current.calls == 1
+            }
+            guard isFirst else { return }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let resumeNow: Bool = state.withLock { current in
                     current.arrived = true

@@ -364,6 +364,77 @@ import TestSupport
         #expect(try await h.row(terminal).activityState == .working)
     }
 
+    /// The app labels what it reads with its cached row, which learns a wake's
+    /// incarnation only from the wake's broadcast. A report it forwards in
+    /// between still claims the incarnation the park ended; observed after
+    /// the park's drop, it can only be the woken process's, and it speaks.
+    /// The previous process's late report, observed before the drop, is still
+    /// refused, and so is a claim of an incarnation no drop ended.
+    @Test func aWokenSessionsReportClaimingTheIncarnationTheParkEndedSpeaks() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+        let incarnationA = try #require(terminal.sessionIncarnationID)
+
+        #expect(await ingest(
+            h, terminal, "state=working:app=claude-code", at: 1,
+            incarnation: .claimed(incarnationA)) == .accepted)
+        try await h.db.terminals.setHibernated(
+            id: terminal.id, sessionID: "acme-session", at: Self.at(2))
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+
+        let parked = try await h.row(terminal)
+        let incarnationB = try #require(try await h.db.terminals.prepareHibernatedAgentRespawn(
+            id: terminal.id, expectedState: TerminalReplacementSnapshot(terminal: parked),
+            at: Self.at(1001)))
+        try await h.db.terminals.clearHibernated(id: terminal.id)
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
+
+        #expect(await ingest(
+            h, terminal, "state=idle:app=claude-code", at: 999,
+            incarnation: .claimed(incarnationA)) == .rejected("observed before drop"))
+        #expect(await ingest(
+            h, terminal, "state=idle:app=claude-code", at: 1002,
+            incarnation: .claimed(UUID())) == .rejected("incarnation mismatch"))
+        #expect(try await h.row(terminal).activityState == .unknown)
+
+        #expect(await ingest(
+            h, terminal, "state=working:app=claude-code", at: 1003,
+            incarnation: .claimed(incarnationA)) == .accepted)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .working)
+        #expect(row.activityStateObservedAt == Self.at(1003))
+        #expect(await h.store.snapshot(for: terminal.id)?.incarnationID == incarnationB)
+    }
+
+    /// The same stale claim on a report the app forwarded while the wake
+    /// still read parked: the wake replays it as the woken process's.
+    @Test func aBackloggedReportClaimingAStaleIncarnationSpeaksAfterTheWake() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal(kind: .codex)
+        let incarnationA = try #require(terminal.sessionIncarnationID)
+
+        await ingest(h, terminal, "state=working:app=codex", at: 1, incarnation: .claimed(incarnationA))
+        try await h.db.terminals.setHibernated(
+            id: terminal.id, sessionID: "acme-thread", at: Self.at(2))
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+
+        let parked = try await h.row(terminal)
+        let incarnationB = try #require(try await h.db.terminals.prepareHibernatedAgentRespawn(
+            id: terminal.id, expectedState: TerminalReplacementSnapshot(terminal: parked),
+            at: Self.at(1001)))
+        #expect(await ingest(
+            h, terminal, "state=idle:app=codex", at: 1002,
+            incarnation: .claimed(incarnationA)) == .rejected("terminal is parked"))
+        try await h.db.terminals.clearHibernated(id: terminal.id)
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
+
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .idle)
+        #expect(row.activityStateSource == .programStatus)
+        #expect(row.activityStateObservedAt == Self.at(1002))
+        #expect(await h.store.snapshot(for: terminal.id)?.incarnationID == incarnationB)
+    }
+
     /// A park that cannot confirm its child gone rolls back, leaving the
     /// park's `.idle` under a live agent the store last saw working. The
     /// agent's next report that maps to the same value must still be written.

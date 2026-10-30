@@ -86,6 +86,15 @@ public actor ProgramStatusStore {
     /// ended — a backlog the daemon's inbox or the app's forwarder delivers
     /// late — and is refused.
     private var droppedAt: [UUID: Date] = [:]
+    /// Per terminal, the incarnations unconditional drops ended — the one
+    /// whose entries a drop removed, and the row's own at the drop — newest
+    /// last, at most `maxEndedIncarnations`. A report observed after a drop
+    /// can only come from the process that replaced the one it ended, so a
+    /// report claiming one of these is filed under the row's current
+    /// incarnation: the app labels what it reads with its cached row, which
+    /// catches up with a wake only when the wake's broadcast arrives.
+    private var endedIncarnations: [UUID: [UUID?]] = [:]
+    private static let maxEndedIncarnations = 8
 
     /// The column value the row is known to hold for one incarnation.
     private struct WrittenColumn {
@@ -205,6 +214,7 @@ public actor ProgramStatusStore {
         if let watermark = droppedAt[terminalID], inbound.observedAt <= watermark {
             return reject(terminalID, "observed before drop")
         }
+        let observedAfterADrop = droppedAt[terminalID] != nil
 
         // 3. A live holder session running an agent that reports, and a
         // report from that agent: `app` must be the terminal's own, so a
@@ -232,16 +242,22 @@ public actor ProgramStatusStore {
             return reject(terminalID, "app does not match the terminal's agent")
         }
 
-        // 4. Incarnation.
+        // 4. Incarnation. A claim of an incarnation a drop ended, observed
+        // after that drop, names a process that is gone: the bytes came from
+        // its replacement, so the report is the row's current incarnation's.
         let incarnationID: UUID?
         switch inbound.incarnation {
         case .currentRow:
             incarnationID = terminal.sessionIncarnationID
         case .claimed(let claimed):
-            guard claimed == terminal.sessionIncarnationID else {
+            if claimed == terminal.sessionIncarnationID {
+                incarnationID = claimed
+            } else if observedAfterADrop,
+                      endedIncarnations[terminalID]?.contains(claimed) == true {
+                incarnationID = terminal.sessionIncarnationID
+            } else {
                 return reject(terminalID, "incarnation mismatch")
             }
-            incarnationID = claimed
         }
 
         // A drop that ran while the lookup was suspended found nothing to
@@ -383,6 +399,11 @@ public actor ProgramStatusStore {
     ///
     /// For an end that is unconditional: the child exited or the row parked.
     ///
+    /// Records the incarnations the drop ended — the held entries' and the
+    /// row's at the drop — so a later report that still claims one of them,
+    /// from a forwarder whose cached row has not caught up, is filed under
+    /// the replacement's (see `endedIncarnations`).
+    ///
     /// A child exit also writes `.unknown` to the columns, for whichever
     /// incarnation is live, whatever this store holds: the column may carry a
     /// value written before a daemon restart that the store never saw. A park
@@ -395,7 +416,15 @@ public actor ProgramStatusStore {
         dropGenerations[terminalID] = (dropGenerations[terminalID] ?? 0) + 1
         droppedAt[terminalID] = droppedNow
         parkedBacklog.removeValue(forKey: terminalID)
+        if let ended = held[terminalID] {
+            recordEnded(ended.incarnationID, terminalID: terminalID)
+        }
         removeHeld(terminalID: terminalID, reason: reason)
+        // After the watermark is set, so no report this drop ended can slip
+        // in while the lookup is suspended.
+        if let row = await terminalLookup(terminalID) {
+            recordEnded(row.sessionIncarnationID, terminalID: terminalID)
+        }
         guard reason == .childExited else { return }
         _ = await writeColumn(ProgramStatusColumnWrite(
             terminalID: terminalID, value: .unknown,
@@ -411,7 +440,12 @@ public actor ProgramStatusStore {
     /// Then replays, through `ingest`, every report refused while the row
     /// still read parked (`parkedBacklog`): the replacement process's first
     /// reports, made before the wake un-parked the row. Each is validated
-    /// again against the row as it stands now.
+    /// again against the row as it stands now, under the row's current
+    /// incarnation whatever incarnation it claimed: every unconditional drop
+    /// empties the backlog and refuses what was observed before it, so what
+    /// is left was observed after the process the park ended was gone, and
+    /// can only be its replacement's — a forwarder labels it with a cached
+    /// row that has not caught up with the wake.
     public func dropIfIncarnationChanged(terminalID: UUID, reason: DropReason) async {
         if held[terminalID] != nil {
             let terminal = await terminalLookup(terminalID)
@@ -422,7 +456,9 @@ public actor ProgramStatusStore {
             }
         }
         for inbound in parkedBacklog.removeValue(forKey: terminalID) ?? [] {
-            _ = await ingest(inbound)
+            _ = await ingest(Inbound(
+                terminalID: inbound.terminalID, incarnation: .currentRow,
+                payload: inbound.payload, observedAt: inbound.observedAt))
         }
     }
 
@@ -458,6 +494,16 @@ public actor ProgramStatusStore {
             break
         }
         return outcome
+    }
+
+    private func recordEnded(_ incarnationID: UUID?, terminalID: UUID) {
+        var ended = endedIncarnations[terminalID] ?? []
+        ended.removeAll { $0 == incarnationID }
+        ended.append(incarnationID)
+        if ended.count > Self.maxEndedIncarnations {
+            ended.removeFirst(ended.count - Self.maxEndedIncarnations)
+        }
+        endedIncarnations[terminalID] = ended
     }
 
     private func holdUntilWake(_ inbound: Inbound) {

@@ -3550,7 +3550,8 @@ final class AppState {
     }
 
     /// Hibernate / wake / keep-warm change: update `hibernatedAt`, `keepWarm`,
-    /// `suspendedSnapshot`, and `hibernateReason` on the row in place so the
+    /// `suspendedSnapshot`, `hibernateReason` and, when the delta carries it,
+    /// `sessionIncarnationID` on the row in place so the
     /// whisper indicator and action menu re-render without a full terminal
     /// refetch. Snapshot and reason must land WITH the `hibernated` flip: the
     /// parked TerminalPanelView materializes the instant `isParked` flips
@@ -3592,6 +3593,12 @@ final class AppState {
         }
         terminals[delta.worktreeID]?[idx].hibernatedAt = delta.hibernated ? Date() : nil
         terminals[delta.worktreeID]?[idx].keepWarm = delta.keepWarm
+        // The incarnation the park or wake minted, with the flip: the woken
+        // view's first Program Status reports are forwarded under the cached
+        // row's incarnation, and the daemon refuses one it no longer runs.
+        if let incarnationID = delta.sessionIncarnationID {
+            terminals[delta.worktreeID]?[idx].sessionIncarnationID = incarnationID
+        }
         if delta.hibernated {
             // Parked: the delta carries the just-captured snapshot + reason
             // (nil from an older daemon — same blank-pane behavior as before).

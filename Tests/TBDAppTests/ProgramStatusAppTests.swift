@@ -163,6 +163,40 @@ struct ProgramStatusAppTests {
         #expect(params.allSatisfy { $0.observedAt == observedAt })
     }
 
+    /// A wake mints a new incarnation, and the woken view's first reports are
+    /// forwarded under the cached row's: the wake's delta must carry it, and a
+    /// delta without one (an older daemon) leaves the cached value alone.
+    @Test("a report after a wake is forwarded under the incarnation the wake's delta carried")
+    func wakeDeltaIncarnationIsForwarded() async throws {
+        let (state, cleanup) = makeAppState()
+        defer { cleanup() }
+        let parkedIncarnation = UUID()
+        let wokenIncarnation = UUID()
+        let id = seed(state, kind: .claude, transport: .holder, incarnation: parkedIncarnation)
+        let worktreeID = try #require(state.terminals.first { $0.value.contains { $0.id == id } }?.key)
+        let sent = SentParamsBox()
+        state.programStatusForwarder = ProgramStatusForwarder(send: { params in sent.append(params) })
+
+        state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+            terminalID: id, worktreeID: worktreeID, hibernated: false, keepWarm: false))
+        state.forwardProgramStatusReport(
+            terminalID: id, payload: Array("state=idle:app=claude-code".utf8), observedAt: Date())
+        state.applyTerminalHibernationDelta(TerminalHibernationDelta(
+            terminalID: id, worktreeID: worktreeID, hibernated: false, keepWarm: false,
+            sessionIncarnationID: wokenIncarnation))
+        state.forwardProgramStatusReport(
+            terminalID: id, payload: Array("state=working:app=claude-code".utf8), observedAt: Date())
+
+        let outcome = await pollUntilTrue(timeout: TestDeadlines.saturatedPass) { @Sendable in sent.count == 2 }
+        if outcome == .timedOut {
+            Issue.record(ForwardTimeout(observed: sent.count))
+        }
+        let params = sent.all
+        try #require(params.count == 2)
+        #expect(params[0].incarnationID == parkedIncarnation)
+        #expect(params[1].incarnationID == wokenIncarnation)
+    }
+
     @Test("a report for an ineligible terminal is not forwarded")
     func ineligibleNotForwarded() async {
         let (state, cleanup) = makeAppState()

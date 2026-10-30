@@ -181,7 +181,9 @@ probe handler checks the same replay state and stays silent while it is up.
 - **Attached** – the app sends the raw OSC data to a new RPC,
   `terminal.programStatusReport`, with `{terminalID, incarnationID,
   payload, observedAt}`. Forwarding the raw payload keeps a single parser on
-  the path that decides anything.
+  the path that decides anything. `incarnationID` is the app's cached row's;
+  a park and a wake each mint an incarnation, and their broadcast carries it
+  to that row.
 
 A report that arrives during a reader hand-off or a daemon restart can be
 lost. The store keeps the last state it accepted, and the agent's next change
@@ -200,7 +202,11 @@ it with a debug log:
   `codex` or the label says so, else Claude when the kind is `claude` or was
   never recorded, else none — a plain shell reports nothing;
 - the report's incarnation matches the terminal's current incarnation, so a
-  late report from a previous process cannot overwrite its successor;
+  late report from a previous process cannot overwrite its successor. A
+  report observed after an unconditional drop (see "Liveness") that claims an
+  incarnation such a drop ended is the exception: the process it names is
+  gone, so its bytes came from the replacement, and it is filed under the
+  row's current incarnation;
 - the report's `app` is the terminal's own agent's — `app=claude-code` on a
   Claude terminal, `app=codex` on a Codex one — except on a `clear`, which
   both agents write without `app`. An `app` TBD does not know is refused
@@ -231,8 +237,11 @@ A wake starts the replacement process while the row still reads parked, and
 un-parks it only once the launch is recorded. A report that process makes in
 between is refused, because the row is parked, and kept: an agent reports on
 change only, so it would not say it again. The wake's drop replays the kept
-reports against the un-parked row. A park's or a child exit's drop discards
-them, since anything reported before it belongs to the session it ended.
+reports against the un-parked row, under its current incarnation: each was
+observed after the drop that ended the previous process, so it is the
+replacement's whatever incarnation the app claimed for it. A park's or a
+child exit's drop discards them, since anything reported before it belongs to
+the session it ended.
 
 ### State model
 
