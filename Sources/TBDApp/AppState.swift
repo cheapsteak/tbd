@@ -846,7 +846,33 @@ final class AppState {
     var paneHistories: [UUID: PaneHistory] = [:] {
         didSet { persistPaneHistories() }
     }
-    var tabs: [UUID: [TBDShared.Tab]] = [:]
+    /// Workspace tabs per worktree. The one observer below is how a tab created,
+    /// closed, reordered, relabelled or re-pointed anywhere in the app reaches
+    /// the daemon's `panel.syncTabs` (`AppState+PanelSurface.swift`).
+    var tabs: [UUID: [TBDShared.Tab]] = [:] {
+        didSet { notePanelTabsChanged(old: oldValue, new: tabs) }
+    }
+    /// The app's copy of the daemon-owned panel surfaces: worktree → workspace
+    /// tab → surface. Filled by `panel.get` and kept current by
+    /// `panelSurfaceChanged` deltas while `panel_tabs_enabled` is on; empty
+    /// otherwise. Carries no tab order — the renderer looks tabs up by ID.
+    /// Written only when a value actually changes, because every reader of a
+    /// dictionary-keyed tracked property is notified on any write.
+    var panelSurfaces: [UUID: [WorkspaceTabID: WorkspaceTabSurface]] = [:]
+    /// Worktrees whose workspace tabs changed since their last `panel.syncTabs`.
+    @ObservationIgnored var panelSyncDirty: Set<UUID> = []
+    /// A tab-sync flush is scheduled or running; later changes join it rather
+    /// than scheduling another.
+    @ObservationIgnored var panelSyncFlushScheduled = false
+    /// A flush is sending. Syncs go out one at a time, so the daemon applies
+    /// a worktree's tab lists in the order the app built them.
+    @ObservationIgnored var panelSyncFlushInFlight = false
+    /// Worktrees whose tab list is complete enough to sync: both the
+    /// terminal-backed and the note-backed tabs have been reconciled against a
+    /// fetch since the current subscription. A sync deletes the surface of
+    /// every tab it does not list, so a list holding only one of the two
+    /// would delete the other's panels. Cleared on resubscribe.
+    @ObservationIgnored var panelSyncReadyWorktrees: Set<UUID> = []
     /// EXPLICIT per-worktree tab selection. Absent (or out of range) means "no
     /// deliberate selection" — read it through `resolvedActiveTabIndex` rather
     /// than defaulting to 0 or clamping at the call site.
@@ -2454,8 +2480,10 @@ final class AppState {
         if let capabilities = await daemonCapabilitiesFetcher() {
             let wasProgramStatusEnabled = daemonCapabilities?.programStatusEnabled
                 ?? Config.programStatusEnabledDefault
+            let wasPanelTabsEnabled = panelTabsActive
             daemonCapabilities = capabilities
             programStatusCapabilitiesChanged(wasEnabled: wasProgramStatusEnabled)
+            panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
         }
     }
     @ObservationIgnored lazy var cliInstallerCoordinator = CLIInstallerCoordinator(daemonClient: daemonClient, userDefaults: userDefaults)
@@ -2971,6 +2999,9 @@ final class AppState {
         programStatusSnapshots.removeAll()
         programStatusRevisions.removeAll()
         Task { [weak self] in await self?.hydrateProgramStatus() }
+        // And for panel surfaces: a new daemon may have reset their revisions,
+        // and the copy's revision guard would refuse every lower one.
+        resetPanelSurfacesForResubscribe()
         subscriptionTask = Task { [weak self] in
             guard let self else { return }
             await self.daemonClient.subscribe { [weak self] delta in
@@ -3080,6 +3111,8 @@ final class AppState {
             )
         case .devServersChanged:
             Task { [weak self] in await self?.refreshDevServersAfterChange() }
+        case .panelSurfaceChanged(let delta):
+            applyPanelSurfaceDelta(delta)
         default:
             break
         }
@@ -3856,7 +3889,9 @@ final class AppState {
             // grouped-sessions vs control-mode at creation time. Fetching
             // afterwards would leave every initially-rendered pane on the
             // grouped path even when the control-mode gate is on.
+            let wasPanelTabsEnabled = panelTabsActive
             daemonCapabilities = try? await daemonClient.daemonCapabilities()
+            panelTabsCapabilityChanged(wasEnabled: wasPanelTabsEnabled)
             await refreshAll()
             // Restore persisted selection before notifying the daemon — the RPC
             // below captures `selectedWorktreeIDs` so the daemon learns the real
@@ -4191,6 +4226,16 @@ final class AppState {
             // histories for worktrees not yet loaded — the pane back/forward
             // history was lost on every restart because of that.
             prunePaneHistories()
+
+            // Both of each visible worktree's tab sources have now been
+            // reconciled against a fetch: terminal-backed tabs through
+            // `adoptTerminalSnapshot` -> `reconcileTabs`, note-backed tabs
+            // through `reconcileNoteTabs`. Each reconcile runs only when its
+            // list changed, so readiness is marked here, where the fetch was
+            // adopted, rather than inside the reconcilers: a worktree with no
+            // notes, or one whose lists were already current after a
+            // resubscribe, would otherwise never become ready.
+            markPanelSyncReady(worktreeIDs: visibleWorktreeIDs)
         } catch {
             logger.error("Failed to list worktrees: \(error)")
             handleConnectionError(error)
