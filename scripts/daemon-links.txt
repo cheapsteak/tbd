@@ -42,12 +42,12 @@
 Actuation -> Database
 AskUserQuestion -> Base
 Claude -> Actuation
+Claude -> Base
 Claude -> Database
 Claude -> Keychain
 Claude -> Lifecycle
 Claude -> ModelProfile
 Claude -> Process
-Claude -> Remote
 Claude -> SessionMod
 Claude -> Tmux
 Codex -> Lifecycle
@@ -57,10 +57,10 @@ Database -> Claude
 Database -> Lifecycle
 Database -> PR
 Database -> Remote
+DevServers -> Base
 DevServers -> Database
 DevServers -> Holder
 DevServers -> Process
-DevServers -> Remote
 DevServers -> Tmux
 GC -> Base
 GC -> Claude

@@ -59,6 +59,8 @@ The bottom folder: code that several daemon folders share and that uses no other
 - `ContinuationGuard.swift` — one-shot claim that keeps a shared `CheckedContinuation` resumed exactly once
 - `SocketFileIdentity.swift` — a socket file's `(st_dev, st_ino)`, so a server unlinks only the socket it bound
 - `ListeningSocket.swift` — `bindListeningSocket(at:)`, which creates and binds an owner-only `AF_UNIX` socket, and `SocketServerStartError`; the RPC and mod-channel servers share both
+- `ShadowPeerPermissionClass.swift` — the permission class (`bypass` / `prompting`) a cross-session message attests
+- `RepoTOML.swift` — the name and path of a repository's committed `tbd.toml`
 
 ### Claude/
 - `ClaudeSpawnCommandBuilder.swift` — pure builder for the `claude` spawn command; appends `--plugin-dir`/`--settings`, returns auth/routing `sensitiveEnv`
