@@ -35,7 +35,7 @@ These stay in `TBDShared`:
 ### What may go into the kernel
 
 `Sources/TBDKernel/CLAUDE.md` states three rules:
-- **A declaration goes into the kernel only if a helper program needs it,** directly or through another kernel declaration. Everything else goes into `TBDShared`.
+- **A declaration goes into the kernel only if a helper program or its tests need it,** directly or through another kernel declaration. Everything else goes into `TBDShared`. For example, `CloseOnExecPipe` is there for the peer helper's tests.
 - **The kernel depends on no other module,** first-party or package.
 - **The wire shapes stay byte-identical.**
   - For the holder, these are the Codable names and shapes, the rendezvous directory and file names, `sunPathLimit` and the busy sentinel. The daemon must work with every holder version that has ever shipped, as the transport spec's protocol section says.
@@ -59,9 +59,10 @@ These stay in `TBDShared`:
 ### Imports
 
 Each file that names a kernel declaration adds `import TBDKernel`, whether the declaration is a type or a member such as `Pipe.closeOnExec()`.
-- **About 100 files:**
-  - 25 daemon source files;
+- **112 files in all**, among them:
+  - 23 daemon source files;
   - 61 daemon and live test files;
+  - the moved kernel tests, the helpers and their tests;
   - a few files in the app, the CLI, `TBDShared` and their tests.
 - **Why one line per file:**
   - Swift doesn't make a top-level name visible through an indirect import.
@@ -108,7 +109,7 @@ Each file that names a kernel declaration adds `import TBDKernel`, whether the d
 
 ## Out of scope
 
-- **The daemon's holder client** (`Sources/TBDDaemon/Holder`) stays in `TBDDaemonLib`. The daemon layer-order spec of the same date records why it doesn't become a module yet, and when to look again.
+- **The daemon's holder client** (`Sources/TBDDaemon/Holder`) stays in `TBDDaemonLib`. As a module of its own, it would need about 100 `public` declarations for the rest of the daemon. Most commits that change it also change Server or Lifecycle, so that API would rarely hold still. The daemon layer-order spec of the same date gives the full reasons, and says when to look again.
 - **The CLI keeps its dependency on `TBDShared`.**
 
 ## Rejected alternatives
