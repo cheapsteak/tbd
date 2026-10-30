@@ -282,8 +282,9 @@ struct WorktreeArchiveScratchRoutingRPCTests {
     }
 
     /// `--force` is accepted and changes nothing on this path. What it governs
-    /// on the repo branch is phase 2's hook skip, and the scratch body has no
-    /// phase 2; the children refusal it does NOT govern is asserted in
+    /// on the repo branch is the uncommitted-changes guard and phase 2's hook
+    /// skip, and the scratch body deletes no folder and has no phase 2; the
+    /// children refusal it does NOT govern is asserted in
     /// `archiveRefusesAScratchSpaceWithAnActiveChild`.
     @Test func forceIsAcceptedAndChangesNothingOnAScratchSpace() async throws {
         let (_, cleanup) = isolateTBDHome(); defer { cleanup() }
@@ -398,10 +399,10 @@ struct WorktreeArchiveScratchRoutingRPCTests {
 
         // `--force` must NOT bypass it, because it does not bypass it for a
         // repo worktree arriving through this same door either:
-        // `handleWorktreeArchive` never forwards `force` to
-        // `beginArchiveWorktree`, so that assertion always runs there too. One
-        // flag meaning opposite things on the two branches of one RPC is the
-        // divergence this asserts against.
+        // `handleWorktreeArchive` never passes `force` on as
+        // `beginArchiveWorktree`'s own `force`, so that assertion always runs
+        // there too. One flag meaning opposite things on the two branches of
+        // one RPC is the divergence this asserts against.
         let forced = await router.handle(try RPCRequest(
             method: RPCMethod.worktreeArchive,
             params: WorktreeArchiveParams(worktreeID: parent.id, force: true)))

@@ -180,6 +180,11 @@ struct HolderTmuxAssumptionGateTests {
     /// In-memory DB plus a worktree whose path exists on disk — both the wake
     /// and the recreate paths refuse to respawn into a missing directory, and
     /// that refusal would mask the one under test.
+    ///
+    /// The worktree's folder is a plain directory, not a git checkout, so
+    /// archive's uncommitted-changes guard cannot read it and would refuse;
+    /// the archive tests here pass `discardUncommittedChanges: true` to reach
+    /// the teardown they are about.
     private func seedWorktree(_ db: TBDDatabase) async throws -> (Worktree, URL) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("tbd-holdergate-repo-\(UUID().uuidString)", isDirectory: true)
@@ -2664,7 +2669,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
 
         _ = try await lifecycle(db, tmux: tmux, registry: registry)
-            .beginArchiveWorktree(worktreeID: wt.id)
+            .beginArchiveWorktree(worktreeID: wt.id, discardUncommittedChanges: true)
 
         #expect(try await db.terminals.get(id: terminal.id) == nil,
                 "archive is supposed to delete the row; the gate is about what goes with it")
@@ -2690,7 +2695,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = holderRegistry(listing: [])
 
         _ = try await lifecycle(db, tmux: tmux, registry: registry)
-            .beginArchiveWorktree(worktreeID: wt.id)
+            .beginArchiveWorktree(worktreeID: wt.id, discardUncommittedChanges: true)
 
         #expect(try await db.terminals.get(id: terminal.id) == nil)
         let argv = recorded.snapshot()
@@ -2752,7 +2757,7 @@ struct HolderTmuxAssumptionGateTests {
         let registry = try await armedRegistry(listing: [terminal], for: terminal.id)
 
         _ = try await lifecycle(db, tmux: tmux, registry: registry)
-            .beginArchiveWorktree(worktreeID: wt.id)
+            .beginArchiveWorktree(worktreeID: wt.id, discardUncommittedChanges: true)
 
         #expect(try await db.terminals.get(id: terminal.id) == nil)
         try await expectHolderEntryWithoutCapture(db, terminal: terminal, path: "archive")

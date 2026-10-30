@@ -1057,9 +1057,28 @@ public struct GitManager: Sendable {
     /// than folded into "dirty", so a caller can tell "has work" from "could
     /// not look". Runs with `--no-optional-locks`, so a background caller
     /// never takes the index lock out from under a user's own git command.
+    ///
+    /// `--untracked-files=normal` is passed explicitly because every caller
+    /// asks whether deleting the directory would lose work, and a user's
+    /// `status.showUntrackedFiles=no` would otherwise hide untracked files
+    /// from that answer and report a tree holding new files as clean.
+    /// `--ignore-submodules=none` is passed for the same reason: it overrides
+    /// every `submodule.<name>.ignore` and `diff.ignoreSubmodules` value,
+    /// including `untracked`, which are often committed in `.gitmodules` and
+    /// would otherwise hide edits inside a submodule's checkout. So a
+    /// submodule holding only untracked build output reads as modified
+    /// (` M <sub>`) and refuses the archive. That is deliberate: untracked
+    /// files inside a submodule can be real work, and its folder is deleted
+    /// with the worktree. A false refusal costs one confirm; a false clean
+    /// costs the files. "Ignored files stay out" means files the worktree's
+    /// own `.gitignore` rules ignore: build output there is not work.
     public func uncommittedStatus(worktreePath: String) async throws -> String {
         try await run(
-            arguments: ["--no-optional-locks", "status", "--porcelain"], at: worktreePath)
+            arguments: [
+                "--no-optional-locks", "status", "--porcelain", "--untracked-files=normal",
+                "--ignore-submodules=none",
+            ],
+            at: worktreePath)
     }
 
     /// Returns `true` if `sha` is an ancestor of (contained in) any local

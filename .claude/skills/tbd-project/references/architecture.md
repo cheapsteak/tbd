@@ -135,7 +135,7 @@ Split across files: base struct (`WorktreeLifecycle.swift`), `+Create`, `+Archiv
 **Phase 2 (completeCreateWorktree):** Best-effort fetch → create base dir (`~/tbd/worktrees/<repo>/`) → git worktree add (retries with a new name on collision) → ensure tmux server → create windows with `TBD_*` env vars → insert terminals → status `.active`. On failure, deletes the DB row.
 
 ### Archive (two-phase async)
-**Phase 1:** Validate not `.main`/`.creating` → status `.archived` + `archivedAt` → kill tmux windows → delete terminals → return. **Phase 2:** background — run archive hook → `git worktree remove`.
+**Phase 1:** Validate not `.main`/`.creating` → refuse a folder with uncommitted changes or an unreadable `git status` (`WorktreeArchiveError.uncommittedChanges`, RPC code `worktreeArchiveUncommitted`; lifted by `force`, which also skips the hook, or by `discardUncommittedChanges`, which does not; auto-archive on merge keeps the worktree and notifies) → status `.archived` + `archivedAt` → kill tmux windows → delete terminals → return. **Phase 2:** background — run archive hook → `git worktree remove`.
 
 ### Revive / Adopt
 Revive recreates a worktree from an archived branch. Adopt (`worktree.adopt`) registers an existing on-disk git worktree into TBD (idempotent).

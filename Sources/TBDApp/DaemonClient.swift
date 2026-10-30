@@ -718,11 +718,17 @@ actor DaemonClient {
         )
     }
 
-    /// Archive a worktree.
-    func archiveWorktree(id: UUID, force: Bool = false) async throws {
+    /// Archive a worktree. `force` and `discardUncommittedChanges` carry
+    /// `WorktreeArchiveParams`' meanings; the app sends the second once the
+    /// user confirms deleting a local worktree's uncommitted changes.
+    func archiveWorktree(
+        id: UUID, force: Bool = false, discardUncommittedChanges: Bool = false
+    ) async throws {
         try await callVoidAsync(
             method: RPCMethod.worktreeArchive,
-            params: WorktreeArchiveParams(worktreeID: id, force: force)
+            params: WorktreeArchiveParams(
+                worktreeID: id, force: force,
+                discardUncommittedChanges: discardUncommittedChanges)
         )
     }
 

@@ -252,9 +252,18 @@ public enum WorktreeMoveError: LocalizedError, CustomStringConvertible {
 
 public enum WorktreeArchiveError: LocalizedError, CustomStringConvertible {
     case hasActiveChildren
+    /// The worktree's folder holds changes git has not committed, or
+    /// `git status` could not show it clean. Archiving deletes the folder and
+    /// a revive restores only the branch, so these are the files an archive
+    /// destroys for good. Thrown by `WorktreeLifecycle.beginArchiveWorktree`
+    /// before it changes anything; `discardUncommittedChanges` lifts it.
+    case uncommittedChanges(UncommittedArchiveRefusal)
 
     public var description: String {
-        "Archive nested worktrees first."
+        switch self {
+        case .hasActiveChildren: return "Archive nested worktrees first."
+        case .uncommittedChanges(let refusal): return refusal.message
+        }
     }
 
     public var errorDescription: String? { description }
