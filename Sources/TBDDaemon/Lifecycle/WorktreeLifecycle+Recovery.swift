@@ -261,7 +261,26 @@ extension WorktreeLifecycle {
     ///   terminal exists to restore them into, so they are kept: the row goes
     ///   through `activateRecoveredCreate`, which also clears
     ///   `archivedAt`, the same outcome as a revive with `skipClaude`.
+    /// - A row with a PR number and no foreign-head stamp is stamped before it
+    ///   is activated. A fork-PR create writes the stamp after its
+    ///   `git worktree add`, so a daemon death or a failed write in between
+    ///   leaves exactly this shape, and whether the create checked out the PR
+    ///   head is not persisted. Recovery cannot tell, so it treats every such
+    ///   row as foreign: the only cost is that Claude asks its own folder-trust
+    ///   question once. If the stamp cannot be written the row is left
+    ///   `.creating`, untouched, for the next startup to retry, because an
+    ///   active unstamped row would let folder trust be pre-answered for
+    ///   contents a fork may have authored.
     private func activateTerminalLessCreate(_ row: Worktree, reposDir: URL?) async {
+        if let prNumber = row.prNumber, !row.foreignHead {
+            logger.warning("recovery: terminal-less .creating worktree \(row.id, privacy: .public) has PR #\(prNumber, privacy: .public) but no foreign-head stamp; recovery cannot tell whether the PR head was checked out, so it stamps the row and withholds folder trust")
+            do {
+                try await db.worktrees.markForeignHead(id: row.id)
+            } catch {
+                logger.error("recovery: could not stamp terminal-less .creating worktree \(row.id, privacy: .public) as foreign-head (\(error.localizedDescription, privacy: .public)); leaving it .creating for the next startup rather than activating it with folder trust still pre-answerable")
+                return
+            }
+        }
         let saved = saveParkedFirstMessage(of: row, reposDir: reposDir)
         if saved.lost {
             logger.error("recovery: the parked first message of \(row.id, privacy: .public) could not be saved and is being cleared")
