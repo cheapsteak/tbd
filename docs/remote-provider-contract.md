@@ -356,7 +356,7 @@ The `sessions` array carries every session the provider knows about, archived on
 
 Providers SHOULD keep exited sessions listable for at least 24 hours (with `state: "exited"`) rather than dropping them from the list immediately. A session disappearing from the list is indistinguishable from transport drift unless exited sessions stick around long enough to be told apart from a genuine loss.
 
-A transport-overload or unreachable failure MUST be returned as a transient error (exit 3), never as a successful empty list. The caller keeps its last successful snapshot and marks the provider stale; an empty successful complete snapshot instead counts toward the two-absence rule and can incorrectly mark live sessions gone.
+A transport-overload or unreachable failure MUST be returned as a transient error (exit 3), never as a successful empty list. The caller keeps its last successful snapshot and marks the provider stale once a second consecutive poll misses (a single missed poll is tolerated); an empty successful complete snapshot instead counts toward the two-absence rule and can incorrectly mark live sessions gone.
 
 ### Snapshot completeness
 

@@ -570,6 +570,10 @@ final class AppState {
             sidebarParentRemoteGroupsCache.removeAll()
         }
     }
+    /// Whether `remoteProviders` holds a roster the daemon actually reported
+    /// (set by a successful `refreshRemote()`, cleared when remote backends are
+    /// unavailable), so an empty list at launch is not read as "no providers".
+    var remoteProvidersLoaded = false
     /// The daemon's remote-session mirror across all providers, fetched by
     /// `refreshRemote()`. See `AppState+Remote.swift`.
     var remoteSessions: [RemoteSessionInfo] = [] {

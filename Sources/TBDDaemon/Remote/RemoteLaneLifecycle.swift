@@ -137,11 +137,19 @@ struct RemoteLaneLifecycle: Sendable {
     /// function never inspects `"stop"` — ending compute and retiring a
     /// record are different acts, and a provider declaring only `stop` must
     /// fall through to `.refused`.
-    static func archivePlan(capabilities: Set<String>, isGone: Bool) -> RemoteLaneArchivePlan {
+    ///
+    /// `providerRetired` is a provider no longer configured at all: it
+    /// enumerates nothing and can be invoked for nothing, so its lanes are in
+    /// substance gone even though no mirror row will ever be marked so. It
+    /// takes the same row-only route as `isGone`. A provider that is
+    /// configured but whose `describe` failed is not retired and is refused.
+    static func archivePlan(
+        capabilities: Set<String>, isGone: Bool, providerRetired: Bool = false
+    ) -> RemoteLaneArchivePlan {
         if capabilities.contains("archive") {
             return .invokeVerb
         }
-        if isGone {
+        if isGone || providerRetired {
             return .rowOnlyGone
         }
         return .refused(
