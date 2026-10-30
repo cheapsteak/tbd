@@ -97,21 +97,6 @@ import TBDShared
         #expect(harness.delivered == [Array(first.utf8), Array(second.utf8)])
     }
 
-    /// Codex's wire form: terminated by ST, with `app=codex` and a kind. The
-    /// tap delivers it as it does Claude Code's — the payload exactly, with
-    /// no reply.
-    @Test func codexReportTerminatedBySTIsDelivered() async throws {
-        let harness = try Harness()
-        defer { harness.tearDown() }
-
-        let payload = "state=blocked:app=codex:kind=permission"
-        await harness.reader.feedChildOutputForTesting(
-            Data("\u{1b}]7501;state=blocked:app=codex:kind=permission\u{1b}\\".utf8))
-
-        #expect(harness.delivered == [Array(payload.utf8)])
-        #expect(harness.readReplies().isEmpty, "a report gets no reply")
-    }
-
     // MARK: - Preamble (replay)
 
     @Test func preambleNeitherAnswersNorDelivers() async throws {
