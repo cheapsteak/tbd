@@ -84,6 +84,7 @@ The bottom folder: code that several daemon folders share and that uses no other
 ### Lifecycle/
 - `WorktreeLifecycle.swift` (+`Create`/`Archive`/`Reconcile`/`Adopt`/`Forget`/`PreSession`/`Recovery`) — worktree create/archive/revive/adopt/reconcile orchestration; `+Forget` untracks without deleting from disk, `+PreSession` runs pre-session hook terminals, `+Recovery` resolves rows stuck in `.creating` on restart
 - `ParentResolver.swift` — resolves a new worktree's parent (lineage)
+- `TmuxManager+WorktreeServerLock.swift` — `withWorktreeServerLock`: locks a worktree's current tmux server and re-reads its row after waiting, retrying if the server changed
 - `SystemPromptBuilder.swift` — builds `TBD_PROMPT_*` layers + `--append-system-prompt`
 - `HibernationCoordinator.swift` (+`Holder`) — parks and wakes Claude sessions on both transports: manual hibernate, the idle sweep, park-on-merge, and the parks the profile swap and the transport migration compose
 - `HibernationGate.swift` / `HibernationSafetyChecks.swift` — idle-sweep and park-on-merge eligibility; the transcript-tail check every park but the profile swap's honours

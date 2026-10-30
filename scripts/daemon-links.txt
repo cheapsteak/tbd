@@ -140,8 +140,6 @@ Server -> Tmux
 Server -> Update
 SessionMod -> Base
 StartAdmission -> Process
-Tmux -> Database
-Tmux -> Lifecycle
 Tmux -> Process
 Tmux -> SSH
 Tmux -> Server
