@@ -219,6 +219,13 @@ entry nothing ever clears. A wake drops only entries whose incarnation differs
 from the terminal's current one, because by the time it runs the replacement
 session is live and what it has already reported is its current state.
 
+A wake starts the replacement process while the row still reads parked, and
+un-parks it only once the launch is recorded. A report that process makes in
+between is refused, because the row is parked, and kept: an agent reports on
+change only, so it would not say it again. The wake's drop replays the kept
+reports against the un-parked row. A park's or a child exit's drop discards
+them, since anything reported before it belongs to the session it ended.
+
 ### State model
 
 `SessionStateValue` gains three cases. Its wire form is tagged and readers

@@ -304,6 +304,87 @@ import TestSupport
         #expect(row.activityStateSource == .database)
     }
 
+    // MARK: - Across a wake and a rolled-back park
+
+    /// A wake starts the replacement process while the row still reads parked,
+    /// and un-parks it only once the launch is recorded. Codex draws its first
+    /// `idle` at once and never repeats it, so a report refused in that window
+    /// must still speak once the wake completes.
+    @Test func aReportMadeWhileTheWakeStillReadsParkedSpeaksAfterTheWake() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal(kind: .codex)
+
+        await ingest(h, terminal, "state=working:app=codex", at: 1)
+        try await h.db.terminals.setHibernated(
+            id: terminal.id, sessionID: "acme-thread", at: Self.at(2))
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+
+        // The wake: a fresh incarnation on the still-parked row, then the
+        // replacement's first report, then the un-park and its broadcast.
+        let parked = try await h.row(terminal)
+        let incarnationB = try #require(try await h.db.terminals.prepareHibernatedAgentRespawn(
+            id: terminal.id, expectedState: TerminalReplacementSnapshot(terminal: parked),
+            at: Self.at(1001)))
+        #expect(await ingest(h, terminal, "state=idle:app=codex", at: 1002)
+            == .rejected("terminal is parked"))
+        #expect(try await h.row(terminal).activityState == .unknown)
+        try await h.db.terminals.clearHibernated(id: terminal.id)
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
+
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .idle)
+        #expect(row.activityStateSource == .programStatus)
+        #expect(row.activityStateObservedAt == Self.at(1002))
+        #expect(await h.store.snapshot(for: terminal.id)?.incarnationID == incarnationB)
+    }
+
+    /// What the ending session reported while its park was under way belongs
+    /// to that session, and the wake replays none of it.
+    @Test func aReportFromTheSessionAParkEndedIsNotReplayed() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        try await h.db.terminals.setHibernated(
+            id: terminal.id, sessionID: "acme-session", at: Self.at(2))
+        #expect(await ingest(h, terminal, "state=idle:app=claude-code", at: 3)
+            == .rejected("terminal is parked"))
+        await h.store.drop(terminalID: terminal.id, reason: .parked)
+
+        let parked = try await h.row(terminal)
+        _ = try #require(try await h.db.terminals.prepareHibernatedAgentRespawn(
+            id: terminal.id, expectedState: TerminalReplacementSnapshot(terminal: parked),
+            at: Self.at(1001)))
+        try await h.db.terminals.clearHibernated(id: terminal.id)
+        await h.store.dropIfIncarnationChanged(terminalID: terminal.id, reason: .woke)
+        #expect(try await h.row(terminal).activityStateSource == .derived)
+
+        // The woken session's own report still lands.
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1005)
+        #expect(try await h.row(terminal).activityState == .working)
+    }
+
+    /// A park that cannot confirm its child gone rolls back, leaving the
+    /// park's `.idle` under a live agent the store last saw working. The
+    /// agent's next report that maps to the same value must still be written.
+    @Test func aRolledBackParkDoesNotSilenceTheNextReport() async throws {
+        let h = try await Harness.make()
+        let terminal = try await h.terminal()
+
+        await ingest(h, terminal, "state=working:app=claude-code", at: 1)
+        let live = try await h.row(terminal)
+        _ = try #require(try await h.db.terminals.beginHibernatedShellRespawn(
+            id: terminal.id, expectedState: TerminalHibernationSnapshot(terminal: live),
+            at: Self.at(2)))
+        try await h.db.terminals.clearHibernated(id: terminal.id)
+        #expect(try await h.row(terminal).activityState == .idle)
+
+        await ingest(h, terminal, "state=working:app=claude-code:id=t1", at: 3)
+        let row = try await h.row(terminal)
+        #expect(row.activityState == .working)
+        #expect(row.activityStateSource == .programStatus)
+    }
+
     // MARK: - Reentrancy
 
     /// Suspends the first caller until `release()`; every later caller passes.

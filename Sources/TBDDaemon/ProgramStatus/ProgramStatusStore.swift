@@ -102,6 +102,16 @@ public actor ProgramStatusStore {
     /// move while it was suspended: a later write, or a drop, then describes
     /// the row better than it does.
     private var columnGenerations: [UUID: UInt64] = [:]
+    /// Per terminal, the reports refused only because the row was parked, in
+    /// arrival order and at most `maxParkedBacklog` of them. A wake starts its
+    /// replacement process while the row still reads parked and un-parks it
+    /// only once the launch is recorded, so whatever that process reports in
+    /// between is refused — and an agent reports on change only, so it never
+    /// says it again. The wake's drop (`dropIfIncarnationChanged`) replays
+    /// these through `ingest`; every unconditional drop discards them, since a
+    /// report from before a park's drop belongs to the session the park ended.
+    private var parkedBacklog: [UUID: [Inbound]] = [:]
+    private static let maxParkedBacklog = ProgramStatusProtocol.maxTaskEntries + 1
 
     /// `effects` defaults to `.inert`: entries are held and published, and
     /// nothing is written, raised or stamped.
@@ -205,7 +215,16 @@ public actor ProgramStatusStore {
             return reject(terminalID, "unknown terminal")
         }
         guard terminal.transport == .holder else { return reject(terminalID, "not a holder session") }
-        guard !terminal.isParked else { return reject(terminalID, "terminal is parked") }
+        if terminal.isParked {
+            // Refused now, and kept for the wake's replay when the report is
+            // the row's own agent's and no drop ran during the lookup.
+            if (dropGenerations[terminalID] ?? 0) == generationBeforeLookup,
+               let expectedApp = ProgramStatusProtocol.expectedApp(for: terminal),
+               report.app.map({ $0 == expectedApp }) ?? true {
+                holdUntilWake(inbound)
+            }
+            return reject(terminalID, "terminal is parked")
+        }
         guard let expectedApp = ProgramStatusProtocol.expectedApp(for: terminal) else {
             return reject(terminalID, "not an agent session")
         }
@@ -292,10 +311,15 @@ public actor ProgramStatusStore {
                 .flatMap { ProgramStatusColumnValue.mapping($0.value) }
         }
         if let columnValue {
-            let alreadyStanding = written[terminalID].map {
+            // Skipped only when this store's last write left the value AND the
+            // row read above still holds it: a park that rolled back writes
+            // the columns without this store seeing it.
+            let memoMatches = written[terminalID].map {
                 $0.incarnationID == incarnationID && $0.value == columnValue
             } ?? false
-            if !alreadyStanding {
+            let rowMatches = terminal.activityState == columnValue.activityState
+                && terminal.awaitingInputReason == columnValue.awaitingInputReason
+            if !(memoMatches && rowMatches) {
                 let outcome = await writeColumn(ProgramStatusColumnWrite(
                     terminalID: terminalID, value: columnValue,
                     scope: .incarnation(incarnationID), observedAt: inbound.observedAt))
@@ -370,6 +394,7 @@ public actor ProgramStatusStore {
         let droppedNow = now()
         dropGenerations[terminalID] = (dropGenerations[terminalID] ?? 0) + 1
         droppedAt[terminalID] = droppedNow
+        parkedBacklog.removeValue(forKey: terminalID)
         removeHeld(terminalID: terminalID, reason: reason)
         guard reason == .childExited else { return }
         _ = await writeColumn(ProgramStatusColumnWrite(
@@ -382,13 +407,23 @@ public actor ProgramStatusStore {
     /// time it runs, the replacement session is live and its reports may
     /// already be held, and those are its current state. Sets no watermark,
     /// so the live session's reports keep flowing.
+    ///
+    /// Then replays, through `ingest`, every report refused while the row
+    /// still read parked (`parkedBacklog`): the replacement process's first
+    /// reports, made before the wake un-parked the row. Each is validated
+    /// again against the row as it stands now.
     public func dropIfIncarnationChanged(terminalID: UUID, reason: DropReason) async {
-        guard held[terminalID] != nil else { return }
-        let terminal = await terminalLookup(terminalID)
-        // Re-read after the await (actor reentrancy).
-        guard let current = held[terminalID] else { return }
-        if let terminal, current.incarnationID == terminal.sessionIncarnationID { return }
-        removeHeld(terminalID: terminalID, reason: reason)
+        if held[terminalID] != nil {
+            let terminal = await terminalLookup(terminalID)
+            // Re-read after the await (actor reentrancy).
+            if let current = held[terminalID],
+               terminal.map({ current.incarnationID != $0.sessionIncarnationID }) ?? true {
+                removeHeld(terminalID: terminalID, reason: reason)
+            }
+        }
+        for inbound in parkedBacklog.removeValue(forKey: terminalID) ?? [] {
+            _ = await ingest(inbound)
+        }
     }
 
     // MARK: - Private
@@ -423,6 +458,15 @@ public actor ProgramStatusStore {
             break
         }
         return outcome
+    }
+
+    private func holdUntilWake(_ inbound: Inbound) {
+        var backlog = parkedBacklog[inbound.terminalID] ?? []
+        backlog.append(inbound)
+        if backlog.count > Self.maxParkedBacklog {
+            backlog.removeFirst(backlog.count - Self.maxParkedBacklog)
+        }
+        parkedBacklog[inbound.terminalID] = backlog
     }
 
     /// Clear the terminal's memo and bump its column generation, so a write
