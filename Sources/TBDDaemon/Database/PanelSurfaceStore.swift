@@ -678,4 +678,39 @@ public struct PanelSurfaceStore: Sendable {
             .deleteAll(db)
         return tabKeys.compactMap(UUID.init(uuidString:))
     }
+
+    /// Moves every surface of `fromWorktreeID` to `toWorktreeID` inside a
+    /// caller's write transaction, and deletes `fromWorktreeID`'s operation
+    /// receipts. Histories go with their surfaces, because they key on the
+    /// tab, which keeps its ID. Each moved row takes the counter's next
+    /// revision, as a sync's re-parent does.
+    ///
+    /// Returns the moved surfaces as stored, ordered by position, for a
+    /// delta's `tabs`; a row that cannot be read still moves but is not
+    /// returned. `WorktreeStore.promoteScratchMigration` runs it in the
+    /// transaction that retires a promoted scratch worktree, which archives
+    /// that row without going through `WorktreeStore.archive`: the tabs move
+    /// to the main worktree, and their panels move with them.
+    static func reparentSurfaces(
+        from fromWorktreeID: UUID, to toWorktreeID: UUID, now: Date, in db: GRDB.Database
+    ) throws -> [WorkspaceTabSurface] {
+        let rows = try WorkspaceTabSurfaceRecord
+            .filter(Column("worktreeID") == fromWorktreeID.uuidString)
+            .order(Column("position"))
+            .fetchAll(db)
+        var moved: [WorkspaceTabSurface] = []
+        for var row in rows {
+            row.worktreeID = toWorktreeID.uuidString
+            row.revision = Int64(try Self.nextRevision(db: db))
+            row.updatedAt = now
+            try row.update(db)
+            if let surface = try Self.loadSurface(row, db: db) {
+                moved.append(surface)
+            }
+        }
+        try PanelOperationReceiptRecord
+            .filter(Column("worktreeID") == fromWorktreeID.uuidString)
+            .deleteAll(db)
+        return moved
+    }
 }

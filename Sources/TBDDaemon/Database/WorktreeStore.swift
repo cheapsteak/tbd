@@ -747,8 +747,11 @@ public struct WorktreeStore: Sendable {
             try record.update(db)
             // The row stays, so its FK cascade never clears the panel
             // surfaces, their histories or their receipts: this is what
-            // reclaims them, for every archive path. A revive needs nothing
-            // back — the next tab sync re-imports from the legacy layout.
+            // reclaims them, for every archive path that comes through here.
+            // The one that does not, a scratch promote, moves them to the main
+            // worktree first (`promoteScratchMigration`), so it leaves none
+            // behind. A revive needs nothing back — the next tab sync
+            // re-imports from the legacy layout.
             return try PanelSurfaceStore.deleteSurfaces(worktreeID: id, in: db)
         }
     }
@@ -1263,26 +1266,36 @@ public struct WorktreeStore: Sendable {
     }
 
     /// The entire scratch-promote row migration in ONE write transaction:
-    /// terminals re-parented, tab rows re-pointed, the main worktree inherits
-    /// the scratch tmux server + tab order/selection, and the scratch row is
-    /// retired (archived + `promotedToRepoID`). Any failure rolls the whole
-    /// thing back, leaving the pre-promote state intact — in particular the
-    /// scratch row stays un-promoted (retryable) and its terminals stay
+    /// terminals re-parented, tab rows re-pointed, the tabs' panel surfaces
+    /// (with their histories) moved along with them, the main worktree
+    /// inherits the scratch tmux server + tab order/selection, and the scratch
+    /// row is retired (archived + `promotedToRepoID`). Any failure rolls the
+    /// whole thing back, leaving the pre-promote state intact — in particular
+    /// the scratch row stays un-promoted (retryable) and its terminals stay
     /// parented to it, so a later `scratch.delete` can never tmux-kill live
     /// windows that a half-migration left behind. DB-only: tmux windows and
     /// the processes inside them are never touched — live sessions keep
     /// running throughout. File copies (Claude project-dir snapshot) are the
     /// caller's job, outside this transaction (idempotent copy-if-newer).
+    ///
+    /// The retired row is archived here rather than through `archive`, so
+    /// this transaction leaves no panel row on it: the surfaces move to the
+    /// main worktree at fresh revisions, and the scratch worktree's operation
+    /// receipts are deleted. Returns the moved surfaces, which the caller
+    /// broadcasts under the main worktree.
+    @discardableResult
     public func promoteScratchMigration(
         scratchID: UUID,
         mainWorktreeID: UUID,
         repoID: UUID,
         tmuxServer: String
-    ) async throws {
-        try await writer.write { db in
-            // Re-parent terminal + tab rows first, guards after: a missing row
-            // then exercises the rollback of these UPDATEs (and tests assert
-            // exactly that), rather than short-circuiting before any mutation.
+    ) async throws -> [WorkspaceTabSurface] {
+        try await writer.write { db -> [WorkspaceTabSurface] in
+            let now = Date()
+            // Re-parent terminal, tab and panel rows first, guards after: a
+            // missing row then exercises the rollback of these UPDATEs (and
+            // tests assert exactly that), rather than short-circuiting before
+            // any mutation.
             try db.execute(
                 sql: "UPDATE terminal SET worktreeID = ? WHERE worktreeID = ?",
                 arguments: [mainWorktreeID.uuidString, scratchID.uuidString]
@@ -1291,6 +1304,8 @@ public struct WorktreeStore: Sendable {
                 sql: "UPDATE tab SET worktreeID = ? WHERE worktreeID = ?",
                 arguments: [mainWorktreeID.uuidString, scratchID.uuidString]
             )
+            let movedSurfaces = try PanelSurfaceStore.reparentSurfaces(
+                from: scratchID, to: mainWorktreeID, now: now, in: db)
             guard let scratch = try WorktreeRecord.fetchOne(db, key: scratchID.uuidString) else {
                 throw DatabaseError(message: "Scratch worktree not found: \(scratchID)")
             }
@@ -1308,9 +1323,10 @@ public struct WorktreeStore: Sendable {
             // skip-trash guard in scratch.delete sees the pointer atomically.
             var retired = scratch
             retired.status = WorktreeStatus.archived.rawValue
-            retired.archivedAt = Date()
+            retired.archivedAt = now
             retired.promotedToRepoID = repoID.uuidString
             try retired.update(db)
+            return movedSurfaces
         }
     }
 

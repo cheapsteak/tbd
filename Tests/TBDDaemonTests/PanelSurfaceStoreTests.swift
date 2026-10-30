@@ -790,6 +790,75 @@ struct PanelSurfaceStoreTests {
         #expect(try await receiptCount(db, worktreeID: keptID) == 1)
     }
 
+    /// Every panel row that names `worktreeID`: its surfaces, the histories
+    /// of those surfaces, and its operation receipts.
+    private func panelRowCount(_ db: TBDDatabase, worktreeID: UUID) async throws -> Int {
+        let key = worktreeID.uuidString
+        return try await db.writerForTests.read { dbc in
+            try Int.fetchOne(
+                dbc,
+                sql: """
+                    SELECT (SELECT COUNT(*) FROM workspace_tab_surface WHERE worktreeID = ?)
+                         + (SELECT COUNT(*) FROM panel_history h
+                              JOIN workspace_tab_surface s ON s.id = h.tabID
+                              WHERE s.worktreeID = ?)
+                         + (SELECT COUNT(*) FROM panel_operation_receipt WHERE worktreeID = ?)
+                    """,
+                arguments: [key, key, key]) ?? -1
+        }
+    }
+
+    /// A scratch promote archives the scratch row without going through
+    /// `archive`, and moves its tabs to the main worktree. Their panels move
+    /// with them, and no panel row stays on the archived row, which no
+    /// reconciler covers.
+    @Test func promoteScratchReparentsPanelSurfaces() async throws {
+        let db = try TBDDatabase(inMemory: true)
+        let repo = try await db.repos.create(
+            path: "/tmp/pss-promote-repo-\(UUID())", displayName: "r", defaultBranch: "main")
+        let scratch = try await db.worktrees.createScratch(
+            name: "s", displayName: "s", path: "/tmp/pss-scratch-\(UUID())", tmuxServer: "tbd-scratch")
+        let main = try await db.worktrees.createMain(
+            repoID: repo.id, name: "main", branch: "main",
+            path: "/tmp/pss-main-\(UUID())", tmuxServer: "tbd-main")
+        let first = makeSurface(worktreeID: scratch.id, paths: ["/a.txt", "/b.txt"])
+        let second = makeSurface(worktreeID: scratch.id, paths: ["/c.txt"])
+        try await seed(db, worktreeID: scratch.id, [first, second])
+        _ = try await db.panelSurface.applyReducing(
+            operationID: UUID(), tabID: first.id, worktreeID: scratch.id, now: Date()
+        ) { current in
+            try PanelSurfaceReducer.apply(.setCollapsed(true), to: current)
+        }
+        let before = try await db.panelSurface.surfaces(worktreeID: scratch.id)
+        // Preconditions: two surfaces, three histories and a receipt.
+        #expect(before.map(\.id) == [first.id, second.id])
+        #expect(try await panelRowCount(db, worktreeID: scratch.id) == 6)
+
+        let moved = try await db.worktrees.promoteScratchMigration(
+            scratchID: scratch.id, mainWorktreeID: main.id, repoID: repo.id,
+            tmuxServer: scratch.tmuxServer)
+
+        let after = try await db.panelSurface.surfaces(worktreeID: main.id)
+        #expect(after == moved, "the promote returns the moved surfaces as stored, for its delta")
+        #expect(after.map(\.id) == [first.id, second.id])
+        for (old, new) in zip(before, after) {
+            #expect(new.worktreeID == main.id)
+            #expect(new.side == old.side, "the panels move with their histories")
+            #expect(new.primary == old.primary)
+            #expect(new.label == old.label)
+        }
+        let highestBefore = try #require(before.map(\.revision).max())
+        #expect(after.allSatisfy { $0.revision > highestBefore },
+                "the move takes fresh revisions, so the app's guard adopts it over any copy it holds")
+        #expect(Self.strictlyIncreasing(after.map(\.revision)))
+        #expect(try await historyRowCount(db, tabID: first.id) == 2)
+        #expect(try await historyRowCount(db, tabID: second.id) == 1)
+        #expect(try await panelRowCount(db, worktreeID: scratch.id) == 0,
+                "no surface, history or receipt references the archived scratch worktree")
+        #expect(try await receiptCount(db, worktreeID: main.id) == 0,
+                "the scratch worktree's receipts are deleted, not moved")
+    }
+
     /// A sync that lands after the archive must not import the archived
     /// worktree's tabs again, nor move a tab it lists from another worktree:
     /// it changes nothing and reports nothing.

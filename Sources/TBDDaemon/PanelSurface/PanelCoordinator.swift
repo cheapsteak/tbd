@@ -293,4 +293,20 @@ extension StateSubscriptionManager {
             activeTabID: nil,
             originOperationID: nil)))
     }
+
+    /// Tells the app that a scratch promote moved these panel surfaces to
+    /// `worktreeID`, the new repo's main worktree, with their tabs
+    /// (`WorktreeStore.promoteScratchMigration` returns them), as one
+    /// `panelSurfaceChanged` carrying them. The app adopts each under
+    /// `worktreeID`, which drops it from the scratch worktree's entry. Sent
+    /// after the promote commits; nothing is sent when nothing moved.
+    func broadcastPanelSurfacesMoved(worktreeID: UUID, surfaces: [WorkspaceTabSurface]) {
+        guard !surfaces.isEmpty else { return }
+        broadcast(delta: .panelSurfaceChanged(PanelSurfaceDelta(
+            worktreeID: worktreeID,
+            tabs: surfaces,
+            removedTabIDs: [],
+            activeTabID: nil,
+            originOperationID: nil)))
+    }
 }

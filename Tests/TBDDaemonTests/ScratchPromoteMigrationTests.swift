@@ -31,13 +31,17 @@ struct ScratchPromoteMigrationTests {
 
     /// Router with a fully isolated Claude config-dir manager: profile config
     /// dirs under `<home>/profiles/`, ambient host dir `<home>/claude-host/`.
-    private func makeRouter(_ db: TBDDatabase, home: URL) -> RPCRouter {
+    private func makeRouter(
+        _ db: TBDDatabase, home: URL,
+        subscriptions: StateSubscriptionManager = StateSubscriptionManager()
+    ) -> RPCRouter {
         RPCRouter(
             db: db,
             lifecycle: WorktreeLifecycle(
                 db: db, git: GitManager(), tmux: TmuxManager(dryRun: true), hooks: HookResolver()),
             tmux: TmuxManager(dryRun: true),
             startTime: Date(),
+            subscriptions: subscriptions,
             configDirManager: ClaudeProfileConfigDirManager(
                 baseDirectory: home.appendingPathComponent("profiles", isDirectory: true),
                 hostBaseDirectory: home.appendingPathComponent("claude-host", isDirectory: true)
@@ -122,6 +126,74 @@ struct ScratchPromoteMigrationTests {
         let scratchRow = try #require(try await db.worktrees.get(id: wt.id))
         #expect(scratchRow.status == .archived)
         #expect(scratchRow.promotedToRepoID == result.repoID)
+    }
+
+    /// The promote moves the scratch worktree's panel surfaces to the main
+    /// worktree with its tabs, and tells the app so: one `panelSurfaceChanged`
+    /// for the main worktree carrying the moved surfaces as stored.
+    @Test func promoteBroadcastsTheMovedPanelSurfacesUnderTheMainWorktree() async throws {
+        let (home, cleanup) = isolate(); defer { cleanup() }
+        let db = try TBDDatabase(inMemory: true)
+        let deltas = PromoteBroadcastDeltas()
+        let subscriptions = StateSubscriptionManager()
+        subscriptions.addSubscriber { data in
+            if let delta = try? JSONDecoder().decode(StateDelta.self, from: data) {
+                deltas.append(delta)
+            }
+            return true
+        }
+        let router = makeRouter(db, home: home, subscriptions: subscriptions)
+
+        let created = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchCreate, params: ScratchCreateParams(name: nil)))
+        let wt = try created.decodeResult(Worktree.self)
+        try await gitInitCommit(at: wt.localPath)
+        let tabID = UUID()
+        let panel = ViewerPanel(id: UUID(), content: .file(FileReference(path: "/a.txt")))
+        let surface = WorkspaceTabSurface(
+            id: tabID, worktreeID: wt.id, label: "tab", primary: .terminal(terminalID: tabID),
+            side: SideRegion(
+                panels: [panel], activePanelID: panel.id, recency: [panel.id],
+                collapsed: false, width: 0.4))
+        let seeded = try await db.panelSurface.syncTabs(
+            worktreeID: wt.id,
+            entries: [SyncTabEntry(
+                tabID: tabID, position: 0, label: "tab", primary: surface.primary,
+                importCandidate: surface)],
+            now: Date())
+        try #require(seeded.imported == [tabID])
+
+        let dest = home.appendingPathComponent("projects/promoted-panels").path
+        let resp = await router.handle(try RPCRequest(
+            method: RPCMethod.scratchPromote,
+            params: ScratchPromoteParams(worktreeID: wt.id, destPath: dest, displayName: nil)))
+        #expect(resp.success)
+        let result = try resp.decodeResult(ScratchPromoteResult.self)
+        let mainWt = try #require(
+            try await db.worktrees.list(repoID: result.repoID, status: .main).first)
+
+        let panelDeltas = deltas.snapshot().compactMap { delta -> PanelSurfaceDelta? in
+            if case .panelSurfaceChanged(let panelDelta) = delta { return panelDelta }
+            return nil
+        }
+        let moved = try Self.single(panelDeltas.filter { $0.worktreeID == mainWt.id })
+        #expect(moved.tabs.map(\.id) == [tabID])
+        #expect(moved.removedTabIDs.isEmpty)
+        let mainSurfaces = try await db.panelSurface.surfaces(worktreeID: mainWt.id)
+        #expect(moved.tabs == mainSurfaces,
+                "the delta carries the surfaces as the main worktree now stores them")
+        #expect(try await db.panelSurface.surfaces(worktreeID: wt.id).isEmpty)
+        #expect(!panelDeltas.contains { $0.worktreeID == wt.id },
+                "nothing was deleted, so no removal is broadcast for the scratch worktree")
+    }
+
+    private static func single<Element>(
+        _ elements: [Element], sourceLocation: SourceLocation = #_sourceLocation
+    ) throws -> Element {
+        try #require(
+            elements.count == 1 ? elements.first : nil,
+            "expected exactly one, observed \(elements.count): \(elements)",
+            sourceLocation: sourceLocation)
     }
 
     @Test func promoteSnapshotsClaudeProjectDirsPerRootWithCopyIfNewer() async throws {
@@ -352,4 +424,20 @@ struct TerminalCreateResumeSyncWiringTests {
     }
 }
 
+}
+
+/// Thread-safe collector for the deltas a promote broadcasts.
+private final class PromoteBroadcastDeltas: @unchecked Sendable {
+    private let lock = NSLock()
+    private var deltas: [StateDelta] = []
+
+    func append(_ delta: StateDelta) {
+        lock.lock(); defer { lock.unlock() }
+        deltas.append(delta)
+    }
+
+    func snapshot() -> [StateDelta] {
+        lock.lock(); defer { lock.unlock() }
+        return deltas
+    }
 }

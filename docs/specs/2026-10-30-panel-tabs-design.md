@@ -193,8 +193,9 @@ soak measurement ever shows a visible gap: the app could run the same reducer,
 render at once, and let the reply confirm. It is not built.
 
 Revisions are daemon-wide. Every write that creates or changes a surface — an
-operation, an import, or a sync's update of position, label, primary or
-worktree — takes its revision from one persistent counter, incremented in the
+operation, an import, a sync's update of position, label, primary or
+worktree, or a scratch promote's move of its surfaces to the main worktree —
+takes its revision from one persistent counter, incremented in the
 write's own transaction, that never decreases. So a tab's revisions keep
 rising when its surface is deleted and imported again, whether a sync dropped
 it, an archive and revive replaced it, or the migration emptied the tables, and
@@ -287,16 +288,24 @@ tab is created, closed, reordered or relabelled. In one transaction the daemon:
 It broadcasts one `panelSurfaceChanged` for whatever changed. The worktree's
 existing cascade still removes every surface when the worktree row is deleted.
 Archiving keeps the row, so the cascade never fires: `WorktreeStore.archive`,
-which every archive path goes through, deletes the worktree's surfaces, their
-histories and its operation receipts in the same transaction and returns the
-deleted tabs' IDs. Whichever path drove the archive then broadcasts a
-`panelSurfaceChanged` naming them in `removedTabIDs`, beside its
-`worktreeArchived`, and the app drops the worktree from its copy, along with
-its pending sync and its readiness to sync. A sync for an archived worktree
-changes nothing and reports nothing, so one that lands after the archive
-cannot import its tabs again. A revive needs nothing back, because the next
-sync re-imports its tabs from the legacy layout, at revisions above any they
-had.
+which every archive path but a scratch promote goes through, deletes the
+worktree's surfaces, their histories and its operation receipts in the same
+transaction and returns the deleted tabs' IDs. Whichever path drove the
+archive then broadcasts a `panelSurfaceChanged` naming them in
+`removedTabIDs`, beside its `worktreeArchived`, and the app drops the worktree
+from its copy, along with its pending sync and its readiness to sync. A sync
+for an archived worktree changes nothing and reports nothing, so one that lands
+after the archive cannot import its tabs again. A revive needs nothing back,
+because the next sync re-imports its tabs from the legacy layout, at revisions
+above any they had.
+
+A scratch promote retires the scratch row in its own transaction, which moves
+the scratch worktree's tabs to the new repo's main worktree. The same
+transaction moves their surfaces, histories included, to the main worktree at
+fresh revisions and deletes the scratch worktree's operation receipts, so no
+panel row is left on the archived row. The promote then broadcasts a
+`panelSurfaceChanged` for the main worktree carrying the moved surfaces, beside
+its `worktreeArchived`, and the app adopts them there.
 
 The sync does not carry the selected tab. The app already records it in
 `worktree.activeTabID` through `worktree.setActiveTab` on every switch, flag or
