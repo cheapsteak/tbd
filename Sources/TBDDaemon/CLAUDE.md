@@ -19,11 +19,12 @@ A unit uses another when one of its Swift files names a declaration from it. Tha
 
 ### The rule
 
-The order lives in `scripts/daemon-layers.txt`: one line per layer, bottom first, each listing its units separated by commas. A blank line or a line that starts with `#` is no layer.
+The order lives in `scripts/daemon-layers.txt`: one line per layer, bottom first, each listing its units separated by commas. A blank line, or a line that starts with `#` after any spaces, is no layer.
 
 - **A unit may use only units in a lower layer.** Any lower layer will do, not only the one just below.
 - **Units in the same layer may not use each other.**
 - **Every unit has a layer.** A new folder fails the check until a line lists it.
+- **`Base` is on the bottom line.** See [Base](#base) below.
 
 The bottom layer holds `Base` and the other folders that use none. The top two hold `Server` and then `(root)`, which wire the rest together. Where a unit sits is a design decision, so moving it is an edit to `scripts/daemon-layers.txt` that the reviewer sees in the diff.
 
@@ -78,13 +79,24 @@ Line 253 of that file names `RPCRouter`, which Server declares, and Server is ei
 Sources/TBDDaemon/Git/GitManager.swift:40: Git (layer 4) uses Tmux (layer 4), its own layer: TmuxManager is declared in Tmux
 ```
 
-A unit with no layer is named with where it fits, the lowest layer above every unit it uses and below every unit that uses it:
+A unit with no layer is named with where it fits: the lowest layer above every unit it uses and below every unit that uses it.
 
 ```
 scripts/daemon-layers.txt: Sandbox has no layer; it fits in layer 4
 ```
 
-When no layer fits, the message says where the unit needs a new line: between two layers, at the top or at the bottom. When no line can hold it either, because it uses a layer that also uses it, the message says that, and a reference has to change first.
+Units with no layer are placed together, as if each were listed, so one that another new unit uses goes below it. Where no layer is both above and below, the message says `it needs a new line between layers 3 and 4`, `it needs a new line at the top` or `it needs a new line at the bottom`. When new units that use each other need new lines between the same two layers, the user's message ends `above the line for <unit>`, or `above the lines for` several. Every layer number is the file's as it stands, before a new line goes in.
+
+When no line can hold the unit, the message says `no layer fits it` and why:
+
+- **`no layer fits it: it uses layer 4, and layer 4 uses it`**: no line is above the one and below the other.
+- **`no layer fits it: layer 1 uses it, and Base stays on the bottom line`**: it would need a new line below `Base`. See [Base](#base).
+- **`no layer fits it: its links run in a circle`**, then the circle: units with no layer that use each other, directly or through others.
+- **`no layer fits it until one fits <unit>`**: its place depends on another unit with no layer that no layer fits, one it uses or one beside a circle.
+
+In the first two, `uses it through <unit>` names a unit with no layer that the use from above runs through.
+
+To make room, change a reference, or move the units involved to other lines so that every use points down; `Base` never moves. Moving one unit is often enough. A new `Sandbox` that uses `Tmux` and that `Git` uses fits no layer while both are in layer 4; moving `Git` up to the `Hooks, Remote` line lets `Sandbox` go on the `Claude, DevServers, Mock` line between them. Moving a unit holds it to its new place, as under "Move the using unit up" below.
 
 ### Fixing a reference against the order
 
@@ -94,7 +106,7 @@ When no layer fits, the message says where the unit needs a new line: between tw
 
 ### Giving a unit a layer
 
-Add the unit's name to the line its failure names, or to a new line where the failure says it needs one, in the change that adds the folder.
+Add the unit's name in the layer it fits in, or on the new line it needs, in the change that adds the folder. Where no layer fits it, make room first, as under "Reading a failure" above.
 
 ### Base
 
@@ -103,7 +115,8 @@ Add the unit's name to the line its failure names, or to a new line where the fa
 - **Nothing in it uses another daemon folder.** Its code may use only `TBDShared`, `TBDKernel`, third-party and system modules.
 - **It holds only code that two or more other folders use.** Code that one folder uses belongs in that folder.
 - **Moving a declaration into `Base`** is the usual way to remove a reference to a unit above, when the declaration needs nothing outside `Base`. Its users then use `Base`, which sits below all of them.
-- **`Base` stays on the bottom line** of `scripts/daemon-layers.txt`, where the check lets it use no other unit. Never move it up. If code in `Base` needs another folder, the code belongs in that folder or above it, or its caller passes a closure or a protocol in.
+- **`Base` stays on the bottom line** of `scripts/daemon-layers.txt`, where the check lets it use no other unit. Never move it up. If code in `Base` needs another folder, the code belongs in that folder or above it, or its caller passes a closure or a protocol in. While `Base` is on another line or none, the check fails with `Base is in layer 2; Base stays on the bottom line` or `Base has no layer; Base stays on the bottom line`, and judges nothing else until `Base` is back on the first line.
+- **No line goes below `Base`.** So a unit with no layer that layer 1 uses fits no layer: `no layer fits it: layer 1 uses it, and Base stays on the bottom line`. Move the units in layer 1 that use it to a higher line, and list it beside `Base`. When `Base` itself uses it, change that reference instead: move what `Base` needs into `Base`, or pass a closure or a protocol in.
 
 ### When `main` fails
 
@@ -114,7 +127,7 @@ Branch protection does not require a branch to be up to date with `main` before 
 Exit 2 means the check could not run. It stops rather than judge references it may have read wrong.
 
 - **`cannot scan <file>:<line>`**: the check could not read that Swift. The reason is an unbalanced brace, a comment or literal that never closes, or bytes that are not UTF-8. The usual cause is an `#if` whose branches open different braces, such as two signatures sharing one body. Make each branch balance its own braces.
-- **`cannot scan` without a line**: either `Sources/TBDDaemon: not found`, because the check ran against a tree without it (see `--repo-root`), or a file in a folder with a space in its name, which the layer file could not name.
+- **`cannot scan` without a line**: either `Sources/TBDDaemon: not found`, because the check ran against a tree without it (see `--repo-root`), or a file in a folder the layer file cannot name: one with a space or a comma in its name, or a `#` at its start, as in `the folder "A,B" has a comma in its name, so the layer file cannot name it`. Rename the folder.
 - **`cannot read <path>`**: the check could not open that file or list that folder, for the reason that follows.
 - **`cannot read scripts/daemon-layers.txt:<line>`**: a name on that line is no unit, is listed twice, is empty, or has a space in it, or the line holds bytes that are not UTF-8. A name that is no unit is a typo, or a folder renamed or emptied of Swift; a unit listed twice is named with its other line; an empty name is a stray comma, and a name with a space a missing one.
 

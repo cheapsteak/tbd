@@ -6,9 +6,10 @@
 # units on a lower line. Units on the same line may not use each other.
 #
 # scripts/lint-daemon-layers.py fails when a unit names a declaration from
-# its own line or a higher one, and when no line lists a unit. To let a unit
-# use one on its own line or above, move its name to a higher line, or to a
-# new line, in the change that needs it; the reviewer sees the move.
+# its own line or a higher one, when no line lists a unit, and when Base is
+# not on the first line. To let a unit use one on its own line or above, move
+# its name to a higher line, or to a new line, in the change that needs it;
+# the reviewer sees the move. Base never moves.
 #
 # How to read and fix a failure: Sources/TBDDaemon/CLAUDE.md,
 # "Folder layers".
