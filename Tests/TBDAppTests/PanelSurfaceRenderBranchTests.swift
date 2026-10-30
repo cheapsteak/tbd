@@ -65,6 +65,26 @@ struct PanelSurfaceRenderBranchTests {
         }
     }
 
+    // MARK: - The primary
+
+    @Test("the primary renders the app's tab, not the surface's copy of it")
+    func primaryRendersTheTabNotTheSurface() throws {
+        let worktree = try #require(LocalWorktree(Worktree(
+            repoID: UUID(), name: "wt", displayName: "WT", branch: "main",
+            path: "/tmp/acme-wt", tmuxServer: "test-server")))
+        // The file viewer has pointed the tab at a new file; the daemon's copy
+        // still names the old one until a `panel.syncTabs` lands.
+        let repointed = PaneContent.codeViewer(id: UUID(), path: "/w/new.swift")
+        let tab = TBDShared.Tab(id: UUID(), content: repointed, label: "new.swift")
+        let surface = WorkspaceTabSurface(
+            id: tab.id, worktreeID: worktree.id,
+            primary: .file(FileReference(path: "/w/old.swift")), revision: 3)
+
+        let view = PanelSurfaceWorkspaceView(tab: tab, surface: surface, worktree: worktree)
+
+        #expect(view.primaryContent == repointed)
+    }
+
     // MARK: - The side region's strip
 
     @Test("a panel with no current content is left out of the strip")

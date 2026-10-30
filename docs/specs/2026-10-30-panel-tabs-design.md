@@ -398,7 +398,10 @@ places it.
 and is not collapsed.
 
 - **The primary** renders through `PanePlaceholder` with the daemon action set,
-  so the terminal keeps its header and transcript button.
+  so the terminal keeps its header and transcript button. Its content comes
+  from the app's own workspace tab, not from the surface: the primary is
+  app-owned, so a re-pointed primary shows at once rather than after the sync
+  carries it to the daemon.
 - **`SideRegionView`** shows a tab strip (each tab: icon, title, close button;
   a click selects) with a collapse button, and below it the active panel through
   `PanePlaceholder`, which keeps its history chevrons and actions. The leaf's own

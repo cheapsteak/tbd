@@ -301,7 +301,7 @@ struct SingleWorktreeView: View {
             // The daemon-owned surface: only with `panel_tabs_enabled` on and
             // this tab in the app's copy. Every other case falls through to
             // the legacy branch below, unchanged.
-            PanelSurfaceWorkspaceView(surface: surface, worktree: worktree)
+            PanelSurfaceWorkspaceView(tab: tab, surface: surface, worktree: worktree)
                 .id(tab.id) // Force new view hierarchy when switching tabs
         } else if let tab = activeTab, let worktree {
             let layoutBinding = Binding<LayoutNode>(

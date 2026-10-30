@@ -17,10 +17,16 @@ struct PanelSurfaceLoadKey: Equatable {
 /// "The renderer"): the primary on the left, the split divider, and the side
 /// region on the right while it has panels and is not collapsed.
 ///
+/// The primary comes from the app's tab, not from the surface: it is
+/// app-owned like the tab itself (panel tabs spec, "Tab sync"), and the
+/// surface's copy of it only catches up after a `panel.syncTabs` round trip.
+/// The side region comes from the surface.
+///
 /// Every gesture here sends one panel operation through
 /// `AppState.applyPanelOperation` and adopts the tab the daemon returns; the
 /// only local state is the divider's overlay while a drag is committing.
 struct PanelSurfaceWorkspaceView: View {
+    let tab: TBDShared.Tab
     let surface: WorkspaceTabSurface
     let worktree: LocalWorktree
     @Environment(AppState.self) var appState
@@ -30,7 +36,8 @@ struct PanelSurfaceWorkspaceView: View {
     /// width another client set, resets them from the surface.
     @State private var ratios: [CGFloat]
 
-    init(surface: WorkspaceTabSurface, worktree: LocalWorktree) {
+    init(tab: TBDShared.Tab, surface: WorkspaceTabSurface, worktree: LocalWorktree) {
+        self.tab = tab
         self.surface = surface
         self.worktree = worktree
         _ratios = State(initialValue: Self.ratios(forWidth: surface.side.width))
@@ -77,9 +84,15 @@ struct PanelSurfaceWorkspaceView: View {
         }
     }
 
+    /// The primary leaf's content: the app's tab, never `surface.primary`. A
+    /// primary re-pointed in the app — the file viewer pointing a file tab at
+    /// a new file — shows at once, and still shows if the sync that carries it
+    /// to the daemon fails.
+    var primaryContent: PaneContent { tab.content }
+
     private var primaryPane: some View {
         PanePlaceholder(
-            content: surface.primary.paneContent(tabID: surface.id),
+            content: primaryContent,
             worktree: worktree,
             tabID: surface.id,
             actions: .daemon(

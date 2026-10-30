@@ -6,8 +6,8 @@ import TBDShared
 // Tier 1: pure value mapping, no state.
 
 /// The content-only bridge from the daemon surface's model to the leaf view's
-/// `PaneContent` (panel tabs spec, "The leaf seam"): every case of both
-/// content enums, and a history mapped entry by entry.
+/// `PaneContent` (panel tabs spec, "The leaf seam"): every panel content
+/// case, and a history mapped entry by entry.
 @Suite("Panel surface content mapping")
 @MainActor
 struct PanelSurfaceContentMappingTests {
@@ -57,24 +57,6 @@ struct PanelSurfaceContentMappingTests {
             #expect(Self.panelContent(of: content.paneContent(panelID: panelID)) == content,
                     "lost in the mapping: \(content)")
         }
-    }
-
-    @Test("every primary content maps to leaf content, the tab's ID standing in for a pane ID")
-    func primaryContentMapsEveryCase() {
-        let tabID = UUID()
-        let terminalID = UUID()
-        let noteID = UUID()
-
-        #expect(PrimaryContent.terminal(terminalID: terminalID).paneContent(tabID: tabID)
-            == .terminal(terminalID: terminalID))
-        #expect(PrimaryContent.note(noteID: noteID).paneContent(tabID: tabID)
-            == .note(noteID: noteID))
-        #expect(PrimaryContent.file(FileReference(path: "/w/b.md")).paneContent(tabID: tabID)
-            == .codeViewer(id: tabID, path: "/w/b.md"))
-        #expect(PrimaryContent.web(Self.pageURL).paneContent(tabID: tabID)
-            == .webview(id: tabID, url: Self.pageURL))
-        #expect(PrimaryContent.transcript(terminalID: terminalID).paneContent(tabID: tabID)
-            == .liveTranscript(id: tabID, terminalID: terminalID))
     }
 
     @Test("a history maps entry by entry, keeping order and cursor")
