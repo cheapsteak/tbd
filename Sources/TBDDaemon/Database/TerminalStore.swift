@@ -1571,16 +1571,19 @@ public struct TerminalStore: Sendable {
     /// - has a staged replacement (`pendingSessionIncarnationID`), so no
     ///   process is entitled to write;
     /// - belongs to another incarnation than `scope` names;
-    /// - holds a program-status value whose ordering watermark
-    ///   (`activityStateOrderObservedAt`) is strictly later than this report.
+    /// - carries an ordering watermark (`activityStateOrderObservedAt`) at or
+    ///   after this report, whichever writer stamped it, and holds a different
+    ///   value. A report at the watermark that repeats the stored value is
+    ///   accepted and changes nothing.
     ///
     /// When the row already holds `activityState` and `awaitingInputReason`,
     /// the value and `activityStateObservedAt` stay as they are, so the
     /// at-rest clock hibernation reads keeps the moment the value was first
-    /// reported; only the ordering watermark advances. Otherwise the state,
-    /// its source (`.programStatus`), both observation stamps and the
-    /// wait-reason columns are written together, so the stored reason always
-    /// describes the state beside it.
+    /// reported; only the ordering watermark advances, so every accepted
+    /// report fences off older ones. Otherwise the state, its source
+    /// (`.programStatus`), both observation stamps and the wait-reason columns
+    /// are written together, so the stored reason always describes the state
+    /// beside it.
     ///
     /// A `.working` report cancels a pending scheduled resume — the session is
     /// already running a turn — and `working -> idle` notifies
@@ -1605,12 +1608,6 @@ public struct TerminalStore: Sendable {
                record.sessionIncarnationID != incarnationID?.uuidString {
                 return ProgramStatusWriteOutcome(result: nil)
             }
-            let storedIsReport = FactColumnJSON.decode(
-                FactSource.self, from: record.activityStateSource) == .programStatus
-            let storedOrder = record.activityStateOrderObservedAt ?? record.activityStateObservedAt
-            if storedIsReport, let storedOrder, storedOrder > observedAt {
-                return ProgramStatusWriteOutcome(result: nil)
-            }
 
             let previousState = record.activityState
                 .flatMap(TerminalActivityState.init(rawValue:)) ?? .unknown
@@ -1618,11 +1615,22 @@ public struct TerminalStore: Sendable {
                 AwaitingInputReason.self, from: record.awaitingInputReason)
             let stateChanged = previousState != activityState
             let reasonChanged = storedReason != awaitingInputReason
+            // Ordered against the stamp whoever wrote it — a report, a park, a
+            // wake's reset — so a report older than the value standing can
+            // never land over it. A tie is not newer: it is refused unless it
+            // repeats the stored value, so of two writes stamped alike the
+            // first to commit stands, and the rule says which without a
+            // tiebreak on the values.
+            let storedOrder = record.activityStateOrderObservedAt ?? record.activityStateObservedAt
+            let isNewer = storedOrder.map { $0 < observedAt } ?? true
+            guard isNewer || (!stateChanged && !reasonChanged) else {
+                return ProgramStatusWriteOutcome(result: nil)
+            }
             if !stateChanged && !reasonChanged {
                 // The report repeats the stored value: only the ordering
-                // watermark moves, so a write of an older report still in
-                // flight is refused when it commits after this one.
-                if storedIsReport, storedOrder.map({ $0 < observedAt }) ?? true {
+                // watermark moves, so an older report still in flight is
+                // refused when it commits after this one.
+                if isNewer {
                     record.activityStateOrderObservedAt = observedAt
                     try record.update(db)
                 }

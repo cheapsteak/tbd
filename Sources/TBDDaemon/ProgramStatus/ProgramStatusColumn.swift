@@ -71,7 +71,8 @@ public enum ProgramStatusWriteScope: Sendable, Equatable {
 /// What a column write did.
 public enum ProgramStatusColumnOutcome: Sendable, Equatable {
     /// Nothing was written: the row is gone, parked, staged for another
-    /// process, of another incarnation, or holds a newer report.
+    /// process, of another incarnation, or stamped at or after the write with
+    /// a different value.
     case refused
     /// The row already held the value.
     case unchanged

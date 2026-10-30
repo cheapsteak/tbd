@@ -114,6 +114,42 @@ import TBDShared
         #expect(stored.activityStateObservedAt == at(2))
     }
 
+    /// A wake's reset leaves `.unknown` stamped by TBD, not by a report. A
+    /// newer bare clear maps to that same value, so it writes nothing — but
+    /// it must still fence off an older report whose write is still in
+    /// flight, or the column sticks at the older value.
+    @Test func aRepeatOverAValueTBDWroteStillOrdersOutAnOlderReport() async throws {
+        let fixture = try await makeFixture()
+        try await fixture.db.terminals.setActivityState(
+            id: fixture.terminal.id, activityState: .unknown, source: .derived,
+            observedAt: at(1))
+
+        let repeated = try #require(try await apply(fixture, .unknown, at: 3))
+        #expect(repeated.stateChanged == false)
+        #expect(repeated.reasonChanged == false)
+
+        #expect(try await apply(fixture, .working, at: 2) == nil)
+        let stored = try await row(fixture)
+        #expect(stored.activityState == .unknown)
+        #expect(stored.activityStateSource == .derived)
+        #expect(stored.activityStateOrderObservedAt == at(3))
+    }
+
+    /// Of two reports stamped alike, the first to commit stands: one that is
+    /// not newer than the stamp is refused, unless it repeats the stored
+    /// value.
+    @Test func aReportAtTheStampIsRefusedUnlessItRepeatsTheValue() async throws {
+        let fixture = try await makeFixture()
+        try await apply(fixture, .working, at: 2)
+
+        #expect(try await apply(fixture, .idle, at: 2) == nil)
+        #expect(try await row(fixture).activityState == .working)
+
+        let repeated = try #require(try await apply(fixture, .working, at: 2))
+        #expect(repeated.stateChanged == false)
+        #expect(try await row(fixture).activityStateOrderObservedAt == at(2))
+    }
+
     @Test func refusesAParkedRow() async throws {
         let fixture = try await makeFixture()
         try await apply(fixture, .working, at: 1)
