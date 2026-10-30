@@ -55,6 +55,7 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 - `ClaudeProfileConfigDirManager.swift` — isolates a model profile's Claude config dir under `~/tbd/profiles/<id>/claude/`
 - `ClaudeSessionScanner.swift` — locates Claude JSONL session files for a worktree cwd
 - `TranscriptParser.swift` — parses Claude JSONL (incl. subagent transcripts) into transcript items
+- `ClaudeStateDetector.swift` — idle detection + session-id capture
 - `UserMessageClassifier.swift` — distinguishes real user messages from system-injected lines
 - `ClaudeUsageFetcher.swift` / `ClaudeUsagePoller.swift` / `PollerClock.swift` — Claude OAuth usage polling
 
@@ -113,7 +114,7 @@ The helper programs' contract: no dependencies, and `TBDHolder` and `TBDPeerHelp
 
 ### Git/ Tmux/ SSH/ Keychain/ AskUserQuestion/
 - `Git/GitManager.swift` — all git operations
-- `Tmux/TmuxManager.swift` — tmux server/window lifecycle, sendKeys/capture; `Tmux/ClaudeStateDetector.swift` — idle detection + session-id capture
+- `Tmux/TmuxManager.swift` — tmux server/window lifecycle, sendKeys/capture
 - `SSH/SSHAgentResolver.swift` — `~/.ssh/tbd-agent.sock` symlink maintenance
 - `Keychain/ModelProfileKeychain.swift` — stores apiKey profile secrets (0600 token files)
 - `AskUserQuestion/PendingPromptStore.swift` — in-memory store of open Claude Code dialogs: AskUserQuestion captures from the pre-tool hook, and the prompts the session mod reports open for answering from the transcript

@@ -39,8 +39,6 @@
 (root) -> Tmux
 (root) -> Update
 Actuation -> Database
-Actuation -> Lifecycle
-Actuation -> Server
 AskUserQuestion -> Server
 Claude -> Actuation
 Claude -> Database
@@ -71,7 +69,6 @@ GC -> Lifecycle
 GC -> Process
 GC -> SessionMod
 GC -> Tmux
-Git -> (root)
 Git -> Tmux
 Holder -> Database
 Holder -> Process
@@ -89,7 +86,6 @@ Lifecycle -> Git
 Lifecycle -> Holder
 Lifecycle -> Hooks
 Lifecycle -> ModelProfile
-Lifecycle -> PR
 Lifecycle -> Process
 Lifecycle -> ProgramStatus
 Lifecycle -> Server
@@ -97,7 +93,6 @@ Lifecycle -> SessionMod
 Lifecycle -> Tmux
 Mock -> Database
 Mock -> Tmux
-ModChannel -> (root)
 ModChannel -> AskUserQuestion
 ModChannel -> Server
 ModelProfile -> Database
@@ -111,7 +106,6 @@ PR -> Lifecycle
 PR -> Remote
 PR -> Server
 PanelSurface -> Database
-Process -> Database
 Process -> SessionMod
 Process -> Tmux
 ProgramStatus -> Database
@@ -148,10 +142,7 @@ Server -> StartAdmission
 Server -> Tmux
 Server -> Update
 SessionMod -> ModChannel
-StartAdmission -> Lifecycle
-StartAdmission -> Server
 StartAdmission -> Tmux
-Tmux -> Claude
 Tmux -> Database
 Tmux -> Git
 Tmux -> Lifecycle
